@@ -676,6 +676,17 @@ pub fn build(b: *std.Build) void {
     zts_exe.root_module.addImport("zts_cli", zts_cli_mod);
     b.installArtifact(zts_exe);
 
+    const zts_overview_drift = b.addSystemCommand(&.{ "/bin/bash", "scripts/check-zts-language-overview.sh" });
+    zts_overview_drift.addFileArg(zts_exe.getEmittedBin());
+    docs_drift_step.dependOn(&zts_overview_drift.step);
+
+    // Chrome is not a standard build dependency, so keep real-browser
+    // interaction coverage explicit and fail loudly when the local toolchain
+    // is unavailable.
+    const zts_overview_browser = b.addSystemCommand(&.{ "node", "scripts/test-zts-language-overview-browser.mjs" });
+    const zts_overview_browser_step = b.step("test-zts-overview-browser", "Test the ZTS language overview in headless Chrome");
+    zts_overview_browser_step.dependOn(&zts_overview_browser.step);
+
     // Strip debug info from the three installed binaries when -Dstrip is set.
     // The release workflow passes -Dstrip so shipped tarballs stay small; local
     // builds keep symbols by default. Stripping happens at link time, so it is
@@ -984,7 +995,7 @@ pub fn build(b: *std.Build) void {
     // cached, so `zig build test` always executes both scripts. CI and
     // scripts/verify.sh deliberately do not invoke test-docs-drift or
     // test-doc-links a second time.
-    test_step.dependOn(&docs_drift.step);
+    test_step.dependOn(docs_drift_step);
     test_step.dependOn(&doc_links.step);
     test_step.dependOn(&convergence_emitter.step);
     test_step.dependOn(&run_module_governance.step);

@@ -1,0 +1,2584 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="A reader-first overview of the implemented zts-model-1 language: source, types, control flow, effects, proofs, TSX, modules, restrictions, and compiler tooling."
+    />
+    <title>ZTS language overview | zttp</title>
+    <script>
+      try {
+        const savedTheme = localStorage.getItem("zts-overview-theme");
+        const darkPreferred = window.matchMedia("(prefers-color-scheme: dark)").matches;
+        document.documentElement.dataset.theme = savedTheme ?? (darkPreferred ? "dark" : "light");
+      } catch (_) {
+        document.documentElement.dataset.theme = "light";
+      }
+    </script>
+    <style>
+      @layer reset, tokens, base, layout, components, utilities;
+
+      @layer reset {
+        *,
+        *::before,
+        *::after {
+          box-sizing: border-box;
+        }
+
+        html {
+          scroll-behavior: smooth;
+        }
+
+        body,
+        h1,
+        h2,
+        h3,
+        p,
+        figure,
+        blockquote,
+        dl,
+        dd {
+          margin: 0;
+        }
+
+        button,
+        input {
+          font: inherit;
+        }
+
+        img,
+        svg {
+          display: block;
+          max-inline-size: 100%;
+        }
+      }
+
+      @layer tokens {
+        :root {
+          color-scheme: light dark;
+
+          --paper-0: oklch(0.99 0.007 84);
+          --paper-1: oklch(0.972 0.012 84);
+          --paper-2: oklch(0.945 0.018 84);
+          --graphite-0: oklch(0.985 0.004 235);
+          --graphite-6: oklch(0.42 0.022 235);
+          --graphite-8: oklch(0.27 0.024 235);
+          --graphite-10: oklch(0.13 0.02 235);
+          --cyan-4: oklch(0.69 0.118 211);
+          --cyan-6: oklch(0.49 0.112 211);
+          --green-5: oklch(0.59 0.13 151);
+          --amber-5: oklch(0.68 0.14 71);
+          --rose-5: oklch(0.61 0.17 21);
+
+          --canvas: var(--paper-1);
+          --surface: var(--paper-0);
+          --surface-sunken: var(--paper-2);
+          --surface-inverse: var(--graphite-10);
+          --text-primary: var(--graphite-10);
+          --text-secondary: var(--graphite-8);
+          --text-tertiary: var(--graphite-6);
+          --text-muted: oklch(0.57 0.018 235);
+          --text-inverse: var(--graphite-0);
+          --border: oklch(0.28 0.026 235 / 0.15);
+          --border-strong: oklch(0.28 0.026 235 / 0.29);
+          --grid-line: oklch(0.38 0.04 211 / 0.055);
+          --accent: var(--cyan-6);
+          --accent-strong: oklch(0.4 0.116 211);
+          --accent-soft: color-mix(in oklch, var(--cyan-4) 14%, var(--surface));
+          --success: var(--green-5);
+          --success-soft: color-mix(in oklch, var(--green-5) 12%, var(--surface));
+          --warning: oklch(0.54 0.13 71);
+          --warning-soft: color-mix(in oklch, var(--amber-5) 13%, var(--surface));
+          --danger: var(--rose-5);
+          --focus: var(--cyan-6);
+
+          --syntax-keyword: oklch(0.76 0.13 211);
+          --syntax-type: oklch(0.8 0.12 151);
+          --syntax-string: oklch(0.83 0.12 86);
+          --syntax-comment: oklch(0.66 0.025 235);
+          --syntax-name: oklch(0.91 0.03 235);
+
+          --font-sans: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+          --font-mono: ui-monospace, "SFMono-Regular", "Cascadia Code", "Roboto Mono", Consolas, monospace;
+
+          --text-xs: 0.6875rem;
+          --text-sm: 0.8125rem;
+          --text-body: 1rem;
+          --text-lede: clamp(1.125rem, 1.5vw, 1.3125rem);
+          --text-h3: clamp(1.25rem, 2vw, 1.5rem);
+          --text-h2: clamp(1.75rem, 3.2vw, 2.625rem);
+          --text-display: clamp(3.35rem, 8vw, 7.4rem);
+
+          --space-1: 0.25rem;
+          --space-2: 0.5rem;
+          --space-3: 0.75rem;
+          --space-4: 1rem;
+          --space-5: 1.25rem;
+          --space-6: 1.5rem;
+          --space-8: 2rem;
+          --space-10: 2.5rem;
+          --space-12: 3rem;
+          --space-16: 4rem;
+          --space-24: 6rem;
+
+          --radius-sm: 0.35rem;
+          --radius-md: 0.6rem;
+          --radius-lg: 1rem;
+          --radius-xl: 1.4rem;
+          --content-max: 80rem;
+          --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+        }
+
+        :root[data-theme="dark"] {
+          --canvas: oklch(0.15 0.018 235);
+          --surface: oklch(0.18 0.02 235);
+          --surface-sunken: oklch(0.13 0.017 235);
+          --surface-inverse: oklch(0.11 0.017 235);
+          --text-primary: oklch(0.94 0.011 84);
+          --text-secondary: oklch(0.82 0.016 84);
+          --text-tertiary: oklch(0.68 0.016 84);
+          --text-muted: oklch(0.57 0.018 84);
+          --text-inverse: oklch(0.94 0.011 84);
+          --border: oklch(0.92 0.012 84 / 0.12);
+          --border-strong: oklch(0.92 0.012 84 / 0.24);
+          --grid-line: oklch(0.69 0.07 211 / 0.06);
+          --accent: oklch(0.72 0.105 211);
+          --accent-strong: oklch(0.81 0.09 211);
+          --accent-soft: color-mix(in oklch, var(--accent) 13%, var(--surface));
+          --success: oklch(0.72 0.115 151);
+          --success-soft: color-mix(in oklch, var(--success) 11%, var(--surface));
+          --warning: oklch(0.76 0.12 71);
+          --warning-soft: color-mix(in oklch, var(--warning) 11%, var(--surface));
+          --danger: oklch(0.72 0.15 21);
+          --focus: oklch(0.77 0.11 211);
+        }
+      }
+
+      @layer base {
+        body {
+          min-block-size: 100vh;
+          background-color: var(--canvas);
+          background-image:
+            linear-gradient(var(--grid-line) 1px, transparent 1px),
+            linear-gradient(90deg, var(--grid-line) 1px, transparent 1px);
+          background-size: 2rem 2rem;
+          color: var(--text-primary);
+          font-family: var(--font-sans);
+          font-size: var(--text-body);
+          line-height: 1.62;
+          text-rendering: optimizeLegibility;
+          -webkit-font-smoothing: antialiased;
+        }
+
+        ::selection {
+          background: var(--accent);
+          color: var(--surface-inverse);
+        }
+
+        a {
+          color: var(--accent-strong);
+          text-decoration-color: color-mix(in oklch, var(--accent) 48%, transparent);
+          text-decoration-thickness: 0.08em;
+          text-underline-offset: 0.18em;
+        }
+
+        a:hover {
+          text-decoration-color: currentColor;
+        }
+
+        :where(a, button, summary):focus-visible {
+          outline: 2px solid var(--focus);
+          outline-offset: 3px;
+        }
+
+        h1,
+        h2,
+        h3 {
+          color: var(--text-primary);
+          font-weight: 680;
+          letter-spacing: -0.035em;
+          line-height: 1.08;
+          text-wrap: balance;
+        }
+
+        h1 {
+          font-size: var(--text-display);
+          letter-spacing: -0.075em;
+        }
+
+        h2 {
+          max-inline-size: 19ch;
+          font-size: var(--text-h2);
+        }
+
+        h3 {
+          font-size: var(--text-h3);
+          letter-spacing: -0.025em;
+        }
+
+        p,
+        li {
+          text-wrap: pretty;
+        }
+
+        code,
+        kbd {
+          font-family: var(--font-mono);
+        }
+
+        :not(pre) > code {
+          border: 1px solid var(--border);
+          border-radius: var(--radius-sm);
+          background: var(--surface-sunken);
+          padding: 0.08em 0.38em;
+          color: var(--text-primary);
+          font-size: 0.88em;
+          white-space: nowrap;
+        }
+
+        table {
+          inline-size: 100%;
+          border-collapse: collapse;
+          font-variant-numeric: tabular-nums;
+        }
+
+        th,
+        td {
+          border-block-end: 1px solid var(--border);
+          padding: var(--space-4);
+          text-align: start;
+          vertical-align: top;
+        }
+
+        th {
+          color: var(--text-tertiary);
+          font-family: var(--font-mono);
+          font-size: var(--text-xs);
+          font-weight: 650;
+          letter-spacing: 0.08em;
+          text-transform: uppercase;
+        }
+      }
+
+      @layer layout {
+        .frame {
+          inline-size: min(calc(100% - 2rem), var(--content-max));
+          margin-inline: auto;
+        }
+
+        .masthead {
+          position: sticky;
+          z-index: 20;
+          inset-block-start: 0;
+          border-block-end: 1px solid var(--border);
+          background: color-mix(in oklch, var(--canvas) 88%, transparent);
+          backdrop-filter: blur(18px) saturate(1.15);
+        }
+
+        .masthead-inner {
+          display: flex;
+          min-block-size: 3.75rem;
+          align-items: center;
+          justify-content: space-between;
+          gap: var(--space-4);
+        }
+
+        .hero {
+          padding-block: clamp(4rem, 9vw, 8.5rem) clamp(3rem, 7vw, 6.5rem);
+        }
+
+        .hero-grid {
+          display: grid;
+          grid-template-columns: minmax(0, 1.28fr) minmax(19rem, 0.72fr);
+          align-items: end;
+          gap: clamp(2.5rem, 7vw, 7rem);
+        }
+
+        .hero-copy {
+          min-inline-size: 0;
+          max-inline-size: 53rem;
+        }
+
+        .hero h1 span {
+          display: block;
+          color: var(--accent-strong);
+        }
+
+        .hero-lede {
+          max-inline-size: 59ch;
+          margin-block-start: var(--space-8);
+          color: var(--text-secondary);
+          font-size: var(--text-lede);
+          line-height: 1.52;
+        }
+
+        .metric-ledger {
+          display: grid;
+          grid-template-columns: repeat(6, minmax(0, 1fr));
+          border-block: 1px solid var(--border-strong);
+          background: color-mix(in oklch, var(--surface) 76%, transparent);
+        }
+
+        .shell {
+          display: grid;
+          grid-template-columns: 14.5rem minmax(0, 1fr);
+          gap: clamp(2.5rem, 6vw, 6.5rem);
+          padding-block: var(--space-16) var(--space-24);
+        }
+
+        .rail {
+          position: sticky;
+          inset-block-start: 5.75rem;
+          align-self: start;
+          max-block-size: calc(100vh - 7rem);
+          overflow: auto;
+          scrollbar-width: thin;
+        }
+
+        .content {
+          min-inline-size: 0;
+          max-inline-size: 59rem;
+        }
+
+        .chapter {
+          scroll-margin-block-start: 6rem;
+          border-block-start: 1px solid var(--border-strong);
+          padding-block: clamp(4rem, 8vw, 7.5rem);
+        }
+
+        .chapter:first-child {
+          padding-block-start: var(--space-6);
+          border-block-start: 0;
+        }
+
+        .chapter-heading {
+          display: grid;
+          grid-template-columns: 4.5rem minmax(0, 1fr);
+          align-items: start;
+          gap: var(--space-6);
+          margin-block-end: var(--space-12);
+        }
+
+        .chapter-body {
+          margin-inline-start: 6rem;
+        }
+
+        .chapter-body > * + * {
+          margin-block-start: var(--space-6);
+        }
+
+        .split {
+          display: grid;
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+          gap: var(--space-8);
+        }
+
+        .wide-split {
+          display: grid;
+          grid-template-columns: minmax(0, 1.15fr) minmax(18rem, 0.85fr);
+          gap: var(--space-8);
+          align-items: start;
+        }
+
+        @media (max-width: 64rem) {
+          .hero-grid {
+            grid-template-columns: 1fr;
+          }
+
+          .hero-copy {
+            max-inline-size: 58rem;
+          }
+
+          .metric-ledger {
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+          }
+
+          .shell {
+            grid-template-columns: 1fr;
+          }
+
+          .rail {
+            position: static;
+            max-block-size: none;
+            overflow: visible;
+          }
+
+          .rail-nav {
+            display: none;
+          }
+
+          .rail-passport {
+            display: grid;
+            grid-template-columns: repeat(4, minmax(0, 1fr));
+          }
+
+          .content {
+            max-inline-size: none;
+          }
+        }
+
+        @media (max-width: 46rem) {
+          .frame {
+            inline-size: min(calc(100% - 1.25rem), var(--content-max));
+          }
+
+          .masthead-inner {
+            min-block-size: 3.5rem;
+          }
+
+          .hero {
+            padding-block-start: 3.5rem;
+          }
+
+          .metric-ledger {
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+          }
+
+          .rail-passport {
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+          }
+
+          .chapter-heading {
+            grid-template-columns: 1fr;
+            gap: var(--space-3);
+          }
+
+          .chapter-body {
+            margin-inline-start: 0;
+          }
+
+          .split,
+          .wide-split {
+            grid-template-columns: 1fr;
+          }
+
+          th,
+          td {
+            padding: var(--space-3);
+          }
+        }
+      }
+
+      @layer components {
+        .skip-link {
+          position: fixed;
+          z-index: 100;
+          inset-block-start: var(--space-3);
+          inset-inline-start: var(--space-3);
+          translate: 0 -200%;
+          border-radius: var(--radius-md);
+          background: var(--surface-inverse);
+          padding: var(--space-3) var(--space-4);
+          color: var(--text-inverse);
+        }
+
+        .skip-link:focus {
+          translate: 0;
+        }
+
+        .progress {
+          position: absolute;
+          inset-block-end: -1px;
+          inset-inline-start: 0;
+          block-size: 2px;
+          inline-size: 100%;
+          background: var(--accent);
+          transform: scaleX(var(--scroll-progress, 0));
+          transform-origin: left center;
+          transition: transform 80ms linear;
+        }
+
+        .wordmark {
+          display: inline-flex;
+          align-items: center;
+          gap: var(--space-3);
+          color: var(--text-primary);
+          font-family: var(--font-mono);
+          font-size: var(--text-sm);
+          font-weight: 700;
+          letter-spacing: -0.02em;
+          text-decoration: none;
+        }
+
+        .wordmark-mark {
+          display: grid;
+          inline-size: 1.75rem;
+          block-size: 1.75rem;
+          place-items: center;
+          border: 1px solid var(--border-strong);
+          border-radius: 50%;
+          color: var(--accent-strong);
+          font-size: 0.72rem;
+        }
+
+        .mast-actions {
+          display: flex;
+          align-items: center;
+          gap: var(--space-2);
+        }
+
+        .mast-link,
+        .theme-toggle,
+        .copy-button {
+          display: inline-flex;
+          min-block-size: 2.75rem;
+          align-items: center;
+          justify-content: center;
+          border: 1px solid var(--border);
+          border-radius: var(--radius-md);
+          background: var(--surface);
+          color: var(--text-secondary);
+          cursor: pointer;
+          font-family: var(--font-mono);
+          font-size: var(--text-xs);
+          font-weight: 650;
+          letter-spacing: 0.04em;
+          text-decoration: none;
+          text-transform: uppercase;
+          transition:
+            border-color 180ms var(--ease-out),
+            color 180ms var(--ease-out),
+            transform 180ms var(--ease-out);
+        }
+
+        .mast-link,
+        .theme-toggle {
+          padding-inline: var(--space-4);
+        }
+
+        .theme-toggle {
+          gap: var(--space-2);
+        }
+
+        .mast-link:hover,
+        .theme-toggle:hover,
+        .copy-button:hover {
+          border-color: var(--accent);
+          color: var(--accent-strong);
+        }
+
+        .mast-link:active,
+        .theme-toggle:active,
+        .copy-button:active {
+          transform: translateY(1px);
+        }
+
+        .eyebrow,
+        .chapter-number,
+        .micro-label {
+          color: var(--accent-strong);
+          font-family: var(--font-mono);
+          font-size: var(--text-xs);
+          font-weight: 680;
+          letter-spacing: 0.11em;
+          text-transform: uppercase;
+        }
+
+        .eyebrow {
+          display: flex;
+          align-items: center;
+          gap: var(--space-3);
+          margin-block-end: var(--space-6);
+        }
+
+        .status-light {
+          inline-size: 0.55rem;
+          block-size: 0.55rem;
+          border-radius: 50%;
+          background: var(--success);
+          box-shadow: 0 0 0 0.25rem var(--success-soft);
+        }
+
+        .profile-record {
+          min-inline-size: 0;
+          overflow: hidden;
+          border: 1px solid color-mix(in oklch, var(--accent) 34%, transparent);
+          border-radius: var(--radius-xl);
+          background: var(--surface-inverse);
+          color: var(--text-inverse);
+        }
+
+        .profile-record-head {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          border-block-end: 1px solid oklch(1 0 0 / 0.11);
+          padding: var(--space-4) var(--space-5);
+          color: var(--syntax-comment);
+          font-family: var(--font-mono);
+          font-size: var(--text-xs);
+          letter-spacing: 0.07em;
+          text-transform: uppercase;
+        }
+
+        .record-state {
+          display: inline-flex;
+          align-items: center;
+          gap: var(--space-2);
+          color: var(--syntax-type);
+        }
+
+        .profile-record-body {
+          padding: var(--space-6);
+        }
+
+        .profile-id {
+          color: var(--text-inverse);
+          font-family: var(--font-mono);
+          font-size: clamp(1.75rem, 4vw, 3rem);
+          font-weight: 700;
+          letter-spacing: -0.07em;
+          line-height: 1;
+        }
+
+        .source-paths {
+          display: grid;
+          gap: var(--space-3);
+          margin-block-start: var(--space-8);
+        }
+
+        .source-path {
+          display: grid;
+          grid-template-columns: 3rem minmax(0, 1fr);
+          align-items: center;
+          gap: var(--space-3);
+          color: var(--syntax-name);
+          font-family: var(--font-mono);
+          font-size: var(--text-sm);
+        }
+
+        .extension {
+          color: var(--syntax-keyword);
+          font-weight: 700;
+        }
+
+        .path-line {
+          display: flex;
+          min-block-size: 2.45rem;
+          align-items: center;
+          border-inline-start: 2px solid var(--accent);
+          background: oklch(1 0 0 / 0.045);
+          padding-inline: var(--space-4);
+        }
+
+        .record-foot {
+          display: grid;
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+          border-block-start: 1px solid oklch(1 0 0 / 0.11);
+        }
+
+        .record-foot > div {
+          padding: var(--space-4) var(--space-5);
+        }
+
+        .record-foot > div + div {
+          border-inline-start: 1px solid oklch(1 0 0 / 0.11);
+        }
+
+        .record-foot dt {
+          color: var(--syntax-comment);
+          font-family: var(--font-mono);
+          font-size: var(--text-xs);
+          letter-spacing: 0.08em;
+          text-transform: uppercase;
+        }
+
+        .record-foot dd {
+          margin-block-start: var(--space-1);
+          color: var(--text-inverse);
+          font-family: var(--font-mono);
+          font-size: var(--text-sm);
+          font-variant-numeric: tabular-nums;
+        }
+
+        .metric {
+          min-block-size: 7.5rem;
+          padding: var(--space-5);
+        }
+
+        .metric + .metric {
+          border-inline-start: 1px solid var(--border);
+        }
+
+        .metric:nth-child(4) {
+          border-inline-start: 1px solid var(--border);
+        }
+
+        .metric dt {
+          min-block-size: 2.6em;
+          color: var(--text-tertiary);
+          font-family: var(--font-mono);
+          font-size: var(--text-xs);
+          letter-spacing: 0.06em;
+          line-height: 1.3;
+          text-transform: uppercase;
+        }
+
+        .metric dd {
+          margin-block-start: var(--space-3);
+          color: var(--text-primary);
+          font-family: var(--font-mono);
+          font-size: clamp(1.35rem, 3vw, 2.1rem);
+          font-variant-numeric: tabular-nums;
+          font-weight: 680;
+          letter-spacing: -0.06em;
+          line-height: 1;
+        }
+
+        .metric dd small {
+          color: var(--text-tertiary);
+          font-size: var(--text-xs);
+          font-weight: 550;
+          letter-spacing: 0;
+        }
+
+        .rail-nav {
+          border-block-start: 1px solid var(--border-strong);
+          padding-block-start: var(--space-4);
+        }
+
+        .rail-nav ol {
+          margin: var(--space-4) 0 0;
+          padding: 0;
+          list-style: none;
+        }
+
+        .rail-nav a {
+          display: grid;
+          grid-template-columns: 2rem minmax(0, 1fr);
+          gap: var(--space-2);
+          border-inline-start: 2px solid transparent;
+          padding: var(--space-2) var(--space-3);
+          color: var(--text-tertiary);
+          font-size: var(--text-sm);
+          line-height: 1.3;
+          text-decoration: none;
+          transition:
+            background-color 180ms var(--ease-out),
+            border-color 180ms var(--ease-out),
+            color 180ms var(--ease-out);
+        }
+
+        .rail-nav a span:first-child {
+          color: var(--text-muted);
+          font-family: var(--font-mono);
+          font-size: var(--text-xs);
+          font-variant-numeric: tabular-nums;
+        }
+
+        .rail-nav a:hover,
+        .rail-nav a[aria-current="location"] {
+          border-inline-start-color: var(--accent);
+          background: var(--accent-soft);
+          color: var(--text-primary);
+        }
+
+        .rail-passport {
+          margin-block-start: var(--space-8);
+          border: 1px solid var(--border);
+          background: var(--surface);
+        }
+
+        .passport-row {
+          padding: var(--space-3) var(--space-4);
+        }
+
+        .passport-row + .passport-row {
+          border-block-start: 1px solid var(--border);
+        }
+
+        .passport-row dt {
+          color: var(--text-muted);
+          font-family: var(--font-mono);
+          font-size: 0.625rem;
+          letter-spacing: 0.08em;
+          text-transform: uppercase;
+        }
+
+        .passport-row dd {
+          margin-block-start: var(--space-1);
+          color: var(--text-secondary);
+          font-family: var(--font-mono);
+          font-size: var(--text-xs);
+          overflow-wrap: anywhere;
+        }
+
+        .chapter-number {
+          display: flex;
+          min-block-size: 2.5rem;
+          align-items: center;
+          border-block-start: 2px solid var(--accent);
+          padding-block-start: var(--space-2);
+          font-variant-numeric: tabular-nums;
+        }
+
+        .chapter-intro {
+          max-inline-size: 61ch;
+          margin-block-start: var(--space-5);
+          color: var(--text-secondary);
+          font-size: var(--text-lede);
+        }
+
+        .rule-ledger {
+          border-block: 1px solid var(--border-strong);
+        }
+
+        .rule-row {
+          display: grid;
+          grid-template-columns: 2.75rem 11rem minmax(0, 1fr);
+          gap: var(--space-4);
+          padding-block: var(--space-5);
+        }
+
+        .rule-row + .rule-row {
+          border-block-start: 1px solid var(--border);
+        }
+
+        .rule-index {
+          color: var(--accent-strong);
+          font-family: var(--font-mono);
+          font-size: var(--text-sm);
+          font-variant-numeric: tabular-nums;
+        }
+
+        .rule-name {
+          color: var(--text-primary);
+          font-weight: 680;
+        }
+
+        .rule-copy {
+          color: var(--text-secondary);
+        }
+
+        .code-window {
+          overflow: hidden;
+          border: 1px solid color-mix(in oklch, var(--accent) 24%, transparent);
+          border-radius: var(--radius-lg);
+          background: var(--surface-inverse);
+          color: var(--text-inverse);
+        }
+
+        .code-head {
+          display: flex;
+          min-block-size: 3rem;
+          align-items: center;
+          justify-content: space-between;
+          gap: var(--space-4);
+          border-block-end: 1px solid oklch(1 0 0 / 0.1);
+          padding-inline: var(--space-4);
+          color: var(--syntax-comment);
+          font-family: var(--font-mono);
+          font-size: var(--text-xs);
+        }
+
+        .code-title {
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+
+        .code-status {
+          display: inline-flex;
+          align-items: center;
+          gap: var(--space-2);
+          color: var(--syntax-type);
+          white-space: nowrap;
+        }
+
+        .copy-button {
+          min-block-size: 2rem;
+          border-color: oklch(1 0 0 / 0.14);
+          background: oklch(1 0 0 / 0.04);
+          color: var(--syntax-comment);
+          padding-inline: var(--space-3);
+        }
+
+        .copy-button:hover {
+          color: var(--text-inverse);
+        }
+
+        pre {
+          margin: 0;
+          padding: var(--space-6);
+          overflow: auto;
+          color: var(--syntax-name);
+          font-family: var(--font-mono);
+          font-size: clamp(0.74rem, 1.25vw, 0.86rem);
+          line-height: 1.72;
+          tab-size: 2;
+        }
+
+        pre code {
+          font-family: inherit;
+        }
+
+        .kw {
+          color: var(--syntax-keyword);
+        }
+
+        .ty {
+          color: var(--syntax-type);
+        }
+
+        .st {
+          color: var(--syntax-string);
+        }
+
+        .cm {
+          color: var(--syntax-comment);
+        }
+
+        .note,
+        .truth-boundary {
+          border-inline-start: 3px solid var(--accent);
+          background: var(--accent-soft);
+          padding: var(--space-5) var(--space-6);
+          color: var(--text-secondary);
+        }
+
+        .note strong,
+        .truth-boundary strong {
+          color: var(--text-primary);
+        }
+
+        .truth-boundary {
+          border-inline-start-color: var(--warning);
+          background: var(--warning-soft);
+        }
+
+        .type-stack {
+          border: 1px solid var(--border);
+          background: var(--surface);
+        }
+
+        .type-row {
+          display: grid;
+          grid-template-columns: 9rem minmax(0, 1fr);
+          gap: var(--space-4);
+          padding: var(--space-4) var(--space-5);
+        }
+
+        .type-row + .type-row {
+          border-block-start: 1px solid var(--border);
+        }
+
+        .type-row dt {
+          color: var(--accent-strong);
+          font-family: var(--font-mono);
+          font-size: var(--text-sm);
+          font-weight: 650;
+        }
+
+        .type-row dd {
+          color: var(--text-secondary);
+          font-size: 0.94rem;
+        }
+
+        .table-wrap {
+          overflow-x: auto;
+          border-block-start: 1px solid var(--border-strong);
+        }
+
+        .table-wrap td:first-child {
+          color: var(--text-primary);
+          font-weight: 640;
+        }
+
+        .table-wrap td {
+          color: var(--text-secondary);
+        }
+
+        .capsule-pair {
+          display: grid;
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+          border: 1px solid var(--border-strong);
+          background: var(--surface);
+        }
+
+        .capsule {
+          padding: var(--space-6);
+        }
+
+        .capsule + .capsule {
+          border-inline-start: 1px solid var(--border);
+        }
+
+        .capsule-name {
+          color: var(--accent-strong);
+          font-family: var(--font-mono);
+          font-size: 1.05rem;
+          font-weight: 700;
+        }
+
+        .capsule p {
+          margin-block-start: var(--space-3);
+          color: var(--text-secondary);
+          font-size: 0.94rem;
+        }
+
+        .property-cloud {
+          display: flex;
+          flex-wrap: wrap;
+          gap: var(--space-2);
+        }
+
+        .property,
+        .module-chip,
+        .effect-chip {
+          border: 1px solid var(--border);
+          border-radius: 999px;
+          background: var(--surface);
+          color: var(--text-secondary);
+          font-family: var(--font-mono);
+          font-size: var(--text-xs);
+          line-height: 1;
+        }
+
+        .property,
+        .module-chip {
+          padding: 0.55rem 0.7rem;
+        }
+
+        .property[data-kind="proof"] {
+          border-color: color-mix(in oklch, var(--success) 33%, var(--border));
+          background: var(--success-soft);
+        }
+
+        .pipeline {
+          display: grid;
+          grid-template-columns: repeat(5, minmax(0, 1fr));
+          border-block: 1px solid var(--border-strong);
+        }
+
+        .pipeline-step {
+          position: relative;
+          min-block-size: 9rem;
+          padding: var(--space-5);
+        }
+
+        .pipeline-step + .pipeline-step {
+          border-inline-start: 1px solid var(--border);
+        }
+
+        .pipeline-step::after {
+          position: absolute;
+          z-index: 1;
+          inset-block-start: 50%;
+          inset-inline-end: -0.34rem;
+          inline-size: 0.6rem;
+          block-size: 0.6rem;
+          border-block-start: 1px solid var(--accent);
+          border-inline-end: 1px solid var(--accent);
+          background: var(--canvas);
+          content: "";
+          rotate: 45deg;
+          translate: 0 -50%;
+        }
+
+        .pipeline-step:last-child::after {
+          display: none;
+        }
+
+        .pipeline-step small {
+          color: var(--accent-strong);
+          font-family: var(--font-mono);
+          font-size: var(--text-xs);
+          letter-spacing: 0.08em;
+          text-transform: uppercase;
+        }
+
+        .pipeline-step strong {
+          display: block;
+          margin-block-start: var(--space-3);
+          color: var(--text-primary);
+          line-height: 1.28;
+        }
+
+        .pipeline-step span {
+          display: block;
+          margin-block-start: var(--space-2);
+          color: var(--text-tertiary);
+          font-size: var(--text-sm);
+          line-height: 1.4;
+        }
+
+        .module-group {
+          border-block-start: 1px solid var(--border-strong);
+        }
+
+        .module-group summary {
+          display: grid;
+          grid-template-columns: minmax(0, 1fr) auto;
+          align-items: center;
+          gap: var(--space-4);
+          min-block-size: 4.5rem;
+          cursor: pointer;
+          list-style: none;
+        }
+
+        .module-group summary::-webkit-details-marker {
+          display: none;
+        }
+
+        .module-summary-title {
+          color: var(--text-primary);
+          font-weight: 680;
+        }
+
+        .module-summary-title small {
+          display: block;
+          margin-block-start: var(--space-1);
+          color: var(--text-tertiary);
+          font-size: var(--text-sm);
+          font-weight: 450;
+        }
+
+        .disclosure-mark {
+          display: grid;
+          inline-size: 2.25rem;
+          block-size: 2.25rem;
+          place-items: center;
+          border: 1px solid var(--border);
+          border-radius: 50%;
+          color: var(--accent-strong);
+          font-family: var(--font-mono);
+          transition: rotate 180ms var(--ease-out);
+        }
+
+        .module-group[open] .disclosure-mark {
+          rotate: 45deg;
+        }
+
+        .module-list {
+          display: flex;
+          flex-wrap: wrap;
+          gap: var(--space-2);
+          padding-block: 0 var(--space-6);
+        }
+
+        .effect-legend {
+          display: grid;
+          grid-template-columns: repeat(3, minmax(0, 1fr));
+          border: 1px solid var(--border);
+          background: var(--surface);
+        }
+
+        .effect-stat {
+          padding: var(--space-5);
+        }
+
+        .effect-stat + .effect-stat {
+          border-inline-start: 1px solid var(--border);
+        }
+
+        .effect-chip {
+          display: inline-flex;
+          padding: 0.42rem 0.58rem;
+        }
+
+        .effect-chip[data-effect="none"] {
+          background: var(--success-soft);
+          border-color: color-mix(in oklch, var(--success) 35%, var(--border));
+        }
+
+        .effect-chip[data-effect="read"] {
+          background: var(--accent-soft);
+          border-color: color-mix(in oklch, var(--accent) 35%, var(--border));
+        }
+
+        .effect-chip[data-effect="write"] {
+          background: var(--warning-soft);
+          border-color: color-mix(in oklch, var(--warning) 35%, var(--border));
+        }
+
+        .effect-stat strong {
+          display: block;
+          margin-block-start: var(--space-3);
+          font-family: var(--font-mono);
+          font-size: 1.75rem;
+          font-variant-numeric: tabular-nums;
+          line-height: 1;
+        }
+
+        .effect-stat p {
+          margin-block-start: var(--space-2);
+          color: var(--text-tertiary);
+          font-size: var(--text-sm);
+        }
+
+        .boundary-grid {
+          display: grid;
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+          border-block-start: 1px solid var(--border-strong);
+          border-inline-start: 1px solid var(--border);
+        }
+
+        .boundary-cell {
+          border-block-end: 1px solid var(--border);
+          border-inline-end: 1px solid var(--border);
+          padding: var(--space-6);
+        }
+
+        .boundary-cell h3 {
+          font-size: 1.05rem;
+          letter-spacing: -0.015em;
+        }
+
+        .boundary-cell p {
+          margin-block-start: var(--space-3);
+          color: var(--text-secondary);
+          font-size: 0.94rem;
+        }
+
+        .swap-list {
+          border-block: 1px solid var(--border-strong);
+        }
+
+        .swap-row {
+          display: grid;
+          grid-template-columns: minmax(8rem, 0.8fr) minmax(9rem, 1fr) minmax(0, 1.7fr);
+          gap: var(--space-5);
+          padding-block: var(--space-4);
+        }
+
+        .swap-row + .swap-row {
+          border-block-start: 1px solid var(--border);
+        }
+
+        .swap-old,
+        .swap-new {
+          font-family: var(--font-mono);
+          font-size: var(--text-sm);
+        }
+
+        .swap-old {
+          color: var(--danger);
+          text-decoration: line-through;
+          text-decoration-thickness: 1px;
+        }
+
+        .swap-new {
+          color: var(--success);
+          font-weight: 650;
+        }
+
+        .swap-why {
+          color: var(--text-secondary);
+          font-size: 0.94rem;
+        }
+
+        .semantics-meter {
+          border: 1px solid var(--border-strong);
+          background: var(--surface);
+        }
+
+        .semantics-row {
+          display: grid;
+          grid-template-columns: 8rem minmax(0, 1fr) 5.5rem;
+          align-items: center;
+          gap: var(--space-4);
+          padding: var(--space-5);
+        }
+
+        .semantics-row + .semantics-row {
+          border-block-start: 1px solid var(--border);
+        }
+
+        .semantics-label {
+          color: var(--text-primary);
+          font-weight: 650;
+        }
+
+        .meter-track {
+          display: flex;
+          block-size: 0.75rem;
+          overflow: hidden;
+          border-radius: 999px;
+          background: var(--surface-sunken);
+        }
+
+        .meter-specified {
+          background: var(--success);
+        }
+
+        .meter-validated {
+          min-inline-size: 2px;
+          background: var(--accent);
+        }
+
+        .meter-trusted {
+          background: color-mix(in oklch, var(--warning) 68%, var(--surface));
+        }
+
+        .semantics-count {
+          color: var(--text-tertiary);
+          font-family: var(--font-mono);
+          font-size: var(--text-sm);
+          font-variant-numeric: tabular-nums;
+          text-align: end;
+        }
+
+        .command-list {
+          border-block: 1px solid var(--border-strong);
+        }
+
+        .command-row {
+          display: grid;
+          grid-template-columns: minmax(13rem, 0.9fr) minmax(0, 1.1fr);
+          gap: var(--space-6);
+          padding-block: var(--space-4);
+        }
+
+        .command-row + .command-row {
+          border-block-start: 1px solid var(--border);
+        }
+
+        .command-row code {
+          align-self: start;
+          color: var(--accent-strong);
+          font-size: var(--text-sm);
+          overflow-wrap: anywhere;
+          white-space: normal;
+        }
+
+        .command-row span {
+          color: var(--text-secondary);
+          font-size: 0.94rem;
+        }
+
+        .link-grid {
+          display: grid;
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+          border-block-start: 1px solid var(--border-strong);
+          border-inline-start: 1px solid var(--border);
+        }
+
+        .doc-link {
+          display: block;
+          min-block-size: 7rem;
+          border-block-end: 1px solid var(--border);
+          border-inline-end: 1px solid var(--border);
+          padding: var(--space-5);
+          color: var(--text-primary);
+          text-decoration: none;
+          transition: background-color 180ms var(--ease-out);
+        }
+
+        .doc-link:hover {
+          background: var(--accent-soft);
+        }
+
+        .doc-link strong {
+          display: block;
+        }
+
+        .doc-link span {
+          display: block;
+          margin-block-start: var(--space-2);
+          color: var(--text-tertiary);
+          font-size: var(--text-sm);
+        }
+
+        .page-footer {
+          border-block-start: 1px solid var(--border-strong);
+          padding-block: var(--space-10);
+          color: var(--text-tertiary);
+          font-size: var(--text-sm);
+        }
+
+        .page-footer-inner {
+          display: flex;
+          justify-content: space-between;
+          gap: var(--space-8);
+        }
+
+        .page-footer p {
+          max-inline-size: 70ch;
+        }
+
+        .back-top {
+          flex: none;
+          font-family: var(--font-mono);
+          font-size: var(--text-xs);
+          text-transform: uppercase;
+        }
+
+        @media (max-width: 64rem) {
+          .metric:nth-child(4) {
+            border-inline-start: 0;
+          }
+
+          .metric:nth-child(n + 4) {
+            border-block-start: 1px solid var(--border);
+          }
+
+          .rail-passport {
+            margin-block-start: 0;
+          }
+
+          .passport-row + .passport-row {
+            border-block-start: 0;
+            border-inline-start: 1px solid var(--border);
+          }
+        }
+
+        @media (max-width: 46rem) {
+          .mast-link {
+            display: none;
+          }
+
+          .theme-toggle {
+            inline-size: 2.75rem;
+            gap: 0;
+            padding: 0;
+          }
+
+          .profile-record {
+            inline-size: 100%;
+          }
+
+          .path-line {
+            min-inline-size: 0;
+            overflow-wrap: anywhere;
+          }
+
+          .theme-label {
+            position: absolute;
+            inline-size: 1px;
+            block-size: 1px;
+            overflow: hidden;
+            clip-path: inset(50%);
+            white-space: nowrap;
+          }
+
+          .metric {
+            min-block-size: 6.5rem;
+          }
+
+          .metric:nth-child(odd) {
+            border-inline-start: 0;
+          }
+
+          .metric:nth-child(even) {
+            border-inline-start: 1px solid var(--border);
+          }
+
+          .metric:nth-child(n + 3) {
+            border-block-start: 1px solid var(--border);
+          }
+
+          .rule-row {
+            grid-template-columns: 2.25rem minmax(0, 1fr);
+          }
+
+          .rule-copy {
+            grid-column: 2;
+          }
+
+          .type-row,
+          .swap-row,
+          .command-row,
+          .semantics-row {
+            grid-template-columns: 1fr;
+            gap: var(--space-2);
+          }
+
+          .capsule-pair,
+          .boundary-grid,
+          .link-grid {
+            grid-template-columns: 1fr;
+          }
+
+          .capsule + .capsule {
+            border-block-start: 1px solid var(--border);
+            border-inline-start: 0;
+          }
+
+          .pipeline {
+            grid-template-columns: 1fr;
+          }
+
+          .pipeline-step {
+            min-block-size: 0;
+          }
+
+          .pipeline-step + .pipeline-step {
+            border-block-start: 1px solid var(--border);
+            border-inline-start: 0;
+          }
+
+          .pipeline-step::after {
+            inset-block-start: auto;
+            inset-block-end: -0.34rem;
+            inset-inline-end: 50%;
+            rotate: 135deg;
+            translate: 50% 0;
+          }
+
+          .effect-legend {
+            grid-template-columns: 1fr;
+          }
+
+          .effect-stat + .effect-stat {
+            border-block-start: 1px solid var(--border);
+            border-inline-start: 0;
+          }
+
+          .semantics-count {
+            text-align: start;
+          }
+
+          .page-footer-inner {
+            display: block;
+          }
+
+          .back-top {
+            display: inline-block;
+            margin-block-start: var(--space-4);
+          }
+        }
+      }
+
+      @layer utilities {
+        .muted {
+          color: var(--text-tertiary);
+        }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        html {
+          scroll-behavior: auto;
+        }
+
+        *,
+        *::before,
+        *::after {
+          scroll-behavior: auto !important;
+          transition-duration: 0.01ms !important;
+        }
+      }
+
+      @media print {
+        :root,
+        :root[data-theme="dark"] {
+          --canvas: white;
+          --surface: white;
+          --surface-sunken: #f4f4f4;
+          --surface-inverse: #15191e;
+          --text-primary: #111;
+          --text-secondary: #333;
+          --text-tertiary: #555;
+          --border: #ccc;
+          --border-strong: #999;
+          --grid-line: transparent;
+        }
+
+        .masthead,
+        .rail,
+        .copy-button,
+        .back-top {
+          display: none;
+        }
+
+        .hero {
+          padding-block: 2rem;
+        }
+
+        .shell {
+          display: block;
+          padding-block-start: 0;
+        }
+
+        .chapter {
+          break-inside: avoid-page;
+        }
+
+        a {
+          color: inherit;
+          text-decoration: none;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#content">Skip to the language overview</a>
+
+    <header class="masthead" id="top">
+      <div class="frame masthead-inner">
+        <a class="wordmark" href="../README.md" aria-label="zttp repository home">
+          <span class="wordmark-mark" aria-hidden="true">zt</span>
+          <span>zttp / language</span>
+        </a>
+        <div class="mast-actions">
+          <a class="mast-link" href="zts-formal-spec-northstar-advanced.md">Formal spec</a>
+          <button class="theme-toggle" id="theme-toggle" type="button" aria-pressed="false">
+            <span aria-hidden="true" id="theme-icon">◐</span>
+            <span class="theme-label" id="theme-label">Dark theme</span>
+          </button>
+        </div>
+      </div>
+      <div class="progress" id="progress" aria-hidden="true"></div>
+    </header>
+
+    <main id="content">
+      <section class="hero frame" aria-labelledby="page-title">
+        <div class="hero-grid">
+          <div class="hero-copy">
+            <p class="eyebrow"><span class="status-light" aria-hidden="true"></span> Implemented profile · ZTS <span data-zts-fact="compiler_version">0.18.0</span></p>
+            <h1 id="page-title">The ZTS <span>language.</span></h1>
+            <p class="hero-lede">
+              ZTS is a constrained application language with TypeScript-shaped source, compiler-visible authority,
+              typed failure, and compiler-visible proof claims. The model-minimal cutover is complete: one core
+              profile, one optional TSX frontend, and no JavaScript compatibility path.
+            </p>
+          </div>
+
+          <aside class="profile-record" aria-label="Implemented source profiles">
+            <div class="profile-record-head">
+              <span>source profile record</span>
+              <span class="record-state"><span class="status-light" aria-hidden="true"></span> active</span>
+            </div>
+            <div class="profile-record-body">
+              <div class="profile-id" data-zts-fact="profile_id">zts-model-1</div>
+              <div class="source-paths" aria-label="Source file paths">
+                <div class="source-path">
+                  <span class="extension">.ts</span>
+                  <span class="path-line">typed core source</span>
+                </div>
+                <div class="source-path">
+                  <span class="extension">.tsx</span>
+                  <span class="path-line"><span data-zts-fact="frontend_profile_id">zts-tsx-1</span> lowering, then core</span>
+                </div>
+              </div>
+            </div>
+            <dl class="record-foot">
+              <div>
+                <dt>Core grammar</dt>
+                <dd><span data-zts-fact="grammar_productions">66</span> productions</dd>
+              </div>
+              <div>
+                <dt>Compatibility</dt>
+                <dd>direct cutover</dd>
+              </div>
+            </dl>
+          </aside>
+        </div>
+      </section>
+
+      <dl class="metric-ledger" aria-label="Current language profile at a glance">
+        <div class="metric">
+          <dt>Core productions</dt>
+          <dd data-zts-fact="grammar_productions">66</dd>
+        </div>
+        <div class="metric">
+          <dt>Published idioms</dt>
+          <dd data-zts-fact="published_idioms">18</dd>
+        </div>
+        <div class="metric">
+          <dt>Ambient types</dt>
+          <dd data-zts-fact="ambient_types">13</dd>
+        </div>
+        <div class="metric">
+          <dt>Ambient values</dt>
+          <dd data-zts-fact="ambient_values">26</dd>
+        </div>
+        <div class="metric">
+          <dt>Capability modules</dt>
+          <dd data-zts-fact="capability_modules">26</dd>
+        </div>
+        <div class="metric">
+          <dt>Module exports</dt>
+          <dd data-zts-fact="module_exports">112</dd>
+        </div>
+      </dl>
+
+      <div class="frame shell">
+        <aside class="rail" aria-label="Overview navigation and profile details">
+          <nav class="rail-nav" aria-label="On this page">
+            <p class="micro-label">On this page</p>
+            <ol>
+              <li><a href="#model"><span>01</span><span>Mental model</span></a></li>
+              <li><a href="#source"><span>02</span><span>Source and types</span></a></li>
+              <li><a href="#control"><span>03</span><span>Control and failure</span></a></li>
+              <li><a href="#effects"><span>04</span><span>Effects and proofs</span></a></li>
+              <li><a href="#tsx"><span>05</span><span>TSX frontend</span></a></li>
+              <li><a href="#modules"><span>06</span><span>Module surface</span></a></li>
+              <li><a href="#boundaries"><span>07</span><span>Language boundary</span></a></li>
+              <li><a href="#compiler"><span>08</span><span>Compiler contract</span></a></li>
+              <li><a href="#start"><span>09</span><span>Start writing</span></a></li>
+            </ol>
+          </nav>
+
+          <dl class="rail-passport" aria-label="Profile identity">
+            <div class="passport-row">
+              <dt>Profile</dt>
+              <dd data-zts-fact="profile_id">zts-model-1</dd>
+            </div>
+            <div class="passport-row">
+              <dt>Frontend</dt>
+              <dd data-zts-fact="frontend_profile_id">zts-tsx-1</dd>
+            </div>
+            <div class="passport-row">
+              <dt>Compiler</dt>
+              <dd data-zts-fact="compiler_version">0.18.0</dd>
+            </div>
+            <div class="passport-row">
+              <dt>Policy</dt>
+              <dd data-zts-fact="policy_version">2026.04.2</dd>
+            </div>
+          </dl>
+        </aside>
+
+        <article class="content">
+          <section class="chapter" id="model" aria-labelledby="model-title">
+            <div class="chapter-heading">
+              <span class="chapter-number">01</span>
+              <div>
+                <h2 id="model-title">The language in one pass</h2>
+                <p class="chapter-intro">
+                  ZTS reduces authoring choices where those choices hide control, authority, or proof state. It keeps
+                  familiar syntax when the compiler can give it one stable meaning.
+                </p>
+              </div>
+            </div>
+            <div class="chapter-body">
+              <div class="rule-ledger">
+                <div class="rule-row">
+                  <span class="rule-index">01</span>
+                  <span class="rule-name">Name the data</span>
+                  <span class="rule-copy"><code>structural</code> defines transparent shapes. <code>nominal</code> creates scalar identities.</span>
+                </div>
+                <div class="rule-row">
+                  <span class="rule-index">02</span>
+                  <span class="rule-name">Show the branch</span>
+                  <span class="rule-copy">Conditions are boolean. Tagged unions use exhaustive <code>match</code>. There is no general truthiness.</span>
+                </div>
+                <div class="rule-row">
+                  <span class="rule-index">03</span>
+                  <span class="rule-name">Type the failure</span>
+                  <span class="rule-copy"><code>Result&lt;T, E&gt;</code> carries recoverable failure. <code>undefined</code> means absence. <code>null</code> is data.</span>
+                </div>
+                <div class="rule-row">
+                  <span class="rule-index">04</span>
+                  <span class="rule-name">Expose authority</span>
+                  <span class="rule-copy">Named <code>zttp:*</code> modules and a closed ambient intrinsic set feed explicit capability and proof facts.</span>
+                </div>
+                <div class="rule-row">
+                  <span class="rule-index">05</span>
+                  <span class="rule-name">Ask the compiler</span>
+                  <span class="rule-copy">Grammar, examples, idioms, repairs, and verifiers are machine-readable. Canonical source is shared by agents and humans.</span>
+                </div>
+              </div>
+
+              <div class="pipeline" aria-label="ZTS source to runtime pipeline">
+                <div class="pipeline-step">
+                  <small>source</small>
+                  <strong>.ts or .tsx</strong>
+                  <span>Typed source with explicit file identity</span>
+                </div>
+                <div class="pipeline-step">
+                  <small>frontend</small>
+                  <strong>typed core</strong>
+                  <span>TSX lowers first; types produce evidence</span>
+                </div>
+                <div class="pipeline-step">
+                  <small>checks</small>
+                  <strong>types, flow, effects</strong>
+                  <span>Failures stay located and structured</span>
+                </div>
+                <div class="pipeline-step">
+                  <small>execution</small>
+                  <strong>bytecode and VM</strong>
+                  <span>Governed calls form the effect boundary</span>
+                </div>
+                <div class="pipeline-step">
+                  <small>evidence</small>
+                  <strong>contract and receipt</strong>
+                  <span>Artifacts bind profile and source identity</span>
+                </div>
+              </div>
+
+              <p class="note">
+                <strong>ZTS is a constrained language, not TypeScript compatibility.</strong> TypeScript lexical habits
+                make the source readable, but the live grammar and checker define the language. Files ending in
+                <code>.js</code> or <code>.jsx</code> are rejected.
+              </p>
+            </div>
+          </section>
+
+          <section class="chapter" id="source" aria-labelledby="source-title">
+            <div class="chapter-heading">
+              <span class="chapter-number">02</span>
+              <div>
+                <h2 id="source-title">Source and type system</h2>
+                <p class="chapter-intro">
+                  The type layer is expressive enough for application data and small enough to erase without becoming
+                  runtime evidence.
+                </p>
+              </div>
+            </div>
+            <div class="chapter-body">
+              <div class="wide-split">
+                <div class="code-window">
+                  <div class="code-head">
+                    <span class="code-title">types.ts</span>
+                    <button class="copy-button" type="button" data-copy-target="type-example">Copy</button>
+                  </div>
+                  <pre><code id="type-example"><span class="kw">nominal</span> <span class="ty">OrderId</span> = <span class="ty">string</span>;
+
+<span class="kw">structural</span> <span class="ty">Command</span> =
+  | { kind: <span class="st">"echo"</span>; text: <span class="ty">string</span> }
+  | { kind: <span class="st">"ping"</span> };
+
+<span class="kw">structural</span> <span class="ty">Tree</span>&lt;T&gt; = {
+  readonly value: T;
+  readonly children: readonly <span class="ty">Tree</span>&lt;T&gt;[];
+};
+
+<span class="kw">function</span> describe(command: <span class="ty">Command</span>): <span class="ty">string</span> {
+  <span class="kw">return match</span> (command) {
+    <span class="kw">when</span> { kind: <span class="st">"echo"</span>, text }: text
+    <span class="kw">when</span> { kind: <span class="st">"ping"</span> }: <span class="st">"pong"</span>
+  };
+}</code></pre>
+                </div>
+
+                <dl class="type-stack">
+                  <div class="type-row">
+                    <dt>Primitives</dt>
+                    <dd><code>boolean</code>, <code>number</code>, <code>string</code>, <code>null</code>, <code>undefined</code>, <code>unknown</code>, <code>never</code>, and <code>Bytes</code>.</dd>
+                  </div>
+                  <div class="type-row">
+                    <dt>Composition</dt>
+                    <dd>Records, arrays, tuples, functions, literal types, unions, intersections, and constrained generics.</dd>
+                  </div>
+                  <div class="type-row">
+                    <dt>Identity</dt>
+                    <dd><code>nominal</code> creates a distinct <code>string</code> or <code>number</code> identity with an unchanged runtime value.</dd>
+                  </div>
+                  <div class="type-row">
+                    <dt>Recursion</dt>
+                    <dd>Recursive aliases are accepted when every cycle passes through a record, tuple, array, or <code>Dict</code>.</dd>
+                  </div>
+                  <div class="type-row">
+                    <dt>Utilities</dt>
+                    <dd><code>Readonly</code>, <code>Pick</code>, <code>Omit</code>, <code>Partial</code>, and <code>Required</code>.</dd>
+                  </div>
+                </dl>
+              </div>
+
+              <div class="table-wrap" role="region" aria-label="Core source forms" tabindex="0">
+                <table>
+                  <thead>
+                    <tr>
+                      <th scope="col">Need</th>
+                      <th scope="col">ZTS form</th>
+                      <th scope="col">Boundary</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr>
+                      <td>Application shape</td>
+                      <td><code>structural User = { ... };</code></td>
+                      <td>Transparent and structurally assignable.</td>
+                    </tr>
+                    <tr>
+                      <td>Scalar identity</td>
+                      <td><code>nominal UserId = string;</code></td>
+                      <td>The constructor adds identity, not validation.</td>
+                    </tr>
+                    <tr>
+                      <td>Public behavior</td>
+                      <td>Named function with parameter and return types</td>
+                      <td>Fixed arity. Reusable or exported arrow helpers and function expressions are refused; direct arrow callbacks stay inside typed, finite APIs.</td>
+                    </tr>
+                    <tr>
+                      <td>Module boundary</td>
+                      <td>Named import, named export, or <code>import type</code></td>
+                      <td>No default export, wildcard import, side-effect import, or dynamic import.</td>
+                    </tr>
+                    <tr>
+                      <td>Text construction</td>
+                      <td><code>String(value)</code> and <code>[a, b].join("")</code></td>
+                      <td>No template interpolation or string-valued addition.</td>
+                    </tr>
+                    <tr>
+                      <td>Record update</td>
+                      <td>Explicit fields, with at most one leading spread</td>
+                      <td>No shorthand, computed keys, methods, getters, or setters.</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+
+              <p class="truth-boundary">
+                <strong>Types never manufacture evidence.</strong> Type predicates are checked before they narrow.
+                <code>Proof</code> and <code>Effects</code> annotations are compared with facts inferred from function
+                bodies. Assertions such as <code>as</code> and <code>satisfies</code> are outside the profile.
+              </p>
+            </div>
+          </section>
+
+          <section class="chapter" id="control" aria-labelledby="control-title">
+            <div class="chapter-heading">
+              <span class="chapter-number">03</span>
+              <div>
+                <h2 id="control-title">Control and failure</h2>
+                <p class="chapter-intro">
+                  Branches, iteration, failure, and absence use different forms. The checker never has to guess which
+                  channel a value belongs to.
+                </p>
+              </div>
+            </div>
+            <div class="chapter-body">
+              <div class="split">
+                <div>
+                  <h3>Control stays visible</h3>
+                  <p class="muted">
+                    Use <code>if</code> for statement branches, a pure ternary for two values, and <code>match</code> for
+                    one scrutinee with multiple cases. <code>assert</code> is reserved for programmer invariants.
+                  </p>
+                </div>
+                <div>
+                  <h3>Iteration stays finite</h3>
+                  <p class="muted">
+                    <code>for...of</code> iterates a finite snapshot. Pure collection transforms use typed array or
+                    <code>Dict</code> operations. Recursion can run, while totality and cost claims remain separate proof
+                    questions.
+                  </p>
+                </div>
+              </div>
+
+              <div class="code-window">
+                <div class="code-head">
+                  <span class="code-title">failure.ts · separate absence from recoverable failure</span>
+                  <button class="copy-button" type="button" data-copy-target="failure-example">Copy</button>
+                </div>
+                <pre><code id="failure-example" data-zts-check="type-only"><span class="kw">structural</span> <span class="ty">Result</span>&lt;T, E&gt; =
+  | { <span class="kw">readonly</span> ok: <span class="kw">true</span>; <span class="kw">readonly</span> value: T }
+  | { <span class="kw">readonly</span> ok: <span class="kw">false</span>; <span class="kw">readonly</span> error: E };
+
+<span class="kw">structural</span> <span class="ty">DivideError</span> = { kind: <span class="st">"division-by-zero"</span> };
+
+<span class="kw">function</span> divide(a: <span class="ty">number</span>, b: <span class="ty">number</span>): <span class="ty">Result</span>&lt;<span class="ty">number</span>, <span class="ty">DivideError</span>&gt; {
+  <span class="kw">if</span> (b === 0) {
+    <span class="kw">return</span> { ok: <span class="kw">false</span>, error: { kind: <span class="st">"division-by-zero"</span> } };
+  }
+  <span class="kw">return</span> { ok: <span class="kw">true</span>, value: a / b };
+}
+
+<span class="kw">function</span> describe(result: <span class="ty">Result</span>&lt;<span class="ty">number</span>, <span class="ty">DivideError</span>&gt;): <span class="ty">string</span> {
+  <span class="kw">return match</span> (result) {
+    <span class="kw">when</span> { ok: <span class="kw">true</span>, value }:
+      [<span class="st">"ratio "</span>, String(value)].join(<span class="st">""</span>)
+    <span class="kw">when</span> { ok: <span class="kw">false</span> }:
+      <span class="st">"undefined ratio"</span>
+  };
+}</code></pre>
+              </div>
+
+              <div class="table-wrap" role="region" aria-label="Control and value distinctions" tabindex="0">
+                <table>
+                  <thead>
+                    <tr>
+                      <th scope="col">Situation</th>
+                      <th scope="col">Write</th>
+                      <th scope="col">Reason</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr>
+                      <td>Optional value</td>
+                      <td><code>value !== undefined</code> or <code>value ?? fallback</code></td>
+                      <td>No truthiness. The branch states whether absence or content matters.</td>
+                    </tr>
+                    <tr>
+                      <td>JSON null</td>
+                      <td>Name <code>null</code> in the type and compare or match it</td>
+                      <td><code>null</code> is data, not an alias for an omitted value.</td>
+                    </tr>
+                    <tr>
+                      <td>Recoverable error</td>
+                      <td><code>Result&lt;T, E&gt;</code></td>
+                      <td>The error is a typed return path, never an exception channel.</td>
+                    </tr>
+                    <tr>
+                      <td>Invariant breach</td>
+                      <td><code>assert condition;</code></td>
+                      <td>Expected application guards use <code>if</code> plus an explicit return.</td>
+                    </tr>
+                    <tr>
+                      <td>Boolean composition</td>
+                      <td><code>a &amp;&amp; b</code>, <code>a || b</code>, <code>!a</code></td>
+                      <td>Operands and result are boolean. Operators never return an operand value.</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </section>
+
+          <section class="chapter" id="effects" aria-labelledby="effects-title">
+            <div class="chapter-heading">
+              <span class="chapter-number">04</span>
+              <div>
+                <h2 id="effects-title">Effects stay visible. Proofs are return types.</h2>
+                <p class="chapter-intro">
+                  Authority enters through visible module calls and a closed set of compiler-known ambient intrinsics.
+                  A function can publish the capabilities it may use and the properties the compiler must discharge.
+                </p>
+              </div>
+            </div>
+            <div class="chapter-body">
+              <div class="capsule-pair">
+                <div class="capsule">
+                  <div class="capsule-name">Effects&lt;T, R&gt;</div>
+                  <p>
+                    A capability ceiling. The inferred effect row must be a subset of <code>R</code>. Exported effectful
+                    helpers declare it; internal helpers rely on inference.
+                  </p>
+                </div>
+                <div class="capsule">
+                  <div class="capsule-name">Proof&lt;T, P&gt;</div>
+                  <p>
+                    A property obligation. The compiler checks the body and reachable calls, then reports the evidence
+                    or a located counterexample for each requested property.
+                  </p>
+                </div>
+              </div>
+
+              <div class="code-window">
+                <div class="code-head">
+                  <span class="code-title">handler.ts · checked against the live compiler</span>
+                  <span class="code-status"><span class="status-light" aria-hidden="true"></span> zero diagnostics</span>
+                  <button class="copy-button" type="button" data-copy-target="complete-example">Copy</button>
+                </div>
+                <pre><code id="complete-example"><span class="kw">import</span> { sha256 } <span class="kw">from</span> <span class="st">"zttp:crypto"</span>;
+
+<span class="kw">structural</span> <span class="ty">Guarded</span>&lt;T&gt; = <span class="ty">Proof</span>&lt;T,
+  | <span class="st">"deterministic"</span>
+  | <span class="st">"state_isolated"</span>
+  | <span class="st">"no_secret_leakage"</span>
+&gt;;
+
+<span class="kw">function</span> handler(_req: <span class="ty">Request</span>): <span class="ty">Guarded</span>&lt;
+  <span class="ty">Effects</span>&lt;<span class="ty">Response</span>, <span class="st">"crypto"</span>&gt;
+&gt; {
+  <span class="kw">return</span> Response.json({ digest: sha256(<span class="st">"zttp"</span>) });
+}</code></pre>
+              </div>
+
+              <div>
+                <p class="micro-label">Published verifier properties</p>
+                <div class="property-cloud" aria-label="Compiler verifier properties">
+                  <span class="property" data-kind="proof">pure</span>
+                  <span class="property" data-kind="proof">read_only</span>
+                  <span class="property" data-kind="proof">stateless</span>
+                  <span class="property" data-kind="proof">deterministic</span>
+                  <span class="property" data-kind="proof">has_egress</span>
+                  <span class="property" data-kind="proof">state_isolated</span>
+                  <span class="property" data-kind="proof">retry_safe</span>
+                  <span class="property" data-kind="proof">idempotent</span>
+                  <span class="property" data-kind="proof">fault_covered</span>
+                  <span class="property" data-kind="proof">results_safe</span>
+                  <span class="property" data-kind="proof">optional_safe</span>
+                  <span class="property" data-kind="proof">input_validated</span>
+                  <span class="property" data-kind="proof">no_secret_leakage</span>
+                  <span class="property" data-kind="proof">no_credential_leakage</span>
+                  <span class="property" data-kind="proof">pii_contained</span>
+                  <span class="property" data-kind="proof">injection_safe</span>
+                  <span class="property" data-kind="proof">canonical</span>
+                  <span class="property" data-kind="proof">post_only</span>
+                  <span class="property" data-kind="proof">cost_bounded</span>
+                </div>
+              </div>
+
+              <p class="note">
+                The annotation is an obligation, not a promise the compiler trusts. A body that reaches a capability
+                outside its <code>Effects</code> ceiling or fails a named <code>Proof</code> property does not check.
+              </p>
+            </div>
+          </section>
+
+          <section class="chapter" id="tsx" aria-labelledby="tsx-title">
+            <div class="chapter-heading">
+              <span class="chapter-number">05</span>
+              <div>
+                <h2 id="tsx-title">TSX is a frontend, not the core</h2>
+                <p class="chapter-intro">
+                  A <code>.tsx</code> file selects the separately identified <code>zts-tsx-1</code> frontend. It lowers
+                  UI syntax to ordinary calls before the core parser runs.
+                </p>
+              </div>
+            </div>
+            <div class="chapter-body">
+              <div class="pipeline" aria-label="TSX lowering pipeline">
+                <div class="pipeline-step">
+                  <small>authored</small>
+                  <strong>.tsx source</strong>
+                  <span>Elements, fragments, props, and children</span>
+                </div>
+                <div class="pipeline-step">
+                  <small>strip</small>
+                  <strong>type evidence</strong>
+                  <span>Source locations remain mapped</span>
+                </div>
+                <div class="pipeline-step">
+                  <small>lower</small>
+                  <strong>zts-tsx-1</strong>
+                  <span>Versioned frontend with its own grammar hash</span>
+                </div>
+                <div class="pipeline-step">
+                  <small>target</small>
+                  <strong>h(tag, props, ...children)</strong>
+                  <span>Ordinary core calls only</span>
+                </div>
+                <div class="pipeline-step">
+                  <small>parse</small>
+                  <strong>zts-model-1</strong>
+                  <span>The core contains no JSX node kind</span>
+                </div>
+              </div>
+
+              <div class="split">
+                <div class="code-window">
+                  <div class="code-head"><span class="code-title">page.tsx</span></div>
+                  <pre><code><span class="kw">function</span> Card(props: { title: <span class="ty">string</span> }): JSX.Element {
+  <span class="kw">return</span> &lt;section class=<span class="st">"card"</span>&gt;
+    &lt;h2&gt;{props.title}&lt;/h2&gt;
+  &lt;/section&gt;;
+}</code></pre>
+                </div>
+                <div class="code-window">
+                  <div class="code-head"><span class="code-title">lowered core</span></div>
+                  <pre><code><span class="kw">function</span> Card(props) {
+  <span class="kw">return</span> h(
+    <span class="st">"section"</span>,
+    { class: <span class="st">"card"</span> },
+    h(<span class="st">"h2"</span>, <span class="kw">null</span>, props.title),
+  );
+}</code></pre>
+                </div>
+              </div>
+
+              <p class="truth-boundary">
+                <strong>The frontend is intentionally small.</strong> It has no component lifecycle, hooks, class
+                components, ambient state, or hidden scheduling. A <code>.ts</code> file containing JSX and every
+                <code>.jsx</code> file are refused.
+              </p>
+            </div>
+          </section>
+
+          <section class="chapter" id="modules" aria-labelledby="modules-title">
+            <div class="chapter-heading">
+              <span class="chapter-number">06</span>
+              <div>
+                <h2 id="modules-title">The application surface</h2>
+                <p class="chapter-intro">
+                  The built-in module catalog exposes data operations, runtime authority, and structured orchestration.
+                  The registry assigns every export a capability set and an effect class.
+                </p>
+              </div>
+            </div>
+            <div class="chapter-body">
+              <div class="effect-legend" aria-label="Built-in export effect counts">
+                <div class="effect-stat">
+                  <span class="effect-chip" data-effect="none">none</span>
+                  <strong data-zts-fact="effect_none">64</strong>
+                  <p>No intrinsic export effect</p>
+                </div>
+                <div class="effect-stat">
+                  <span class="effect-chip" data-effect="read">read</span>
+                  <strong data-zts-fact="effect_read">9</strong>
+                  <p>Runtime reads without mutation</p>
+                </div>
+                <div class="effect-stat">
+                  <span class="effect-chip" data-effect="write">write</span>
+                  <strong data-zts-fact="effect_write">39</strong>
+                  <p>I/O, mutation, or scheduled callbacks</p>
+                </div>
+              </div>
+
+              <p class="muted">
+                These are intrinsic export classifications. A higher-order call joins its callback's effects into the
+                inferred row, so a <code>Result</code> combinator can still be effectful.
+              </p>
+
+              <div>
+                <details class="module-group" open>
+                  <summary>
+                    <span class="module-summary-title">Data and boundary tools <small>Values, parsing, validation, routing, and text</small></span>
+                    <span class="disclosure-mark" aria-hidden="true">+</span>
+                  </summary>
+                  <div class="module-list">
+                    <span class="module-chip" data-zts-module>zttp:bytes</span>
+                    <span class="module-chip" data-zts-module>zttp:collections</span>
+                    <span class="module-chip" data-zts-module>zttp:decode</span>
+                    <span class="module-chip" data-zts-module>zttp:http</span>
+                    <span class="module-chip" data-zts-module>zttp:json</span>
+                    <span class="module-chip" data-zts-module>zttp:result</span>
+                    <span class="module-chip" data-zts-module>zttp:router</span>
+                    <span class="module-chip" data-zts-module>zttp:text</span>
+                    <span class="module-chip" data-zts-module>zttp:time</span>
+                    <span class="module-chip" data-zts-module>zttp:url</span>
+                    <span class="module-chip" data-zts-module>zttp:validate</span>
+                  </div>
+                </details>
+                <details class="module-group">
+                  <summary>
+                    <span class="module-summary-title">Explicit authority <small>Environment, identity, storage, network, and observability</small></span>
+                    <span class="disclosure-mark" aria-hidden="true">+</span>
+                  </summary>
+                  <div class="module-list">
+                    <span class="module-chip" data-zts-module>zttp:auth</span>
+                    <span class="module-chip" data-zts-module>zttp:cache</span>
+                    <span class="module-chip" data-zts-module>zttp:crypto</span>
+                    <span class="module-chip" data-zts-module>zttp:env</span>
+                    <span class="module-chip" data-zts-module>zttp:fetch</span>
+                    <span class="module-chip" data-zts-module>zttp:id</span>
+                    <span class="module-chip" data-zts-module>zttp:log</span>
+                    <span class="module-chip" data-zts-module>zttp:ratelimit</span>
+                    <span class="module-chip" data-zts-module>zttp:service</span>
+                    <span class="module-chip" data-zts-module>zttp:sql</span>
+                  </div>
+                </details>
+                <details class="module-group">
+                  <summary>
+                    <span class="module-summary-title">Structured orchestration <small>Bounded concurrency, resources, queues, and replay</small></span>
+                    <span class="disclosure-mark" aria-hidden="true">+</span>
+                  </summary>
+                  <div class="module-list">
+                    <span class="module-chip" data-zts-module>zttp:durable</span>
+                    <span class="module-chip" data-zts-module>zttp:io</span>
+                    <span class="module-chip" data-zts-module>zttp:queue</span>
+                    <span class="module-chip" data-zts-module>zttp:scope</span>
+                    <span class="module-chip" data-zts-module>zttp:workflow</span>
+                  </div>
+                </details>
+              </div>
+
+              <p class="note">
+                Imports are authority declarations. The compiler also tracks the closed ambient varying reads such as
+                <code>Date.now()</code> and <code>Math.random()</code>. It derives least-privilege runtime policy from
+                the reachable graph, while each compiler <code>FunctionBinding</code> records an export's signature,
+                effect, capabilities, replay classification, failure severity, provenance labels, and algebraic laws.
+              </p>
+            </div>
+          </section>
+
+          <section class="chapter" id="boundaries" aria-labelledby="boundaries-title">
+            <div class="chapter-heading">
+              <span class="chapter-number">07</span>
+              <div>
+                <h2 id="boundaries-title">What stays outside</h2>
+                <p class="chapter-intro">
+                  The omissions are part of the language design. Each removed family either duplicates an admitted
+                  operation or hides state, control, authority, or type evidence from the compiler.
+                </p>
+              </div>
+            </div>
+            <div class="chapter-body">
+              <div class="boundary-grid">
+                <div class="boundary-cell">
+                  <h3>Hidden control</h3>
+                  <p>Exceptions, <code>async</code>/<code>await</code>, Promises, generators, detached tasks, and ambient scheduling.</p>
+                </div>
+                <div class="boundary-cell">
+                  <h3>Hidden state</h3>
+                  <p>Classes, inheritance, <code>new</code>, dynamic <code>this</code>, prototypes, and mutable module-global application state.</p>
+                </div>
+                <div class="boundary-cell">
+                  <h3>Open execution</h3>
+                  <p><code>while</code>, C-style loops, user-defined iterators, dynamic imports, <code>eval</code>, reflection, and proxies.</p>
+                </div>
+                <div class="boundary-cell">
+                  <h3>Type escape hatches</h3>
+                  <p><code>any</code>, assertions, <code>satisfies</code>, overloads, index signatures, conditional types, and mapped types.</p>
+                </div>
+                <div class="boundary-cell">
+                  <h3>Implicit coercion</h3>
+                  <p>Loose equality, truthiness, unary plus, string addition, mutation shorthand, assignment expressions, and automatic semicolon insertion.</p>
+                </div>
+                <div class="boundary-cell">
+                  <h3>Dynamic shapes</h3>
+                  <p>Computed record keys, deletion, object methods, getters, setters, regex construction, namespaces, and decorators.</p>
+                </div>
+              </div>
+
+              <div class="swap-list" aria-label="Common TypeScript to ZTS replacements">
+                <div class="swap-row">
+                  <span class="swap-old">type / interface</span>
+                  <span class="swap-new">structural</span>
+                  <span class="swap-why">One transparent data-contract declaration.</span>
+                </div>
+                <div class="swap-row">
+                  <span class="swap-old">switch</span>
+                  <span class="swap-new">match</span>
+                  <span class="swap-why">Tagged narrowing and checked exhaustiveness without fallthrough.</span>
+                </div>
+                <div class="swap-row">
+                  <span class="swap-old">throw / catch</span>
+                  <span class="swap-new">Result&lt;T, E&gt;</span>
+                  <span class="swap-why">One visible, typed return channel.</span>
+                </div>
+                <div class="swap-row">
+                  <span class="swap-old">while / for (;;)</span>
+                  <span class="swap-new">for...of / finite fold</span>
+                  <span class="swap-why">The iteration domain remains explicit.</span>
+                </div>
+                <div class="swap-row">
+                  <span class="swap-old">template interpolation</span>
+                  <span class="swap-new">String + join</span>
+                  <span class="swap-why">Conversion and concatenation are separate operations.</span>
+                </div>
+                <div class="swap-row">
+                  <span class="swap-old">computed object key</span>
+                  <span class="swap-new">Dict&lt;K, V&gt;</span>
+                  <span class="swap-why">Fixed records keep their shape; dynamic keys use a typed collection.</span>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section class="chapter" id="compiler" aria-labelledby="compiler-title">
+            <div class="chapter-heading">
+              <span class="chapter-number">08</span>
+              <div>
+                <h2 id="compiler-title">The compiler is part of the language</h2>
+                <p class="chapter-intro">
+                  The profile publishes its grammar, examples, idioms, modules, diagnostics, validators, and verifier
+                  vocabulary through one versioned agent protocol.
+                </p>
+              </div>
+            </div>
+            <div class="chapter-body">
+              <div class="command-list">
+                <div class="command-row">
+                  <code>zts agent --stdin-json</code>
+                  <span><span data-zts-fact="agent_operations">11</span> schema-v2 operations cover discovery, checks, bound repairs, normalization, and property verification.</span>
+                </div>
+                <div class="command-row">
+                  <code>zts check handler.ts --json</code>
+                  <span>Returns located diagnostics and proof traces for the checked handler.</span>
+                </div>
+                <div class="command-row">
+                  <code>zts canonicalize handler.ts --json</code>
+                  <span>The schema-v2 operation returns bound candidates for <code>simulate_edit</code>, then <code>apply_repair</code>.</span>
+                </div>
+                <div class="command-row">
+                  <code>zts normalize handler.ts --check</code>
+                  <span>Runs the fixed-point normalizer, bounded at 64 iterations, and checks byte-stable output.</span>
+                </div>
+                <div class="command-row">
+                  <code>zts spec-check --json</code>
+                  <span>Checks semantic tables, lowering structure, differential cases, and SMT obligations.</span>
+                </div>
+              </div>
+
+              <div>
+                <p class="micro-label">Current semantic disposition</p>
+                <div class="semantics-meter" aria-label="Reachable semantic classification">
+                  <div class="semantics-row">
+                    <span class="semantics-label">IR nodes</span>
+                    <span class="meter-track" aria-hidden="true">
+                      <span class="meter-specified" style="inline-size: 17.39%"></span>
+                      <span class="meter-trusted" style="inline-size: 82.61%"></span>
+                    </span>
+                    <span class="semantics-count"><span data-zts-fact="ir_classified">69</span> / <span data-zts-fact="ir_reachable">69</span></span>
+                  </div>
+                  <div class="semantics-row">
+                    <span class="semantics-label">Opcodes</span>
+                    <span class="meter-track" aria-hidden="true">
+                      <span class="meter-specified" style="inline-size: 5.51%"></span>
+                      <span class="meter-validated" style="inline-size: 0.79%"></span>
+                      <span class="meter-trusted" style="inline-size: 93.7%"></span>
+                    </span>
+                    <span class="semantics-count"><span data-zts-fact="opcode_classified">127</span> / <span data-zts-fact="opcode_reachable">127</span></span>
+                  </div>
+                </div>
+                <p class="muted">
+                  All reachable entries are classified. <span data-zts-fact="ir_specified">12</span> IR nodes and
+                  <span data-zts-fact="opcode_specified">7</span> opcodes have direct specified semantics;
+                  <span data-zts-fact="opcode_translation_validated">1</span> opcode path is translation-validated.
+                  The remaining <span data-zts-fact="ir_trusted">57</span> nodes and
+                  <span data-zts-fact="opcode_trusted">119</span> opcodes are explicit trusted-boundary entries with
+                  narrow reasons.
+                </p>
+              </div>
+
+              <p class="truth-boundary">
+                <strong>Classification is wider than mechanized semantics.</strong> The independent assurance
+                certificate and verifier remain proposed. Current proof grades are useful compiler evidence, but they do
+                not become an independently checked end-to-end certificate by being signed or hashed.
+              </p>
+            </div>
+          </section>
+
+          <section class="chapter" id="start" aria-labelledby="start-title">
+            <div class="chapter-heading">
+              <span class="chapter-number">09</span>
+              <div>
+                <h2 id="start-title">Start writing</h2>
+                <p class="chapter-intro">
+                  Begin with a named <code>handler</code>, check it against the live profile, then inspect the compiler's
+                  structured answer before adding authority.
+                </p>
+              </div>
+            </div>
+            <div class="chapter-body">
+              <div class="code-window">
+                <div class="code-head">
+                  <span class="code-title">terminal</span>
+                  <button class="copy-button" type="button" data-copy-target="start-commands">Copy</button>
+                </div>
+                <pre><code id="start-commands"><span class="cm"># See the current compiler-owned language contract</span>
+zts agent --stdin-json &lt; request-meta.json
+
+<span class="cm"># Check, canonicalize, and verify one handler</span>
+zts check src/handler.ts --json
+zts canonicalize src/handler.ts --json --simulate
+zts normalize src/handler.ts --check
+zts verify-paths src/handler.ts --json</code></pre>
+              </div>
+
+              <div class="link-grid">
+                <a class="doc-link" href="user-guide.md">
+                  <strong>User guide</strong>
+                  <span>Handlers, routing, local development, deployment, and troubleshooting.</span>
+                </a>
+                <a class="doc-link" href="typescript.md">
+                  <strong>Type system</strong>
+                  <span>Type checking, capsules, narrowing, TSX, and compile-time evaluation.</span>
+                </a>
+                <a class="doc-link" href="feature-detection.md">
+                  <strong>Feature matrix</strong>
+                  <span>Accepted and rejected source features with diagnostic behavior.</span>
+                </a>
+                <a class="doc-link" href="restrictions-to-proofs.md">
+                  <strong>Restrictions to proofs</strong>
+                  <span>The proof or predictability trade behind each major exclusion.</span>
+                </a>
+                <a class="doc-link" href="virtual-modules/README.md">
+                  <strong>Virtual modules</strong>
+                  <span>The live <code>zttp:*</code> catalog, capabilities, effects, and runtime flags.</span>
+                </a>
+                <a class="doc-link" href="zts-formal-spec-northstar-advanced.md">
+                  <strong>Formal specification</strong>
+                  <span>The language-design northstar, including target text not yet reconciled with the compiler.</span>
+                </a>
+              </div>
+            </div>
+          </section>
+        </article>
+      </div>
+    </main>
+
+    <footer class="page-footer">
+      <div class="frame page-footer-inner">
+        <p>
+          This page is a reader-first overview of the implemented <code data-zts-fact="profile_id">zts-model-1</code>
+          profile at ZTS <span data-zts-fact="compiler_version">0.18.0</span>. Compiler-owned registries define the
+          implemented syntax, names, operations, and counts. The formal specification is the design and assurance
+          northstar; some target-level text remains unreconciled with the current compiler.
+        </p>
+        <a class="back-top" href="#top">Back to top</a>
+      </div>
+    </footer>
+
+    <script>
+      const root = document.documentElement;
+      const themeToggle = document.getElementById("theme-toggle");
+      const themeLabel = document.getElementById("theme-label");
+      const themeIcon = document.getElementById("theme-icon");
+
+      function syncThemeControl() {
+        const isDark = root.dataset.theme === "dark";
+        themeToggle.setAttribute("aria-pressed", String(isDark));
+        themeLabel.textContent = isDark ? "Light theme" : "Dark theme";
+        themeIcon.textContent = isDark ? "☼" : "◐";
+      }
+
+      themeToggle.addEventListener("click", () => {
+        const nextTheme = root.dataset.theme === "dark" ? "light" : "dark";
+        root.dataset.theme = nextTheme;
+        try {
+          localStorage.setItem("zts-overview-theme", nextTheme);
+        } catch (_) {
+          // The selected theme still applies for this page view.
+        }
+        syncThemeControl();
+      });
+      syncThemeControl();
+
+      const progress = document.getElementById("progress");
+      let progressFrame = 0;
+      function renderProgress() {
+        const available = document.documentElement.scrollHeight - window.innerHeight;
+        const ratio = available > 0 ? window.scrollY / available : 0;
+        progress.style.setProperty("--scroll-progress", String(Math.min(1, Math.max(0, ratio))));
+        progressFrame = 0;
+      }
+      function requestProgressSync() {
+        if (progressFrame) return;
+        progressFrame = window.requestAnimationFrame(renderProgress);
+      }
+      document.addEventListener("scroll", requestProgressSync, { passive: true });
+      window.addEventListener("resize", requestProgressSync, { passive: true });
+      renderProgress();
+
+      const navLinks = [...document.querySelectorAll(".rail-nav a")];
+      const sections = navLinks
+        .map((link) => document.querySelector(link.getAttribute("href")))
+        .filter(Boolean);
+
+      if ("IntersectionObserver" in window) {
+        const visible = new Map();
+        const observer = new IntersectionObserver(
+          (entries) => {
+            for (const entry of entries) visible.set(entry.target.id, entry.intersectionRatio);
+            const current = [...visible.entries()]
+              .filter(([, ratio]) => ratio > 0)
+              .sort((a, b) => b[1] - a[1])[0]?.[0];
+            for (const link of navLinks) {
+              const active = link.getAttribute("href") === `#${current}`;
+              if (active) link.setAttribute("aria-current", "location");
+              else link.removeAttribute("aria-current");
+            }
+          },
+          { rootMargin: "-18% 0px -56%", threshold: [0, 0.2, 0.5, 0.8] },
+        );
+        for (const section of sections) observer.observe(section);
+      }
+
+      const copyResetTimers = new WeakMap();
+      const copyRequestTokens = new WeakMap();
+      for (const button of document.querySelectorAll("[data-copy-target]")) {
+        const originalLabel = button.textContent;
+        button.addEventListener("click", async () => {
+          const source = document.getElementById(button.dataset.copyTarget);
+          if (!source) return;
+          const requestToken = (copyRequestTokens.get(button) ?? 0) + 1;
+          copyRequestTokens.set(button, requestToken);
+          window.clearTimeout(copyResetTimers.get(button));
+          let feedback;
+          try {
+            await navigator.clipboard.writeText(source.textContent);
+            feedback = "Copied";
+          } catch (_) {
+            feedback = "Select text";
+          }
+          if (copyRequestTokens.get(button) !== requestToken) return;
+          button.textContent = feedback;
+          const timer = window.setTimeout(() => {
+            if (copyRequestTokens.get(button) !== requestToken) return;
+            button.textContent = originalLabel;
+            copyResetTimers.delete(button);
+          }, 1500);
+          copyResetTimers.set(button, timer);
+        });
+      }
+    </script>
+  </body>
+</html>

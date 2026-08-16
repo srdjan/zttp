@@ -9,6 +9,9 @@ they are designs rather than a backlog. Finished plans live under
 
 ## Start Here
 
+- [ZTS Language Overview](zts-language-overview.html) - a browser-readable map
+  of the implemented `zts-model-1` source, types, control flow, effects, proofs,
+  TSX frontend, modules, restrictions, and compiler contract.
 - [User Guide](user-guide.md) - the single user guide for install, first
   project, handler API, routing, JSON, JS/TS/TSX, virtual modules, tests,
   deploy, proof receipts, and troubleshooting.
@@ -78,8 +81,10 @@ they are designs rather than a backlog. Finished plans live under
   `zts agent --stdin-json` request and response envelope, its closed operation
   set, and version negotiation.
 - [zts-model-1 Formal Spec](zts-formal-spec-northstar-advanced.md) - the
-  north-star language specification the roadmap's language program implements.
-  It describes the target profile, not today's compiler.
+  language-design and assurance northstar for `zts-model-1`. Compiler-owned
+  registries define the implemented surface, and some target-level design text
+  remains unreconciled with the live compiler. The independent assurance
+  certificate remains proposed work.
 
 ## Solutions
 

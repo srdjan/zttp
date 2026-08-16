@@ -110,7 +110,7 @@ import their measurement noise into the gate, so `bench-check` stays separate.
 
 ## What `zig build test` Excludes
 
-Three build steps:
+Four build steps:
 
 - **`test-zruntime`**, the `zruntime_tests.zig` root. See the next section.
 - **`test-module-scope-panic`**, a focused executable that proves authorization
@@ -118,6 +118,9 @@ Three build steps:
 - **`test-panic-isolation`**, an end-to-end script that needs the installed
   `zttp` binary, so it depends on the install step rather than on a test root.
   This step also depends on `test-module-scope-panic`.
+- **`test-zts-overview-browser`**, the dependency-free Chrome CDP check for the
+  ZTS language overview. It stays explicit because Chrome and Node are not
+  standard build dependencies. The step fails loudly when either is missing.
 
 Everything driven by a shell script rather than a build step is also outside
 it: `smoke-v1`, `scripts/test-examples.sh`,
