@@ -37,22 +37,30 @@ pub const DurableCallbacks = struct {
 pub const binding = mb.ModuleBinding{
     .specifier = "zttp:durable",
     .name = "durable",
+    .summary = "run(key, fn) wraps the whole durable execution under an idempotency key, and every step inside it is named so a replay can match it. signal delivers to a run by its key, and waitSignal parks on a signal name inside that run.",
     .required_capabilities = &.{.runtime_callback},
     .stateful = true,
     .self_managed_io = true,
     .contract_section = "durable",
     .exports = &.{
-        .{ .name = "run", .func = runNative, .arg_count = 2, .effect = .write, .returns = .unknown, .returns_from_param = .{ .param_index = 1, .kind = .call_result }, .param_types = &.{ .string, .unknown }, .contract_extractions = &.{.{ .category = .durable_key }}, .contract_flags = .{ .sets_durable_used = true } },
-        .{ .name = "step", .func = stepNative, .arg_count = 2, .effect = .write, .returns = .unknown, .returns_from_param = .{ .param_index = 1, .kind = .call_result }, .param_types = &.{ .string, .unknown }, .contract_extractions = &.{.{ .category = .durable_step }}, .contract_flags = .{ .sets_durable_used = true } },
-        .{ .name = "stepWithTimeout", .func = stepWithTimeoutNative, .arg_count = 3, .effect = .write, .returns = .result, .param_types = &.{ .string, .number, .unknown }, .failure_severity = .expected, .traceable = true, .contract_extractions = &.{.{ .category = .durable_step }}, .contract_flags = .{ .sets_durable_used = true, .sets_durable_timers = true } },
-        .{ .name = "sleep", .func = sleepNative, .arg_count = 1, .effect = .write, .returns = .undefined, .param_types = &.{.number}, .contract_flags = .{ .sets_durable_used = true, .sets_durable_timers = true } },
-        .{ .name = "sleepUntil", .func = sleepUntilNative, .arg_count = 1, .effect = .write, .returns = .undefined, .param_types = &.{.number}, .contract_flags = .{ .sets_durable_used = true, .sets_durable_timers = true } },
-        .{ .name = "waitSignal", .func = waitSignalNative, .arg_count = 1, .effect = .write, .returns = .unknown, .param_types = &.{.string}, .contract_extractions = &.{.{ .category = .durable_signal }}, .contract_flags = .{ .sets_durable_used = true }, .return_labels = .{ .external = true } },
-        .{ .name = "signal", .func = signalNative, .arg_count = 2, .effect = .write, .returns = .boolean, .param_types = &.{ .string, .string }, .contract_extractions = &.{
+        .{ .name = "run", .func = runNative, .arg_count = 2, .effect = .write, .returns = .unknown, .returns_from_param = .{ .param_index = 1, .kind = .call_result }, .param_types = &.{ .string, .unknown }, .param_names = &.{ "key", "fn" }, .contract_extractions = &.{.{ .category = .durable_key }}, .contract_flags = .{ .sets_durable_used = true } },
+        .{ .name = "step", .func = stepNative, .arg_count = 2, .effect = .write, .returns = .unknown, .returns_from_param = .{ .param_index = 1, .kind = .call_result }, .param_types = &.{ .string, .unknown }, .param_names = &.{ "name", "fn" }, .contract_extractions = &.{.{ .category = .durable_step }}, .contract_flags = .{ .sets_durable_used = true } },
+        .{ .name = "stepWithTimeout", .func = stepWithTimeoutNative, .arg_count = 3, .effect = .write, .returns = .result, .param_types = &.{ .string, .number, .unknown }, .param_names = &.{ "name", "timeoutMs", "fn" }, .failure_severity = .expected, .traceable = true, .contract_extractions = &.{.{ .category = .durable_step }}, .contract_flags = .{ .sets_durable_used = true, .sets_durable_timers = true } },
+        .{ .name = "sleep", .func = sleepNative, .arg_count = 1, .effect = .write, .returns = .undefined, .param_types = &.{.number}, .param_names = &.{"delayMs"}, .contract_flags = .{ .sets_durable_used = true, .sets_durable_timers = true } },
+        .{ .name = "sleepUntil", .func = sleepUntilNative, .arg_count = 1, .effect = .write, .returns = .undefined, .param_types = &.{.number}, .param_names = &.{"epochMs"}, .contract_flags = .{ .sets_durable_used = true, .sets_durable_timers = true } },
+        .{ .name = "waitSignal", .func = waitSignalNative, .arg_count = 1, .effect = .write, .returns = .unknown, .param_types = &.{.string}, .param_names = &.{"name"}, .contract_extractions = &.{.{ .category = .durable_signal }}, .contract_flags = .{ .sets_durable_used = true }, .return_labels = .{ .external = true } },
+        // The payload is a real third argument - `signalNative` reads `args[2]`
+        // and hands it to the runtime callback - and it was undeclared here.
+        // The arity rule never rejected the three-argument call, so nothing
+        // failed; what the omission cost was discovery, which published
+        // `signal(key, name)` and gave a reader no way to learn a payload can
+        // be delivered at all. Optional, because the impl defaults it to
+        // undefined.
+        .{ .name = "signal", .func = signalNative, .arg_count = 3, .required_arg_count = 2, .effect = .write, .returns = .boolean, .param_types = &.{ .string, .string, .unknown }, .param_names = &.{ "key", "name", "payload" }, .contract_extractions = &.{
             .{ .category = .durable_producer_key },
             .{ .arg_position = 1, .category = .durable_signal },
         }, .contract_flags = .{ .sets_durable_used = true } },
-        .{ .name = "signalAt", .func = signalAtNative, .arg_count = 3, .effect = .write, .returns = .boolean, .param_types = &.{ .string, .string, .number }, .contract_extractions = &.{
+        .{ .name = "signalAt", .func = signalAtNative, .arg_count = 3, .effect = .write, .returns = .boolean, .param_types = &.{ .string, .string, .number }, .param_names = &.{ "key", "name", "atMs" }, .contract_extractions = &.{
             .{ .category = .durable_producer_key },
             .{ .arg_position = 1, .category = .durable_signal },
         }, .contract_flags = .{ .sets_durable_used = true, .sets_durable_timers = true } },

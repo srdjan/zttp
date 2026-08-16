@@ -2,6 +2,7 @@
   "schemaVersion": 1,
   "specifier": "zttp:json",
   "source": "packages/zts/src/modules/data/json_mod.zig",
+  "summary": "parseJson and parseJsonBytes return a Result: object nodes are Dict<string, JsonValue> in wire order, null is data rather than an absence sentinel, and duplicate keys are refused rather than last-wins.",
   "requiredCapabilities": [],
   "exports": [
     {
@@ -10,6 +11,9 @@
       "returns": "result",
       "params": [
         "string"
+      ],
+      "paramNames": [
+        "text"
       ],
       "laws": [
         "pure"
@@ -22,6 +26,9 @@
       "params": [
         "bytes"
       ],
+      "paramNames": [
+        "bytes"
+      ],
       "laws": [
         "pure"
       ]
@@ -32,6 +39,9 @@
       "returns": "result",
       "params": [
         "unknown"
+      ],
+      "paramNames": [
+        "value"
       ],
       "laws": [
         "pure"

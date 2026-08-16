@@ -6,6 +6,7 @@ const sdk = @import("zttp-sdk");
 pub const binding = sdk.ModuleBinding{
     .specifier = "zttp:id",
     .name = "id",
+    .summary = "Identifier generation. Every export draws randomness, so none of them is deterministic.",
     .required_capabilities = &.{ .clock, .random },
     .exports = &.{
         // formatUuidV4 -> fillRandom only; v4 carries no timestamp.
@@ -13,7 +14,7 @@ pub const binding = sdk.ModuleBinding{
         // formatUlid -> nowMs for the timestamp prefix, fillRandom for the suffix.
         .{ .name = "ulid", .required_capabilities = &.{ .clock, .random }, .module_func = ulidImpl, .arg_count = 0, .returns = .string, .param_types = &.{}, .effect = .read, .return_labels = .{ .internal = true } },
         // fillRandom only; the length argument comes from the caller.
-        .{ .name = "nanoid", .required_capabilities = &.{.random}, .module_func = nanoidImpl, .arg_count = 1, .returns = .string, .param_types = &.{.number}, .effect = .read, .return_labels = .{ .internal = true } },
+        .{ .name = "nanoid", .required_capabilities = &.{.random}, .module_func = nanoidImpl, .arg_count = 1, .returns = .string, .param_types = &.{.number}, .param_names = &.{"length"}, .effect = .read, .return_labels = .{ .internal = true } },
     },
 };
 

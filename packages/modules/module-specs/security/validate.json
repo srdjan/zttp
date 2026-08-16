@@ -2,6 +2,7 @@
   "schemaVersion": 1,
   "specifier": "zttp:validate",
   "source": "packages/modules/src/security/validate.zig",
+  "summary": "Register every schema once with schemaCompile(name, schemaJson) at module scope, then validate against it by that name: the first argument of validateJson, validateObject, and coerceJson is the registered name, never the schema.",
   "requiredCapabilities": [],
   "exports": [
     {
@@ -11,6 +12,10 @@
       "params": [
         "string",
         "string"
+      ],
+      "paramNames": [
+        "name",
+        "schemaJson"
       ],
       "contractExtractions": [
         {
@@ -25,6 +30,10 @@
       "params": [
         "string",
         "string"
+      ],
+      "paramNames": [
+        "name",
+        "json"
       ],
       "failureSeverity": "critical",
       "contractExtractions": [
@@ -44,6 +53,10 @@
         "string",
         "object"
       ],
+      "paramNames": [
+        "name",
+        "value"
+      ],
       "failureSeverity": "critical",
       "contractExtractions": [
         {
@@ -62,6 +75,10 @@
         "string",
         "string"
       ],
+      "paramNames": [
+        "name",
+        "json"
+      ],
       "failureSeverity": "critical",
       "contractExtractions": [
         {
@@ -78,6 +95,9 @@
       "returns": "boolean",
       "params": [
         "string"
+      ],
+      "paramNames": [
+        "name"
       ]
     }
   ]

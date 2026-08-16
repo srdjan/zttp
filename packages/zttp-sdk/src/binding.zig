@@ -292,11 +292,22 @@ pub fn validateBindings(comptime bindings: []const ModuleBinding) void {
         if (findDuplicateRequiredCapability(binding.required_capabilities)) |capability| {
             @compileError("duplicate required capability '" ++ @tagName(capability) ++ "' in " ++ binding.specifier);
         }
+        if (binding.summary.len == 0) {
+            @compileError("module must declare a summary: " ++ binding.specifier);
+        }
         for (binding.exports) |f| {
+            // Equality, not "empty or parallel". While the roster was being
+            // filled, an unnamed export was permitted - and that permission is
+            // the shape AGENTS.md warns about, because partial coverage looks
+            // exactly like full coverage from here. Now every parameter must be
+            // named: a zero-parameter export satisfies this with two empty
+            // lists, and a parameter added later without a name is a compile
+            // error at the binding rather than a gap in what discovery says.
+            //
             // Checked before the capability `orelse continue` below, so an
             // export that inherits its module's set is still checked here.
-            if (f.param_names.len != 0 and f.param_names.len != f.param_types.len) {
-                @compileError("param_names must be parallel to param_types on " ++ binding.specifier ++ "." ++ f.name);
+            if (f.param_names.len != f.param_types.len) {
+                @compileError("every parameter must be named: param_names is not parallel to param_types on " ++ binding.specifier ++ "." ++ f.name);
             }
             const export_caps = f.required_capabilities orelse continue;
             if (findDuplicateRequiredCapability(export_caps)) |capability| {

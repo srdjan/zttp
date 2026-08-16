@@ -30,18 +30,19 @@ pub const QueueCallbacks = struct {
 pub const binding = mb.ModuleBinding{
     .specifier = "zttp:queue",
     .name = "queue",
+    .summary = "send and request address a queue by name; ack, nack, and reply address one delivered message by the id it arrived with. Every export returns a Result.",
     .required_capabilities = &.{.runtime_callback},
     .stateful = true,
     .contract_section = "queue",
     .exports = &.{
-        .{ .name = "send", .func = sendNative, .arg_count = 2, .effect = .write, .returns = .result, .param_types = &.{ .string, .unknown }, .failure_severity = .expected, .traceable = true, .json_encodable_args = &.{1} },
-        .{ .name = "request", .func = requestNative, .arg_count = 2, .effect = .write, .returns = .result, .param_types = &.{ .string, .unknown }, .failure_severity = .expected, .traceable = true, .json_encodable_args = &.{1} },
+        .{ .name = "send", .func = sendNative, .arg_count = 2, .effect = .write, .returns = .result, .param_types = &.{ .string, .unknown }, .param_names = &.{ "queue", "message" }, .failure_severity = .expected, .traceable = true, .json_encodable_args = &.{1} },
+        .{ .name = "request", .func = requestNative, .arg_count = 2, .effect = .write, .returns = .result, .param_types = &.{ .string, .unknown }, .param_names = &.{ "queue", "message" }, .failure_severity = .expected, .traceable = true, .json_encodable_args = &.{1} },
         // actor is optional (defaults to "main"), so required_arg_count = 0.
-        .{ .name = "receive", .func = receiveNative, .arg_count = 1, .required_arg_count = 0, .effect = .write, .returns = .result, .param_types = &.{.string}, .failure_severity = .expected, .traceable = true, .return_labels = .{ .external = true } },
-        .{ .name = "ack", .func = ackNative, .arg_count = 1, .effect = .write, .returns = .result, .param_types = &.{.string}, .failure_severity = .expected, .traceable = true, .signature = .{ .params = &.{"MessageId"}, .returns = "{ ok: boolean; value?: unknown; error?: unknown; errors?: unknown }" } },
+        .{ .name = "receive", .func = receiveNative, .arg_count = 1, .required_arg_count = 0, .effect = .write, .returns = .result, .param_types = &.{.string}, .param_names = &.{"queue"}, .failure_severity = .expected, .traceable = true, .return_labels = .{ .external = true } },
+        .{ .name = "ack", .func = ackNative, .arg_count = 1, .effect = .write, .returns = .result, .param_types = &.{.string}, .param_names = &.{"messageId"}, .failure_severity = .expected, .traceable = true, .signature = .{ .params = &.{"MessageId"}, .returns = "{ ok: boolean; value?: unknown; error?: unknown; errors?: unknown }" } },
         // trailing reason is optional (defaults to "nack"), so required_arg_count = 1.
-        .{ .name = "nack", .func = nackNative, .arg_count = 2, .required_arg_count = 1, .effect = .write, .returns = .result, .param_types = &.{ .string, .string }, .failure_severity = .expected, .traceable = true, .signature = .{ .params = &.{ "MessageId", "string" }, .returns = "{ ok: boolean; value?: unknown; error?: unknown; errors?: unknown }" } },
-        .{ .name = "reply", .func = replyNative, .arg_count = 2, .effect = .write, .returns = .result, .param_types = &.{ .string, .unknown }, .failure_severity = .expected, .traceable = true, .json_encodable_args = &.{1} },
+        .{ .name = "nack", .func = nackNative, .arg_count = 2, .required_arg_count = 1, .effect = .write, .returns = .result, .param_types = &.{ .string, .string }, .param_names = &.{ "messageId", "reason" }, .failure_severity = .expected, .traceable = true, .signature = .{ .params = &.{ "MessageId", "string" }, .returns = "{ ok: boolean; value?: unknown; error?: unknown; errors?: unknown }" } },
+        .{ .name = "reply", .func = replyNative, .arg_count = 2, .effect = .write, .returns = .result, .param_types = &.{ .string, .unknown }, .param_names = &.{ "messageId", "message" }, .failure_severity = .expected, .traceable = true, .json_encodable_args = &.{1} },
     },
 };
 

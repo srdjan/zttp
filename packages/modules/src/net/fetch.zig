@@ -30,6 +30,7 @@ pub const FetchState = struct {
 pub const binding = sdk.ModuleBinding{
     .specifier = "zttp:fetch",
     .name = "fetch",
+    .summary = "Outbound HTTP to a literal URL. A handler that declares an egress host must reach it through these exports.",
     .required_capabilities = &.{ .network, .runtime_callback },
     .stateful = true,
     .exports = &.{
@@ -46,6 +47,7 @@ pub const binding = sdk.ModuleBinding{
             .effect = .write,
             .returns = .object,
             .param_types = &.{ .string, .object },
+            .param_names = &.{ "url", "init" },
             // The shape the runtime actually hands back and the options it
             // actually reads, spelled here rather than assembled in
             // `module_types.zig` behind an `is_fetch` branch that also
@@ -78,6 +80,7 @@ pub const binding = sdk.ModuleBinding{
             .effect = .write,
             .returns = .object,
             .param_types = &.{ .string, .object, .object },
+            .param_names = &.{ "url", "init", "retry" },
             // The same options and the same response. The third argument
             // keeps its coarse `object`: its four retry fields are read by
             // `fetchWithRetryImpl` here rather than by the runtime, and

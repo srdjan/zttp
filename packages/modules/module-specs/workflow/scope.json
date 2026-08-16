@@ -2,6 +2,7 @@
   "schemaVersion": 1,
   "specifier": "zttp:scope",
   "source": "packages/zts/src/modules/workflow/scope.zig",
+  "summary": "The request is already inside an implicit root scope. Nested scopes unwind in reverse registration order.",
   "requiredCapabilities": [
     "runtime_callback"
   ],
@@ -13,6 +14,10 @@
       "params": [
         "string",
         "unknown"
+      ],
+      "paramNames": [
+        "name",
+        "fn"
       ],
       "contractExtractions": [
         {
@@ -27,6 +32,10 @@
       "params": [
         "unknown",
         "unknown"
+      ],
+      "paramNames": [
+        "resource",
+        "closeFn"
       ]
     },
     {
@@ -35,6 +44,9 @@
       "returns": "undefined",
       "params": [
         "unknown"
+      ],
+      "paramNames": [
+        "fn"
       ]
     }
   ]

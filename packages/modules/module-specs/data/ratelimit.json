@@ -2,6 +2,7 @@
   "schemaVersion": 1,
   "specifier": "zttp:ratelimit",
   "source": "packages/modules/src/data/ratelimit.zig",
+  "summary": "Fixed-window per-key counters. rateCheck returns a Result whose error names rate_exceeded and carries retryAfter.",
   "requiredCapabilities": [
     "clock"
   ],
@@ -14,6 +15,11 @@
         "string",
         "number",
         "number"
+      ],
+      "paramNames": [
+        "key",
+        "limit",
+        "windowSec"
       ],
       "requiredCapabilities": [
         "clock"
@@ -31,6 +37,9 @@
       "returns": "boolean",
       "params": [
         "string"
+      ],
+      "paramNames": [
+        "key"
       ],
       "requiredCapabilities": []
     }

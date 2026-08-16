@@ -16,6 +16,7 @@ const MAC_LEN = 32;
 pub const binding = sdk.ModuleBinding{
     .specifier = "zttp:auth",
     .name = "auth",
+    .summary = "jwtSign takes the claims already serialized as JSON text, not a claims object. verifyWebhookSignature takes the payload and secret before the signature to compare.",
     .required_capabilities = &.{ .crypto, .clock },
     .exports = &.{
         .{
@@ -28,6 +29,7 @@ pub const binding = sdk.ModuleBinding{
             .effect = .none,
             .returns = .optional_string,
             .param_types = &.{.string},
+            .param_names = &.{"authorizationHeader"},
             .failure_severity = .expected,
             .contract_flags = .{ .sets_bearer_auth = true },
             .return_labels = .{ .credential = true },
@@ -46,6 +48,7 @@ pub const binding = sdk.ModuleBinding{
             // documented (`jwtVerify(token, secret, "HS256")`), but callers may
             // omit it and use the verifier's HS256 default.
             .param_types = &.{ .string, .string, .string },
+            .param_names = &.{ "token", "secret", "algorithm" },
             .failure_severity = .critical,
             .contract_flags = .{ .sets_jwt_auth = true },
             .return_labels = .{ .credential = true, .validated = true },
@@ -58,7 +61,7 @@ pub const binding = sdk.ModuleBinding{
             },
         },
         // hmacSha256 only: the caller supplies every claim, including exp.
-        .{ .name = "jwtSign", .derives_from_args = true, .required_capabilities = &.{.crypto}, .module_func = jwtSignImpl, .arg_count = 2, .effect = .none, .returns = .string, .param_types = &.{ .string, .string }, .return_labels = .{ .credential = true } },
+        .{ .name = "jwtSign", .derives_from_args = true, .required_capabilities = &.{.crypto}, .module_func = jwtSignImpl, .arg_count = 2, .effect = .none, .returns = .string, .param_types = &.{ .string, .string }, .param_names = &.{ "claimsJson", "secret" }, .return_labels = .{ .credential = true } },
         .{
             .name = "verifyWebhookSignature",
             // hmacSha256 over the payload; no time window is checked here.
@@ -68,6 +71,7 @@ pub const binding = sdk.ModuleBinding{
             .effect = .none,
             .returns = .boolean,
             .param_types = &.{ .string, .string, .string },
+            .param_names = &.{ "payload", "secret", "signature" },
             .laws = &.{.pure},
         },
         .{
@@ -79,6 +83,7 @@ pub const binding = sdk.ModuleBinding{
             .effect = .none,
             .returns = .boolean,
             .param_types = &.{ .string, .string },
+            .param_names = &.{ "a", "b" },
             .laws = &.{.pure},
         },
     },

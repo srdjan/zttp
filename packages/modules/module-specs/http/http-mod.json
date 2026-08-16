@@ -2,6 +2,7 @@
   "schemaVersion": 1,
   "specifier": "zttp:http",
   "source": "packages/modules/src/http/http_mod.zig",
+  "summary": "Header helpers: each takes the raw header text it parses, and negotiate takes the supported types as a comma-separated string rather than an array.",
   "requiredCapabilities": [],
   "exports": [
     {
@@ -10,6 +11,9 @@
       "returns": "object",
       "params": [
         "string"
+      ],
+      "paramNames": [
+        "cookieHeader"
       ]
     },
     {
@@ -20,6 +24,11 @@
         "string",
         "string",
         "object"
+      ],
+      "paramNames": [
+        "name",
+        "value",
+        "options"
       ],
       "contractExtractions": [
         {
@@ -35,6 +44,10 @@
         "string",
         "string"
       ],
+      "paramNames": [
+        "acceptHeader",
+        "supported"
+      ],
       "failureSeverity": "expected"
     },
     {
@@ -43,6 +56,9 @@
       "returns": "object",
       "params": [
         "string"
+      ],
+      "paramNames": [
+        "contentTypeHeader"
       ]
     },
     {
@@ -52,6 +68,10 @@
       "params": [
         "string",
         "object"
+      ],
+      "paramNames": [
+        "origin",
+        "options"
       ],
       "contractExtractions": [
         {

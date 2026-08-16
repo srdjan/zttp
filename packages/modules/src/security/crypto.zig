@@ -24,6 +24,7 @@ const sdk = @import("zttp-sdk");
 pub const binding = sdk.ModuleBinding{
     .specifier = "zttp:crypto",
     .name = "crypto",
+    .summary = "hmacSha256 takes the key first and the message second.",
     .required_capabilities = &.{.crypto},
     .exports = &.{
         .{
@@ -37,6 +38,7 @@ pub const binding = sdk.ModuleBinding{
             .effect = .none,
             .returns = .string,
             .param_types = &.{.string},
+            .param_names = &.{"text"},
             .laws = &.{.pure},
         },
         .{
@@ -48,6 +50,7 @@ pub const binding = sdk.ModuleBinding{
             .effect = .none,
             .returns = .string,
             .param_types = &.{ .string, .string },
+            .param_names = &.{ "key", "message" },
             .laws = &.{.pure},
         },
         .{
@@ -63,6 +66,7 @@ pub const binding = sdk.ModuleBinding{
             .effect = .none,
             .returns = .string,
             .param_types = &.{.string},
+            .param_names = &.{"text"},
             .laws = &.{ .pure, .{ .inverse_of = "base64Decode" } },
         },
         .{
@@ -74,6 +78,7 @@ pub const binding = sdk.ModuleBinding{
             .effect = .none,
             .returns = .string,
             .param_types = &.{.string},
+            .param_names = &.{"text"},
             .laws = &.{ .pure, .{ .inverse_of = "base64Encode" } },
         },
     },

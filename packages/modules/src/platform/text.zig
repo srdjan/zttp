@@ -17,12 +17,13 @@ const sdk = @import("zttp-sdk");
 pub const binding = sdk.ModuleBinding{
     .specifier = "zttp:text",
     .name = "text",
+    .summary = "String helpers. mask exists to make a secret printable and is the one declassifier here: its result no longer carries the secret label its input did.",
     .exports = &.{
-        .{ .name = "escapeHtml", .module_func = escapeHtmlImpl, .arg_count = 1, .effect = .none, .returns = .string, .param_types = &.{.string}, .return_labels = .{ .validated = true }, .laws = &.{.pure} },
-        .{ .name = "unescapeHtml", .derives_from_args = true, .module_func = unescapeHtmlImpl, .arg_count = 1, .effect = .none, .returns = .string, .param_types = &.{.string}, .laws = &.{.pure} },
-        .{ .name = "slugify", .derives_from_args = true, .module_func = slugifyImpl, .arg_count = 1, .effect = .none, .returns = .string, .param_types = &.{.string}, .laws = &.{.pure} },
-        .{ .name = "truncate", .derives_from_args = true, .module_func = truncateImpl, .arg_count = 3, .effect = .none, .returns = .string, .param_types = &.{ .string, .number, .string }, .required_arg_count = 2, .laws = &.{.pure} },
-        .{ .name = "mask", .module_func = maskImpl, .arg_count = 2, .effect = .none, .returns = .string, .param_types = &.{ .string, .number }, .required_arg_count = 1, .return_labels = .{ .internal = true }, .laws = &.{.pure} },
+        .{ .name = "escapeHtml", .module_func = escapeHtmlImpl, .arg_count = 1, .effect = .none, .returns = .string, .param_types = &.{.string}, .param_names = &.{"text"}, .return_labels = .{ .validated = true }, .laws = &.{.pure} },
+        .{ .name = "unescapeHtml", .derives_from_args = true, .module_func = unescapeHtmlImpl, .arg_count = 1, .effect = .none, .returns = .string, .param_types = &.{.string}, .param_names = &.{"text"}, .laws = &.{.pure} },
+        .{ .name = "slugify", .derives_from_args = true, .module_func = slugifyImpl, .arg_count = 1, .effect = .none, .returns = .string, .param_types = &.{.string}, .param_names = &.{"text"}, .laws = &.{.pure} },
+        .{ .name = "truncate", .derives_from_args = true, .module_func = truncateImpl, .arg_count = 3, .effect = .none, .returns = .string, .param_types = &.{ .string, .number, .string }, .param_names = &.{ "text", "maxLength", "suffix" }, .required_arg_count = 2, .laws = &.{.pure} },
+        .{ .name = "mask", .module_func = maskImpl, .arg_count = 2, .effect = .none, .returns = .string, .param_types = &.{ .string, .number }, .param_names = &.{ "text", "visible" }, .required_arg_count = 1, .return_labels = .{ .internal = true }, .laws = &.{.pure} },
     },
 };
 

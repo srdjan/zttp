@@ -41,20 +41,21 @@ pub const WorkflowCallbacks = struct {
 pub const binding = mb.ModuleBinding{
     .specifier = "zttp:workflow",
     .name = "workflow",
+    .summary = "call dispatches to a co-located handler named in the project's system.json. saga runs an ordered array of { name, run, compensate } steps and returns the outcome, including which steps compensated when a later one fails - a handler that discards that result reports success on a saga that rolled back.",
     .required_capabilities = &.{.runtime_callback},
     .stateful = true,
     .self_managed_io = true,
     .exports = &.{
-        .{ .name = "call", .func = callNative, .arg_count = 2, .effect = .write, .returns = .object, .param_types = &.{ .string, .unknown }, .return_labels = .{ .external = true }, .contract_extractions = &.{.{ .category = .workflow_call }} },
-        .{ .name = "saga", .func = sagaNative, .arg_count = 1, .effect = .write, .returns = .object, .param_types = &.{.unknown}, .return_labels = .{ .external = true } },
+        .{ .name = "call", .func = callNative, .arg_count = 2, .effect = .write, .returns = .object, .param_types = &.{ .string, .unknown }, .param_names = &.{ "name", "init" }, .return_labels = .{ .external = true }, .contract_extractions = &.{.{ .category = .workflow_call }} },
+        .{ .name = "saga", .func = sagaNative, .arg_count = 1, .effect = .write, .returns = .object, .param_types = &.{.unknown}, .param_names = &.{"steps"}, .return_labels = .{ .external = true } },
         // Named `fanout`, not `parallel`: module exports share one flat global
         // name namespace (resolver registers each via ctx.setGlobal by name), so
         // `parallel` would collide with and clobber zttp:io's `parallel`.
-        .{ .name = "fanout", .func = fanoutNative, .arg_count = 1, .effect = .write, .returns = .object, .param_types = &.{.unknown}, .return_labels = .{ .external = true } },
+        .{ .name = "fanout", .func = fanoutNative, .arg_count = 1, .effect = .write, .returns = .object, .param_types = &.{.unknown}, .param_names = &.{"calls"}, .return_labels = .{ .external = true } },
         // follow(resource, rel, init?) - HATEOAS: resolve affordance `rel` on a
         // structured resource() to a bundle route and dispatch in-process. The
         // trailing `init` (body/headers) is optional, so required_arg_count = 2.
-        .{ .name = "follow", .func = followNative, .arg_count = 3, .required_arg_count = 2, .effect = .write, .returns = .object, .param_types = &.{ .unknown, .string, .unknown }, .return_labels = .{ .external = true } },
+        .{ .name = "follow", .func = followNative, .arg_count = 3, .required_arg_count = 2, .effect = .write, .returns = .object, .param_types = &.{ .unknown, .string, .unknown }, .param_names = &.{ "resource", "rel", "init" }, .return_labels = .{ .external = true } },
     },
 };
 

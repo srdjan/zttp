@@ -7,6 +7,7 @@ const validate = @import("validate.zig");
 pub const binding = sdk.ModuleBinding{
     .specifier = "zttp:decode",
     .name = "decode",
+    .summary = "Register a schema once with schemaCompile(name, schema) from zttp:validate, then decode against it by that name: the first argument of every export here is the registered schema name, never the schema itself.",
     .stateful = false,
     .exports = &.{
         // decodeJson/decodeForm/decodeQuery delegate to the same in-process
@@ -22,6 +23,7 @@ pub const binding = sdk.ModuleBinding{
             .effect = .none,
             .returns = .result,
             .param_types = &.{ .string, .string },
+            .param_names = &.{ "name", "body" },
             .failure_severity = .critical,
             .contract_extractions = &.{.{ .category = .request_schema }},
             .return_labels = .{ .validated = true },
@@ -35,6 +37,7 @@ pub const binding = sdk.ModuleBinding{
             .effect = .none,
             .returns = .result,
             .param_types = &.{ .string, .string },
+            .param_names = &.{ "name", "body" },
             .failure_severity = .critical,
             .contract_extractions = &.{.{ .category = .request_schema }},
             .return_labels = .{ .validated = true },
@@ -48,6 +51,7 @@ pub const binding = sdk.ModuleBinding{
             .effect = .none,
             .returns = .result,
             .param_types = &.{ .string, .object },
+            .param_names = &.{ "name", "query" },
             .failure_severity = .critical,
             .contract_extractions = &.{.{ .category = .request_schema }},
             .return_labels = .{ .validated = true },
@@ -61,6 +65,7 @@ pub const binding = sdk.ModuleBinding{
             .effect = .none,
             .returns = .result,
             .param_types = &.{ .string, .string, .string },
+            .param_names = &.{ "name", "body", "contentType" },
             .failure_severity = .critical,
             .contract_extractions = &.{.{ .category = .request_schema }},
             .return_labels = .{ .validated = true },

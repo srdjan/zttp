@@ -10,9 +10,10 @@ pub const MODULE_STATE_SLOT: usize = 4;
 pub const binding = sdk.ModuleBinding{
     .specifier = "zttp:validate",
     .name = "validate",
+    .summary = "Register every schema once with schemaCompile(name, schemaJson) at module scope, then validate against it by that name: the first argument of validateJson, validateObject, and coerceJson is the registered name, never the schema.",
     .stateful = true,
     .exports = &.{
-        .{ .name = "schemaCompile", .module_func = schemaCompileImpl, .arg_count = 2, .effect = .write, .returns = .boolean, .param_types = &.{ .string, .string }, .traceable = false, .contract_extractions = &.{.{ .category = .schema_compile }} },
+        .{ .name = "schemaCompile", .module_func = schemaCompileImpl, .arg_count = 2, .effect = .write, .returns = .boolean, .param_types = &.{ .string, .string }, .param_names = &.{ "name", "schemaJson" }, .traceable = false, .contract_extractions = &.{.{ .category = .schema_compile }} },
         .{
             .name = "validateJson",
             .module_func = validateJsonImpl,
@@ -20,6 +21,7 @@ pub const binding = sdk.ModuleBinding{
             .effect = .none,
             .returns = .result,
             .param_types = &.{ .string, .string },
+            .param_names = &.{ "name", "json" },
             .failure_severity = .critical,
             .contract_extractions = &.{.{ .category = .request_schema }},
             .return_labels = .{ .validated = true },
@@ -33,6 +35,7 @@ pub const binding = sdk.ModuleBinding{
             .effect = .none,
             .returns = .result,
             .param_types = &.{ .string, .object },
+            .param_names = &.{ "name", "value" },
             .failure_severity = .critical,
             .contract_extractions = &.{.{ .category = .request_schema }},
             .return_labels = .{ .validated = true },
@@ -46,13 +49,14 @@ pub const binding = sdk.ModuleBinding{
             .effect = .none,
             .returns = .result,
             .param_types = &.{ .string, .string },
+            .param_names = &.{ "name", "json" },
             .failure_severity = .critical,
             .contract_extractions = &.{.{ .category = .request_schema }},
             .return_labels = .{ .validated = true },
             .laws = &.{.pure},
             .replay_pure = true,
         },
-        .{ .name = "schemaDrop", .module_func = schemaDropImpl, .arg_count = 1, .effect = .write, .returns = .boolean, .param_types = &.{.string}, .traceable = false },
+        .{ .name = "schemaDrop", .module_func = schemaDropImpl, .arg_count = 1, .effect = .write, .returns = .boolean, .param_types = &.{.string}, .param_names = &.{"name"}, .traceable = false },
     },
 };
 

@@ -851,7 +851,14 @@ fn signatureCorpusDigest(allocator: std.mem.Allocator, out_members: *usize) ![32
 
 /// The committed digest of the whole signature surface. Regenerate deliberately:
 /// a diff here is a change to what every handler sees from `zttp:*`.
-const frozen_signature_digest = "34d008e2621c72eaca6c391f9853fd0f52f235ad99c1f79deb74abdbe4d4a717";
+///
+/// Moved 2026-08-17 by exactly one export. `zttp:durable.signal` declared two
+/// parameters while `signalNative` reads `args[2]` and hands it to the runtime
+/// callback, so the payload argument was real and undeclared; it is now
+/// `arg_count = 3` with `required_arg_count = 2`. Nothing else in the surface
+/// changed - the parameter names added in the same commit are not part of this
+/// digest, which covers arity and types.
+const frozen_signature_digest = "e143fe92f3656a48d504cdeaed6cf7aafc81a26ffc28288c84fd8fd71a57eb9f";
 
 test "frozen signature corpus: the gate has an input before it has a verdict" {
     // The floor. A corpus that is empty, or an emitter that writes nothing,

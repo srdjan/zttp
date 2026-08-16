@@ -2,6 +2,7 @@
   "schemaVersion": 1,
   "specifier": "zttp:log",
   "source": "packages/modules/src/platform/log.zig",
+  "summary": "Structured logging: a message and an optional object of fields merged into the record.",
   "requiredCapabilities": [
     "clock",
     "stderr"
@@ -14,6 +15,10 @@
       "params": [
         "string",
         "object"
+      ],
+      "paramNames": [
+        "message",
+        "fields"
       ]
     },
     {
@@ -23,6 +28,10 @@
       "params": [
         "string",
         "object"
+      ],
+      "paramNames": [
+        "message",
+        "fields"
       ]
     },
     {
@@ -32,6 +41,10 @@
       "params": [
         "string",
         "object"
+      ],
+      "paramNames": [
+        "message",
+        "fields"
       ]
     },
     {
@@ -41,6 +54,10 @@
       "params": [
         "string",
         "object"
+      ],
+      "paramNames": [
+        "message",
+        "fields"
       ]
     }
   ]

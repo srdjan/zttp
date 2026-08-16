@@ -6,12 +6,13 @@ const sdk = @import("zttp-sdk");
 pub const binding = sdk.ModuleBinding{
     .specifier = "zttp:log",
     .name = "log",
+    .summary = "Structured logging: a message and an optional object of fields merged into the record.",
     .required_capabilities = &.{ .clock, .stderr },
     .exports = &.{
-        .{ .name = "logDebug", .module_func = makeLogImpl("debug"), .arg_count = 2, .returns = .unknown, .param_types = &.{ .string, .object }, .effect = .write, .traceable = false },
-        .{ .name = "logInfo", .module_func = makeLogImpl("info"), .arg_count = 2, .returns = .unknown, .param_types = &.{ .string, .object }, .effect = .write, .traceable = false },
-        .{ .name = "logWarn", .module_func = makeLogImpl("warn"), .arg_count = 2, .returns = .unknown, .param_types = &.{ .string, .object }, .effect = .write, .traceable = false },
-        .{ .name = "logError", .module_func = makeLogImpl("error"), .arg_count = 2, .returns = .unknown, .param_types = &.{ .string, .object }, .effect = .write, .traceable = false },
+        .{ .name = "logDebug", .module_func = makeLogImpl("debug"), .arg_count = 2, .returns = .unknown, .param_types = &.{ .string, .object }, .param_names = &.{ "message", "fields" }, .effect = .write, .traceable = false },
+        .{ .name = "logInfo", .module_func = makeLogImpl("info"), .arg_count = 2, .returns = .unknown, .param_types = &.{ .string, .object }, .param_names = &.{ "message", "fields" }, .effect = .write, .traceable = false },
+        .{ .name = "logWarn", .module_func = makeLogImpl("warn"), .arg_count = 2, .returns = .unknown, .param_types = &.{ .string, .object }, .param_names = &.{ "message", "fields" }, .effect = .write, .traceable = false },
+        .{ .name = "logError", .module_func = makeLogImpl("error"), .arg_count = 2, .returns = .unknown, .param_types = &.{ .string, .object }, .param_names = &.{ "message", "fields" }, .effect = .write, .traceable = false },
     },
 };
 

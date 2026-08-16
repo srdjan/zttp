@@ -2,6 +2,7 @@
   "schemaVersion": 1,
   "specifier": "zttp:service",
   "source": "packages/modules/src/net/service.zig",
+  "summary": "serviceCall dispatches to a service named in the project's system.json, not to a URL: the first argument is that declared service name and the second is the route pattern on it.",
   "requiredCapabilities": [
     "network",
     "filesystem",
@@ -16,6 +17,11 @@
         "string",
         "string",
         "object"
+      ],
+      "paramNames": [
+        "service",
+        "route",
+        "init"
       ],
       "requiredCapabilities": [
         "network",

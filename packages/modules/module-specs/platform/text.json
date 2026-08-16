@@ -2,6 +2,7 @@
   "schemaVersion": 1,
   "specifier": "zttp:text",
   "source": "packages/modules/src/platform/text.zig",
+  "summary": "String helpers. mask exists to make a secret printable and is the one declassifier here: its result no longer carries the secret label its input did.",
   "requiredCapabilities": [],
   "exports": [
     {
@@ -10,6 +11,9 @@
       "returns": "string",
       "params": [
         "string"
+      ],
+      "paramNames": [
+        "text"
       ],
       "laws": [
         "pure"
@@ -22,6 +26,9 @@
       "params": [
         "string"
       ],
+      "paramNames": [
+        "text"
+      ],
       "laws": [
         "pure"
       ]
@@ -32,6 +39,9 @@
       "returns": "string",
       "params": [
         "string"
+      ],
+      "paramNames": [
+        "text"
       ],
       "laws": [
         "pure"
@@ -46,6 +56,11 @@
         "number",
         "string"
       ],
+      "paramNames": [
+        "text",
+        "maxLength",
+        "suffix"
+      ],
       "laws": [
         "pure"
       ]
@@ -57,6 +72,10 @@
       "params": [
         "string",
         "number"
+      ],
+      "paramNames": [
+        "text",
+        "visible"
       ],
       "laws": [
         "pure"

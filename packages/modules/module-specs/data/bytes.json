@@ -2,6 +2,7 @@
   "schemaVersion": 1,
   "specifier": "zttp:bytes",
   "source": "packages/zts/src/modules/data/bytes_mod.zig",
+  "summary": "Pure operations over the immutable Bytes value: every export reads its arguments and returns a new value or a scalar, so a Bytes a caller still holds is never changed. Construction, slicing, concatenation, and the two decoders return a Result; the rest answer directly.",
   "requiredCapabilities": [],
   "exports": [
     {
@@ -10,6 +11,9 @@
       "returns": "result",
       "params": [
         "object"
+      ],
+      "paramNames": [
+        "octets"
       ],
       "laws": [
         "pure"
@@ -20,6 +24,9 @@
       "effect": "none",
       "returns": "number",
       "params": [
+        "bytes"
+      ],
+      "paramNames": [
         "bytes"
       ],
       "laws": [
@@ -34,6 +41,10 @@
         "bytes",
         "number"
       ],
+      "paramNames": [
+        "bytes",
+        "index"
+      ],
       "laws": [
         "pure"
       ]
@@ -47,6 +58,11 @@
         "number",
         "number"
       ],
+      "paramNames": [
+        "bytes",
+        "start",
+        "end"
+      ],
       "laws": [
         "pure"
       ]
@@ -57,6 +73,9 @@
       "returns": "result",
       "params": [
         "object"
+      ],
+      "paramNames": [
+        "parts"
       ],
       "laws": [
         "pure"
@@ -69,6 +88,9 @@
       "params": [
         "string"
       ],
+      "paramNames": [
+        "text"
+      ],
       "laws": [
         "pure"
       ]
@@ -78,6 +100,9 @@
       "effect": "none",
       "returns": "result",
       "params": [
+        "bytes"
+      ],
+      "paramNames": [
         "bytes"
       ],
       "laws": [
@@ -91,6 +116,9 @@
       "params": [
         "string"
       ],
+      "paramNames": [
+        "text"
+      ],
       "laws": [
         "pure"
       ]
@@ -100,6 +128,9 @@
       "effect": "none",
       "returns": "string",
       "params": [
+        "bytes"
+      ],
+      "paramNames": [
         "bytes"
       ],
       "laws": [

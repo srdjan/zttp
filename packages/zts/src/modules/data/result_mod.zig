@@ -52,16 +52,17 @@ const JSObject = object.JSObject;
 pub const binding = mb.ModuleBinding{
     .specifier = "zttp:result",
     .name = "result",
+    .summary = "Free functions, not methods: the profile has no member form for a Result, so unwrapOr(r, d) is the spelling and r.unwrapOr(d) is refused.",
     .required_capabilities = &.{},
     .exports = &.{
-        .{ .name = "ok", .func = okNative, .arg_count = 1, .effect = .none, .returns = .result, .param_types = &.{.unknown}, .laws = &.{.pure}, .replay_pure = true, .derives_from_args = true },
-        .{ .name = "err", .func = errNative, .arg_count = 1, .effect = .none, .returns = .result, .param_types = &.{.unknown}, .laws = &.{.pure}, .replay_pure = true, .derives_from_args = true },
-        .{ .name = "mapResult", .func = mapResultNative, .arg_count = 2, .effect = .none, .returns = .result, .param_types = &.{ .result, .object }, .replay_pure = true, .derives_from_args = true },
-        .{ .name = "mapError", .func = mapErrorNative, .arg_count = 2, .effect = .none, .returns = .result, .param_types = &.{ .result, .object }, .replay_pure = true, .derives_from_args = true },
-        .{ .name = "andThen", .func = andThenNative, .arg_count = 2, .effect = .none, .returns = .result, .param_types = &.{ .result, .object }, .replay_pure = true, .derives_from_args = true },
-        .{ .name = "orElse", .func = orElseNative, .arg_count = 2, .effect = .none, .returns = .result, .param_types = &.{ .result, .object }, .replay_pure = true, .derives_from_args = true },
-        .{ .name = "unwrapOr", .func = unwrapOrNative, .arg_count = 2, .effect = .none, .returns = .unknown, .param_types = &.{ .result, .unknown }, .laws = &.{.pure}, .replay_pure = true, .derives_from_args = true },
-        .{ .name = "collectAll", .func = collectAllNative, .arg_count = 1, .effect = .none, .returns = .result, .param_types = &.{.object}, .laws = &.{.pure}, .replay_pure = true, .derives_from_args = true },
+        .{ .name = "ok", .func = okNative, .arg_count = 1, .effect = .none, .returns = .result, .param_types = &.{.unknown}, .param_names = &.{"value"}, .laws = &.{.pure}, .replay_pure = true, .derives_from_args = true },
+        .{ .name = "err", .func = errNative, .arg_count = 1, .effect = .none, .returns = .result, .param_types = &.{.unknown}, .param_names = &.{"error"}, .laws = &.{.pure}, .replay_pure = true, .derives_from_args = true },
+        .{ .name = "mapResult", .func = mapResultNative, .arg_count = 2, .effect = .none, .returns = .result, .param_types = &.{ .result, .object }, .param_names = &.{ "result", "fn" }, .replay_pure = true, .derives_from_args = true },
+        .{ .name = "mapError", .func = mapErrorNative, .arg_count = 2, .effect = .none, .returns = .result, .param_types = &.{ .result, .object }, .param_names = &.{ "result", "fn" }, .replay_pure = true, .derives_from_args = true },
+        .{ .name = "andThen", .func = andThenNative, .arg_count = 2, .effect = .none, .returns = .result, .param_types = &.{ .result, .object }, .param_names = &.{ "result", "fn" }, .replay_pure = true, .derives_from_args = true },
+        .{ .name = "orElse", .func = orElseNative, .arg_count = 2, .effect = .none, .returns = .result, .param_types = &.{ .result, .object }, .param_names = &.{ "result", "fn" }, .replay_pure = true, .derives_from_args = true },
+        .{ .name = "unwrapOr", .func = unwrapOrNative, .arg_count = 2, .effect = .none, .returns = .unknown, .param_types = &.{ .result, .unknown }, .param_names = &.{ "result", "fallback" }, .laws = &.{.pure}, .replay_pure = true, .derives_from_args = true },
+        .{ .name = "collectAll", .func = collectAllNative, .arg_count = 1, .effect = .none, .returns = .result, .param_types = &.{.object}, .param_names = &.{"results"}, .laws = &.{.pure}, .replay_pure = true, .derives_from_args = true },
     },
 };
 

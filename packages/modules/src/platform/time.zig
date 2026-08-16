@@ -8,11 +8,12 @@ const epoch = std.time.epoch;
 pub const binding = sdk.ModuleBinding{
     .specifier = "zttp:time",
     .name = "time",
+    .summary = "Timestamps are epoch milliseconds, not seconds. Reading the clock is a capability, so these format and parse values a caller already has rather than reading it themselves.",
     .exports = &.{
-        .{ .name = "formatIso", .derives_from_args = true, .module_func = formatIsoImpl, .arg_count = 1, .effect = .none, .returns = .string, .param_types = &.{.number}, .laws = &.{.pure} },
-        .{ .name = "formatHttp", .derives_from_args = true, .module_func = formatHttpImpl, .arg_count = 1, .effect = .none, .returns = .string, .param_types = &.{.number}, .laws = &.{.pure} },
-        .{ .name = "parseIso", .derives_from_args = true, .module_func = parseIsoImpl, .arg_count = 1, .effect = .none, .returns = .number, .param_types = &.{.string}, .failure_severity = .expected, .laws = &.{.pure} },
-        .{ .name = "addSeconds", .derives_from_args = true, .module_func = addSecondsImpl, .arg_count = 2, .effect = .none, .returns = .number, .param_types = &.{ .number, .number }, .laws = &.{.pure} },
+        .{ .name = "formatIso", .derives_from_args = true, .module_func = formatIsoImpl, .arg_count = 1, .effect = .none, .returns = .string, .param_types = &.{.number}, .param_names = &.{"epochMs"}, .laws = &.{.pure} },
+        .{ .name = "formatHttp", .derives_from_args = true, .module_func = formatHttpImpl, .arg_count = 1, .effect = .none, .returns = .string, .param_types = &.{.number}, .param_names = &.{"epochMs"}, .laws = &.{.pure} },
+        .{ .name = "parseIso", .derives_from_args = true, .module_func = parseIsoImpl, .arg_count = 1, .effect = .none, .returns = .number, .param_types = &.{.string}, .param_names = &.{"text"}, .failure_severity = .expected, .laws = &.{.pure} },
+        .{ .name = "addSeconds", .derives_from_args = true, .module_func = addSecondsImpl, .arg_count = 2, .effect = .none, .returns = .number, .param_types = &.{ .number, .number }, .param_names = &.{ "epochMs", "seconds" }, .laws = &.{.pure} },
     },
 };
 

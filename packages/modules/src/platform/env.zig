@@ -7,6 +7,7 @@ const util = @import("../internal/util.zig");
 pub const binding = sdk.ModuleBinding{
     .specifier = "zttp:env",
     .name = "env",
+    .summary = "env reads one declared environment variable by name. The name must be a literal so the contract can record it.",
     .required_capabilities = &.{ .env, .policy_check },
     .contract_section = "env",
     .sandboxable = true,
@@ -17,6 +18,7 @@ pub const binding = sdk.ModuleBinding{
             .arg_count = 1,
             .returns = .optional_string,
             .param_types = &.{.string},
+            .param_names = &.{"name"},
             .failure_severity = .expected,
             .contract_extractions = &.{.{ .category = .env }},
             .return_labels = .{ .secret = true },

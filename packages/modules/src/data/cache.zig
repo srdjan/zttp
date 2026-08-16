@@ -20,6 +20,7 @@ const MODULE_STATE_SLOT: usize = 5; // module_slots.Slot.cache
 pub const binding = sdk.ModuleBinding{
     .specifier = "zttp:cache",
     .name = "cache",
+    .summary = "Every entry is addressed by a namespace and a key together. Namespaces share the LRU list and the global byte and entry budget but keep independent hit and miss counters. TTL is in seconds: zero or negative means already expired, and omitting it means no expiry.",
     .required_capabilities = &.{ .clock, .policy_check },
     .stateful = true,
     .contract_section = "cache",
@@ -37,6 +38,7 @@ pub const binding = sdk.ModuleBinding{
             // declaration under-required, so `cacheGet("ns")` type-checked but
             // always returned undefined at runtime (impl needs args.len >= 2).
             .param_types = &.{ .string, .string },
+            .param_names = &.{ "namespace", "key" },
             .required_arg_count = 2,
             .failure_severity = .expected,
             .contract_extractions = &.{.{ .category = .cache_namespace }},
@@ -54,6 +56,7 @@ pub const binding = sdk.ModuleBinding{
             // declaration let `cacheSet("ns", value)` (missing the key, or value)
             // type-check clean while the impl silently returned false (no write).
             .param_types = &.{ .string, .string, .string, .number },
+            .param_names = &.{ "namespace", "key", "value", "ttlSeconds" },
             .required_arg_count = 3,
             .contract_extractions = &.{.{ .category = .cache_namespace }},
             .laws = &.{.idempotent_call},
@@ -69,6 +72,7 @@ pub const binding = sdk.ModuleBinding{
             .returns = .boolean,
             // cacheDelete(namespace, key): both required.
             .param_types = &.{ .string, .string },
+            .param_names = &.{ "namespace", "key" },
             .required_arg_count = 2,
             .contract_extractions = &.{.{ .category = .cache_namespace }},
             .laws = &.{.idempotent_call},
@@ -84,6 +88,7 @@ pub const binding = sdk.ModuleBinding{
             .returns = .number,
             // cacheIncr(namespace, key, delta?, ttl?): namespace+key required.
             .param_types = &.{ .string, .string, .number, .number },
+            .param_names = &.{ "namespace", "key", "delta", "ttlSeconds" },
             .required_arg_count = 2,
             .contract_extractions = &.{.{ .category = .cache_namespace }},
         },
@@ -100,6 +105,7 @@ pub const binding = sdk.ModuleBinding{
             .effect = .read,
             .returns = .object,
             .param_types = &.{.string},
+            .param_names = &.{"namespace"},
         },
     },
 };

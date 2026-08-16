@@ -2,6 +2,7 @@
   "schemaVersion": 1,
   "specifier": "zttp:crypto",
   "source": "packages/modules/src/security/crypto.zig",
+  "summary": "hmacSha256 takes the key first and the message second.",
   "requiredCapabilities": [
     "crypto"
   ],
@@ -12,6 +13,9 @@
       "returns": "string",
       "params": [
         "string"
+      ],
+      "paramNames": [
+        "text"
       ],
       "requiredCapabilities": [
         "crypto"
@@ -28,6 +32,10 @@
         "string",
         "string"
       ],
+      "paramNames": [
+        "key",
+        "message"
+      ],
       "requiredCapabilities": [
         "crypto"
       ],
@@ -41,6 +49,9 @@
       "returns": "string",
       "params": [
         "string"
+      ],
+      "paramNames": [
+        "text"
       ],
       "requiredCapabilities": [],
       "laws": [
@@ -56,6 +67,9 @@
       "returns": "string",
       "params": [
         "string"
+      ],
+      "paramNames": [
+        "text"
       ],
       "requiredCapabilities": [],
       "laws": [

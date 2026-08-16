@@ -45,17 +45,18 @@ const JSObject = object.JSObject;
 pub const binding = mb.ModuleBinding{
     .specifier = "zttp:bytes",
     .name = "bytes",
+    .summary = "Pure operations over the immutable Bytes value: every export reads its arguments and returns a new value or a scalar, so a Bytes a caller still holds is never changed. Construction, slicing, concatenation, and the two decoders return a Result; the rest answer directly.",
     .required_capabilities = &.{},
     .exports = &.{
-        .{ .name = "bytesFromOctets", .func = bytesFromOctetsNative, .arg_count = 1, .effect = .none, .returns = .result, .param_types = &.{.object}, .laws = &.{.pure}, .replay_pure = true, .derives_from_args = true },
-        .{ .name = "bytesLength", .func = bytesLengthNative, .arg_count = 1, .effect = .none, .returns = .number, .param_types = &.{.bytes}, .laws = &.{.pure}, .replay_pure = true },
-        .{ .name = "byteAt", .func = byteAtNative, .arg_count = 2, .effect = .none, .returns = .optional_number, .param_types = &.{ .bytes, .number }, .laws = &.{.pure}, .replay_pure = true, .derives_from_args = true },
-        .{ .name = "sliceBytes", .func = sliceBytesNative, .arg_count = 3, .effect = .none, .returns = .result, .param_types = &.{ .bytes, .number, .number }, .laws = &.{.pure}, .replay_pure = true, .derives_from_args = true },
-        .{ .name = "concatBytes", .func = concatBytesNative, .arg_count = 1, .effect = .none, .returns = .result, .param_types = &.{.object}, .laws = &.{.pure}, .replay_pure = true, .derives_from_args = true },
-        .{ .name = "encodeUtf8", .func = encodeUtf8Native, .arg_count = 1, .effect = .none, .returns = .bytes, .param_types = &.{.string}, .laws = &.{.pure}, .replay_pure = true, .derives_from_args = true },
-        .{ .name = "decodeUtf8", .func = decodeUtf8Native, .arg_count = 1, .effect = .none, .returns = .result, .param_types = &.{.bytes}, .laws = &.{.pure}, .replay_pure = true, .derives_from_args = true },
-        .{ .name = "decodeBase64", .func = decodeBase64Native, .arg_count = 1, .effect = .none, .returns = .result, .param_types = &.{.string}, .laws = &.{.pure}, .replay_pure = true, .derives_from_args = true },
-        .{ .name = "encodeBase64", .func = encodeBase64Native, .arg_count = 1, .effect = .none, .returns = .string, .param_types = &.{.bytes}, .laws = &.{.pure}, .replay_pure = true, .derives_from_args = true },
+        .{ .name = "bytesFromOctets", .func = bytesFromOctetsNative, .arg_count = 1, .effect = .none, .returns = .result, .param_types = &.{.object}, .param_names = &.{"octets"}, .laws = &.{.pure}, .replay_pure = true, .derives_from_args = true },
+        .{ .name = "bytesLength", .func = bytesLengthNative, .arg_count = 1, .effect = .none, .returns = .number, .param_types = &.{.bytes}, .param_names = &.{"bytes"}, .laws = &.{.pure}, .replay_pure = true },
+        .{ .name = "byteAt", .func = byteAtNative, .arg_count = 2, .effect = .none, .returns = .optional_number, .param_types = &.{ .bytes, .number }, .param_names = &.{ "bytes", "index" }, .laws = &.{.pure}, .replay_pure = true, .derives_from_args = true },
+        .{ .name = "sliceBytes", .func = sliceBytesNative, .arg_count = 3, .effect = .none, .returns = .result, .param_types = &.{ .bytes, .number, .number }, .param_names = &.{ "bytes", "start", "end" }, .laws = &.{.pure}, .replay_pure = true, .derives_from_args = true },
+        .{ .name = "concatBytes", .func = concatBytesNative, .arg_count = 1, .effect = .none, .returns = .result, .param_types = &.{.object}, .param_names = &.{"parts"}, .laws = &.{.pure}, .replay_pure = true, .derives_from_args = true },
+        .{ .name = "encodeUtf8", .func = encodeUtf8Native, .arg_count = 1, .effect = .none, .returns = .bytes, .param_types = &.{.string}, .param_names = &.{"text"}, .laws = &.{.pure}, .replay_pure = true, .derives_from_args = true },
+        .{ .name = "decodeUtf8", .func = decodeUtf8Native, .arg_count = 1, .effect = .none, .returns = .result, .param_types = &.{.bytes}, .param_names = &.{"bytes"}, .laws = &.{.pure}, .replay_pure = true, .derives_from_args = true },
+        .{ .name = "decodeBase64", .func = decodeBase64Native, .arg_count = 1, .effect = .none, .returns = .result, .param_types = &.{.string}, .param_names = &.{"text"}, .laws = &.{.pure}, .replay_pure = true, .derives_from_args = true },
+        .{ .name = "encodeBase64", .func = encodeBase64Native, .arg_count = 1, .effect = .none, .returns = .string, .param_types = &.{.bytes}, .param_names = &.{"bytes"}, .laws = &.{.pure}, .replay_pure = true, .derives_from_args = true },
     },
 };
 

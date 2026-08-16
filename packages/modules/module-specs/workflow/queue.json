@@ -2,6 +2,7 @@
   "schemaVersion": 1,
   "specifier": "zttp:queue",
   "source": "packages/zts/src/modules/workflow/queue.zig",
+  "summary": "send and request address a queue by name; ack, nack, and reply address one delivered message by the id it arrived with. Every export returns a Result.",
   "requiredCapabilities": [
     "runtime_callback"
   ],
@@ -14,6 +15,10 @@
         "string",
         "unknown"
       ],
+      "paramNames": [
+        "queue",
+        "message"
+      ],
       "failureSeverity": "expected"
     },
     {
@@ -24,6 +29,10 @@
         "string",
         "unknown"
       ],
+      "paramNames": [
+        "queue",
+        "message"
+      ],
       "failureSeverity": "expected"
     },
     {
@@ -33,6 +42,9 @@
       "params": [
         "string"
       ],
+      "paramNames": [
+        "queue"
+      ],
       "failureSeverity": "expected"
     },
     {
@@ -41,6 +53,9 @@
       "returns": "result",
       "params": [
         "string"
+      ],
+      "paramNames": [
+        "messageId"
       ],
       "failureSeverity": "expected"
     },
@@ -52,6 +67,10 @@
         "string",
         "string"
       ],
+      "paramNames": [
+        "messageId",
+        "reason"
+      ],
       "failureSeverity": "expected"
     },
     {
@@ -61,6 +80,10 @@
       "params": [
         "string",
         "unknown"
+      ],
+      "paramNames": [
+        "messageId",
+        "message"
       ],
       "failureSeverity": "expected"
     }

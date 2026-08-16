@@ -2,6 +2,7 @@
   "schemaVersion": 1,
   "specifier": "zttp:fetch",
   "source": "packages/modules/src/net/fetch.zig",
+  "summary": "Outbound HTTP to a literal URL. A handler that declares an egress host must reach it through these exports.",
   "requiredCapabilities": [
     "network",
     "runtime_callback"
@@ -14,6 +15,10 @@
       "params": [
         "string",
         "object"
+      ],
+      "paramNames": [
+        "url",
+        "init"
       ],
       "contractExtractions": [
         {
@@ -30,6 +35,11 @@
         "string",
         "object",
         "object"
+      ],
+      "paramNames": [
+        "url",
+        "init",
+        "retry"
       ],
       "contractExtractions": [
         {

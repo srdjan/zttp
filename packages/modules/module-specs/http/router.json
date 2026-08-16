@@ -2,6 +2,7 @@
   "schemaVersion": 1,
   "specifier": "zttp:router",
   "source": "packages/modules/src/http/router.zig",
+  "summary": "routerMatch takes the whole route table and the request, and answers which route matched.",
   "requiredCapabilities": [],
   "exports": [
     {
@@ -11,6 +12,10 @@
       "params": [
         "object",
         "object"
+      ],
+      "paramNames": [
+        "routes",
+        "request"
       ],
       "failureSeverity": "expected",
       "contractExtractions": [

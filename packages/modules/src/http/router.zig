@@ -6,6 +6,7 @@ const sdk = @import("zttp-sdk");
 pub const binding = sdk.ModuleBinding{
     .specifier = "zttp:router",
     .name = "router",
+    .summary = "routerMatch takes the whole route table and the request, and answers which route matched.",
     .exports = &.{
         .{
             .name = "routerMatch",
@@ -15,6 +16,7 @@ pub const binding = sdk.ModuleBinding{
             .effect = .none,
             .returns = .optional_object,
             .param_types = &.{ .object, .object },
+            .param_names = &.{ "routes", "request" },
             .traceable = false,
             .failure_severity = .expected,
             .contract_extractions = &.{.{ .category = .route_pattern }},

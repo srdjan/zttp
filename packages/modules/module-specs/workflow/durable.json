@@ -2,6 +2,7 @@
   "schemaVersion": 1,
   "specifier": "zttp:durable",
   "source": "packages/zts/src/modules/workflow/durable.zig",
+  "summary": "run(key, fn) wraps the whole durable execution under an idempotency key, and every step inside it is named so a replay can match it. signal delivers to a run by its key, and waitSignal parks on a signal name inside that run.",
   "requiredCapabilities": [
     "runtime_callback"
   ],
@@ -13,6 +14,10 @@
       "params": [
         "string",
         "unknown"
+      ],
+      "paramNames": [
+        "key",
+        "fn"
       ],
       "contractExtractions": [
         {
@@ -27,6 +32,10 @@
       "params": [
         "string",
         "unknown"
+      ],
+      "paramNames": [
+        "name",
+        "fn"
       ],
       "contractExtractions": [
         {
@@ -43,6 +52,11 @@
         "number",
         "unknown"
       ],
+      "paramNames": [
+        "name",
+        "timeoutMs",
+        "fn"
+      ],
       "failureSeverity": "expected",
       "contractExtractions": [
         {
@@ -56,6 +70,9 @@
       "returns": "undefined",
       "params": [
         "number"
+      ],
+      "paramNames": [
+        "delayMs"
       ]
     },
     {
@@ -64,6 +81,9 @@
       "returns": "undefined",
       "params": [
         "number"
+      ],
+      "paramNames": [
+        "epochMs"
       ]
     },
     {
@@ -72,6 +92,9 @@
       "returns": "unknown",
       "params": [
         "string"
+      ],
+      "paramNames": [
+        "name"
       ],
       "contractExtractions": [
         {
@@ -85,7 +108,13 @@
       "returns": "boolean",
       "params": [
         "string",
-        "string"
+        "string",
+        "unknown"
+      ],
+      "paramNames": [
+        "key",
+        "name",
+        "payload"
       ],
       "contractExtractions": [
         {
@@ -105,6 +134,11 @@
         "string",
         "string",
         "number"
+      ],
+      "paramNames": [
+        "key",
+        "name",
+        "atMs"
       ],
       "contractExtractions": [
         {

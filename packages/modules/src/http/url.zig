@@ -6,11 +6,12 @@ const sdk = @import("zttp-sdk");
 pub const binding = sdk.ModuleBinding{
     .specifier = "zttp:url",
     .name = "url",
+    .summary = "urlParse splits a whole URL; urlSearchParams takes only the query string, with or without its leading question mark.",
     .exports = &.{
-        .{ .name = "urlParse", .derives_from_args = true, .module_func = urlParseImpl, .arg_count = 1, .returns = .object, .param_types = &.{.string}, .effect = .none, .return_labels = .{ .user_input = true }, .laws = &.{.pure} },
-        .{ .name = "urlSearchParams", .derives_from_args = true, .module_func = urlSearchParamsImpl, .arg_count = 1, .returns = .object, .param_types = &.{.string}, .effect = .none, .return_labels = .{ .user_input = true }, .laws = &.{.pure} },
-        .{ .name = "urlEncode", .derives_from_args = true, .module_func = urlEncodeImpl, .arg_count = 1, .effect = .none, .returns = .string, .param_types = &.{.string}, .laws = &.{.pure} },
-        .{ .name = "urlDecode", .derives_from_args = true, .module_func = urlDecodeImpl, .arg_count = 1, .effect = .none, .returns = .string, .param_types = &.{.string}, .laws = &.{.pure} },
+        .{ .name = "urlParse", .derives_from_args = true, .module_func = urlParseImpl, .arg_count = 1, .returns = .object, .param_types = &.{.string}, .param_names = &.{"url"}, .effect = .none, .return_labels = .{ .user_input = true }, .laws = &.{.pure} },
+        .{ .name = "urlSearchParams", .derives_from_args = true, .module_func = urlSearchParamsImpl, .arg_count = 1, .returns = .object, .param_types = &.{.string}, .param_names = &.{"query"}, .effect = .none, .return_labels = .{ .user_input = true }, .laws = &.{.pure} },
+        .{ .name = "urlEncode", .derives_from_args = true, .module_func = urlEncodeImpl, .arg_count = 1, .effect = .none, .returns = .string, .param_types = &.{.string}, .param_names = &.{"text"}, .laws = &.{.pure} },
+        .{ .name = "urlDecode", .derives_from_args = true, .module_func = urlDecodeImpl, .arg_count = 1, .effect = .none, .returns = .string, .param_types = &.{.string}, .param_names = &.{"text"}, .laws = &.{.pure} },
     },
 };
 

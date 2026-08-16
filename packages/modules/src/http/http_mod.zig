@@ -6,12 +6,13 @@ const sdk = @import("zttp-sdk");
 pub const binding = sdk.ModuleBinding{
     .specifier = "zttp:http",
     .name = "http",
+    .summary = "Header helpers: each takes the raw header text it parses, and negotiate takes the supported types as a comma-separated string rather than an array.",
     .exports = &.{
-        .{ .name = "parseCookies", .derives_from_args = true, .module_func = parseCookiesImpl, .arg_count = 1, .returns = .object, .param_types = &.{.string}, .effect = .none, .return_labels = .{ .user_input = true, .credential = true } },
-        .{ .name = "setCookie", .derives_from_args = true, .module_func = setCookieImpl, .arg_count = 3, .returns = .string, .param_types = &.{ .string, .string, .object }, .effect = .none, .return_labels = .{ .internal = true }, .contract_extractions = &.{.{ .arg_position = 0, .category = .cookie_name }} },
-        .{ .name = "negotiate", .derives_from_args = true, .module_func = negotiateImpl, .arg_count = 2, .returns = .optional_string, .param_types = &.{ .string, .string }, .effect = .none, .failure_severity = .expected },
-        .{ .name = "parseContentType", .derives_from_args = true, .module_func = parseContentTypeImpl, .arg_count = 1, .effect = .none, .returns = .object, .param_types = &.{.string} },
-        .{ .name = "cors", .derives_from_args = true, .module_func = corsImpl, .arg_count = 2, .returns = .object, .param_types = &.{ .string, .object }, .effect = .none, .contract_extractions = &.{.{ .arg_position = 0, .category = .cors_origin }} },
+        .{ .name = "parseCookies", .derives_from_args = true, .module_func = parseCookiesImpl, .arg_count = 1, .returns = .object, .param_types = &.{.string}, .param_names = &.{"cookieHeader"}, .effect = .none, .return_labels = .{ .user_input = true, .credential = true } },
+        .{ .name = "setCookie", .derives_from_args = true, .module_func = setCookieImpl, .arg_count = 3, .returns = .string, .param_types = &.{ .string, .string, .object }, .param_names = &.{ "name", "value", "options" }, .effect = .none, .return_labels = .{ .internal = true }, .contract_extractions = &.{.{ .arg_position = 0, .category = .cookie_name }} },
+        .{ .name = "negotiate", .derives_from_args = true, .module_func = negotiateImpl, .arg_count = 2, .returns = .optional_string, .param_types = &.{ .string, .string }, .param_names = &.{ "acceptHeader", "supported" }, .effect = .none, .failure_severity = .expected },
+        .{ .name = "parseContentType", .derives_from_args = true, .module_func = parseContentTypeImpl, .arg_count = 1, .effect = .none, .returns = .object, .param_types = &.{.string}, .param_names = &.{"contentTypeHeader"} },
+        .{ .name = "cors", .derives_from_args = true, .module_func = corsImpl, .arg_count = 2, .returns = .object, .param_types = &.{ .string, .object }, .param_names = &.{ "origin", "options" }, .effect = .none, .contract_extractions = &.{.{ .arg_position = 0, .category = .cors_origin }} },
     },
 };
 
