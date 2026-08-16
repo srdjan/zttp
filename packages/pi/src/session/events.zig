@@ -29,7 +29,6 @@ const EventKind = enum {
     tool_result,
     proof_card,
     diagnostic_box,
-    verified_patch,
     verified_change_set,
     system_note,
     autoloop_outcome,
@@ -76,14 +75,14 @@ pub const TurnEnd = struct {
 /// release scorecard is staked on (see STRATEGY.md): expert success rate
 /// (`reached_proof` aggregated across sessions), round-trips to first green
 /// proof (`round_trips_to_first_green`), and the proven-path ratio
-/// (`proven_properties / tracked_properties`). `verified_patch_count` is the
+/// (`proven_properties / tracked_properties`). `verified_change_set_count` is the
 /// number of edits the compiler veto approved this session - the authoritative
 /// "handler advanced" signal, since a plain-text turn (e.g. a clarifying
 /// question) ends `approved` without applying an edit.
 pub const SessionSummary = struct {
     turn_count: u32 = 0,
     total_roundtrips: u32 = 0,
-    verified_patch_count: u32 = 0,
+    verified_change_set_count: u32 = 0,
     reached_proof: bool = false,
     /// Model round-trips accumulated up to and including the turn that produced
     /// the first verified edit. 0 when no edit was applied this session.
@@ -100,7 +99,7 @@ pub const SessionSummary = struct {
     veto_retry_count: u32 = 0,
     tool_call_count: u32 = 0,
     /// Edits that landed via the compiler-authored repair lane with no model
-    /// round-trip (model-free applies). Over verified_patch_count this is the
+    /// round-trip (model-free applies). Over verified_change_set_count this is the
     /// "% of edits that became model-free" win.
     compiler_authored_apply_count: u32 = 0,
     last_workflow_kind: []const u8 = "unknown",
@@ -135,7 +134,7 @@ pub const AutoloopVerdict = enum {
 
 pub const AutoloopOutcome = struct {
     verdict: AutoloopVerdict,
-    final_patch_hash: ?[32]u8 = null,
+    final_change_set_hash: ?[32]u8 = null,
     goals_met: []const []const u8 = &.{},
     goals_unmet: []const []const u8 = &.{},
     iterations: u32 = 0,
@@ -169,7 +168,6 @@ pub const EventRecord = union(EventKind) {
     tool_result: ToolResult,
     proof_card: DisplayMessage,
     diagnostic_box: DisplayMessage,
-    verified_patch: DisplayMessage,
     verified_change_set: DisplayMessage,
     system_note: []const u8,
     autoloop_outcome: AutoloopOutcome,
@@ -700,7 +698,7 @@ fn validateEnvelopePayload(allocator: std.mem.Allocator, payload: []const u8) !v
     const entry_id = object.get("entry_id");
     const part_index = object.get("part_index");
     const transcript_record = switch (event_kind) {
-        .user_text, .model_text, .tool_use, .tool_use_batch, .tool_result, .proof_card, .diagnostic_box, .verified_patch, .verified_change_set, .system_note => true,
+        .user_text, .model_text, .tool_use, .tool_use_batch, .tool_result, .proof_card, .diagnostic_box, .verified_change_set, .system_note => true,
         .autoloop_outcome, .turn_end, .session_summary, .compaction_checkpoint => false,
     };
     if (transcript_record) {
@@ -732,7 +730,7 @@ fn validateEnvelopePayload(allocator: std.mem.Allocator, payload: []const u8) !v
                 return error.CorruptEventsLog;
             }
         },
-        .proof_card, .diagnostic_box, .verified_patch, .verified_change_set => if (data != .string and data != .object) {
+        .proof_card, .diagnostic_box, .verified_change_set => if (data != .string and data != .object) {
             return error.CorruptEventsLog;
         },
         .autoloop_outcome, .turn_end, .session_summary, .compaction_checkpoint => if (data != .object) {
@@ -829,7 +827,6 @@ fn isTranscriptRecord(record: EventRecord) bool {
         .tool_result,
         .proof_card,
         .diagnostic_box,
-        .verified_patch,
         .verified_change_set,
         .system_note,
         => true,
@@ -846,7 +843,6 @@ fn kindTag(record: EventRecord) []const u8 {
         .tool_result => "tool_result",
         .proof_card => "proof_card",
         .diagnostic_box => "diagnostic_box",
-        .verified_patch => "verified_patch",
         .verified_change_set => "verified_change_set",
         .system_note => "system_note",
         .autoloop_outcome => "autoloop_outcome",
@@ -912,7 +908,6 @@ fn writePayload(writer: *std.Io.Writer, record: EventRecord) !void {
         },
         .proof_card => |message| try writeDisplayPayload(writer, message),
         .diagnostic_box => |message| try writeDisplayPayload(writer, message),
-        .verified_patch => |message| try writeDisplayPayload(writer, message),
         .verified_change_set => |message| try writeDisplayPayload(writer, message),
         .autoloop_outcome => |outcome| try writeAutoloopOutcomePayload(writer, outcome),
         .turn_end => |te| {
@@ -957,7 +952,7 @@ fn writeSessionSummaryPayload(writer: *std.Io.Writer, s: SessionSummary) !void {
     try writer.writeByte('{');
     try writer.print("\"turn_count\":{d}", .{s.turn_count});
     try writer.print(",\"total_roundtrips\":{d}", .{s.total_roundtrips});
-    try writer.print(",\"verified_patch_count\":{d}", .{s.verified_patch_count});
+    try writer.print(",\"verified_change_set_count\":{d}", .{s.verified_change_set_count});
     try writer.writeAll(",\"reached_proof\":");
     try writer.writeAll(if (s.reached_proof) "true" else "false");
     try writer.print(",\"round_trips_to_first_green\":{d}", .{s.round_trips_to_first_green});
@@ -1000,8 +995,8 @@ fn writeAutoloopOutcomePayload(
         try json_writer.writeString(writer, goal);
     }
     try writer.writeByte(']');
-    if (outcome.final_patch_hash) |hash| {
-        try writer.writeAll(",\"final_patch_hash\":\"");
+    if (outcome.final_change_set_hash) |hash| {
+        try writer.writeAll(",\"final_change_set_hash\":\"");
         const hex = std.fmt.bytesToHex(hash, .lower);
         try writer.writeAll(&hex);
         try writer.writeByte('"');
@@ -1257,47 +1252,6 @@ test "appendEvent serializes tool_result with llm_text body alias and ui_payload
     try testing.expect(std.mem.indexOf(u8, raw, "\"ui_payload\":{\"kind\":\"plain_text\"") != null);
 }
 
-test "appendEvent serializes verified_patch with ui_payload" {
-    const allocator = testing.allocator;
-    var tmp = try initTmp(allocator);
-    defer tmp.cleanup(allocator);
-
-    const path = try tmp.childPath(allocator, "events.jsonl");
-    defer allocator.free(path);
-
-    var patch: ui_payload.UiPayload = .{ .verified_patch = .{
-        .file = try allocator.dupe(u8, "handler.ts"),
-        .policy_hash = try allocator.dupe(u8, "a" ** 64),
-        .applied_at_unix_ms = 42,
-        .stats = .{ .total = 0, .new = 0, .preexisting = 0 },
-        .before = null,
-        .after = try allocator.dupe(u8, "export default {}"),
-        .unified_diff = try allocator.alloc(u8, 0),
-        .hunks = try allocator.alloc(ui_payload.DiffHunk, 0),
-        .violations = try allocator.alloc(ui_payload.ViolationDeltaItem, 0),
-        .before_properties = null,
-        .after_properties = null,
-        .prove = null,
-        .system = null,
-        .rule_citations = try allocator.alloc([]u8, 0),
-        .post_apply_ok = true,
-        .post_apply_summary = null,
-    } };
-    defer patch.deinit(allocator);
-
-    try appendEntryEvent(allocator, path, 1, null, .{ .verified_patch = .{
-        .llm_text = "verified: handler.ts",
-        .ui_payload = patch,
-    } });
-
-    const raw = try readWhole(allocator, path);
-    defer allocator.free(raw);
-    try testing.expect(std.mem.indexOf(u8, raw, "\"k\":\"verified_patch\"") != null);
-    try testing.expect(std.mem.indexOf(u8, raw, "\"ui_payload\":{\"kind\":\"verified_patch\"") != null);
-    try testing.expect(std.mem.indexOf(u8, raw, "\"policy_hash\":\"aaaaa") != null);
-    try testing.expect(std.mem.indexOf(u8, raw, "\"post_apply_ok\":true") != null);
-}
-
 test "appendEvent serializes proof_card as a display object" {
     const allocator = testing.allocator;
     var tmp = try initTmp(allocator);
@@ -1393,7 +1347,7 @@ test "appendEvent serializes autoloop_outcome with goals and final hash" {
 
     try appendEvent(allocator, path, .{ .autoloop_outcome = .{
         .verdict = .achieved,
-        .final_patch_hash = hash,
+        .final_change_set_hash = hash,
         .goals_met = &.{ "retry_safe", "pure" },
         .goals_unmet = &.{},
         .iterations = 3,
@@ -1406,10 +1360,10 @@ test "appendEvent serializes autoloop_outcome with goals and final hash" {
     try testing.expect(std.mem.indexOf(u8, raw, "\"iterations\":3") != null);
     try testing.expect(std.mem.indexOf(u8, raw, "\"retry_safe\"") != null);
     try testing.expect(std.mem.indexOf(u8, raw, "\"goals_unmet\":[]") != null);
-    try testing.expect(std.mem.indexOf(u8, raw, "\"final_patch_hash\":\"000102") != null);
+    try testing.expect(std.mem.indexOf(u8, raw, "\"final_change_set_hash\":\"000102") != null);
 }
 
-test "appendEvent omits final_patch_hash when null" {
+test "appendEvent omits final_change_set_hash when null" {
     const allocator = testing.allocator;
     var tmp = try initTmp(allocator);
     defer tmp.cleanup(allocator);
@@ -1427,7 +1381,7 @@ test "appendEvent omits final_patch_hash when null" {
     const raw = try readWhole(allocator, path);
     defer allocator.free(raw);
     try testing.expect(std.mem.indexOf(u8, raw, "\"verdict\":\"exhausted_iters\"") != null);
-    try testing.expect(std.mem.indexOf(u8, raw, "final_patch_hash") == null);
+    try testing.expect(std.mem.indexOf(u8, raw, "final_change_set_hash") == null);
 }
 
 test "readMeta rejects older metadata schema versions after the protocol cutover" {
@@ -1710,7 +1664,7 @@ test "appendEvent serializes session_summary with metrics" {
     try appendEvent(allocator, path, .{ .session_summary = .{
         .turn_count = 2,
         .total_roundtrips = 5,
-        .verified_patch_count = 1,
+        .verified_change_set_count = 1,
         .reached_proof = true,
         .round_trips_to_first_green = 4,
         .proven_properties = 12,
@@ -1731,7 +1685,7 @@ test "appendEvent serializes session_summary with metrics" {
     defer allocator.free(raw);
     try testing.expect(std.mem.indexOf(u8, raw, "\"k\":\"session_summary\"") != null);
     try testing.expect(std.mem.indexOf(u8, raw, "\"turn_count\":2") != null);
-    try testing.expect(std.mem.indexOf(u8, raw, "\"verified_patch_count\":1") != null);
+    try testing.expect(std.mem.indexOf(u8, raw, "\"verified_change_set_count\":1") != null);
     try testing.expect(std.mem.indexOf(u8, raw, "\"reached_proof\":true") != null);
     try testing.expect(std.mem.indexOf(u8, raw, "\"round_trips_to_first_green\":4") != null);
     try testing.expect(std.mem.indexOf(u8, raw, "\"proven_path_ratio\":0.750") != null);

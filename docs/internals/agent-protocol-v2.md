@@ -82,7 +82,6 @@ second metadata contract.
 | `canonicalize` | implemented | `file`, `simulate` | |
 | `normalize` | implemented | `file`, `write` | `write: true` is refused |
 | `simulate_edit` | implemented | `file`, `repairs` | |
-| `apply_repair` | implemented | `file`, `repairs` | |
 | `verify` | implemented | `file`, `properties`, `content` | `content` verifies supplied bytes without a write |
 
 Every operation in the closed set is implemented as of 2026-08-03. The
@@ -92,6 +91,11 @@ and a future member may land deferred: such an operation answers
 member of the spec's set and saying otherwise would be false. Read the status
 column from `agent_protocol.zig` rather than from here - this table was stale for
 three operations until it was reconciled.
+
+The protocol is read-only. Source writes belong to PI's aggregate change-set
+transaction, which proves the complete overlay, checks its full read set, and
+emits one durable receipt. The removed `apply_repair` operation is rejected as
+an unknown operation so it cannot bypass that authority.
 
 ## Version negotiation
 

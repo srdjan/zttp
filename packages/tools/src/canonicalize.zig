@@ -151,8 +151,9 @@ pub fn collectFromSource(
 ///   through the frontend lowering map.
 ///
 /// The corpus needs zero of these repairs, so withdrawing costs nothing a user
-/// can feel, while leaving it in place kept `apply_repair` writing edits that
-/// changed a program's meaning and publishing them as proven equivalences. It
+/// can feel, while leaving it in place let the former `apply_repair` operation
+/// write edits that changed a program's meaning and publish them as proven
+/// equivalences. It
 /// comes back when the line mapping goes through `sourcePosition`, the
 /// replacement is built from a span rather than a trimmed line, and M2 compares
 /// against the grammar this compiler actually ships.

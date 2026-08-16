@@ -1,11 +1,7 @@
 //! Read-only derivations over the session transcript.
 //!
-//! The autoloop orchestrator (D2) needs three signals at every iteration:
-//! the current HandlerProperties for a file (to decide convergence), the
-//! hash of the most recent VerifiedPatch (to populate parent_hash on the
-//! next one), and the set of witnesses still pending against the current
-//! goal context (to feed regression detection). All three are derivable
-//! from the transcript by scanning the verified_patch entries.
+//! The autoloop derives the current HandlerProperties and latest aggregate
+//! proof identity for a file by scanning verified-change-set receipts.
 //!
 //! Derivation beats materialization here because the transcript is the
 //! only source of truth that survives resume via reconstructTranscript.
@@ -18,18 +14,14 @@ const std = @import("std");
 const transcript_mod = @import("transcript.zig");
 const ui_payload = @import("ui_payload.zig");
 
-/// Unwrap a transcript entry as a VerifiedPatchPayload, or null if it is
-/// not a verified_patch entry, has no payload, or carries a non-
-/// verified_patch payload. The shared predicate behind every "extract the
-/// patch from this entry" lookup in this module and the REPL.
-pub fn patchPayload(
+pub fn changeSetPayload(
     entry: *const transcript_mod.OwnedEntry,
-) ?ui_payload.VerifiedPatchPayload {
+) ?ui_payload.VerifiedChangeSetPayload {
     switch (entry.*) {
-        .verified_patch => |message| {
+        .verified_change_set => |message| {
             const payload = message.ui_payload orelse return null;
             switch (payload) {
-                .verified_patch => |patch| return patch,
+                .verified_change_set => |receipt| return receipt,
                 else => return null,
             }
         },
@@ -37,18 +29,18 @@ pub fn patchPayload(
     }
 }
 
-/// Same as `patchPayload` but also requires the patch to be for `file`.
-pub fn patchPayloadIfMatching(
+pub fn changeSetPayloadIfMatching(
     entry: *const transcript_mod.OwnedEntry,
     file: []const u8,
-) ?ui_payload.VerifiedPatchPayload {
-    const patch = patchPayload(entry) orelse return null;
-    if (!std.mem.eql(u8, patch.file, file)) return null;
-    return patch;
+) ?ui_payload.VerifiedChangeSetPayload {
+    const receipt = changeSetPayload(entry) orelse return null;
+    for (receipt.changes) |change| {
+        if (std.mem.eql(u8, change.file, file)) return receipt;
+    }
+    return null;
 }
 
-/// Return the `after_properties` of the most recent verified_patch entry
-/// whose `file` matches, or null if no patch for that file has landed.
+/// Return the primary-root properties of the latest receipt touching `file`.
 pub fn currentProperties(
     transcript: *const transcript_mod.Transcript,
     file: []const u8,
@@ -56,24 +48,26 @@ pub fn currentProperties(
     var i = transcript.len();
     while (i > 0) {
         i -= 1;
-        if (patchPayloadIfMatching(transcript.at(i), file)) |patch| {
-            return patch.after_properties;
+        if (changeSetPayloadIfMatching(transcript.at(i), file)) |receipt| {
+            return receipt.primary_properties;
         }
     }
     return null;
 }
 
-/// Return the `patch_hash` of the most recent verified_patch for `file`,
-/// or null if none exists or the patch predates the chain metadata.
-pub fn lastPatchHash(
+/// Return the binary aggregate proof id of the latest receipt touching `file`.
+pub fn lastChangeSetHash(
     transcript: *const transcript_mod.Transcript,
     file: []const u8,
 ) ?[32]u8 {
     var i = transcript.len();
     while (i > 0) {
         i -= 1;
-        if (patchPayloadIfMatching(transcript.at(i), file)) |patch| {
-            return patch.patch_hash;
+        if (changeSetPayloadIfMatching(transcript.at(i), file)) |receipt| {
+            if (receipt.transaction_id.len != 64) return null;
+            var digest: [32]u8 = undefined;
+            _ = std.fmt.hexToBytes(&digest, receipt.transaction_id) catch return null;
+            return digest;
         }
     }
     return null;
@@ -98,37 +92,58 @@ pub fn propertyByName(props: ui_payload.PropertiesSnapshot, name: []const u8) bo
 
 const testing = std.testing;
 
-fn appendPatch(
+fn appendChangeSet(
     allocator: std.mem.Allocator,
     tr: *transcript_mod.Transcript,
     file: []const u8,
     hash: ?[32]u8,
     after: ui_payload.PropertiesSnapshot,
 ) !void {
-    var patch: ui_payload.UiPayload = .{ .verified_patch = .{
-        .file = try allocator.dupe(u8, file),
-        .policy_hash = try allocator.dupe(u8, "p" ** 64),
-        .applied_at_unix_ms = 0,
-        .stats = .{ .total = 0, .new = 0, .preexisting = 0 },
+    var transaction_buffer: [64]u8 = undefined;
+    const transaction_id: []u8 = if (hash) |value| blk: {
+        transaction_buffer = std.fmt.bytesToHex(value, .lower);
+        break :blk &transaction_buffer;
+    } else @constCast("g" ** 64);
+    var changes = [_]ui_payload.VerifiedChange{.{
+        .file = @constCast(file),
+        .baseline_state = @constCast("absent"),
+        .baseline_sha256 = @constCast("a" ** 64),
+        .candidate_sha256 = @constCast("b" ** 64),
         .before = null,
-        .after = try allocator.dupe(u8, ""),
-        .unified_diff = try allocator.dupe(u8, ""),
-        .hunks = try allocator.alloc(ui_payload.DiffHunk, 0),
-        .violations = try allocator.alloc(ui_payload.ViolationDeltaItem, 0),
-        .before_properties = null,
-        .after_properties = after,
-        .prove = null,
-        .system = null,
-        .rule_citations = try allocator.alloc([]u8, 0),
-        .patch_hash = hash,
-        .post_apply_ok = true,
-        .post_apply_summary = null,
+        .after = @constCast(""),
+        .unified_diff = @constCast(""),
+    }};
+    var roots = [_][]u8{@constCast(file)};
+    var inputs = [_]ui_payload.VerifiedProofInput{.{
+        .path = @constCast(file),
+        .state = @constCast("absent"),
+        .sha256 = @constCast("a" ** 64),
+    }};
+    const source: ui_payload.UiPayload = .{ .verified_change_set = .{
+        .proof_schema_version = @constCast("test-proof-v1"),
+        .transaction_id = transaction_id,
+        .compiler_version = @constCast("test"),
+        .profile_id = @constCast("test"),
+        .policy_hash = @constCast("c" ** 64),
+        .grammar_hash = @constCast("d" ** 64),
+        .semantics_hash = @constCast("e" ** 64),
+        .diagnostic_catalog_hash = @constCast("f" ** 64),
+        .read_set_digest = @constCast("1" ** 64),
+        .applied_at_unix_ms = 0,
+        .system_proven = false,
+        .primary_properties = after,
+        .proof_roots = &roots,
+        .changes = &changes,
+        .proof_inputs = &inputs,
     } };
-    errdefer patch.deinit(allocator);
+    var receipt = try source.clone(allocator);
+    errdefer receipt.deinit(allocator);
+    const llm_text = try allocator.dupe(u8, "verified");
+    errdefer allocator.free(llm_text);
 
-    try tr.entries.append(allocator, .{ .verified_patch = .{
-        .llm_text = try allocator.dupe(u8, "verified"),
-        .ui_payload = patch,
+    try tr.entries.append(allocator, .{ .verified_change_set = .{
+        .llm_text = llm_text,
+        .ui_payload = receipt,
     } });
 }
 
@@ -160,11 +175,11 @@ test "currentProperties returns the latest patch for the matching file" {
 
     var p1 = zeroProps();
     p1.retry_safe = false;
-    try appendPatch(testing.allocator, &tr, "handler.ts", null, p1);
+    try appendChangeSet(testing.allocator, &tr, "handler.ts", null, p1);
 
     var p2 = zeroProps();
     p2.retry_safe = true;
-    try appendPatch(testing.allocator, &tr, "handler.ts", null, p2);
+    try appendChangeSet(testing.allocator, &tr, "handler.ts", null, p2);
 
     const current = currentProperties(&tr, "handler.ts");
     try testing.expect(current != null);
@@ -176,7 +191,7 @@ test "provider projection does not hide raw proof state" {
     defer tr.deinit(testing.allocator);
     var props = zeroProps();
     props.retry_safe = true;
-    try appendPatch(testing.allocator, &tr, "handler.ts", null, props);
+    try appendChangeSet(testing.allocator, &tr, "handler.ts", null, props);
     try tr.replaceProjection(testing.allocator, "summary", tr.nextEntryId());
 
     const current = currentProperties(&tr, "handler.ts") orelse return error.TestExpectedProperties;
@@ -188,7 +203,7 @@ test "currentProperties returns null when no patch matches the file" {
     var tr: transcript_mod.Transcript = .{};
     defer tr.deinit(testing.allocator);
 
-    try appendPatch(testing.allocator, &tr, "other.ts", null, zeroProps());
+    try appendChangeSet(testing.allocator, &tr, "other.ts", null, zeroProps());
 
     const current = currentProperties(&tr, "handler.ts");
     try testing.expect(current == null);
@@ -200,11 +215,11 @@ test "currentProperties is scoped per file" {
 
     var a = zeroProps();
     a.pure = true;
-    try appendPatch(testing.allocator, &tr, "a.ts", null, a);
+    try appendChangeSet(testing.allocator, &tr, "a.ts", null, a);
 
     var b = zeroProps();
     b.retry_safe = true;
-    try appendPatch(testing.allocator, &tr, "b.ts", null, b);
+    try appendChangeSet(testing.allocator, &tr, "b.ts", null, b);
 
     const ca = currentProperties(&tr, "a.ts").?;
     const cb = currentProperties(&tr, "b.ts").?;
@@ -214,7 +229,7 @@ test "currentProperties is scoped per file" {
     try testing.expect(!cb.pure);
 }
 
-test "lastPatchHash returns the most recent hash for the file" {
+test "lastChangeSetHash returns the most recent hash for the file" {
     var tr: transcript_mod.Transcript = .{};
     defer tr.deinit(testing.allocator);
 
@@ -223,19 +238,19 @@ test "lastPatchHash returns the most recent hash for the file" {
     var h2: [32]u8 = undefined;
     for (&h2, 0..) |*b, i| b.* = @intCast(i + 100);
 
-    try appendPatch(testing.allocator, &tr, "handler.ts", h1, zeroProps());
-    try appendPatch(testing.allocator, &tr, "handler.ts", h2, zeroProps());
+    try appendChangeSet(testing.allocator, &tr, "handler.ts", h1, zeroProps());
+    try appendChangeSet(testing.allocator, &tr, "handler.ts", h2, zeroProps());
 
-    const latest = lastPatchHash(&tr, "handler.ts");
+    const latest = lastChangeSetHash(&tr, "handler.ts");
     try testing.expect(latest != null);
     try testing.expectEqualSlices(u8, &h2, &latest.?);
 }
 
-test "lastPatchHash returns null when only legacy patches exist" {
+test "lastChangeSetHash returns null for a malformed transaction identity" {
     var tr: transcript_mod.Transcript = .{};
     defer tr.deinit(testing.allocator);
 
-    try appendPatch(testing.allocator, &tr, "handler.ts", null, zeroProps());
+    try appendChangeSet(testing.allocator, &tr, "handler.ts", null, zeroProps());
 
-    try testing.expect(lastPatchHash(&tr, "handler.ts") == null);
+    try testing.expect(lastChangeSetHash(&tr, "handler.ts") == null);
 }

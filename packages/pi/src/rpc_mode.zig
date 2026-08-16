@@ -835,10 +835,6 @@ fn emitEntryNotification(
             .llm_text = b.llm_text,
             .ui_payload = b.ui_payload,
         } },
-        .verified_patch => |b| .{ .verified_patch = .{
-            .llm_text = b.llm_text,
-            .ui_payload = b.ui_payload,
-        } },
         .verified_change_set => |b| .{ .verified_change_set = .{
             .llm_text = b.llm_text,
             .ui_payload = b.ui_payload,

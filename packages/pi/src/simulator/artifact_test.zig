@@ -26,7 +26,6 @@ const Mutation = enum {
     local_runtime_version_only,
     cloud_runtime,
     draft_metric_half,
-    draft_metric_mixed,
     draft_metric_impossible,
 };
 
@@ -54,18 +53,7 @@ fn zeroDigest() artifact.Sha256Hex {
     return .{ .bytes = [_]u8{'0'} ** 64 };
 }
 
-test "draft expectations preserve legacy meaning and reject impossible pairs" {
-    const legacy = try (artifact.TurnExpectation{
-        .index = 0,
-        .user_input = "x",
-        .outcome = .approved,
-        .final_response_sha256 = artifact.Sha256Hex.fromBytes(""),
-        .first_draft_veto_pass = true,
-    }).draftExpectation();
-    try testing.expect(legacy.matches(.raw_veto_pass));
-    try testing.expect(legacy.matches(.normalized));
-    try testing.expect(!legacy.matches(.compiler_repaired));
-
+test "draft expectations distinguish raw and compiler-assisted first attempts" {
     const current = try (artifact.TurnExpectation{
         .index = 0,
         .user_input = "x",
@@ -175,11 +163,6 @@ fn buildCase(mutation: Mutation) !Fixture {
     };
     switch (mutation) {
         .draft_metric_half => turns[0].raw_first_draft_veto_pass = true,
-        .draft_metric_mixed => {
-            turns[0].first_draft_veto_pass = true;
-            turns[0].raw_first_draft_veto_pass = true;
-            turns[0].first_attempt_green = true;
-        },
         .draft_metric_impossible => {
             turns[0].raw_first_draft_veto_pass = true;
             turns[0].first_attempt_green = false;
@@ -450,7 +433,6 @@ test "flow artifact loader rejects strict checkpoint mutations" {
         .{ .mutation = .local_runtime_version_only, .failure = .invalid_inventory },
         .{ .mutation = .cloud_runtime, .failure = .invalid_inventory },
         .{ .mutation = .draft_metric_half, .failure = .invalid_inventory },
-        .{ .mutation = .draft_metric_mixed, .failure = .invalid_inventory },
         .{ .mutation = .draft_metric_impossible, .failure = .invalid_inventory },
     };
     for (cases) |case| {
@@ -490,6 +472,22 @@ test "flow artifact loader rejects strict descriptor and fixture drift" {
     defer testing.allocator.free(path);
     try orphan.tree.writeFile(testing.allocator, path, "orphan\n");
     try expectLoadFailure(orphan.case_root_abs, .unexpected_fixture);
+}
+
+test "flow artifact loader rejects the pre-change-set schema before reading its manifest" {
+    var fixture = try buildCase(.none);
+    defer fixture.deinit();
+    const descriptor = artifact.CaseDescriptor{
+        .schema_version = artifact.schema_version - 1,
+        .case_name = "multi-turn",
+        .evidence_class = .deterministic_harness,
+        .executable = true,
+        .active_generation = fixture.flow_version,
+    };
+    const bytes = try renderJson(testing.allocator, descriptor);
+    defer testing.allocator.free(bytes);
+    try fixture.tree.writeFile(testing.allocator, "case.json", bytes);
+    try expectLoadFailure(fixture.case_root_abs, .unsupported_schema_version);
 }
 
 test "flow artifact loader rejects a symlink in the case root" {

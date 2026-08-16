@@ -492,10 +492,13 @@ The closed operation set is:
 - `check` for source, type, effect, policy, and proof diagnostics,
 - `canonicalize` for compiler-authored rewrite candidates,
 - `simulate_edit` for diagnostic and policy non-regression,
-- `apply_repair` for atomic application of exact validated repairs,
 - `normalize` for canonical fixed-point validation,
 - and `verify` for a set of discovered property identifiers and their
   assurance grades.
+
+The protocol is proof-only and has no source-write operation. The host submits
+complete candidate sources to PI's aggregate change-set transaction after the
+protocol has produced and simulated any compiler-authored repairs.
 
 `meta.payload.operations` MUST provide the request and response schema for
 every operation. `meta.payload.verifiers` MUST enumerate each property
@@ -580,8 +583,8 @@ diagnostic shape below applies only to source-bound diagnostics.
 The `expected` block obeys one rule for every operation: a supplied field that
 does not match the recomputed identity fails the request with a stable
 staleness error naming the mismatched field and both values. Omitting
-`expected` skips the guard. `apply_repair` additionally guarantees that a
-mismatch writes nothing.
+`expected` skips the guard. Every operation is read-only, so a mismatch cannot
+mutate source.
 
 The agent transport emits only the response JSON on standard output. Logs go
 to standard error. Array order, diagnostic order, rewrite order, and serialized
@@ -635,15 +638,13 @@ Pre-parse lexical errors carry a dedicated lexical-repair grade
 so a file that does not yet parse still has a mechanical exit; no agent or
 human hand-fixes profile syntax.
 
-`apply_repair` is stateless and self-contained: it re-runs edit simulation and
-equivalence validation internally on the submitted repairs before writing, so
-the standalone `simulate_edit` operation is an optional preview, never a
-trusted client assertion. One request accepts an ordered set of validated
-repairs bound to the same source digest with pairwise non-overlapping spans.
-It rechecks every bound identity and span, applies the whole set atomically as
-one edit, and returns the new source digest and recomputed complete
-module-graph hash. Overlapping spans, cross-digest sets, a mismatch, or a
-failed validation reject the whole request and write nothing.
+`simulate_edit` is stateless and self-contained: it re-runs edit simulation and
+equivalence validation on the submitted repairs. Its result is evidence, never
+write authority. PI's aggregate transaction accepts the resulting complete
+source candidates, normalizes them, proves the simultaneous overlay, binds the
+full proof read set, and rechecks that set before any write. Overlapping repair
+spans, cross-digest sets, a stale read, or failed validation reject the whole
+change set and write nothing.
 
 Advanced-profile mechanical normalization MUST be deterministic, terminating,
 semantics-preserving, and idempotent. If a rewrite cannot establish those
@@ -661,9 +662,9 @@ The canonical repair loop is bounded:
 3. resolve and bind the complete module graph,
 4. check and classify every diagnostic, collecting the inline bound repairs,
 5. optionally preview non-obvious repairs with `simulate_edit`,
-6. apply the non-overlapping repair set atomically; `apply_repair`
-   revalidates internally,
-7. accept the returned post-edit source and module-graph identities,
+6. submit the complete candidate sources to PI's aggregate change-set
+   transaction, which revalidates the overlay and full read set,
+7. accept the receipted post-edit source and module-graph identities,
 8. normalize to a fixed point, routing any required rewrite back through
    atomic application,
 9. recheck against the latest identities and invoke `verify` with the
@@ -2771,7 +2772,6 @@ zts agent --stdin-json < request-modules.json
 zts agent --stdin-json < request-check.json
 zts agent --stdin-json < request-canonicalize.json
 zts agent --stdin-json < request-simulate-edit.json
-zts agent --stdin-json < request-apply-repair.json
 zts agent --stdin-json < request-normalize.json
 zts agent --stdin-json < request-recheck.json
 zts agent --stdin-json < request-verify.json
@@ -2780,10 +2780,10 @@ zts agent --stdin-json < request-verify.json
 Each request uses the version-2 envelope and explicit project root. `check`
 embeds the complete bound repair object inline for every repairable
 diagnostic; `canonicalize` emits the rewrite candidates not attached to a
-diagnostic; `simulate_edit` is an optional preview. The agent submits the
-non-overlapping repair set unchanged, and `apply_repair` re-runs simulation
-and equivalence validation internally before writing, rejecting anything
-without a registered validator.
+diagnostic; `simulate_edit` is an optional preview. The agent submits complete
+candidate sources to PI's aggregate change-set transaction, which re-runs
+proof over the simultaneous overlay and rejects anything without a registered
+validator or a current proof read set.
 
 The final check and verification bind the same profile and policy, plus the
 latest complete module-graph identity returned after all applied source

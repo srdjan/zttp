@@ -5,7 +5,7 @@ const models = @import("../providers/models.zig");
 const context_budget = @import("../context_budget.zig");
 const codegen_types = @import("../expert_codegen_types.zig");
 
-pub const schema_version: u32 = 1;
+pub const schema_version: u32 = 2;
 
 pub const Limits = struct {
     pub const manifest_bytes: usize = 1 * 1024 * 1024;
@@ -76,7 +76,6 @@ pub const EventKind = enum {
     tool_result,
     proof_card,
     diagnostic_box,
-    verified_patch,
     verified_change_set,
     system_note,
     turn_end,
@@ -88,7 +87,6 @@ pub const TranscriptItemKind = enum {
     tool_result,
     proof_card,
     diagnostic_box,
-    verified_patch,
     verified_change_set,
     system_note,
 };
@@ -107,10 +105,6 @@ pub const TurnExpectation = struct {
     user_input: []const u8,
     outcome: TurnOutcome,
     final_response_sha256: Sha256Hex,
-    /// Legacy field whose historical meaning was "attempt one became green",
-    /// including compiler normalization. It remains decode-only compatibility
-    /// for committed artifacts and is never written by a new recorder.
-    first_draft_veto_pass: ?bool = null,
     /// Whether the exact model-authored bytes passed unchanged on attempt one.
     raw_first_draft_veto_pass: ?bool = null,
     /// Whether attempt one became green after any compiler normalization or
@@ -120,9 +114,7 @@ pub const TurnExpectation = struct {
     pub fn draftExpectation(self: TurnExpectation) error{InvalidDraftExpectation}!DraftExpectation {
         const has_raw = self.raw_first_draft_veto_pass != null;
         const has_first_attempt = self.first_attempt_green != null;
-        if (has_raw != has_first_attempt or
-            (self.first_draft_veto_pass != null and has_raw))
-        {
+        if (has_raw != has_first_attempt) {
             return error.InvalidDraftExpectation;
         }
         if (has_raw) {
@@ -130,9 +122,6 @@ pub const TurnExpectation = struct {
             const first_attempt = self.first_attempt_green.?;
             if (raw and !first_attempt) return error.InvalidDraftExpectation;
             return .{ .current = .{ .raw = raw, .first_attempt = first_attempt } };
-        }
-        if (self.first_draft_veto_pass) |legacy| {
-            return .{ .legacy_first_draft_veto_pass = legacy };
         }
         return .unmeasured;
     }
@@ -147,10 +136,6 @@ pub const TurnExpectation = struct {
         try json.write(self.outcome);
         try json.objectField("final_response_sha256");
         try json.write(self.final_response_sha256);
-        if (self.first_draft_veto_pass) |expectation| {
-            try json.objectField("first_draft_veto_pass");
-            try json.write(expectation);
-        }
         if (self.raw_first_draft_veto_pass) |expectation| {
             try json.objectField("raw_first_draft_veto_pass");
             try json.write(expectation);
@@ -165,7 +150,6 @@ pub const TurnExpectation = struct {
 
 pub const DraftExpectation = union(enum) {
     unmeasured,
-    legacy_first_draft_veto_pass: bool,
     current: struct {
         raw: bool,
         first_attempt: bool,
@@ -174,7 +158,6 @@ pub const DraftExpectation = union(enum) {
     pub fn matches(self: DraftExpectation, quality: codegen_types.DraftQuality) bool {
         return switch (self) {
             .unmeasured => true,
-            .legacy_first_draft_veto_pass => |expected| expected == quality.legacyFirstDraftVetoPass(),
             .current => |expected| expected.raw == quality.rawFirstDraftVetoPass() and
                 expected.first_attempt == quality.firstAttemptGreen(),
         };

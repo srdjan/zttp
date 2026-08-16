@@ -2357,7 +2357,7 @@
               <div class="command-list">
                 <div class="command-row">
                   <code>zts agent --stdin-json</code>
-                  <span><span data-zts-fact="agent_operations">11</span> schema-v2 operations cover discovery, checks, bound repairs, normalization, and property verification.</span>
+                  <span><span data-zts-fact="agent_operations">10</span> schema-v2 operations cover discovery, checks, bound repairs, normalization, and property verification.</span>
                 </div>
                 <div class="command-row">
                   <code>zts check handler.ts --json</code>
@@ -2365,7 +2365,7 @@
                 </div>
                 <div class="command-row">
                   <code>zts canonicalize handler.ts --json</code>
-                  <span>The schema-v2 operation returns bound candidates for <code>simulate_edit</code>, then <code>apply_repair</code>.</span>
+                  <span>Returns canonical source and bound candidates without writing the workspace; source writes go through the host's aggregate change-set proof.</span>
                 </div>
                 <div class="command-row">
                   <code>zts normalize handler.ts --check</code>

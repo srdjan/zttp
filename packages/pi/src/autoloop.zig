@@ -4,9 +4,9 @@
 //! (to decide if we are done and extract witnesses), `pi_repair_plan` (to
 //! produce typed edit intents for the still-unmet goals), and
 //! `pi_apply_repair_plan` (to compiler-verify each candidate as a dry-run).
-//! When a candidate verifies, the orchestrator writes it to disk and emits a
-//! chained VerifiedPatch event. It continues until every goal flips to true or
-//! a budget trips.
+//! When a candidate verifies, the orchestrator proves and commits it through
+//! the same aggregate change-set transaction used by interactive edits. It
+//! continues until every goal flips to true or a budget trips.
 //!
 //! The orchestrator is intentionally decoupled from the turn state machine and
 //! from the LLM. The model is not in the loop here; the compiler is. The CLI
@@ -24,12 +24,18 @@ const registry_mod = @import("registry/registry.zig");
 const transcript_mod = @import("transcript.zig");
 const ui_payload = @import("ui_payload.zig");
 const witness_replay = @import("witness_replay.zig");
-const proof_enrichment = @import("proof_enrichment.zig");
 const session_state = @import("session_state.zig");
 const session_events = @import("session/events.zig");
 const persister = @import("session/persister.zig");
 const tools_common = @import("tools/common.zig");
 const pi_apply_repair_plan = @import("tools/pi_apply_repair_plan.zig");
+const pi_goal_check = @import("tools/pi_goal_check.zig");
+const turn = @import("turn.zig");
+const change_set = @import("change_set.zig");
+const workspace_snapshot = @import("workspace_snapshot.zig");
+const aggregate_proof = @import("aggregate_proof.zig");
+const change_transaction = @import("change_transaction.zig");
+const change_set_receipt = @import("change_set_receipt.zig");
 const json_writer = @import("providers/json_writer.zig");
 const TextBuffer = @import("text_buffer.zig").TextBuffer;
 
@@ -68,7 +74,6 @@ pub const DriveOptions = struct {
     budget: Budget = .{},
     events_path: ?[]const u8 = null,
     journal_writer: ?*session_events.JournalWriter = null,
-    policy_hash: []const u8 = "",
     /// Optional stable witness key. When set, the autoloop terminates
     /// `.achieved` as soon as no witness with this key remains, even
     /// if other witnesses for the same property tag are still live.
@@ -110,7 +115,7 @@ inline fn cancelRequested(options: DriveOptions) bool {
 pub const Outcome = struct {
     verdict: AutoloopVerdict,
     iterations: u32,
-    final_patch_hash: ?[32]u8 = null,
+    final_change_set_hash: ?[32]u8 = null,
     goals_met_count: u32 = 0,
     goals_unmet_count: u32 = 0,
 };
@@ -147,13 +152,12 @@ pub fn drive(
         var plans = try parseRepairPlans(allocator, plans_json);
         defer plans.deinit(allocator);
 
-        if (plans.items.len == 0) {
+        if (!hasAutomaticPlan(plans.items)) {
             return finalize(allocator, transcript, options, .stalled, iter);
         }
 
         const apply_outcome = try applyPlans(
             allocator,
-            registry,
             transcript,
             options,
             plans.items,
@@ -276,12 +280,12 @@ fn finalize(
         }
     }
 
-    const final_hash = session_state.lastPatchHash(transcript, options.file);
+    const final_hash = session_state.lastChangeSetHash(transcript, options.file);
 
     if (options.journal_writer != null or options.events_path != null) {
         try appendEvent(allocator, options, .{ .autoloop_outcome = .{
             .verdict = verdict,
-            .final_patch_hash = final_hash,
+            .final_change_set_hash = final_hash,
             .goals_met = met_buf.items,
             .goals_unmet = unmet_buf.items,
             .iterations = iterations,
@@ -291,7 +295,7 @@ fn finalize(
     return .{
         .verdict = verdict,
         .iterations = iterations,
-        .final_patch_hash = final_hash,
+        .final_change_set_hash = final_hash,
         .goals_met_count = @intCast(met_buf.items.len),
         .goals_unmet_count = @intCast(unmet_buf.items.len),
     };
@@ -513,6 +517,7 @@ fn diffWitnessKeys(
 
 const RepairPlan = struct {
     id: []u8,
+    behavioral_change: bool,
     /// Verbatim JSON source of the plan object, suitable for re-serialization
     /// into pi_apply_repair_plan's `plan` input.
     raw_json: []u8,
@@ -525,6 +530,11 @@ const RepairPlan = struct {
     /// earlier insertions.
     line_target: u32 = 0,
 };
+
+fn hasAutomaticPlan(plans: []const RepairPlan) bool {
+    for (plans) |plan| if (!plan.behavioral_change) return true;
+    return false;
+}
 
 const RepairPlanList = struct {
     items: []RepairPlan,
@@ -565,6 +575,9 @@ fn parseRepairPlans(allocator: std.mem.Allocator, json_text: []const u8) !Repair
         if (plan_val != .object) return error.InvalidToolOutput;
         const id_val = plan_val.object.get("id") orelse return error.InvalidToolOutput;
         if (id_val != .string) return error.InvalidToolOutput;
+        const behavioral_change = plan_val.object.get("behavioral_change") orelse
+            return error.InvalidToolOutput;
+        if (behavioral_change != .bool) return error.InvalidToolOutput;
 
         const id_copy = try allocator.dupe(u8, id_val.string);
         errdefer allocator.free(id_copy);
@@ -576,6 +589,7 @@ fn parseRepairPlans(allocator: std.mem.Allocator, json_text: []const u8) !Repair
         items[next] = .{
             .id = id_copy,
             .raw_json = try raw_buf.toOwnedSlice(),
+            .behavioral_change = behavioral_change.bool,
             .line_target = extractEditIntentLine(plan_val),
         };
         next += 1;
@@ -666,7 +680,6 @@ const ApplyOutcome = struct {
 
 fn applyPlans(
     allocator: std.mem.Allocator,
-    registry: *const registry_mod.Registry,
     transcript: *transcript_mod.Transcript,
     options: DriveOptions,
     plans: []RepairPlan,
@@ -688,6 +701,7 @@ fn applyPlans(
 
     for (plans) |plan| {
         if (cancelRequested(options)) return .{ .applied = applied };
+        if (plan.behavioral_change) continue;
         var candidate = invokeApply(allocator, options.file, plan.raw_json) catch |err| switch (err) {
             error.InvalidToolOutput, error.ToolFailed => continue,
             else => return err,
@@ -696,118 +710,123 @@ fn applyPlans(
 
         if (!candidate.ok) continue;
 
-        const absolute = try tools_common.resolveInsideWorkspace(allocator, options.workspace_root, options.file);
-        defer allocator.free(absolute);
+        var workspace_lock = try change_transaction.WorkspaceLock.acquire(allocator, options.workspace_root);
+        defer workspace_lock.deinit();
+        _ = try change_transaction.recoverAllLocked(allocator, &workspace_lock, options.workspace_root);
 
-        const before = zts.file_io.readFile(allocator, absolute, 16 * 1024 * 1024) catch |err| switch (err) {
-            error.FileNotFound => try allocator.alloc(u8, 0),
+        var prepared = change_set.prepare(allocator, options.workspace_root, turn.ChangeSet{
+            .file = options.file,
+            .content = candidate.proposed_content,
+        }) catch |err| switch (err) {
+            error.NoOpChange => continue,
             else => return err,
         };
-        defer allocator.free(before);
-
-        zts.file_io.writeFile(allocator, absolute, candidate.proposed_content) catch {
-            return error.FileWriteFailed;
+        defer prepared.deinit(allocator);
+        var snapshot = try workspace_snapshot.Snapshot.capture(allocator, &prepared);
+        defer snapshot.deinit(allocator);
+        var proof_result = try aggregate_proof.prove(allocator, &prepared, &snapshot);
+        defer proof_result.deinit(allocator);
+        const proof = switch (proof_result) {
+            .rejected => continue,
+            .accepted => |*accepted| accepted,
         };
 
-        // Tolerant of post-check failures: if pi_goal_check is unavailable
-        // or returns garbage, fall back to an empty post-set so the patch
-        // still lands - the ledger just won't carry a defeated/new diff
-        // for this plan.
-        const post_check_json = invokePathGoalsTool(
+        if (propertiesRegress(proof.baseline_primary_properties, proof.primary_properties)) {
+            return .{ .applied = applied, .regression = true };
+        }
+
+        // Derive the candidate witness set from the proven normalized bytes,
+        // before commit. Invalid output is a hard failure: provenance must
+        // never be silently omitted from an otherwise authoritative receipt.
+        var post_check = try pi_goal_check.evaluateSource(
             allocator,
-            registry,
-            "pi_goal_check",
+            prepared.changes[0].candidate,
             options.file,
             options.goals,
-        ) catch null;
-        defer if (post_check_json) |text| allocator.free(text);
-        var post_result: ?GoalCheckResult = if (post_check_json) |text|
-            parseGoalCheckResult(allocator, text) catch null
-        else
-            null;
-        defer if (post_result) |*r| ui_payload.freeWitnessBodySlice(allocator, r.witnesses);
+        );
+        defer post_check.deinit(allocator);
+        var post_result = try parseGoalCheckResult(allocator, post_check.llm_text);
+        defer ui_payload.freeWitnessBodySlice(allocator, post_result.witnesses);
 
-        const post_witnesses: []const ui_payload.WitnessBody = if (post_result) |r| r.witnesses else &.{};
+        const post_witnesses: []const ui_payload.WitnessBody = post_result.witnesses;
         const defeated_view = try diffWitnessKeys(allocator, pre_witnesses, post_witnesses);
         defer allocator.free(defeated_view);
         const new_view = try diffWitnessKeys(allocator, post_witnesses, pre_witnesses);
         defer allocator.free(new_view);
 
-        const parent_hash = session_state.lastPatchHash(transcript, options.file);
         const plan_ids = [_][]const u8{plan.id};
+        var receipt_payload: ui_payload.UiPayload = .{ .verified_change_set = try change_set_receipt.buildWithProvenance(
+            allocator,
+            &prepared,
+            &snapshot,
+            proof,
+            tools_common.nowUnixMs(),
+            .{
+                .repair_plan_ids = &plan_ids,
+                .goal_context = options.goals,
+                .witnesses_defeated = defeated_view,
+                .witnesses_new = new_view,
+            },
+        ) };
+        var receipt_owned = true;
+        defer if (receipt_owned) receipt_payload.deinit(allocator);
+        var receipt_json = TextBuffer.init(allocator);
+        defer receipt_json.deinit();
+        try ui_payload.writeJson(receipt_json.writer(), receipt_payload);
 
-        var payload = try proof_enrichment.buildVerifiedPatchPayload(allocator, .{
-            .workspace_root = options.workspace_root,
-            .file = options.file,
-            .before = before,
-            .after = candidate.proposed_content,
-            .policy_hash = options.policy_hash,
-            .applied_at_unix_ms = tools_common.nowUnixMs(),
-            .post_apply_ok = true,
-            .repair_plan_ids = &plan_ids,
-            .parent_hash = parent_hash,
-            .goal_context = options.goals,
-            .witnesses_defeated = defeated_view,
-            .witnesses_new = new_view,
-            .emit_perf_receipt = true,
-        });
-        errdefer payload.deinit(allocator);
-
-        const regressed = detectRegression(payload);
+        var committed = try change_transaction.commitLocked(
+            allocator,
+            &workspace_lock,
+            &prepared,
+            &snapshot,
+            proof,
+            .{ .receipt_json = receipt_json.written() },
+        );
+        defer committed.deinit(allocator);
 
         const summary = try std.fmt.allocPrint(
             allocator,
-            "autoloop {s}: {s} (plan {s})",
-            .{
-                if (regressed) "reverted" else "verified",
-                options.file,
-                plan.id,
-            },
+            "autoloop verified change set: {s} (plan {s}, {s})",
+            .{ options.file, plan.id, proof.proof_id },
         );
-        errdefer allocator.free(summary);
+        var summary_owned = true;
+        defer if (summary_owned) allocator.free(summary);
 
-        const ui: ui_payload.UiPayload = .{ .verified_patch = payload };
-        try transcript.entries.append(allocator, .{ .verified_patch = .{
+        try transcript.entries.append(allocator, .{ .verified_change_set = .{
             .llm_text = summary,
-            .ui_payload = ui,
+            .ui_payload = receipt_payload,
         } });
+        summary_owned = false;
+        receipt_owned = false;
 
         if (options.journal_writer != null or options.events_path != null) {
-            try appendEntryEvent(allocator, options, transcript.entryIdAt(transcript.len() - 1), .{ .verified_patch = .{
+            try appendEntryEvent(allocator, options, transcript.entryIdAt(transcript.len() - 1), .{ .verified_change_set = .{
                 .llm_text = summary,
-                .ui_payload = ui,
+                .ui_payload = receipt_payload,
             } });
         }
+        try change_transaction.markReceiptedLocked(
+            allocator,
+            &workspace_lock,
+            options.workspace_root,
+            &proof.proof_id,
+        );
 
         // Auto-replay: confirm in the engine what the proof claimed about
         // each defeated and new witness. The note lands in the transcript
-        // immediately after the verified_patch event so the user sees the
+        // immediately after the verified_change_set event so the user sees the
         // executed verdicts alongside the proof badges. Skipped silently
         // when no replay implementation is registered (unit-test paths,
         // headless builds).
-        if (!regressed and witness_replay.isConfigured()) {
-            try emitWitnessReplaySummary(allocator, transcript, options, absolute, payload);
-        }
-
-        if (regressed) {
-            // Roll the file back. The verified_patch entry stays in the
-            // transcript as an audit record of the attempt; the autoloop
-            // signals regression_blocked up to drive() so the session
-            // stops rather than keep trying past a property demotion.
-            zts.file_io.writeFile(allocator, absolute, before) catch {
-                return error.FileWriteFailed;
-            };
-            if (options.journal_writer != null or options.events_path != null) {
-                const note = try std.fmt.allocPrint(
-                    allocator,
-                    "autoloop: plan {s} demoted a property; reverted {s} to the pre-patch snapshot.",
-                    .{ plan.id, options.file },
-                );
-                defer allocator.free(note);
-                try transcript.append(allocator, .{ .system_note = note });
-                try appendEntryEvent(allocator, options, transcript.entryIdAt(transcript.len() - 1), .{ .system_note = note });
-            }
-            return .{ .applied = applied, .regression = true };
+        if (witness_replay.isConfigured()) {
+            try emitWitnessReplaySummary(
+                allocator,
+                transcript,
+                options,
+                prepared.changes[0].resolved_path,
+                defeated_view,
+                new_view,
+            );
         }
 
         applied += 1;
@@ -816,11 +835,9 @@ fn applyPlans(
         // them with our pre_witnesses so the per-iteration defer frees the
         // old pre and the function-exit defer frees the final pre. No
         // clone, no extra pi_goal_check call.
-        if (post_result) |*r| {
-            const stolen = r.witnesses;
-            r.witnesses = pre_witnesses;
-            pre_witnesses = stolen;
-        }
+        const stolen = post_result.witnesses;
+        post_result.witnesses = pre_witnesses;
+        pre_witnesses = stolen;
     }
     return .{ .applied = applied };
 }
@@ -885,15 +902,16 @@ fn emitWitnessReplaySummary(
     transcript: *transcript_mod.Transcript,
     options: DriveOptions,
     handler_path: []const u8,
-    payload: ui_payload.VerifiedPatchPayload,
+    witnesses_defeated: []const ui_payload.WitnessBody,
+    witnesses_new: []const ui_payload.WitnessBody,
 ) !void {
-    const total = payload.witnesses_defeated.len + payload.witnesses_new.len;
+    const total = witnesses_defeated.len + witnesses_new.len;
     if (total == 0) return;
 
     const defeated = accumulateReplays(
         allocator,
         handler_path,
-        payload.witnesses_defeated,
+        witnesses_defeated,
         max_witness_replays,
         options.cancel,
     );
@@ -904,7 +922,7 @@ fn emitWitnessReplaySummary(
     const new_w = accumulateReplays(
         allocator,
         handler_path,
-        payload.witnesses_new,
+        witnesses_new,
         new_budget,
         options.cancel,
     );
@@ -935,13 +953,16 @@ fn emitWitnessReplaySummary(
     }
 }
 
-/// A patch regresses if any bool property that was true in `before` is
+/// A change set regresses if any bool property that was true in `before` is
 /// false in `after`. The witness diff (`witnesses_new`) is now populated
 /// per patch but is not consulted here: a patch that introduces a new
 /// witness while preserving every property bool is considered safe at
 /// this layer; the witness pane surfaces it instead.
-fn detectRegression(payload: ui_payload.VerifiedPatchPayload) bool {
-    const after = payload.after_properties orelse return false;
+fn propertiesRegress(
+    before: ?ui_payload.PropertiesSnapshot,
+    after_optional: ?ui_payload.PropertiesSnapshot,
+) bool {
+    const after = after_optional orelse return false;
     const Visitor = struct {
         found: bool = false,
         pub fn visit(self: *@This(), change: ui_payload.PropertiesSnapshot.Change) !void {
@@ -950,7 +971,7 @@ fn detectRegression(payload: ui_payload.VerifiedPatchPayload) bool {
     };
     var visitor: Visitor = .{};
     ui_payload.PropertiesSnapshot.forEachChange(
-        payload.before_properties,
+        before,
         after,
         *Visitor,
         &visitor,
@@ -963,6 +984,8 @@ fn detectRegression(payload: ui_payload.VerifiedPatchPayload) bool {
 // ---------------------------------------------------------------------------
 
 const testing = std.testing;
+const IsolatedTmp = @import("test_support/tmp.zig").IsolatedTmp;
+const cwd_support = @import("test_support/cwd.zig");
 
 const StubTool = struct {
     pub fn alwaysOkGoalCheck(
@@ -1118,7 +1141,7 @@ test "drive returns .exhausted_iters when budget runs out" {
             _ = args;
             return .{ .ok = true, .llm_text = try alloc.dupe(
                 u8,
-                "{\"ok\":false,\"plans\":[{\"id\":\"p1\",\"kind\":\"noop\",\"edit_intent\":{\"kind\":\"noop\",\"line\":1,\"column\":1,\"template\":\"\"}}]}",
+                "{\"ok\":false,\"plans\":[{\"id\":\"p1\",\"kind\":\"noop\",\"behavioral_change\":false,\"edit_intent\":{\"kind\":\"noop\",\"line\":1,\"column\":1,\"template\":\"\"}}]}",
             ) };
         }
     };
@@ -1156,12 +1179,98 @@ test "drive returns .exhausted_iters when budget runs out" {
         .goals = &.{"retry_safe"},
         .budget = .{ .max_iterations = 3, .max_wall_time_ms = 60_000 },
     });
-
     try testing.expectEqual(AutoloopVerdict.exhausted_iters, outcome.verdict);
     try testing.expectEqual(@as(u32, 3), outcome.iterations);
 }
 
-test "detectRegression is true when any bool property demotes" {
+test "applyPlans commits a compiler-planned repair through one receipted change set" {
+    const allocator = testing.allocator;
+    var tmp = try IsolatedTmp.init(allocator, "autoloop-change-set");
+    defer tmp.cleanup(allocator);
+    const source =
+        \\function handler(req: Request): Proof<Response, "state_isolated"> {
+        \\  let total = 1;
+        \\  return Response.json({ total: total });
+        \\}
+        \\
+    ;
+    try tmp.writeFile(allocator, "handler.ts", source);
+    const events_path = try tmp.childPath(allocator, "events.jsonl");
+    defer allocator.free(events_path);
+
+    const saved_cwd = try cwd_support.cwdPathAlloc(allocator);
+    defer allocator.free(saved_cwd);
+    defer std.Io.Threaded.chdir(saved_cwd) catch {};
+    try std.Io.Threaded.chdir(tmp.abs_path);
+
+    var transcript: transcript_mod.Transcript = .{};
+    defer transcript.deinit(allocator);
+    var plans = [_]RepairPlan{.{
+        .id = @constCast("rp_test"),
+        .behavioral_change = false,
+        .raw_json = @constCast(
+            "{\"id\":\"rp_test\",\"behavioral_change\":false," ++
+                "\"edit_intent\":{\"kind\":\"replace_let_with_const\"," ++
+                "\"line\":2,\"column\":3,\"template\":\"\"}}",
+        ),
+        .line_target = 2,
+    }};
+    var preview = try invokeApply(allocator, "handler.ts", plans[0].raw_json);
+    defer preview.deinit(allocator);
+    try testing.expect(preview.ok);
+    try testing.expect(std.mem.indexOf(u8, preview.proposed_content, "const total = 1;") != null);
+    const apply_outcome = try applyPlans(allocator, &transcript, .{
+        .workspace_root = tmp.abs_path,
+        .file = "handler.ts",
+        .goals = &.{},
+        .events_path = events_path,
+    }, &plans, &.{});
+    try testing.expectEqual(@as(u32, 1), apply_outcome.applied);
+    try testing.expect(!apply_outcome.regression);
+
+    const handler_path = try tmp.childPath(allocator, "handler.ts");
+    defer allocator.free(handler_path);
+    const repaired = try zts.file_io.readFile(allocator, handler_path, 1024 * 1024);
+    defer allocator.free(repaired);
+    try testing.expect(!std.mem.eql(u8, repaired, source));
+    try testing.expect(std.mem.indexOf(u8, repaired, "const total = 1;") != null);
+
+    var receipts: usize = 0;
+    for (transcript.entries.items) |*entry| {
+        const payload = session_state.changeSetPayload(entry) orelse continue;
+        receipts += 1;
+        try testing.expectEqual(@as(usize, 1), payload.repair_plan_ids.len);
+        try testing.expectEqualStrings("rp_test", payload.repair_plan_ids[0]);
+        try testing.expectEqual(@as(usize, 0), payload.goal_context.len);
+        try testing.expect(payload.primary_properties.?.no_secret_leakage);
+    }
+    try testing.expectEqual(@as(usize, 1), receipts);
+
+    const events = try zts.file_io.readFile(allocator, events_path, 4 * 1024 * 1024);
+    defer allocator.free(events);
+    try testing.expectEqual(
+        @as(usize, 1),
+        std.mem.count(u8, events, "\"k\":\"verified_change_set\""),
+    );
+
+    var lock = try change_transaction.WorkspaceLock.acquire(allocator, tmp.abs_path);
+    defer lock.deinit();
+    try testing.expectEqual(
+        @as(usize, 0),
+        try change_transaction.recoverAllLocked(allocator, &lock, tmp.abs_path),
+    );
+}
+
+test "behavior-changing plans remain outside the automatic lane" {
+    var plans = [_]RepairPlan{.{
+        .id = @constCast("behavioral"),
+        .behavioral_change = true,
+        .raw_json = @constCast("{}"),
+    }};
+    try testing.expect(!hasAutomaticPlan(&plans));
+}
+
+test "propertiesRegress is true when any bool property demotes" {
     const before: ui_payload.PropertiesSnapshot = .{
         .pure = true,
         .read_only = true,
@@ -1183,29 +1292,11 @@ test "detectRegression is true when any bool property demotes" {
     };
     var after = before;
     after.pure = false;
-    const payload: ui_payload.VerifiedPatchPayload = .{
-        .file = @constCast(""),
-        .policy_hash = @constCast(""),
-        .applied_at_unix_ms = 0,
-        .stats = .{ .total = 0, .new = 0, .preexisting = 0 },
-        .before = null,
-        .after = @constCast(""),
-        .unified_diff = @constCast(""),
-        .hunks = &.{},
-        .violations = &.{},
-        .before_properties = before,
-        .after_properties = after,
-        .prove = null,
-        .system = null,
-        .rule_citations = &.{},
-        .post_apply_ok = true,
-        .post_apply_summary = null,
-    };
-    try testing.expect(detectRegression(payload));
+    try testing.expect(propertiesRegress(before, after));
 }
 
-test "detectRegression is false when only promotions occur" {
-    var before: ui_payload.PropertiesSnapshot = .{
+test "propertiesRegress is false when only promotions occur" {
+    const before: ui_payload.PropertiesSnapshot = .{
         .pure = false,
         .read_only = false,
         .stateless = false,
@@ -1227,29 +1318,10 @@ test "detectRegression is false when only promotions occur" {
     var after = before;
     after.retry_safe = true;
     after.no_secret_leakage = true;
-    const payload: ui_payload.VerifiedPatchPayload = .{
-        .file = @constCast(""),
-        .policy_hash = @constCast(""),
-        .applied_at_unix_ms = 0,
-        .stats = .{ .total = 0, .new = 0, .preexisting = 0 },
-        .before = null,
-        .after = @constCast(""),
-        .unified_diff = @constCast(""),
-        .hunks = &.{},
-        .violations = &.{},
-        .before_properties = before,
-        .after_properties = after,
-        .prove = null,
-        .system = null,
-        .rule_citations = &.{},
-        .post_apply_ok = true,
-        .post_apply_summary = null,
-    };
-    _ = &before;
-    try testing.expect(!detectRegression(payload));
+    try testing.expect(!propertiesRegress(before, after));
 }
 
-test "detectRegression is false when before_properties is absent" {
+test "propertiesRegress is false when before properties are absent" {
     const after: ui_payload.PropertiesSnapshot = .{
         .pure = false,
         .read_only = false,
@@ -1269,25 +1341,7 @@ test "detectRegression is false when before_properties is absent" {
         .result_safe = false,
         .optional_safe = false,
     };
-    const payload: ui_payload.VerifiedPatchPayload = .{
-        .file = @constCast(""),
-        .policy_hash = @constCast(""),
-        .applied_at_unix_ms = 0,
-        .stats = .{ .total = 0, .new = 0, .preexisting = 0 },
-        .before = null,
-        .after = @constCast(""),
-        .unified_diff = @constCast(""),
-        .hunks = &.{},
-        .violations = &.{},
-        .before_properties = null,
-        .after_properties = after,
-        .prove = null,
-        .system = null,
-        .rule_citations = &.{},
-        .post_apply_ok = true,
-        .post_apply_summary = null,
-    };
-    try testing.expect(!detectRegression(payload));
+    try testing.expect(!propertiesRegress(null, after));
 }
 
 test "parseRepairPlans handles missing plans field as empty list" {
@@ -1301,8 +1355,8 @@ test "parseRepairPlans extracts ids and re-serializes plan bodies" {
     const allocator = testing.allocator;
     const input =
         \\{"plans":[
-        \\  {"id":"p1","edit_intent":{"kind":"insert_guard_before_line","line":3,"column":1,"template":"if (x.ok) {"}},
-        \\  {"id":"p2","edit_intent":{"kind":"add_trailing_return","line":10,"column":1,"template":"return Response.text(\"ok\");"}}
+        \\  {"id":"p1","behavioral_change":false,"edit_intent":{"kind":"insert_guard_before_line","line":3,"column":1,"template":"if (x.ok) {"}},
+        \\  {"id":"p2","behavioral_change":true,"edit_intent":{"kind":"add_trailing_return","line":10,"column":1,"template":"return Response.text(\"ok\");"}}
         \\]}
     ;
     var plans = try parseRepairPlans(allocator, input);
@@ -1311,16 +1365,28 @@ test "parseRepairPlans extracts ids and re-serializes plan bodies" {
     try testing.expectEqual(@as(usize, 2), plans.items.len);
     try testing.expectEqualStrings("p1", plans.items[0].id);
     try testing.expectEqualStrings("p2", plans.items[1].id);
+    try testing.expect(!plans.items[0].behavioral_change);
+    try testing.expect(plans.items[1].behavioral_change);
     try testing.expect(std.mem.indexOf(u8, plans.items[0].raw_json, "insert_guard_before_line") != null);
     try testing.expect(std.mem.indexOf(u8, plans.items[1].raw_json, "add_trailing_return") != null);
     try testing.expectEqual(@as(u32, 3), plans.items[0].line_target);
     try testing.expectEqual(@as(u32, 10), plans.items[1].line_target);
 }
 
+test "parseRepairPlans rejects plans without a behavioral classification" {
+    try testing.expectError(
+        error.InvalidToolOutput,
+        parseRepairPlans(
+            testing.allocator,
+            "{\"plans\":[{\"id\":\"p1\",\"edit_intent\":{\"kind\":\"replace_let_with_const\",\"line\":2,\"column\":3,\"template\":\"\"}}]}",
+        ),
+    );
+}
+
 test "parseRepairPlans yields line_target=0 when edit_intent.line is absent" {
     const allocator = testing.allocator;
     const input =
-        \\{"plans":[{"id":"p1","edit_intent":{"kind":"insert_guard_before_line","template":""}}]}
+        \\{"plans":[{"id":"p1","behavioral_change":false,"edit_intent":{"kind":"insert_guard_before_line","template":""}}]}
     ;
     var plans = try parseRepairPlans(allocator, input);
     defer plans.deinit(allocator);
@@ -1335,13 +1401,13 @@ test "applyPlans-sort places higher-line plans first, stable on ties" {
     const a = arena.allocator();
 
     var plans = [_]RepairPlan{
-        .{ .id = try a.dupe(u8, "low"), .raw_json = try a.dupe(u8, "{}"), .line_target = 5 },
-        .{ .id = try a.dupe(u8, "high"), .raw_json = try a.dupe(u8, "{}"), .line_target = 12 },
-        .{ .id = try a.dupe(u8, "mid"), .raw_json = try a.dupe(u8, "{}"), .line_target = 8 },
+        .{ .id = try a.dupe(u8, "low"), .behavioral_change = false, .raw_json = try a.dupe(u8, "{}"), .line_target = 5 },
+        .{ .id = try a.dupe(u8, "high"), .behavioral_change = false, .raw_json = try a.dupe(u8, "{}"), .line_target = 12 },
+        .{ .id = try a.dupe(u8, "mid"), .behavioral_change = false, .raw_json = try a.dupe(u8, "{}"), .line_target = 8 },
         // Two plans tied at line 5; the one ordered first in the input
         // should still be first after sort (stable).
-        .{ .id = try a.dupe(u8, "low_dup"), .raw_json = try a.dupe(u8, "{}"), .line_target = 5 },
-        .{ .id = try a.dupe(u8, "no_line"), .raw_json = try a.dupe(u8, "{}"), .line_target = 0 },
+        .{ .id = try a.dupe(u8, "low_dup"), .behavioral_change = false, .raw_json = try a.dupe(u8, "{}"), .line_target = 5 },
+        .{ .id = try a.dupe(u8, "no_line"), .behavioral_change = false, .raw_json = try a.dupe(u8, "{}"), .line_target = 0 },
     };
 
     std.sort.insertion(RepairPlan, &plans, {}, comparePlanLineDesc);

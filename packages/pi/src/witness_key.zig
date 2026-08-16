@@ -4,7 +4,7 @@
 //! at its ideal. When node IDs are unavailable the key falls back to
 //! line/column. The autoloop orchestrator compares before/after witness
 //! sets by these keys to decide `witnesses_defeated` vs `witnesses_new`
-//! for each VerifiedPatch event.
+//! for each verified change-set receipt.
 //!
 //! The actual hash computation lives on `counterexample.CounterexampleWitness.stableKey`
 //! so that compiler-internal code can write a key without taking a `pi`

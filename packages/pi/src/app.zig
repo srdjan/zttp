@@ -141,7 +141,7 @@ fn runAutoloop(
     defer allocator.free(workspace_root);
 
     // Bootstrap a session unless `--no-session` is passed: lets the
-    // autoloop's verified_patch and autoloop_outcome events persist to
+    // autoloop's verified_change_set and autoloop_outcome events persist to
     // events.jsonl, so a follow-up `zttp expert --resume` can open
     // the resulting witnesses tab on the same patches. Without
     // session bootstrap the run is in-memory only (the original
@@ -206,14 +206,14 @@ fn printAutoloopOutcome(
     for (goals) |goal| {
         // .achieved means pi_goal_check reported ok for every requested goal
         // on this handler, even when no patch was needed and the transcript
-        // holds no VerifiedPatch snapshot to derive properties from.
+        // holds no verified change-set snapshot to derive properties from.
         const met = outcome.verdict == .achieved or
             (if (props) |p| session_state.propertyByName(p, goal) else false);
         try w.print("  {s} {s}\n", .{ if (met) "[x]" else "[ ]", goal });
     }
-    if (outcome.final_patch_hash) |hash| {
+    if (outcome.final_change_set_hash) |hash| {
         const hex = std.fmt.bytesToHex(hash, .lower);
-        try w.writeAll("final_patch_hash: ");
+        try w.writeAll("final_change_set_hash: ");
         try w.writeAll(&hex);
         try w.writeByte('\n');
     }

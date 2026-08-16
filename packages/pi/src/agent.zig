@@ -154,14 +154,14 @@ fn modelConfigMatches(
 }
 
 /// Running per-session metrics, folded one turn at a time and emitted as a
-/// `session_summary` event at session close. Keyed on the `verified_patch`
-/// signal (`TurnResult.applied_edit`), not `turn_end`, so a plain-text turn
+/// `session_summary` event at session close. Keyed on `verified_change_set`
+/// signal (`TurnResult.applied_change_set`), not `turn_end`, so a plain-text turn
 /// such as a clarifying question is counted as a turn without being mistaken
 /// for an applied edit. See STRATEGY.md for the three staked metrics.
 pub const SessionMetrics = struct {
     turn_count: u32 = 0,
     total_roundtrips: u32 = 0,
-    verified_patch_count: u32 = 0,
+    verified_change_set_count: u32 = 0,
     round_trips_to_first_green: u32 = 0,
     proven_properties: u32 = 0,
     tracked_properties: u32 = 0,
@@ -173,7 +173,7 @@ pub const SessionMetrics = struct {
     tool_call_count: u32 = 0,
     /// Edits that landed via the compiler-authored repair lane with no model
     /// round-trip. The numerator of "% of edits that became model-free"
-    /// (denominator: verified_patch_count).
+    /// (denominator: verified_change_set_count).
     compiler_authored_apply_count: u32 = 0,
     last_workflow_kind: expert_workflow.TaskKind = .unknown,
     last_workflow_confidence: expert_workflow.Confidence = .low,
@@ -197,13 +197,13 @@ pub const SessionMetrics = struct {
         self.veto_retry_count +|= result.veto_retry_count;
         self.tool_call_count +|= result.tool_call_count;
         if (result.compiler_authored_apply) self.compiler_authored_apply_count += 1;
-        if (result.applied_edit) {
-            if (self.verified_patch_count == 0) {
+        if (result.applied_change_set) {
+            if (self.verified_change_set_count == 0) {
                 // Round-trips accumulated up to and including the first verified
                 // edit - "round-trips to first green proof".
                 self.round_trips_to_first_green = self.total_roundtrips;
             }
-            self.verified_patch_count += 1;
+            self.verified_change_set_count += 1;
             self.proven_properties = result.proven_guarantees;
             self.tracked_properties = result.tracked_guarantees;
         }
@@ -213,8 +213,8 @@ pub const SessionMetrics = struct {
         return .{
             .turn_count = self.turn_count,
             .total_roundtrips = self.total_roundtrips,
-            .verified_patch_count = self.verified_patch_count,
-            .reached_proof = self.verified_patch_count > 0,
+            .verified_change_set_count = self.verified_change_set_count,
+            .reached_proof = self.verified_change_set_count > 0,
             .round_trips_to_first_green = self.round_trips_to_first_green,
             .proven_properties = self.proven_properties,
             .tracked_properties = self.tracked_properties,
@@ -2619,7 +2619,7 @@ test "SessionMetrics folds a clarifying text turn then an applied edit" {
         .final_state = .done,
         .attempt = 1,
         .roundtrips = 3,
-        .applied_edit = true,
+        .applied_change_set = true,
         .proven_guarantees = 16,
         .tracked_guarantees = 16,
         .workflow_kind = .route_add,
@@ -2632,7 +2632,7 @@ test "SessionMetrics folds a clarifying text turn then an applied edit" {
     const s = m.summary();
     try testing.expectEqual(@as(u32, 2), s.turn_count);
     try testing.expectEqual(@as(u32, 4), s.total_roundtrips);
-    try testing.expectEqual(@as(u32, 1), s.verified_patch_count);
+    try testing.expectEqual(@as(u32, 1), s.verified_change_set_count);
     try testing.expect(s.reached_proof);
     // Both turns' round-trips count toward reaching the first green proof.
     try testing.expectEqual(@as(u32, 4), s.round_trips_to_first_green);
@@ -2653,7 +2653,7 @@ test "SessionMetrics with no applied edit reports no proof reached" {
     m.record(.{ .final_state = .done, .attempt = 0, .roundtrips = 2, .end_reason = .veto_exhausted });
     const s = m.summary();
     try testing.expectEqual(@as(u32, 1), s.turn_count);
-    try testing.expectEqual(@as(u32, 0), s.verified_patch_count);
+    try testing.expectEqual(@as(u32, 0), s.verified_change_set_count);
     try testing.expect(!s.reached_proof);
     try testing.expectEqual(@as(u32, 0), s.round_trips_to_first_green);
     try testing.expectEqual(session_events.TurnEndReason.veto_exhausted, s.final_outcome);
@@ -2741,7 +2741,7 @@ test "runOneTurn folds the turn into session metrics" {
     // A stub reply is plain text - it counts as a turn, but applies no edit, so
     // it must not register as a verified patch or a reached proof.
     try testing.expectEqual(@as(u32, 1), session.metrics.turn_count);
-    try testing.expectEqual(@as(u32, 0), session.metrics.verified_patch_count);
+    try testing.expectEqual(@as(u32, 0), session.metrics.verified_change_set_count);
     try testing.expectEqual(@as(u32, 1), session.metrics.workflow_hint_count);
     try testing.expectEqual(@as(u32, 1), session.metrics.high_confidence_workflow_hint_count);
     try testing.expectEqualStrings("route_add", session.metrics.summary().last_workflow_kind);

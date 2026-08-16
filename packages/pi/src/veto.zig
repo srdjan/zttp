@@ -30,7 +30,7 @@ pub const Edit = struct {
 ///
 /// The `outcome` is the turn-machine-facing payload (ok bit, llm_text for the
 /// provider, optional UiPayload for rendering). The `report` carries the
-/// compiler-proof-flavored fields that a `verified_patch` event needs: the
+/// compiler-proof-flavored fields that a verified change-set receipt needs: the
 /// `policy_hash` in force at apply time, the violation counts keyed by the
 /// edit-simulate delta heuristic, and the post-edit `HandlerProperties` when
 /// analysis reached the contract phase.

@@ -228,7 +228,7 @@ pub fn createSnapshot(allocator: std.mem.Allocator, input: Input) !ModelRequestS
                 .llm_text = result.llm_text,
             } }),
             .system_note => |body| try items.append(allocator, .{ .system_note = body }),
-            .proof_card, .diagnostic_box, .verified_patch, .verified_change_set => {},
+            .proof_card, .diagnostic_box, .verified_change_set => {},
         }
         if (items.items.len > start) {
             try item_groups.append(allocator, .{

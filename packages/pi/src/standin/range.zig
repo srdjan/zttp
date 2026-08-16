@@ -11,11 +11,12 @@ pub const version = "step-6-v2";
 // hash after review found it outside: emptying it changed no published number
 // while both false-fire gates silently fell to zero iterations. The declared
 // range itself did not change when this value did.
-pub const content_hash = "f9bf6fe35859e38db01c5dfe13f510493b759bf40dbb276b51716af7d75fb4a0";
+pub const content_hash = "4073fceb29543e5d8956e747ff2cef9d33b7938c51af0d8b584e49ed40361046";
 
 pub const Action = enum {
     answer,
-    edit,
+    change_set,
+    blocked,
 };
 
 pub const Entry = struct {
@@ -58,7 +59,7 @@ pub const entries = [_]Entry{
             "Create a GET /health route",
             "Add route POST /users to handler.ts",
         },
-        .action = .edit,
+        .action = .change_set,
         .description = "Read the handler, inspect module facts, and propose one complete route edit.",
     },
     .{
@@ -69,7 +70,7 @@ pub const entries = [_]Entry{
             "Add the APP_NAME environment variable",
             "Read configuration with zttp:env",
         },
-        .action = .edit,
+        .action = .change_set,
         .description = "Read the handler, inspect zttp:env, and propose one complete configuration edit.",
     },
     .{
@@ -80,8 +81,8 @@ pub const entries = [_]Entry{
             "Add test coverage for the successful health response",
             "Add a jsonl test case for the health handler",
         },
-        .action = .edit,
-        .description = "Read the handler and its JSONL tests, then propose one complete test-file edit.",
+        .action = .blocked,
+        .description = "Read the handler and its JSONL tests, then refuse the write because the aggregate transaction accepts only source files.",
     },
     .{
         .id = "fix",
@@ -91,7 +92,7 @@ pub const entries = [_]Entry{
             "Fix the ZTS300 compiler error",
             "Repair this handler's compiler error",
         },
-        .action = .edit,
+        .action = .change_set,
         .description = "Inspect the violation and repair facts, then propose one complete handler edit.",
     },
     .{
@@ -102,7 +103,7 @@ pub const entries = [_]Entry{
             "Fill the hole on line 3 of handler.ts",
             "Replace the hole() in handler.ts with an expression",
         },
-        .action = .edit,
+        .action = .change_set,
         .description = "Read the compiler's typed-hole frame, fill one site through `zts_expert_fill_hole`, and apply what the tool returns.",
     },
 };
@@ -221,6 +222,7 @@ pub fn actionName(action: Action) []const u8 {
     return switch (action) {
         .answer => "text answer",
         .change_set => "workspace edit",
+        .blocked => "unsupported test-file write",
     };
 }
 

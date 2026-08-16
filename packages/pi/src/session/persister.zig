@@ -49,10 +49,6 @@ fn entryToEvent(entry: *const transcript.OwnedEntry) events.EventRecord {
             .llm_text = message.llm_text,
             .ui_payload = message.ui_payload,
         } },
-        .verified_patch => |message| .{ .verified_patch = .{
-            .llm_text = message.llm_text,
-            .ui_payload = message.ui_payload,
-        } },
         .verified_change_set => |message| .{ .verified_change_set = .{
             .llm_text = message.llm_text,
             .ui_payload = message.ui_payload,

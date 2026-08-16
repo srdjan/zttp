@@ -139,7 +139,7 @@ test "local MLX expert flow" {
     );
     defer allocator.free(rendered);
 
-    if (session.metrics.verified_patch_count == 0) {
+    if (session.metrics.verified_change_set_count == 0) {
         std.debug.print(
             "[mlx-e2e] no verified patch: tools={d} veto_retries={d} outcome={s}\n",
             .{
@@ -163,7 +163,7 @@ test "local MLX expert flow" {
 
     try std.testing.expect(session.metrics.tool_call_count > 0);
     try std.testing.expect(session.metrics.veto_retry_count > 0);
-    try std.testing.expectEqual(@as(u32, 1), session.metrics.verified_patch_count);
+    try std.testing.expectEqual(@as(u32, 1), session.metrics.verified_change_set_count);
     try std.testing.expect(approval.calls > 0);
 
     var saw_read_call = false;

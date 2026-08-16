@@ -202,11 +202,21 @@ pub const seeds = [_]DefectSeed{
         \\function handler(req: Request): Proof<Response, "deterministic"> {
         \\  const result = validateJson("item", req.body ?? "");
         \\  const data = result.value;
-        \\  return Response.json({ data: data });
+        \\  return Response.json({ data: data, updated: true });
         \\}
         \\
         ,
-        .good_draft = clean_checked_result,
+        .good_draft =
+        \\import { validateJson } from "zttp:validate";
+        \\
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const result = validateJson("item", req.body ?? "");
+        \\  if (!result.ok) return Response.json({ error: result.error }, { status: 400 });
+        \\  const data = result.value;
+        \\  return Response.json({ data: data, updated: true });
+        \\}
+        \\
+        ,
         .ask = "Fix the ZTS303 compiler error in handler.ts",
     },
     .{
@@ -219,11 +229,20 @@ pub const seeds = [_]DefectSeed{
         \\
         \\function handler(req: Request): Proof<Response, "deterministic"> {
         \\  const appName = env("APP_NAME");
-        \\  return Response.json({ appName: appName });
+        \\  return Response.json({ appName: appName, updated: true });
         \\}
         \\
         ,
-        .good_draft = clean_checked_optional,
+        .good_draft =
+        \\import { env } from "zttp:env";
+        \\
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const appName = env("APP_NAME");
+        \\  if (appName === undefined) return Response.json({ error: "missing value" }, { status: 400 });
+        \\  return Response.json({ appName: appName, updated: true });
+        \\}
+        \\
+        ,
         .ask = "Fix the ZTS308 compiler error in handler.ts",
     },
 };

@@ -8,12 +8,30 @@ const workspace_snapshot = @import("workspace_snapshot.zig");
 const aggregate_proof = @import("aggregate_proof.zig");
 const proof_enrichment = @import("proof_enrichment.zig");
 
+pub const Provenance = struct {
+    repair_plan_ids: []const []const u8 = &.{},
+    goal_context: []const []const u8 = &.{},
+    witnesses_defeated: []const ui_payload.WitnessBody = &.{},
+    witnesses_new: []const ui_payload.WitnessBody = &.{},
+};
+
 pub fn build(
     allocator: std.mem.Allocator,
     prepared: *const change_set.PreparedChangeSet,
     snapshot: *const workspace_snapshot.Snapshot,
     proof: *const aggregate_proof.AggregateProof,
     applied_at_unix_ms: i64,
+) !ui_payload.VerifiedChangeSetPayload {
+    return buildWithProvenance(allocator, prepared, snapshot, proof, applied_at_unix_ms, .{});
+}
+
+pub fn buildWithProvenance(
+    allocator: std.mem.Allocator,
+    prepared: *const change_set.PreparedChangeSet,
+    snapshot: *const workspace_snapshot.Snapshot,
+    proof: *const aggregate_proof.AggregateProof,
+    applied_at_unix_ms: i64,
+    provenance: Provenance,
 ) !ui_payload.VerifiedChangeSetPayload {
     const changes = try allocator.alloc(ui_payload.VerifiedChange, prepared.changes.len);
     for (changes) |*change| change.* = undefined;
@@ -64,6 +82,14 @@ pub fn build(
     errdefer allocator.free(diagnostics_hash);
     const read_set_digest = try allocator.dupe(u8, &proof.read_set_digest);
     errdefer allocator.free(read_set_digest);
+    const repair_plan_ids = try cloneStrings(allocator, provenance.repair_plan_ids);
+    errdefer freeStrings(allocator, repair_plan_ids);
+    const goal_context = try cloneStrings(allocator, provenance.goal_context);
+    errdefer freeStrings(allocator, goal_context);
+    const witnesses_defeated = try ui_payload.cloneWitnessBodySlice(allocator, provenance.witnesses_defeated);
+    errdefer ui_payload.freeWitnessBodySlice(allocator, witnesses_defeated);
+    const witnesses_new = try ui_payload.cloneWitnessBodySlice(allocator, provenance.witnesses_new);
+    errdefer ui_payload.freeWitnessBodySlice(allocator, witnesses_new);
 
     return .{
         .proof_schema_version = proof_schema,
@@ -77,9 +103,15 @@ pub fn build(
         .read_set_digest = read_set_digest,
         .applied_at_unix_ms = applied_at_unix_ms,
         .system_proven = proof.system_proven,
+        .baseline_primary_properties = proof.baseline_primary_properties,
+        .primary_properties = proof.primary_properties,
         .proof_roots = proof_roots,
         .changes = changes,
         .proof_inputs = proof_inputs,
+        .repair_plan_ids = repair_plan_ids,
+        .goal_context = goal_context,
+        .witnesses_defeated = witnesses_defeated,
+        .witnesses_new = witnesses_new,
     };
 }
 

@@ -435,57 +435,6 @@ pub fn freeWitnessBodySlice(
     allocator.free(items);
 }
 
-pub const VerifiedPatchPayload = struct {
-    file: []u8,
-    policy_hash: []u8,
-    /// Post-write identities returned by v2 `apply_repair`. Manual semantic
-    /// edits leave both null because Pi must not fabricate protocol evidence.
-    source_digest: ?[]u8 = null,
-    module_graph_hash: ?[]u8 = null,
-    applied_at_unix_ms: i64,
-    stats: ProofStats,
-    before: ?[]u8,
-    after: []u8,
-    unified_diff: []u8,
-    hunks: []DiffHunk,
-    violations: []ViolationDeltaItem,
-    before_properties: ?PropertiesSnapshot,
-    after_properties: ?PropertiesSnapshot,
-    prove: ?ProveSummary,
-    system: ?SystemProofSummary,
-    rule_citations: [][]u8,
-    repair_plan_ids: [][]u8 = &.{},
-    closed_witness_ids: [][]u8 = &.{},
-    patch_hash: ?[32]u8 = null,
-    parent_hash: ?[32]u8 = null,
-    goal_context: [][]u8 = &.{},
-    witnesses_defeated: []WitnessBody = &.{},
-    witnesses_new: []WitnessBody = &.{},
-    post_apply_ok: bool,
-    post_apply_summary: ?[]u8,
-    /// Proof Flight Recorder capsule replay against this applied edit.
-    /// `capsule_total == 0` means no capsule was checked (none recorded, or
-    /// the probe is disabled/unwired). `capsule_regressed > 0` means the edit
-    /// changed behavior on a recorded request. Scalar, no ownership.
-    capsule_total: u32 = 0,
-    capsule_regressed: u32 = 0,
-    /// Canonical normalize-on-apply outputs. `is_canonical` is true when the
-    /// applied (attested) bytes carry zero residual canonical-band diagnostics.
-    /// `rewrite_trace` lists the typed canonical rewrites the normalize pass
-    /// applied to reach that form, in application order (empty when the model's
-    /// draft was already canonical). Owned (each string and the slice).
-    is_canonical: bool = false,
-    rewrite_trace: [][]u8 = &.{},
-
-    pub fn clone(self: VerifiedPatchPayload, allocator: std.mem.Allocator) !VerifiedPatchPayload {
-        return payload_memory.cloneOwned(VerifiedPatchPayload, self, allocator);
-    }
-
-    pub fn deinit(self: *VerifiedPatchPayload, allocator: std.mem.Allocator) void {
-        payload_memory.freeOwned(VerifiedPatchPayload, self, allocator);
-    }
-};
-
 pub const VerifiedChange = struct {
     file: []u8,
     baseline_state: []u8,
@@ -534,9 +483,15 @@ pub const VerifiedChangeSetPayload = struct {
     read_set_digest: []u8,
     applied_at_unix_ms: i64,
     system_proven: bool,
+    baseline_primary_properties: ?PropertiesSnapshot = null,
+    primary_properties: ?PropertiesSnapshot = null,
     proof_roots: [][]u8,
     changes: []VerifiedChange,
     proof_inputs: []VerifiedProofInput,
+    repair_plan_ids: [][]u8 = &.{},
+    goal_context: [][]u8 = &.{},
+    witnesses_defeated: []WitnessBody = &.{},
+    witnesses_new: []WitnessBody = &.{},
 
     pub fn clone(self: VerifiedChangeSetPayload, allocator: std.mem.Allocator) !VerifiedChangeSetPayload {
         return payload_memory.cloneOwned(VerifiedChangeSetPayload, self, allocator);
@@ -605,7 +560,6 @@ pub const UiPayload = union(enum) {
     command_outcome: CommandOutcomePayload,
     repair_candidate: RepairCandidatePayload,
     protocol_repair: ProtocolRepairPayload,
-    verified_patch: VerifiedPatchPayload,
     verified_change_set: VerifiedChangeSetPayload,
     plain_text: []u8,
 
@@ -620,7 +574,6 @@ pub const UiPayload = union(enum) {
             .command_outcome => |payload| .{ .command_outcome = try payload.clone(allocator) },
             .repair_candidate => |payload| .{ .repair_candidate = try payload.clone(allocator) },
             .protocol_repair => |payload| .{ .protocol_repair = try payload.clone(allocator) },
-            .verified_patch => |payload| .{ .verified_patch = try payload.clone(allocator) },
             .verified_change_set => |payload| .{ .verified_change_set = try payload.clone(allocator) },
             .plain_text => |text| .{ .plain_text = try allocator.dupe(u8, text) },
         };
@@ -634,7 +587,6 @@ pub const UiPayload = union(enum) {
             .command_outcome => |*payload| payload.deinit(allocator),
             .repair_candidate => |*payload| payload.deinit(allocator),
             .protocol_repair => |*payload| payload.deinit(allocator),
-            .verified_patch => |*payload| payload.deinit(allocator),
             .verified_change_set => |*payload| payload.deinit(allocator),
             .plain_text => |text| allocator.free(text),
         }
@@ -787,186 +739,6 @@ pub fn writeJson(writer: *std.Io.Writer, payload: UiPayload) !void {
             }
             try writer.writeByte('}');
         },
-        .verified_patch => |patch| {
-            try writer.writeAll("\"kind\":\"verified_patch\",\"file\":");
-            try json_writer.writeString(writer, patch.file);
-            try writer.writeAll(",\"policy_hash\":");
-            try json_writer.writeString(writer, patch.policy_hash);
-            try writer.writeAll(",\"source_digest\":");
-            if (patch.source_digest) |digest| try json_writer.writeString(writer, digest) else try writer.writeAll("null");
-            try writer.writeAll(",\"module_graph_hash\":");
-            if (patch.module_graph_hash) |hash| try json_writer.writeString(writer, hash) else try writer.writeAll("null");
-            try writer.writeAll(",\"applied_at_unix_ms\":");
-            try writer.print("{d}", .{patch.applied_at_unix_ms});
-            try writer.writeAll(",\"stats\":{\"total\":");
-            try writer.print("{d}", .{patch.stats.total});
-            try writer.writeAll(",\"new\":");
-            try writer.print("{d}", .{patch.stats.new});
-            if (patch.stats.preexisting) |preexisting| {
-                try writer.writeAll(",\"preexisting\":");
-                try writer.print("{d}", .{preexisting});
-            }
-            try writer.writeAll("},\"before\":");
-            if (patch.before) |b| {
-                try json_writer.writeString(writer, b);
-            } else {
-                try writer.writeAll("null");
-            }
-            try writer.writeAll(",\"after\":");
-            try json_writer.writeString(writer, patch.after);
-            try writer.writeAll(",\"unified_diff\":");
-            try json_writer.writeString(writer, patch.unified_diff);
-            try writer.writeAll(",\"hunks\":[");
-            for (patch.hunks, 0..) |hunk, i| {
-                if (i > 0) try writer.writeByte(',');
-                try writer.writeAll("{\"old_start\":");
-                try writer.print("{d}", .{hunk.old_start});
-                try writer.writeAll(",\"old_count\":");
-                try writer.print("{d}", .{hunk.old_count});
-                try writer.writeAll(",\"new_start\":");
-                try writer.print("{d}", .{hunk.new_start});
-                try writer.writeAll(",\"new_count\":");
-                try writer.print("{d}", .{hunk.new_count});
-                try writer.writeByte('}');
-            }
-            try writer.writeAll("],\"violations\":[");
-            for (patch.violations, 0..) |violation, i| {
-                if (i > 0) try writer.writeByte(',');
-                try writer.writeAll("{\"stable_key\":");
-                try json_writer.writeString(writer, violation.stable_key);
-                try writer.writeAll(",\"code\":");
-                try json_writer.writeString(writer, violation.code);
-                try writer.writeAll(",\"severity\":");
-                try json_writer.writeString(writer, violation.severity);
-                try writer.writeAll(",\"message\":");
-                try json_writer.writeString(writer, violation.message);
-                try writer.writeAll(",\"line\":");
-                try writer.print("{d}", .{violation.line});
-                try writer.writeAll(",\"column\":");
-                try writer.print("{d}", .{violation.column});
-                try writer.writeAll(",\"introduced_by_patch\":");
-                try writer.writeAll(if (violation.introduced_by_patch) "true" else "false");
-                try writer.writeByte('}');
-            }
-            try writer.writeAll("],\"before_properties\":");
-            try writePropertiesSnapshot(writer, patch.before_properties);
-            try writer.writeAll(",\"after_properties\":");
-            try writePropertiesSnapshot(writer, patch.after_properties);
-            try writer.writeAll(",\"prove\":");
-            if (patch.prove) |prove| {
-                try writer.writeByte('{');
-                try writer.writeAll("\"classification\":");
-                try json_writer.writeString(writer, prove.classification);
-                try writer.writeAll(",\"proof_level\":");
-                try json_writer.writeString(writer, prove.proof_level);
-                try writer.writeAll(",\"recommendation\":");
-                try json_writer.writeString(writer, prove.recommendation);
-                try writer.writeAll(",\"counterexample\":");
-                if (prove.counterexample) |counterexample| {
-                    try json_writer.writeString(writer, counterexample);
-                } else {
-                    try writer.writeAll("null");
-                }
-                try writer.writeAll(",\"laws_used\":[");
-                for (prove.laws_used, 0..) |law, i| {
-                    if (i > 0) try writer.writeByte(',');
-                    try json_writer.writeString(writer, law);
-                }
-                try writer.writeByte(']');
-                try writer.writeByte('}');
-            } else {
-                try writer.writeAll("null");
-            }
-            try writer.writeAll(",\"system\":");
-            if (patch.system) |system| {
-                try writer.writeByte('{');
-                try writer.writeAll("\"system_path\":");
-                try json_writer.writeString(writer, system.system_path);
-                try writer.writeAll(",\"proof_level\":");
-                try json_writer.writeString(writer, system.proof_level);
-                try writer.writeAll(",\"all_links_resolved\":");
-                try writer.writeAll(if (system.all_links_resolved) "true" else "false");
-                try writer.writeAll(",\"all_responses_covered\":");
-                try writer.writeAll(if (system.all_responses_covered) "true" else "false");
-                try writer.writeAll(",\"payload_compatible\":");
-                try writer.writeAll(if (system.payload_compatible) "true" else "false");
-                try writer.writeAll(",\"injection_safe\":");
-                try writer.writeAll(if (system.injection_safe) "true" else "false");
-                try writer.writeAll(",\"no_secret_leakage\":");
-                try writer.writeAll(if (system.no_secret_leakage) "true" else "false");
-                try writer.writeAll(",\"no_credential_leakage\":");
-                try writer.writeAll(if (system.no_credential_leakage) "true" else "false");
-                try writer.writeAll(",\"retry_safe\":");
-                try writer.writeAll(if (system.retry_safe) "true" else "false");
-                try writer.writeAll(",\"fault_covered\":");
-                try writer.writeAll(if (system.fault_covered) "true" else "false");
-                try writer.writeAll(",\"state_isolated\":");
-                try writer.writeAll(if (system.state_isolated) "true" else "false");
-                try writer.writeAll(",\"max_system_io_depth\":");
-                if (system.max_system_io_depth) |depth| {
-                    try writer.print("{d}", .{depth});
-                } else {
-                    try writer.writeAll("null");
-                }
-                try writer.writeAll(",\"dynamic_links\":");
-                try writer.print("{d}", .{system.dynamic_links});
-                try writer.writeAll(",\"warnings\":[");
-                for (system.warnings, 0..) |warning, i| {
-                    if (i > 0) try writer.writeByte(',');
-                    try json_writer.writeString(writer, warning);
-                }
-                try writer.writeByte(']');
-                try writer.writeByte('}');
-            } else {
-                try writer.writeAll("null");
-            }
-            try writer.writeAll(",\"rule_citations\":[");
-            for (patch.rule_citations, 0..) |citation, i| {
-                if (i > 0) try writer.writeByte(',');
-                try json_writer.writeString(writer, citation);
-            }
-            try writer.writeByte(']');
-            try writer.writeAll(",\"repair_plan_ids\":[");
-            for (patch.repair_plan_ids, 0..) |repair_id, i| {
-                if (i > 0) try writer.writeByte(',');
-                try json_writer.writeString(writer, repair_id);
-            }
-            try writer.writeByte(']');
-            try writer.writeAll(",\"closed_witness_ids\":[");
-            for (patch.closed_witness_ids, 0..) |closed_id, i| {
-                if (i > 0) try writer.writeByte(',');
-                try json_writer.writeString(writer, closed_id);
-            }
-            try writer.writeByte(']');
-            if (patch.patch_hash) |hash| {
-                try writer.writeAll(",\"patch_hash\":\"");
-                const hex = std.fmt.bytesToHex(hash, .lower);
-                try writer.writeAll(&hex);
-                try writer.writeByte('"');
-            }
-            if (patch.parent_hash) |hash| {
-                try writer.writeAll(",\"parent_hash\":\"");
-                const hex = std.fmt.bytesToHex(hash, .lower);
-                try writer.writeAll(&hex);
-                try writer.writeByte('"');
-            }
-            try writeOptionalStringArray(writer, "goal_context", patch.goal_context);
-            try writeOptionalWitnessBodyArray(writer, "witnesses_defeated", patch.witnesses_defeated);
-            try writeOptionalWitnessBodyArray(writer, "witnesses_new", patch.witnesses_new);
-            try writer.writeAll(",\"post_apply_ok\":");
-            try writer.writeAll(if (patch.post_apply_ok) "true" else "false");
-            if (patch.post_apply_summary) |s| {
-                try writer.writeAll(",\"post_apply_summary\":");
-                try json_writer.writeString(writer, s);
-            }
-            try writer.writeAll(",\"is_canonical\":");
-            try writer.writeAll(if (patch.is_canonical) "true" else "false");
-            try writeOptionalStringArray(writer, "rewrite_trace", patch.rewrite_trace);
-            try writer.print(
-                ",\"capsule_total\":{d},\"capsule_regressed\":{d}",
-                .{ patch.capsule_total, patch.capsule_regressed },
-            );
-        },
         .verified_change_set => |receipt| {
             try writer.writeAll("\"kind\":\"verified_change_set\",\"proof_schema_version\":");
             try json_writer.writeString(writer, receipt.proof_schema_version);
@@ -990,6 +762,10 @@ pub fn writeJson(writer: *std.Io.Writer, payload: UiPayload) !void {
             try writer.print("{d}", .{receipt.applied_at_unix_ms});
             try writer.writeAll(",\"system_proven\":");
             try writer.writeAll(if (receipt.system_proven) "true" else "false");
+            try writer.writeAll(",\"baseline_primary_properties\":");
+            try writePropertiesSnapshot(writer, receipt.baseline_primary_properties);
+            try writer.writeAll(",\"primary_properties\":");
+            try writePropertiesSnapshot(writer, receipt.primary_properties);
             try writer.writeAll(",\"proof_roots\":[");
             for (receipt.proof_roots, 0..) |root, index| {
                 if (index > 0) try writer.writeByte(',');
@@ -1031,6 +807,10 @@ pub fn writeJson(writer: *std.Io.Writer, payload: UiPayload) !void {
                 try writer.writeByte('}');
             }
             try writer.writeByte(']');
+            try writeOptionalStringArray(writer, "repair_plan_ids", receipt.repair_plan_ids);
+            try writeOptionalStringArray(writer, "goal_context", receipt.goal_context);
+            try writeOptionalWitnessBodyArray(writer, "witnesses_defeated", receipt.witnesses_defeated);
+            try writeOptionalWitnessBodyArray(writer, "witnesses_new", receipt.witnesses_new);
         },
     }
     try writer.writeByte('}');
@@ -1077,32 +857,6 @@ pub fn writeLegible(writer: *std.Io.Writer, payload: UiPayload) !bool {
             );
             for (receipt.changes) |change| try writer.print("  {s}\n", .{change.file});
             if (receipt.system_proven) try writer.writeAll("  aggregate system proof passed\n");
-            return true;
-        },
-        .verified_patch => |patch| {
-            try writer.writeAll("verified: ");
-            try writer.writeAll(patch.file);
-            if (patch.prove) |prove| {
-                try writer.writeAll(" (");
-                try writer.writeAll(prove.classification);
-                try writer.writeByte(')');
-            }
-            try writer.writeByte('\n');
-            try writer.print(
-                "  {d} total, {d} new",
-                .{ patch.stats.total, patch.stats.new },
-            );
-            if (patch.stats.preexisting) |preexisting| {
-                try writer.print(", {d} preexisting", .{preexisting});
-            }
-            try writer.writeByte('\n');
-            if (patch.is_canonical) try writer.writeAll("  canonical\n");
-            if (patch.capsule_regressed > 0) {
-                try writer.print(
-                    "  capsule: {d}/{d} recorded requests regressed\n",
-                    .{ patch.capsule_regressed, patch.capsule_total },
-                );
-            }
             return true;
         },
         .diagnostics => |diagnostics| {
@@ -1305,111 +1059,6 @@ pub fn parse(allocator: std.mem.Allocator, value: std.json.Value) !UiPayload {
             },
         ) };
     }
-    if (std.mem.eql(u8, kind_val.string, "verified_patch")) {
-        const file = getString(obj, "file") orelse return error.InvalidUiPayload;
-        const policy_hash = getString(obj, "policy_hash") orelse return error.InvalidUiPayload;
-        const source_digest = try getOptionalString(obj, "source_digest");
-        const module_graph_hash = try getOptionalString(obj, "module_graph_hash");
-        const stats_val = obj.get("stats") orelse return error.InvalidUiPayload;
-        if (stats_val != .object) return error.InvalidUiPayload;
-        const stats_obj = stats_val.object;
-        const after = getString(obj, "after") orelse return error.InvalidUiPayload;
-        const before_opt = try getOptionalString(obj, "before");
-        const applied_at_unix_ms = getInteger(obj, "applied_at_unix_ms") orelse 0;
-        const unified_diff = getString(obj, "unified_diff") orelse "";
-        const post_apply_ok = getBool(obj, "post_apply_ok") orelse return error.InvalidUiPayload;
-        const hunks = try parseDiffHunks(allocator, obj.get("hunks"));
-        errdefer allocator.free(hunks);
-        const violations = try parseViolationDeltaItems(allocator, obj.get("violations"));
-        errdefer {
-            for (violations) |*item| item.deinit(allocator);
-            allocator.free(violations);
-        }
-        const before_properties = try parsePropertiesSnapshot(obj.get("before_properties"));
-        const after_properties = try parsePropertiesSnapshot(obj.get("after_properties"));
-        var prove = try parseProveSummary(allocator, obj.get("prove"));
-        errdefer if (prove) |*summary| summary.deinit(allocator);
-        var system = try parseSystemProofSummary(allocator, obj.get("system"));
-        errdefer if (system) |*summary| summary.deinit(allocator);
-        const rule_citations = try parseStringArrayField(allocator, obj.get("rule_citations"));
-        errdefer freeStringSlice(allocator, rule_citations);
-        const repair_plan_ids = try parseStringArrayField(allocator, obj.get("repair_plan_ids"));
-        errdefer freeStringSlice(allocator, repair_plan_ids);
-        const closed_witness_ids = try parseStringArrayField(allocator, obj.get("closed_witness_ids"));
-        errdefer freeStringSlice(allocator, closed_witness_ids);
-        const goal_context = try parseStringArrayField(allocator, obj.get("goal_context"));
-        errdefer freeStringSlice(allocator, goal_context);
-        const witnesses_defeated = try parseWitnessBodyArray(allocator, obj.get("witnesses_defeated"));
-        errdefer freeWitnessBodySlice(allocator, witnesses_defeated);
-        const witnesses_new = try parseWitnessBodyArray(allocator, obj.get("witnesses_new"));
-        errdefer freeWitnessBodySlice(allocator, witnesses_new);
-        const patch_hash_opt = try parseHash32(obj.get("patch_hash"));
-        const parent_hash_opt = try parseHash32(obj.get("parent_hash"));
-
-        const file_copy = try allocator.dupe(u8, file);
-        errdefer allocator.free(file_copy);
-        const policy_copy = try allocator.dupe(u8, policy_hash);
-        errdefer allocator.free(policy_copy);
-        const source_digest_copy: ?[]u8 = if (source_digest) |digest| try allocator.dupe(u8, digest) else null;
-        errdefer if (source_digest_copy) |digest| allocator.free(digest);
-        const module_graph_hash_copy: ?[]u8 = if (module_graph_hash) |hash| try allocator.dupe(u8, hash) else null;
-        errdefer if (module_graph_hash_copy) |hash| allocator.free(hash);
-        const before_copy: ?[]u8 = if (before_opt) |b| try allocator.dupe(u8, b) else null;
-        errdefer if (before_copy) |b| allocator.free(b);
-        const after_copy = try allocator.dupe(u8, after);
-        errdefer allocator.free(after_copy);
-        const unified_diff_copy = try allocator.dupe(u8, unified_diff);
-        errdefer allocator.free(unified_diff_copy);
-        const post_apply_summary_copy: ?[]u8 = blk: {
-            const s = try getOptionalString(obj, "post_apply_summary");
-            break :blk if (s) |text| try allocator.dupe(u8, text) else null;
-        };
-        errdefer if (post_apply_summary_copy) |s| allocator.free(s);
-        const is_canonical = getBool(obj, "is_canonical") orelse false;
-        const rewrite_trace = try parseStringArrayField(allocator, obj.get("rewrite_trace"));
-        errdefer freeStringSlice(allocator, rewrite_trace);
-        const capsule_total: u32 = @intCast(getUnsignedOrDefault(obj, "capsule_total", 0));
-        const capsule_regressed: u32 = @intCast(getUnsignedOrDefault(obj, "capsule_regressed", 0));
-
-        return .{ .verified_patch = .{
-            .file = file_copy,
-            .policy_hash = policy_copy,
-            .source_digest = source_digest_copy,
-            .module_graph_hash = module_graph_hash_copy,
-            .applied_at_unix_ms = applied_at_unix_ms,
-            .stats = .{
-                .total = @intCast(getUnsigned(stats_obj, "total") orelse return error.InvalidUiPayload),
-                .new = @intCast(getUnsigned(stats_obj, "new") orelse return error.InvalidUiPayload),
-                .preexisting = if (getUnsigned(stats_obj, "preexisting")) |preexisting|
-                    @intCast(preexisting)
-                else
-                    null,
-            },
-            .before = before_copy,
-            .after = after_copy,
-            .unified_diff = unified_diff_copy,
-            .hunks = hunks,
-            .violations = violations,
-            .before_properties = before_properties,
-            .after_properties = after_properties,
-            .prove = prove,
-            .system = system,
-            .rule_citations = rule_citations,
-            .repair_plan_ids = repair_plan_ids,
-            .closed_witness_ids = closed_witness_ids,
-            .patch_hash = patch_hash_opt,
-            .parent_hash = parent_hash_opt,
-            .goal_context = goal_context,
-            .witnesses_defeated = witnesses_defeated,
-            .witnesses_new = witnesses_new,
-            .post_apply_ok = post_apply_ok,
-            .post_apply_summary = post_apply_summary_copy,
-            .is_canonical = is_canonical,
-            .rewrite_trace = rewrite_trace,
-            .capsule_total = capsule_total,
-            .capsule_regressed = capsule_regressed,
-        } };
-    }
     if (std.mem.eql(u8, kind_val.string, "verified_change_set")) {
         const changes_value = obj.get("changes") orelse return error.InvalidUiPayload;
         const inputs_value = obj.get("proof_inputs") orelse return error.InvalidUiPayload;
@@ -1448,6 +1097,14 @@ pub fn parse(allocator: std.mem.Allocator, value: std.json.Value) !UiPayload {
         }
         const proof_roots = try parseStringArrayField(allocator, roots_value);
         errdefer freeStringSlice(allocator, proof_roots);
+        const repair_plan_ids = try parseStringArrayField(allocator, obj.get("repair_plan_ids"));
+        errdefer freeStringSlice(allocator, repair_plan_ids);
+        const goal_context = try parseStringArrayField(allocator, obj.get("goal_context"));
+        errdefer freeStringSlice(allocator, goal_context);
+        const witnesses_defeated = try parseWitnessBodyArray(allocator, obj.get("witnesses_defeated"));
+        errdefer freeWitnessBodySlice(allocator, witnesses_defeated);
+        const witnesses_new = try parseWitnessBodyArray(allocator, obj.get("witnesses_new"));
+        errdefer freeWitnessBodySlice(allocator, witnesses_new);
 
         const proof_schema_copy = try allocator.dupe(u8, getString(obj, "proof_schema_version") orelse return error.InvalidUiPayload);
         errdefer allocator.free(proof_schema_copy);
@@ -1480,9 +1137,15 @@ pub fn parse(allocator: std.mem.Allocator, value: std.json.Value) !UiPayload {
             .read_set_digest = read_set_copy,
             .applied_at_unix_ms = getInteger(obj, "applied_at_unix_ms") orelse return error.InvalidUiPayload,
             .system_proven = getBool(obj, "system_proven") orelse return error.InvalidUiPayload,
+            .baseline_primary_properties = try parsePropertiesSnapshot(obj.get("baseline_primary_properties")),
+            .primary_properties = try parsePropertiesSnapshot(obj.get("primary_properties")),
             .proof_roots = proof_roots,
             .changes = changes,
             .proof_inputs = proof_inputs,
+            .repair_plan_ids = repair_plan_ids,
+            .goal_context = goal_context,
+            .witnesses_defeated = witnesses_defeated,
+            .witnesses_new = witnesses_new,
         } };
     }
 
@@ -2230,345 +1893,6 @@ test "protocol repair payload round-trips exact binding" {
             try testing.expectEqualStrings("policy", repair.policy_hash);
             try testing.expectEqualStrings("graph", repair.module_graph_hash);
             try testing.expect(std.mem.indexOf(u8, repair.repairs_json, "replace_let_with_const") != null);
-        },
-        else => return error.TestFailed,
-    }
-}
-
-test "verified_patch payload round-trips with rich proof metadata" {
-    const hunks = try testing.allocator.alloc(DiffHunk, 2);
-    hunks[0] = .{ .old_start = 1, .old_count = 3, .new_start = 1, .new_count = 4 };
-    hunks[1] = .{ .old_start = 9, .old_count = 1, .new_start = 10, .new_count = 2 };
-
-    const violations = try testing.allocator.alloc(ViolationDeltaItem, 1);
-    violations[0] = try ViolationDeltaItem.init(
-        testing.allocator,
-        "8d8f",
-        "ZTS123",
-        "warning",
-        "possible egress expansion",
-        12,
-        4,
-        true,
-    );
-
-    const laws_used = try testing.allocator.alloc([]u8, 2);
-    laws_used[0] = try testing.allocator.dupe(u8, "contract_equivalence");
-    laws_used[1] = try testing.allocator.dupe(u8, "response_covariance");
-
-    const warnings = try testing.allocator.alloc([]u8, 1);
-    warnings[0] = try testing.allocator.dupe(u8, "dynamic route fan-out not fully resolved");
-
-    const citations = try testing.allocator.alloc([]u8, 2);
-    citations[0] = try testing.allocator.dupe(u8, "ZTS204");
-    citations[1] = try testing.allocator.dupe(u8, "ZTS311");
-
-    var payload: UiPayload = .{ .verified_patch = .{
-        .file = try testing.allocator.dupe(u8, "handler.ts"),
-        .policy_hash = try testing.allocator.dupe(u8, "a" ** 64),
-        .source_digest = try testing.allocator.dupe(u8, "b" ** 64),
-        .module_graph_hash = try testing.allocator.dupe(u8, "c" ** 64),
-        .applied_at_unix_ms = 1700000000123,
-        .stats = .{ .total = 1, .new = 0, .preexisting = 1 },
-        .before = try testing.allocator.dupe(u8, "old content"),
-        .after = try testing.allocator.dupe(u8, "new content"),
-        .unified_diff = try testing.allocator.dupe(u8, "@@ -1,1 +1,1 @@\n-old\n+new\n"),
-        .hunks = hunks,
-        .violations = violations,
-        .before_properties = .{
-            .pure = true,
-            .read_only = true,
-            .stateless = true,
-            .retry_safe = true,
-            .deterministic = true,
-            .has_egress = false,
-            .no_secret_leakage = true,
-            .no_credential_leakage = true,
-            .input_validated = true,
-            .pii_contained = true,
-            .idempotent = true,
-            .max_io_depth = 0,
-            .injection_safe = true,
-            .state_isolated = true,
-            .fault_covered = true,
-            .result_safe = true,
-            .optional_safe = true,
-        },
-        .after_properties = .{
-            .pure = true,
-            .read_only = false,
-            .stateless = true,
-            .retry_safe = true,
-            .deterministic = true,
-            .has_egress = true,
-            .no_secret_leakage = true,
-            .no_credential_leakage = true,
-            .input_validated = true,
-            .pii_contained = true,
-            .idempotent = true,
-            .max_io_depth = 2,
-            .state_isolated = true,
-            .injection_safe = true,
-            .fault_covered = false,
-            .result_safe = true,
-            .optional_safe = false,
-        },
-        .prove = .{
-            .classification = try testing.allocator.dupe(u8, "additive"),
-            .proof_level = try testing.allocator.dupe(u8, "partial"),
-            .recommendation = try testing.allocator.dupe(u8, "review widened response surface"),
-            .counterexample = try testing.allocator.dupe(u8, "POST /foo now yields 202"),
-            .laws_used = laws_used,
-        },
-        .system = .{
-            .system_path = try testing.allocator.dupe(u8, "system.json"),
-            .proof_level = try testing.allocator.dupe(u8, "partial"),
-            .all_links_resolved = false,
-            .all_responses_covered = true,
-            .payload_compatible = true,
-            .injection_safe = true,
-            .no_secret_leakage = true,
-            .no_credential_leakage = true,
-            .retry_safe = true,
-            .fault_covered = false,
-            .state_isolated = true,
-            .max_system_io_depth = 3,
-            .dynamic_links = 1,
-            .warnings = warnings,
-        },
-        .rule_citations = citations,
-        .patch_hash = blk: {
-            var bytes: [32]u8 = undefined;
-            for (&bytes, 0..) |*b, i| b.* = @intCast(i);
-            break :blk bytes;
-        },
-        .parent_hash = blk: {
-            var bytes: [32]u8 = undefined;
-            for (&bytes, 0..) |*b, i| b.* = @intCast(31 - i);
-            break :blk bytes;
-        },
-        .goal_context = blk: {
-            const goals = try testing.allocator.alloc([]u8, 2);
-            goals[0] = try testing.allocator.dupe(u8, "retry_safe");
-            goals[1] = try testing.allocator.dupe(u8, "no_secret_leakage");
-            break :blk goals;
-        },
-        .witnesses_defeated = blk: {
-            const bodies = try testing.allocator.alloc(WitnessBody, 1);
-            bodies[0] = .{
-                .key = try testing.allocator.dupe(u8, "d" ** 64),
-                .property = try testing.allocator.dupe(u8, "no_secret_leakage"),
-                .summary = try testing.allocator.dupe(u8, "DB_KEY in response body"),
-                .origin_line = 5,
-                .origin_column = 9,
-                .sink_line = 7,
-                .sink_column = 12,
-                .request_method = try testing.allocator.dupe(u8, "GET"),
-                .request_url = try testing.allocator.dupe(u8, "/"),
-                .request_has_auth = false,
-                .request_body = null,
-                .io_stubs = blk_stubs: {
-                    const stubs = try testing.allocator.alloc(WitnessStub, 1);
-                    stubs[0] = .{
-                        .seq = 0,
-                        .module = try testing.allocator.dupe(u8, "env"),
-                        .func = try testing.allocator.dupe(u8, "env"),
-                        .result_json = try testing.allocator.dupe(u8, "\"secret-sentinel\""),
-                    };
-                    break :blk_stubs stubs;
-                },
-            };
-            break :blk bodies;
-        },
-        .witnesses_new = blk: {
-            const bodies = try testing.allocator.alloc(WitnessBody, 1);
-            bodies[0] = .{
-                .key = try testing.allocator.dupe(u8, "e" ** 64),
-                .property = try testing.allocator.dupe(u8, "injection_safe"),
-                .summary = try testing.allocator.dupe(u8, "unvalidated body reaches sql"),
-                .origin_line = 11,
-                .origin_column = 3,
-                .sink_line = 14,
-                .sink_column = 7,
-                .request_method = try testing.allocator.dupe(u8, "POST"),
-                .request_url = try testing.allocator.dupe(u8, "/api/items"),
-                .request_has_auth = true,
-                .request_body = try testing.allocator.dupe(u8, "{\"name\":\"x\"}"),
-                .io_stubs = blk_stubs: {
-                    const stubs = try testing.allocator.alloc(WitnessStub, 0);
-                    break :blk_stubs stubs;
-                },
-            };
-            break :blk bodies;
-        },
-        .post_apply_ok = true,
-        .post_apply_summary = try testing.allocator.dupe(u8, "post-apply verification passed"),
-        .capsule_total = 3,
-        .capsule_regressed = 1,
-    } };
-    defer payload.deinit(testing.allocator);
-
-    var roundtripped = try roundTrip(testing.allocator, payload);
-    defer roundtripped.deinit(testing.allocator);
-
-    switch (roundtripped) {
-        .verified_patch => |patch| {
-            try testing.expectEqualStrings("handler.ts", patch.file);
-            try testing.expectEqualStrings("a" ** 64, patch.policy_hash);
-            try testing.expectEqualStrings("b" ** 64, patch.source_digest.?);
-            try testing.expectEqualStrings("c" ** 64, patch.module_graph_hash.?);
-            try testing.expectEqual(@as(i64, 1700000000123), patch.applied_at_unix_ms);
-            try testing.expectEqual(@as(u32, 1), patch.stats.total);
-            try testing.expectEqual(@as(u32, 0), patch.stats.new);
-            try testing.expect(patch.before != null);
-            try testing.expectEqualStrings("old content", patch.before.?);
-            try testing.expectEqualStrings("new content", patch.after);
-            try testing.expectEqualStrings("@@ -1,1 +1,1 @@\n-old\n+new\n", patch.unified_diff);
-            try testing.expectEqual(@as(usize, 2), patch.hunks.len);
-            try testing.expectEqual(@as(usize, 1), patch.violations.len);
-            try testing.expectEqualStrings("ZTS123", patch.violations[0].code);
-            try testing.expect(patch.before_properties != null);
-            try testing.expect(patch.after_properties != null);
-            try testing.expect(patch.before_properties.?.read_only);
-            try testing.expect(patch.after_properties.?.pure);
-            try testing.expect(!patch.after_properties.?.read_only);
-            try testing.expect(patch.after_properties.?.retry_safe);
-            try testing.expect(!patch.after_properties.?.fault_covered);
-            try testing.expectEqual(@as(?u32, 2), patch.after_properties.?.max_io_depth);
-            try testing.expect(patch.prove != null);
-            try testing.expectEqualStrings("additive", patch.prove.?.classification);
-            try testing.expectEqual(@as(usize, 2), patch.prove.?.laws_used.len);
-            try testing.expect(patch.system != null);
-            try testing.expectEqualStrings("system.json", patch.system.?.system_path);
-            try testing.expectEqual(@as(usize, 2), patch.rule_citations.len);
-            try testing.expect(patch.post_apply_ok);
-            try testing.expect(patch.post_apply_summary != null);
-            try testing.expectEqualStrings("post-apply verification passed", patch.post_apply_summary.?);
-            try testing.expectEqual(@as(u32, 3), patch.capsule_total);
-            try testing.expectEqual(@as(u32, 1), patch.capsule_regressed);
-            try testing.expect(patch.patch_hash != null);
-            try testing.expect(patch.parent_hash != null);
-            try testing.expectEqual(@as(u8, 0), patch.patch_hash.?[0]);
-            try testing.expectEqual(@as(u8, 31), patch.patch_hash.?[31]);
-            try testing.expectEqual(@as(u8, 31), patch.parent_hash.?[0]);
-            try testing.expectEqual(@as(u8, 0), patch.parent_hash.?[31]);
-            try testing.expectEqual(@as(usize, 2), patch.goal_context.len);
-            try testing.expectEqualStrings("retry_safe", patch.goal_context[0]);
-            try testing.expectEqualStrings("no_secret_leakage", patch.goal_context[1]);
-            try testing.expectEqual(@as(usize, 1), patch.witnesses_defeated.len);
-            try testing.expectEqualStrings("d" ** 64, patch.witnesses_defeated[0].key);
-            try testing.expectEqualStrings("no_secret_leakage", patch.witnesses_defeated[0].property);
-            try testing.expectEqualStrings("DB_KEY in response body", patch.witnesses_defeated[0].summary);
-            try testing.expectEqual(@as(u32, 5), patch.witnesses_defeated[0].origin_line);
-            try testing.expectEqualStrings("GET", patch.witnesses_defeated[0].request_method);
-            try testing.expect(!patch.witnesses_defeated[0].request_has_auth);
-            try testing.expect(patch.witnesses_defeated[0].request_body == null);
-            try testing.expectEqual(@as(usize, 1), patch.witnesses_defeated[0].io_stubs.len);
-            try testing.expectEqualStrings("env", patch.witnesses_defeated[0].io_stubs[0].module);
-            try testing.expectEqualStrings("\"secret-sentinel\"", patch.witnesses_defeated[0].io_stubs[0].result_json);
-
-            try testing.expectEqual(@as(usize, 1), patch.witnesses_new.len);
-            try testing.expectEqualStrings("e" ** 64, patch.witnesses_new[0].key);
-            try testing.expectEqualStrings("injection_safe", patch.witnesses_new[0].property);
-            try testing.expectEqualStrings("POST", patch.witnesses_new[0].request_method);
-            try testing.expectEqualStrings("/api/items", patch.witnesses_new[0].request_url);
-            try testing.expect(patch.witnesses_new[0].request_has_auth);
-            try testing.expect(patch.witnesses_new[0].request_body != null);
-            try testing.expectEqualStrings("{\"name\":\"x\"}", patch.witnesses_new[0].request_body.?);
-            try testing.expectEqual(@as(usize, 0), patch.witnesses_new[0].io_stubs.len);
-        },
-        else => return error.TestFailed,
-    }
-}
-
-test "verified_patch chain metadata defaults when omitted from JSON" {
-    const json =
-        \\{
-        \\  "kind":"verified_patch",
-        \\  "file":"new.ts",
-        \\  "policy_hash":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-        \\  "stats":{"total":0,"new":0},
-        \\  "before":null,
-        \\  "after":"export default {}",
-        \\  "post_apply_ok":true
-        \\}
-    ;
-    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, json, .{});
-    defer parsed.deinit();
-
-    var payload = try parse(testing.allocator, parsed.value);
-    defer payload.deinit(testing.allocator);
-
-    switch (payload) {
-        .verified_patch => |patch| {
-            try testing.expect(patch.patch_hash == null);
-            try testing.expect(patch.parent_hash == null);
-            try testing.expectEqual(@as(usize, 0), patch.goal_context.len);
-            try testing.expectEqual(@as(usize, 0), patch.witnesses_defeated.len);
-            try testing.expectEqual(@as(usize, 0), patch.witnesses_new.len);
-        },
-        else => return error.TestFailed,
-    }
-}
-
-test "verified_patch parser rejects malformed patch_hash hex" {
-    const json =
-        \\{
-        \\  "kind":"verified_patch",
-        \\  "file":"new.ts",
-        \\  "policy_hash":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-        \\  "stats":{"total":0,"new":0},
-        \\  "before":null,
-        \\  "after":"export default {}",
-        \\  "post_apply_ok":true,
-        \\  "patch_hash":"not-a-hex-string"
-        \\}
-    ;
-    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, json, .{});
-    defer parsed.deinit();
-
-    try testing.expectError(error.InvalidUiPayload, parse(testing.allocator, parsed.value));
-}
-
-test "verified_patch parser accepts legacy minimal schema" {
-    const json =
-        \\{
-        \\  "kind":"verified_patch",
-        \\  "file":"new.ts",
-        \\  "policy_hash":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-        \\  "stats":{"total":0,"new":0},
-        \\  "before":null,
-        \\  "after":"export default {}",
-        \\  "after_properties":{"pure":true,"retry_safe":true,"idempotent":true,"state_isolated":true,"injection_safe":true},
-        \\  "post_apply_ok":false,
-        \\  "post_apply_summary":"verify_paths regressed"
-        \\}
-    ;
-    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, json, .{});
-    defer parsed.deinit();
-
-    var payload = try parse(testing.allocator, parsed.value);
-    defer payload.deinit(testing.allocator);
-
-    switch (payload) {
-        .verified_patch => |patch| {
-            try testing.expectEqual(@as(i64, 0), patch.applied_at_unix_ms);
-            try testing.expectEqualStrings("", patch.unified_diff);
-            try testing.expectEqual(@as(usize, 0), patch.hunks.len);
-            try testing.expectEqual(@as(usize, 0), patch.violations.len);
-            try testing.expect(patch.before == null);
-            try testing.expect(patch.before_properties == null);
-            try testing.expect(patch.after_properties != null);
-            try testing.expect(patch.after_properties.?.pure);
-            try testing.expect(!patch.after_properties.?.read_only);
-            try testing.expectEqual(@as(?u32, null), patch.after_properties.?.max_io_depth);
-            try testing.expect(patch.prove == null);
-            try testing.expect(patch.system == null);
-            try testing.expectEqual(@as(usize, 0), patch.rule_citations.len);
-            try testing.expect(!patch.post_apply_ok);
-            try testing.expectEqualStrings("verify_paths regressed", patch.post_apply_summary.?);
-            try testing.expectEqual(@as(u32, 0), patch.capsule_total);
-            try testing.expectEqual(@as(u32, 0), patch.capsule_regressed);
         },
         else => return error.TestFailed,
     }

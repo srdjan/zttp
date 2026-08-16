@@ -150,7 +150,39 @@ fn execute(
         }
     }
 
-    var prepared = zts.PreparedSource.init(allocator, source, args[0], .{
+    return evaluateSourceWithTags(allocator, source, args[0], goals.items, true);
+}
+
+/// Evaluate candidate bytes without reading or changing the live workspace.
+/// The autoloop uses this before a transaction commit so witness deltas are
+/// proof-time evidence rather than a write-then-check authorization step.
+pub fn evaluateSource(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    path: []const u8,
+    goal_names: []const []const u8,
+) !registry_mod.ToolResult {
+    var goals: std.ArrayListUnmanaged(counterexample.PropertyTag) = .empty;
+    defer goals.deinit(allocator);
+    if (goal_names.len == 0) {
+        try goals.appendSlice(allocator, &property_goals.supported_goals);
+    } else {
+        for (goal_names) |goal_name| {
+            const tag = parseGoal(goal_name) orelse return error.UnknownPropertyGoal;
+            try goals.append(allocator, tag);
+        }
+    }
+    return evaluateSourceWithTags(allocator, source, path, goals.items, false);
+}
+
+fn evaluateSourceWithTags(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    path: []const u8,
+    goals: []const counterexample.PropertyTag,
+    persist_witnesses: bool,
+) !registry_mod.ToolResult {
+    var prepared = zts.PreparedSource.init(allocator, source, path, .{
         .comptime_env = .{},
     }) catch |e| {
         return registry_mod.ToolResult.errFmt(
@@ -199,7 +231,7 @@ fn execute(
     const w = text_buf.writer();
 
     try w.writeAll("{\"goals\":[");
-    for (goals.items, 0..) |g, i| {
+    for (goals, 0..) |g, i| {
         if (i > 0) try w.writeByte(',');
         try w.writeByte('"');
         try w.writeAll(g.asString());
@@ -210,16 +242,19 @@ fn execute(
     // Persist materialised witnesses into the on-disk corpus so they
     // accumulate across goal-check invocations. The corpus is keyed by
     // the workspace-relative handler path. Failures are non-fatal.
-    const corpus_dir = zts.witness_corpus.corpusDir(allocator, args[0]) catch null;
+    const corpus_dir = if (persist_witnesses)
+        zts.witness_corpus.corpusDir(allocator, path) catch null
+    else
+        null;
     defer if (corpus_dir) |d| allocator.free(d);
     if (corpus_dir) |d| {
-        zts.witness_corpus.ensureCorpusDir(allocator, d, args[0]) catch {};
+        zts.witness_corpus.ensureCorpusDir(allocator, d, path) catch {};
     }
 
     var witness_count: usize = 0;
     for (checker.getDiagnostics()) |diag| {
         const tag = flow_checker.propertyTagForKind(diag.kind) orelse continue;
-        if (!goalRequested(goals.items, tag)) continue;
+        if (!goalRequested(goals, tag)) continue;
 
         const loc = ir_view.getLoc(diag.node) orelse continue;
         const span: counterexample.SourceSpan = .{

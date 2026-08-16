@@ -7,6 +7,8 @@ const project_config = @import("project_config");
 const change_set = @import("change_set.zig");
 const workspace_snapshot = @import("workspace_snapshot.zig");
 const common = @import("tools/common.zig");
+const ui_payload = @import("ui_payload.zig");
+const proof_enrichment = @import("proof_enrichment.zig");
 
 pub const proof_schema_version = "zttp-aggregate-source-proof-v1";
 
@@ -32,6 +34,8 @@ pub const AggregateProof = struct {
     proof_roots: [][]u8,
     diagnostics: []Diagnostic,
     system_proven: bool,
+    baseline_primary_properties: ?ui_payload.PropertiesSnapshot = null,
+    primary_properties: ?ui_payload.PropertiesSnapshot = null,
 
     pub fn deinit(self: *AggregateProof, allocator: std.mem.Allocator) void {
         for (self.proof_roots) |root| allocator.free(root);
@@ -114,7 +118,9 @@ pub fn prove(
     var candidate_diagnostics: std.ArrayList(Diagnostic) = .empty;
     defer deinitDiagnostics(allocator, &candidate_diagnostics);
 
-    for (roots) |relative_root| {
+    var baseline_primary_properties: ?ui_payload.PropertiesSnapshot = null;
+    var primary_properties: ?ui_payload.PropertiesSnapshot = null;
+    for (roots, 0..) |relative_root, root_index| {
         const before_path = try baseline.pathFor(allocator, relative_root);
         defer allocator.free(before_path);
         const after_path = try candidate.pathFor(allocator, relative_root);
@@ -129,7 +135,7 @@ pub fn prove(
         defer if (after_system) |path| allocator.free(path);
 
         if (fileExists(allocator, before_path)) {
-            collectCheckDiagnostics(
+            const properties = collectCheckDiagnostics(
                 allocator,
                 &baseline_diagnostics,
                 baseline.root,
@@ -140,8 +146,9 @@ pub fn prove(
                 if (err == error.OutOfMemory) return err;
                 return rejectedFmt(allocator, "baseline_analysis_failed", "baseline analysis failed for {s}: {s}", .{ relative_root, @errorName(err) });
             };
+            if (root_index == 0) baseline_primary_properties = properties;
         }
-        collectCheckDiagnostics(
+        const properties = collectCheckDiagnostics(
             allocator,
             &candidate_diagnostics,
             candidate.root,
@@ -152,6 +159,7 @@ pub fn prove(
             if (err == error.OutOfMemory) return err;
             return rejectedFmt(allocator, "candidate_analysis_failed", "candidate analysis failed for {s}: {s}", .{ relative_root, @errorName(err) });
         };
+        if (root_index == 0) primary_properties = properties;
     }
 
     if (firstNewDiagnostic(baseline_diagnostics.items, candidate_diagnostics.items)) |diagnostic| {
@@ -187,6 +195,8 @@ pub fn prove(
         .proof_roots = roots,
         .diagnostics = owned_diagnostics,
         .system_proven = system_proven,
+        .baseline_primary_properties = baseline_primary_properties,
+        .primary_properties = primary_properties,
     } };
 }
 
@@ -402,7 +412,7 @@ fn collectCheckDiagnostics(
     handler_path: []const u8,
     schema_path: ?[]const u8,
     system_path: ?[]const u8,
-) !void {
+) !?ui_payload.PropertiesSnapshot {
     var check = zts_cli.precompile.runCheckOnly(allocator, handler_path, schema_path, true, system_path) catch |full_error| {
         const source = try zts.file_io.readFile(allocator, handler_path, change_set.max_file_bytes);
         defer allocator.free(source);
@@ -418,10 +428,11 @@ fn collectCheckDiagnostics(
         defer fallback.deinit(allocator);
         if (fallback.json_diagnostics.items.len == 0) return full_error;
         try appendCheckDiagnostics(allocator, out, materialized_root, fallback.json_diagnostics.items);
-        return;
+        return if (fallback.properties) |properties| proof_enrichment.propertiesSnapshot(properties) else null;
     };
     defer check.deinit(allocator);
     try appendCheckDiagnostics(allocator, out, materialized_root, check.json_diagnostics.items);
+    return if (check.properties) |properties| proof_enrichment.propertiesSnapshot(properties) else null;
 }
 
 fn appendCheckDiagnostics(

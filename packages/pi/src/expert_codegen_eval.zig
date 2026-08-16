@@ -139,14 +139,14 @@ pub fn runCase(
 
     const passed = switch (case.criterion) {
         .raw_first_draft_veto => result.rawFirstDraftVetoPass(),
-        .reaches_green => result.applied_edit,
+        .reaches_green => result.applied_change_set,
     };
 
     var cr: CaseResult = .{
         .name = case.name,
         .routed = expert_workflow.classify(case.prompt).kind == case.expected_kind,
         .draft_quality = result.draft_quality,
-        .applied = result.applied_edit,
+        .applied = result.applied_change_set,
         .passed_criterion = passed,
         .roundtrips = result.roundtrips,
         .tool_calls = result.tool_call_count,

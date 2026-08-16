@@ -312,7 +312,7 @@ pub const Runner = struct {
             );
             try self.expectEvent(event);
             try self.expectTranscriptItem(expected.index, entry, event.payload_sha256);
-            if (event.kind == .verified_patch or event.kind == .verified_change_set) {
+            if (event.kind == .verified_change_set) {
                 const receipt_digest = try observation.applyReceiptDigest(self.allocator, entry);
                 try self.expectApplyReceipt(expected.index, receipt_digest);
             }

@@ -257,7 +257,7 @@ test "stand-in gate: playbooks call facts first and apply at most one edit last"
         .{ .entry_id = "review", .tools = &.{"workspace_read_file"} },
         .{ .entry_id = "add-route", .tools = &.{ "workspace_read_file", "zts_expert_verify_paths", "zts_expert_modules", "propose_change_set" } },
         .{ .entry_id = "add-env", .tools = &.{ "zts_expert_modules", "workspace_read_file", "propose_change_set" } },
-        .{ .entry_id = "write-test", .tools = &.{ "workspace_read_file", "zts_expert_verify_paths", "workspace_read_file", "propose_change_set" } },
+        .{ .entry_id = "write-test", .tools = &.{ "workspace_read_file", "zts_expert_verify_paths", "workspace_read_file" } },
         .{ .entry_id = "fix", .tools = &.{ "zts_expert_verify_paths", "pi_repair_plan", "workspace_read_file", "propose_change_set" } },
         .{
             .entry_id = "fill-hole",
@@ -308,6 +308,7 @@ test "stand-in gate: playbooks call facts first and apply at most one edit last"
         switch (entry.action) {
             .answer => try testing.expectEqual(@as(usize, 0), propose_change_sets),
             .change_set => try testing.expectEqual(@as(usize, 1), propose_change_sets),
+            .blocked => try testing.expectEqual(@as(usize, 0), propose_change_sets),
         }
 
         var arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -324,6 +325,7 @@ test "stand-in gate: playbooks call facts first and apply at most one edit last"
             .final_text => |text| switch (entry.action) {
                 .answer => try testing.expect(text.len >= 120),
                 .change_set => try testing.expect(text.len > 0),
+                .blocked => try testing.expect(std.mem.indexOf(u8, text, "source-only") != null),
             },
             else => return error.ExpectedFinalText,
         }

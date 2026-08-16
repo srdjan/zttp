@@ -85,7 +85,7 @@ test "stand-in add-route playbook applies an edit through the real OpenAI agent 
     );
     try server.stop();
 
-    try testing.expect(result.applied_edit);
+    try testing.expect(result.applied_change_set);
     try testing.expect(result.rawFirstDraftVetoPass());
     try testing.expect(result.firstAttemptGreen());
     try testing.expectEqual(expert_workflow.TaskKind.route_add, result.workflow_kind);
@@ -157,7 +157,7 @@ fn runSeedArm(
 // failed tool result, the retry nudge, and the second draft that follows were
 // reachable only by spending live model turns.
 //
-// The negative observables carry these gates. `applied_edit` alone is satisfied
+// The negative observables carry these gates. `applied_change_set` alone is satisfied
 // by a first draft that simply passed, which is precisely the arm not running.
 test "stand-in seeded arm: a rejected draft is repaired on the retry round trip" {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
@@ -173,7 +173,7 @@ test "stand-in seeded arm: a rejected draft is repaired on the retry round trip"
         try testing.expect(!run.result.rawFirstDraftVetoPass());
         try testing.expect(!run.result.firstAttemptGreen());
         try testing.expectEqual(@as(u32, 1), run.result.veto_retry_count);
-        try testing.expect(run.result.applied_edit);
+        try testing.expect(run.result.applied_change_set);
         try testing.expectEqualStrings(seed.good_draft, run.on_disk);
     }
 
@@ -195,15 +195,15 @@ test "stand-in seeded arm: compiler repair lands without a model retry" {
 
         const run = try runSeedArm(allocator, seed);
         try testing.expect(!run.result.rawFirstDraftVetoPass());
-        try testing.expect(run.result.firstAttemptGreen());
         try testing.expectEqual(codegen_types.DraftQuality.compiler_repaired, run.result.draft_quality);
+        try testing.expect(run.result.firstAttemptGreen());
         try testing.expect(run.result.compiler_authored_apply);
         try testing.expectEqual(@as(u32, 0), run.result.veto_retry_count);
         // Four loopback wire turns gather facts and submit the bad draft. The
         // compiler repair lands immediately after that rejection, with no fifth
         // turn asking a model to redraft it.
         try testing.expectEqual(@as(u8, 4), run.result.roundtrips);
-        try testing.expect(run.result.applied_edit);
+        try testing.expect(run.result.applied_change_set);
         try testing.expectEqualStrings(seed.good_draft, run.on_disk);
     }
 
@@ -231,7 +231,7 @@ test "stand-in seeded arm: a canonical slip is salvaged without a retry" {
         try testing.expect(run.result.firstAttemptGreen());
         try testing.expectEqual(codegen_types.DraftQuality.normalized, run.result.draft_quality);
         try testing.expectEqual(@as(u32, 0), run.result.veto_retry_count);
-        try testing.expect(run.result.applied_edit);
+        try testing.expect(run.result.applied_change_set);
 
         // The exact claim, not "different from these bytes". A gate asserting
         // only difference passes when the arm submits a clean draft and no
@@ -309,7 +309,7 @@ test "stand-in seeded arm: a foreign source gets a miss, not a scripted defect" 
     );
     try server.stop();
 
-    try testing.expect(!result.applied_edit);
+    try testing.expect(!result.applied_change_set);
     const handler_path = try tmp.childPath(allocator, "handler.ts");
     const on_disk = try zts.file_io.readFile(allocator, handler_path, 1024 * 1024);
     try testing.expectEqualStrings(foreign, on_disk);
@@ -397,7 +397,7 @@ test "stand-in hole arm: two one-fill turns compose through publisher and apply"
         entry.paraphrases[0],
         options,
     );
-    try testing.expect(first.applied_edit);
+    try testing.expect(first.applied_change_set);
     try testing.expectEqual(@as(u8, 4), first.roundtrips);
 
     const handler_path = try tmp.childPath(allocator, "handler.ts");
@@ -414,7 +414,7 @@ test "stand-in hole arm: two one-fill turns compose through publisher and apply"
         options,
     );
     try server.stop();
-    try testing.expect(second.applied_edit);
+    try testing.expect(second.applied_change_set);
     try testing.expectEqual(@as(u8, 4), second.roundtrips);
 
     const after_second = try zts.file_io.readFile(allocator, handler_path, 1024 * 1024);
@@ -488,7 +488,7 @@ test "stand-in miss returns its marker through the real loop and applies no edit
     );
     try server.stop();
 
-    try testing.expect(!result.applied_edit);
+    try testing.expect(!result.applied_change_set);
     try testing.expect(transcriptContains(&session.transcript, "[standin-miss]"));
     const handler_path = try tmp.childPath(allocator, "handler.ts");
     try testing.expectError(error.FileNotFound, zts.file_io.readFile(allocator, handler_path, 1024));
@@ -565,7 +565,7 @@ test "stand-in gate: out-of-range asks have zero false fires through the real lo
 
         const handler_path = try tmp.childPath(allocator, "handler.ts");
         const current = try zts.file_io.readFile(allocator, handler_path, 1024 * 1024);
-        if (result.applied_edit or !std.mem.eql(u8, current, original) or
+        if (result.applied_change_set or !std.mem.eql(u8, current, original) or
             !transcriptContains(&session.transcript, "[standin-miss]"))
         {
             false_fires += 1;
@@ -579,7 +579,7 @@ test "stand-in gate: out-of-range asks have zero false fires through the real lo
     try testing.expectEqual(@as(usize, 0), false_fires);
 }
 
-test "stand-in gate: every edit draft passes the real parser and compiler veto" {
+test "stand-in gate: every source edit draft passes the real parser and compiler veto" {
     const DraftCase = struct {
         ask: []const u8,
         step_index: usize,
@@ -588,12 +588,6 @@ test "stand-in gate: every edit draft passes the real parser and compiler veto" 
         must_contain: []const u8,
     };
     const normal_handler = "function handler(req: Request): Response {\n    return Response.json({ ok: true });\n}\n";
-    const jsonl_tests =
-        \\{"type":"test","name":"GET / returns 200"}
-        \\{"type":"request","method":"GET","url":"/","headers":{},"body":null}
-        \\{"type":"expect","status":200,"bodyContains":"ok"}
-        \\
-    ;
     const violation_handler =
         \\import { validateJson } from "zttp:validate";
         \\
@@ -618,13 +612,6 @@ test "stand-in gate: every edit draft passes the real parser and compiler veto" 
             .source = normal_handler,
             .file = "handler.ts",
             .must_contain = "env(\"APP_NAME\")",
-        },
-        .{
-            .ask = "Write test case for the successful health response",
-            .step_index = 3,
-            .source = jsonl_tests,
-            .file = "handler.test.jsonl",
-            .must_contain = "GET /health returns 200",
         },
         .{
             .ask = "Fix the ZTS300 compiler error in handler.ts",
@@ -660,9 +647,6 @@ test "stand-in gate: every edit draft passes the real parser and compiler veto" 
                 defer veto_result.deinit(allocator);
                 try testing.expect(veto_result.outcome.ok);
                 try testing.expectEqual(@as(u32, 0), veto_result.report.new);
-                if (std.mem.endsWith(u8, case.file, ".jsonl")) {
-                    try expectValidJsonLines(allocator, edit.content);
-                }
             },
             else => return error.ExpectedEdit,
         }
@@ -958,13 +942,13 @@ fn runCoverageCase(allocator: std.mem.Allocator, entry: range.Entry) !void {
     const handler = try zts.file_io.readFile(allocator, handler_path, 1024 * 1024);
     switch (entry.action) {
         .answer => {
-            try testing.expect(!result.applied_edit);
+            try testing.expect(!result.applied_change_set);
             try testing.expectEqualStrings(original_handler, handler);
             try testing.expect(transcriptContains(&session.transcript, "deterministic playbook server"));
             try testing.expect(transcriptTextBytes(&session.transcript) >= 120);
         },
         .change_set => {
-            try testing.expect(result.applied_edit);
+            try testing.expect(result.applied_change_set);
             try testing.expect(result.rawFirstDraftVetoPass());
             try testing.expect(result.firstAttemptGreen());
             if (std.mem.eql(u8, entry.id, "add-route")) {
@@ -972,12 +956,6 @@ fn runCoverageCase(allocator: std.mem.Allocator, entry: range.Entry) !void {
             } else if (std.mem.eql(u8, entry.id, "add-env")) {
                 try testing.expect(std.mem.indexOf(u8, handler, "from \"zttp:env\"") != null);
                 try testing.expect(std.mem.indexOf(u8, handler, "env(\"APP_NAME\")") != null);
-            } else if (std.mem.eql(u8, entry.id, "write-test")) {
-                try testing.expectEqualStrings(original_handler, handler);
-                const tests_path = try tmp.childPath(allocator, "handler.test.jsonl");
-                const tests = try zts.file_io.readFile(allocator, tests_path, 1024 * 1024);
-                try testing.expect(std.mem.indexOf(u8, tests, "GET /health returns 200") != null);
-                try expectValidJsonLines(allocator, tests);
             } else if (std.mem.eql(u8, entry.id, "fix")) {
                 try testing.expect(std.mem.indexOf(u8, handler, "if (!result.ok)") != null);
                 try testing.expect(std.mem.indexOf(u8, handler, "result.error") != null);
@@ -988,6 +966,14 @@ fn runCoverageCase(allocator: std.mem.Allocator, entry: range.Entry) !void {
             } else {
                 return error.UncheckedRangeEntry;
             }
+        },
+        .blocked => {
+            try testing.expect(!result.applied_change_set);
+            try testing.expectEqualStrings(original_handler, handler);
+            try testing.expect(transcriptContains(&session.transcript, "source-only"));
+            const tests_path = try tmp.childPath(allocator, "handler.test.jsonl");
+            const tests = try zts.file_io.readFile(allocator, tests_path, 1024 * 1024);
+            try testing.expectEqualStrings(original_tests, tests);
         },
     }
 }

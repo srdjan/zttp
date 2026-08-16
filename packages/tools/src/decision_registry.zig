@@ -7,8 +7,8 @@
 //! says a structured unsupported result names "allowed next actions" and never a
 //! guessed replacement.
 //!
-//! What exists in this compiler to publish: the refusals `apply_repair` and
-//! `simulate_edit` answer with. Each already carried a stable wire string chosen
+//! What exists in this compiler to publish: the refusals returned by edit
+//! simulation and canonicalization. Each already carried a stable wire string chosen
 //! at its own emission site, which is the shape this registry replaces - the
 //! `Id` enum below is the wire vocabulary, so a refusal that names a kind the
 //! registry does not carry no longer compiles.

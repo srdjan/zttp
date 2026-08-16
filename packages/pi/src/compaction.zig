@@ -223,7 +223,7 @@ fn entryTokens(entry: *const transcript_mod.OwnedEntry) u64 {
         .tool_result => |result| jsonStringPayloadBytes(result.tool_use_id) +|
             jsonStringPayloadBytes(result.tool_name) +|
             jsonStringPayloadBytes(result.llm_text) +| 40,
-        .proof_card, .diagnostic_box, .verified_patch, .verified_change_set => 0,
+        .proof_card, .diagnostic_box, .verified_change_set => 0,
     };
     return context_budget.estimateBytes(bytes);
 }
@@ -341,7 +341,6 @@ fn serializeEntry(
         .system_note => |body| try writeSection(writer, "Internal context", body),
         .proof_card => |message| try writeSection(writer, "Verification: proof", message.llm_text),
         .diagnostic_box => |message| try writeSection(writer, "Verification: diagnostics", message.llm_text),
-        .verified_patch => |message| try writeSection(writer, "Verification: applied patch", message.llm_text),
         .verified_change_set => |message| try writeSection(writer, "Verification: applied change set", message.llm_text),
         .assistant_tool_use => |calls| {
             try writer.writeAll("[Assistant tool calls]:\n");
@@ -450,10 +449,6 @@ pub fn extractFileOps(
     for (transcript.entries.items[start..end]) |entry| switch (entry) {
         .tool_result => |result| if (result.ok) {
             try successful_calls.put(allocator, result.tool_use_id, {});
-        },
-        .verified_patch => |message| if (message.ui_payload) |payload| switch (payload) {
-            .verified_patch => |patch| try addUnique(allocator, &modified, patch.file),
-            else => {},
         },
         .verified_change_set => |message| if (message.ui_payload) |payload| switch (payload) {
             .verified_change_set => |receipt| for (receipt.changes) |change| {
@@ -1001,31 +996,44 @@ test "extractFileOps is cumulative unique and deterministic" {
         .ok = !std.mem.eql(u8, call.id, "e1"),
         .llm_text = "ok",
     } });
-    const patch_source: ui_payload_mod.UiPayload = .{ .verified_patch = .{
+    var changes = [_]ui_payload_mod.VerifiedChange{.{
         .file = @constCast("m.ts"),
-        .policy_hash = @constCast("a" ** 64),
-        .applied_at_unix_ms = 1,
-        .stats = .{ .total = 0, .new = 0 },
+        .baseline_state = @constCast("absent"),
+        .baseline_sha256 = @constCast("a" ** 64),
+        .candidate_sha256 = @constCast("b" ** 64),
         .before = null,
         .after = @constCast("x"),
         .unified_diff = @constCast(""),
-        .hunks = &.{},
-        .violations = &.{},
-        .before_properties = null,
-        .after_properties = null,
-        .prove = null,
-        .system = null,
-        .rule_citations = &.{},
-        .post_apply_ok = true,
-        .post_apply_summary = null,
+    }};
+    var roots = [_][]u8{@constCast("m.ts")};
+    var proof_inputs = [_]ui_payload_mod.VerifiedProofInput{.{
+        .path = @constCast("m.ts"),
+        .state = @constCast("absent"),
+        .sha256 = @constCast("a" ** 64),
+    }};
+    const receipt_source: ui_payload_mod.UiPayload = .{ .verified_change_set = .{
+        .proof_schema_version = @constCast("test-proof-v1"),
+        .transaction_id = @constCast("c" ** 64),
+        .compiler_version = @constCast("test"),
+        .profile_id = @constCast("test"),
+        .policy_hash = @constCast("d" ** 64),
+        .grammar_hash = @constCast("e" ** 64),
+        .semantics_hash = @constCast("f" ** 64),
+        .diagnostic_catalog_hash = @constCast("1" ** 64),
+        .read_set_digest = @constCast("2" ** 64),
+        .applied_at_unix_ms = 1,
+        .system_proven = false,
+        .proof_roots = &roots,
+        .changes = &changes,
+        .proof_inputs = &proof_inputs,
     } };
-    const patch_text = try testing.allocator.dupe(u8, "verified: m.ts");
-    errdefer testing.allocator.free(patch_text);
-    var patch_payload = try patch_source.clone(testing.allocator);
-    errdefer patch_payload.deinit(testing.allocator);
-    try tr.entries.append(testing.allocator, .{ .verified_patch = .{
-        .llm_text = patch_text,
-        .ui_payload = patch_payload,
+    const receipt_text = try testing.allocator.dupe(u8, "verified change set: m.ts");
+    errdefer testing.allocator.free(receipt_text);
+    var receipt_payload = try receipt_source.clone(testing.allocator);
+    errdefer receipt_payload.deinit(testing.allocator);
+    try tr.entries.append(testing.allocator, .{ .verified_change_set = .{
+        .llm_text = receipt_text,
+        .ui_payload = receipt_payload,
     } });
     var ops = try extractFileOps(testing.allocator, &tr, 0, tr.len());
     defer ops.deinit(testing.allocator);

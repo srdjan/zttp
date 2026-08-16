@@ -4,7 +4,7 @@
 
 Range version: `step-6-v2`
 
-Range hash: `f9bf6fe35859e38db01c5dfe13f510493b759bf40dbb276b51716af7d75fb4a0`
+Range hash: `4073fceb29543e5d8956e747ff2cef9d33b7938c51af0d8b584e49ed40361046`
 
 The deterministic playbook server supports the entries below. Use `zig build zttp-standin -- --range` to print this document.
 
@@ -53,8 +53,8 @@ This server is a scripted responder, not a model. Its drafts and defect seeds ar
 ## `write-test`
 
 - Task kind: `test_generation`
-- Result: workspace edit
-- Behavior: Read the handler and its JSONL tests, then propose one complete test-file edit.
+- Result: unsupported test-file write
+- Behavior: Read the handler and its JSONL tests, then refuse the write because the aggregate transaction accepts only source files.
 - Canonical prompt: Write test case for the successful health response
 - Example paraphrases:
   - Add test coverage for the successful health response

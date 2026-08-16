@@ -7,8 +7,14 @@ const session_paths = @import("session/paths.zig");
 const protocol_identity = @import("session/protocol_identity.zig");
 const tool_registry = @import("tool_registry.zig");
 const models_registry = @import("providers/models.zig");
-const proof_enrichment = @import("proof_enrichment.zig");
 const ui_payload = @import("ui_payload.zig");
+const turn = @import("turn.zig");
+const change_set = @import("change_set.zig");
+const workspace_snapshot = @import("workspace_snapshot.zig");
+const aggregate_proof = @import("aggregate_proof.zig");
+const change_transaction = @import("change_transaction.zig");
+const change_set_receipt = @import("change_set_receipt.zig");
+const TextBuffer = @import("text_buffer.zig").TextBuffer;
 
 const marker_relpath = ".zttp/proof-passport-session";
 const dir_marker_relpath = ".zttp/proof-passport-session-dir";
@@ -104,7 +110,7 @@ pub fn appendStep(
     switch (options.step) {
         .baseline => try appendBaseline(allocator, info.events_path),
         .witness => try appendWitness(allocator, info.events_path, options.handler_path),
-        .repaired => try appendVerifiedPatch(allocator, info.events_path, options),
+        .repaired => try appendVerifiedChangeSet(allocator, info.events_path, options),
         .deployed => try appendDeployed(allocator, info.events_path, options.deploy_artifact),
     }
     return info;
@@ -153,32 +159,69 @@ fn appendWitness(
     } });
 }
 
-fn appendVerifiedPatch(
+fn appendVerifiedChangeSet(
     allocator: std.mem.Allocator,
     events_path: []const u8,
     options: AppendOptions,
 ) !void {
     const before = options.before orelse return error.MissingBeforeSource;
     const after = options.after orelse return error.MissingAfterSource;
-    const policy_hash = zts.policyHash();
-
-    var patch = try proof_enrichment.buildVerifiedPatchPayload(allocator, .{
-        .workspace_root = options.workspace_root,
-        .file = options.handler_path,
-        .before = before,
-        .after = after,
-        .policy_hash = policy_hash[0..],
-        .applied_at_unix_ms = nowUnixMs(),
-        .post_apply_ok = true,
-        .post_apply_summary = "demo repair removed the SECRET_KEY response flow",
-        .goal_context = &.{ "no_secret_leakage", "injection_safe" },
+    const relative_path = try std.fs.path.relative(
+        allocator,
+        options.workspace_root,
+        null,
+        options.workspace_root,
+        options.handler_path,
+    );
+    defer allocator.free(relative_path);
+    var lock = try change_transaction.WorkspaceLock.acquire(allocator, options.workspace_root);
+    defer lock.deinit();
+    _ = try change_transaction.recoverAllLocked(allocator, &lock, options.workspace_root);
+    var prepared = try change_set.prepare(allocator, options.workspace_root, turn.ChangeSet{
+        .file = relative_path,
+        .content = after,
     });
-    defer patch.deinit(allocator);
+    defer prepared.deinit(allocator);
+    if (prepared.changes[0].baseline.bytes() == null or
+        !std.mem.eql(u8, prepared.changes[0].baseline.bytes().?, before))
+    {
+        return error.DemoRepairBaselineChanged;
+    }
+    var snapshot = try workspace_snapshot.Snapshot.capture(allocator, &prepared);
+    defer snapshot.deinit(allocator);
+    var result = try aggregate_proof.prove(allocator, &prepared, &snapshot);
+    defer result.deinit(allocator);
+    const proof = switch (result) {
+        .rejected => return error.DemoRepairRejected,
+        .accepted => |*accepted| accepted,
+    };
+    var payload: ui_payload.UiPayload = .{ .verified_change_set = try change_set_receipt.buildWithProvenance(
+        allocator,
+        &prepared,
+        &snapshot,
+        proof,
+        nowUnixMs(),
+        .{ .goal_context = &.{ "no_secret_leakage", "injection_safe" } },
+    ) };
+    defer payload.deinit(allocator);
+    var receipt_json = TextBuffer.init(allocator);
+    defer receipt_json.deinit();
+    try ui_payload.writeJson(receipt_json.writer(), payload);
+    var committed = try change_transaction.commitLocked(
+        allocator,
+        &lock,
+        &prepared,
+        &snapshot,
+        proof,
+        .{ .receipt_json = receipt_json.written() },
+    );
+    defer committed.deinit(allocator);
 
-    try session_events.appendEntryEvent(allocator, events_path, try session_events.nextEntryId(allocator, events_path), null, .{ .verified_patch = .{
-        .llm_text = "Verified patch: repaired src/handler.tsx and restored no_secret_leakage.",
-        .ui_payload = .{ .verified_patch = patch },
+    try session_events.appendEntryEvent(allocator, events_path, try session_events.nextEntryId(allocator, events_path), null, .{ .verified_change_set = .{
+        .llm_text = "Verified change set: repaired src/handler.tsx and restored no_secret_leakage.",
+        .ui_payload = payload,
     } });
+    try change_transaction.markReceiptedLocked(allocator, &lock, options.workspace_root, &proof.proof_id);
 }
 
 fn appendDeployed(

@@ -38,7 +38,6 @@ pub const Operation = enum {
     check,
     canonicalize,
     simulate_edit,
-    apply_repair,
     normalize,
     verify,
 };
@@ -113,9 +112,6 @@ pub const operations = [_]OperationSpec{
     .{ .op = .simulate_edit, .status = .implemented, .input_fields = &.{ "file", "repairs" }, .payload_fields = &.{
         "file",              "source_digest",    "ok",          "new_count",
         "preexisting_count", "proposed_content", "diagnostics", "refusal",
-    } },
-    .{ .op = .apply_repair, .status = .implemented, .input_fields = &.{ "file", "repairs" }, .payload_fields = &.{
-        "file", "applied", "source_digest", "module_graph_hash", "refusal",
     } },
     .{ .op = .verify, .status = .implemented, .input_fields = &.{ "file", "properties", "content" }, .payload_fields = &.{
         "file", "source_digest", "results",
@@ -476,18 +472,18 @@ pub fn handleRequest(
         };
     }
 
-    var identity = Identity{
+    const identity = Identity{
         .policy_hash = zts.policyHash(),
         .module_graph_hash = if (graph) |g| g.hash else module_graph_record.contextFreeHash(),
     };
 
-    // Writing is `apply_repair`'s job, and that operation is phase 6. Refusing
-    // here is louder than accepting the flag and ignoring it, which would
+    // Source mutation belongs to Pi's aggregate propose/prove/apply lane.
+    // Refusing here is louder than accepting the flag and ignoring it, which would
     // report a rewrite the client believes was persisted.
     if (op == .normalize and boolField(input, "write")) {
         return writeErrorEnvelope(&json, op_name, identity, .{
             .code = .operation_not_implemented,
-            .message = "normalize does not write in schema version 2; apply the returned canonical_source through apply_repair",
+            .message = "normalize does not write; submit the returned canonical_source through propose_change_set",
             .field = "input.write",
         });
     }
@@ -535,7 +531,6 @@ pub fn handleRequest(
         ),
         .verify => try runVerify(allocator, &payload_json, canonical_root, file_rel.?, input),
         .simulate_edit => try runSimulateEdit(allocator, &payload_json, canonical_root, file_rel.?, identity, input),
-        .apply_repair => try runApplyRepair(allocator, io, &payload_json, canonical_root, file_rel.?, &identity, input),
     };
     // No `else` prong: spec 4.8's operation set is closed and every member is
     // served, so an unhandled one is a compile error rather than a runtime
@@ -1355,196 +1350,6 @@ fn writeModulesPayload(
 ///
 /// `success` is exactly "produced no error diagnostic" (spec 4.8): warnings and
 /// advisories never fail a check.
-/// `apply_repair`: the same repairs as `simulate_edit`, written to disk.
-///
-/// The only operation on this wire that writes, and it is gated four ways
-/// before it does. Every repair's intent must be gradable, meaning the registry
-/// says something discharges it - spec 4.8 permits advertising an exact repair
-/// only under that condition, and applying one unasked is a stronger claim than
-/// advertising it. Each repair is then applied on its own and discharged
-/// against its law on the actual edit, so a rewriter that mis-locates a
-/// construct is caught here rather than trusted. The result runs the veto, and
-/// a single new diagnostic refuses the whole set. The write happens once, at
-/// the end, from a buffer that passed all three.
-///
-/// Atomic by construction: repairs accumulate in memory and any refusal returns
-/// before the file is touched, so a rejected set leaves the file exactly as it
-/// was rather than half-repaired.
-fn runApplyRepair(
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    json: *std.json.Stringify,
-    canonical_root: []const u8,
-    file_rel: []const u8,
-    identity: *Identity,
-    input: ?std.json.Value,
-) !bool {
-    const abs = try std.fs.path.resolve(allocator, &.{ canonical_root, file_rel });
-    defer allocator.free(abs);
-
-    const source = try zts.file_io.readFile(allocator, abs, 10 * 1024 * 1024);
-    defer allocator.free(source);
-    const before_digest = agent_identity.sourceDigest(source);
-
-    var repairs: std.ArrayListUnmanaged(canonicalize.Repair) = .empty;
-    defer repairs.deinit(allocator);
-    if (try parseRepairs(allocator, json, &repairs, file_rel, before_digest, identity.*, input, source)) |refused| return refused;
-
-    if (repairs.items.len == 0) {
-        return try writeApplyRefusalWithGraph(json, file_rel, before_digest, identity.module_graph_hash, .no_repairs, "`repairs` must carry at least one repair");
-    }
-
-    // Gradability first, before anything is applied: refusing early keeps the
-    // reason about the request rather than about a rewrite it should not have
-    // reached.
-    for (repairs.items) |r| {
-        if (!repairPolicy.isGradable(r.intent)) {
-            return try writeApplyRefusalWithGraph(
-                json,
-                file_rel,
-                before_digest,
-                identity.module_graph_hash,
-                .ungraded_intent,
-                "this operation applies only repairs a registered validator discharges; read meta.validators, and use simulate_edit to preview an ungraded one",
-            );
-        }
-    }
-
-    // Validate the set as a set before applying any of it. Every repair's span
-    // is an offset into the file as read, so overlap and staleness are facts
-    // about the request that must be settled against those bytes: applying one
-    // repair first would move the others and turn "these two repairs conflict"
-    // into "this repair is stale", which names the wrong one. The spliced
-    // result is discarded; only the verdict is wanted here.
-    {
-        const dry = canonicalize.applyRepairs(allocator, source, repairs.items) catch |err| switch (err) {
-            error.StaleRepair => return try writeApplyRefusalWithGraph(json, file_rel, before_digest, identity.module_graph_hash, .stale_repair, "a repair's `original` does not match the file as it stands"),
-            error.OverlappingRepairs => return try writeApplyRefusalWithGraph(json, file_rel, before_digest, identity.module_graph_hash, .overlapping_repairs, "two repairs cover the same bytes"),
-            error.RepairOutOfBounds => return try writeApplyRefusalWithGraph(json, file_rel, before_digest, identity.module_graph_hash, .repair_out_of_range, "a repair names a line past the end of the file, or a byte span outside it"),
-            else => return err,
-        };
-        allocator.free(dry);
-    }
-
-    // Then one at a time, each discharged against its own law on the edit it
-    // produced. A bulk apply followed by one check could not say which repair
-    // was wrong, and could not catch two rewrites that are each wrong in ways
-    // that cancel in the final text.
-    //
-    // Descending by start offset, which is what the span vocabulary requires
-    // and the line vocabulary hid: splicing at the highest offset first leaves
-    // every lower span, and every line number below it, exactly where the
-    // client computed it. Ascending order would shift the rest by the length
-    // difference after the first splice.
-    const order = try allocator.alloc(usize, repairs.items.len);
-    defer allocator.free(order);
-    for (order, 0..) |*o, i| o.* = i;
-    for (1..order.len) |i| {
-        var j = i;
-        while (j > 0 and repairs.items[order[j - 1]].start_offset < repairs.items[order[j]].start_offset) : (j -= 1) {
-            const tmp = order[j - 1];
-            order[j - 1] = order[j];
-            order[j] = tmp;
-        }
-    }
-
-    var current = try allocator.dupe(u8, source);
-    defer allocator.free(current);
-    for (order) |idx| {
-        const r = repairs.items[idx];
-        var one = [_]canonicalize.Repair{r};
-        const next = canonicalize.applyRepairs(allocator, current, &one) catch |err| switch (err) {
-            error.StaleRepair => return try writeApplyRefusalWithGraph(json, file_rel, before_digest, identity.module_graph_hash, .stale_repair, "a repair's `original` does not match the file as it stands"),
-            error.OverlappingRepairs => return try writeApplyRefusalWithGraph(json, file_rel, before_digest, identity.module_graph_hash, .overlapping_repairs, "two repairs cover the same bytes"),
-            error.RepairOutOfBounds => return try writeApplyRefusalWithGraph(json, file_rel, before_digest, identity.module_graph_hash, .repair_out_of_range, "a repair names a line past the end of the file, or a byte span outside it"),
-            else => return err,
-        };
-
-        switch (try repairPolicy.validateApplication(allocator, r.intent, current, next, r.line)) {
-            .equivalent => {},
-            .not_law_shape => |why| {
-                allocator.free(next);
-                return try writeApplyRefusalWithGraph(json, file_rel, before_digest, identity.module_graph_hash, .not_law_shape, why);
-            },
-            .no_validator => {
-                allocator.free(next);
-                return try writeApplyRefusalWithGraph(json, file_rel, before_digest, identity.module_graph_hash, .ungraded_intent, "no validator discharges this intent");
-            },
-            // The validator ran and formed no answer. That is its own refusal
-            // code rather than one of the two above: the edit was neither
-            // graded wrong nor left ungraded, and folding it into either would
-            // tell the client something that did not happen.
-            .undecided => |why| {
-                allocator.free(next);
-                return try writeApplyRefusalWithGraph(json, file_rel, before_digest, identity.module_graph_hash, .undecided_equivalence, why);
-            },
-        }
-
-        allocator.free(current);
-        current = next;
-    }
-
-    var verdict = try edit_simulate.simulate(allocator, .{
-        .file = abs,
-        .content = current,
-        .before = source,
-    });
-    defer verdict.deinit(allocator);
-    if (verdict.new_count > 0) {
-        return try writeApplyRefusalWithGraph(
-            json,
-            file_rel,
-            before_digest,
-            identity.module_graph_hash,
-            .veto,
-            "the repaired file carries diagnostics the original did not; nothing was written",
-        );
-    }
-
-    // Derive the identity of the bytes that passed validation before mutating
-    // the file. Imported modules still come from disk, while the entry module
-    // is read from `current`, so an edit that changes imports is represented in
-    // the post-edit graph without a write-first failure window.
-    var post_graph = module_graph_record.buildWithEntrySource(
-        allocator,
-        io,
-        canonical_root,
-        file_rel,
-        current,
-    ) catch |err| switch (err) {
-        error.OutOfMemory => return err,
-        else => return try writeApplyRefusalWithGraph(
-            json,
-            file_rel,
-            before_digest,
-            identity.module_graph_hash,
-            .veto,
-            "the repaired module graph could not be resolved; nothing was written",
-        ),
-    };
-    defer post_graph.deinit(allocator);
-
-    try zts.file_io.writeFile(allocator, abs, current);
-    const after_digest = agent_identity.sourceDigest(current);
-    identity.module_graph_hash = post_graph.hash;
-
-    try json.beginObject();
-    try json.objectField("file");
-    try json.write(file_rel);
-    try json.objectField("applied");
-    try json.write(repairs.items.len);
-    // The digest of what is now on disk, so the client's next request can bind
-    // to the file it just changed rather than the one it read.
-    try json.objectField("source_digest");
-    try json.write(&after_digest);
-    try json.objectField("module_graph_hash");
-    try json.write(&identity.module_graph_hash);
-    try json.objectField("refusal");
-    try json.write(null);
-    try json.endObject();
-    return true;
-}
-
 fn writeApplyRefusalWithGraph(
     json: *std.json.Stringify,
     file_rel: []const u8,
@@ -1582,9 +1387,7 @@ fn writeApplyRefusalWithGraph(
 /// Decode `input.repairs` into line-keyed refactors. Returns a refusal verdict
 /// when the request is malformed, and null when `repairs` is populated.
 ///
-/// Shared by `simulate_edit` and `apply_repair` so the two cannot disagree
-/// about what a repair is - a client that previewed a set and then applied it
-/// must not find the second call parsing it differently.
+/// Shared decoder for the compiler-owned repair candidate vocabulary.
 fn parseRepairs(
     allocator: std.mem.Allocator,
     json: *std.json.Stringify,
@@ -1714,10 +1517,8 @@ fn runSimulateEdit(
 
     var repairs: std.ArrayListUnmanaged(canonicalize.Repair) = .empty;
     defer repairs.deinit(allocator);
-    // Shared with `apply_repair`: a client that previewed a set and then
-    // applied it must not find the second call parsing it differently. The
-    // refusal shape differs by operation, so the parser writes `apply_repair`'s
-    // and simulate maps it - both carry the same `reason` strings.
+    // Canonicalize and simulate share one decoder, so a candidate cannot change
+    // meaning between discovery and proof.
     if (try parseRepairs(allocator, json, &repairs, file_rel, digest, identity, input, source)) |refused| return refused;
 
     if (repairs.items.len == 0) {
@@ -1850,7 +1651,7 @@ fn runVerify(
     // verify cycle without a write. `simulate_edit` hands back
     // `proposed_content`; without this a client could only verify the file it
     // had not repaired yet, and would have to write the candidate to disk
-    // through `apply_repair` just to ask about it.
+    // through a write operation just to ask about it.
     //
     // The digest covers whatever was analyzed, so a verdict about supplied
     // bytes is never bound to the digest of bytes on disk that nobody checked.
@@ -2848,11 +2649,8 @@ test "an unknown operation is a protocol error, not a diagnostic" {
 }
 
 test "spec 4.8's operation set is closed and every member is served" {
-    // This test used to drive `apply_repair` and assert
-    // `operation_not_implemented`, which was the honest answer while three
-    // operations were unbuilt. There are none left, so it asserts the state
-    // that replaced it. A future operation added as `.deferred` fails here and
-    // has to say so deliberately rather than inheriting a passing test.
+    // The compiler protocol is analysis-only. Every published member must be
+    // served; source mutation belongs to Pi's aggregate transaction lane.
     //
     // The deferred branch in `handleRequest` stays: it is what such an
     // operation would take, and the sibling test below pins that a deferred row
@@ -3040,15 +2838,9 @@ test "a non-string expected value is malformed" {
 }
 
 test "the guard runs before the operation does any work" {
-    // A stale request never reaches the code that would act on it. The example
-    // is `apply_repair` on purpose: it is the one operation that writes, so
-    // "the guard runs first" is the difference between a refusal and a file
-    // changed on the strength of a policy the client no longer has.
-    //
-    // The file exists and carries a real, applicable repair, so the only thing
-    // standing between the request and a write is the guard. Asserting the file
-    // is byte-identical afterwards is the part that matters; the error code
-    // alone would not distinguish "refused" from "wrote, then refused".
+    // A stale request never reaches operation dispatch. This repair is
+    // deliberately unbound, so a dispatch-first implementation would report
+    // malformed_repair instead of the required identity mismatch.
     const a = testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -3057,7 +2849,7 @@ test "the guard runs before the operation does any work" {
     defer a.free(root);
 
     const req = try std.fmt.allocPrint(a,
-        \\{{"schema_version":2,"operation":"apply_repair","project_root":"{s}","input":{{"file":"h.ts","repairs":[{{"intent":"replace_let_with_const","line":6,"original":"    let name = \"world\";","replacement":"    const name = \"world\";"}}]}},
+        \\{{"schema_version":2,"operation":"simulate_edit","project_root":"{s}","input":{{"file":"h.ts","repairs":[{{"intent":"replace_let_with_const","line":6,"original":"    let name = \"world\";","replacement":"    const name = \"world\";"}}]}},
         \\ "expected":{{"policy_hash":"0000000000000000000000000000000000000000000000000000000000000000"}}}}
     , .{root});
     defer a.free(req);
@@ -3072,6 +2864,27 @@ test "the guard runs before the operation does any work" {
     );
 
     const on_disk = try tmp.dir.readFileAlloc(testing.io, "h.ts", a, .limited(4096));
+    defer a.free(on_disk);
+    try testing.expectEqualStrings(let_handler, on_disk);
+}
+
+test "apply_repair is outside the direct-cut operation vocabulary" {
+    const a = testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "h.ts", .data = let_handler });
+    const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", a);
+    defer a.free(root);
+    const request = try std.fmt.allocPrint(a,
+        \\{{"schema_version":2,"operation":"apply_repair","project_root":"{s}","input":{{"file":"h.ts","repairs":[]}}}}
+    , .{root});
+    defer a.free(request);
+    const output = try respond(a, request);
+    defer a.free(output);
+    var parsed = try parse(a, output);
+    defer parsed.deinit();
+    try testing.expectEqualStrings("unknown_operation", parsed.value.object.get("error").?.object.get("code").?.string);
+    const on_disk = try tmp.dir.readFileAlloc(testing.io, "h.ts", a, .unlimited);
     defer a.free(on_disk);
     try testing.expectEqualStrings(let_handler, on_disk);
 }
@@ -3628,141 +3441,6 @@ test "repair_available is true for the one intent with an implemented validator"
     try testing.expect(found);
 }
 
-test "apply_repair writes a graded repair and rebinds the digest" {
-    const a = testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const source =
-        \\import { marker } from "./util.ts";
-        \\
-        \\
-        \\structural Guardrails<T> = Proof<T, "state_isolated">;
-        \\
-        \\export function handler(req: Request): Guardrails<Response> {
-        \\    let name = "world";
-        \\    return Response.json({ hello: name, marker });
-        \\}
-        \\
-    ;
-    try tmp.dir.writeFile(testing.io, .{ .sub_path = "h.ts", .data = source });
-    try tmp.dir.writeFile(testing.io, .{ .sub_path = "util.ts", .data = "export const marker = 1;\n" });
-    const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", a);
-    defer a.free(root);
-
-    var before_graph = try module_graph_record.build(a, testing.io, root, "h.ts");
-    const before_hash = before_graph.hash;
-    before_graph.deinit(a);
-    try testing.expect(!std.mem.eql(u8, &before_hash, &module_graph_record.contextFreeHash()));
-
-    const req = try std.fmt.allocPrint(a,
-        \\{{"schema_version":2,"operation":"apply_repair","project_root":"{s}","input":{{"file":"h.ts","repairs":[{{"intent":"replace_let_with_const","line":7,"original":"    let name = \"world\";","replacement":"    const name = \"world\";"}}]}}}}
-    , .{root});
-    defer a.free(req);
-    const out = try respondWithCurrentRepairBindings(a, req);
-    defer a.free(out);
-
-    var parsed = try parse(a, out);
-    defer parsed.deinit();
-    try testing.expect(parsed.value.object.get("success").?.bool);
-    const payload = parsed.value.object.get("payload").?.object;
-    try testing.expectEqual(@as(i64, 1), payload.get("applied").?.integer);
-    try testing.expect(payload.get("refusal").? == .null);
-
-    const on_disk = try tmp.dir.readFileAlloc(testing.io, "h.ts", a, .limited(4096));
-    defer a.free(on_disk);
-    try testing.expect(std.mem.indexOf(u8, on_disk, "const name") != null);
-    try testing.expect(std.mem.indexOf(u8, on_disk, "let name") == null);
-
-    // The digest names what is now on disk, so the client's next request binds
-    // to the file it just changed rather than the one it read.
-    const digest = agent_identity.sourceDigest(on_disk);
-    try testing.expectEqualStrings(&digest, payload.get("source_digest").?.string);
-
-    var after_graph = try module_graph_record.build(a, testing.io, root, "h.ts");
-    defer after_graph.deinit(a);
-    try testing.expect(!std.mem.eql(u8, &before_hash, &after_graph.hash));
-    try testing.expect(!std.mem.eql(u8, &after_graph.hash, &module_graph_record.contextFreeHash()));
-    try testing.expectEqualStrings(&after_graph.hash, payload.get("module_graph_hash").?.string);
-    try testing.expectEqualStrings(
-        parsed.value.object.get("module_graph_hash").?.string,
-        payload.get("module_graph_hash").?.string,
-    );
-
-    const followup_req = try std.fmt.allocPrint(a,
-        \\{{"schema_version":2,"operation":"modules","project_root":"{s}","input":{{"file":"h.ts"}},"expected":{{"module_graph_hash":"{s}"}}}}
-    , .{ root, payload.get("module_graph_hash").?.string });
-    defer a.free(followup_req);
-    const followup_out = try respond(a, followup_req);
-    defer a.free(followup_out);
-    var followup = try parse(a, followup_out);
-    defer followup.deinit();
-    try testing.expect(followup.value.object.get("success").?.bool);
-}
-
-test "apply_repair accepts a repair keyed on a byte span" {
-    // The span is what a repair is keyed on now. `line` still works - the test
-    // above sends one, and a field cannot be removed inside schema version 2 -
-    // but a client that took `span` off a `canonicalize` candidate must be able
-    // to hand it straight back, which is the round trip the two operations
-    // exist to make possible.
-    const a = testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.writeFile(testing.io, .{ .sub_path = "h.ts", .data = let_handler });
-    const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", a);
-    defer a.free(root);
-
-    const target = "    let name = \"world\";";
-    const start = std.mem.indexOf(u8, let_handler, target).?;
-
-    const req = try std.fmt.allocPrint(a,
-        \\{{"schema_version":2,"operation":"apply_repair","project_root":"{s}","input":{{"file":"h.ts","repairs":[{{"intent":"replace_let_with_const","span":{{"start":{d},"end":{d}}},"original":"    let name = \"world\";","replacement":"    const name = \"world\";"}}]}}}}
-    , .{ root, start, start + target.len });
-    defer a.free(req);
-    const out = try respondWithCurrentRepairBindings(a, req);
-    defer a.free(out);
-
-    var parsed = try parse(a, out);
-    defer parsed.deinit();
-    try testing.expect(parsed.value.object.get("success").?.bool);
-    const payload = parsed.value.object.get("payload").?.object;
-    try testing.expectEqual(@as(i64, 1), payload.get("applied").?.integer);
-
-    const on_disk = try tmp.dir.readFileAlloc(testing.io, "h.ts", a, .limited(4096));
-    defer a.free(on_disk);
-    try testing.expect(std.mem.indexOf(u8, on_disk, "const name") != null);
-    try testing.expect(std.mem.indexOf(u8, on_disk, "let name") == null);
-}
-
-test "apply_repair refuses a span outside the file" {
-    // The floor under the test above: a span the client made up is refused
-    // rather than clamped, so "the span form works" is not satisfied by an
-    // applier that ignores the span it was given.
-    const a = testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.writeFile(testing.io, .{ .sub_path = "h.ts", .data = let_handler });
-    const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", a);
-    defer a.free(root);
-
-    const req = try std.fmt.allocPrint(a,
-        \\{{"schema_version":2,"operation":"apply_repair","project_root":"{s}","input":{{"file":"h.ts","repairs":[{{"intent":"replace_let_with_const","span":{{"start":10,"end":99999}},"original":"    let name = \"world\";","replacement":"    const name = \"world\";"}}]}}}}
-    , .{root});
-    defer a.free(req);
-    const out = try respondWithCurrentRepairBindings(a, req);
-    defer a.free(out);
-
-    var parsed = try parse(a, out);
-    defer parsed.deinit();
-    const payload = parsed.value.object.get("payload").?.object;
-    try testing.expectEqual(@as(i64, 0), payload.get("applied").?.integer);
-    try testing.expectEqualStrings("repair_out_of_range", payload.get("refusal").?.object.get("reason").?.string);
-
-    const on_disk = try tmp.dir.readFileAlloc(testing.io, "h.ts", a, .limited(4096));
-    defer a.free(on_disk);
-    try testing.expectEqualStrings(let_handler, on_disk);
-}
-
 test "canonicalize publishes the span a repair is keyed on" {
     // The producing end of the round trip: a candidate carries the span, and
     // the span names exactly the bytes its `original` snapshot copied. A
@@ -3796,7 +3474,7 @@ test "canonicalize publishes the span a repair is keyed on" {
     }
 }
 
-test "a bound canonicalize candidate round-trips unchanged through simulate and apply" {
+test "a bound canonicalize candidate round-trips unchanged through simulate" {
     const a = testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -3835,25 +3513,16 @@ test "a bound canonicalize candidate round-trips unchanged through simulate and 
     defer a.free(simulate_out);
     var simulated = try parse(a, simulate_out);
     defer simulated.deinit();
-    try testing.expect(simulated.value.object.get("payload").?.object.get("ok").?.bool);
-
-    const apply_req = try std.fmt.allocPrint(a,
-        \\{{"schema_version":2,"operation":"apply_repair","project_root":"{s}","input":{{"file":"h.ts","repairs":[{f}]}}}}
-    , .{ root, std.json.fmt(candidate, .{}) });
-    defer a.free(apply_req);
-    const apply_out = try respond(a, apply_req);
-    defer a.free(apply_out);
-    var applied = try parse(a, apply_out);
-    defer applied.deinit();
-    try testing.expect(applied.value.object.get("success").?.bool);
+    const simulated_payload = simulated.value.object.get("payload").?.object;
+    try testing.expect(simulated_payload.get("ok").?.bool);
+    try testing.expect(std.mem.indexOf(u8, simulated_payload.get("proposed_content").?.string, "const name") != null);
 
     const on_disk = try tmp.dir.readFileAlloc(testing.io, "h.ts", a, .limited(4096));
     defer a.free(on_disk);
-    try testing.expect(std.mem.indexOf(u8, on_disk, "const name") != null);
-    try testing.expect(std.mem.indexOf(u8, on_disk, "let name") == null);
+    try testing.expectEqualStrings(let_handler, on_disk);
 }
 
-test "simulate and apply refuse an unbound repair" {
+test "simulate refuses an unbound repair" {
     const a = testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -3861,7 +3530,8 @@ test "simulate and apply refuse an unbound repair" {
     const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", a);
     defer a.free(root);
 
-    for ([_][]const u8{ "simulate_edit", "apply_repair" }) |operation| {
+    {
+        const operation = "simulate_edit";
         const req = try std.fmt.allocPrint(a,
             \\{{"schema_version":2,"operation":"{s}","project_root":"{s}","input":{{"file":"h.ts","repairs":[{{"intent":"replace_let_with_const","line":6,"original":"    let name = \"world\";","replacement":"    const name = \"world\";"}}]}}}}
         , .{ operation, root });
@@ -3881,7 +3551,7 @@ test "simulate and apply refuse an unbound repair" {
     try testing.expectEqualStrings(let_handler, on_disk);
 }
 
-test "simulate and apply refuse every stale repair binding" {
+test "simulate refuses every stale repair binding" {
     const a = testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -3901,7 +3571,8 @@ test "simulate and apply refuse every stale repair binding" {
             stale_field,
         );
         defer a.free(repair);
-        for ([_][]const u8{ "simulate_edit", "apply_repair" }) |operation| {
+        {
+            const operation = "simulate_edit";
             const req = try std.fmt.allocPrint(a,
                 \\{{"schema_version":2,"operation":"{s}","project_root":"{s}","input":{{"file":"h.ts","repairs":[{s}]}}}}
             , .{ operation, root, repair });
@@ -3922,7 +3593,7 @@ test "simulate and apply refuse every stale repair binding" {
     try testing.expectEqualStrings(let_handler, on_disk);
 }
 
-test "simulate and apply refuse a mixed-binding batch atomically" {
+test "simulate refuses a mixed-binding batch atomically" {
     const a = testing.allocator;
     const source =
         \\
@@ -3947,7 +3618,8 @@ test "simulate and apply refuse a mixed-binding batch atomically" {
     const second = try testRepairJson(a, "replace_let_with_const", 7, "    let second = \"b\";", "    const second = \"b\";", binding, .profile_id);
     defer a.free(second);
 
-    for ([_][]const u8{ "simulate_edit", "apply_repair" }) |operation| {
+    {
+        const operation = "simulate_edit";
         const req = try std.fmt.allocPrint(a,
             \\{{"schema_version":2,"operation":"{s}","project_root":"{s}","input":{{"file":"h.ts","repairs":[{s},{s}]}}}}
         , .{ operation, root, first, second });
@@ -3965,141 +3637,6 @@ test "simulate and apply refuse a mixed-binding batch atomically" {
     const on_disk = try tmp.dir.readFileAlloc(testing.io, "h.ts", a, .limited(4096));
     defer a.free(on_disk);
     try testing.expectEqualStrings(source, on_disk);
-}
-
-test "apply_repair refuses an ungraded intent without touching the file" {
-    // The gate that separates this operation from `simulate_edit`. Applying a
-    // rewrite unasked is a stronger claim than advertising it, so only an
-    // intent a registered validator discharges may be written.
-    // `add_trailing_return` is correctly ungradable - it exists to change what
-    // the program does - and must never be auto-applied.
-    const a = testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.writeFile(testing.io, .{ .sub_path = "h.ts", .data = let_handler });
-    const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", a);
-    defer a.free(root);
-
-    const req = try std.fmt.allocPrint(a,
-        \\{{"schema_version":2,"operation":"apply_repair","project_root":"{s}","input":{{"file":"h.ts","repairs":[{{"intent":"add_trailing_return","line":6,"original":"    let name = \"world\";","replacement":"    return Response.json({{}});"}}]}}}}
-    , .{root});
-    defer a.free(req);
-    const out = try respondWithCurrentRepairBindings(a, req);
-    defer a.free(out);
-
-    var parsed = try parse(a, out);
-    defer parsed.deinit();
-    const payload = parsed.value.object.get("payload").?.object;
-    try testing.expectEqual(@as(i64, 0), payload.get("applied").?.integer);
-    try testing.expectEqualStrings("ungraded_intent", payload.get("refusal").?.object.get("reason").?.string);
-
-    const on_disk = try tmp.dir.readFileAlloc(testing.io, "h.ts", a, .limited(4096));
-    defer a.free(on_disk);
-    try testing.expectEqualStrings(let_handler, on_disk);
-}
-
-test "apply_repair is atomic: a rejected set leaves the file untouched" {
-    // Two repairs, the first applicable and the second stale. Repairs
-    // accumulate in memory and any refusal returns before the file is touched,
-    // so the file must not come back half-repaired - which is the failure a
-    // client cannot recover from, because it no longer matches either the
-    // digest it read or the one it expected.
-    const a = testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.writeFile(testing.io, .{ .sub_path = "h.ts", .data = let_handler });
-    const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", a);
-    defer a.free(root);
-
-    const req = try std.fmt.allocPrint(a,
-        \\{{"schema_version":2,"operation":"apply_repair","project_root":"{s}","input":{{"file":"h.ts","repairs":[{{"intent":"replace_let_with_const","line":6,"original":"    let name = \"world\";","replacement":"    const name = \"world\";"}},{{"intent":"replace_let_with_const","line":7,"original":"    let other = 1;","replacement":"    const other = 1;"}}]}}}}
-    , .{root});
-    defer a.free(req);
-    const out = try respondWithCurrentRepairBindings(a, req);
-    defer a.free(out);
-
-    var parsed = try parse(a, out);
-    defer parsed.deinit();
-    const payload = parsed.value.object.get("payload").?.object;
-    try testing.expectEqual(@as(i64, 0), payload.get("applied").?.integer);
-    try testing.expect(payload.get("refusal").? == .object);
-
-    const on_disk = try tmp.dir.readFileAlloc(testing.io, "h.ts", a, .limited(4096));
-    defer a.free(on_disk);
-    try testing.expectEqualStrings(let_handler, on_disk);
-
-    // The refusal's own digest has to be the digest of what is on disk. Byte
-    // equality above proves the file did not move; this proves the response did
-    // not lie about it, which is the field a client rebinds from and the one
-    // thing a half-applied write would make wrong.
-    const reported = payload.get("source_digest").?.string;
-    const actual = agent_identity.sourceDigest(on_disk);
-    try testing.expectEqualStrings(&actual, reported);
-}
-
-test "apply_repair refuses an overlapping set and writes nothing" {
-    // The refusal exists in the apply path and no test reached it through the
-    // wire until now. Two repairs on the same line cover the same bytes, so
-    // which one applies is undefined - the set is refused whole.
-    const a = testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.writeFile(testing.io, .{ .sub_path = "h.ts", .data = let_handler });
-    const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", a);
-    defer a.free(root);
-
-    const req = try std.fmt.allocPrint(a,
-        \\{{"schema_version":2,"operation":"apply_repair","project_root":"{s}","input":{{"file":"h.ts","repairs":[{{"intent":"replace_let_with_const","line":6,"original":"    let name = \"world\";","replacement":"    const name = \"world\";"}},{{"intent":"replace_let_with_const","line":6,"original":"    let name = \"world\";","replacement":"    const name = \"earth\";"}}]}}}}
-    , .{root});
-    defer a.free(req);
-    const out = try respondWithCurrentRepairBindings(a, req);
-    defer a.free(out);
-
-    var parsed = try parse(a, out);
-    defer parsed.deinit();
-    const payload = parsed.value.object.get("payload").?.object;
-    try testing.expectEqual(@as(i64, 0), payload.get("applied").?.integer);
-    try testing.expectEqualStrings(
-        "overlapping_repairs",
-        payload.get("refusal").?.object.get("reason").?.string,
-    );
-
-    const on_disk = try tmp.dir.readFileAlloc(testing.io, "h.ts", a, .limited(4096));
-    defer a.free(on_disk);
-    try testing.expectEqualStrings(let_handler, on_disk);
-    const reported = payload.get("source_digest").?.string;
-    const actual = agent_identity.sourceDigest(on_disk);
-    try testing.expectEqualStrings(&actual, reported);
-}
-
-test "apply_repair refuses an edit its own law does not discharge" {
-    // The discharge runs on the actual edit, not on the intent name. A repair
-    // that claims `replace_let_with_const` and rewrites the line to something
-    // else is caught here rather than trusted, which is why the validator
-    // re-derives independently instead of calling the rewriter.
-    const a = testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.writeFile(testing.io, .{ .sub_path = "h.ts", .data = let_handler });
-    const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", a);
-    defer a.free(root);
-
-    const req = try std.fmt.allocPrint(a,
-        \\{{"schema_version":2,"operation":"apply_repair","project_root":"{s}","input":{{"file":"h.ts","repairs":[{{"intent":"replace_let_with_const","line":6,"original":"    let name = \"world\";","replacement":"    const name = \"attacker\";"}}]}}}}
-    , .{root});
-    defer a.free(req);
-    const out = try respondWithCurrentRepairBindings(a, req);
-    defer a.free(out);
-
-    var parsed = try parse(a, out);
-    defer parsed.deinit();
-    const payload = parsed.value.object.get("payload").?.object;
-    try testing.expectEqual(@as(i64, 0), payload.get("applied").?.integer);
-    try testing.expectEqualStrings("not_law_shape", payload.get("refusal").?.object.get("reason").?.string);
-
-    const on_disk = try tmp.dir.readFileAlloc(testing.io, "h.ts", a, .limited(4096));
-    defer a.free(on_disk);
-    try testing.expectEqualStrings(let_handler, on_disk);
 }
 
 test "simulate_edit round-trips a canonicalize candidate" {
@@ -4223,8 +3760,7 @@ test "an external client completes propose, simulate, verify over the wire" {
 
     // 3. Verify the candidate itself. Without the `content` override the client
     // could only ask about the file it has not repaired, and would have to
-    // write the candidate to disk to ask about it - which is `apply_repair`'s
-    // job and still deferred.
+    // write the candidate to disk merely to ask about it.
     const verify_req = try std.fmt.allocPrint(a,
         \\{{"schema_version":2,"operation":"verify","project_root":"{s}","input":{{"file":"h.ts","properties":["state_isolated","canonical"],"content":{f}}}}}
     , .{ root, std.json.fmt(sim_payload.get("proposed_content").?.string, .{}) });
@@ -4677,7 +4213,7 @@ test "normalize with write true is refused, not silently ignored" {
     const err = parsed.value.object.get("error").?.object;
     try testing.expectEqualStrings("operation_not_implemented", err.get("code").?.string);
     try testing.expectEqualStrings("input.write", err.get("field").?.string);
-    try testing.expect(std.mem.indexOf(u8, err.get("message").?.string, "apply_repair") != null);
+    try testing.expect(std.mem.indexOf(u8, err.get("message").?.string, "propose_change_set") != null);
 
     const on_disk = try tmp.dir.readFileAlloc(testing.io, "h.ts", a, .unlimited);
     defer a.free(on_disk);
@@ -4889,7 +4425,7 @@ test "a refusal on the wire carries a published kind and its next action" {
     // next action beside it has to be the registry's.
     const a = testing.allocator;
     const req =
-        \\{"schema_version":2,"operation":"apply_repair","project_root":".","input":{"file":"packages/tools/tests/fixtures/contract/plain_ts.ts","repairs":[]}}
+        \\{"schema_version":2,"operation":"simulate_edit","project_root":".","input":{"file":"packages/tools/tests/fixtures/contract/plain_ts.ts","repairs":[]}}
     ;
     const out = try respond(a, req);
     defer a.free(out);
@@ -4907,12 +4443,9 @@ test "a refusal on the wire carries a published kind and its next action" {
     };
     try testing.expectEqualStrings("no_repairs", reason);
     try testing.expectEqualStrings(@tagName(row.next_action), refusal.get("next_action").?.string);
-    // A malformed request is not evidence the file moved, and the wire says so.
     try testing.expectEqualStrings("fix_the_request", refusal.get("next_action").?.string);
     const envelope_hash = parsed.value.object.get("module_graph_hash").?.string;
-    const payload_hash = parsed.value.object.get("payload").?.object.get("module_graph_hash").?.string;
-    try testing.expectEqualStrings(envelope_hash, payload_hash);
-    try testing.expect(!std.mem.eql(u8, payload_hash, &module_graph_record.contextFreeHash()));
+    try testing.expect(!std.mem.eql(u8, envelope_hash, &module_graph_record.contextFreeHash()));
 }
 
 test "every admitted surface form has an example, and every example names one" {

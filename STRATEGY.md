@@ -101,8 +101,10 @@ What holds today, by construction: the single fenced write path; the veto with
 canonicalize-and-salvage; the model-free repair lane; the autoloop with rollback on
 regression; replayable counterexamples; and registry hashes that bind every agent
 response to the exact rule, idiom, and restriction set in force. The wire protocol's
-three agent verbs (`verify`, `simulate_edit`, `apply_repair`) ship, so an outside client
-completes a propose, simulate, verify cycle with no in-process access. Capability
+proof operations (`verify` and `simulate_edit`) ship, so an outside client completes a
+propose, simulate, verify cycle with no in-process access. PI's aggregate change-set
+transaction is the only source-write authority: it proves the simultaneous overlay,
+checks the complete proof read set, and records one crash-consistent receipt. Capability
 ceilings are declared per export rather than per module. First-draft pass, median
 round-trips, and intent pass are published per row and dated in
 [docs/convergence.md](docs/convergence.md), each carrying the corpus version and policy

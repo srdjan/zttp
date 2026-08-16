@@ -532,7 +532,7 @@ fn renderLedgerGuidance(allocator: std.mem.Allocator, summary: session_events.Se
         try w.writeAll("This session so far:\n");
         try w.print("  turns:             {d}\n", .{summary.turn_count});
         try w.print("  model round-trips: {d}\n", .{summary.total_roundtrips});
-        try w.print("  verified edits:    {d}\n", .{summary.verified_patch_count});
+        try w.print("  verified edits:    {d}\n", .{summary.verified_change_set_count});
         try w.print("  workflow hints:    {d} ({d} high-confidence)\n", .{
             summary.workflow_hint_count,
             summary.high_confidence_workflow_hint_count,
@@ -2173,7 +2173,7 @@ test "renderLedgerGuidance shows live session metrics when turns exist" {
     var res = try renderLedgerGuidance(testing.allocator, .{
         .turn_count = 3,
         .total_roundtrips = 7,
-        .verified_patch_count = 1,
+        .verified_change_set_count = 1,
         .reached_proof = true,
         .round_trips_to_first_green = 5,
         .proven_properties = 12,

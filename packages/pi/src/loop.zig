@@ -217,7 +217,7 @@ pub const TurnResult = struct {
     /// True when this turn applied a compiler-verified edit. A plain-text turn
     /// (e.g. a clarifying question) ends `.approved` without applying one, so
     /// metrics key "handler advanced" on this, not on `end_reason`.
-    applied_edit: bool = false,
+    applied_change_set: bool = false,
     /// Proof guarantees discharged / tracked on the applied edit, counted at the
     /// veto (see PropertiesSnapshot.guaranteeCounts). Both 0 when no edit applied.
     proven_guarantees: u32 = 0,
@@ -247,7 +247,7 @@ pub const TurnResult = struct {
 };
 
 const TurnProgress = struct {
-    applied_edit: bool = false,
+    applied_change_set: bool = false,
     applied_proven: u32 = 0,
     applied_tracked: u32 = 0,
     draft_quality: codegen_types.DraftQuality = .not_green,
@@ -659,7 +659,7 @@ pub fn runTurnWith(
                                     if (state.denied) {
                                         return finishTurn(&machine, turn_usage, .approval_denied, model_roundtrips, workflow_hint, workflow_hint_injected, tool_calls_used, progress);
                                     }
-                                    progress.applied_edit = state.applied;
+                                    progress.applied_change_set = state.applied;
                                     progress.applied_proven = state.proven;
                                     progress.applied_tracked = state.tracked;
                                     progress.compiler_authored_apply = true;
@@ -714,7 +714,7 @@ pub fn runTurnWith(
                             if (state.denied) {
                                 return finishTurn(&machine, turn_usage, .approval_denied, model_roundtrips, workflow_hint, workflow_hint_injected, tool_calls_used, progress);
                             }
-                            progress.applied_edit = state.applied;
+                            progress.applied_change_set = state.applied;
                             progress.applied_proven = state.proven;
                             progress.applied_tracked = state.tracked;
                         }
@@ -869,7 +869,7 @@ fn finishTurn(
         .usage = usage,
         .end_reason = reason,
         .roundtrips = model_roundtrips,
-        .applied_edit = progress.applied_edit,
+        .applied_change_set = progress.applied_change_set,
         .proven_guarantees = progress.applied_proven,
         .tracked_guarantees = progress.applied_tracked,
         .workflow_kind = workflow_hint.kind,
@@ -1233,7 +1233,7 @@ test "veto failure triggers model-free compiler-authored apply" {
     // The first draft (unchecked result) failed veto; the deterministic lane
     // authored a fix that passed the binding re-veto and landed model-free -
     // no retry, no second model call.
-    try testing.expect(result.applied_edit);
+    try testing.expect(result.applied_change_set);
     try testing.expectEqual(@as(usize, 1), client.index); // second reply never requested
     try testing.expect(result.compiler_authored_apply);
     try testing.expectEqual(@as(u32, 0), result.veto_retry_count);
@@ -1538,7 +1538,7 @@ test "coordinated two-file change proves once approves once and commits one rece
         "add a helper and use it",
         .{ .workspace_root = workspace_root, .approval_fn = approval.callback() },
     );
-    try testing.expect(result.applied_edit);
+    try testing.expect(result.applied_change_set);
     try testing.expectEqual(@as(u32, 1), approval.calls);
     try testing.expect(approval.saw_expected_change_count);
     var receipt_count: usize = 0;
@@ -1760,7 +1760,7 @@ test "workspace change during approval fails closed without overwriting concurre
         .{ .workspace_root = workspace_root, .approval_fn = race.callback() },
     );
     try testing.expectEqual(session_events.TurnEndReason.approval_denied, result.end_reason);
-    try testing.expect(!result.applied_edit);
+    try testing.expect(!result.applied_change_set);
     try testing.expect(race.saw_authoritative_before);
     switch (tr.at(tr.len() - 1).*) {
         .system_note => |note| try testing.expect(std.mem.indexOf(u8, note, "proof input changed") != null),

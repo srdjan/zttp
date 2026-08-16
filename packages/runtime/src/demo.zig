@@ -161,9 +161,8 @@ pub fn applyAction(allocator: std.mem.Allocator, config: Config, action: Action)
             return .witness;
         },
         .repair_bug => {
-            const before = zts.file_io.readFile(allocator, config.handler_path, 1024 * 1024) catch try allocator.dupe(u8, bug_source);
+            const before = try zts.file_io.readFile(allocator, config.handler_path, 1024 * 1024);
             defer allocator.free(before);
-            try zts.file_io.writeFile(allocator, config.handler_path, repaired_source);
             var info = try pi_app.demo_passport.appendStep(allocator, .{
                 .workspace_root = config.workspace_root,
                 .handler_path = config.handler_path,
@@ -922,6 +921,69 @@ test "demo temp workspace cleanup removes owned directory" {
     try std.Io.Dir.access(std.Io.Dir.cwd(), io, root, .{});
     ws.cleanup(allocator);
     try std.testing.expectError(error.FileNotFound, std.Io.Dir.access(std.Io.Dir.cwd(), io, root, .{}));
+}
+
+test "demo repair commits one receipted aggregate change set" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const old_cwd = try proof_ledger.chdirTmpForTest(&tmp);
+    defer allocator.free(old_cwd);
+    defer std.Io.Threaded.chdir(old_cwd) catch {};
+
+    const sessions_dir = try std.fs.path.resolve(allocator, &.{"sessions"});
+    defer allocator.free(sessions_dir);
+    const sessions_z = try allocator.dupeZ(u8, sessions_dir);
+    defer allocator.free(sessions_z);
+    _ = setenv("ZTTP_SESSIONS_DIR", sessions_z.ptr, 1);
+    defer _ = unsetenv("ZTTP_SESSIONS_DIR");
+
+    var ws = try createWorkspace(allocator, "proof-demo", 4567);
+    defer ws.deinit(allocator);
+    const handler_path = try std.fs.path.join(allocator, &.{ ws.root, "src", "handler.tsx" });
+    defer allocator.free(handler_path);
+    const config = Config{ .workspace_root = ws.root, .handler_path = handler_path };
+
+    try std.testing.expectEqual(Step.witness, try applyAction(allocator, config, .introduce_bug));
+    const unsafe_source = try zts.file_io.readFile(allocator, handler_path, 1024 * 1024);
+    defer allocator.free(unsafe_source);
+    try std.testing.expectEqualStrings(bug_source, unsafe_source);
+
+    try std.testing.expectEqual(Step.repaired, try applyAction(allocator, config, .repair_bug));
+    const repaired = try zts.file_io.readFile(allocator, handler_path, 1024 * 1024);
+    defer allocator.free(repaired);
+    try std.testing.expectEqualStrings(repaired_source, repaired);
+
+    var passport = try pi_app.demo_passport.ensureSession(allocator, ws.root);
+    defer passport.deinit(allocator);
+    const events = try zts.file_io.readFile(allocator, passport.events_path, 4 * 1024 * 1024);
+    defer allocator.free(events);
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        std.mem.count(u8, events, "\"k\":\"verified_change_set\""),
+    );
+
+    const transaction_root = try std.fs.path.resolve(allocator, &.{ ws.root, ".zttp", "change-sets" });
+    defer allocator.free(transaction_root);
+    var io_backend = shared.threadedIo(allocator);
+    defer io_backend.deinit();
+    const io = io_backend.io();
+    var directory = try std.Io.Dir.cwd().openDir(io, transaction_root, .{ .iterate = true });
+    defer directory.close(io);
+    var iterator = directory.iterate();
+    var transactions: usize = 0;
+    while (try iterator.next(io)) |entry| {
+        if (entry.kind != .directory) return error.UnexpectedTransactionEntry;
+        transactions += 1;
+        const transaction_dir = try std.fs.path.join(allocator, &.{ transaction_root, entry.name });
+        defer allocator.free(transaction_dir);
+        for ([_][]const u8{ "committed", "receipted", "receipt.json" }) |name| {
+            const path = try std.fs.path.join(allocator, &.{ transaction_dir, name });
+            defer allocator.free(path);
+            try std.testing.expect(zts.file_io.fileExists(allocator, path));
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 1), transactions);
 }
 
 test "demo passport export writes offline files" {

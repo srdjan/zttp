@@ -253,12 +253,15 @@ fn renderTestGeneration(allocator: std.mem.Allocator, parsed: request.ParsedRequ
             break :blk try renderToolCall(allocator, 2, "workspace_read_file", args);
         },
         3 => blk: {
-            const source = parsed.source orelse break :blk try renderUnreadableSource(allocator, "write-test");
-            const proposed = try synthesizeTestFile(allocator, source);
-            defer allocator.free(proposed);
-            const args = try renderApplyArgs(allocator, test_file, proposed);
-            defer allocator.free(args);
-            break :blk try renderToolCall(allocator, 3, "propose_change_set", args);
+            if (parsed.source == null) break :blk try renderUnreadableSource(allocator, "write-test");
+            break :blk try renderText(
+                allocator,
+                "The requested JSONL test change was not proposed. The aggregate " ++
+                    "`propose_change_set` transaction is source-only and accepts complete " ++
+                    "`.ts` or `.tsx` replacements; it cannot authorize a `.jsonl` write. " ++
+                    "The existing test file was left unchanged. Add a dedicated " ++
+                    "compiler-owned JSONL validator and transaction proof before enabling this write.",
+            );
         },
         else => try renderText(
             allocator,
@@ -512,7 +515,7 @@ fn renderViolationFix(allocator: std.mem.Allocator, parsed: request.ParsedReques
 }
 
 pub const EnvTransform = union(enum) {
-    edit: []u8,
+    change_set: []u8,
     unsupported_handler,
     conflicting_env_import,
     existing_read,
@@ -543,31 +546,11 @@ pub fn synthesizeEnvFeature(
     try out.appendSlice(allocator, source[0 .. handler_open + 1]);
     try out.print(allocator, "\n    env(\"{s}\");", .{variable});
     try out.appendSlice(allocator, source[handler_open + 1 ..]);
-    return .{ .edit = try out.toOwnedSlice(allocator) };
-}
-
-fn synthesizeTestFile(allocator: std.mem.Allocator, source: []const u8) ![]u8 {
-    const test_case =
-        \\{"type":"test","name":"GET /health returns 200"}
-        \\{"type":"request","method":"GET","url":"/health","headers":{},"body":null}
-        \\{"type":"expect","status":200,"bodyContains":"ok"}
-        \\
-    ;
-    if (std.mem.indexOf(u8, source, "GET /health returns 200") != null) {
-        return allocator.dupe(u8, source);
-    }
-
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(allocator);
-    try out.appendSlice(allocator, source);
-    if (source.len > 0 and source[source.len - 1] != '\n') try out.append(allocator, '\n');
-    if (source.len > 0) try out.append(allocator, '\n');
-    try out.appendSlice(allocator, test_case);
-    return try out.toOwnedSlice(allocator);
+    return .{ .change_set = try out.toOwnedSlice(allocator) };
 }
 
 const ViolationTransform = union(enum) {
-    edit: []u8,
+    change_set: []u8,
     unsupported_seed,
     already_guarded,
 };
@@ -597,7 +580,7 @@ fn synthesizeViolationFix(allocator: std.mem.Allocator, source: []const u8) !Vio
         .{ indentation, indentation, indentation },
     );
     try out.appendSlice(allocator, source[line_start + 1 ..]);
-    return .{ .edit = try out.toOwnedSlice(allocator) };
+    return .{ .change_set = try out.toOwnedSlice(allocator) };
 }
 
 /// No read has produced usable bytes for the target file.
@@ -1181,9 +1164,9 @@ fn renderReadArgsAt(allocator: std.mem.Allocator, file: []const u8, offset: usiz
 fn renderVerifyPathsArgs(allocator: std.mem.Allocator, file: []const u8) ![]u8 {
     var buf = TextBuffer.init(allocator);
     defer buf.deinit();
-    try buf.writer().writeAll("{\"paths\":[");
+    try buf.writer().writeAll("{\"file\":");
     try writeJsonString(buf.writer(), file);
-    try buf.writer().writeAll("]}");
+    try buf.writer().writeByte('}');
     return try buf.toOwnedSlice();
 }
 
@@ -1195,11 +1178,11 @@ fn renderApplyArgs(
     var buf = TextBuffer.init(allocator);
     defer buf.deinit();
     const writer = buf.writer();
-    try writer.writeAll("{\"file\":");
+    try writer.writeAll("{\"changes\":[{\"file\":");
     try writeJsonString(writer, file);
     try writer.writeAll(",\"content\":");
     try writeJsonString(writer, content);
-    try writer.writeByte('}');
+    try writer.writeAll("}]}");
     return try buf.toOwnedSlice();
 }
 

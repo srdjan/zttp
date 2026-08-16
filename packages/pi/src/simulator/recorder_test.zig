@@ -592,7 +592,6 @@ test "simulator recorder promotes and replays a complete two-Turn flow" {
                 flow_case.manifest.turns[0].raw_first_draft_veto_pass,
             );
             try testing.expectEqual(@as(?bool, false), flow_case.manifest.turns[0].first_attempt_green);
-            try testing.expectEqual(@as(?bool, null), flow_case.manifest.turns[0].first_draft_veto_pass);
             try testing.expectEqual(@as(usize, 2), flow_case.trace.model_calls.len);
             for (flow_case.trace.model_calls) |checkpoint| {
                 try testing.expect(checkpoint.request_budget != null);

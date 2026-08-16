@@ -23,12 +23,6 @@ pub const DraftQuality = enum {
     pub fn firstAttemptGreen(self: DraftQuality) bool {
         return self != .not_green;
     }
-
-    /// Compatibility meaning of the historical cassette field. It counted
-    /// normalize-on-reject as a first-draft pass but predated Phase B repairs.
-    pub fn legacyFirstDraftVetoPass(self: DraftQuality) bool {
-        return self == .raw_veto_pass or self == .normalized;
-    }
 };
 
 pub const IntentOutcome = enum {
@@ -44,16 +38,14 @@ test "draft quality derives consistent public metrics" {
         quality: DraftQuality,
         raw: bool,
         first_attempt: bool,
-        legacy: bool,
     }{
-        .{ .quality = .not_green, .raw = false, .first_attempt = false, .legacy = false },
-        .{ .quality = .normalized, .raw = false, .first_attempt = true, .legacy = true },
-        .{ .quality = .compiler_repaired, .raw = false, .first_attempt = true, .legacy = false },
-        .{ .quality = .raw_veto_pass, .raw = true, .first_attempt = true, .legacy = true },
+        .{ .quality = .not_green, .raw = false, .first_attempt = false },
+        .{ .quality = .normalized, .raw = false, .first_attempt = true },
+        .{ .quality = .compiler_repaired, .raw = false, .first_attempt = true },
+        .{ .quality = .raw_veto_pass, .raw = true, .first_attempt = true },
     };
     for (cases) |case| {
         try testing.expectEqual(case.raw, case.quality.rawFirstDraftVetoPass());
         try testing.expectEqual(case.first_attempt, case.quality.firstAttemptGreen());
-        try testing.expectEqual(case.legacy, case.quality.legacyFirstDraftVetoPass());
     }
 }

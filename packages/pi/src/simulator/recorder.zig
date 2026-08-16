@@ -239,7 +239,7 @@ pub const Recorder = struct {
                 .kind = observation.transcriptKind(entry),
                 .payload_sha256 = event.payload_sha256,
             });
-            if (event.kind == .verified_patch or event.kind == .verified_change_set) {
+            if (event.kind == .verified_change_set) {
                 const receipt_digest = try observation.applyReceiptDigest(self.allocator(), entry);
                 try self.apply_receipts.append(self.allocator(), .{
                     .index = @intCast(self.apply_receipts.items.len),

@@ -261,10 +261,6 @@ fn emitEntry(allocator: std.mem.Allocator, out: ?*std.Io.Writer, entry: *const t
             .llm_text = body.llm_text,
             .ui_payload = body.ui_payload,
         } }),
-        .verified_patch => |body| try emitRecord(allocator, out, .{ .verified_patch = .{
-            .llm_text = body.llm_text,
-            .ui_payload = body.ui_payload,
-        } }),
         .verified_change_set => |body| try emitRecord(allocator, out, .{ .verified_change_set = .{
             .llm_text = body.llm_text,
             .ui_payload = body.ui_payload,

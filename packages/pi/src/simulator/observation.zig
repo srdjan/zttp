@@ -41,13 +41,12 @@ pub fn eventForEntry(
         .tool_result => .tool_result,
         .proof_card => .proof_card,
         .diagnostic_box => .diagnostic_box,
-        .verified_patch => .verified_patch,
         .verified_change_set => .verified_change_set,
         .system_note => .system_note,
     };
     const payload_sha256 = switch (entry.*) {
         .user_text, .model_text, .system_note => |text| artifact.Sha256Hex.fromBytes(text),
-        .proof_card, .diagnostic_box, .verified_patch, .verified_change_set => |message| artifact.Sha256Hex.fromBytes(message.llm_text),
+        .proof_card, .diagnostic_box, .verified_change_set => |message| artifact.Sha256Hex.fromBytes(message.llm_text),
         .assistant_tool_use => |calls| blk: {
             var canonical = TextBuffer.init(allocator);
             defer canonical.deinit();
@@ -74,7 +73,7 @@ pub fn eventForEntry(
     };
 }
 
-/// Hashes every stable field in the structured verified-patch receipt. The
+/// Hashes every stable field in the structured verified-change-set receipt. The
 /// wall-clock application time is deliberately excluded so a recording can be
 /// replayed later while every semantic and proof-bearing field remains bound.
 pub fn applyReceiptDigest(
@@ -82,10 +81,6 @@ pub fn applyReceiptDigest(
     entry: *const transcript_mod.OwnedEntry,
 ) !artifact.Sha256Hex {
     return switch (entry.*) {
-        .verified_patch => |message| switch (message.ui_payload orelse return error.InvalidApplyReceipt) {
-            .verified_patch => |payload| digestReceiptPayload(allocator, "zttp-apply-receipt-v1", payload),
-            else => return error.InvalidApplyReceipt,
-        },
         .verified_change_set => |message| switch (message.ui_payload orelse return error.InvalidApplyReceipt) {
             .verified_change_set => |payload| digestReceiptPayload(allocator, "zttp-change-set-receipt-v1", payload),
             else => return error.InvalidApplyReceipt,
@@ -125,7 +120,6 @@ pub fn transcriptKind(entry: *const transcript_mod.OwnedEntry) artifact.Transcri
         .tool_result => .tool_result,
         .proof_card => .proof_card,
         .diagnostic_box => .diagnostic_box,
-        .verified_patch => .verified_patch,
         .verified_change_set => .verified_change_set,
         .system_note => .system_note,
     };

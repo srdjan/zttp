@@ -1,16 +1,20 @@
 const std = @import("std");
 const TextBuffer = @import("text_buffer.zig").TextBuffer;
 const zts = @import("zts");
-const proof_enrichment = @import("proof_enrichment.zig");
 const transcript_mod = @import("transcript.zig");
 const ui_payload = @import("ui_payload.zig");
+const turn = @import("turn.zig");
+const change_set = @import("change_set.zig");
+const workspace_snapshot = @import("workspace_snapshot.zig");
+const aggregate_proof = @import("aggregate_proof.zig");
+const change_transaction = @import("change_transaction.zig");
 const session_events = @import("session/events.zig");
 const session_paths = @import("session/paths.zig");
 const reconstructor = @import("session/reconstructor.zig");
 const json_writer = @import("providers/json_writer.zig");
 const tools_common = @import("tools/common.zig");
 
-pub const export_schema_version: u32 = 1;
+pub const export_schema_version: u32 = 2;
 
 pub const ExportMeta = struct {
     workspace_hash: []u8,
@@ -31,12 +35,12 @@ pub const ExportMeta = struct {
     }
 };
 
-pub const LedgerPatch = struct {
+pub const LedgerChangeSet = struct {
     session_id: []u8,
     summary: []u8,
-    payload: ui_payload.VerifiedPatchPayload,
+    payload: ui_payload.VerifiedChangeSetPayload,
 
-    pub fn deinit(self: *LedgerPatch, allocator: std.mem.Allocator) void {
+    pub fn deinit(self: *LedgerChangeSet, allocator: std.mem.Allocator) void {
         allocator.free(self.session_id);
         allocator.free(self.summary);
         self.payload.deinit(allocator);
@@ -50,15 +54,15 @@ pub const LedgerPatch = struct {
 
 pub const ExportBundle = struct {
     meta: ExportMeta,
-    patches: []LedgerPatch,
+    change_sets: []LedgerChangeSet,
 
     pub fn deinit(self: *ExportBundle, allocator: std.mem.Allocator) void {
         self.meta.deinit(allocator);
-        for (self.patches) |*patch| patch.deinit(allocator);
-        allocator.free(self.patches);
+        for (self.change_sets) |*change_set_receipt| change_set_receipt.deinit(allocator);
+        allocator.free(self.change_sets);
         self.* = .{
             .meta = undefined,
-            .patches = &.{},
+            .change_sets = &.{},
         };
     }
 };
@@ -74,7 +78,7 @@ pub const ReplayKind = enum {
 
 pub const ReplayResult = struct {
     kind: ReplayKind,
-    patch_index: usize,
+    change_set_index: usize,
     file: []u8,
     detail: []u8,
 
@@ -83,7 +87,7 @@ pub const ReplayResult = struct {
         allocator.free(self.detail);
         self.* = .{
             .kind = .success,
-            .patch_index = 0,
+            .change_set_index = 0,
             .file = &.{},
             .detail = &.{},
         };
@@ -104,8 +108,8 @@ pub fn exportSessionLedger(
 
     try writeMetaLine(w, bundle.meta);
     try w.writeByte('\n');
-    for (bundle.patches) |patch| {
-        try writePatchLine(w, patch);
+    for (bundle.change_sets) |change_set_receipt| {
+        try writeChangeSetLine(w, change_set_receipt);
         try w.writeByte('\n');
     }
 
@@ -147,8 +151,8 @@ pub fn collectSessionLedger(
     }
     std.mem.reverse(usize, chain.items);
 
-    var patches: std.ArrayList(LedgerPatch) = .empty;
-    defer patches.deinit(allocator);
+    var change_sets: std.ArrayList(LedgerChangeSet) = .empty;
+    defer change_sets.deinit(allocator);
     var seen: std.StringHashMapUnmanaged(void) = .empty;
     defer {
         var it = seen.iterator();
@@ -167,24 +171,23 @@ pub fn collectSessionLedger(
 
         for (transcript.entries.items) |*entry| {
             switch (entry.*) {
-                .verified_patch => |message| {
-                    const patch_payload = if (message.ui_payload) |payload|
+                .verified_change_set => |message| {
+                    const receipt_payload = if (message.ui_payload) |payload|
                         switch (payload) {
-                            .verified_patch => |value| value,
+                            .verified_change_set => |value| value,
                             else => continue,
                         }
                     else
                         continue;
 
-                    const fingerprint = try patchFingerprint(allocator, patch_payload);
-                    defer allocator.free(fingerprint);
+                    const fingerprint = receipt_payload.transaction_id;
                     if (seen.contains(fingerprint)) continue;
                     try seen.put(allocator, try allocator.dupe(u8, fingerprint), {});
 
-                    try patches.append(allocator, .{
+                    try change_sets.append(allocator, .{
                         .session_id = try allocator.dupe(u8, entries[index].session_id),
                         .summary = try allocator.dupe(u8, message.llm_text),
-                        .payload = try patch_payload.clone(allocator),
+                        .payload = try receipt_payload.clone(allocator),
                     });
                 },
                 else => {},
@@ -202,7 +205,7 @@ pub fn collectSessionLedger(
                 null,
             .exported_at_unix_ms = nowUnixMs(),
         },
-        .patches = try patches.toOwnedSlice(allocator),
+        .change_sets = try change_sets.toOwnedSlice(allocator),
     };
 }
 
@@ -219,19 +222,19 @@ pub fn readLedgerFile(
 
     var bundle = ExportBundle{
         .meta = try parseMetaLine(allocator, meta_line),
-        .patches = try allocator.alloc(LedgerPatch, 0),
+        .change_sets = try allocator.alloc(LedgerChangeSet, 0),
     };
     errdefer bundle.deinit(allocator);
 
-    var patches = std.ArrayList(LedgerPatch).empty;
-    defer patches.deinit(allocator);
+    var change_sets = std.ArrayList(LedgerChangeSet).empty;
+    defer change_sets.deinit(allocator);
 
     while (lines.next()) |line| {
         if (line.len == 0) continue;
-        try patches.append(allocator, try parsePatchLine(allocator, line));
+        try change_sets.append(allocator, try parseChangeSetLine(allocator, line));
     }
 
-    bundle.patches = try patches.toOwnedSlice(allocator);
+    bundle.change_sets = try change_sets.toOwnedSlice(allocator);
     return bundle;
 }
 
@@ -240,82 +243,143 @@ pub fn replayBundleInWorkspace(
     workspace_root: []const u8,
     bundle: *const ExportBundle,
 ) !ReplayResult {
-    for (bundle.patches, 0..) |patch, index| {
-        const absolute = try tools_common.resolveInsideWorkspace(allocator, workspace_root, patch.payload.file);
-        defer allocator.free(absolute);
+    var workspace_lock = try change_transaction.WorkspaceLock.acquire(allocator, workspace_root);
+    defer workspace_lock.deinit();
+    _ = try change_transaction.recoverAllLocked(allocator, &workspace_lock, workspace_root);
 
-        const current_before = zts.file_io.readFile(allocator, absolute, 16 * 1024 * 1024) catch |err| switch (err) {
-            error.FileNotFound => null,
-            else => return err,
+    for (bundle.change_sets, 0..) |change_set_receipt, index| {
+        const receipt = change_set_receipt.payload;
+        const primary_file = receipt.changes[0].file;
+        const additional = try allocator.alloc(turn.Change, receipt.changes.len - 1);
+        defer allocator.free(additional);
+        for (receipt.changes[1..], additional) |change, *out| out.* = .{
+            .file = change.file,
+            .content = change.after,
         };
-        defer if (current_before) |before| allocator.free(before);
-
-        if (!optionalStringEqual(current_before, patch.payload.before)) {
-            return .{
-                .kind = .apply_failure,
-                .patch_index = index,
-                .file = try allocator.dupe(u8, patch.payload.file),
-                .detail = try allocator.dupe(u8, "base content does not match stored before snapshot"),
-            };
+        var prepared = change_set.prepare(allocator, workspace_root, .{
+            .file = primary_file,
+            .content = receipt.changes[0].after,
+            .additional = additional,
+        }) catch |err| {
+            return replayFailure(allocator, .apply_failure, index, primary_file, @errorName(err));
+        };
+        defer prepared.deinit(allocator);
+        if (!receiptMatchesBaselines(&prepared, receipt)) {
+            return replayFailure(
+                allocator,
+                .apply_failure,
+                index,
+                primary_file,
+                "current source baselines do not match the receipt",
+            );
         }
 
-        try ensureParentDir(allocator, absolute);
-        try zts.file_io.writeFile(allocator, absolute, patch.payload.after);
+        var snapshot = workspace_snapshot.Snapshot.capture(allocator, &prepared) catch |err| {
+            return replayFailure(allocator, .prove_drift, index, primary_file, @errorName(err));
+        };
+        defer snapshot.deinit(allocator);
+        var result = try aggregate_proof.prove(allocator, &prepared, &snapshot);
+        defer result.deinit(allocator);
+        const proof = switch (result) {
+            .rejected => |rejection| return replayFailure(allocator, .prove_drift, index, primary_file, rejection.message),
+            .accepted => |*accepted| accepted,
+        };
 
-        var analysis = try proof_enrichment.analyzePatch(
+        if (!std.mem.eql(u8, &proof.policy_hash, receipt.policy_hash)) {
+            return replayFailure(allocator, .policy_drift, index, primary_file, "compiler policy identity changed");
+        }
+        if (!receiptMatchesProof(receipt, proof)) {
+            return replayFailure(allocator, .prove_drift, index, primary_file, "aggregate proof identity or read set changed");
+        }
+
+        var receipt_json = TextBuffer.init(allocator);
+        defer receipt_json.deinit();
+        try ui_payload.writeJson(receipt_json.writer(), .{ .verified_change_set = receipt });
+        var committed = change_transaction.commitLocked(
             allocator,
+            &workspace_lock,
+            &prepared,
+            &snapshot,
+            proof,
+            .{ .receipt_json = receipt_json.written() },
+        ) catch |err| {
+            return replayFailure(allocator, .apply_failure, index, primary_file, @errorName(err));
+        };
+        defer committed.deinit(allocator);
+        try change_transaction.markReceiptedLocked(
+            allocator,
+            &workspace_lock,
             workspace_root,
-            patch.payload.file,
-            patch.payload.before,
-            patch.payload.after,
-            null,
+            &proof.proof_id,
         );
-        defer analysis.deinit(allocator);
-
-        const current_hash = zts.policyHash();
-        if (!std.mem.eql(u8, &current_hash, patch.payload.policy_hash)) {
-            return .{
-                .kind = .policy_drift,
-                .patch_index = index,
-                .file = try allocator.dupe(u8, patch.payload.file),
-                .detail = try std.fmt.allocPrint(allocator, "expected {s}, got {s}", .{ patch.payload.policy_hash, &current_hash }),
-            };
-        }
-
-        if (!sameViolationState(analysis, patch.payload)) {
-            return .{
-                .kind = .violation_drift,
-                .patch_index = index,
-                .file = try allocator.dupe(u8, patch.payload.file),
-                .detail = try allocator.dupe(u8, "violation summary or delta set changed"),
-            };
-        }
-
-        if (!sameProveSummary(analysis.prove, patch.payload.prove)) {
-            return .{
-                .kind = .prove_drift,
-                .patch_index = index,
-                .file = try allocator.dupe(u8, patch.payload.file),
-                .detail = try allocator.dupe(u8, "prove verdict changed"),
-            };
-        }
-
-        if (!sameSystemSummary(analysis.system, patch.payload.system)) {
-            return .{
-                .kind = .system_drift,
-                .patch_index = index,
-                .file = try allocator.dupe(u8, patch.payload.file),
-                .detail = try allocator.dupe(u8, "system proof summary changed"),
-            };
-        }
     }
 
     return .{
         .kind = .success,
-        .patch_index = bundle.patches.len,
+        .change_set_index = bundle.change_sets.len,
         .file = try allocator.dupe(u8, ""),
-        .detail = try std.fmt.allocPrint(allocator, "replayed {d} patch(es)", .{bundle.patches.len}),
+        .detail = try std.fmt.allocPrint(allocator, "replayed {d} change set(s)", .{bundle.change_sets.len}),
     };
+}
+
+fn replayFailure(
+    allocator: std.mem.Allocator,
+    kind: ReplayKind,
+    index: usize,
+    file: []const u8,
+    detail: []const u8,
+) !ReplayResult {
+    return .{
+        .kind = kind,
+        .change_set_index = index,
+        .file = try allocator.dupe(u8, file),
+        .detail = try allocator.dupe(u8, detail),
+    };
+}
+
+fn receiptMatchesBaselines(
+    prepared: *const change_set.PreparedChangeSet,
+    receipt: ui_payload.VerifiedChangeSetPayload,
+) bool {
+    if (prepared.changes.len != receipt.changes.len) return false;
+    for (prepared.changes, receipt.changes) |actual, expected| {
+        if (!std.mem.eql(u8, actual.authored_path, expected.file)) return false;
+        const expected_state = if (actual.baseline == .absent) "absent" else "present";
+        if (!std.mem.eql(u8, expected_state, expected.baseline_state)) return false;
+        const digest = std.fmt.bytesToHex(actual.baseline_sha256, .lower);
+        if (!std.mem.eql(u8, &digest, expected.baseline_sha256)) return false;
+        if (!optionalStringEqual(actual.baseline.bytes(), expected.before)) return false;
+        var candidate_digest: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(actual.candidate, &candidate_digest, .{});
+        const candidate_hex = std.fmt.bytesToHex(candidate_digest, .lower);
+        if (!std.mem.eql(u8, &candidate_hex, expected.candidate_sha256)) return false;
+    }
+    return true;
+}
+
+fn receiptMatchesProof(
+    receipt: ui_payload.VerifiedChangeSetPayload,
+    proof: *const aggregate_proof.AggregateProof,
+) bool {
+    const grammar_hash = zts.grammarHash();
+    const semantics_hash = zts.semanticsHash();
+    const diagnostics_hash = zts.diagnosticCatalogHash();
+    if (!std.mem.eql(u8, receipt.proof_schema_version, aggregate_proof.proof_schema_version) or
+        receipt.proof_roots.len != proof.proof_roots.len)
+    {
+        return false;
+    }
+    for (receipt.proof_roots, proof.proof_roots) |expected, actual| {
+        if (!std.mem.eql(u8, expected, actual)) return false;
+    }
+    return std.mem.eql(u8, receipt.transaction_id, &proof.proof_id) and
+        std.mem.eql(u8, receipt.read_set_digest, &proof.read_set_digest) and
+        std.mem.eql(u8, receipt.compiler_version, zts.version.string) and
+        std.mem.eql(u8, receipt.profile_id, zts.GrammarCatalog.profile_id) and
+        std.mem.eql(u8, receipt.grammar_hash, &grammar_hash) and
+        std.mem.eql(u8, receipt.semantics_hash, &semantics_hash) and
+        std.mem.eql(u8, receipt.diagnostic_catalog_hash, &diagnostics_hash) and
+        receipt.system_proven == proof.system_proven;
 }
 
 pub fn replayLedgerOntoRef(
@@ -553,13 +617,13 @@ fn writeMetaLine(writer: *std.Io.Writer, meta: ExportMeta) !void {
     try writer.writeByte('}');
 }
 
-fn writePatchLine(writer: *std.Io.Writer, patch: LedgerPatch) !void {
-    try writer.writeAll("{\"kind\":\"verified_patch\",\"session_id\":");
-    try json_writer.writeString(writer, patch.session_id);
+fn writeChangeSetLine(writer: *std.Io.Writer, receipt: LedgerChangeSet) !void {
+    try writer.writeAll("{\"kind\":\"verified_change_set\",\"session_id\":");
+    try json_writer.writeString(writer, receipt.session_id);
     try writer.writeAll(",\"summary\":");
-    try json_writer.writeString(writer, patch.summary);
+    try json_writer.writeString(writer, receipt.summary);
     try writer.writeAll(",\"payload\":");
-    try ui_payload.writeJson(writer, .{ .verified_patch = patch.payload });
+    try ui_payload.writeJson(writer, .{ .verified_change_set = receipt.payload });
     try writer.writeByte('}');
 }
 
@@ -584,20 +648,20 @@ fn parseMetaLine(allocator: std.mem.Allocator, line: []const u8) !ExportMeta {
     };
 }
 
-fn parsePatchLine(allocator: std.mem.Allocator, line: []const u8) !LedgerPatch {
+fn parseChangeSetLine(allocator: std.mem.Allocator, line: []const u8) !LedgerChangeSet {
     var parsed = std.json.parseFromSlice(std.json.Value, allocator, line, .{}) catch return error.InvalidLedgerFile;
     defer parsed.deinit();
 
     if (parsed.value != .object) return error.InvalidLedgerFile;
     const obj = parsed.value.object;
-    if (!valueIsString(obj.get("kind"), "verified_patch")) return error.InvalidLedgerFile;
+    if (!valueIsString(obj.get("kind"), "verified_change_set")) return error.InvalidLedgerFile;
 
     const payload_val = obj.get("payload") orelse return error.InvalidLedgerFile;
     var payload_union = try ui_payload.parse(allocator, payload_val);
     errdefer payload_union.deinit(allocator);
 
     return switch (payload_union) {
-        .verified_patch => |payload| .{
+        .verified_change_set => |payload| .{
             .session_id = try allocator.dupe(u8, getString(obj, "session_id") orelse return error.InvalidLedgerFile),
             .summary = try allocator.dupe(u8, getString(obj, "summary") orelse return error.InvalidLedgerFile),
             .payload = payload,
@@ -606,98 +670,10 @@ fn parsePatchLine(allocator: std.mem.Allocator, line: []const u8) !LedgerPatch {
     };
 }
 
-fn patchFingerprint(
-    allocator: std.mem.Allocator,
-    patch: ui_payload.VerifiedPatchPayload,
-) ![]u8 {
-    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
-    hasher.update(patch.file);
-    hasher.update("\x00");
-    hasher.update(patch.policy_hash);
-    hasher.update("\x00");
-    if (patch.before) |before| hasher.update(before);
-    hasher.update("\x00");
-    hasher.update(patch.after);
-    hasher.update("\x00");
-    var time_buf: [32]u8 = undefined;
-    const time_text = try std.fmt.bufPrint(&time_buf, "{d}", .{patch.applied_at_unix_ms});
-    hasher.update(time_text);
-    var digest: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
-    hasher.final(&digest);
-    return std.fmt.allocPrint(allocator, "{s}", .{std.fmt.bytesToHex(digest, .lower)});
-}
-
 fn optionalStringEqual(a: ?[]const u8, b: ?[]const u8) bool {
     if (a == null and b == null) return true;
     if (a == null or b == null) return false;
     return std.mem.eql(u8, a.?, b.?);
-}
-
-fn ensureParentDir(allocator: std.mem.Allocator, absolute_path: []const u8) !void {
-    if (std.fs.path.dirname(absolute_path)) |parent| {
-        var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
-        defer io_backend.deinit();
-        try std.Io.Dir.createDirPath(std.Io.Dir.cwd(), io_backend.io(), parent);
-    }
-}
-
-fn sameViolationState(
-    analysis: proof_enrichment.PatchAnalysis,
-    payload: ui_payload.VerifiedPatchPayload,
-) bool {
-    if (analysis.stats.total != payload.stats.total) return false;
-    if (analysis.stats.new != payload.stats.new) return false;
-    if ((analysis.stats.preexisting orelse 0) != (payload.stats.preexisting orelse 0)) return false;
-    if (analysis.violations.len != payload.violations.len) return false;
-    for (analysis.violations, payload.violations) |left, right| {
-        if (!std.mem.eql(u8, left.stable_key, right.stable_key)) return false;
-        if (!std.mem.eql(u8, left.code, right.code)) return false;
-        if (!std.mem.eql(u8, left.severity, right.severity)) return false;
-        if (!std.mem.eql(u8, left.message, right.message)) return false;
-        if (left.line != right.line or left.column != right.column) return false;
-        if (left.introduced_by_patch != right.introduced_by_patch) return false;
-    }
-    return true;
-}
-
-fn sameProveSummary(
-    left: ?ui_payload.ProveSummary,
-    right: ?ui_payload.ProveSummary,
-) bool {
-    if (left == null and right == null) return true;
-    if (left == null or right == null) return false;
-    const a = left.?;
-    const b = right.?;
-    if (!std.mem.eql(u8, a.classification, b.classification)) return false;
-    if (!std.mem.eql(u8, a.proof_level, b.proof_level)) return false;
-    if (!optionalStringEqual(a.counterexample, b.counterexample)) return false;
-    if (a.laws_used.len != b.laws_used.len) return false;
-    for (a.laws_used, b.laws_used) |law_a, law_b| {
-        if (!std.mem.eql(u8, law_a, law_b)) return false;
-    }
-    return true;
-}
-
-fn sameSystemSummary(
-    left: ?ui_payload.SystemProofSummary,
-    right: ?ui_payload.SystemProofSummary,
-) bool {
-    if (left == null and right == null) return true;
-    if (left == null or right == null) return false;
-    const a = left.?;
-    const b = right.?;
-    return std.mem.eql(u8, a.proof_level, b.proof_level) and
-        a.all_links_resolved == b.all_links_resolved and
-        a.all_responses_covered == b.all_responses_covered and
-        a.payload_compatible == b.payload_compatible and
-        a.injection_safe == b.injection_safe and
-        a.no_secret_leakage == b.no_secret_leakage and
-        a.no_credential_leakage == b.no_credential_leakage and
-        a.retry_safe == b.retry_safe and
-        a.fault_covered == b.fault_covered and
-        a.state_isolated == b.state_isolated and
-        a.max_system_io_depth == b.max_system_io_depth and
-        a.dynamic_links == b.dynamic_links;
 }
 
 fn valueIsString(value: ?std.json.Value, expected: []const u8) bool {
@@ -731,9 +707,9 @@ fn nowUnixMs() i64 {
 }
 
 fn printReplayResult(result: ReplayResult) void {
-    const line = std.fmt.allocPrint(std.heap.smp_allocator, "{s}: patch {d} {s} - {s}\n", .{
+    const line = std.fmt.allocPrint(std.heap.smp_allocator, "{s}: change set {d} {s} - {s}\n", .{
         @tagName(result.kind),
-        result.patch_index,
+        result.change_set_index,
         result.file,
         result.detail,
     }) catch return;
@@ -743,7 +719,7 @@ fn printReplayResult(result: ReplayResult) void {
 
 fn printHelp() void {
     const help =
-        \\zttp ledger - export, replay, or aggregate verified_patch ledgers
+        \\zttp ledger - export, replay, or aggregate verified change-set ledgers
         \\
         \\Usage:
         \\  zttp ledger export --session <id> --out <path>
@@ -796,49 +772,82 @@ test "collectSessionLedger exports empty ledger when events file is missing" {
     defer bundle.deinit(testing.allocator);
 
     try testing.expectEqualStrings("sess-fresh", bundle.meta.session_id);
-    try testing.expectEqual(@as(usize, 0), bundle.patches.len);
+    try testing.expectEqual(@as(usize, 0), bundle.change_sets.len);
 }
 
-test "readLedgerFile round-trips exported verified patch payload" {
+fn testLedgerReceipt(
+    allocator: std.mem.Allocator,
+    before: ?[]const u8,
+    after: []const u8,
+    policy_hash: []const u8,
+) !LedgerChangeSet {
+    const before_digest = blk: {
+        const digest = change_set.digestBaseline(before);
+        break :blk std.fmt.bytesToHex(digest, .lower);
+    };
+    const after_digest = blk: {
+        var digest: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(after, &digest, .{});
+        break :blk std.fmt.bytesToHex(digest, .lower);
+    };
+    const baseline_state: []u8 = @constCast(if (before == null) "absent" else "present");
+    var changes = [_]ui_payload.VerifiedChange{.{
+        .file = @constCast("handler.ts"),
+        .baseline_state = baseline_state,
+        .baseline_sha256 = @constCast(&before_digest),
+        .candidate_sha256 = @constCast(&after_digest),
+        .before = if (before) |bytes| @constCast(bytes) else null,
+        .after = @constCast(after),
+        .unified_diff = @constCast(""),
+    }};
+    var roots = [_][]u8{@constCast("handler.ts")};
+    var inputs = [_]ui_payload.VerifiedProofInput{.{
+        .path = @constCast("handler.ts"),
+        .state = baseline_state,
+        .sha256 = @constCast(&before_digest),
+    }};
+    const grammar_hash = zts.grammarHash();
+    const semantics_hash = zts.semanticsHash();
+    const diagnostics_hash = zts.diagnosticCatalogHash();
+    const source = ui_payload.VerifiedChangeSetPayload{
+        .proof_schema_version = @constCast(aggregate_proof.proof_schema_version),
+        .transaction_id = @constCast("a" ** 64),
+        .compiler_version = @constCast(zts.version.string),
+        .profile_id = @constCast(zts.GrammarCatalog.profile_id),
+        .policy_hash = @constCast(policy_hash),
+        .grammar_hash = @constCast(&grammar_hash),
+        .semantics_hash = @constCast(&semantics_hash),
+        .diagnostic_catalog_hash = @constCast(&diagnostics_hash),
+        .read_set_digest = @constCast("b" ** 64),
+        .applied_at_unix_ms = 42,
+        .system_proven = false,
+        .proof_roots = &roots,
+        .changes = &changes,
+        .proof_inputs = &inputs,
+    };
+    var payload = try source.clone(allocator);
+    errdefer payload.deinit(allocator);
+    const session_id = try allocator.dupe(u8, "sess-1");
+    errdefer allocator.free(session_id);
+    const summary = try allocator.dupe(u8, "verified change set: handler.ts");
+    errdefer allocator.free(summary);
+    return .{
+        .session_id = session_id,
+        .summary = summary,
+        .payload = payload,
+    };
+}
+
+test "readLedgerFile round-trips exported verified change-set payload" {
     var tmp = try initTmp(testing.allocator);
     defer tmp.cleanup(testing.allocator);
 
     const path = try tmp.childPath(testing.allocator, "ledger.ndjson");
     defer testing.allocator.free(path);
 
-    const file_copy = try testing.allocator.dupe(u8, "handler.ts");
-    const policy_copy = try testing.allocator.dupe(u8, "a" ** 64);
-    const after_copy = try testing.allocator.dupe(u8, "after");
-    const diff_copy = try testing.allocator.dupe(u8, "@@ -0,0 +1,1 @@\n+after\n");
-    const citations = try testing.allocator.alloc([]u8, 1);
-    citations[0] = try testing.allocator.dupe(u8, "ZTS204");
-    const hunks = try testing.allocator.alloc(ui_payload.DiffHunk, 1);
-    hunks[0] = .{ .old_start = 0, .old_count = 0, .new_start = 1, .new_count = 1 };
-
-    const patch = LedgerPatch{
-        .session_id = try testing.allocator.dupe(u8, "sess-1"),
-        .summary = try testing.allocator.dupe(u8, "verified: handler.ts"),
-        .payload = .{
-            .file = file_copy,
-            .policy_hash = policy_copy,
-            .applied_at_unix_ms = 42,
-            .stats = .{ .total = 0, .new = 0, .preexisting = 0 },
-            .before = null,
-            .after = after_copy,
-            .unified_diff = diff_copy,
-            .hunks = hunks,
-            .violations = try testing.allocator.alloc(ui_payload.ViolationDeltaItem, 0),
-            .before_properties = null,
-            .after_properties = null,
-            .prove = null,
-            .system = null,
-            .rule_citations = citations,
-            .post_apply_ok = true,
-            .post_apply_summary = null,
-        },
-    };
+    const receipt = try testLedgerReceipt(testing.allocator, null, "after", "a" ** 64);
     defer {
-        var owned = patch;
+        var owned = receipt;
         owned.deinit(testing.allocator);
     }
 
@@ -857,7 +866,7 @@ test "readLedgerFile round-trips exported verified patch payload" {
     defer buf.deinit();
     try writeMetaLine(buf.writer(), meta);
     try buf.writer().writeByte('\n');
-    try writePatchLine(buf.writer(), patch);
+    try writeChangeSetLine(buf.writer(), receipt);
     try buf.writer().writeByte('\n');
     try zts.file_io.writeFile(testing.allocator, path, buf.written());
 
@@ -865,9 +874,9 @@ test "readLedgerFile round-trips exported verified patch payload" {
     defer bundle.deinit(testing.allocator);
 
     try testing.expectEqualStrings("sess-1", bundle.meta.session_id);
-    try testing.expectEqual(@as(usize, 1), bundle.patches.len);
-    try testing.expectEqualStrings("handler.ts", bundle.patches[0].payload.file);
-    try testing.expectEqualStrings("ZTS204", bundle.patches[0].payload.rule_citations[0]);
+    try testing.expectEqual(@as(usize, 1), bundle.change_sets.len);
+    try testing.expectEqualStrings("handler.ts", bundle.change_sets[0].payload.changes[0].file);
+    try testing.expectEqualStrings("a" ** 64, bundle.change_sets[0].payload.transaction_id);
 }
 
 test "replayBundleInWorkspace detects policy drift" {
@@ -878,29 +887,13 @@ test "replayBundleInWorkspace detects policy drift" {
     defer testing.allocator.free(file_path);
     try zts.file_io.writeFile(testing.allocator, file_path, "function handler(req: Request): Response { return Response.json({ ok: true }); }");
 
-    const patches = try testing.allocator.alloc(LedgerPatch, 1);
-    patches[0] = .{
-        .session_id = try testing.allocator.dupe(u8, "sess-1"),
-        .summary = try testing.allocator.dupe(u8, "verified: handler.ts"),
-        .payload = .{
-            .file = try testing.allocator.dupe(u8, "handler.ts"),
-            .policy_hash = try testing.allocator.dupe(u8, "b" ** 64),
-            .applied_at_unix_ms = 1,
-            .stats = .{ .total = 0, .new = 0, .preexisting = 0 },
-            .before = try testing.allocator.dupe(u8, "function handler(req: Request): Response { return Response.json({ ok: true }); }"),
-            .after = try testing.allocator.dupe(u8, "function handler(req: Request): Response { return Response.json({ ok: true }); }"),
-            .unified_diff = try testing.allocator.alloc(u8, 0),
-            .hunks = try testing.allocator.alloc(ui_payload.DiffHunk, 0),
-            .violations = try testing.allocator.alloc(ui_payload.ViolationDeltaItem, 0),
-            .before_properties = null,
-            .after_properties = null,
-            .prove = null,
-            .system = null,
-            .rule_citations = try testing.allocator.alloc([]u8, 0),
-            .post_apply_ok = true,
-            .post_apply_summary = null,
-        },
-    };
+    const change_sets = try testing.allocator.alloc(LedgerChangeSet, 1);
+    change_sets[0] = try testLedgerReceipt(
+        testing.allocator,
+        "function handler(req: Request): Response { return Response.json({ ok: true }); }",
+        "function handler(req: Request): Response { return Response.json({ ok: false }); }",
+        "b" ** 64,
+    );
     var bundle = ExportBundle{
         .meta = .{
             .workspace_hash = try testing.allocator.dupe(u8, "h" ** 64),
@@ -908,7 +901,7 @@ test "replayBundleInWorkspace detects policy drift" {
             .parent_session_id = null,
             .exported_at_unix_ms = 1,
         },
-        .patches = patches,
+        .change_sets = change_sets,
     };
     defer bundle.deinit(testing.allocator);
 
