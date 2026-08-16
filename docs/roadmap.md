@@ -806,12 +806,14 @@ Recorded so they are not proposed again:
   assume a decidable check; stretching them to fuzzy goals would break rollback
   semantics.
 
-## The zts-advanced-1 Language Program
+## The Advanced ZTS Language Program
 
-Implement the `zts-advanced-1` language profile incrementally on the existing
-engine, keeping `scripts/verify.sh` green at every phase boundary. The source
+Implement the advanced language incrementally on the existing engine, keeping
+`scripts/verify.sh` green at every phase boundary. The implemented source
+identities are `zts-model-1` for core `.ts` and `zts-tsx-1` for the lowering
+frontend. The source
 spec is [zts-formal-spec-northstar-advanced.md](zts-formal-spec-northstar-advanced.md)
-revision 4. The certificate and verifier stack (spec 13.3-13.4) and the
+revision 5. The certificate and verifier stack (spec 13.3-13.4) and the
 two-client conformance lab (14.2) are outside this program.
 
 Three ground rules survive from phase to phase: the engine stays
@@ -820,7 +822,7 @@ admitted form adds its semantics-registry rules in the same phase, so
 `spec-check` stays green by construction; and no `meta` payload is ever
 hand-written, because a hand-written payload is another drift gate.
 
-Phases 0 through 3 are done. The executed plans and the program's decision log
+Phases 0 through 7 are done. The executed plans and the program's decision log
 are in [docs/archive/plans/](archive/README.md); phase 2's plan is still
 [docs/plans/2026-08-04-018-zts-advanced-rev4-phase2-plan.md](plans/2026-08-04-018-zts-advanced-rev4-phase2-plan.md)
 and phase 3's is
@@ -991,16 +993,14 @@ and its annotation was ignored, an object spread contributed its operand's name
 instead of its fields, a used destructured binding read as unused, and a
 template literal type was not assignable to `string`.
 
-Phase 7 has started with its declaration keywords, and the frozen pre-cutover
-baseline it measures against is the last row of
-[convergence.md](convergence.md), published from a clean tree for that purpose.
-`structural` and `nominal` are admitted now, alongside the `type` and
-`distinct type` they replace: each pair is one path and one type-map kind, so
-the two spellings behave identically and mix in one file during the migration.
-The published profile stays `zts-advanced-1` until the removal list is done,
-because the identity is compared against a client's `expected.profile_id` and
-naming it `zts-model-1` while truthiness and templates still parse would make
-it a claim the compiler does not meet.
+Phase 7's compiler cutover is implemented. `structural` and scalar `nominal`
+are the only declaration spellings, boolean contexts accept only booleans,
+text construction uses explicit `join` or `String`, and TSX lowers through the
+`zts-tsx-1` frontend before the `zts-model-1` core parses it. The compact grammar
+publishes 66 admitted productions and the idiom registry publishes 18 legal
+preferences; removed forms live only in the restriction registry. Source
+profile and grammar identity now flow through contracts, caches, receipts,
+attestations, capsules, and Pi session evidence.
 
 Two findings came out of that slice. `distinct type Bad = { a: number };`
 checked clean, while the published grammar has said `ScalarType` at that
@@ -1077,8 +1077,9 @@ predicates require a boolean. Optional and unknown values fail closed instead
 of participating in truthiness, so absence must be written explicitly as
 `value === undefined` or `value !== undefined`. The internal witness tags keep
 their existing names, but they are now derived from explicit comparisons or a
-module result whose declared return type is boolean. The published profile
-remains `zts-advanced-1` until the other phase 7 removals are complete.
+module result whose declared return type is boolean. The published core profile
+is `zts-model-1`; optional and unknown values do not regain truthiness through
+a compatibility path.
 
 The source frontend is now one owned boundary, and file identity is explicit:
 `.ts` enters the core, `.tsx` enters the TSX lowering frontend, and `.js`,
@@ -1121,29 +1122,19 @@ and standalone empty statements are ZTS001 refusals with removal guidance, and
 `when _:` is refused in favor of `default:`. Their parser IR and bytecode nodes
 were deleted once the front-door refusal tests passed.
 
-**Owed, and this is the debt the cutover has been accumulating toward.** The
-recorded codegen cassettes are pre-cutover model output and 10 of the 19 cases
-write `type X =`, so `zig build test` now fails two of them: `weather-egress`
-loses its recorded first-draft pass to ZTS050, and `jwt-auth` exhausts its
-16-step cassette because the veto retry consumes steps it does not have. The
-ratchet is right and the pins are right - what changed is the compiler under a
-dated recording. Neither can be re-pinned honestly: `expect_first_draft_pass`
-records what a model did, not what today's fence says about it.
+The post-cutover DeepSeek corpus was recorded live and replay-validated on
+2026-08-16. It contains 19 promoted flows: 9 passed on the first draft, all 19
+reached green, all 13 intent-bearing cases preserved declared intent, and the
+median successful flow used 5 round trips. Compaction occurred in the long
+cases and is replayed through the same request controller used in production.
+Promotion required a green result, so failed live samples could not replace an
+active artifact. These measurements replace the stale pre-cutover cassettes
+rather than rewriting their answers.
 
-Two ways out, and phase 7's plan names the first. An exact repair for the alias
-keywords would cost no model turn, which is what "exact alias and syntax
-repairs consume no model turn" requires of the cutover; the lane does not exist
-yet, because ZTS050 fires in the stripper, before the parse the `canonicalize`
-repair path operates on. The second is a live re-record, which is owed anyway:
-the plan wants paired pre-cutover and post-cutover flows, and only a recorded
-live model can publish that row.
-
-The parameter contract and compact grammar in
-[the northstar spec](zts-formal-spec-northstar-advanced.md) now describe the
-fixed-arity cut. Its declaration and text sections still describe legacy forms
-and remain owed. The document and compiler continue to publish
-`zts-advanced-1` until the whole removal list is true; the final identity flip
-must be one deliberate boundary, not a name applied to a partial cutover.
+That result closes phase 7's convergence exit without a compatibility profile
+or a relaxed checker. The language, identity, diagnostic, classification, and
+live-model cuts are complete; future protocol and repair work can improve the
+first-draft rate without weakening this boundary.
 
 The last thing the compose import held up was rate limiting. `detectRateLimiting`
 required that import plus a `cacheIncr` call, and no handler in the repository
@@ -1158,8 +1149,8 @@ the primitive now, and three tests give it the floor it never had.
 |---|---|---|
 | 4. Dict, JSON, Result completion | `Dict` and `zttp:collections` with persistent semantics, SameValueZero keys, and insertion order; `zttp:json` with a closed error taxonomy and policy-driven limits; `zttp:result` completion (`unwrapOr`, `orElse`, `collectAll`) with effect-row-polymorphic combinators per D2. | Dict determinism and SameValueZero tests; JSON round-trip and limit tests; `collectAll` first-error test. **Done.** |
 | 5. Bytes, ABI re-typing, defaults, Effects ceiling | [`Bytes` and `zttp:bytes`](plans/2026-08-09-025-zts-advanced-rev4-phase5-plan.md); the HTTP, queue, and durable ABIs re-typed to the spec's 7.2 shapes including total `responseText` (the WebSocket subsystem was removed rather than re-typed); trailing scalar default parameters; the decidable `Effects`-ceiling rule with repairs computed from the inferred row. | fetch and queue examples re-typed; ceiling-rule repair tests. **Done**, with the function-type ceiling landed for the empty row and blocked for a nonempty one - a function type whose return carries a capsule does not survive the checker, which is a type-representation fix recorded in the plan. |
-| 6. Full idiom table, validators, gate-complete protocol | [The remaining idiom rows](plans/2026-08-10-026-zts-advanced-rev4-phase6-plan.md); equivalence validators per D3's method taxonomy, with any row lacking a registered validator shipping advisory-only; fixed-point normalization with a published pass bound; batch `apply_repair` and multi-property `verify`; the full registry-generated meta payload set. | Double-normalize byte-identity over the whole corpus; atomic `apply_repair` rejection tests; meta drift gates wired into `scripts/verify.sh`. **Done.** The idiom table is 24 rows and the canonical formatter prints 53 of 58 corpus files, the five it refuses being JSX and TSX, each named by the gate. Nine validator rows are gradable: eight under M4 and one under M2, which returned with its consumer when ASI removal landed. `deferred_sections` fell from ten rows to three, and the three that remain are decisions rather than schedules - an authenticated extension manifest needs a trust policy, and per-rule severity and the repair budget are questions no registry here can answer. Spec 5.5's no-ASI rule holds; the semicolon repair that shipped with it was withdrawn in the same phase after a review found it unsound, so a program that needs terminators is refused with a location and fixed by hand. |
-| 7. Model-minimal direct cutover | [`zts-model-1` and `zts-tsx-1`](plans/2026-08-09-024-zts-model-minimal-phase7-plan.md); explicit `structural` and scalar `nominal` declarations; boolean-only control flow; one canonical syntax for modules, parameters, objects, callbacks, guards, and text; TSX as a lowering frontend rather than core syntax. | Zero removed forms in tracked source; every removed form has one diagnostic and repair or refusal; `spec-check` classifies every reachable node and opcode; paired live-model flows preserve behavior, intent, proofs, and reached-green convergence. |
+| 6. Full idiom table, validators, gate-complete protocol | [The remaining idiom rows](plans/2026-08-10-026-zts-advanced-rev4-phase6-plan.md); equivalence validators per D3's method taxonomy, with any row lacking a registered validator shipping advisory-only; fixed-point normalization with a published pass bound; batch `apply_repair` and multi-property `verify`; the full registry-generated meta payload set. | Double-normalize byte-identity over the whole corpus; atomic `apply_repair` rejection tests; meta drift gates wired into `scripts/verify.sh`. **Done.** The current model-minimal idiom table is 18 rows. Nine validator rows are gradable: eight under M4 and one under M2, which returned with its consumer when ASI removal landed. `deferred_sections` fell from ten rows to three, and the three that remain are decisions rather than schedules - an authenticated extension manifest needs a trust policy, and per-rule severity and the repair budget are questions no registry here can answer. Spec 5.5's no-ASI rule holds; the semicolon repair that shipped with it was withdrawn in the same phase after a review found it unsound, so a program that needs terminators is refused with a location and fixed by hand. |
+| 7. Model-minimal direct cutover | [`zts-model-1` and `zts-tsx-1`](plans/2026-08-09-024-zts-model-minimal-phase7-plan.md); explicit `structural` and scalar `nominal` declarations; boolean-only control flow; one canonical syntax for modules, parameters, objects, callbacks, guards, and text; TSX as a lowering frontend rather than core syntax. | **Done.** Zero removed forms in tracked source; every removed form has one diagnostic and repair or refusal; `spec-check` classifies all 69 nodes and 127 opcodes; 19 of 19 post-cutover DeepSeek flows reached green, 13 of 13 intent-bearing flows preserved intent, 9 of 19 passed on the first draft, and the median was 5 round trips. |
 
 Three design documents own the decisions the phases consume. Two of them also
 retire an interim marker left in the code by phase 0:
