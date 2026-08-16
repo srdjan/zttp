@@ -331,9 +331,12 @@ pub fn selectInputEstimate(input: SelectEstimateInput) BudgetError!SelectedEstim
 }
 
 /// A compaction bridge is deliberately separate from the active usage anchor.
-/// It may inform exactly the first request after a projection shrinks, but a
-/// model/provider change or a non-shrinking request invalidates it. The next
-/// successful normal request replaces it with an ordinary same-epoch anchor.
+/// It may inform exactly the first request after a projection checkpoint. The
+/// new request need not be smaller than the preceding request: model output
+/// appended after that request may outweigh the bytes compaction removed. The
+/// explicit checkpoint transition, stable provider/model, and stable fixed
+/// prefix establish the bridge. The next successful normal request replaces it
+/// with an ordinary same-epoch anchor.
 fn projectAcrossCompaction(
     bridge: InputAnchor,
     current_epoch: UsageEpoch,
@@ -348,8 +351,6 @@ fn projectAcrossCompaction(
     const previous = bridge.budget;
     if (current.bytes.system != previous.bytes.system or
         current.bytes.tools != previous.bytes.tools or
-        current.bytes.history >= previous.bytes.history or
-        current.bytes.wire >= previous.bytes.wire or
         previous.bytes.wire == 0)
     {
         return null;

@@ -101,6 +101,23 @@ test "fresh estimate stays calibrated after current validate body compaction" {
     try expectCapturedDeepSeekFlowCalibrates(&captured);
 }
 
+test "compaction bridge survives trailing output that grows the next request" {
+    // Captured from parallel-secret on 2026-08-16. The checkpoint did shrink
+    // the active context after the 7,071-token response, but that response was
+    // not part of the preceding request. The first compacted wire body was
+    // therefore larger than the last pre-compaction request. Request-size
+    // direction cannot identify whether a checkpoint is a valid bridge; the
+    // explicit projection generation does.
+    const captured = [_]CapturedDeepSeekInput{
+        .{ .system_bytes = 4_394, .tools_bytes = 20_390, .wire_bytes = 25_540, .history_bytes = 502, .actual_tokens = 6_326 },
+        .{ .system_bytes = 4_394, .tools_bytes = 20_390, .wire_bytes = 29_552, .history_bytes = 3_868, .actual_tokens = 7_437 },
+        .{ .system_bytes = 4_394, .tools_bytes = 20_390, .wire_bytes = 69_651, .history_bytes = 40_208, .actual_tokens = 16_645 },
+        .{ .system_bytes = 4_394, .tools_bytes = 20_390, .wire_bytes = 86_895, .history_bytes = 56_542, .transient_bytes = 191, .actual_tokens = 20_641 },
+        .{ .system_bytes = 4_394, .tools_bytes = 20_390, .wire_bytes = 107_412, .history_bytes = 75_547, .actual_tokens = 26_348, .checkpoint_generation = 16 },
+    };
+    try expectCapturedDeepSeekFlowCalibrates(&captured);
+}
+
 test "current repository full preset fixed prefix meets U2 budget and stays stable" {
     const pre_u2_baseline_tokens: u64 = 31_477;
     const fixed_prefix_target_tokens: u64 = 20_000;
