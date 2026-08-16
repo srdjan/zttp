@@ -220,8 +220,8 @@ Three diagnostic codes:
 - **ZTS500 - spec_not_discharged**: the corresponding property field is
   false. Cause-only specs (`deterministic`, `read_only`, `retry_safe`,
   `idempotent`, `state_isolated`, `fault_covered`, `pure`, `stateless`,
-  `result_safe`, `optional_safe`, `cost_bounded`) include a per-property `Try:`
-  suggestion. Counterexample-rich specs
+  `result_safe`, `optional_safe`, `canonical`, `cost_bounded`) include a
+  per-property `Try:` suggestion. Counterexample-rich specs
   (`no_secret_leakage`, `no_credential_leakage`, `input_validated`,
   `pii_contained`, `injection_safe`) include a falsifying request body.
   `cost_bounded` discharges when the worst-path module-call count has a

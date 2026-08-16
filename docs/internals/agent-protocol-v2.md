@@ -160,7 +160,8 @@ producer that has an offset but no extent reports.
 
 `repair_available` is true exactly when the diagnostic's repair intent has a
 validator row whose method is implemented, which is what spec 4.8 permits
-advertising an exact repair on. Eight rows qualify, all under M4: the validator
+advertising an exact repair on. Six of the registry's fifteen rows qualify, all
+under M4: the validator
 re-derives the declared law's rewrite from the original and requires the
 candidate to match it. A `canonicalize` candidate or `normalize` rewrite grades
 `mechanical_repair` under the same condition and `proposed_refactor` otherwise,

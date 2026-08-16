@@ -21,7 +21,7 @@ Release builds, handler precompilation (`-Dhandler` with `-Dverify`, `-Dcontract
 
 ## CLI Surface
 
-`zttp --help` advertises five core commands: `init`, `dev`, `test`, `expert`, `deploy`. Everything else is advanced and listed by `zttp help --all`, in six categories: Analyze, Run and inspect, Package, Proof ledger, Credentials, and Machine tools. Every analyzer command is reachable both as `zts <command>` and as `zttp <command>` with identical output; `expert` and `ledger` live only in `zttp`.
+`zttp --help` advertises five core commands: `init`, `dev`, `test`, `expert`, `deploy`. Everything else is listed by `zttp help --all`, in seven categories: Analyze, Run and inspect, Package, Proof ledger, Credentials, Machine tools, and Advanced. Every analyzer command is reachable both as `zts <command>` and as `zttp <command>` with identical output; `expert` and `ledger` live only in `zttp`.
 
 `zttp verify <url>` is the proof-receipt verifier and is distinct from `zttp proofs verify <bundle-dir>`, which checks bundle integrity. `studio` and `edge` are compiled out by default. Hosted cloud deploy and the account verbs are deferred from this beta; hosted control-plane, provider, registry, and OCI image orchestration are intentionally out of core.
 
@@ -39,19 +39,21 @@ HTTP in `server.zig`, runtime management in `handler_instance.zig` (`zruntime_te
 
 Request flow: accept connection, check proven route table, check proof cache for deterministic and read-only handlers (`proof_adapter.zig`), acquire an isolated runtime from HandlerPool, convert to a JS Request, invoke the handler, extract the Response, release the runtime. Self-extracting binaries parse the embedded contract at startup for env var validation, route pre-filtering, proof cache activation, and property logging (`contract_runtime.zig`).
 
-Key patterns: native Zig error unions (`!T`) throughout the implementation (the `Result<T>` seen in handlers is a user-facing JS and verification construct, not a Zig engine pattern), hidden classes for inline caching, request-scoped arena allocation, guard composition via the pipe operator (`packages/modules/src/workflow/compose.zig`).
+Key patterns: native Zig error unions (`!T`) throughout the implementation (the `Result<T>` seen in handlers is a user-facing JS and verification construct, not a Zig engine pattern), hidden classes for inline caching, request-scoped arena allocation.
 
 Detail: [docs/internals/architecture.md](docs/internals/architecture.md) and [docs/performance.md](docs/performance.md).
 
 ## Virtual Modules
 
-Import via `import { fn } from "zttp:module"`. Most implementations live in `packages/modules/src/` under `data/`, `http/`, `net/`, `platform/`, `security/`, and `workflow/`; the workflow modules `zttp:io`, `zttp:scope`, `zttp:durable`, `zttp:workflow`, and `zttp:queue` live under `packages/zts/src/modules/workflow/`. The authoritative module-to-path registry is `packages/zts/src/builtin_modules.zig`. Each module owns its `pub const binding = sdk.ModuleBinding{...}` next to its implementation file; the type and the shared capability-enforcement helpers live in `packages/zts/src/module_binding.zig`. Bindings declare `required_capabilities` (clock, crypto, random, stderr, and so on) enforced at call time.
+Import via `import { fn } from "zttp:module"`. The SDK-pure implementations live in `packages/modules/src/` under `data/`, `http/`, `net/`, `platform/`, and `security/`. The engine-coupled ones live in `packages/zts/src/modules/` under `data/`, `net/`, and `workflow/`. Some of those are whole implementations (`zttp:collections`, `zttp:bytes`, `zttp:json`, `zttp:result`, and the `workflow/` set: `zttp:io`, `zttp:scope`, `zttp:durable`, `zttp:workflow`, `zttp:queue`); the `net/` and `data/sql.zig` files are thin adapters that wrap the SDK-pure binding through `module_binding_adapter.zig`. The authoritative module-to-path registry is `packages/zts/src/builtin_modules.zig`. Each module owns its `pub const binding = sdk.ModuleBinding{...}` next to its implementation file; the type and the shared capability-enforcement helpers live in `packages/zts/src/module_binding.zig`. Bindings declare `required_capabilities` (clock, crypto, random, stderr, and so on) enforced at call time.
 
 For the module list and every export, read `packages/zts/src/builtin_modules.zig`.
 
 ## JavaScript Subset
 
-ES5 + arrow functions, template literals, destructuring, spread, `for...of` (arrays), optional chaining, nullish coalescing, `match` expression, `assert` statement, pipe operator, typed arrays, compound assignments, array HOFs, `Object.keys/values/entries`, `range()`.
+ES5 + arrow functions, template literals without interpolation, leading object and array spread, `for...of` (arrays), optional chaining, nullish coalescing, `match` expression, `assert` statement, array HOFs, `Object.keys/values/entries`, `range()`.
+
+The model-minimal profile refuses several forms an ES2015 author reaches for. Declaration destructuring is refused at the parser boundary: bind the source to one name, then read each member with explicit `const` bindings. Template interpolation is refused; build a string array with explicit `String(...)` conversions and call `.join("")`. The pipe operator, `pipe()`, and `guard()` report ZTS001, and object literal shorthand does too. Compound assignment is ZTS613: write `x = x + 1`. Non-leading object spread is ZTS614 and call-site spread is ZTS616.
 
 `match` patterns are literals, record patterns, array patterns, and the six type tests `boolean`, `number`, `string`, `array`, `Dict`, and `Bytes`. A record pattern field is a discriminant test (`kind: "echo"`), a binding under the field's own name (`text`), or a binding under a new name (`value: v`); a binding is an arm-scoped `const` carrying the narrowed field type. A closed union covered member by member needs no `default`, and `??`/`?.` are refused on an operand whose type admits `null` (ZTS624). A recursive type alias must be contractive: every cycle passes through a record, tuple, or array (ZTS212).
 
@@ -63,7 +65,7 @@ Response helpers: `Response.json()`, `Response.text()`, `Response.html()`, `Resp
 
 Request body readers (globals): `requestBody(req)` returns `Bytes` and is total, `requestText(req)` and `requestJson(req)` return a `Result` whose error names `absent`, `invalid-encoding`, or spec 6.4's JSON taxonomy.
 
-TS and TSX files work directly through the native type stripper. JSX is parsed by the zts parser and rendered via `h()` and `renderToString()` in `packages/zts/src/http.zig`. `comptime()` evaluates expressions at load time. See [docs/typescript.md](docs/typescript.md).
+File identity selects the frontend: `.ts` enters the `zts-model-1` core and `.tsx` enters the `zts-tsx-1` lowering frontend, which rewrites TSX to ordinary `h(...)` calls before the core parses it. `.js`, `.jsx`, and unknown extensions are refused with ZTS052. The core tokenizer, parser, IR, and bytecode generator carry no JSX mode. `h()` and `renderToString()` live in `packages/zts/src/http.zig`. `comptime()` evaluates expressions at load time. See [docs/typescript.md](docs/typescript.md).
 
 ## Compile-Time Systems
 
@@ -79,16 +81,19 @@ TS and TSX files work directly through the native type stripper. JSX is parsed b
 
 ## Models
 
-Local first, as of 2026-08-13. Do not record cassettes, run the convergence
-corpus, or drive the expert loop against Claude or OpenAI. The default backend
-is a developer-managed MLX-LM server:
+Two providers are permitted here: DeepSeek and a developer-managed local MLX-LM
+server. Do not record cassettes, run the convergence corpus, or drive the expert
+loop against Claude or OpenAI.
+
+Start the local server yourself when you want it:
 
 ```bash
 mlx_lm.server --model LiquidAI/LFM2.5-2.6B-MLX-8bit --host 127.0.0.1 --port 8080
 ```
 
-`ZTTP_CODEGEN_PROVIDER=local` selects it for recording and is the default.
-Local recordings land under
+`zttp expert --provider local` then selects it for a session, and
+`ZTTP_CODEGEN_PROVIDER=local` selects it for recording, which is the recorder's
+default when the variable is unset. Local recordings land under
 `packages/pi/src/simulator/testdata/empirical/local/codegen/`. The frozen Claude
 corpus under `packages/pi/src/providers/testdata/codegen/` is the pre-cutover
 baseline and is not re-recorded.
@@ -115,10 +120,9 @@ replay finishes in milliseconds and asks for one more model call than the
 recording holds, so the recorder now refuses to promote such a turn instead of
 emitting an artifact that fails later as a false divergence.
 
-A failing local case is the measurement, not a reason to reach for a hosted
-model. A recorded turn is capped at 3 minutes
-(`ZTTP_CODEGEN_TURN_TIMEOUT_MS`), because a stalled local generation is silence
-rather than an error and would otherwise take the whole corpus run with it.
+The same ceiling exists because a stalled local generation is silence rather
+than an error and would otherwise take the whole corpus run with it. A failing
+local case is the measurement, not a reason to reach for a hosted model.
 
 ## Conventions
 

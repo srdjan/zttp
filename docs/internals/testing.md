@@ -47,7 +47,8 @@ there without a row here fails `zig build test-docs-drift`:
 | `test-standin` | `packages/pi/src/standin_tests.zig` |
 
 `test-standin` compiles with its filters pinned to the literal `stand-in`
-(`build.zig:316`), so a test in that root whose name omits the token never runs.
+(the `standin_only` row in `host_test_roots`, applied at `build.zig:356`), so a
+test in that root whose name omits the token never runs.
 A gate in `packages/pi/src/standin_range_tests.zig` enforces the naming rule the
 filter depends on. See "Adding A Test Root" for the rule behind it.
 
@@ -92,10 +93,11 @@ The package suites: `test-zts`, `test-sdk`, `test-modules`,
 `test-proof-review`, `test-release-check`, `test-server`, `test-compile-bench`.
 
 The audits and gates: `test-capability-audit`, `test-module-boundary`,
-`test-proof-swallow`, `test-module-governance`, `test-runtime-purity`,
-`test-contract-golden`, `test-expert-golden`, `test-docs-drift`,
-`test-doc-links`, `test-production-branch-metric`,
-`test-comptime-cli-matrix`, `test-generic-intersection-cli-matrix`.
+`test-proof-swallow`, `test-zts-layering`, `test-module-governance`,
+`test-runtime-purity`, `test-contract-golden`, `test-expert-golden`,
+`test-docs-drift`, `test-doc-links`, `test-convergence-emitter`,
+`test-production-branch-metric`, `test-comptime-cli-matrix`,
+`test-generic-intersection-cli-matrix`.
 
 The docs drift and link gates run here and only here. Neither Run step is
 cached, so `zig build test` always executes both scripts, and `verify.sh` and
@@ -137,7 +139,7 @@ scripts rather than build steps. `ci.yml` runs the same six:
 | `check-idiom-table.sh` | spec 4.2.1's table matches `idiom_registry.zig` row for row |
 | `check-grammar-drift.sh` | spec section 8's productions match `grammar_registry.zig` in document order |
 | `check-decision-registry.sh` | every decision kind `meta` publishes is emitted somewhere |
-| `check-meta-drift.sh` | the four registry hashes `meta` publishes match their pins |
+| `check-meta-drift.sh` | the six registry hashes `meta` publishes match their pins |
 | `check-agent-determinism.sh` | the same request twice produces identical bytes |
 
 Each carries a floor on its own input, because a gate whose corpus is empty or

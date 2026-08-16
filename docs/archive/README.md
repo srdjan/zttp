@@ -32,6 +32,10 @@ Still live, and deliberately not archived:
   reference specifications that later phases consume, not plans to execute.
   Their master plan and the executed phase 0 and phase 1 plans are here in
   `plans/`; `docs/roadmap.md` carries the remaining phase map.
+- The phase 2 through phase 7 plans, and the local-LFM cutover plan. Each phase
+  is closed, but `docs/roadmap.md` links its row to the plan that recorded what
+  the phase actually found, so archiving them would break the roadmap's
+  evidence trail.
 - `docs/solutions/`, which agents are pointed at and which is not planning
   residue.
 

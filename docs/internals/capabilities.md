@@ -6,7 +6,7 @@ Read this end-to-end before adding a new virtual module.
 
 ## The capability enum
 
-`ModuleCapability` is declared in [`packages/zts/src/module_authorization.zig`](../../packages/zts/src/module_authorization.zig) and re-exported through `module_binding`. Eleven variants exist today:
+`ModuleCapability` is declared in [`packages/zts/src/module_authorization.zig`](../../packages/zts/src/module_authorization.zig) and re-exported through `module_binding`. Ten variants exist today:
 
 | Capability | Gates |
 |---|---|

@@ -83,7 +83,7 @@ properties and runtime policy.
 | Effect | Meaning | Examples |
 |---|---|---|
 | `none` | Pure or analysis-only operation. | `sha256`, `routerMatch`, `parseCookies`, `decodeJson` |
-| `read` | Reads runtime state without mutating it. | `env`, `cacheGet`, `cacheStats`, `deserializeAttachment` |
+| `read` | Reads runtime state without mutating it. | `env`, `cacheGet`, `cacheStats`, `sqlOne`, `sqlMany` |
 | `write` | Mutates state, performs I/O, or schedules runtime callbacks. | `fetch`, `serviceCall`, `sqlExec`, `cacheSet`, `parallel`, `run`, `send`, `logInfo` |
 
 `fetchWithRetry(url, init?, retryOptions?)` accepts `maxRetries`,

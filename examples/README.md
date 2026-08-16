@@ -32,7 +32,8 @@ The core shape of a zttp handler. Start with the three above, then:
 - [handler.ts](handler/handler.ts) - the canonical TS handler with `Proof<T, P>`.
 - [handler.tsx](handler/handler.tsx) - the same shape in TSX.
 - [handler-with-imports.ts](handler/handler-with-imports.ts) - importing multiple virtual modules.
-- [sugar.ts](handler/sugar.ts) - the small syntactic conveniences (compound assignment, array HOFs, `Object.keys`) the parser permits.
+- [sugar.ts](handler/sugar.ts) - the small syntactic conveniences (array HOFs, `Object.keys`, arrow callbacks) the parser permits. Its `score += 50` is not one of them any more: compound assignment is a ZTS613 canonical error, so `zts check` reports it.
+- [effects-capsule.ts](handler/effects-capsule.ts) - `Effects<T, "...">` as a handler budget, and the decidable rule for where a helper ceiling goes (ZTS610 and ZTS623).
 - [feature-probes.ts](handler/feature-probes.ts) - exact-output probes for runtime language features tracked in the feature matrix.
 - [spec-fails-idempotent.ts](handler/spec-fails-idempotent.ts) - a deliberately failing `Proof<T, P>` for the discharge diagnostics path.
 
@@ -92,8 +93,9 @@ zts check examples/handler/spec-guardrails.ts                          # verify 
 `zttp check` (equivalently `zts check`) runs the strict analyzer. Its
 default is to demand a *fully discharged* handler: when a handler declares no
 `Proof<T, P>` on its return type, the verifier must prove the entire default
-profile (`read_only`, `retry_safe`, `idempotent`, `pure`) and emits **ZTS500**
-if any member does not hold. Most examples here are intentionally minimal -
+profile, which is all seventeen v1 spec names in
+`packages/zts/src/spec_discharge.zig`, and emits **ZTS500** if any member does
+not hold. Most examples here are intentionally minimal -
 they exist to show one feature (a route, a module import, a JSX component) and
 deliberately do *not* carry a `Proof<T, P>`, so they exit non-zero under `check`.
 That is expected, not a bug: the example test harness

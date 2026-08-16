@@ -40,7 +40,7 @@ The type stripper (`packages/zts/src/stripper.zig`) removes TypeScript syntax be
 
 **Generic type aliases** (stripped and type-checked):
 
-Generic type aliases like `type Result<T> = { ok: boolean; value: T }` are stripped at load time and resolved by the type checker. When the alias is used in an annotation (`const x: Result<string>`), the type checker instantiates the body by substituting the type parameters with the provided arguments, producing a concrete record type for structural checking.
+Generic type aliases like `structural Result<T> = { ok: boolean; value: T }` are stripped at load time and resolved by the type checker. When the alias is used in an annotation (`const x: Result<string>`), the type checker instantiates the body by substituting the type parameters with the provided arguments, producing a concrete record type for structural checking.
 
 ```typescript
 structural Result<T> = { ok: boolean; value: T; error: string };
@@ -379,7 +379,7 @@ For union annotations, the declared type is preserved to support exhaustiveness 
 
 ### Generic Type Aliases
 
-Generic type aliases (`type Result<T> = { ok: boolean; value: T }`) are instantiated when used in annotations. `Result<string>` resolves to `{ ok: boolean; value: string }` for structural checking. Up to 8 type parameters per alias.
+Generic type aliases (`structural Result<T> = { ok: boolean; value: T }`) are instantiated when used in annotations. `Result<string>` resolves to `{ ok: boolean; value: string }` for structural checking. Up to 8 type parameters per alias.
 
 ---
 
@@ -682,7 +682,7 @@ structural UserPatch = Partial<User>;           // every field optional
 
 See [derive-types.ts](../examples/patterns/derive-types.ts). Intersection (`&`)
 still composes narrower types where a utility does not fit:
-`type WithMeta = Base & { createdAt: string }`.
+`structural WithMeta = Base & { createdAt: string }`.
 
 ### Adapted
 

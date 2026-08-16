@@ -207,10 +207,10 @@ concrete type without `null` both operators keep their single meaning and stay
 the idiomatic spelling of it.
 
 A recursive type alias must be contractive: every cycle passes through a
-record, tuple, or array constructor. `type JsonValue = null | boolean | number
-| string | readonly JsonValue[]` is admitted; `type Loop = Loop` and
-`type U = number | U` are refused (ZTS212), because a union edge does not guard
-recursion.
+record, tuple, or array constructor. `structural JsonValue = null | boolean |
+number | string | readonly JsonValue[]` is admitted; `structural Loop = Loop`
+and `structural U = number | U` are refused (ZTS212), because a union edge does
+not guard recursion.
 
 ### Author-Declared Proofs
 

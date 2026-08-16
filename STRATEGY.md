@@ -1,6 +1,6 @@
 ---
 name: zttp
-last_updated: 2026-08-01
+last_updated: 2026-08-16
 ---
 
 # zttp Strategy
@@ -50,17 +50,19 @@ other: a restricted language, a proof engine that is total over it, and an agent
 can only author inside the proof boundary.
 
 The language is restricted on purpose. zts removes the constructs that make analysis
-undecidable: classes, async, try/catch, regex, `==`, `null`, `while`, `this`, `new`.
-Each removal buys a proof. The analyzer walks every path of every handler and
-terminates in milliseconds. "No findings" is a theorem over the whole handler, not a
-sample of it.
+undecidable: classes, async, try/catch, regex, `==`, `while`, `this`, `new`. Each
+removal buys a proof. `null` is not one of them: it is admitted as explicit data and
+permitted only where the declared type names it, held apart from the `undefined`
+absence sentinel so neither can stand in for the other. The analyzer walks every path
+of every handler and terminates in milliseconds. "No findings" is a theorem over the
+whole handler, not a sample of it.
 
 The agent lives inside the fence. The model in `zttp expert` has exactly one write
 path, and the compiler sits on it. Every draft is simulated before it touches disk. A
 draft that adds violations is vetoed. On a veto, the compiler first tries to save the
 draft itself: it canonicalizes the source and re-simulates. If that fails, it composes
 a typed repair plan and applies it with no model call; the session records that edit as
-compiler-authored. For three safety properties the loop runs with no model at all: the
+compiler-authored. For five safety properties the loop runs with no model at all: the
 compiler plans, applies, verifies, and rolls back on regression. The compiler does not
 check the agent's work after the fact. It co-authors the work.
 
@@ -98,22 +100,28 @@ A strategy that sells verdicts must grade itself the same way.
 What holds today, by construction: the single fenced write path; the veto with
 canonicalize-and-salvage; the model-free repair lane; the autoloop with rollback on
 regression; replayable counterexamples; and registry hashes that bind every agent
-response to the exact rule, idiom, and restriction set in force.
+response to the exact rule, idiom, and restriction set in force. The wire protocol's
+three agent verbs (`verify`, `simulate_edit`, `apply_repair`) ship, so an outside client
+completes a propose, simulate, verify cycle with no in-process access. Capability
+ceilings are declared per export rather than per module. First-draft pass, median
+round-trips, and intent pass are published per row and dated in
+[docs/convergence.md](docs/convergence.md), each carrying the corpus version and policy
+hash it was measured under, and `zttp ledger stats` aggregates the same metrics per
+workspace.
 
-What is thin: the stable wire protocol is missing its three agent verbs, so an outside
-client can ask what is wrong but cannot ask the compiler to simulate, repair, or
-verify. On that wire every rewrite is graded a proposed refactor and none is a
-mechanical repair. Mechanical repair exists only inside the agent package, and only a
-minority of the typed repair intents lower to a real source edit. No canonical
-formatter exists, so every rewrite splices byte spans. Capability ceilings are declared
-per module rather than per export, so every ceiling is coarser than the code it
-describes.
+What is thin: six of the validator registry's fifteen repair intents grade as mechanical
+repairs, so most rewrites still ship as proposed refactors an outside client must judge
+for itself. The canonical formatter refuses JSX and TSX, five of the 58 corpus files, and
+a refused file keeps the layout its author wrote. The convergence corpus is 19 cases and
+trips 5 of the compiler's 71 advertised rules, so most of the fence stands under no
+published number at all.
 
-What is unmeasured: the headline metrics have no honest denominator yet. The session
-ledger is local, per-workspace, and empty by default. The one agent number we ever
-published is stale. The current eval corpus checks compiler compliance, not intent, and
-it is recorded once and replayed, so it cannot be tuned against without leaking the
-benchmark. Fixing the scoreboard is a track, not a footnote.
+What is unmeasured: provable-set reach, the convergence metric itself. Given a reference
+suite of programs the compiler certifies green, the fraction the agent reproduces to
+green inside a fixed budget is one hundred percent minus the convergence gap, and nothing
+computes it today. The eval corpus is recorded once and replayed, so it cannot be tuned
+against without leaking the benchmark, and growing it is the binding constraint on every
+number this section cites.
 
 Counts behind each of these live in
 [the agent-compiler agenda](docs/roadmap.md#agent-compiler-agenda), each beside the
@@ -135,6 +143,13 @@ Stated in three tiers, so a reader knows which numbers exist today.
 - **Repair totality** - how many diagnostic rules carry a typed repair, and how many of
   those intents lower to an executable edit. The compiler-side convergence proxy, and
   countable today.
+- **Round-trips to first green proof** - median model round-trips to a fully proven
+  handler. `zttp ledger stats` aggregates it per workspace, and each convergence row
+  publishes the corpus median.
+- **Proven-path ratio** - fraction of a shipped handler's response paths covered by a
+  proof rather than `unproven`. `ledger stats` reports the median. It never stands
+  alone: a handler that returns 501 on every path is fully green, so this pairs with a
+  functional acceptance check.
 
 **Needs a measurement home.**
 
@@ -145,11 +160,6 @@ Stated in three tiers, so a reader knows which numbers exist today.
 - **Fence-breach rate** - share of agent-applied edits that re-verify with zero *total*
   violations, not only zero new ones. By construction this sits near one. Any deviation
   is a soundness incident, not a quality dip.
-- **Round-trips to first green proof** - median model round-trips to a fully proven
-  handler. Honest only once ledger aggregation exists.
-- **Proven-path ratio** - fraction of a shipped handler's response paths covered by a
-  proof rather than `unproven`. It never stands alone: a handler that returns 501 on
-  every path is fully green, so this pairs with a functional acceptance check.
 
 **Guardrails.**
 

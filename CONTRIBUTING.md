@@ -35,9 +35,9 @@ Larger benchmarks live in the sibling repo `../zttp-bench`; do not add benchmark
 
 ## Adding a virtual module
 
-Virtual modules live in `packages/zts/src/modules/`. Each module must:
+SDK-pure virtual modules live in `packages/modules/src/`; engine-coupled ones live in `packages/zts/src/modules/`. `packages/zts/src/builtin_modules.zig` maps every specifier to its implementation. Each module must:
 
-1. Declare a `ModuleBinding` in `module_binding.zig` with explicit `required_capabilities` (clock, crypto, random, stderr, sqlite, filesystem, network, env, runtime_callback, policy_check).
+1. Declare a `pub const binding = ModuleBinding{...}` next to its implementation file, with explicit `required_capabilities` (clock, crypto, random, stderr, sqlite, filesystem, network, env, runtime_callback, policy_check). The type and the enforcement helpers live in `packages/zts/src/module_binding.zig`.
 2. Enter and leave the active-module context via the shared helpers in `module_binding.zig`; the `test-capability-audit` build step enforces this.
 3. Annotate each exported function with its effect class (read / write / none) so contract extraction can derive handler properties.
 4. Ship fixtures under `tests/validate/` or an example under `examples/` covering both success and failure paths.
@@ -54,7 +54,7 @@ Rules live in the checker cluster (`type_checker.zig`, `flow_checker.zig`, `faul
 
 - `zig fmt` before every commit. CI does not auto-format.
 - Types `UpperCamelCase`, functions/variables `lowerCamelCase`, files lowercase (`server.zig`, `handler_instance.zig`).
-- Prefer `Result(T)` over exceptions for expected failures across the engine/runtime.
+- Use native Zig error unions (`!T`) for expected failures across the engine and runtime. `Result<T>` is a user-facing JS and verification construct in handlers, not a Zig engine pattern.
 - `errdefer` every allocation. `orelse` over `?` unwrap on hot paths.
 - No `catch unreachable` on request paths. If the invariant is real, return a typed error and handle it.
 - Do not introduce shared mutable state between pool workers; see `HandlerPool` / `LockFreePool`.

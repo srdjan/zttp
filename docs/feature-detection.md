@@ -39,7 +39,7 @@ Each of these was accepted silently before and is now refused with a location.
 | `0x`, `0b`, `0o` with no digits | ZTS012 | Write the digits |
 | `1e`, `1e+` with no exponent digits | ZTS012 | Write the exponent |
 | `0755` - a legacy octal literal | ZTS012 | `0o755` for octal, or drop the leading zero for decimal |
-| A byte above ASCII inside an identifier | ZTS046 | Identifiers are letters, digits, `_` and `$`. Not reported inside a JSX file, where text content reaches the same code path |
+| A byte above ASCII inside an identifier | ZTS046 | Identifiers are letters, digits, `_` and `$`. TSX text content never reaches this rule: the frontend lowers it to string literals before the core tokenizer runs |
 | A statement with no `;` | ZTS047 | Write the terminator; this profile has no automatic semicolon insertion |
 
 The last one is a statement-termination rule rather than a lexical one. It has
@@ -196,13 +196,13 @@ messages.
 | `x++` (postfix increment) | Use `x = x + 1` |
 | `x--` (postfix decrement) | Use `x = x - 1` |
 
-### Supported Compound Assignment Operators (12 total)
+### Compound Assignment Operators (12 total)
 
-Arithmetic and bitwise compound assignments are supported and desugar to `x = x [op] value`:
+The parser accepts arithmetic and bitwise compound assignments and desugars them to `x = x [op] value`:
 
 `+=`, `-=`, `*=`, `/=`, `%=`, `**=`, `&=`, `|=`, `^=`, `<<=`, `>>=`, `>>>=`
 
-**Canonical profile note:** the arithmetic compound assignments (`+=`, `-=`, `*=`, `/=`, `%=`, `**=`) emit `ZTS613 canonical_compound_assignment` and must be rewritten to the explicit form `x = x + e`. See [Canonicalize And Normalize](cli.md#canonicalize-and-normalize) for the full canonical ruleset.
+**Canonical profile note:** all twelve emit `ZTS613 canonical_compound_assignment` and must be rewritten to the explicit form `x = x + e`, so a file using any of them fails `zttp check`. See [Canonicalize And Normalize](cli.md#canonicalize-and-normalize) for the full canonical ruleset.
 
 ### Unsupported Logical Compound Assignments (3 total)
 
@@ -228,6 +228,8 @@ Logical compound assignments require short-circuit semantics and are not support
 | Function expressions (named & anonymous) | Use arrow functions `(x) => x * 2` or function declarations |
 | `yield` expressions | Generators are not available |
 | `delete` operator | Use object spread to omit properties |
+| Template interpolation `` `n=${n}` `` | Build a string array with explicit `String(...)` conversions and call `.join("")`. A backtick literal with no interpolation is fine |
+| `\|>`, `pipe()`, `guard()` | Write the call directly, as `f(a)` for `a \|> f`; run guards by explicit early return |
 
 ### Statement Forms
 
@@ -251,6 +253,7 @@ Logical compound assignments require short-circuit semantics and are not support
 
 | Feature | Suggested Alternative |
 |---------|----------------------|
+| Shorthand `{ value }` | Name both key and value: `{ value: value }` |
 | Object method `{ go() { ... } }` | Hold an arrow function in the property: `{ go: () => ... }` |
 | Getter `{ get x() { ... } }` | Call an explicit function |
 | Setter `{ set x(v) { ... } }` | Call an explicit function |

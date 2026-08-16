@@ -45,10 +45,12 @@ solver: `unsat` means equivalent, `sat` gives a counterexample.
 It encodes numbers as unbounded mathematical integers, which is an abstraction
 of the engine's i32 numbers promoting to f64. The law table must therefore only
 assert laws that hold under the engine's value model, not merely over the
-integers. Three are deliberately excluded for this reason:
+integers. Four are deliberately excluded for this reason:
 
-- associativity of `+`, which fails on f64 rounding,
-- `!` involution, which fails on truthiness coercion.
+- associativity of `+`, which fails on f64 rounding past 2^53,
+- commutativity of `+`, which fails on string concatenation,
+- involution of `!`, which fails on truthiness coercion,
+- involution of unary `-`, which fails on number coercion.
 
 The solver is injected from `packages/tools/src/smt_solver.zig`, so
 `std.process.Child` never enters the wasm analyzer build.
@@ -100,15 +102,16 @@ gate: 0 when the committed spec matches the registry, 1 when it is stale.
 
 `module-spec-render` applies the same pattern to the virtual-module specs. The
 typed Zig bindings in `packages/zts/src/module_binding.zig` are authoritative,
-and `packages/modules/module-specs/*.json` is generated from them. That is 24
+and `packages/modules/module-specs/*.json` is generated from them. That is 26
 files, with output paths taken from `builtin_governance_entries`. The command
 also owns the Module Catalog table in `docs/virtual-modules/README.md`, a
 marked region between `<!-- BEGIN GENERATED: module catalog ... -->` and
 `<!-- END GENERATED: module catalog -->`. The rest of that file is hand-written
 prose.
 
-`module-spec-render --check` gates all 25 artifacts in `scripts/verify.sh` and
-reports every stale path. A missing region marker is exit 2 rather than a skip.
+`module-spec-render --check` gates all 27 artifacts in `scripts/verify.sh` and
+reports every stale path: the 26 JSON specs plus the catalog table. A missing
+region marker is exit 2 rather than a skip.
 
 Do not hand-edit the JSON files or that table. Edit the binding and regenerate.
 

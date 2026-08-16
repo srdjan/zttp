@@ -145,7 +145,6 @@ predicate callbacks face the same rule at runtime.
 | `!` | boolean |
 | `-x`, `+x`, `~x` | number |
 | `typeof` | string |
-| `void` | undefined |
 | `const x = expr; ... x` | same as expr |
 | reassigned `let x = expr; ... x` | same as expr until reassignment invalidates it |
 | `cond ? a : b` | unified type of a and b |

@@ -12,6 +12,7 @@ reported.
 | Handler execution timeout | 30 seconds | Set with `ServerConfig.timeout_ms` or edge `timeoutMs`. Slow handlers return `504 Gateway Timeout` and invalidate the pool slot. |
 | JavaScript memory | no explicit limit | Set per runtime with `-m` / `--memory`. |
 | Runtime pool size | `cpu_count * 2`, clamped 8-128 | Set with `-n` / `--pool`. |
+| Connection workers | `cpu_count * 2` | A fixed pool, not one thread per connection. Not configurable from the CLI. |
 | Value stack | 1 MB | 131,072 JSValue slots. |
 | Call-stack depth | 1,024 frames | Deep recursion raises a typed error. |
 | Saved-state depth | 1,024 | Exceeding the cap raises a typed error. |
@@ -42,9 +43,6 @@ key, user, or route.
   the step deadline expires. Timers and signal waits inside that step obey the
   same deadline.
 - Exhausted runtime pools return `503`.
-  before protocol ownership transfers. Each accepted connection currently owns
-  one joinable kernel thread; graceful shutdown wakes and joins those workers
-  before destroying handler or room state.
 - A handler panic is caught by a setjmp/longjmp boundary around each handler
   invocation, returns `500`, and quarantines the pool slot. The server and other
   workers keep running. A panic in server infrastructure outside that boundary

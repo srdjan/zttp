@@ -444,7 +444,7 @@ ship advisory-only, which D3 blesses directly.
 
 `repair_available` answers from the registry instead of a constant, and every
 declared-law row is now `implemented`: the two arrow-to-function rewrites, let-to-const,
-its for-of form, compound assignment, and the bool compare. Six of eighteen intents are
+its for-of form, compound assignment, and the bool compare. Six of fifteen intents are
 gradable, and ZTS604 and ZTS620 advertise exact repairs. A `status` distinct from
 `method` is what kept that honest while they waited, and it still does: the four M3 rows
 name the right method and the semantic kernel they need does not exist, so they answer
@@ -591,7 +591,7 @@ Observable: one published row per model in the item-2 table, dated.
 
 Two of the three parts were already done and this item's premise was stale.
 Double-normalize byte-idempotence has run as `scripts/check-normalize-idempotent.sh`
-inside `scripts/verify.sh` for some time (54 files, 1 skipped as not fully canonical),
+inside `scripts/verify.sh` for some time (58 files today, no skips, 5 unprinted as JSX),
 and `original_line` reaches the JSON boundary at `agent_protocol.zig:1201`, so a client
 can already re-validate a repair span. D3's "idempotence does not exist today" no longer
 holds.
@@ -965,9 +965,10 @@ The canonical formatter exists and prints 53 of the 58 corpus files; the five it
 refuses are JSX and TSX, and the idempotence gate names each one rather than
 counting it as coverage. Double-normalize byte-identity holds over all 58. The
 idiom table is the spec's full 24 rows, the advisory channel no longer decides a
-build, and nine validator rows are gradable - eight under M4, and one under M2,
-which was deleted mid-phase after measuring that it discharged nothing and
-returned when ASI removal gave it a consumer.
+build, and the validator registry grades under M4. M2 was deleted mid-phase after
+measuring that it discharged nothing, and returned when ASI removal gave it a
+consumer; its one row went back to `.planned` when the semicolon repair was
+withdrawn, so six rows are gradable today and all six are M4.
 
 `meta` went from ten `deferred_sections` rows to three, and the three that
 remain are decisions rather than schedules: an authenticated `zttp-ext:`
@@ -1040,7 +1041,8 @@ ZTS001 naming the direct call, at the operator's own span. It keeps its
 precedence row so it is recognized there rather than falling out as an
 unexpected token wherever the expression happens to end, and it builds no IR.
 
-`zttp:compose` is deleted, taking the module surface from 24 specifiers to 23.
+`zttp:compose` is deleted, taking the module surface from 24 specifiers to 23 at
+that point; later phases grew it back, and `zttp modules` is the live count.
 Its two exports were compile-time forms wearing a module's clothes: the parser
 replaced every use, so the native implementations shipped and never ran. What
 went with them is 313 lines of parser desugaring - the guard-chain lowering
@@ -1149,7 +1151,7 @@ the primitive now, and three tests give it the floor it never had.
 |---|---|---|
 | 4. Dict, JSON, Result completion | `Dict` and `zttp:collections` with persistent semantics, SameValueZero keys, and insertion order; `zttp:json` with a closed error taxonomy and policy-driven limits; `zttp:result` completion (`unwrapOr`, `orElse`, `collectAll`) with effect-row-polymorphic combinators per D2. | Dict determinism and SameValueZero tests; JSON round-trip and limit tests; `collectAll` first-error test. **Done.** |
 | 5. Bytes, ABI re-typing, defaults, Effects ceiling | [`Bytes` and `zttp:bytes`](plans/2026-08-09-025-zts-advanced-rev4-phase5-plan.md); the HTTP, queue, and durable ABIs re-typed to the spec's 7.2 shapes including total `responseText` (the WebSocket subsystem was removed rather than re-typed); trailing scalar default parameters; the decidable `Effects`-ceiling rule with repairs computed from the inferred row. | fetch and queue examples re-typed; ceiling-rule repair tests. **Done**, with the function-type ceiling landed for the empty row and blocked for a nonempty one - a function type whose return carries a capsule does not survive the checker, which is a type-representation fix recorded in the plan. |
-| 6. Full idiom table, validators, gate-complete protocol | [The remaining idiom rows](plans/2026-08-10-026-zts-advanced-rev4-phase6-plan.md); equivalence validators per D3's method taxonomy, with any row lacking a registered validator shipping advisory-only; fixed-point normalization with a published pass bound; batch `apply_repair` and multi-property `verify`; the full registry-generated meta payload set. | Double-normalize byte-identity over the whole corpus; atomic `apply_repair` rejection tests; meta drift gates wired into `scripts/verify.sh`. **Done.** The current model-minimal idiom table is 18 rows. Nine validator rows are gradable: eight under M4 and one under M2, which returned with its consumer when ASI removal landed. `deferred_sections` fell from ten rows to three, and the three that remain are decisions rather than schedules - an authenticated extension manifest needs a trust policy, and per-rule severity and the repair budget are questions no registry here can answer. Spec 5.5's no-ASI rule holds; the semicolon repair that shipped with it was withdrawn in the same phase after a review found it unsound, so a program that needs terminators is refused with a location and fixed by hand. |
+| 6. Full idiom table, validators, gate-complete protocol | [The remaining idiom rows](plans/2026-08-10-026-zts-advanced-rev4-phase6-plan.md); equivalence validators per D3's method taxonomy, with any row lacking a registered validator shipping advisory-only; fixed-point normalization with a published pass bound; batch `apply_repair` and multi-property `verify`; the full registry-generated meta payload set. | Double-normalize byte-identity over the whole corpus; atomic `apply_repair` rejection tests; meta drift gates wired into `scripts/verify.sh`. **Done.** The current model-minimal idiom table is 18 rows. Six validator rows are gradable, all under M4; the M2 row went back to `.planned` when the semicolon repair was withdrawn. `deferred_sections` fell from ten rows to three, and the three that remain are decisions rather than schedules - an authenticated extension manifest needs a trust policy, and per-rule severity and the repair budget are questions no registry here can answer. Spec 5.5's no-ASI rule holds; the semicolon repair that shipped with it was withdrawn in the same phase after a review found it unsound, so a program that needs terminators is refused with a location and fixed by hand. |
 | 7. Model-minimal direct cutover | [`zts-model-1` and `zts-tsx-1`](plans/2026-08-09-024-zts-model-minimal-phase7-plan.md); explicit `structural` and scalar `nominal` declarations; boolean-only control flow; one canonical syntax for modules, parameters, objects, callbacks, guards, and text; TSX as a lowering frontend rather than core syntax. | **Done.** Zero removed forms in tracked source; every removed form has one diagnostic and repair or refusal; `spec-check` classifies all 69 nodes and 127 opcodes; 19 of 19 post-cutover DeepSeek flows reached green, 13 of 13 intent-bearing flows preserved intent, 9 of 19 passed on the first draft, and the median was 5 round trips. |
 
 Three design documents own the decisions the phases consume. Two of them also
