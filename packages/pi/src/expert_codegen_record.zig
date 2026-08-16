@@ -34,6 +34,7 @@ const agent = @import("agent.zig");
 const codegen = @import("expert_codegen_eval.zig");
 const codegen_types = @import("expert_codegen_types.zig");
 const evidence_identity = @import("expert_evidence_identity.zig");
+const security_probes = @import("expert_security_probes.zig");
 const expert_persona = @import("expert_persona.zig");
 const models = @import("providers/models.zig");
 const tool_common = @import("tools/common.zig");
@@ -915,13 +916,8 @@ pub fn intentSuiteIdentity() evidence_identity.IntentSuiteIdentity {
     return evidence_identity.intentSuite(&scenarios);
 }
 
-// A model-authoring case is not a deterministic adversarial probe. Keep the
-// cohort empty until the risk-catalog slice adds executable positive and
-// adversarial inputs with exact diagnostic or property assertions.
-const security_probe_corpus = [_]evidence_identity.SecurityProbe{};
-
 pub fn securityProbeIdentity() evidence_identity.SecurityProbeCorpusIdentity {
-    return evidence_identity.securityProbeCorpus(&security_probe_corpus);
+    return security_probes.identity();
 }
 
 pub fn thresholdIdentity() evidence_identity.ThresholdIdentity {
@@ -994,7 +990,7 @@ test "intent cohort is explicit and non-vacuous" {
     try testing.expectEqual(@as(usize, 13), executable);
     try testing.expectEqual(@as(usize, 5), pending_runtime);
     try testing.expectEqual(@as(usize, 1), compiler_veto_only);
-    try testing.expectEqual(@as(usize, 0), security_probe_corpus.len);
+    try testing.expect(security_probes.corpus.len > 0);
 }
 
 /// Compile the fenced block opened by the `:start` marker at `marker_at`.
@@ -3186,6 +3182,7 @@ fn compilerEvidenceIdentities(allocator: std.mem.Allocator) !evidence_identity.C
     const schema_hash = zts_cli.agent_protocol.schemaHash();
     const grammar_hash = zts.grammarHash();
     const semantics_hash = zts.semanticsHash();
+    const diagnostic_hash = zts.diagnosticCatalogHash();
     const policy_hash = zts.policyHash();
     const idiom_hash = zts.idiomTableHash();
     const restriction_hash = zts.restrictionMatrixHash();
@@ -3197,7 +3194,7 @@ fn compilerEvidenceIdentities(allocator: std.mem.Allocator) !evidence_identity.C
         "compiler-version\x00{s}\x00policy-version\x00{s}\x00profile-id\x00{s}" ++
             "\x00schema\x00{s}\x00policy\x00{s}\x00grammar\x00{s}\x00idioms\x00{s}" ++
             "\x00restrictions\x00{s}\x00builtins\x00{s}\x00module-graph\x00{s}" ++
-            "\x00semantics\x00{s}",
+            "\x00semantics\x00{s}\x00diagnostics\x00{s}",
         .{
             zts_cli.expert_meta.compiler_version,
             zts_cli.expert_meta.policy_version,
@@ -3210,23 +3207,15 @@ fn compilerEvidenceIdentities(allocator: std.mem.Allocator) !evidence_identity.C
             builtin_hash,
             module_graph_hash,
             semantics_hash,
+            diagnostic_hash,
         },
-    );
-    const diagnostic_seed = try std.fmt.allocPrint(
-        allocator,
-        "interim-diagnostic-surface\x00schema\x00{s}\x00policy\x00{s}" ++
-            "\x00grammar\x00{s}\x00restrictions\x00{s}",
-        .{ schema_hash, policy_hash, grammar_hash, restriction_hash },
     );
     return .{
         .schema = evidence_identity.schema(&schema_hash),
         .meta = evidence_identity.meta(meta_bytes),
         .grammar = evidence_identity.grammar(&grammar_hash),
         .semantics = evidence_identity.semantics(&semantics_hash),
-        // U1D replaces this explicit interim identity with the closed,
-        // compiler-owned diagnostic catalog. It is not derived from observed
-        // coverage and therefore cannot make one run look like another.
-        .diagnostics = evidence_identity.diagnostics(diagnostic_seed),
+        .diagnostics = evidence_identity.diagnostics(&diagnostic_hash),
         .policy = evidence_identity.policy(&policy_hash),
     };
 }
@@ -3890,6 +3879,7 @@ test "codegen baseline replays at the committed first-attempt green rate" {
     const schema_hash = zts_cli.agent_protocol.schemaHash();
     const grammar_hash = zts.grammarHash();
     const semantics_hash = zts.semanticsHash();
+    const diagnostic_hash = zts.diagnosticCatalogHash();
     const policy_hash = zts.policyHash();
 
     const convergence_marker = try markerJson(a, .{
@@ -3921,7 +3911,7 @@ test "codegen baseline replays at the committed first-attempt green rate" {
         .metaHash = compiler.meta.slice(),
         .grammarHash = grammar_hash[0..],
         .semanticsHash = semantics_hash[0..],
-        .diagnosticHash = compiler.diagnostics.slice(),
+        .diagnosticHash = diagnostic_hash[0..],
         .policyHash = policy_hash[0..],
         .sourceCommit = source.revision.commit,
         .sourceDirty = source.revision.dirty,
@@ -3970,7 +3960,7 @@ test "codegen baseline replays at the committed first-attempt green rate" {
         .metaHash = compiler.meta.slice(),
         .grammarHash = grammar_hash[0..],
         .semanticsHash = semantics_hash[0..],
-        .diagnosticHash = compiler.diagnostics.slice(),
+        .diagnosticHash = diagnostic_hash[0..],
         .policyHash = policy_hash[0..],
         .sourceCommit = source.revision.commit,
         .sourceDirty = source.revision.dirty,

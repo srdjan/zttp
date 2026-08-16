@@ -10,6 +10,7 @@
 const std = @import("std");
 const zts = @import("zts");
 const parser = zts.parser;
+const diagnostic_catalog = zts.DiagnosticCatalog;
 const diagnostic_projection = zts.DiagnosticProjection;
 const restrictionCatalog = zts.RestrictionCatalog;
 const handler_contract = zts.handler_contract;
@@ -61,63 +62,7 @@ pub const JsonDiagnostic = struct {
 
 /// Parser error codes: ZTS0xx
 fn parserErrorCode(kind: ErrorKind) []const u8 {
-    return switch (kind) {
-        .unsupported_feature => "ZTS001",
-        .unexpected_token => "ZTS002",
-        .expected_token => "ZTS003",
-        .expected_expression => "ZTS004",
-        .expected_statement => "ZTS005",
-        .expected_identifier => "ZTS006",
-        .unexpected_eof => "ZTS007",
-        .unterminated_string => "ZTS008",
-        .unterminated_template => "ZTS009",
-        .unterminated_regex => "ZTS010",
-        .unterminated_comment => "ZTS011",
-        .invalid_number => "ZTS012",
-        .invalid_escape_sequence => "ZTS013",
-        .invalid_unicode_escape => "ZTS014",
-        // Minted rather than folded into `invalid_escape_sequence`: a reader
-        // told "invalid escape sequence" looks for a bad escape letter, and
-        // the fault is a string that spans a line.
-        .string_line_continuation => "ZTS045",
-        // Minted rather than folded into `unexpected_token`: the fault is that
-        // an identifier carries a byte outside ASCII, not that a token arrived
-        // where another was expected.
-        .non_ascii_identifier => "ZTS046",
-        // Minted rather than reusing `expected_token`: the fault is that a
-        // statement was never terminated, not that some particular token was
-        // expected in place of another.
-        .missing_semicolon => "ZTS047",
-        .expected_property_name => "ZTS015",
-        .invalid_assignment_target => "ZTS016",
-        .invalid_destructuring => "ZTS017",
-        .duplicate_parameter => "ZTS018",
-        .duplicate_binding => "ZTS019",
-        .undeclared_variable => "ZTS020",
-        .const_without_initializer => "ZTS021",
-        .invalid_break => "ZTS022",
-        .invalid_continue => "ZTS023",
-        .invalid_return => "ZTS024",
-        .invalid_yield => "ZTS025",
-        .invalid_await => "ZTS026",
-        .invalid_super => "ZTS027",
-        .too_many_parameters => "ZTS028",
-        .too_many_locals => "ZTS029",
-        .too_many_upvalues => "ZTS030",
-        .too_many_constants => "ZTS031",
-        .jump_too_large => "ZTS032",
-        .invalid_import => "ZTS037",
-        .invalid_export => "ZTS038",
-        .duplicate_export => "ZTS039",
-        .unexpected_character => "ZTS040",
-        // ZTS041-ZTS043 belong to the type stripper (`stripErrorCode`). This
-        // row read ZTS041 too, so one code named both the nesting limit and
-        // the `any` rejection. The nesting limit moved because it is the
-        // rarer of the two and the only reference to it is this table, where
-        // the stripper block is contiguous and cited by
-        // `restriction_registry`'s type-evidence row.
-        .nesting_too_deep => "ZTS044",
-    };
+    return diagnostic_catalog.parserCode(kind);
 }
 
 // -------------------------------------------------------------------------
@@ -170,35 +115,7 @@ pub fn fromParseError(err: ParseError, file: []const u8) JsonDiagnostic {
 /// Type stripper error codes: ZTS041-ZTS043 (inside the parser ZTS0xx range,
 /// which ends at ZTS040 plus the relocated ZTS044).
 fn stripErrorCode(kind: zts.StripDiagnosticKind) []const u8 {
-    return switch (kind) {
-        .any_type => "ZTS041",
-        .as_assertion => "ZTS042",
-        .satisfies_assertion => "ZTS043",
-        // Minted rather than folded into a type-checker code: the declaration is
-        // blanked before the parser runs, so the stripper is the only pass that
-        // can point at the base the author wrote.
-        .nominal_base_not_scalar => "ZTS048",
-        // Minted rather than reusing a parser code: `interface` is recognized
-        // far enough to name the exact repair and then refused, so the fault is
-        // the declaration form, not an unexpected token.
-        .interface_declaration => "ZTS049",
-        // One code each rather than one shared with `interface`: a client keys
-        // on the code to pick a repair, and the three repairs differ.
-        .type_alias_declaration => "ZTS050",
-        .distinct_type_declaration => "ZTS051",
-        .legacy_types_import => "ZTS053",
-        .default_parameter => "ZTS054",
-        .optional_parameter => "ZTS055",
-        .default_export => "ZTS056",
-        .mutable_export => "ZTS057",
-        .array_type_alias => "ZTS058",
-        .readonly_array_type_alias => "ZTS059",
-        .void_type => "ZTS060",
-        // The parser band's existing code for the same fault. The stripper
-        // reaches it first, so the code is shared rather than minted: a client
-        // that handles ZTS008 handles it wherever it was raised.
-        .unterminated_string => "ZTS008",
-    };
+    return diagnostic_catalog.stripCode(kind);
 }
 
 /// Map a TypeScript stripper rejection to a structured diagnostic so `--json`
@@ -222,7 +139,7 @@ pub fn fromStripError(diag: zts.StripDiagnostic, file: []const u8) JsonDiagnosti
 
 pub fn fromUnsupportedSourceExtension(file: []const u8) JsonDiagnostic {
     return .{
-        .code = "ZTS052",
+        .code = diagnostic_catalog.driverCode(.unsupported_source_extension),
         .severity = "error",
         .message = "source files must use the .ts or .tsx extension",
         .file = file,
@@ -233,12 +150,7 @@ pub fn fromUnsupportedSourceExtension(file: []const u8) JsonDiagnostic {
 }
 
 fn prepareSourceErrorCode(kind: zts.PrepareSourceDiagnosticKind) []const u8 {
-    return switch (kind) {
-        .mismatched_tag => "ZTS033",
-        .invalid_attribute => "ZTS034",
-        .unclosed_element => "ZTS035",
-        .expression_expected => "ZTS036",
-    };
+    return diagnostic_catalog.prepareSourceCode(kind);
 }
 
 pub fn fromPrepareSourceDiagnostic(diagnostic: zts.PrepareSourceDiagnostic, file: []const u8) JsonDiagnostic {
@@ -498,7 +410,7 @@ fn writeSpecDiagnosticsJson(writer: anytype, items: anytype) !void {
     for (items, 0..) |d, i| {
         if (i > 0) try writer.writeByte(',');
         try writer.writeAll("{\"code\":");
-        try writeJsonString(writer, d.kind.code());
+        try writeJsonString(writer, diagnostic_catalog.specCode(d.kind));
         try writer.writeAll(",\"kind\":");
         try writeJsonString(writer, @tagName(d.kind));
         try writer.writeAll(",\"severity\":");

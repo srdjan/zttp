@@ -50,6 +50,7 @@ comptime {
     _ = @import("expert_eval.zig");
     _ = @import("expert_codegen_eval.zig");
     _ = @import("expert_evidence_identity.zig");
+    _ = @import("expert_security_probes.zig");
     _ = @import("expert_codegen_record.zig");
     _ = @import("auto_repair.zig");
     _ = @import("expert_persona.zig");

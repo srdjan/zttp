@@ -44,6 +44,7 @@ pub const proof_trace = @import("proof_trace.zig");
 pub const witness_corpus = @import("witness_corpus.zig");
 pub const spec_discharge = @import("spec_discharge.zig");
 pub const property_diagnostics = @import("property_diagnostics.zig");
+pub const diagnostic_catalog = @import("diagnostic_catalog.zig");
 pub const diagnostic_projection = @import("diagnostic_projection.zig");
 
 pub const ambient_names = @import("ambient_names.zig");

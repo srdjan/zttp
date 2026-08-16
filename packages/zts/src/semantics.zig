@@ -17,6 +17,7 @@
 const std = @import("std");
 const bytecode = @import("zts-engine").bytecode;
 const ir = @import("zts-engine").parser.ir;
+const diagnostic_catalog = @import("diagnostic_catalog.zig");
 
 pub const Opcode = bytecode.Opcode;
 pub const NodeTag = ir.NodeTag;
@@ -571,35 +572,10 @@ pub const excluded_laws = [_]Law{
     },
 };
 
-/// Conformance diagnostic codes (ZTS75x). Kept as local registry data rather
-/// than in rule_registry.zig: registering them there would change policyHash and
-/// break the pinned policy hash. The 75x block is distinct from the 70x codes
-/// already used elsewhere (e.g. the missing-sql-schema ZTS700).
-pub const SpecCode = enum {
-    uncovered_node,
-    uncovered_opcode,
-    unbalanced_lowering,
-    lowering_divergence,
-    refinement_divergence,
-    smt_counterexample,
-    smt_unencodable,
-    excluded_law_holds,
-    audit_solver_error,
-
-    pub fn code(self: SpecCode) []const u8 {
-        return switch (self) {
-            .uncovered_node => "ZTS750",
-            .uncovered_opcode => "ZTS751",
-            .unbalanced_lowering => "ZTS752",
-            .lowering_divergence => "ZTS753",
-            .refinement_divergence => "ZTS754",
-            .smt_counterexample => "ZTS755",
-            .smt_unencodable => "ZTS756",
-            .excluded_law_holds => "ZTS757",
-            .audit_solver_error => "ZTS758",
-        };
-    }
-};
+/// Conformance diagnostic codes (ZTS75x). They live in the closed diagnostic
+/// catalog rather than the policy rule registry, because conformance failures
+/// identify compiler implementation faults rather than source-policy rules.
+pub const SpecCode = diagnostic_catalog.SemanticsKind;
 
 // ---------------------------------------------------------------------------
 // Drift gate.

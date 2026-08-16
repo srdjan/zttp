@@ -357,7 +357,7 @@ fn writeMissingSqlSchemaJson(allocator: std.mem.Allocator, target: []const u8) !
 
 fn writeMissingSqlSchemaJsonToWriter(writer: anytype, target: []const u8) !void {
     const diagnostics = [_]json_diag.JsonDiagnostic{.{
-        .code = "ZTS700",
+        .code = zts.DiagnosticCatalog.driverCode(.missing_sql_schema),
         .severity = "error",
         .message = "zttp:sql queries require --sql-schema <schema.sql|schema.sqlite>",
         .file = target,

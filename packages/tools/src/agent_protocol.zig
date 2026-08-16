@@ -2022,7 +2022,7 @@ fn runCheck(
         error.MissingSqlSchema => {
             try diag_json.beginArray();
             try writeDiagnostic(&diag_json, allocator, io, canonical_root, .{
-                .code = "ZTS700",
+                .code = zts.DiagnosticCatalog.driverCode(.missing_sql_schema),
                 .severity = "error",
                 .message = "zttp:sql queries require a SQL schema, which this operation cannot supply",
                 .file = file_rel,

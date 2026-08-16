@@ -7,6 +7,7 @@
 const std = @import("std");
 const bool_checker = @import("bool_checker.zig");
 const counterexample = @import("counterexample.zig");
+const diagnostic_catalog = @import("diagnostic_catalog.zig");
 const flow_checker = @import("flow_checker.zig");
 const handler_verifier = @import("handler_verifier.zig");
 const strict_checker = @import("strict_checker.zig");
@@ -126,97 +127,23 @@ pub fn projectFlowWitness(diagnostic: anytype, ir_view: anytype) ?FlowWitness {
 }
 
 fn booleanCode(kind: bool_checker.DiagnosticKind) []const u8 {
-    return switch (kind) {
-        .condition_not_boolean => "ZTS100",
-        .logical_operand_not_boolean => "ZTS101",
-        .not_operand_not_boolean => "ZTS102",
-        .nullish_on_non_nullable => "ZTS103",
-        .arithmetic_on_non_numeric => "ZTS104",
-        .add_on_non_addable => "ZTS106",
-        .tautological_comparison => "ZTS107",
-    };
+    return diagnostic_catalog.booleanCode(kind);
 }
 
 fn typeCode(kind: type_checker.DiagnosticKind) []const u8 {
-    return switch (kind) {
-        .type_mismatch => "ZTS200",
-        .missing_field => "ZTS201",
-        .arg_count_mismatch => "ZTS202",
-        .arg_type_mismatch => "ZTS203",
-        .return_type_mismatch => "ZTS204",
-        .non_exhaustive_match => "ZTS205",
-        .ambiguous_type_argument => "ZTS208",
-        .type_constraint_violation => "ZTS209",
-        .type_argument_count_mismatch => "ZTS210",
-        .invalid_type_predicate => "ZTS211",
-        .non_contractive_alias => "ZTS212",
-        .unencodable_json_payload => "ZTS213",
-        .string_add => "ZTS105",
-        .nominal_constructor_call => "ZTS214",
-        .readonly_mutation => "ZTS215",
-    };
+    return diagnostic_catalog.typeCode(kind);
 }
 
 fn verifierCode(kind: handler_verifier.DiagnosticKind) []const u8 {
-    return switch (kind) {
-        .missing_return_else => "ZTS300",
-        .missing_return_default => "ZTS301",
-        .missing_return_path => "ZTS302",
-        .unchecked_result_value => "ZTS303",
-        .unreachable_after_return => "ZTS304",
-        .unused_variable => "ZTS305",
-        .unused_import => "ZTS306",
-        .non_exhaustive_match => "ZTS307",
-        .unchecked_optional_use => "ZTS308",
-        .unchecked_optional_access => "ZTS309",
-        .module_scope_mutation => "ZTS310",
-        .spec_not_discharged => "ZTS500",
-        .spec_incompatible_with_import => "ZTS501",
-        .spec_unknown_name => "ZTS502",
-    };
+    return diagnostic_catalog.verifierCode(kind);
 }
 
 fn flowCode(kind: flow_checker.DiagnosticKind) []const u8 {
-    return switch (kind) {
-        .secret_in_response => "ZTS400",
-        .credential_in_response => "ZTS401",
-        .secret_in_log => "ZTS402",
-        .credential_in_log => "ZTS403",
-        .secret_in_egress_url => "ZTS404",
-        .credential_in_egress_url => "ZTS405",
-        .secret_in_egress_body => "ZTS406",
-        .unvalidated_input_in_egress => "ZTS407",
-    };
+    return diagnostic_catalog.flowCode(kind);
 }
 
 fn strictCode(kind: strict_checker.DiagnosticKind) []const u8 {
-    return switch (kind) {
-        .implicit_unknown => "ZTS600",
-        .unpublished_ambient_global => "ZTS629",
-        .missing_public_annotation => "ZTS601",
-        .dynamic_capability_access => "ZTS602",
-        .non_exhaustive_profile_match => "ZTS603",
-        .avoidable_let => "ZTS604",
-        .computed_property_access => "ZTS605",
-        .raw_exported_boundary_type => "ZTS061",
-        .canonical_arrow_helper => "ZTS608",
-        .canonical_export_function_const => "ZTS609",
-        .canonical_public_helper_effects => "ZTS610",
-        .canonical_public_helper_proof => "ZTS611",
-        .canonical_ternary_impure => "ZTS612",
-        .canonical_compound_assignment => "ZTS613",
-        .canonical_non_leading_spread => "ZTS614",
-        .canonical_call_spread => "ZTS616",
-        .canonical_redundant_bool_compare => "ZTS620",
-        .canonical_ternary_chain => "ZTS621",
-        .mutable_live_iteration => "ZTS622",
-        .canonical_internal_helper_effects => "ZTS623",
-        .nullish_operator_on_null => "ZTS624",
-        .canonical_redundant_pattern_rename => "ZTS625",
-        .canonical_unbound_field_read => "ZTS626",
-        .canonical_dict_entry_round_trip => "ZTS627",
-        .canonical_dict_entries_reduce => "ZTS628",
-    };
+    return diagnostic_catalog.strictCode(kind);
 }
 
 fn Kind(comptime source: Source) type {

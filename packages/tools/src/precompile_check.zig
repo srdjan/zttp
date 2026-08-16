@@ -5,6 +5,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const zts = @import("zts");
+const diagnostic_catalog = zts.DiagnosticCatalog;
 
 const handler_contract = zts.handler_contract;
 const HandlerContract = zts.HandlerContract;
@@ -175,7 +176,7 @@ pub fn appendSpecDiagnosticsJson(
 ) void {
     const contract = if (result.contract) |*c| c else return;
     for (contract.spec_diagnostics.items) |diag| {
-        const code: []const u8 = diag.kind.code();
+        const code = diagnostic_catalog.specCode(diag.kind);
         // Single source of truth shared with the human card (formatProofCard)
         // so the two surfaces cannot drift.
         const message: []const u8 = specDiagnosticMessage(diag);
@@ -215,7 +216,7 @@ pub fn appendExportCapsuleDiagnostics(
         // write down.
         const repair = computedCapsuleRepair(allocator, "Proof", provenPropertyNames(cap, &proven_buf)) orelse continue;
         result.json_diagnostics.append(allocator, .{
-            .code = SpecDiagnostic.Kind.missing_proof_capsule_export.code(),
+            .code = diagnostic_catalog.specCode(.missing_proof_capsule_export),
             .severity = "warning",
             .message = "exported helper carries no Proof<...> capsule",
             .file = handler_path,
@@ -511,7 +512,7 @@ pub fn formatProofCard(writer: anytype, r: *const CheckResult, filename: []const
                 if (d.kind.severity() != .err) continue;
                 writer.print(
                     "    {s} (error) {s}:{d}:{d}  {s}\n",
-                    .{ d.kind.code(), filename, contract.handler.line, contract.handler.column, specDiagnosticMessage(d) },
+                    .{ diagnostic_catalog.specCode(d.kind), filename, contract.handler.line, contract.handler.column, specDiagnosticMessage(d) },
                 ) catch return;
                 if (d.suggestion) |suggestion| {
                     writer.print("      help: {s}\n", .{suggestion}) catch return;

@@ -8,6 +8,7 @@
 //! Used by `zts describe-rule`, `zts search`, and policy hash assertions.
 
 const std = @import("std");
+const diagnostic_catalog = @import("diagnostic_catalog.zig");
 const handler_verifier = @import("handler_verifier.zig");
 const strict_checker = @import("strict_checker.zig");
 const handler_policy = @import("zts-engine").handler_policy;
@@ -749,7 +750,7 @@ pub const all_rules: [total_count]RuleEntry = blk: {
     for (verifier_meta) |v| {
         rules[i] = .{
             .name = verifierName(v.kind),
-            .code = v.code,
+            .code = diagnostic_catalog.verifierCode(v.kind),
             .category = .verifier,
             .description = v.description,
             .example = v.example,
@@ -762,7 +763,7 @@ pub const all_rules: [total_count]RuleEntry = blk: {
     for (strict_meta) |s| {
         rules[i] = .{
             .name = strictName(s.kind),
-            .code = s.code,
+            .code = diagnostic_catalog.strictCode(s.kind),
             .category = .verifier,
             .description = s.description,
             .example = s.example,
@@ -801,7 +802,7 @@ pub const all_rules: [total_count]RuleEntry = blk: {
     for (property_meta) |p| {
         rules[i] = .{
             .name = propertyName(p.kind),
-            .code = p.code,
+            .code = diagnostic_catalog.propertyCode(p.kind),
             .category = .property,
             .description = p.description,
             .example = null,
@@ -814,7 +815,7 @@ pub const all_rules: [total_count]RuleEntry = blk: {
     for (flow_meta) |f| {
         rules[i] = .{
             .name = flowName(f.kind),
-            .code = f.code,
+            .code = diagnostic_catalog.flowCode(f.kind),
             .category = .flow,
             .description = f.description,
             .example = f.example,
@@ -953,6 +954,16 @@ test "all_rules has expected count" {
     // tracks the smallest legitimate set; the exact count is enforced by the
     // total_count == all_rules.len check above.
     try std.testing.expect(all_rules.len >= 35);
+}
+
+test "every policy rule resolves through the closed diagnostic catalog" {
+    for (&all_rules) |*rule| {
+        const diagnostic = diagnostic_catalog.findByCode(rule.code) orelse {
+            std.log.err("rule '{s}' uses uncataloged diagnostic {s}", .{ rule.name, rule.code });
+            return error.UncatalogedDiagnostic;
+        };
+        try std.testing.expect(diagnostic.code.len > 0);
+    }
 }
 
 test "all_rules includes every flow_checker.DiagnosticKind under .flow" {

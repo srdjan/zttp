@@ -112,6 +112,7 @@ pub const json_utils = base.json_utils;
 pub const behavior_canonical = compiler.behavior_canonical;
 pub const fault_coverage = compiler.fault_coverage;
 pub const property_diagnostics = compiler.property_diagnostics;
+pub const diagnostic_catalog = compiler.diagnostic_catalog;
 pub const route_match = base.route_match;
 pub const type_map = base.type_map;
 pub const type_pool = compiler.type_pool;
@@ -285,6 +286,17 @@ pub const ContractProof = struct {
 /// Stable identity of the analyzer policy linked into this build.
 pub fn policyHash() [64]u8 {
     return rule_registry.policyHash();
+}
+
+/// Stable identity of every compiler-emitted diagnostic and its risk family.
+pub fn diagnosticCatalogHash() [64]u8 {
+    return compiler.diagnostic_catalog.catalogHash();
+}
+
+test "stable diagnosticCatalogHash exposes the compiler catalog identity" {
+    const stable_hash = diagnosticCatalogHash();
+    const catalog_hash = compiler.diagnostic_catalog.catalogHash();
+    try std.testing.expectEqualStrings(&catalog_hash, &stable_hash);
 }
 
 test "stable policyHash exposes the policy registry identity" {
@@ -564,6 +576,7 @@ test "stable AmbientCatalog and TypeSerialization publish the registries behind 
 }
 
 pub const DiagnosticProjection = diagnostic_projection;
+pub const DiagnosticCatalog = compiler.diagnostic_catalog;
 
 test "DiagnosticProjection exposes stable tagged checker codes" {
     try std.testing.expectEqualStrings(

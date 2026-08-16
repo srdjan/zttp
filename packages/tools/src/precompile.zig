@@ -9,6 +9,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const zts = @import("zts");
+const diagnostic_catalog = zts.DiagnosticCatalog;
 const ir = zts.parser;
 const IrTranspiler = @import("transpiler.zig").IrTranspiler;
 const handler_contract = zts.handler_contract;
@@ -954,7 +955,7 @@ pub fn runCheckOnlyWithOptions(
             return err;
         };
         result.json_diagnostics.append(allocator, .{
-            .code = "ZTS000",
+            .code = diagnostic_catalog.driverCode(.compiler_io_failure),
             .severity = "error",
             .message = message,
             .file = handler_path,
@@ -1272,10 +1273,7 @@ fn runCheckOnPreparedSource(
                     .missing_export => "Use an export published for this module by meta.module_catalog.",
                 };
                 try result.json_diagnostics.append(allocator, .{
-                    .code = switch (diagnostic.kind) {
-                        .unknown_module => "ZTS206",
-                        .missing_export => "ZTS207",
-                    },
+                    .code = diagnostic_catalog.virtualImportCode(diagnostic.kind),
                     .severity = "error",
                     .message = message,
                     .file = handler_path,
@@ -2327,7 +2325,7 @@ fn resolveImportedAtomName(
 }
 
 const VirtualImportDiagnostic = struct {
-    kind: enum { unknown_module, missing_export },
+    kind: diagnostic_catalog.VirtualImportKind,
     module: []const u8,
     missing_export: ?[]const u8 = null,
     line: u32,

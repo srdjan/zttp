@@ -34,7 +34,7 @@ pub fn collect(
             .json_mode = true,
         }) catch |err| {
             const fake: Diagnostic = .{
-                .code = "ZTS000",
+                .code = zts.DiagnosticCatalog.driverCode(.compiler_io_failure),
                 .severity = "error",
                 .message = @errorName(err),
                 .file = path,

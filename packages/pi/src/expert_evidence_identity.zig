@@ -38,7 +38,7 @@ pub const DiagnosticIdentity = TypedIdentity("zttp-expert-diagnostics-v1");
 pub const PolicyIdentity = TypedIdentity("zttp-expert-policy-v1");
 pub const HeadlineInputIdentity = TypedIdentity("zttp-expert-headline-input-v1");
 pub const IntentSuiteIdentity = TypedIdentity("zttp-expert-intent-suite-v1");
-pub const SecurityProbeCorpusIdentity = TypedIdentity("zttp-expert-security-probes-v1");
+pub const SecurityProbeCorpusIdentity = TypedIdentity("zttp-expert-security-probes-v2");
 pub const ThresholdIdentity = TypedIdentity("zttp-expert-thresholds-v1");
 pub const ManifestIdentity = TypedIdentity("zttp-expert-manifest-v1");
 pub const ResultRunIdentity = TypedIdentity("zttp-expert-result-run-v1");
@@ -68,10 +68,36 @@ pub const IntentScenario = union(enum) {
     },
 };
 
+pub const SecurityProbeDiagnosticSeverity = enum { err, warning, advisory };
+
+pub const SecurityProbeExpectedDiagnostic = struct {
+    code: []const u8,
+    severity: SecurityProbeDiagnosticSeverity,
+};
+
+pub const SecurityProbeDiagnosticExpectation = struct {
+    primary: []const u8,
+    exact_diagnostics: []const SecurityProbeExpectedDiagnostic,
+};
+
+pub const PositiveSecurityProbeExpectation = union(enum) {
+    property: struct {
+        name: []const u8,
+        value: bool,
+    },
+    capability_budget: []const []const u8,
+};
+
+pub const SecurityProbeClaim = union(enum) {
+    positive: PositiveSecurityProbeExpectation,
+    adversarial: SecurityProbeDiagnosticExpectation,
+};
+
 pub const SecurityProbe = struct {
     scenario: []const u8,
-    target_property: []const u8,
-    variant: []const u8,
+    family: []const u8,
+    source: []const u8,
+    claim: SecurityProbeClaim,
 };
 
 pub const ExpectedVerdict = enum { pass, fail };
@@ -356,8 +382,38 @@ pub fn securityProbeCorpus(probes: []const SecurityProbe) SecurityProbeCorpusIde
     for (probes, 0..) |probe, probe_index| {
         hasher.u64Field("probe-index", probe_index);
         hasher.field("scenario", probe.scenario);
-        hasher.field("target-property", probe.target_property);
-        hasher.field("variant", probe.variant);
+        hasher.field("family", probe.family);
+        hasher.field("source", probe.source);
+        switch (probe.claim) {
+            .adversarial => |diagnostic| {
+                hasher.field("claim", "adversarial");
+                hasher.field("primary-diagnostic-code", diagnostic.primary);
+                hasher.u64Field("diagnostic-count", diagnostic.exact_diagnostics.len);
+                for (diagnostic.exact_diagnostics, 0..) |expected, diagnostic_index| {
+                    hasher.u64Field("diagnostic-index", diagnostic_index);
+                    hasher.field("diagnostic-code", expected.code);
+                    hasher.field("diagnostic-severity", @tagName(expected.severity));
+                }
+            },
+            .positive => |positive| {
+                hasher.field("claim", "positive");
+                switch (positive) {
+                    .property => |property| {
+                        hasher.field("expectation", "property");
+                        hasher.field("property-name", property.name);
+                        hasher.boolField("property-value", property.value);
+                    },
+                    .capability_budget => |capabilities| {
+                        hasher.field("expectation", "capability-budget");
+                        hasher.u64Field("capability-count", capabilities.len);
+                        for (capabilities, 0..) |capability, capability_index| {
+                            hasher.u64Field("capability-index", capability_index);
+                            hasher.field("capability", capability);
+                        }
+                    },
+                }
+            },
+        }
     }
     return hasher.finish(SecurityProbeCorpusIdentity);
 }
@@ -585,17 +641,40 @@ test "cohort identities are deterministic domain separated and field isolated" {
     try expectChanged(intent, intentSuite(&changed_intents));
 
     const probes = [_]SecurityProbe{
-        .{ .scenario = "alpha", .target_property = "no_secret_leakage", .variant = "transformed-return" },
+        .{
+            .scenario = "alpha",
+            .family = "sensitive_data_flow",
+            .source = "return secret",
+            .claim = .{ .adversarial = .{
+                .primary = "ZTS400",
+                .exact_diagnostics = &.{
+                    .{ .code = "ZTS400", .severity = .err },
+                    .{ .code = "ZTS500", .severity = .err },
+                },
+            } },
+        },
     };
     const probe = securityProbeCorpus(&probes);
     var changed_probes = probes;
     changed_probes[0].scenario = "beta";
     try expectChanged(probe, securityProbeCorpus(&changed_probes));
     changed_probes = probes;
-    changed_probes[0].target_property = "input_validated";
+    changed_probes[0].family = "untrusted_input_flow";
     try expectChanged(probe, securityProbeCorpus(&changed_probes));
     changed_probes = probes;
-    changed_probes[0].variant = "direct-return";
+    changed_probes[0].claim = .{ .positive = .{ .property = .{
+        .name = "no_secret_leakage",
+        .value = false,
+    } } };
+    try expectChanged(probe, securityProbeCorpus(&changed_probes));
+    changed_probes = probes;
+    changed_probes[0].source = "return public";
+    try expectChanged(probe, securityProbeCorpus(&changed_probes));
+    changed_probes = probes;
+    changed_probes[0].claim = .{ .positive = .{ .property = .{
+        .name = "no_secret_leakage",
+        .value = true,
+    } } };
     try expectChanged(probe, securityProbeCorpus(&changed_probes));
 
     const expected = [_]ExpectedOutcome{
