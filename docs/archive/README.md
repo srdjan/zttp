@@ -23,6 +23,18 @@ Three loose files sit at the top level: `IMPROVEMENT_PLAN.md` and
 and `v0.1-v0.2-gap-analysis.md`, which was the only file under
 `packages/zts/src/docs/`.
 
+Two files in `plans/` are program records rather than plans, lifted out of
+`docs/roadmap.md` on 2026-08-16 when every item in them had closed:
+
+- [the agent-compiler agenda](plans/2026-08-16-028-agent-compiler-agenda-closed.md),
+  eight closed items on the convergence thesis.
+- [the advanced ZTS language program](plans/2026-08-16-029-zts-advanced-language-program-closed.md),
+  phases 0 through 7 and how the four carried risks landed.
+
+Both are worth reading before proposing work in those areas: several entries
+record a measurement that did not support the expectation the item was written
+on, which is the part a summary would drop.
+
 Still live, and deliberately not archived:
 
 - `docs/plans/2026-07-28-001-reset-simplification-plan.md`, because three items
