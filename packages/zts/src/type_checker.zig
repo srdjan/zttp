@@ -77,6 +77,7 @@ pub const DiagnosticKind = enum {
     unencodable_json_payload, // a `Response.json` payload whose type cannot be JSON
     string_add, // string-valued use of + instead of explicit join
     nominal_constructor_call, // a nominal type name used in call position
+    readonly_mutation, // a mutating array method called on a readonly receiver
 };
 
 pub const Diagnostic = struct {
@@ -748,6 +749,7 @@ pub const TypeChecker = struct {
                 const c = self.ir_view.getCall(node) orelse return;
                 self.collectSchemaCompileCall(c) catch self.markAllocationFailure();
                 self.reportNominalConstructorCall(node, c);
+                self.reportReadonlyMutation(node, c);
                 self.walkExpr(c.callee);
                 // Check argument types against function signature
                 self.checkCallArgs(node, c);
@@ -3904,6 +3906,69 @@ pub const TypeChecker = struct {
         });
     }
 
+    /// The array methods that write through their receiver.
+    ///
+    /// Closed against what the engine implements rather than against the
+    /// JavaScript surface: `sort`, `reverse`, `fill`, and `copyWithin` mutate
+    /// too and are not admitted, so listing them here would describe a call
+    /// that cannot be written. `concat` and `slice` return a new array and are
+    /// deliberately absent.
+    const mutating_array_methods = [_][]const u8{ "push", "pop", "shift", "unshift", "splice" };
+
+    /// Refuse a mutating method call on a `readonly` array.
+    ///
+    /// `readonly` was enforced only through assignability, which decides what
+    /// may cross a call boundary and says nothing about what happens to a value
+    /// that never crosses one. `const ro: readonly string[] = ["x"]; ro.push("y")`
+    /// checked clean and appended at runtime, so the modifier documented an
+    /// intention the compiler did not hold anyone to.
+    ///
+    /// Keyed on the method, not the receiver: `ro.join(",")` and `ro.slice(0, 1)`
+    /// read a readonly array and stay legal.
+    fn reportReadonlyMutation(self: *TypeChecker, node: NodeIndex, call: Node.CallExpr) void {
+        const callee_tag = self.ir_view.getTag(call.callee) orelse return;
+        if (callee_tag != .member_access and callee_tag != .optional_chain) return;
+        const member = self.ir_view.getMember(call.callee) orelse return;
+        const method = self.resolveAtomName(member.property) orelse return;
+
+        var mutates = false;
+        for (mutating_array_methods) |name| {
+            if (std.mem.eql(u8, method, name)) mutates = true;
+        }
+        if (!mutates) return;
+
+        const receiver = self.inferType(member.object);
+        if (receiver == null_type_idx) return;
+        if (!self.env.pool.isReadonlyArray(receiver)) return;
+
+        self.addReadonlyMutation(node, method);
+    }
+
+    fn addReadonlyMutation(self: *TypeChecker, node: NodeIndex, method: []const u8) void {
+        const msg = std.fmt.allocPrint(
+            self.allocator,
+            "`{s}` writes through a readonly array",
+            .{method},
+        ) catch {
+            self.addDiagnostic(.{
+                .severity = .err,
+                .kind = .readonly_mutation,
+                .node = node,
+                .message = "a readonly array cannot be mutated",
+                .help = "drop `readonly` from the declared type, or build a new array instead of writing to this one",
+            });
+            return;
+        };
+        self.addDiagnostic(.{
+            .severity = .err,
+            .kind = .readonly_mutation,
+            .node = node,
+            .message = msg,
+            .help = "drop `readonly` from the declared type, or build a new array instead of writing to this one",
+            .allocated = true,
+        });
+    }
+
     /// Refuse a nominal type name used in call position.
     ///
     /// `UserId("u-1")` used to check clean and then fault at runtime with
@@ -5170,6 +5235,70 @@ test "TypeChecker: allows assignment to non-readonly property" {
         \\const cfg: Config = { port: 3000, host: "localhost" };
         \\cfg.host = "other";
     , 0, 0);
+}
+
+test "TypeChecker: a readonly array refuses a mutating method" {
+    // `readonly` was enforced through assignability alone, so a readonly array
+    // could not be handed to a mutating parameter and could still be mutated
+    // in place. `ro.push("y")` checked clean and appended at runtime, which
+    // made the modifier decorative wherever the value never crossed a call
+    // boundary.
+    for ([_][]const u8{ "push", "pop", "shift", "unshift", "splice" }) |method| {
+        const source = try std.fmt.allocPrint(std.testing.allocator,
+            \\function handler(req: Request): Response {{
+            \\  const ro: readonly string[] = ["x"];
+            \\  ro.{s}();
+            \\  return Response.json({{ n: ro.length }});
+            \\}}
+        , .{method});
+        defer std.testing.allocator.free(source);
+        try checkTypedSourceSaying(source, 1, "readonly");
+    }
+}
+
+test "TypeChecker: a mutable array still takes every method" {
+    // The companion direction. Dropping `readonly` must leave every one of
+    // those calls alone, or the rule is refusing arrays rather than refusing
+    // mutation.
+    for ([_][]const u8{ "push", "pop", "shift", "unshift", "splice" }) |method| {
+        const source = try std.fmt.allocPrint(std.testing.allocator,
+            \\function handler(req: Request): Response {{
+            \\  const xs: string[] = ["x"];
+            \\  xs.{s}();
+            \\  return Response.json({{ n: xs.length }});
+            \\}}
+        , .{method});
+        defer std.testing.allocator.free(source);
+        try checkTypedSource(source, 0, null);
+    }
+}
+
+test "TypeChecker: a readonly array still takes a non-mutating method" {
+    // `readonly` bans mutation, not use. A rule keyed on the receiver rather
+    // than the method would take these with it.
+    try checkTypedSource(
+        \\function handler(req: Request): Response {
+        \\  const ro: readonly string[] = ["x"];
+        \\  const joined: string = ro.join(",");
+        \\  const first: string[] = ro.slice(0, 1);
+        \\  return Response.json({ joined: joined, n: first.length });
+        \\}
+    , 0, null);
+}
+
+test "TypeChecker: a readonly parameter refuses mutation in the body" {
+    // The case the assignability rule already covers at the call site, checked
+    // from the other side: a function that declares it will not write must not
+    // write.
+    try checkTypedSourceSaying(
+        \\function drain(xs: readonly string[]): number {
+        \\  xs.pop();
+        \\  return xs.length;
+        \\}
+        \\function handler(req: Request): Response {
+        \\  return Response.json({ n: drain(["a"]) });
+        \\}
+    , 1, "readonly");
 }
 
 test "TypeChecker: nominal construction is the annotated declaration" {
