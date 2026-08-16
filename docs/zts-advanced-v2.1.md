@@ -76,6 +76,14 @@ diff. The second removes a call the reader has to know is free. Either closes
 the gap; shipping both would give one operation two spellings, which design law
 4.2 argues against.
 
+**Resolved by measurement, in favour of the second.** `parser/codegen.zig` holds
+`node_types` as an optional, and the only caller of `setNodeTypes` in the tree is
+`packages/tools/src/precompile.zig:2026`. Type information reaches the generator
+on the precompile path and nowhere else, so a constructor erasure keyed on it
+would work under `zttp build` and fault under `zttp dev`. The implementation plan
+is
+[2026-08-16-030-boundary-types-plan.md](plans/2026-08-16-030-boundary-types-plan.md).
+
 ### 1.3 Scope
 
 The rule binds **exported** functions only, in both parameter and return
