@@ -33,6 +33,11 @@ the case.
 
 ## Before recording
 
+Finish compiler, persona, protocol, and tool-catalog changes before recording.
+Those inputs are part of the request identity, so recording first only creates
+artifacts that the completed implementation must reject. A stale replay is the
+expected state during a direct cutover.
+
 Replay first. A failing replay tells you which cases are stale and confirms the
 harness is sound offline:
 
@@ -75,6 +80,49 @@ explicitly.
 | `ZTTP_CODEGEN_MODEL_REVISION` | Overrides the model revision the recorder otherwise reads from the Hugging Face cache. Local provider only. |
 | `ZTTP_CODEGEN_TOOLS` | Comma-separated allowlist that shrinks the model-facing tool catalog, for non-publishable experiments. It never drops `propose_change_set`, and it fails on a name matching no model-visible tool. |
 | `ZTTP_CODEGEN_REPLAY_PROVIDER` | Replays a non-headline corpus. Recording ignores it. |
+
+## Qualification is not recording
+
+Qualification measures a candidate without replacing a committed corpus. It
+attempts all 19 cases, keeps every generated flow under `.zig-cache`, and emits
+one report-only run record. `scripts/qualify-expert.sh` performs three
+consecutive runs and passes the records to the typed `expert-qualification`
+gate. It refuses filters, a dirty source tree, missing local provenance, and a
+run that omits any case.
+
+Every run must reach 19/19 final green, 18/18 runtime intents, at least 14/19
+raw model-authored first-draft passes, a median of at most four model round
+trips, and zero empty, timeout, decode, provider, or internal failures. All
+three runs must bind the same source, model, request policy, prompt, tool
+catalog, compiler identities, cohort identities, and local serving provenance.
+
+The wrapper spends three full runs of real model time, so it requires an
+explicit confirmation flag. For the current local candidate:
+
+```bash
+mlx_lm.server --model mlx-community/Qwen3-8B-4bit --host 127.0.0.1 --port 8080
+
+export ZTTP_CODEGEN_QUALIFY_CONFIRM=1
+export ZTTP_CODEGEN_PROVIDER=local
+export ZTTP_CODEGEN_MODEL=mlx-community/Qwen3-8B-4bit
+export ZTTP_CODEGEN_MODEL_REVISION=<exact-model-revision>
+export ZTTP_CODEGEN_MODEL_ARTIFACT_SHA256=<canonical-snapshot-sha256>
+export ZTTP_CODEGEN_QUANTIZATION=4-bit
+export ZTTP_CODEGEN_CHAT_TEMPLATE_SHA256=<canonical-chat-template-sha256>
+export ZTTP_CODEGEN_SERVING_ARGS='mlx_lm.server --model mlx-community/Qwen3-8B-4bit --host 127.0.0.1 --port 8080'
+export ZTTP_CODEGEN_HARDWARE="$(uname -m)"
+export ZTTP_CODEGEN_OS="$(uname -srv)"
+export ZTTP_CODEGEN_PEAK_MEMORY_BYTES=<measured-serving-process-peak>
+
+bash scripts/qualify-expert.sh > /tmp/qwen3-8b-4bit-qualification.json
+```
+
+The local request adapter sends no temperature, top-p, or seed override, so the
+report records `server-defaults` and a null seed. The exact serving arguments
+remain part of the report; secret-shaped serving flags are refused instead of
+being logged. A passing report sets `qualified: true` and still
+sets `default_change_authorized: false`. Changing either the LFM local-provider
+default or the DeepSeek product default is a separate product decision.
 
 ### The per-turn ceiling
 
@@ -139,12 +187,13 @@ the operator's shell, and the recorder refuses a malformed value rather than
 guessing one.
 
 Registered models: `LiquidAI/LFM2.5-2.6B-MLX-8bit` (default) and
-`mlx-community/Qwen3-8B-4bit`.
+`mlx-community/Qwen3-8B-4bit` (qualification candidate).
 
 Artifacts: `packages/pi/src/simulator/testdata/empirical/local/codegen/`.
 
 A failing local case is the measurement, not a reason to reach for a hosted
-model.
+model. Use the qualification wrapper for a candidate comparison. Use recording
+only when deliberately replacing a committed provider corpus.
 
 ### Claude
 

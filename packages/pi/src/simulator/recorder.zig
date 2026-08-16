@@ -59,6 +59,11 @@ pub const ProgressObserver = struct {
     }
 };
 
+pub const RuntimeIdentity = struct {
+    name: []const u8,
+    revision: []const u8,
+};
+
 pub const Options = struct {
     case_name: []const u8,
     evidence_class: artifact.EvidenceClass,
@@ -161,6 +166,19 @@ pub const Recorder = struct {
     pub fn deinit(self: *Recorder) void {
         self.arena.deinit();
         self.* = undefined;
+    }
+
+    /// Provider runtime observed from the response fingerprint or supplied by
+    /// the operator for a server that exposes no version endpoint. Borrowed
+    /// from the recorder and valid until `deinit`.
+    pub fn runtimeIdentity(self: *const Recorder) ?RuntimeIdentity {
+        if (self.options.mlx_lm_version) |revision| {
+            return .{ .name = "mlx-lm", .revision = revision };
+        }
+        if (self.options.runtime_name) |name| {
+            return .{ .name = name, .revision = self.options.runtime_version.? };
+        }
+        return null;
     }
 
     pub fn captureSink(self: *Recorder) capture_sink.CaptureSink {
@@ -901,6 +919,33 @@ test "local response fingerprint exposes the MLX-LM version" {
         std.testing.allocator,
         "{\"system_fingerprint\":\"unknown-build\"}",
     )) == null);
+}
+
+test "recorder exposes one provider runtime identity" {
+    var mlx = try Recorder.init(std.testing.allocator, .{
+        .case_name = "runtime",
+        .evidence_class = .empirical_model,
+        .provider = .local,
+        .model = "model",
+        .mlx_lm_version = "0.31.3",
+        .workspace_allowlist = &.{},
+    });
+    defer mlx.deinit();
+    try std.testing.expectEqualStrings("mlx-lm", mlx.runtimeIdentity().?.name);
+    try std.testing.expectEqualStrings("0.31.3", mlx.runtimeIdentity().?.revision);
+
+    var declared = try Recorder.init(std.testing.allocator, .{
+        .case_name = "runtime",
+        .evidence_class = .empirical_model,
+        .provider = .local,
+        .model = "model",
+        .runtime_name = "rapid-mlx",
+        .runtime_version = "0.12.11",
+        .workspace_allowlist = &.{},
+    });
+    defer declared.deinit();
+    try std.testing.expectEqualStrings("rapid-mlx", declared.runtimeIdentity().?.name);
+    try std.testing.expectEqualStrings("0.12.11", declared.runtimeIdentity().?.revision);
 }
 
 fn lessThanPath(_: void, left: []const u8, right: []const u8) bool {

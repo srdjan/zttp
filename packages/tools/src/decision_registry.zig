@@ -29,7 +29,7 @@ const std = @import("std");
 /// It moves when a row's meaning changes or a row is removed - not when a row
 /// is added, which a client that does not know the identifier already handles
 /// by treating it as an unknown refusal.
-pub const version: u32 = 1;
+pub const version: u32 = 2;
 
 /// The wire vocabulary. `@tagName` is the string on the wire, so the enum and
 /// the published identifiers cannot drift apart.
@@ -40,10 +40,6 @@ pub const Id = enum {
     stale_repair,
     overlapping_repairs,
     repair_out_of_range,
-    ungraded_intent,
-    not_law_shape,
-    undecided_equivalence,
-    veto,
 
     pub fn wire(self: Id) []const u8 {
         return @tagName(self);
@@ -64,9 +60,6 @@ pub const NextAction = enum {
     /// No validator discharges this intent, so no automatic application is
     /// possible. `simulate_edit` still previews it for a human decision.
     choose_a_graded_intent,
-    /// A validator ran and refused, or formed no answer. The edit is not known
-    /// to be an equivalence, and this compiler will not apply it on that basis.
-    no_mechanical_repair,
 };
 
 pub const Decision = struct {
@@ -78,17 +71,17 @@ pub const Decision = struct {
     parameters: []const []const u8,
 };
 
-/// Every refusal both repair operations can answer with. The two share a shape:
-/// the payload's published key set stays intact and `refusal` carries the kind
-/// and a message, so a client that reads `refusal` first never has to guess
-/// which other fields are present.
+/// Every refusal the read-only repair simulator can answer with. The payload's
+/// published key set stays intact and `refusal` carries the kind and a message,
+/// so a client that reads `refusal` first never has to guess which other fields
+/// are present.
 const refusal_parameters: []const []const u8 = &.{ "file", "source_digest", "refusal.reason", "refusal.message" };
 
 pub const decisions = [_]Decision{
     .{
         .id = .no_repairs,
         .next_action = .fix_the_request,
-        .description = "the request carried an empty repair set, so there was nothing to apply",
+        .description = "the request carried an empty repair set, so there was nothing to simulate",
         .parameters = refusal_parameters,
     },
     .{
@@ -112,37 +105,13 @@ pub const decisions = [_]Decision{
     .{
         .id = .overlapping_repairs,
         .next_action = .narrow_the_repair_set,
-        .description = "two repairs in the set cover the same bytes, and the set is applied atomically or not at all",
+        .description = "two repairs in the set cover the same bytes, so the set cannot be simulated as one edit",
         .parameters = refusal_parameters,
     },
     .{
         .id = .repair_out_of_range,
         .next_action = .reread_the_file,
         .description = "a repair names a line past the end of the file, or a byte span outside it",
-        .parameters = refusal_parameters,
-    },
-    .{
-        .id = .ungraded_intent,
-        .next_action = .choose_a_graded_intent,
-        .description = "no registered validator discharges this intent, so the edit cannot be graded as an equivalence and is not applied automatically",
-        .parameters = refusal_parameters,
-    },
-    .{
-        .id = .not_law_shape,
-        .next_action = .no_mechanical_repair,
-        .description = "the validator re-derived the edit from the original and got something else, so the submitted edit is not the law's",
-        .parameters = refusal_parameters,
-    },
-    .{
-        .id = .undecided_equivalence,
-        .next_action = .no_mechanical_repair,
-        .description = "the validator formed no answer - the construct is one it does not model - which is neither an acceptance nor a refusal of the edit",
-        .parameters = refusal_parameters,
-    },
-    .{
-        .id = .veto,
-        .next_action = .narrow_the_repair_set,
-        .description = "the repaired file carries diagnostics the original did not, so the set was refused as a whole and nothing was written",
         .parameters = refusal_parameters,
     },
 };

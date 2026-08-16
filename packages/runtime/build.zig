@@ -70,6 +70,7 @@ pub fn build(b: *std.Build) void {
     });
     runtime_main_tests.addImport("zts", zts_mod);
     runtime_main_tests.addImport("project_config", project_config_mod);
+    runtime_main_tests.addImport("zttp_proof_review", proof_review_mod);
     runtime_main_tests.addOptions("runtime_feature_options", runtime_features);
 
     const cli_main = b.addModule("cli_main", .{

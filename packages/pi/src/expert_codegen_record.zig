@@ -4,6 +4,8 @@
 //! `ZTTP_CODEGEN_RECORD=1`. `ZTTP_CODEGEN_PROVIDER` selects the provider;
 //! `ZTTP_CODEGEN_REQUIRE_GREEN=1` refuses to stage a case that did not apply an
 //! edit or whose declared runtime intent did not pass.
+//! `ZTTP_CODEGEN_QUALIFY=1` is a separate report-only full-corpus mode. It
+//! never activates cassettes or changes a model default.
 //! cloud credentials are required only for an explicitly selected cloud
 //! provider. Transport, capture, disk, and replay are tested offline.
 //! Live cassettes remain the only source for model-behavior measurements.
@@ -33,6 +35,8 @@ const agent = @import("agent.zig");
 const codegen = @import("expert_codegen_eval.zig");
 const codegen_types = @import("expert_codegen_types.zig");
 const evidence_identity = @import("expert_evidence_identity.zig");
+const failure_analysis = @import("expert_failure_analysis.zig");
+const qualification = @import("expert_qualification.zig");
 const security_probes = @import("expert_security_probes.zig");
 const expert_persona = @import("expert_persona.zig");
 const models = @import("providers/models.zig");
@@ -362,8 +366,8 @@ fn declaredRuntimeFrom(provider: agent.Provider, raw_opt: ?[]const u8) !?Runtime
 }
 
 fn cachedModelRevision(allocator: std.mem.Allocator, provider: agent.Provider, model: []const u8) !?[]u8 {
-    if (provider != .local or !std.mem.eql(u8, model, local.default_model)) return null;
     if (envValue("ZTTP_CODEGEN_MODEL_REVISION")) |revision| return try allocator.dupe(u8, revision);
+    if (provider != .local or !std.mem.eql(u8, model, local.default_model)) return null;
     const cache_root = if (envValue("HF_HOME")) |root|
         try allocator.dupe(u8, root)
     else if (envValue("HOME")) |home|
@@ -619,6 +623,31 @@ fn envValue(name_z: [:0]const u8) ?[]const u8 {
 fn recordingRequested() bool {
     const flag = envValue("ZTTP_CODEGEN_RECORD") orelse return false;
     return std.mem.eql(u8, flag, "1");
+}
+
+const LiveCorpusMode = enum { record, qualify };
+
+fn qualificationRequested() bool {
+    const flag = envValue("ZTTP_CODEGEN_QUALIFY") orelse return false;
+    return std.mem.eql(u8, flag, "1");
+}
+
+fn liveCorpusModeFrom(record: bool, qualify: bool) !?LiveCorpusMode {
+    if (record and qualify) return error.ConflictingLiveCorpusModes;
+    if (record) return .record;
+    if (qualify) return .qualify;
+    return null;
+}
+
+fn requestedLiveCorpusMode() !?LiveCorpusMode {
+    return liveCorpusModeFrom(recordingRequested(), qualificationRequested());
+}
+
+test "recording and qualification modes are distinct" {
+    try testing.expectEqual(LiveCorpusMode.record, (try liveCorpusModeFrom(true, false)).?);
+    try testing.expectEqual(LiveCorpusMode.qualify, (try liveCorpusModeFrom(false, true)).?);
+    try testing.expect((try liveCorpusModeFrom(false, false)) == null);
+    try testing.expectError(error.ConflictingLiveCorpusModes, liveCorpusModeFrom(true, true));
 }
 
 fn greenRecordingRequired() bool {
@@ -949,6 +978,9 @@ pub fn thresholdIdentity() evidence_identity.ThresholdIdentity {
         .{ .name = "empty-responses", .comparison = .exactly, .value = 0 },
         .{ .name = "timeout-failures", .comparison = .exactly, .value = 0 },
         .{ .name = "decode-failures", .comparison = .exactly, .value = 0 },
+        .{ .name = "provider-failures", .comparison = .exactly, .value = 0 },
+        .{ .name = "internal-failures", .comparison = .exactly, .value = 0 },
+        .{ .name = "qualification-runs", .comparison = .exactly, .value = qualification.required_runs },
     });
 }
 
@@ -2299,6 +2331,126 @@ fn classifyRecordingFailure(err: anyerror) RecordingFailureKind {
     };
 }
 
+fn qualificationFailureKind(kind: RecordingFailureKind) qualification.FailureKind {
+    return switch (kind) {
+        .empty_response => .empty_response,
+        .timeout => .timeout,
+        .decode => .decode,
+        .provider => .provider,
+        .intent => .intent,
+        .validation => .validation,
+        .internal => .internal,
+    };
+}
+
+fn requiredQualificationEnv(name: [:0]const u8) ![]const u8 {
+    return envValue(name) orelse error.MissingQualificationProvenance;
+}
+
+fn containsAsciiIgnoreCase(haystack: []const u8, needle: []const u8) bool {
+    if (needle.len == 0 or needle.len > haystack.len) return false;
+    for (0..haystack.len - needle.len + 1) |start| {
+        if (std.ascii.eqlIgnoreCase(haystack[start .. start + needle.len], needle)) return true;
+    }
+    return false;
+}
+
+fn servingArgsContainSecret(args: []const u8) bool {
+    inline for (&.{ "api-key", "apikey", "token", "secret", "password", "credential" }) |needle| {
+        if (containsAsciiIgnoreCase(args, needle)) return true;
+    }
+    return false;
+}
+
+fn qualificationLocalProvenance(provider: agent.Provider) !?qualification.LocalProvenance {
+    const names = .{
+        "ZTTP_CODEGEN_MODEL_ARTIFACT_SHA256",
+        "ZTTP_CODEGEN_QUANTIZATION",
+        "ZTTP_CODEGEN_CHAT_TEMPLATE_SHA256",
+        "ZTTP_CODEGEN_SERVING_ARGS",
+        "ZTTP_CODEGEN_HARDWARE",
+        "ZTTP_CODEGEN_OS",
+        "ZTTP_CODEGEN_PEAK_MEMORY_BYTES",
+    };
+    if (provider != .local) {
+        inline for (names) |name| {
+            if (envValue(name) != null) return error.LocalProvenanceRequiresLocalProvider;
+        }
+        return null;
+    }
+
+    const artifact_sha256 = try requiredQualificationEnv(names[0]);
+    const chat_template_sha256 = try requiredQualificationEnv(names[2]);
+    if (artifact_sha256.len != 64 or !isLowerHex(artifact_sha256) or
+        chat_template_sha256.len != 64 or !isLowerHex(chat_template_sha256))
+    {
+        return error.MalformedQualificationDigest;
+    }
+    const peak_memory = std.fmt.parseInt(
+        u64,
+        try requiredQualificationEnv(names[6]),
+        10,
+    ) catch return error.MalformedQualificationPeakMemory;
+    if (peak_memory == 0) return error.MalformedQualificationPeakMemory;
+    const serving_args = try requiredQualificationEnv(names[3]);
+    if (servingArgsContainSecret(serving_args)) return error.SecretInQualificationProvenance;
+    const quantization = try requiredQualificationEnv(names[1]);
+    const hardware = try requiredQualificationEnv(names[4]);
+    const os = try requiredQualificationEnv(names[5]);
+    if (quantization.len == 0 or serving_args.len == 0 or
+        hardware.len == 0 or os.len == 0 or
+        quantization.len > 64 or serving_args.len > 4096 or
+        hardware.len > 512 or os.len > 512)
+    {
+        return error.QualificationProvenanceTooLarge;
+    }
+    return .{
+        .model_artifact_sha256 = artifact_sha256,
+        .quantization = quantization,
+        .chat_template_sha256 = chat_template_sha256,
+        .serving_args = serving_args,
+        .sampling_policy = "server-defaults",
+        .seed = null,
+        .hardware = hardware,
+        .os = os,
+        .peak_memory_bytes = peak_memory,
+    };
+}
+
+test "recording failures map exhaustively into qualification failures" {
+    try testing.expectEqual(
+        qualification.FailureKind.empty_response,
+        qualificationFailureKind(.empty_response),
+    );
+    try testing.expectEqual(
+        qualification.FailureKind.internal,
+        qualificationFailureKind(.internal),
+    );
+}
+
+test "qualification serving arguments reject secret-shaped flags" {
+    try testing.expect(!servingArgsContainSecret("mlx_lm.server --model candidate --port 8080"));
+    try testing.expect(servingArgsContainSecret("mlx_lm.server --api-key do-not-record"));
+    try testing.expect(servingArgsContainSecret("serve --TOKEN=value"));
+}
+
+fn copyDraftFailure(
+    allocator: std.mem.Allocator,
+    analysis: *const failure_analysis.Analysis,
+) !qualification.DraftFailure {
+    const diagnostic_code = if (analysis.diagnosticCode()) |code| try allocator.dupe(u8, code) else null;
+    const tool_name = if (analysis.toolName()) |name| try allocator.dupe(u8, name) else null;
+    return .{
+        .primary = analysis.primary,
+        .contributors = try allocator.dupe(qualification.DraftFailureCause, analysis.contributors()),
+        .evidence = .{
+            .diagnostic_code = diagnostic_code,
+            .transcript_entry = analysis.transcript_entry,
+            .tool_name = tool_name,
+        },
+    };
+}
+
 const CorpusSwapFault = enum { after_old_rename, after_new_rename };
 
 const CorpusSwapHooks = struct {
@@ -2495,6 +2647,7 @@ test "whole corpus swap recovers both crash boundaries" {
 }
 
 const LiveRecordContext = struct {
+    allocator: std.mem.Allocator,
     io: std.Io,
     registry: *registry_mod.Registry,
     session: *agent.AgentSession,
@@ -2508,14 +2661,25 @@ const LiveRecordContext = struct {
     diagnostics_run_id: []const u8,
     turn_timeout_ms: u64,
     require_green: bool,
+    enforce_headline_ratchet: bool,
 };
 
 const LiveRecordOutcome = struct {
-    raw_first_draft_pass: bool,
-    first_attempt_green: bool,
+    artifact_identity: evidence_identity.ContentDigest,
+    draft_quality: codegen_types.DraftQuality,
     applied: bool,
-    intent_passed: bool,
+    intent: codegen_types.IntentOutcome,
+    roundtrips: u8,
+    wall_clock_ms: u64,
+    draft_failure: ?failure_analysis.Analysis,
+    provider_runtime: ?evidence_identity.RuntimeRevision,
 };
+
+fn elapsedWallClockMs(started_ms: i64) u64 {
+    const finished_ms = zts.realtimeNowMs() catch started_ms;
+    if (finished_ms <= started_ms) return 0;
+    return @intCast(finished_ms - started_ms);
+}
 
 fn recordLiveCase(
     context: *LiveRecordContext,
@@ -2523,6 +2687,7 @@ fn recordLiveCase(
     case_index: usize,
     case_count: usize,
 ) !LiveRecordOutcome {
+    const started_ms = zts.realtimeNowMs() catch 0;
     var case_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer case_arena.deinit();
     const allocator = case_arena.allocator();
@@ -2627,7 +2792,7 @@ fn recordLiveCase(
             result.tool_call_count,
         },
     );
-    if (context.provider == headline_provider) {
+    if (context.enforce_headline_ratchet) {
         if (firstAttemptExpectation(context.provider, null, rc.expect_first_attempt_green)) |expected| {
             if (result.firstAttemptGreen() != expected) {
                 std.debug.print(
@@ -2649,7 +2814,10 @@ fn recordLiveCase(
         }
     else
         null;
-    var intent_passed = true;
+    var intent_outcome: codegen_types.IntentOutcome = switch (rc.intent) {
+        .runtime => .not_checked,
+        .compiler_veto_only => .compiler_veto_only,
+    };
     requireRecordedIntent(
         allocator,
         runtimeIntent(rc.intent),
@@ -2657,7 +2825,7 @@ fn recordLiveCase(
         zttp_bin,
         codegen.runIntentCheck,
     ) catch |err| {
-        intent_passed = false;
+        intent_outcome = .failed;
         const handler_path: ?[]u8 = std.fs.path.join(
             allocator,
             &.{ tmp.abs_path, "handler.ts" },
@@ -2677,6 +2845,11 @@ fn recordLiveCase(
         );
         if (err == error.IntentCheckUnavailable) return err;
     };
+    if (runtimeIntent(rc.intent) != null and intent_outcome == .not_checked) {
+        intent_outcome = .passed;
+    }
+
+    const intent_passed = intent_outcome == .passed or intent_outcome == .compiler_veto_only;
 
     requireGreenRecording(
         context.require_green,
@@ -2703,6 +2876,22 @@ fn recordLiveCase(
         context.request_config,
     );
     const fail_code = codegen.firstZtsCode(&transcript) orelse "-";
+    const draft_failure = if (result.rawFirstDraftVetoPass())
+        null
+    else
+        failure_analysis.analyze(
+            allocator,
+            rc.mode,
+            &transcript,
+            codegen.firstZtsCode(&transcript),
+        );
+    const provider_runtime: ?evidence_identity.RuntimeRevision = if (recorder.runtimeIdentity()) |identity|
+        .{
+            .name = try context.allocator.dupe(u8, identity.name),
+            .revision = try context.allocator.dupe(u8, identity.revision),
+        }
+    else
+        null;
     std.debug.print(
         "[codegen-record] [{d}/{d}] {s}: staged provider={s} model={s} flow={s} raw_first_draft_pass={} first_attempt_green={} applied={} compiler_authored={} roundtrips={d} retries={d} tools={d} calls={d} fail={s}\n",
         .{
@@ -2724,15 +2913,19 @@ fn recordLiveCase(
         },
     );
     return .{
-        .raw_first_draft_pass = result.rawFirstDraftVetoPass(),
-        .first_attempt_green = result.firstAttemptGreen(),
+        .artifact_identity = evidence_identity.contentDigest("flow-artifact", staged_version.slice()),
+        .draft_quality = result.draft_quality,
         .applied = result.applied_change_set,
-        .intent_passed = intent_passed,
+        .intent = intent_outcome,
+        .roundtrips = result.roundtrips,
+        .wall_clock_ms = elapsedWallClockMs(started_ms),
+        .draft_failure = draft_failure,
+        .provider_runtime = provider_runtime,
     };
 }
 
-// Record the real expert agent against the corpus and report the live baseline.
-// Gated: ZTTP_CODEGEN_RECORD=1. Cloud providers additionally require their
+// Record or qualify the real expert agent against the corpus.
+// Gated: ZTTP_CODEGEN_RECORD=1 or ZTTP_CODEGEN_QUALIFY=1. Cloud providers additionally require their
 // named key. Each case runs in its own tmp
 // workspace with cwd switched to it, so the agent's tools and the edit veto
 // resolve the same files; cassettes are written to an absolute repo path so the
@@ -2740,7 +2933,12 @@ fn recordLiveCase(
 // failed runs stay under `.zig-cache/codegen-record-staging`; only a complete
 // unfiltered run swaps the provider corpus root.
 test "record codegen baseline corpus (live, gated)" {
-    if (!recordingRequested()) return error.SkipZigTest;
+    const live_mode = (try requestedLiveCorpusMode()) orelse return error.SkipZigTest;
+    if (live_mode == .qualify and
+        (envValue("ZTTP_CODEGEN_PROVIDER") == null or envValue("ZTTP_CODEGEN_MODEL") == null))
+    {
+        return error.QualificationRequiresExplicitCandidate;
+    }
     const corpus_provider = try recordingProvider();
     if (!recordingAuthAvailable(corpus_provider)) return error.SkipZigTest;
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
@@ -2753,7 +2951,10 @@ test "record codegen baseline corpus (live, gated)" {
         if (value.len == 0) null else value
     else
         null;
-    const require_green = greenRecordingRequired();
+    if (live_mode == .qualify and greenRecordingRequired()) {
+        return error.QualificationMustMeasureFailures;
+    }
+    const require_green = live_mode == .record and greenRecordingRequired();
     const record_turn_timeout_ms: u64 = if (envValue("ZTTP_CODEGEN_TURN_TIMEOUT_MS")) |raw|
         std.fmt.parseInt(u64, raw, 10) catch default_record_turn_timeout_ms
     else
@@ -2768,7 +2969,23 @@ test "record codegen baseline corpus (live, gated)" {
         return error.CodegenCorpusCountMismatch;
     }
 
+    const has_limit = if (envValue("ZTTP_CODEGEN_LIMIT")) |value| value.len != 0 else false;
+    const has_tool_filter = if (envValue("ZTTP_CODEGEN_TOOLS")) |value| value.len != 0 else false;
+    if (live_mode == .qualify and
+        (only_case != null or has_limit or has_tool_filter or selected_case_count != record_corpus.len))
+    {
+        return error.FilteredQualificationRefused;
+    }
+    const local_provenance = if (live_mode == .qualify)
+        try qualificationLocalProvenance(corpus_provider)
+    else
+        null;
+
     const repo_root = try cwdPathAlloc(allocator);
+    const source_before = readSourceIdentity(allocator, repo_root);
+    if (live_mode == .qualify and (!source_before.known or source_before.revision.dirty)) {
+        return error.QualificationRequiresCleanKnownSource;
+    }
     const out_dir = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root, flowRoot(corpus_provider) });
     var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
     defer io_backend.deinit();
@@ -2791,6 +3008,12 @@ test "record codegen baseline corpus (live, gated)" {
 
     const request_config = try requestConfigForSession(&session);
     const model_revision = try cachedModelRevision(allocator, corpus_provider, corpus_model);
+    if (live_mode == .qualify and corpus_provider == .local) {
+        const revision = model_revision orelse return error.LocalQualificationRequiresModelRevision;
+        if (revision.len != 40 or !isLowerHex(revision)) {
+            return error.MalformedQualificationModelRevision;
+        }
+    }
     const runtime_identity = try declaredRuntime(corpus_provider);
     if (runtime_identity) |identity| {
         std.debug.print(
@@ -2811,8 +3034,6 @@ test "record codegen baseline corpus (live, gated)" {
     if (try pathKind(io, stage_root) != null) return error.CorpusStagingPathExists;
     try std.Io.Dir.createDirPath(std.Io.Dir.cwd(), io, stage_root);
 
-    const has_limit = if (envValue("ZTTP_CODEGEN_LIMIT")) |value| value.len != 0 else false;
-    const has_tool_filter = if (envValue("ZTTP_CODEGEN_TOOLS")) |value| value.len != 0 else false;
     const canonical_full_run = recordingShapeCanActivate(
         only_case,
         has_limit,
@@ -2823,11 +3044,12 @@ test "record codegen baseline corpus (live, gated)" {
     );
     std.debug.print(
         "[codegen-record] corpus start: provider={s} model={s} cases={d} " ++
-            "timeout={d}ms require-green={} canonical-full-run={} stage={s}\n",
+            "mode={s} timeout={d}ms require-green={} canonical-full-run={} stage={s}\n",
         .{
             corpus_provider.publicName(),
             corpus_model,
             selected_case_count,
+            @tagName(live_mode),
             record_turn_timeout_ms,
             require_green,
             canonical_full_run,
@@ -2836,6 +3058,7 @@ test "record codegen baseline corpus (live, gated)" {
     );
 
     var context: LiveRecordContext = .{
+        .allocator = allocator,
         .io = io,
         .registry = &registry,
         .session = &session,
@@ -2849,6 +3072,9 @@ test "record codegen baseline corpus (live, gated)" {
         .diagnostics_run_id = diagnostics_run_id,
         .turn_timeout_ms = record_turn_timeout_ms,
         .require_green = require_green,
+        .enforce_headline_ratchet = live_mode == .record and
+            corpus_provider == headline_provider and
+            std.mem.eql(u8, corpus_model, headline_model),
     };
     var raw_first_draft_passes: usize = 0;
     var first_attempt_greens: usize = 0;
@@ -2856,6 +3082,9 @@ test "record codegen baseline corpus (live, gated)" {
     var intent_passes: usize = 0;
     var total: usize = 0;
     var staged: usize = 0;
+    var qualification_cases: std.ArrayList(qualification.CaseResult) = .empty;
+    defer qualification_cases.deinit(allocator);
+    var observed_runtime: RuntimeConsensus = .{};
     var failures: std.ArrayList(RecordingFailure) = .empty;
     defer failures.deinit(allocator);
     for (record_corpus, 0..) |rc, i| {
@@ -2865,6 +3094,7 @@ test "record codegen baseline corpus (live, gated)" {
             "[codegen-record] [{d}/{d}] {s}: case start\n",
             .{ total, selected_case_count, rc.name },
         );
+        const case_started_ms = zts.realtimeNowMs() catch 0;
         const outcome = recordLiveCase(&context, rc, total, selected_case_count) catch |err| {
             const kind = classifyRecordingFailure(err);
             try failures.append(allocator, .{
@@ -2876,27 +3106,74 @@ test "record codegen baseline corpus (live, gated)" {
                 "[codegen-record] [{d}/{d}] {s}: quarantined failure kind={s} error={s}\n",
                 .{ total, selected_case_count, rc.name, @tagName(kind), @errorName(err) },
             );
+            const case_failures = try allocator.alloc(qualification.FailureKind, 1);
+            case_failures[0] = qualificationFailureKind(kind);
+            const error_names = try allocator.alloc([]const u8, 1);
+            error_names[0] = @errorName(err);
+            try qualification_cases.append(allocator, .{
+                .name = rc.name,
+                .artifact_identity = null,
+                .draft_quality = .not_green,
+                .applied = false,
+                .intent = switch (rc.intent) {
+                    .runtime => .not_checked,
+                    .compiler_veto_only => .compiler_veto_only,
+                },
+                .roundtrips = 0,
+                .wall_clock_ms = elapsedWallClockMs(case_started_ms),
+                .failures = case_failures,
+                .error_names = error_names,
+            });
             continue;
         };
+        try observed_runtime.observe(allocator, outcome.provider_runtime);
         staged += 1;
-        if (outcome.raw_first_draft_pass) raw_first_draft_passes += 1;
-        if (outcome.first_attempt_green) first_attempt_greens += 1;
+        if (outcome.draft_quality.rawFirstDraftVetoPass()) raw_first_draft_passes += 1;
+        if (outcome.draft_quality.firstAttemptGreen()) first_attempt_greens += 1;
         if (outcome.applied) greens += 1;
-        if (outcome.intent_passed) intent_passes += 1;
+        const intent_satisfied = outcome.intent == .passed or outcome.intent == .compiler_veto_only;
+        if (intent_satisfied) intent_passes += 1;
+        var case_failure_count: usize = 0;
+        if (!outcome.applied) case_failure_count += 1;
+        if (!intent_satisfied) case_failure_count += 1;
+        const case_failures = try allocator.alloc(qualification.FailureKind, case_failure_count);
+        const error_names = try allocator.alloc([]const u8, case_failure_count);
+        var case_failure_index: usize = 0;
         if (!outcome.applied) {
             try failures.append(allocator, .{
                 .case_name = rc.name,
                 .kind = .validation,
                 .error_name = @errorName(error.RecordedEditNotApplied),
             });
+            case_failures[case_failure_index] = .validation;
+            error_names[case_failure_index] = @errorName(error.RecordedEditNotApplied);
+            case_failure_index += 1;
         }
-        if (!outcome.intent_passed) {
+        if (!intent_satisfied) {
             try failures.append(allocator, .{
                 .case_name = rc.name,
                 .kind = .intent,
                 .error_name = @errorName(error.RecordedIntentCheckFailed),
             });
+            case_failures[case_failure_index] = .intent;
+            error_names[case_failure_index] = @errorName(error.RecordedIntentCheckFailed);
         }
+        const draft_failure = if (outcome.draft_failure) |*analysis|
+            try copyDraftFailure(allocator, analysis)
+        else
+            null;
+        try qualification_cases.append(allocator, .{
+            .name = rc.name,
+            .artifact_identity = try allocator.dupe(u8, outcome.artifact_identity.slice()),
+            .draft_quality = outcome.draft_quality,
+            .applied = outcome.applied,
+            .intent = outcome.intent,
+            .roundtrips = outcome.roundtrips,
+            .wall_clock_ms = outcome.wall_clock_ms,
+            .failures = case_failures,
+            .error_names = error_names,
+            .draft_failure = draft_failure,
+        });
     }
     std.debug.print(
         "[codegen-record] RUN raw first-draft pass: {d}/{d}; first-attempt green: {d}/{d}; " ++
@@ -2921,6 +3198,29 @@ test "record codegen baseline corpus (live, gated)" {
         );
     }
     if (total != selected_case_count) return error.CodegenCorpusCountMismatch;
+    if (qualification_cases.items.len != selected_case_count) return error.CodegenCorpusCountMismatch;
+    if (live_mode == .qualify) {
+        try emitQualificationRun(
+            allocator,
+            &registry,
+            corpus_provider,
+            corpus_model,
+            model_revision,
+            &observed_runtime,
+            request_config,
+            source_before,
+            repo_root,
+            diagnostics_run_id,
+            record_turn_timeout_ms,
+            local_provenance,
+            qualification_cases.items,
+        );
+        std.debug.print(
+            "[codegen-record] qualification artifacts remain quarantined at {s}; active corpora and model defaults are unchanged\n",
+            .{stage_root},
+        );
+        return;
+    }
     const complete_green_run = recordingRunCanActivate(canonical_full_run, .{
         .selected = total,
         .staged = staged,
@@ -3314,6 +3614,163 @@ fn markerJson(allocator: std.mem.Allocator, value: anytype) ![]u8 {
     defer out.deinit();
     try std.json.Stringify.value(value, .{}, out.writer());
     return try out.toOwnedSlice();
+}
+
+fn contentDigestFromHex(value: []const u8) !evidence_identity.ContentDigest {
+    if (value.len != 64 or !isLowerHex(value)) return error.InvalidArtifactIdentity;
+    var out: evidence_identity.ContentDigest = undefined;
+    @memcpy(&out.bytes, value);
+    return out;
+}
+
+fn emitQualificationRun(
+    allocator: std.mem.Allocator,
+    registry: *const registry_mod.Registry,
+    provider: agent.Provider,
+    model: []const u8,
+    model_revision: ?[]const u8,
+    observed_runtime: *const RuntimeConsensus,
+    request_config: model_request.Config,
+    source_before: SourceIdentity,
+    repo_root: []const u8,
+    run_suffix: []const u8,
+    turn_timeout_ms: u64,
+    local_provenance: ?qualification.LocalProvenance,
+    cases: []const qualification.CaseResult,
+) !void {
+    if (cases.len != record_corpus.len) return error.CodegenCorpusCountMismatch;
+    const source_after = readSourceIdentity(allocator, repo_root);
+    if (!source_before.known or !source_after.known or
+        source_before.revision.dirty != source_after.revision.dirty or
+        !std.mem.eql(u8, source_before.revision.commit, source_after.revision.commit))
+    {
+        return error.SourceChangedDuringQualification;
+    }
+
+    const tools_json = request_config.tools_json orelse return error.EmptyToolCatalog;
+    const request_policy: evidence_identity.RequestPolicy = .{
+        .max_output_tokens = request_config.max_output_tokens,
+        .reserve_tokens = request_config.reserve_tokens,
+        .stream = request_config.stream,
+        .purpose = request_config.purpose,
+        .cache_policy = request_config.cache_policy,
+    };
+    const prompt_persona = evidence_identity.promptPersona(request_config.system_prompt);
+    const catalogs: evidence_identity.CatalogIdentities = .{
+        .provider_neutral = try neutralCatalogIdentity(allocator, registry),
+        .provider_serialized = evidence_identity.providerSerializedCatalog(tools_json),
+    };
+    const compiler = try compilerEvidenceIdentities(allocator);
+    const cohorts: evidence_identity.ManifestComponents = .{
+        .headline_input = headlineInputIdentity(),
+        .intent_suite = intentSuiteIdentity(),
+        .security_probes = securityProbeIdentity(),
+        .thresholds = thresholdIdentity(),
+    };
+    const manifest_identity = evidence_identity.manifest(cohorts);
+    const provider_runtime = if (observed_runtime.observed) observed_runtime.value else null;
+    const run_id = try std.fmt.allocPrint(
+        allocator,
+        "{s}-{s}",
+        .{ source_after.revision.commit[0..12], run_suffix },
+    );
+
+    const observations = try allocator.alloc(evidence_identity.ObservedResult, cases.len);
+    for (cases, 0..) |case, index| {
+        observations[index] = .{
+            .scenario = case.name,
+            .artifact_identity = if (case.artifact_identity) |identity|
+                try contentDigestFromHex(identity)
+            else
+                null,
+            .draft_quality = case.draft_quality,
+            .intent_outcome = case.intent,
+            .applied = case.applied,
+            .roundtrips = case.roundtrips,
+        };
+    }
+    const result_run = evidence_identity.resultRun(.{
+        .provider = provider,
+        .model = model,
+        .model_revision = model_revision,
+        .provider_runtime = provider_runtime,
+        .request_policy = request_policy,
+        .prompt_persona = prompt_persona,
+        .catalogs = catalogs,
+        .compiler = compiler,
+        .cohorts = cohorts,
+        .source_revision = source_after.revision,
+        .run_id = run_id,
+        .observations = observations,
+    });
+    const defaults: loop.RunOptions = .{};
+    const summary = qualification.summarize(cases);
+    const run: qualification.Run = .{
+        .schema_version = qualification.schema_version,
+        .run_id = run_id,
+        .result_run_hash = result_run.slice(),
+        .complete = true,
+        .filtered = false,
+        .report_only = true,
+        .default_change_authorized = false,
+        .identity = .{
+            .provider = provider.publicName(),
+            .model = model,
+            .model_revision = model_revision,
+            .provider_runtime = if (provider_runtime) |runtime| .{
+                .name = runtime.name,
+                .revision = runtime.revision,
+            } else null,
+            .request_policy = .{
+                .max_output_tokens = request_policy.max_output_tokens,
+                .reserve_tokens = request_policy.reserve_tokens,
+                .stream = request_policy.stream,
+                .purpose = @tagName(request_policy.purpose),
+                .cache_policy = @tagName(request_policy.cache_policy),
+            },
+            .provider_tool_count = tool_catalog.count(registry),
+            .provider_tool_bytes = tools_json.len,
+            .headline_input_hash = cohorts.headline_input.slice(),
+            .intent_suite_hash = cohorts.intent_suite.slice(),
+            .security_probe_hash = cohorts.security_probes.slice(),
+            .threshold_hash = cohorts.thresholds.slice(),
+            .manifest_hash = manifest_identity.slice(),
+            .prompt_persona_hash = prompt_persona.slice(),
+            .provider_neutral_catalog_hash = catalogs.provider_neutral.slice(),
+            .provider_serialized_catalog_hash = catalogs.provider_serialized.slice(),
+            .schema_hash = compiler.schema.slice(),
+            .meta_hash = compiler.meta.slice(),
+            .grammar_hash = compiler.grammar.slice(),
+            .semantics_hash = compiler.semantics.slice(),
+            .diagnostic_hash = compiler.diagnostics.slice(),
+            .policy_hash = compiler.policy.slice(),
+        },
+        .source = .{
+            .commit = source_after.revision.commit,
+            .dirty = source_after.revision.dirty,
+            .known = source_after.known,
+        },
+        .limits = .{
+            .turn_timeout_ms = turn_timeout_ms,
+            .max_model_roundtrips_per_turn = defaults.max_model_roundtrips_per_turn,
+            .max_tool_calls_per_turn = defaults.max_tool_calls_per_turn,
+        },
+        .local_provenance = local_provenance,
+        .cases = cases,
+        .summary = summary,
+    };
+    const status = qualification.assessRun(run);
+    std.debug.print(
+        "[expert-qualification-status] candidate={s}/{s} passed={} reason={s}\n",
+        .{
+            provider.publicName(),
+            model,
+            status == null,
+            if (status) |reason| @tagName(reason) else "none",
+        },
+    );
+    const marker = try markerJson(allocator, run);
+    std.debug.print("[expert-qualification-run] {s}\n", .{marker});
 }
 
 test "corpus evidence consensus and publication floor fail closed" {

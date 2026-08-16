@@ -494,8 +494,8 @@ persona, and the tool schemas.
 
 Source crosses the wire when the model calls a tool that returns it. Three do:
 `workspace_read_file` returns a file's contents, `workspace_search_text` returns
-matching lines, and `apply_edit` carries a full proposed file - though that
-content is what the model just wrote. The compiler's
+matching lines, and `propose_change_set` carries the complete source candidates
+the model just wrote. The compiler's
 veto verdict comes back as a tool result and can quote diagnostics with source
 spans.
 
@@ -534,6 +534,27 @@ The local adapter was tested with MLX-LM 0.31.3 and model revision
 `b372ebbb518c0e81617e25d8824427dd9ee1f08c`. The model has a 131,072-token
 context window; zttp requests at most 8,192 output tokens and otherwise uses the
 model-shipped generation defaults.
+
+### Qualifying an expert model
+
+Model qualification is a repository maintenance operation, not a runtime
+setting. Run it only after the compiler, persona, protocol, and static tool
+catalog are frozen. `scripts/qualify-expert.sh` performs three complete live
+19-case runs, retains failures in the denominator, and emits a report that
+binds the exact model, runtime, request limits, source revision, prompt,
+provider serialization, compiler identities, and evaluation cohorts.
+
+The quality bar is 19/19 final green, 18/18 runtime intents, at least 14/19 raw
+first-draft passes, median round trips no higher than four, and no empty,
+timeout, decode, provider, or internal failures in each run. A local run also
+requires model artifact, quantization, chat-template, serving-argument,
+hardware, OS, and peak-memory evidence. See
+[Recording the codegen cassettes](internals/cassette-recording.md) for the exact
+command and environment.
+
+Qualification is report-only. It neither promotes cassettes nor changes the
+LFM local-provider default or the DeepSeek product default. A passing candidate
+report is input to a separate product decision.
 
 ### How a turn runs
 

@@ -459,6 +459,27 @@ pub fn build(b: *std.Build) void {
     const standin_step = b.step("zttp-standin", "Run the deterministic playbook server");
     standin_step.dependOn(&standin_cmd.step);
 
+    // Repository-only expert qualification decision. It consumes exactly
+    // three report-only live-run records and never edits the model registry.
+    const expert_qualification_mod = b.createModule(.{
+        .root_source_file = pi_host_dep.path("src/expert_qualification.zig"),
+        .target = b.graph.host,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    const expert_qualification_exe = b.addExecutable(.{
+        .name = "expert-qualification",
+        .root_module = expert_qualification_mod,
+    });
+    const expert_qualification_cmd = b.addRunArtifact(expert_qualification_exe);
+    expert_qualification_cmd.has_side_effects = true;
+    if (b.args) |args| expert_qualification_cmd.addArgs(args);
+    const expert_qualification_step = b.step(
+        "expert-qualification",
+        "Assess three report-only expert qualification runs",
+    );
+    expert_qualification_step.dependOn(&expert_qualification_cmd.step);
+
     const module_boundary = b.addSystemCommand(&.{ "/bin/bash", "scripts/check-module-boundary.sh" });
     const module_boundary_step = b.step("test-module-boundary", "Check consumer reach into zts internals against the allowlist");
     module_boundary_step.dependOn(&module_boundary.step);
@@ -474,6 +495,16 @@ pub fn build(b: *std.Build) void {
     const convergence_emitter = b.addSystemCommand(&.{ "/bin/bash", "scripts/check-convergence-emitter.sh" });
     const convergence_emitter_step = b.step("test-convergence-emitter", "Check the convergence marker has one producer and one consumer");
     convergence_emitter_step.dependOn(&convergence_emitter.step);
+
+    const expert_qualification_boundary = b.addSystemCommand(&.{
+        "python3",
+        "scripts/test-expert-qualification.py",
+    });
+    const expert_qualification_boundary_step = b.step(
+        "test-expert-qualification",
+        "Check report-only expert qualification boundaries",
+    );
+    expert_qualification_boundary_step.dependOn(&expert_qualification_boundary.step);
 
     const docs_drift = b.addSystemCommand(&.{ "/bin/bash", "scripts/check-docs-drift.sh" });
     const docs_drift_step = b.step("test-docs-drift", "Check docs against current registry and build paths");
@@ -991,6 +1022,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(docs_drift_step);
     test_step.dependOn(&doc_links.step);
     test_step.dependOn(&convergence_emitter.step);
+    test_step.dependOn(&expert_qualification_boundary.step);
     test_step.dependOn(&run_module_governance.step);
     test_step.dependOn(zts_test_step);
     test_step.dependOn(&run_sdk_tests.step);

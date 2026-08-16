@@ -26,8 +26,9 @@ cd "$(dirname "$0")/.."
 
 registry="packages/tools/src/decision_registry.zig"
 
-# Measured on 2026-08-12, when the registry was written.
-MIN_MEMBERS=10
+# Measured on 2026-08-16 after the write-capable apply-repair protocol was
+# removed. The remaining six kinds are emitted by the read-only simulator.
+MIN_MEMBERS=6
 
 fail() {
   printf 'decision registry: %s\n' "$1" >&2

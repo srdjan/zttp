@@ -269,11 +269,9 @@ pub const Discharge = union(enum) {
     /// and an acceptance, and every caller must treat it as a reason not to
     /// apply: "undecided" is not "equivalent".
     ///
-    /// No implemented method produces it today - it was M1's and M2's answer
-    /// for a source the printer refused or a tree the comparison did not
-    /// model, and both went out with them. It stays because it is the answer
-    /// the next whole-program method will need, and because the wire publishes
-    /// `undecided_equivalence` as a refusal reason a client already handles.
+    /// An implemented method can produce this when its semantic kernel does
+    /// not model the concrete construct. Every caller must handle it as a
+    /// refusal to claim equivalence.
     undecided: []const u8,
 };
 
@@ -977,8 +975,7 @@ test "every gradable row has a law, and every law has a gradable row" {
             // something for this row's method. M4 is the only one that does,
             // and it needs a law of its own. Every other method answers
             // `.no_validator` there, so a row naming one and claiming
-            // `implemented` advertises a repair the apply path then refuses
-            // with `ungraded_intent`.
+            // `implemented` advertises a repair no caller can discharge.
             const dischargeable = switch (row.method) {
                 .declared_law => has_law,
                 // M2 needs no law: it compares whole trees, so there is
@@ -1006,8 +1003,8 @@ test "every gradable row has a law, and every law has a gradable row" {
 
 test "the withdrawn semicolon row advertises nothing" {
     // While the row is `.planned`, `validateApplication` must answer
-    // `no_validator` for it - the apply path then refuses the intent rather
-    // than applying an edit nothing checked.
+    // `no_validator` for it so callers refuse the intent rather than treating
+    // an edit nothing checked as equivalent.
     try std.testing.expect(!gradable(.insert_semicolon));
     try std.testing.expectEqual(
         Discharge.no_validator,

@@ -78,12 +78,13 @@ Read it before proposing work in this area: several items record a measurement t
 did not support the expectation the item was written on. One item is still open, and
 the refusals below stand.
 
-### 5. The small-local-model run
+### 5. The small-local-model qualification evidence
 
-Run the item-2 corpus in live mode against a small local model through the existing
-OpenAI-compatible provider path, and report first-draft pass, round-trips, and
-intent-pass against the frontier-model baseline. If the results are close, emit a
-decoding grammar from the restriction registry and test grammar-constrained sampling.
+The report-only qualification path is implemented. What remains is an explicitly
+authorized three-run measurement of `mlx-community/Qwen3-8B-4bit`. Each run attempts
+all 19 cases and reports raw first-draft pass, final green, round trips, runtime intent,
+typed failures, latency, peak memory, and exact model and serving provenance under the
+same identities as the hosted headline.
 
 Why: the narrow grammar is the stated reason a small model might be enough, and that is
 currently an argument rather than a result. If a small model reaches the same green
@@ -98,27 +99,25 @@ and `ZTS_OPENAI_BASE_URL` may redirect its Responses API transport without chang
 provider or model identity. Model selection stays explicit through `--model`; the old
 off-registry `ZTS_OPENAI_MODEL` override is rejected.
 
-To run the supported local measurement:
+To run the supported local qualification, supply the exact artifact and serving
+provenance described in [the recording guide](internals/cassette-recording.md), then:
 
 ```bash
-# Both tool flags are required. Without them the server returns LFM2's native
-# [fn(arg='x')] calls as prose, and the agent loop sees nothing to run.
-rapid-mlx serve LiquidAI/LFM2.5-2.6B-MLX-8bit --port 8080 \
-  --enable-auto-tool-choice --tool-call-parser lfm
-zig build test-expert-app          # replay first: confirms the harness is sound offline
-ZTTP_CODEGEN_RECORD=1 ZTTP_CODEGEN_PROVIDER=local \
-  ZTTP_CODEGEN_MODEL=LiquidAI/LFM2.5-2.6B-MLX-8bit \
-  ZTTP_CODEGEN_LOCAL_RUNTIME=rapid-mlx@0.12.11 \
-  zig build test-expert-app -Dtest-filter="record codegen baseline corpus"
-# then `bash scripts/update-convergence.sh` to publish
+mlx_lm.server --model mlx-community/Qwen3-8B-4bit --host 127.0.0.1 --port 8080
+ZTTP_CODEGEN_QUALIFY_CONFIRM=1 \
+  ZTTP_CODEGEN_PROVIDER=local \
+  ZTTP_CODEGEN_MODEL=mlx-community/Qwen3-8B-4bit \
+  bash scripts/qualify-expert.sh > /tmp/qwen3-8b-4bit-qualification.json
 ```
 
-What remains is a full passing corpus measurement. The structural real-model flow has
-passed, but the measured local corpus is incomplete, so local never became the default.
-[Plan 027](plans/2026-08-13-027-local-lfm-default-cutover-plan.md) was the approved
-execution path for that cutover; the default went to DeepSeek on 2026-08-14 instead.
+The wrapper requires three comparable clean-source runs. Every run must reach 19/19
+final green, 18/18 runtime intent, at least 14/19 raw first-draft passes, median round
+trips no higher than four, and zero empty, timeout, decode, provider, or internal
+failures. It never promotes a candidate corpus and always reports
+`default_change_authorized: false`. LFM remains the local-provider default and DeepSeek
+remains the product default unless a later product decision changes one explicitly.
 
-Status as of 2026-08-14: the local corpus holds 16 of 19 cases and is parked until a
+Historical baseline from 2026-08-14: the local LFM corpus holds 16 of 19 cases and is parked until a
 more capable local model replaces LiquidAI/LFM2.5-2.6B-MLX-8bit. The three missing cases
 are model failures rather than harness failures: `durable-order`, `workflow-wait-signal`,
 and `cache-counter-holes` all end in `EmptyResponse`.
@@ -172,11 +171,14 @@ pass. There is no local first-draft or green number in existence today, because 
 aborts before it computes one, so completing all 19 is the precondition for publishing a
 local row at all.
 
-When a better local model lands, the work is a full 19-case re-record rather than a patch
-of the three. Every manifest pins the model revision and the stack that served it, so a
-model swap supersedes all 16 committed cassettes.
+When a better local model lands, qualify it on all 19 cases rather than patching the
+three missing LFM cases. Replace the committed local corpus only after a separate
+decision to publish that model's row. Every manifest pins the model revision and the
+stack that served it, so a model swap supersedes all 16 historical cassettes.
 
-Observable: one published row per model in the item-2 table, dated.
+Observable: one retained three-run qualification report per candidate. A dated
+published row follows only when that candidate is deliberately promoted into a
+committed corpus.
 
 ### Considered and refused
 

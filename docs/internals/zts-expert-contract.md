@@ -90,14 +90,14 @@ ordering.
 `zttp expert --print <prompt> --mode json` emits newline-delimited events:
 
 ```json
-{ "v": 2, "k": "model_text", "d": "..." }
+{ "v": 4, "k": "model_text", "d": "..." }
 ```
 
 The event envelope uses:
 
 | Field | Meaning |
 |---|---|
-| `v` | Event schema version (currently `2`). |
+| `v` | Event schema version (currently `4`). |
 | `k` | Event kind. |
 | `d` | Kind-specific payload (omitted on the terminal `end` event). |
 
@@ -112,10 +112,10 @@ Event kinds and their `d` payloads:
 | `tool_result` | object: `{ "tool_use_id", "tool_name", "ok", "llm_text", "body", "ui_payload"? }` |
 | `proof_card` | object: `{ "llm_text", "ui_payload"? }` |
 | `diagnostic_box` | object: `{ "llm_text", "ui_payload"? }` |
-| `verified_patch` | object: `{ "llm_text", "ui_payload"? }` |
+| `verified_change_set` | object: `{ "llm_text", "ui_payload"? }` |
 | `autoloop_outcome` | object: `{ "verdict", "iterations", "goals_met", "goals_unmet", ... }` |
-| `session_summary` | object: `{ "turn_count", "total_roundtrips", "verified_patch_count", "workflow_hint_count", "first_draft_veto_pass_count", "veto_retry_count", "tool_call_count", ... }` |
-| `end` | none (terminal sentinel: `{ "v": 2, "k": "end" }`) |
+| `session_summary` | object: `{ "turn_count", "total_roundtrips", "verified_change_set_count", "workflow_hint_count", "first_draft_veto_pass_count", "veto_retry_count", "tool_call_count", ... }` |
+| `end` | none (terminal sentinel: `{ "v": 4, "k": "end" }`) |
 
 ## In-Process Expert Tools
 
@@ -140,8 +140,9 @@ credentials are read only after resolution. `session.info` includes the
 resolved provider and model.
 
 Edits in RPC mode are proposed only through the model-mediated `turn` method:
-the model emits an `apply_edit`, the compiler veto runs, and a `verified_patch`
-event is returned. `apply_edit` is not a directly invocable entry in
+the model emits one ordered `propose_change_set`, the compiler proves the
+aggregate overlay, and a `verified_change_set` event is returned.
+`propose_change_set` is not a directly invocable entry in
 `tools.list` / `tools.invoke` (those expose the read-only analyzer tools); a
 client cannot apply an unverified edit out of band. Generic `tools.invoke`
 exposes only tools classified as `analyze` or `read_workspace`; process,
