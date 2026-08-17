@@ -178,17 +178,28 @@ pub fn appendSpecDiagnosticsJson(
     for (contract.spec_diagnostics.items) |diag| {
         const code = diagnostic_catalog.specCode(diag.kind);
         // Single source of truth shared with the human card (formatProofCard)
-        // so the two surfaces cannot drift.
-        const message: []const u8 = specDiagnosticMessage(diag);
+        // so the two surfaces cannot drift: both take the base text from
+        // `specDiagnosticMessage` and the failing names from
+        // `specDiagnosticSubject`.
+        //
+        // Owned rather than static, because naming the spec means building the
+        // string. A failed allocation falls back to the base text: a message
+        // without the name is what shipped until now, and is better than
+        // dropping the diagnostic.
+        const owned_message: ?[]u8 = specDiagnosticMessageAlloc(allocator, diag) catch null;
+        const message: []const u8 = owned_message orelse specDiagnosticMessage(diag);
         result.json_diagnostics.append(allocator, .{
             .code = code,
             .severity = if (diag.kind.severity() == .warn) "warning" else "error",
             .message = message,
+            .message_owned = owned_message != null,
             .file = handler_path,
             .line = contract.handler.line,
             .column = @intCast(@min(contract.handler.column, std.math.maxInt(u16))),
             .suggestion = diag.suggestion,
-        }) catch {};
+        }) catch {
+            if (owned_message) |owned| allocator.free(owned);
+        };
     }
 }
 
@@ -511,9 +522,13 @@ pub fn formatProofCard(writer: anytype, r: *const CheckResult, filename: []const
             for (contract.spec_diagnostics.items) |d| {
                 if (d.kind.severity() != .err) continue;
                 writer.print(
-                    "    {s} (error) {s}:{d}:{d}  {s}\n",
+                    "    {s} (error) {s}:{d}:{d}  {s}",
                     .{ diagnostic_catalog.specCode(d.kind), filename, contract.handler.line, contract.handler.column, specDiagnosticMessage(d) },
                 ) catch return;
+                if (specDiagnosticSubject(d)) |subject| {
+                    writer.print(" (failing spec: {s})", .{subject}) catch return;
+                }
+                writer.print("\n", .{}) catch return;
                 if (d.suggestion) |suggestion| {
                     writer.print("      help: {s}\n", .{suggestion}) catch return;
                 }
@@ -529,6 +544,41 @@ pub fn formatProofCard(writer: anytype, r: *const CheckResult, filename: []const
     } else {
         writer.print("\n  {d} errors, {d} warnings\n", .{ r.totalErrors(), r.totalWarnings() }) catch return;
     }
+}
+
+/// The spec names a diagnostic is about, when it has any to report.
+///
+/// `SpecDiagnostic` has carried `spec_name` all along and every message above
+/// discarded it, so a handler declaring twelve properties was told that one of
+/// them was not discharged and never which. A recorded model spent eighteen
+/// roundtrips on that question - "So the capsule discharge fails. Which trait?"
+/// - and never landed an edit. The name is free; it is already computed.
+///
+/// Null for the implicit-default cases, which have no declared name, and for the
+/// `Effects<...>` kinds, whose `spec_name` is the literal "Effects" rather than
+/// anything a reader could act on.
+fn specDiagnosticSubject(diag: zts.SpecDiagnostic) ?[]const u8 {
+    if (diag.implicit_default) return null;
+    if (diag.spec_name.len == 0) return null;
+    return switch (diag.kind) {
+        .not_discharged,
+        .incompatible_with_import,
+        .unknown_name,
+        .missing_capsule,
+        => diag.spec_name,
+        else => null,
+    };
+}
+
+/// `specDiagnosticMessage` with the failing spec names appended. Caller owns
+/// the result. Used where a message is stored rather than printed.
+fn specDiagnosticMessageAlloc(
+    allocator: std.mem.Allocator,
+    diag: zts.SpecDiagnostic,
+) ![]u8 {
+    const base = specDiagnosticMessage(diag);
+    const subject = specDiagnosticSubject(diag) orelse return allocator.dupe(u8, base);
+    return std.fmt.allocPrint(allocator, "{s} (failing spec: {s})", .{ base, subject });
 }
 
 /// Human-readable message for a spec/Effects diagnostic, mirroring the JSON
@@ -961,4 +1011,57 @@ test "frozen signature corpus: digests are stable and match the committed pin" {
         hex[i * 2 + 1] = digits[byte & 0x0f];
     }
     try std.testing.expectEqualStrings(frozen_signature_digest, &hex);
+}
+
+test "a spec diagnostic names the spec it is about" {
+    // The recorded loop this closes: a handler declared twelve properties, was
+    // told one of them was not discharged, and could not tell which. The model
+    // asked "So the capsule discharge fails. Which trait?" and spent eighteen
+    // roundtrips guessing from a properties snapshot instead of reading it.
+    const allocator = std.testing.allocator;
+
+    const named = try specDiagnosticMessageAlloc(allocator, .{
+        .kind = .not_discharged,
+        .spec_name = "fault_covered",
+    });
+    defer allocator.free(named);
+    try std.testing.expectEqualStrings(
+        "declared Proof capsule was not discharged by handler proof (failing spec: fault_covered)",
+        named,
+    );
+
+    // A comma-joined name set is what the builder produces when several
+    // properties fail at once, and it has to read as a list rather than as one
+    // odd identifier.
+    const several = try specDiagnosticMessageAlloc(allocator, .{
+        .kind = .not_discharged,
+        .spec_name = "fault_covered, cost_bounded",
+    });
+    defer allocator.free(several);
+    try std.testing.expectEqualStrings(
+        "declared Proof capsule was not discharged by handler proof " ++
+            "(failing spec: fault_covered, cost_bounded)",
+        several,
+    );
+
+    // No capsule was authored, so there is no declared name to report and the
+    // message must not invent one.
+    const implicit = try specDiagnosticMessageAlloc(allocator, .{
+        .kind = .not_discharged,
+        .spec_name = "fault_covered",
+        .implicit_default = true,
+    });
+    defer allocator.free(implicit);
+    try std.testing.expectEqualStrings(
+        "handler returns no Proof<T, P> capsule; the default proof profile " ++
+            "demands a property this handler does not hold",
+        implicit,
+    );
+
+    // An Effects diagnostic carries the literal "Effects" as its spec_name,
+    // which names nothing a reader could act on.
+    try std.testing.expect(specDiagnosticSubject(.{
+        .kind = .effect_undeclared,
+        .spec_name = "Effects",
+    }) == null);
 }
