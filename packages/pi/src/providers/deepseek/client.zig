@@ -226,10 +226,6 @@ pub const Client = struct {
         }
         var change_set_rejection: ?propose_change_set.RejectionShape = null;
         const result = decodeResponseValue(arena, response.value, &change_set_rejection) catch |err| {
-            // Quarantine first: it borrows the attempt index the diagnostics row
-            // below is about to consume, so the body and the row that names its
-            // refusal carry the same number.
-            self.quarantineRejectedResponse(err, change_set_rejection, response.bytes);
             if (diagnostics_enabled) {
                 inspection.addWarning(.decoder_rejected_response);
                 self.recordResponseDiagnostics(&inspection, latency_ms, null, err, change_set_rejection);
@@ -240,26 +236,6 @@ pub const Client = struct {
             self.recordResponseDiagnostics(&inspection, latency_ms, null, null, null);
         }
         return result;
-    }
-
-    /// Hand the refused bytes to the sink. A decoder refusal is the one failure
-    /// whose cause lives in the body rather than in any metadata around it: the
-    /// diagnostics row names which branch fired, and only these bytes say why.
-    fn quarantineRejectedResponse(
-        self: *Client,
-        failure: anyerror,
-        change_set_rejection: ?propose_change_set.RejectionShape,
-        body: []const u8,
-    ) void {
-        const sink = self.capture orelse return;
-        sink.quarantineRejectedResponse(.{
-            .provider = .deepseek,
-            .model = self.config.model,
-        }, .{
-            .failure = failure,
-            .change_set_rejection = change_set_rejection,
-            .body = body,
-        });
     }
 
     fn recordResponseDiagnostics(
@@ -345,8 +321,25 @@ pub fn decodeResponse(
     arena: std.mem.Allocator,
     response_body: []const u8,
 ) !loop.ModelCallResult {
+    return decodeResponseObserved(arena, response_body, null);
+}
+
+/// `decodeResponse`, reporting which change-set refusal fired through
+/// `observed`.
+///
+/// This is the decode a recording actually runs. `sendTurn` captures before it
+/// decodes, and the capture pre-decodes the body through here to prove the
+/// cassette will replay, so a refused proposal fails at capture and `sendTurn`'s
+/// own decode is never reached. Instrumenting only that later branch left the
+/// path that fires blind, which is how two occurrences in one run reported a
+/// null shape.
+pub fn decodeResponseObserved(
+    arena: std.mem.Allocator,
+    response_body: []const u8,
+    observed: ?*?propose_change_set.RejectionShape,
+) !loop.ModelCallResult {
     const response = try parseSanitizedResponse(arena, response_body);
-    return decodeResponseValue(arena, response.value, null);
+    return decodeResponseValue(arena, response.value, observed);
 }
 
 /// The response with unneeded reasoning fields removed, plus the parsed value.
@@ -1124,88 +1117,6 @@ test "provider rejection records status without capturing response content" {
     try testing.expectEqual(error.RateLimited, probe.failure.?);
 }
 
-const RejectedBodyProbe = struct {
-    quarantine_count: usize = 0,
-    shape: ?propose_change_set.RejectionShape = null,
-    failure: ?anyerror = null,
-    body: [4096]u8 = undefined,
-    body_len: usize = 0,
-
-    fn record(
-        _: *anyopaque,
-        _: usize,
-        _: *const model_request.ModelRequestSnapshot,
-        _: []const u8,
-    ) anyerror!void {}
-
-    fn quarantine(
-        context: *anyopaque,
-        _: usize,
-        _: capture_sink.ResponseDiagnosticContext,
-        rejection: capture_sink.RejectedResponse,
-    ) anyerror!void {
-        const self: *RejectedBodyProbe = @ptrCast(@alignCast(context));
-        self.quarantine_count += 1;
-        self.shape = rejection.change_set_rejection;
-        self.failure = rejection.failure;
-        // Borrowed for this call only, exactly as the sink documents.
-        if (rejection.body.len > self.body.len) return error.BodyTooLargeForProbe;
-        @memcpy(self.body[0..rejection.body.len], rejection.body);
-        self.body_len = rejection.body.len;
-    }
-
-    fn capturedBody(self: *const RejectedBodyProbe) []const u8 {
-        return self.body[0..self.body_len];
-    }
-};
-
-/// A complete, untruncated proposal carrying one key too many - the shape a
-/// model reaches for when it wants to explain itself alongside the edit.
-fn extraTopLevelKeyPost(_: std.mem.Allocator, _: Config, _: []const u8) !TransportResponse {
-    return .{ .ok = "{\"choices\":[{\"finish_reason\":\"tool_calls\",\"message\":{\"content\":null," ++
-        "\"tool_calls\":[{\"id\":\"call_edit\",\"type\":\"function\",\"function\":{" ++
-        "\"name\":\"propose_change_set\",\"arguments\":\"{\\\"changes\\\":[{\\\"file\\\":" ++
-        "\\\"handler.ts\\\",\\\"content\\\":\\\"ok\\\"}],\\\"why\\\":\\\"explained\\\"}\"}}]}}]," ++
-        "\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":9}}" };
-}
-
-test "a refused change set hands its body to the sink" {
-    // The refusal shape says which branch fired; only the bytes say why the
-    // model chose them. Three occurrences sank corpus recordings with neither.
-    var transcript: transcript_mod.Transcript = .{};
-    defer transcript.deinit(testing.allocator);
-    try transcript.append(testing.allocator, .{ .user_text = "hello" });
-
-    var probe: RejectedBodyProbe = .{};
-    var sink: capture_sink.CaptureSink = .{
-        .context = &probe,
-        .record_fn = RejectedBodyProbe.record,
-        .quarantine_fn = RejectedBodyProbe.quarantine,
-    };
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    var client = Client.initWithCapture(
-        .{ .api_key = "test-key", .system_prompt = "zts expert" },
-        &sink,
-    );
-    try testing.expectError(
-        error.InvalidChangeSetArgs,
-        client.sendTurnWithPost(arena.allocator(), &transcript, null, extraTopLevelKeyPost),
-    );
-
-    try testing.expectEqual(@as(usize, 1), probe.quarantine_count);
-    try testing.expectEqual(error.InvalidChangeSetArgs, probe.failure.?);
-    try testing.expectEqual(
-        propose_change_set.RejectionShape.args_extra_top_level_key,
-        probe.shape.?,
-    );
-    // The sanitized bytes, which are the same bytes a cassette would hold had
-    // they decoded - not the raw socket body and not a summary of it.
-    const transport = try extraTopLevelKeyPost(arena.allocator(), client.config, "");
-    const sanitized = try sanitizeResponse(arena.allocator(), transport.ok);
-    try testing.expectEqualStrings(sanitized, probe.capturedBody());
-}
-
 test "a silence ceiling separates a stalled request from a spent budget" {
     // One number answered both questions and the two failures were then
     // indistinguishable: a turn whose 600s budget drained across fifteen calls
@@ -1231,28 +1142,4 @@ test "a silence ceiling separates a stalled request from a spent budget" {
 
     // Zero would be an instant, permanent stall on a healthy socket.
     try testing.expectEqual(@as(i32, 1), effectiveStallCeilingMs(0, budget_ms));
-}
-
-test "a decoded turn quarantines nothing" {
-    // The quarantine is the one path model bytes leave memory on. It must fire
-    // on a refusal and never on a turn that decoded.
-    var transcript: transcript_mod.Transcript = .{};
-    defer transcript.deinit(testing.allocator);
-    try transcript.append(testing.allocator, .{ .user_text = "hello" });
-
-    var probe: RejectedBodyProbe = .{};
-    var sink: capture_sink.CaptureSink = .{
-        .context = &probe,
-        .record_fn = RejectedBodyProbe.record,
-        .quarantine_fn = RejectedBodyProbe.quarantine,
-    };
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    var client = Client.initWithCapture(
-        .{ .api_key = "test-key", .system_prompt = "zts expert" },
-        &sink,
-    );
-    const result = try client.sendTurnWithPost(arena.allocator(), &transcript, null, stubPost);
-    try testing.expectEqualStrings("done", result.reply.response.final_text);
-    try testing.expectEqual(@as(usize, 0), probe.quarantine_count);
 }

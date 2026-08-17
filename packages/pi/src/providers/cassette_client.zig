@@ -236,6 +236,21 @@ fn isSafeSidecarPath(path: []const u8) bool {
 /// Replay a cassette's body bytes through the matching provider parser
 /// and return a `ModelCallResult` shaped exactly like the live client.
 pub fn replay(arena: std.mem.Allocator, cassette: Cassette) !loop.ModelCallResult {
+    return replayObserved(arena, cassette, null);
+}
+
+/// `replay`, reporting which change-set refusal fired through `observed`.
+///
+/// Separate rather than a parameter on the one function because only the
+/// recorder has somewhere to put the answer. It is the recorder that needs it:
+/// a live recording pre-decodes each captured body through here, so a refused
+/// proposal surfaces as a capture rejection and this is the only decode that
+/// ran.
+pub fn replayObserved(
+    arena: std.mem.Allocator,
+    cassette: Cassette,
+    observed: ?*?anthropic_propose_change_set.RejectionShape,
+) !loop.ModelCallResult {
     return switch (cassette.header.provider) {
         .local => {
             if (cassette.header.stream) return CassetteError.InvalidCassette;
@@ -250,7 +265,7 @@ pub fn replay(arena: std.mem.Allocator, cassette: Cassette) !loop.ModelCallResul
         .anthropic => {
             const event_list = try anthropic_sse_parser.parseAll(arena, cassette.body);
             const outcome = try anthropic_response_assembler.assemble(arena, event_list);
-            const reply = try anthropic_propose_change_set.maybeRemap(arena, outcome.reply, outcome.stop_reason);
+            const reply = try anthropic_propose_change_set.maybeRemapObserved(arena, outcome.reply, outcome.stop_reason, observed);
             return .{ .reply = reply, .usage = outcome.usage, .stop_reason = outcome.stop_reason };
         },
         .deepseek => {
@@ -258,7 +273,7 @@ pub fn replay(arena: std.mem.Allocator, cassette: Cassette) !loop.ModelCallResul
             // request digest the way the local adapter does: the recorded body
             // alone reproduces the live reply.
             if (cassette.header.stream) return CassetteError.InvalidCassette;
-            return deepseek_client.decodeResponse(arena, cassette.body);
+            return deepseek_client.decodeResponseObserved(arena, cassette.body, observed);
         },
         .openai => {
             // The live OpenAI client only speaks the streaming Responses API
@@ -268,7 +283,7 @@ pub fn replay(arena: std.mem.Allocator, cassette: Cassette) !loop.ModelCallResul
             if (!cassette.header.stream) return CassetteError.NonStreamingOpenAINotSupported;
             const event_list = try openai_sse_parser.parseAll(arena, cassette.body);
             const outcome = try openai_response_assembler.assemble(arena, event_list);
-            const reply = try anthropic_propose_change_set.maybeRemap(arena, outcome.reply, outcome.stop_reason);
+            const reply = try anthropic_propose_change_set.maybeRemapObserved(arena, outcome.reply, outcome.stop_reason, observed);
             return .{ .reply = reply, .usage = outcome.usage, .stop_reason = outcome.stop_reason };
         },
     };

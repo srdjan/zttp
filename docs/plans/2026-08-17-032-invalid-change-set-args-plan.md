@@ -83,15 +83,30 @@ explainable rather than another statistic.
 
 Then decide retry-versus-feedback from one observed body.
 
-**Landed.** The body goes to
-`.zig-cache/codegen-record-diagnostics/<run>/<case>.rejected-<attempt>.json`,
+**Landed, at the second attempt.** The body goes to
+`.zig-cache/codegen-record-diagnostics/<run>/<case>.rejected-call-<n>.json`,
 beside the metadata rows rather than in the staging tree, because the staging
-tree is swapped wholesale on promotion and a failed run never promotes. The
-attempt index in the file name is the index of the diagnostics row for the same
-failure, so the shape and the bytes read together. `CaptureSink.quarantine_fn`
-is the hook and it is wired only when the recorder has a diagnostics path, which
-is an ignored worktree location; a live interactive session has no such path and
-so writes nothing.
+tree is swapped wholesale on promotion and a failed run never promotes. The file
+is a self-contained envelope: refusal shape, error name, call index and bytes
+together.
+
+The first attempt instrumented the wrong branch and cost a run to find out.
+`sendTurn` captures before it decodes, and the capture pre-decodes the same
+bytes through `cassette_client.replay` to prove the cassette will replay - so a
+refused proposal fails at capture, and the client's own decode, which was the
+branch carrying both the shape and the quarantine, is never reached. The next
+full run sank on two occurrences (`sql-users`, `parallel-secret`) and reported
+`change_set_rejection: null` with no body for both. The single diagnostic that
+identified this was `parser_warnings: ["capture_rejected_response"]` in those
+rows.
+
+The write now lives in `recordModelExchange`, which is where the refusal
+actually happens and the only place the bytes still exist. `replayObserved`
+carries the shape out, and the recorder retains it so the diagnostics row the
+client writes for the same failure can name it too - the client cannot see a
+refusal that happened inside the capture call it made. It fires for any
+capture-side decode refusal, not only a change-set one, because they all destroy
+their evidence the same way.
 
 ## Explicitly not doing
 

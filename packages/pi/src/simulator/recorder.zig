@@ -12,6 +12,7 @@ const artifact = @import("artifact.zig");
 const observation = @import("observation.zig");
 const recording_storage = @import("recording_storage.zig");
 const capture_sink = @import("../providers/capture_sink.zig");
+const propose_change_set = @import("../providers/anthropic/propose_change_set.zig");
 const cassette_client = @import("../providers/cassette_client.zig");
 const cassette_record = @import("../providers/cassette_record.zig");
 const context_budget = @import("../context_budget.zig");
@@ -116,6 +117,10 @@ pub const Recorder = struct {
     pending_turn: ?PendingTurn = null,
     captured_initial: bool = false,
     captured_expected: bool = false,
+    /// Refusal shape from the capture-side decode, waiting for the diagnostics
+    /// row that reports the same failure. The live client writes that row and
+    /// cannot see a refusal that happened inside the capture it called.
+    pending_capture_rejection: ?propose_change_set.RejectionShape = null,
 
     pub fn init(backing_allocator: std.mem.Allocator, options: Options) !Recorder {
         var arena = std.heap.ArenaAllocator.init(backing_allocator);
@@ -187,13 +192,6 @@ pub const Recorder = struct {
             .record_fn = recordModelExchange,
             .diagnostics_fn = if (self.options.diagnostics_path != null or self.options.progress != null)
                 recordResponseDiagnostics
-            else
-                null,
-            // Only the diagnostics path is an ignored worktree location the
-            // operator already expects to hold run debris. With no such path
-            // there is nowhere a refused body may be written.
-            .quarantine_fn = if (self.options.diagnostics_path != null)
-                quarantineRejectedResponse
             else
                 null,
         };
@@ -393,7 +391,12 @@ pub const Recorder = struct {
         });
         var decode_arena = std.heap.ArenaAllocator.init(self.arena.child_allocator);
         defer decode_arena.deinit();
-        const decoded = try cassette_client.replay(decode_arena.allocator(), .{
+        // This decode is the one a refused proposal dies on. It runs before
+        // the live client's own decode of the same bytes, so the client's
+        // decode is never reached and this is the only place the refusal is
+        // visible - and the only place the bytes still exist.
+        var capture_rejection: ?propose_change_set.RejectionShape = null;
+        const decoded = cassette_client.replayObserved(decode_arena.allocator(), .{
             .header = .{
                 .provider = self.options.provider,
                 .stream = snapshot.config.stream,
@@ -403,7 +406,10 @@ pub const Recorder = struct {
                     null,
             },
             .body = raw_response,
-        });
+        }, &capture_rejection) catch |err| {
+            self.quarantineRejectedResponse(global_call_index, err, capture_rejection, raw_response);
+            return err;
+        };
         const reported_input_tokens = try context_budget.normalizeLogicalInput(
             self.options.provider,
             decoded.usage,
@@ -526,13 +532,23 @@ pub const Recorder = struct {
                 },
             });
         }
+        // A capture-side refusal knows the shape; the client reporting this row
+        // does not, because the refusal happened inside the call it made to the
+        // capture. Take the retained shape when the row has none of its own, and
+        // clear it either way so it can never label a later, unrelated row.
+        var reported = diagnostics;
+        const retained = self.pending_capture_rejection;
+        self.pending_capture_rejection = null;
+        if (reported.change_set_rejection == null and reported.failure != null) {
+            reported.change_set_rejection = retained;
+        }
         const path = self.options.diagnostics_path orelse return;
         const line = try serializeResponseDiagnostics(
             self.allocator(),
             self.options.case_name,
             attempt_index,
             diagnostic_context,
-            diagnostics,
+            reported,
         );
         defer self.allocator().free(line);
         appendDiagnosticLine(self.allocator(), path, line) catch |err| {
@@ -544,52 +560,86 @@ pub const Recorder = struct {
         };
     }
 
-    /// Write a refused response body beside the metadata diagnostics.
+    /// Keep the one response a capture refused, beside the metadata diagnostics.
     ///
-    /// The recorder holds everything in memory until `promote`, so a case that
-    /// fails takes its captured responses with it - including the one response
-    /// that would explain the failure. This writes that one body, and only that
-    /// one, to the ignored worktree the diagnostics already use. The file name
-    /// carries the case and the attempt index, which is the same index the
-    /// diagnostics row for this failure carries, so the two read together.
+    /// Everything the recorder collects lives in memory until `promote`, so a
+    /// case that fails takes its captured responses with it - including the one
+    /// response that would explain the failure. This writes that one body to the
+    /// ignored worktree the diagnostics already use, in a self-contained
+    /// envelope: the refusal shape, the error, and the call index travel with
+    /// the bytes rather than needing a row somewhere else to be read against.
+    ///
+    /// Best-effort by construction. It never changes the error the capture
+    /// returns, because a recording that failed must fail for its own reason and
+    /// not for a diagnostic write.
     fn quarantineRejectedResponse(
-        context: *anyopaque,
-        attempt_index: usize,
-        _: capture_sink.ResponseDiagnosticContext,
-        rejection: capture_sink.RejectedResponse,
-    ) anyerror!void {
-        const self: *Recorder = @ptrCast(@alignCast(context));
-        const diagnostics_path = self.options.diagnostics_path orelse return;
-        // A body over the ceiling never reached the decoder: `recordModelExchange`
-        // refuses it first. Check anyway rather than write a file whose size the
-        // rest of the recorder would have rejected.
-        if (rejection.body.len > artifact.Limits.trace_or_response_bytes) {
-            return error.FlowLimitExceeded;
-        }
-        const parent = std.fs.path.dirname(diagnostics_path) orelse
-            return error.InvalidDiagnosticsPath;
-        const quarantine_path = try std.fmt.allocPrint(
-            self.allocator(),
-            "{s}/{s}.rejected-{d}.json",
-            .{ parent, self.options.case_name, attempt_index },
+        self: *Recorder,
+        global_call_index: usize,
+        failure: anyerror,
+        shape: ?propose_change_set.RejectionShape,
+        body: []const u8,
+    ) void {
+        // Named here so the operator sees it in the run log even if the write
+        // below cannot happen.
+        std.debug.print(
+            "[response-diagnostics] {s}: capture refused call {d} ({s}, shape={s})\n",
+            .{
+                self.options.case_name,
+                global_call_index,
+                @errorName(failure),
+                if (shape) |value| @tagName(value) else "none",
+            },
         );
-        defer self.allocator().free(quarantine_path);
-        appendDiagnosticLine(self.allocator(), quarantine_path, rejection.body) catch |err| {
+        // Retaining the shape lets the diagnostics row for this same failure
+        // name it too. The live client reports that row and has no way to see a
+        // refusal that happened inside the capture it called.
+        self.pending_capture_rejection = shape;
+        self.writeRejectedResponse(global_call_index, failure, shape, body) catch |err| {
             std.debug.print(
                 "[response-diagnostics] rejected body write failed: {s}\n",
                 .{@errorName(err)},
             );
-            return err;
         };
+    }
+
+    fn writeRejectedResponse(
+        self: *Recorder,
+        global_call_index: usize,
+        failure: anyerror,
+        shape: ?propose_change_set.RejectionShape,
+        body: []const u8,
+    ) !void {
+        const diagnostics_path = self.options.diagnostics_path orelse return;
+        if (body.len > artifact.Limits.trace_or_response_bytes) return error.FlowLimitExceeded;
+        const parent = std.fs.path.dirname(diagnostics_path) orelse
+            return error.InvalidDiagnosticsPath;
+        const quarantine_path = try std.fmt.allocPrint(
+            self.allocator(),
+            "{s}/{s}.rejected-call-{d}.json",
+            .{ parent, self.options.case_name, global_call_index },
+        );
+        defer self.allocator().free(quarantine_path);
+
+        var buffer = TextBuffer.init(self.allocator());
+        defer buffer.deinit();
+        const writer = buffer.writer();
+        try std.json.Stringify.value(.{
+            .v = @as(u32, 1),
+            .case_name = self.options.case_name,
+            .provider = self.options.provider,
+            .model = self.options.model,
+            .call_index = global_call_index,
+            .error_name = @errorName(failure),
+            .change_set_rejection = if (shape) |value| @tagName(value) else null,
+            .body = body,
+        }, .{}, writer);
+        try writer.writeByte('\n');
+        const line = try buffer.toOwnedSlice();
+        defer self.allocator().free(line);
+        try appendDiagnosticLine(self.allocator(), quarantine_path, line);
         std.debug.print(
-            "[response-diagnostics] {s} refused attempt {d}" ++
-                " (shape={s}); body kept at {s}\n",
-            .{
-                @errorName(rejection.failure),
-                attempt_index,
-                if (rejection.change_set_rejection) |shape| @tagName(shape) else "none",
-                quarantine_path,
-            },
+            "[response-diagnostics] body kept at {s}\n",
+            .{quarantine_path},
         );
     }
 
@@ -1012,17 +1062,19 @@ fn lessThanPath(_: void, left: []const u8, right: []const u8) bool {
     return std.mem.lessThan(u8, left, right);
 }
 
-test "a refused body survives the case that failed on it" {
-    // The recorder holds captured responses in memory until promotion, so the
-    // one response that explains a failure dies with the case. This asserts the
-    // body reaches disk under the same attempt index its diagnostics row
-    // carries: a file that exists but cannot be tied to a row would leave the
-    // next occurrence as unexplainable as the last three were.
+test "the capture keeps the body of the proposal it refused" {
+    // Driven through `record`, which is the path a recording takes, because the
+    // first version of this was driven through the live client's own decode
+    // instead. That decode never runs during a recording - the capture decodes
+    // the same bytes first and fails first - so the instrumentation passed its
+    // tests and then reported a null shape and no body for two occurrences in
+    // one run.
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const diagnostics_path = try diagnosticTestPath(allocator, tmp, "refused-case.jsonl");
     defer allocator.free(diagnostics_path);
+    const workspace_root = std.fs.path.dirname(diagnostics_path).?;
 
     var recorder = try Recorder.init(allocator, .{
         .case_name = "refused-case",
@@ -1033,92 +1085,92 @@ test "a refused body survives the case that failed on it" {
         .workspace_allowlist = &.{},
     });
     defer recorder.deinit();
-    var sink = recorder.captureSink();
-    const context: capture_sink.ResponseDiagnosticContext = .{
-        .provider = .deepseek,
-        .model = "deepseek-v4-flash",
-    };
-    const clean: capture_sink.ResponseDiagnostics = .{
-        .latency_ms = 5,
-        .http_status = null,
-        .finish_reason = .stop,
-        .completion_tokens = 10,
-        .field_presence = .{},
-        .parser_warnings = &.{},
-        .failure = null,
-    };
-    // Two clean attempts first: a refusal in a real case arrives mid-turn, and
-    // an index that only ever reads zero would prove nothing about correlation.
-    sink.recordDiagnostics(context, clean);
-    sink.recordDiagnostics(context, clean);
+    try recorder.captureInitialWorkspace(workspace_root);
+    var transcript: transcript_mod.Transcript = .{};
+    defer transcript.deinit(allocator);
+    try transcript.append(allocator, .{ .user_text = "add a health route" });
+    try recorder.beginTurn("add a health route", 0, .approve);
 
+    var snapshot = try model_request.createSnapshot(allocator, .{
+        .config = .{
+            .provider = .deepseek,
+            .model = "deepseek-v4-flash",
+            .max_output_tokens = 1024,
+            .stream = false,
+            .system_prompt = "zts expert",
+        },
+        .transcript = &transcript,
+    });
+    defer snapshot.deinit(allocator);
+    try snapshot.completePreparation("{\"model\":\"deepseek-v4-flash\"}");
+    snapshot.wire_request_sha256 = model_request.Sha256Hex.fromRawBytes("{\"model\":\"deepseek-v4-flash\"}");
+
+    // A complete, untruncated proposal carrying one key too many - the shape a
+    // model reaches for when it wants to explain itself alongside the edit.
     const body =
-        "{\"choices\":[{\"finish_reason\":\"tool_calls\",\"message\":" ++
-        "{\"tool_calls\":[{\"function\":{\"name\":\"propose_change_set\"," ++
-        "\"arguments\":\"{\\\"changes\\\":[],\\\"why\\\":\\\"explained\\\"}\"}}]}}]}";
-    sink.quarantineRejectedResponse(context, .{
-        .failure = error.InvalidChangeSetArgs,
-        .change_set_rejection = .args_extra_top_level_key,
-        .body = body,
-    });
-    sink.recordDiagnostics(context, .{
-        .latency_ms = 48139,
-        .http_status = null,
-        .finish_reason = .tool_calls,
-        .completion_tokens = 5674,
-        .field_presence = .{},
-        .parser_warnings = &.{.decoder_rejected_response},
-        .failure = error.InvalidChangeSetArgs,
-        .change_set_rejection = .args_extra_top_level_key,
-    });
+        "{\"choices\":[{\"finish_reason\":\"tool_calls\",\"message\":{\"content\":null," ++
+        "\"tool_calls\":[{\"id\":\"call_edit\",\"type\":\"function\",\"function\":{" ++
+        "\"name\":\"propose_change_set\",\"arguments\":\"{\\\"changes\\\":[{\\\"file\\\":" ++
+        "\\\"handler.ts\\\",\\\"content\\\":\\\"ok\\\"}],\\\"why\\\":\\\"explained\\\"}\"}}]}}]," ++
+        "\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":9}}";
 
-    const parent = std.fs.path.dirname(diagnostics_path).?;
+    var sink = recorder.captureSink();
+    try std.testing.expectError(error.InvalidChangeSetArgs, sink.record(&snapshot, body));
+
+    // The envelope is self-contained: shape, error, call index and bytes
+    // together, so it needs no other file to be read against.
     const quarantine_path = try std.fmt.allocPrint(
         allocator,
-        "{s}/refused-case.rejected-2.json",
-        .{parent},
+        "{s}/refused-case.rejected-call-0.json",
+        .{workspace_root},
     );
     defer allocator.free(quarantine_path);
     const written = try zts.file_io.readFile(allocator, quarantine_path, 64 * 1024);
     defer allocator.free(written);
-    try std.testing.expectEqualStrings(body, written);
+    var envelope = try std.json.parseFromSlice(std.json.Value, allocator, written, .{});
+    defer envelope.deinit();
+    const root = envelope.value.object;
+    try std.testing.expectEqualStrings("InvalidChangeSetArgs", root.get("error_name").?.string);
+    try std.testing.expectEqualStrings(
+        "args_extra_top_level_key",
+        root.get("change_set_rejection").?.string,
+    );
+    try std.testing.expectEqual(@as(i64, 0), root.get("call_index").?.integer);
+    try std.testing.expectEqualStrings(body, root.get("body").?.string);
 
-    // The row at that same index has to name the refusal, or the body on disk
-    // belongs to nothing a reader can find.
-    const rows = try zts.file_io.readFile(allocator, diagnostics_path, 64 * 1024);
-    defer allocator.free(rows);
-    var lines = std.mem.splitScalar(u8, rows, '\n');
-    var refused_rows: usize = 0;
-    while (lines.next()) |line| {
-        if (line.len == 0) continue;
-        var parsed = try std.json.parseFromSlice(std.json.Value, allocator, line, .{});
-        defer parsed.deinit();
-        const root = parsed.value.object;
-        if (root.get("error_name").? == .null) continue;
-        refused_rows += 1;
-        try std.testing.expectEqual(@as(i64, 2), root.get("attempt_index").?.integer);
-        try std.testing.expectEqualStrings(
-            "args_extra_top_level_key",
-            root.get("change_set_rejection").?.string,
-        );
-    }
-    try std.testing.expectEqual(@as(usize, 1), refused_rows);
-}
-
-test "a refused body is written nowhere when the run has no diagnostics path" {
-    // The quarantine is the one place model bytes leave memory on a failure.
-    // Without the ignored worktree path the diagnostics already use, there is no
-    // location that was agreed on, so the hook must be absent rather than
-    // guessing at one.
-    var recorder = try Recorder.init(std.testing.allocator, .{
-        .case_name = "no-diagnostics",
-        .evidence_class = .empirical_model,
+    // And the row the live client writes for this same failure names the shape
+    // too, though the client itself never saw it - the refusal happened inside
+    // the capture call it made.
+    sink.recordDiagnostics(.{
         .provider = .deepseek,
         .model = "deepseek-v4-flash",
-        .workspace_allowlist = &.{},
+    }, .{
+        .latency_ms = 5131,
+        .http_status = null,
+        .finish_reason = .tool_calls,
+        .completion_tokens = 397,
+        .field_presence = .{},
+        .parser_warnings = &.{.capture_rejected_response},
+        .failure = error.InvalidChangeSetArgs,
+        .change_set_rejection = null,
     });
-    defer recorder.deinit();
-    try std.testing.expect(recorder.captureSink().quarantine_fn == null);
+    const rows = try zts.file_io.readFile(allocator, diagnostics_path, 64 * 1024);
+    defer allocator.free(rows);
+    var row = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        std.mem.trim(u8, rows, "\n"),
+        .{},
+    );
+    defer row.deinit();
+    try std.testing.expectEqualStrings(
+        "args_extra_top_level_key",
+        row.value.object.get("change_set_rejection").?.string,
+    );
+
+    // Consumed, not sticky: a retained shape that outlived its own failure
+    // would label the next unrelated row with it.
+    try std.testing.expect(recorder.pending_capture_rejection == null);
 }
 
 test "a refused change set names which refusal fired" {
