@@ -820,6 +820,23 @@ fn writeBootstrapMetaPayload(json: *std.json.Stringify) !bool {
     return true;
 }
 
+/// Whether any module in the resolved graph imports this builtin specifier.
+///
+/// Reads the graph the caller already resolved rather than re-parsing: an
+/// import the resolver rejected is in `rejected`, not here, so a specifier that
+/// failed to resolve is never treated as imported.
+fn graphImportsSpecifier(
+    graph: *const module_graph_record.GraphRecord,
+    specifier: []const u8,
+) bool {
+    for (graph.modules) |module| {
+        for (module.imports) |import| {
+            if (std.mem.eql(u8, import.specifier, specifier)) return true;
+        }
+    }
+    return false;
+}
+
 /// Emit a module's use protocol, when it declares one.
 ///
 /// Omitted rather than emitted empty: an absent field reads as "this module
@@ -1331,27 +1348,53 @@ fn writeModulesPayload(
     }
     try json.endArray();
 
+    // Scoped to what the file imports, which `meta` is deliberately not.
+    //
+    // This operation resolves one entry file; `meta` owns the whole catalog.
+    // Emitting all 26 modules in full here cost 10,406 of the response's 11,061
+    // bytes to describe modules the file does not import, paid on every call,
+    // in exactly the cases that loop.
+    //
+    // What an unimported module keeps is not negotiable down to a bare index.
+    // A specifier list is what discovery published before parameter names, and
+    // a model reading it wrote a SELECT statement into the argument that takes
+    // a registered query name. So every module keeps its summary and the
+    // `name(params)` signature of every export: that is the fact whose absence
+    // was measured. What an unimported module drops is its capability set and
+    // its per-export effect - both enforced mechanically by the veto rather
+    // than by the model remembering them, and both still available from `meta`
+    // and `effects`.
     try json.objectField("builtins");
     try json.beginArray();
     for (zts.builtinModules) |binding| {
+        const imported = graphImportsSpecifier(graph, binding.specifier);
         try json.beginObject();
         try json.objectField("specifier");
         try json.write(binding.specifier);
         try json.objectField("name");
         try json.write(binding.name);
         try writeModuleSummary(json, binding);
-        try json.objectField("required_capabilities");
-        try json.beginArray();
-        for (binding.required_capabilities) |cap| try json.write(@tagName(cap));
-        try json.endArray();
+        // Says which of the two shapes this entry is, so a reader never has to
+        // infer it from a missing key and never mistakes a scoped entry for a
+        // module that declares no capabilities.
+        try json.objectField("resolved");
+        try json.write(imported);
+        if (imported) {
+            try json.objectField("required_capabilities");
+            try json.beginArray();
+            for (binding.required_capabilities) |cap| try json.write(@tagName(cap));
+            try json.endArray();
+        }
         try json.objectField("exports");
         try json.beginArray();
         for (binding.exports) |exp| {
             try json.beginObject();
             try json.objectField("name");
             try json.write(exp.name);
-            try json.objectField("effect");
-            try json.write(@tagName(exp.effect));
+            if (imported) {
+                try json.objectField("effect");
+                try json.write(@tagName(exp.effect));
+            }
             try writeExportParams(json, exp);
             try json.endObject();
         }
@@ -3200,6 +3243,82 @@ test "module discovery names each parameter and the module use protocol" {
     // never running one.
     try testing.expect(found_sql_module);
     try testing.expect(found_sql_many);
+}
+
+// `modules` resolves one entry file, so it describes the file's own imports in
+// full and every other module in the shape a chooser needs. The scoping is only
+// safe because of what it KEEPS: a bare specifier list is what discovery
+// published before parameter names, and the measured consequence was a model
+// writing SQL text into the argument that takes a registered query name. So the
+// assertions below are mostly about the unimported entry, not the imported one.
+test "modules describes imports in full and keeps every other module choosable" {
+    const a = testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "handler.ts", .data =
+        \\import { env } from "zttp:env";
+        \\export function handler(req) { return Response.text(env("HOME")); }
+        \\
+    });
+    const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", a);
+    defer a.free(root);
+
+    const req = try std.fmt.allocPrint(a,
+        \\{{"schema_version":2,"operation":"modules","project_root":"{s}","input":{{"file":"handler.ts"}}}}
+    , .{root});
+    defer a.free(req);
+    const out = try respond(a, req);
+    defer a.free(out);
+
+    var parsed = try parse(a, out);
+    defer parsed.deinit();
+    const payload = parsed.value.object.get("payload").?.object;
+
+    var saw_imported = false;
+    var saw_unimported = false;
+    for (payload.get("builtins").?.array.items) |module| {
+        const m = module.object;
+        const spec = m.get("specifier").?.string;
+        const resolved = m.get("resolved").?.bool;
+
+        if (std.mem.eql(u8, spec, "zttp:env")) {
+            saw_imported = true;
+            try testing.expect(resolved);
+            // The imported module keeps everything: capabilities and per-export
+            // effect are what a handler that actually calls it needs.
+            try testing.expect(m.get("required_capabilities") != null);
+            const exp = m.get("exports").?.array.items[0].object;
+            try testing.expect(exp.get("effect") != null);
+            try testing.expectEqualStrings("name", exp.get("params").?.array.items[0].string);
+            continue;
+        }
+
+        if (std.mem.eql(u8, spec, "zttp:sql")) {
+            saw_unimported = true;
+            try testing.expect(!resolved);
+            // Dropped, because the veto enforces both mechanically and `meta`
+            // and `effects` still answer them.
+            try testing.expect(m.get("required_capabilities") == null);
+
+            // KEPT, and this is the whole safety argument for scoping. A model
+            // choosing a module still learns that zttp:sql registers a
+            // statement by name and that sqlMany takes that name, not SQL.
+            const summary = m.get("summary").?.string;
+            try testing.expect(std.mem.indexOf(u8, summary, "never SQL text") != null);
+            for (m.get("exports").?.array.items) |exp_value| {
+                const exp = exp_value.object;
+                try testing.expect(exp.get("effect") == null);
+                if (!std.mem.eql(u8, exp.get("name").?.string, "sqlMany")) continue;
+                const params = exp.get("params").?.array;
+                try testing.expectEqualStrings("name", params.items[0].string);
+                try testing.expectEqualStrings("params?", params.items[1].string);
+            }
+        }
+    }
+    // The floor. A payload that stopped emitting either shape would satisfy
+    // every assertion above by never running one.
+    try testing.expect(saw_imported);
+    try testing.expect(saw_unimported);
 }
 
 test "a file-bound operation binds the graph digest, not the context-free one" {
