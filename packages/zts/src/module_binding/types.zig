@@ -656,6 +656,20 @@ pub fn validateBindings(comptime bindings: []const ModuleBinding) void {
                     .{ b.specifier, f.name, f.arg_count, f.param_types.len },
                 ));
             }
+            // The same rule the SDK validator carries, which reaches only the
+            // SDK-pure half of the registry. The engine-coupled modules -
+            // zttp:durable, zttp:workflow, zttp:queue, zttp:scope, zttp:io,
+            // zttp:collections, zttp:bytes, zttp:json, zttp:result - declare
+            // FunctionBinding directly and are validated here, so without this
+            // an argument added without a name compiled clean and
+            // agent_protocol.writeExportParams told the model one name fewer
+            // than the export takes.
+            if (f.param_names.len != f.param_types.len) {
+                @compileError(std.fmt.comptimePrint(
+                    "{s}.{s} declares {d} param_types but {d} param_names; every parameter must be named",
+                    .{ b.specifier, f.name, f.param_types.len, f.param_names.len },
+                ));
+            }
             // A return read off an argument must name an argument that exists,
             // and must leave `returns` at `.unknown`. A fixed kind beside it
             // would be a second answer to the same question, and the consumers
