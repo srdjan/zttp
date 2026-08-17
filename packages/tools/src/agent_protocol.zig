@@ -820,6 +820,32 @@ fn writeBootstrapMetaPayload(json: *std.json.Stringify) !bool {
     return true;
 }
 
+/// Emit what an export answers with.
+///
+/// Discovery published a name, an effect, and (since parameter names landed)
+/// what each argument means - and nothing at all about the return. A model had
+/// no way to learn that `sqlMany` answers an array rather than a Result, and
+/// three corpus cases failed the same way because of it: sql-users, jwt-auth
+/// and workflow-queued-call each read `.ok` and `.value` off a value that has
+/// neither, which the compiler proved safe and the runtime faulted on.
+///
+/// The declared signature wins when an export has one, because that is what the
+/// checker enforces - `zttp:workflow.call` and `zttp:fetch` both answer a
+/// Response and both advertised `object` until now. Everything else renders the
+/// coarse kind through the same `jsTypeName` the rest of the surface uses.
+///
+/// This is deliberately NOT the `returns` field in `zts modules --json`, which
+/// stays a `ReturnKind` name: `module_manifest.zig:267` parses that one back
+/// through `stringToEnum` and a structural type there would refuse to load.
+fn writeExportReturns(json: *std.json.Stringify, exp: anytype) !void {
+    try json.objectField("returns");
+    if (exp.signature) |declared| {
+        try json.write(declared.returns);
+    } else {
+        try json.write(exp.returns.jsTypeName());
+    }
+}
+
 /// Whether any module in the resolved graph imports this builtin specifier.
 ///
 /// Reads the graph the caller already resolved rather than re-parsing: an
@@ -981,6 +1007,7 @@ fn writeFullMetaPayload(json: *std.json.Stringify) !bool {
             try json.objectField("effect");
             try json.write(@tagName(exp.effect));
             try writeExportParams(json, exp);
+            try writeExportReturns(json, exp);
             try json.endObject();
         }
         try json.endArray();
@@ -1396,6 +1423,10 @@ fn writeModulesPayload(
                 try json.write(@tagName(exp.effect));
             }
             try writeExportParams(json, exp);
+            // Universal, like params: a chooser needs to know what a module
+            // answers before importing it, and the absence of exactly this
+            // fact is what three failing cases had in common.
+            try writeExportReturns(json, exp);
             try json.endObject();
         }
         try json.endArray();
@@ -3303,6 +3334,7 @@ test "modules describes imports in full and keeps every other module choosable" 
             // KEPT, and this is the whole safety argument for scoping. A model
             // choosing a module still learns that zttp:sql registers a
             // statement by name and that sqlMany takes that name, not SQL.
+            // (Return types are asserted separately, below.)
             const summary = m.get("summary").?.string;
             try testing.expect(std.mem.indexOf(u8, summary, "never SQL text") != null);
             for (m.get("exports").?.array.items) |exp_value| {
@@ -3319,6 +3351,69 @@ test "modules describes imports in full and keeps every other module choosable" 
     // every assertion above by never running one.
     try testing.expect(saw_imported);
     try testing.expect(saw_unimported);
+}
+
+// Three corpus cases failed the same way - sql-users, jwt-auth and
+// workflow-queued-call each read `.ok` and `.value` off a value that has
+// neither - and discovery published no return type for any export, so the model
+// had nothing to read. Asserted on the values, not on the field's presence: a
+// test that only checked `returns` existed would pass on the `object` that
+// taught nothing.
+test "module discovery says what each export answers with" {
+    const a = testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "handler.ts", .data =
+        \\import { parseBearer } from "zttp:auth";
+        \\export function handler(req) { return Response.text(parseBearer("x")); }
+        \\
+    });
+    const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", a);
+    defer a.free(root);
+
+    const req = try std.fmt.allocPrint(a,
+        \\{{"schema_version":2,"operation":"modules","project_root":"{s}","input":{{"file":"handler.ts"}}}}
+    , .{root});
+    defer a.free(req);
+    const out = try respond(a, req);
+    defer a.free(out);
+
+    var parsed = try parse(a, out);
+    defer parsed.deinit();
+    const payload = parsed.value.object.get("payload").?.object;
+
+    var saw_optional = false;
+    var saw_declared = false;
+    for (payload.get("builtins").?.array.items) |module| {
+        const m = module.object;
+        const spec = m.get("specifier").?.string;
+        for (m.get("exports").?.array.items) |exp_value| {
+            const exp = exp_value.object;
+            const name = exp.get("name").?.string;
+            const returns = exp.get("returns").?.string;
+
+            // The coarse kind, rendered the way the rest of the surface renders
+            // it. This exact fact is what jwt-auth needed: `string?` says the
+            // result must be narrowed, not destructured as a Result.
+            if (std.mem.eql(u8, spec, "zttp:auth") and std.mem.eql(u8, name, "parseBearer")) {
+                saw_optional = true;
+                try testing.expectEqualStrings("string?", returns);
+            }
+
+            // A declared signature wins over the kind, because that is what the
+            // checker enforces. `call` answered `object` here until now while
+            // returning a Response, which is what taught a draft to read `.ok`.
+            if (std.mem.eql(u8, spec, "zttp:workflow") and std.mem.eql(u8, name, "call")) {
+                saw_declared = true;
+                try testing.expect(std.mem.indexOf(u8, returns, "status: number") != null);
+                try testing.expect(!std.mem.eql(u8, returns, "object"));
+            }
+        }
+    }
+    // The floor: a payload that stopped carrying either export would satisfy
+    // every assertion above by never running one.
+    try testing.expect(saw_optional);
+    try testing.expect(saw_declared);
 }
 
 test "a file-bound operation binds the graph digest, not the context-free one" {

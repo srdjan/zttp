@@ -239,6 +239,21 @@ pub fn registryHashFromBindings(comptime bindings: []const mb.ModuleBinding) [64
                 hasher.update(param);
                 hasher.update(",");
             }
+            hasher.update(":");
+            // A declared signature overrides the coarse kind at every position
+            // and is what discovery now publishes, so it is squarely "what a
+            // caller is told" - the thing this hash exists to identify. It was
+            // outside the hash while it was also outside the payload, which was
+            // at least consistent; publishing it without hashing it would let
+            // `zttp:workflow.call` change from `object` to a Response shape
+            // under a client's cached identity.
+            if (exp.signature) |declared| {
+                inline for (declared.params) |param| {
+                    hasher.update(param);
+                    hasher.update(",");
+                }
+                hasher.update(declared.returns);
+            }
             hasher.update("\x00");
         }
         hasher.update("\n");
