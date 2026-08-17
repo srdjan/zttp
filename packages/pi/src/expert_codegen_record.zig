@@ -1365,9 +1365,20 @@ const record_corpus = [_]RecordCase{
     },
     .{
         .name = "workflow-queued-call",
+        // "dispatch a greet child handler" read as an instruction to write one,
+        // and the model created `greet.ts` - which the recorder refuses, because
+        // the capture allowlist is handler.ts plus the case's seed_files and
+        // this case seeds nothing at draft time. The whole case then aborts with
+        // an internal UndeclaredWorkspacePath rather than recording an outcome.
+        //
+        // The child is already registered and resolved from the system registry
+        // at run time, so say so. Same omission as saga's: the case provides
+        // something the prompt never mentions.
         .prompt = "Create a durable workflow handler in handler.ts using zttp:durable and " ++
             "zttp:workflow. It should read the Idempotency-Key header, enter run(key), " ++
-            "and dispatch a greet child handler with workflow.call at durable depth 0.",
+            "and dispatch the already-registered `greet` child handler with workflow.call " ++
+            "at durable depth 0. The child handler already exists in the system registry - " ++
+            "write only handler.ts.",
         .intent = .{ .runtime = .{
             .zttp_json = "{\n  \"entry\": \"handler.ts\",\n  \"system\": \"intent-system.json\"\n}\n",
             .runtime_files = &queued_call_runtime_files,
@@ -1387,9 +1398,14 @@ const record_corpus = [_]RecordCase{
     },
     .{
         .name = "workflow-nested-dispatch-avoidance",
+        // Same omission, same internal abort: the model wrote `notify.ts` and
+        // the recorder refused the capture, so run 5 recorded no outcome for
+        // this case at all.
         .prompt = "Create a durable order workflow in handler.ts. Reserve inventory with a " ++
-            "durable step, then dispatch a notify child handler with workflow.call after the " ++
-            "step completes. Keep the child dispatch outside the step callback.",
+            "durable step, then dispatch the already-registered `notify` child handler with " ++
+            "workflow.call after the step completes. Keep the child dispatch outside the step " ++
+            "callback. The child handler already exists in the system registry - write only " ++
+            "handler.ts.",
         .intent = .{ .runtime = .{
             .zttp_json = "{\n  \"entry\": \"handler.ts\",\n  \"system\": \"intent-system.json\"\n}\n",
             .runtime_files = &nested_dispatch_runtime_files,
@@ -3400,8 +3416,8 @@ const deepseek_coverage_baseline = [_][]const u8{
     "ZTS501",
     "ZTS502",
 };
-// Moved again when durable-order's step-result shape and
-// workflow-saga-compensation's service names were stated. The identity covers
+// Moved again when the two workflow.call cases were told their child
+// handler already exists, after each wrote one and aborted the capture. The identity covers
 // the model-visible input, so a prompt edit moves it by construction.
 //
 // The list above still reads five of seventy-one, measured over the corpus this
@@ -3410,7 +3426,7 @@ const deepseek_coverage_baseline = [_][]const u8{
 // `coverageBaseline` returns null and the ratchet silently stops applying.
 // Re-measure with `bash scripts/update-coverage.sh` once a corpus records, and
 // correct the list and this note from that run rather than from this one.
-const deepseek_coverage_headline_input_id = "95cdd383c2335680f9002d17700f197c3f1d8e08e84ff21b769c20bf0a8f7b57";
+const deepseek_coverage_headline_input_id = "d53f204f89792fd19f361452892e41e92a5f706df41efc2e5976deda797a9311";
 
 /// Return the live coverage floor for one exact model-visible input and model.
 /// Expected outcomes and thresholds cannot reset this ratchet.
