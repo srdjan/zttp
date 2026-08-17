@@ -256,10 +256,11 @@ pub fn replayObserved(
             if (cassette.header.stream) return CassetteError.InvalidCassette;
             const request_sha256 = cassette.header.request_sha256 orelse
                 return CassetteError.InvalidCassette;
-            return local_client.decodeResponseFromRequestDigest(
+            return local_client.decodeResponseFromRequestDigestObserved(
                 arena,
                 request_sha256,
                 cassette.body,
+                observed,
             );
         },
         .anthropic => {

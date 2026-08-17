@@ -185,6 +185,7 @@ pub const Client = struct {
             request_digest,
             response.bytes,
             response.value,
+            null,
         ) catch |err| {
             if (diagnostics_enabled) {
                 inspection.addWarning(.decoder_rejected_response);
@@ -382,7 +383,7 @@ pub fn decodeResponse(
     response_body: []const u8,
 ) !loop.ModelCallResult {
     const response = try parseSanitizedResponse(arena, response_body);
-    return decodeResponseValue(arena, sha256(request_body), response.bytes, response.value);
+    return decodeResponseValue(arena, sha256(request_body), response.bytes, response.value, null);
 }
 
 pub fn decodeResponseFromRequestDigest(
@@ -390,11 +391,27 @@ pub fn decodeResponseFromRequestDigest(
     request_sha256: []const u8,
     response_body: []const u8,
 ) !loop.ModelCallResult {
+    return decodeResponseFromRequestDigestObserved(arena, request_sha256, response_body, null);
+}
+
+/// `decodeResponseFromRequestDigest`, reporting which change-set refusal fired
+/// through `observed`.
+///
+/// `local` is the recorder's default provider, so this is the decode most
+/// refusals actually run. Leaving it on the unobserved path wrote
+/// `"change_set_rejection": null` into every local quarantine envelope and left
+/// the operator the bare `InvalidChangeSetArgs` the shape exists to replace.
+pub fn decodeResponseFromRequestDigestObserved(
+    arena: std.mem.Allocator,
+    request_sha256: []const u8,
+    response_body: []const u8,
+    observed: ?*?propose_change_set.RejectionShape,
+) !loop.ModelCallResult {
     var digest: [32]u8 = undefined;
     if (request_sha256.len != 64) return ClientError.InvalidResponseJson;
     _ = std.fmt.hexToBytes(&digest, request_sha256) catch return ClientError.InvalidResponseJson;
     const response = try parseSanitizedResponse(arena, response_body);
-    return decodeResponseValue(arena, digest, response.bytes, response.value);
+    return decodeResponseValue(arena, digest, response.bytes, response.value, observed);
 }
 
 pub fn sanitizeResponse(arena: std.mem.Allocator, response_body: []const u8) ![]u8 {
@@ -615,6 +632,7 @@ fn decodeResponseValue(
     request_digest: [32]u8,
     response_body: []const u8,
     root: std.json.Value,
+    observed: ?*?propose_change_set.RejectionShape,
 ) !loop.ModelCallResult {
     if (response_body.len > max_response_body_bytes) return ClientError.ResponseTooLarge;
     if (root != .object) return ClientError.UnexpectedResponseShape;
@@ -658,7 +676,7 @@ fn decodeResponseValue(
                 .response = .{ .tool_calls = calls },
             };
             return .{
-                .reply = try propose_change_set.maybeRemap(arena, reply, finish_reason),
+                .reply = try propose_change_set.maybeRemapObserved(arena, reply, finish_reason, observed),
                 .usage = usage,
                 .stop_reason = finish_reason,
             };
@@ -670,7 +688,7 @@ fn decodeResponseValue(
         const calls = try parseToolEnvelopes(arena, request_digest, response_digest, text);
         const reply: turn.AssistantReply = .{ .response = .{ .tool_calls = calls } };
         return .{
-            .reply = try propose_change_set.maybeRemap(arena, reply, finish_reason),
+            .reply = try propose_change_set.maybeRemapObserved(arena, reply, finish_reason, observed),
             .usage = usage,
             .stop_reason = finish_reason,
         };
