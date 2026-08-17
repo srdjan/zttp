@@ -4076,6 +4076,40 @@ test "formatProofCard: spec-less handler renders ZTS500 lines matching the foote
     try std.testing.expectEqual(spec_err_count, printed);
 }
 
+test "formatProofCard: the card names the demotion site --json already carried" {
+    // The two surfaces were said to share one source of truth, and did not:
+    // `--json` printed "; demoted at line L:C by `snippet`" from `diag.cause`
+    // and the card spelled its own suffix without it. So `zttp check` named the
+    // failing spec and left out the line number, which is the half that turns
+    // one property into one edit.
+    const allocator = std.testing.allocator;
+    const source =
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  return Response.json({ at: Date.now() });
+        \\}
+    ;
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "demoted-text.ts", .{});
+    defer result.deinit(allocator);
+
+    const contract = result.contract orelse return error.TestUnexpectedResult;
+    var caused: usize = 0;
+    for (contract.spec_diagnostics.items) |d| {
+        if (d.kind.severity() == .err and d.cause != null) caused += 1;
+    }
+    // The floor: with no caused diagnostic the assertions below would pass over
+    // a card that renders nothing at all.
+    try std.testing.expect(caused > 0);
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+    formatProofCard(&aw.writer, &result, "demoted-text.ts");
+    buf = aw.toArrayList();
+
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "demoted at line") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "Date.now()") != null);
+}
+
 test "formatProofCard: strict canonical diagnostics are visible in text mode" {
     const allocator = std.testing.allocator;
     const source =

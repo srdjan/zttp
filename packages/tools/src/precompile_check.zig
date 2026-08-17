@@ -177,10 +177,11 @@ pub fn appendSpecDiagnosticsJson(
     const contract = if (result.contract) |*c| c else return;
     for (contract.spec_diagnostics.items) |diag| {
         const code = diagnostic_catalog.specCode(diag.kind);
-        // Single source of truth shared with the human card (formatProofCard)
-        // so the two surfaces cannot drift: both take the base text from
-        // `specDiagnosticMessage` and the failing names from
-        // `specDiagnosticSubject`.
+        // Single source of truth shared with the human card (formatProofCard):
+        // both take the base text from `specDiagnosticMessage`, the failing
+        // names from `specDiagnosticSubject`, and the suffix from
+        // `spec_suffix_with_cause`/`spec_suffix_plain`. The suffix was the half
+        // that drifted - the card spelled its own, without `diag.cause`.
         //
         // Owned rather than static, because naming the spec means building the
         // string. A failed allocation falls back to the base text: a message
@@ -527,7 +528,14 @@ pub fn formatProofCard(writer: anytype, r: *const CheckResult, filename: []const
                     .{ diagnostic_catalog.specCode(d.kind), filename, contract.handler.line, contract.handler.column, specDiagnosticMessage(d) },
                 ) catch return;
                 if (specDiagnosticSubject(d)) |subject| {
-                    writer.print(" (failing spec: {s})", .{subject}) catch return;
+                    if (d.cause) |cause| {
+                        writer.print(
+                            spec_suffix_with_cause,
+                            .{ subject, cause.line, cause.column, cause.snippet },
+                        ) catch return;
+                    } else {
+                        writer.print(spec_suffix_plain, .{subject}) catch return;
+                    }
                 }
                 writer.print("\n", .{}) catch return;
                 if (d.suggestion) |suggestion| {
@@ -573,23 +581,29 @@ fn specDiagnosticSubject(diag: zts.SpecDiagnostic) ?[]const u8 {
 
 /// `specDiagnosticMessage` with the failing spec names appended. Caller owns
 /// the result. Used where a message is stored rather than printed.
+/// The suffix both surfaces append to a spec diagnostic: which spec failed and,
+/// when the classifier recorded one, the site that demoted it.
+///
+/// One pair of format strings rather than two copies. The card kept only the
+/// first half while `--json` printed both, so `zttp check` named the spec and
+/// left out the line number - the half that turns one property into one edit.
+const spec_suffix_with_cause = " (failing spec: {s}; demoted at line {d}:{d} by `{s}`)";
+const spec_suffix_plain = " (failing spec: {s})";
+
 fn specDiagnosticMessageAlloc(
     allocator: std.mem.Allocator,
     diag: zts.SpecDiagnostic,
 ) ![]u8 {
     const base = specDiagnosticMessage(diag);
     const subject = specDiagnosticSubject(diag) orelse return allocator.dupe(u8, base);
-    // The exact site that demoted the property, when the classifier recorded
-    // one. Naming the spec turns twelve candidates into one; naming the line
-    // turns one property into one edit.
     if (diag.cause) |cause| {
         return std.fmt.allocPrint(
             allocator,
-            "{s} (failing spec: {s}; demoted at line {d}:{d} by `{s}`)",
+            "{s}" ++ spec_suffix_with_cause,
             .{ base, subject, cause.line, cause.column, cause.snippet },
         );
     }
-    return std.fmt.allocPrint(allocator, "{s} (failing spec: {s})", .{ base, subject });
+    return std.fmt.allocPrint(allocator, "{s}" ++ spec_suffix_plain, .{ base, subject });
 }
 
 /// Human-readable message for a spec/Effects diagnostic, mirroring the JSON
