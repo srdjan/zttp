@@ -1377,8 +1377,8 @@ const record_corpus = [_]RecordCase{
         .prompt = "Create a durable workflow handler in handler.ts using zttp:durable and " ++
             "zttp:workflow. It should read the Idempotency-Key header, enter run(key), " ++
             "and dispatch the already-registered `greet` child handler with workflow.call " ++
-            "at durable depth 0. The child handler already exists in the system registry - " ++
-            "write only handler.ts.",
+            "at durable depth 0, answering with the child's response body. The child " ++
+            "handler already exists in the system registry - write only handler.ts.",
         .intent = .{ .runtime = .{
             .zttp_json = "{\n  \"entry\": \"handler.ts\",\n  \"system\": \"intent-system.json\"\n}\n",
             .runtime_files = &queued_call_runtime_files,
@@ -1402,10 +1402,11 @@ const record_corpus = [_]RecordCase{
         // the recorder refused the capture, so run 5 recorded no outcome for
         // this case at all.
         .prompt = "Create a durable order workflow in handler.ts. Reserve inventory with a " ++
-            "durable step, then dispatch the already-registered `notify` child handler with " ++
-            "workflow.call after the step completes. Keep the child dispatch outside the step " ++
-            "callback. The child handler already exists in the system registry - write only " ++
-            "handler.ts.",
+            "durable step that returns the reservation response, then dispatch the " ++
+            "already-registered `notify` child handler with workflow.call after the step " ++
+            "completes. Keep the child dispatch outside the step callback. Respond 201 with " ++
+            "a body carrying notified as the child call's status code. The child handler " ++
+            "already exists in the system registry - write only handler.ts.",
         .intent = .{ .runtime = .{
             .zttp_json = "{\n  \"entry\": \"handler.ts\",\n  \"system\": \"intent-system.json\"\n}\n",
             .runtime_files = &nested_dispatch_runtime_files,
@@ -1508,7 +1509,8 @@ const record_corpus = [_]RecordCase{
             "signal, both paths served on POST. POST /wait parks a run under the " ++
             "Idempotency-Key header waiting on a signal named `approval`, answering 202 " ++
             "until it resumes and 200 with approved true once it has. POST /signal " ++
-            "delivers the approval payload to the same key and answers 200 with delivered true.",
+            "delivers an approval payload carrying approved true to the same key and " ++
+            "answers 200 with delivered true.",
         .intent = .{ .runtime = .{
             .tests_jsonl =
             \\{"type":"runtime","durable":true,"workflowQueue":false}
@@ -3416,8 +3418,10 @@ const deepseek_coverage_baseline = [_][]const u8{
     "ZTS501",
     "ZTS502",
 };
-// Moved again when the two workflow.call cases were told their child
-// handler already exists, after each wrote one and aborted the capture. The identity covers
+// Moved again when a full audit of all 19 cases found three more assertions
+// stated nowhere the model could read: queued-call's echoed child body,
+// nested-dispatch's 201 and `notified` key, and wait-signal's delivered
+// payload contents. The identity covers
 // the model-visible input, so a prompt edit moves it by construction.
 //
 // The list above still reads five of seventy-one, measured over the corpus this
@@ -3426,7 +3430,7 @@ const deepseek_coverage_baseline = [_][]const u8{
 // `coverageBaseline` returns null and the ratchet silently stops applying.
 // Re-measure with `bash scripts/update-coverage.sh` once a corpus records, and
 // correct the list and this note from that run rather than from this one.
-const deepseek_coverage_headline_input_id = "d53f204f89792fd19f361452892e41e92a5f706df41efc2e5976deda797a9311";
+const deepseek_coverage_headline_input_id = "0012ad8ca6d5d08ac5023862378fe0c971b3672dadbc079256fb47d810033516";
 
 /// Return the live coverage floor for one exact model-visible input and model.
 /// Expected outcomes and thresholds cannot reset this ratchet.
