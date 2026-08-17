@@ -228,6 +228,17 @@ pub fn writeDiagnosticJson(writer: anytype, diag: *const JsonDiagnostic) !void {
     } else {
         try writer.writeAll(",\"suggestion\":null");
     }
+    // The typed repair primitive, when the rule has one. `JsonDiagnostic` has
+    // carried it since the projection was written and this writer dropped it,
+    // so `zts check --json` reported every repairable diagnostic as if it had
+    // no repair - which is what an IDE or agent reads to decide whether a
+    // mechanical fix exists.
+    if (diag.repair_intent) |intent| {
+        try writer.writeAll(",\"repair_intent\":");
+        try writeJsonString(writer, intent.asString());
+    } else {
+        try writer.writeAll(",\"repair_intent\":null");
+    }
     try writer.writeByte('}');
 }
 

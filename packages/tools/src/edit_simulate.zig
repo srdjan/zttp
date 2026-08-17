@@ -44,6 +44,14 @@ pub const SimulatedViolation = struct {
     line: u32,
     column: u32,
     introduced_by_patch: bool,
+    /// The checker's typed repair primitive for this diagnostic, when it has
+    /// one. `zts_expert_ast_rewrite` takes exactly this value as its `intent`
+    /// argument, and its own end-to-end test describes the contract as "the
+    /// agent reads the diagnostic's repair_intent and invokes the matching AST
+    /// primitive" - but the diagnostic surface the agent reads never carried
+    /// it, so the argument had to be guessed. A tag, not an allocation: the
+    /// enum is copied by value and nothing here owns it.
+    repair_intent: ?zts.RepairIntent = null,
 };
 
 pub const SimulateResult = struct {
@@ -155,6 +163,7 @@ pub fn simulate(
         errdefer if (help) |h| allocator.free(h);
 
         try result.violations.append(allocator, .{
+            .repair_intent = diag.repair_intent,
             .code = code,
             .severity = severity,
             .message = message,
@@ -236,6 +245,10 @@ pub fn writeResultJson(writer: anytype, result: *const SimulateResult) !void {
         if (v.help) |h| {
             try writer.writeAll(",\"suggestion\":");
             try writeJsonString(writer, h);
+        }
+        if (v.repair_intent) |intent| {
+            try writer.writeAll(",\"repair_intent\":");
+            try writeJsonString(writer, intent.asString());
         }
         try writer.writeAll("}");
     }
@@ -754,4 +767,40 @@ test "simulate vetoes a nonexistent virtual module export" {
     try std.testing.expectEqual(@as(usize, 1), result.violations.items.len);
     try std.testing.expectEqualStrings("ZTS207", result.violations.items[0].code);
     try std.testing.expect(result.violations.items[0].introduced_by_patch);
+}
+
+test "a repairable diagnostic carries its repair intent to the caller" {
+    // `zts_expert_ast_rewrite` takes the intent as an argument and its own
+    // end-to-end test describes the contract as "the agent reads the
+    // diagnostic's repair_intent and invokes the matching AST primitive". The
+    // diagnostic surface the agent reads never carried it, so the argument had
+    // to be guessed, and across nineteen recorded corpus cases the tool was
+    // called zero times.
+    const source =
+        \\export function handler(req: Request): Response {
+        \\  let x = 1;
+        \\  x += 1;
+        \\  return Response.json({ x: x });
+        \\}
+    ;
+    var result = try simulate(std.testing.allocator, .{ .file = "handler.ts", .content = source });
+    defer result.deinit(std.testing.allocator);
+
+    var saw: ?zts.RepairIntent = null;
+    for (result.violations.items) |v| {
+        if (std.mem.eql(u8, v.code, "ZTS613")) saw = v.repair_intent;
+    }
+    const intent = saw orelse return error.TestExpectedRepairIntent;
+    try std.testing.expectEqual(zts.RepairIntent.replace_compound_assign_with_explicit, intent);
+
+    // And it has to survive serialization, because the JSON is what the tool
+    // returns as the model's text - the struct field alone reaches nobody.
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(std.testing.allocator, &buf);
+    try writeResultJson(&aw.writer, &result);
+    buf = aw.toArrayList();
+    try std.testing.expect(
+        std.mem.indexOf(u8, buf.items, "\"repair_intent\":\"replace_compound_assign_with_explicit\"") != null,
+    );
 }
