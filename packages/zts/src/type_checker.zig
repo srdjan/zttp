@@ -6856,18 +6856,22 @@ test "a return mismatch through a callback points at the callback's return" {
     // four recorded runs. `run(key, cb)` is typed `<T>(string, () => T) -> T`,
     // so the outer return's type IS the callback's, and the diagnostic landed
     // on the outer `return run(...)` line while the line the author has to edit
-    // is the `return call(...)` inside the callback. The model spent four
-    // roundtrips rewriting the line it was pointed at.
+    // is the callback's return. The model spent four roundtrips rewriting the
+    // line it was pointed at.
+    //
+    // The original repro used `return call(...)`, which stopped being a
+    // mismatch once `zttp:workflow.call` declared its real Response return.
+    // The attribution defect is independent of that case, so the repro is now
+    // a plain wrong-typed return rather than one that depends on a binding.
     //
     // Asserted on the reported line, not merely on the error count: the count
     // was already right, and pointing at the wrong line is the whole defect.
     const allocator = std.testing.allocator;
     const source =
         \\import { run } from "zttp:durable";
-        \\import { call } from "zttp:workflow";
         \\export function handler(req: Request): Response {
         \\  return run("k", () => {
-        \\    return call("greet", { path: "/greet" });
+        \\    return "not a response";
         \\  });
         \\}
     ;
@@ -6896,8 +6900,8 @@ test "a return mismatch through a callback points at the callback's return" {
         if (diag.kind != .return_type_mismatch) continue;
         saw = true;
         const loc = ir_view.getLoc(diag.node) orelse return error.TestExpectedLocation;
-        // Line 5 is `return call(...)`; line 4 is `return run(...)`.
-        try std.testing.expectEqual(@as(u32, 5), loc.line);
+        // Line 4 is the callback's return; line 3 is `return run(...)`.
+        try std.testing.expectEqual(@as(u32, 4), loc.line);
         // And it must say what to do, not only that something is wrong.
         try std.testing.expect(diag.help != null);
     }

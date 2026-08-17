@@ -46,7 +46,23 @@ pub const binding = mb.ModuleBinding{
     .stateful = true,
     .self_managed_io = true,
     .exports = &.{
-        .{ .name = "call", .func = callNative, .arg_count = 2, .effect = .write, .returns = .object, .param_types = &.{ .string, .unknown }, .param_names = &.{ "name", "init" }, .return_labels = .{ .external = true }, .contract_extractions = &.{.{ .category = .workflow_call }} },
+        // The return type is `Response`, spelled structurally because module
+        // types populate before the ABI aliases and the name would not resolve
+        // - the same reason `zttp:fetch` spells it out. It is not an
+        // approximation: this value comes from `createFetchResponse`, the very
+        // function fetch's does, carrying the Response prototype.
+        //
+        // Declaring `.object` cost two things measured on
+        // workflow-queued-call. `return call(...)` tripped ZTS204 against a
+        // handler's declared Response, forcing a wrap that the runtime does not
+        // need. And `.object` resolves to an unresolved `t_ref`, which member
+        // access falls through silently, so a draft reading `.value` off the
+        // result compiled clean with results_safe PROVEN and returned 502 for
+        // every request.
+        .{ .name = "call", .func = callNative, .arg_count = 2, .effect = .write, .returns = .object, .signature = .{
+            .params = &.{ "string", "unknown" },
+            .returns = "{ ok: boolean; status: number; statusText: string; body: string; headers: { get: (name: string) => string | undefined; has: (name: string) => boolean }; json: () => unknown; text: () => string }",
+        }, .param_types = &.{ .string, .unknown }, .param_names = &.{ "name", "init" }, .return_labels = .{ .external = true }, .contract_extractions = &.{.{ .category = .workflow_call }} },
         .{ .name = "saga", .func = sagaNative, .arg_count = 1, .effect = .write, .returns = .object, .param_types = &.{.unknown}, .param_names = &.{"steps"}, .return_labels = .{ .external = true } },
         // Named `fanout`, not `parallel`: module exports share one flat global
         // name namespace (resolver registers each via ctx.setGlobal by name), so
