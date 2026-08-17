@@ -59,12 +59,20 @@ const TransportResponse = union(enum) {
 /// A non-streaming DeepSeek response sends its head at once and then nothing at
 /// all until generation finishes, so the silence sits between the head and the
 /// first body byte and lasts as long as the model takes. The shared 2-minute
-/// idle budget expires inside a healthy request of that shape. This one value
-/// bounds both the polls and the socket's own read timeout: an expired
-/// `SO_RCVTIMEO` surfaces as POSIX EAGAIN inside a blocking read, which Zig
-/// 0.16 treats as a programmer bug and panics on instead of returning an error,
-/// so an under-sized socket budget aborts the process mid-corpus.
+/// idle budget expires inside a healthy request of that shape.
+///
+/// This is the socket's read timeout and nothing else. An expired `SO_RCVTIMEO`
+/// surfaces as POSIX EAGAIN inside a blocking read, which Zig 0.16 treats as a
+/// programmer bug and panics on instead of returning an error, so the socket
+/// value must be one no healthy request can reach - not the turn's remaining
+/// budget, which is smaller than this ceiling by definition. Detecting a stall
+/// is the polls' job, and bounding the turn is the turn deadline's.
 const generation_ceiling_ms: i32 = 15 * 60 * 1000;
+
+/// The value handed to `SO_RCVTIMEO`. Named so a test can assert what it is not:
+/// derived from the turn budget, which is what made the panic above reachable on
+/// every call.
+const socket_read_timeout_ms: i32 = generation_ceiling_ms;
 
 pub const Config = struct {
     api_key: []const u8,
@@ -741,9 +749,23 @@ fn post(arena: std.mem.Allocator, config: Config, body: []const u8) !TransportRe
     };
     const request_timeout_ms = effectiveRequestTimeoutMs(config.request_timeout_ms, generation_ceiling_ms);
     const silence_ceiling_ms = effectiveStallCeilingMs(config.stall_timeout_ms, request_timeout_ms);
-    // The socket keeps the full budget. Only the polls below are shortened, so
-    // a stall is detected without changing when a blocking read gives up.
-    http_errors.setReadTimeoutMs(connection.stream_reader.stream.socket.handle, @intCast(request_timeout_ms));
+    // The socket gets the generation ceiling, never the turn's remaining budget.
+    //
+    // `SO_RCVTIMEO` expiring inside a blocking read is POSIX EAGAIN, which Zig
+    // 0.16 treats as a programmer bug and panics on, killing the process rather
+    // than failing the call - and a corpus recording loses all nineteen cases
+    // with it. A budget-sized socket timeout is under-sized by construction: the
+    // budget is whatever the turn has left, always at or below the ceiling, so
+    // every call was one mid-body stall away from that panic. It happened on
+    // `durable-order` call 3, about 600s into a 600s budget.
+    //
+    // The polls below stay short. They are what detects a stall and turns it
+    // into a typed error; the socket timeout exists only so a read cannot hang
+    // forever, and the turn deadline is what bounds the turn.
+    http_errors.setReadTimeoutMs(
+        connection.stream_reader.stream.socket.handle,
+        @intCast(socket_read_timeout_ms),
+    );
     const authorization = try std.fmt.allocPrint(arena, "Bearer {s}", .{config.api_key});
     const headers = [_]std.http.Header{
         .{ .name = "content-type", .value = "application/json" },
@@ -1115,6 +1137,33 @@ test "provider rejection records status without capturing response content" {
     try testing.expectEqual(@as(usize, 1), probe.diagnostic_count);
     try testing.expectEqual(@as(?u16, 429), probe.http_status);
     try testing.expectEqual(error.RateLimited, probe.failure.?);
+}
+
+test "the socket read timeout is never the first thing to expire" {
+    // A read that outlives SO_RCVTIMEO is EAGAIN, which Zig 0.16 panics on, so
+    // the socket value must be unreachable by anything healthy and must never be
+    // whatever the turn had left. It was the latter, which made the panic
+    // reachable on every call, and it fired mid-corpus on durable-order call 3
+    // after four cases had already staged.
+    try testing.expectEqual(generation_ceiling_ms, socket_read_timeout_ms);
+
+    // Every poll the request makes has to expire first, so a stall surfaces as a
+    // typed error rather than as a dead process. Checked at the recording budget
+    // and at a nearly spent one, which is the case the old code got wrong.
+    const recording_budget: i32 = 600_000;
+    const stall: u64 = 300_000;
+    try testing.expect(effectiveStallCeilingMs(stall, recording_budget) < socket_read_timeout_ms);
+    try testing.expect(effectiveStallCeilingMs(stall, 1_000) < socket_read_timeout_ms);
+    try testing.expect(effectiveStallCeilingMs(null, recording_budget) < socket_read_timeout_ms);
+
+    // And the request budget itself, which the socket used to be set from, is
+    // always at or below the ceiling - so setting the socket from it could only
+    // ever make the socket expire first or tie.
+    try testing.expect(effectiveRequestTimeoutMs(600_000, generation_ceiling_ms) < socket_read_timeout_ms);
+    try testing.expectEqual(
+        socket_read_timeout_ms,
+        effectiveRequestTimeoutMs(null, generation_ceiling_ms),
+    );
 }
 
 test "a silence ceiling separates a stalled request from a spent budget" {
