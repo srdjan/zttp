@@ -4973,32 +4973,113 @@ test "no flow diagnostic offers a repair a guard cannot perform" {
     // line 24: e.g., check `values.appName === undefined`? That doesn't remove
     // taint." A wrong repair is worse than none, because none is silent.
     //
-    // Asserted over the enum rather than against a list of codes, so a kind
-    // added later cannot quietly acquire one.
+    // Read off diagnostics the checker emitted, not off a struct this test
+    // built. An earlier version constructed its own `Diagnostic` literal per
+    // enum member and asserted `repair_intent == null` on it: that field's
+    // declared default is null, so the loop asserted the struct default and
+    // would have passed with every emission site in this file setting an
+    // intent. `kindsTrippedByProbeCorpus` runs the checker instead, and its
+    // coverage floor below fails when a kind stops being reachable - a corpus
+    // that trips nothing must not read as a pass.
+    var seen = std.EnumSet(DiagnosticKind).initEmpty();
+    for (repair_intent_probe_corpus) |source| {
+        try collectFlowDiagnosticKinds(std.testing.allocator, source, &seen);
+    }
     inline for (@typeInfo(DiagnosticKind).@"enum".fields) |field| {
         const kind = @field(DiagnosticKind, field.name);
-        const diagnostic: Diagnostic = .{
-            .severity = .err,
-            .kind = kind,
-            .node = 0,
-            .message = "probe",
-            .help = "probe",
-        };
+        if (!seen.contains(kind)) {
+            std.debug.print("no probe source trips flow kind '{s}'\n", .{field.name});
+            return error.FlowProbeCorpusMissesKind;
+        }
+    }
+}
+
+/// One handler per `DiagnosticKind`, so the probe above reads a real emission
+/// for every member of the enum rather than a default it wrote itself.
+const repair_intent_probe_corpus = [_][]const u8{
+    // secret_in_response
+    \\import { env } from "zttp:env";
+    \\function handler(req) { return Response.json({ v: env("SECRET_KEY") }); }
+    ,
+    // credential_in_response
+    \\function handler(req) { return Response.json({ v: req.headers.authorization }); }
+    ,
+    // secret_in_log
+    \\import { env } from "zttp:env";
+    \\function handler(req) {
+    \\  console.log(env("SECRET_KEY"));
+    \\  return Response.json({ ok: true });
+    \\}
+    ,
+    // credential_in_log
+    \\function handler(req) {
+    \\  console.log(req.headers.authorization);
+    \\  return Response.json({ ok: true });
+    \\}
+    ,
+    // secret_in_egress_url
+    \\import { env } from "zttp:env";
+    \\import { fetch } from "zttp:fetch";
+    \\function handler(req) {
+    \\  fetch(env("SECRET_URL"));
+    \\  return Response.json({ ok: true });
+    \\}
+    ,
+    // credential_in_egress_url
+    \\import { fetch } from "zttp:fetch";
+    \\function handler(req) {
+    \\  fetch(req.headers.authorization);
+    \\  return Response.json({ ok: true });
+    \\}
+    ,
+    // secret_in_egress_body
+    \\import { env } from "zttp:env";
+    \\import { fetch } from "zttp:fetch";
+    \\function handler(req) {
+    \\  fetch("https://api.example.com/v1", { body: env("SECRET_KEY") });
+    \\  return Response.json({ ok: true });
+    \\}
+    ,
+    // unvalidated_input_in_egress
+    \\import { fetch } from "zttp:fetch";
+    \\function handler(req) {
+    \\  fetch("https://api.example.com/v1", { body: req.body });
+    \\  return Response.json({ ok: true });
+    \\}
+    ,
+};
+
+/// Run the FlowChecker over `source`, record which kinds it emitted, and refuse
+/// any diagnostic that carries a repair intent.
+fn collectFlowDiagnosticKinds(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    seen: *std.EnumSet(DiagnosticKind),
+) !void {
+    var parser = try @import("zts-engine").parser.JsParser.init(allocator, source);
+    var atoms = atom_table.AtomTable.init(allocator);
+    defer atoms.deinit();
+    parser.setAtomTable(&atoms);
+    defer parser.deinit();
+    const root = try parser.parse();
+    const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+
+    const handler_verifier = @import("handler_verifier.zig");
+    const handler_fn = handler_verifier.findHandlerFunction(ir_view, root) orelse
+        return error.HandlerNotFound;
+
+    var checker = FlowChecker.init(allocator, ir_view, &atoms);
+    defer checker.deinit();
+    _ = try checker.check(handler_fn);
+
+    for (checker.getDiagnostics()) |diagnostic| {
+        seen.insert(diagnostic.kind);
         if (diagnostic.repair_intent != null) {
-            std.debug.print("flow kind '{s}' carries a repair intent\n", .{field.name});
+            std.debug.print(
+                "flow kind '{s}' carries a repair intent\n",
+                .{@tagName(diagnostic.kind)},
+            );
             return error.FlowDiagnosticOffersUnperformableRepair;
         }
     }
-    // The default is null, so the loop above passes on an unpopulated struct
-    // too. Assert the field still exists and can hold the value the checker
-    // must never set, or this test drifts into checking nothing.
-    const guarded: Diagnostic = .{
-        .severity = .err,
-        .kind = .secret_in_response,
-        .node = 0,
-        .message = "probe",
-        .help = "probe",
-        .repair_intent = .insert_guard_before_line,
-    };
-    try std.testing.expectEqual(RepairIntent.insert_guard_before_line, guarded.repair_intent.?);
 }
