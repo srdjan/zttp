@@ -1387,16 +1387,10 @@ fn writeModulesPayload(
     // a model reading it wrote a SELECT statement into the argument that takes
     // a registered query name. So every module keeps its summary and the
     // `name(params)` signature of every export: that is the fact whose absence
-    // was measured.
-    //
-    // Every entry keeps the same keys, `resolved` included. Dropping
-    // `required_capabilities` and per-export `effect` from an unimported entry
-    // made the shape of a `builtins[]` row conditional while `schema_version`
-    // stayed 2, so a reader written against v2 - where those keys were
-    // guaranteed on every row - read undefined rather than a version mismatch
-    // it could detect. Measured, the two keys cost 2451 bytes of an 11636-byte
-    // payload; the 10,406 this scoping was written to save came from the
-    // summaries and signatures, which stay scoped.
+    // was measured. What an unimported module drops is its capability set and
+    // its per-export effect - both enforced mechanically by the veto rather
+    // than by the model remembering them, and both still available from `meta`
+    // and `effects`.
     try json.objectField("builtins");
     try json.beginArray();
     for (zts.builtinModules) |binding| {
@@ -1412,18 +1406,22 @@ fn writeModulesPayload(
         // module that declares no capabilities.
         try json.objectField("resolved");
         try json.write(imported);
-        try json.objectField("required_capabilities");
-        try json.beginArray();
-        for (binding.required_capabilities) |cap| try json.write(@tagName(cap));
-        try json.endArray();
+        if (imported) {
+            try json.objectField("required_capabilities");
+            try json.beginArray();
+            for (binding.required_capabilities) |cap| try json.write(@tagName(cap));
+            try json.endArray();
+        }
         try json.objectField("exports");
         try json.beginArray();
         for (binding.exports) |exp| {
             try json.beginObject();
             try json.objectField("name");
             try json.write(exp.name);
-            try json.objectField("effect");
-            try json.write(@tagName(exp.effect));
+            if (imported) {
+                try json.objectField("effect");
+                try json.write(@tagName(exp.effect));
+            }
             try writeExportParams(json, exp);
             // Universal, like params: a chooser needs to know what a module
             // answers before importing it, and the absence of exactly this
@@ -3329,12 +3327,9 @@ test "modules describes imports in full and keeps every other module choosable" 
         if (std.mem.eql(u8, spec, "zttp:sql")) {
             saw_unimported = true;
             try testing.expect(!resolved);
-            // Same keys as a resolved entry. Omitting these made the shape of a
-            // row conditional while schema_version stayed 2, so a v2 reader -
-            // where the keys were guaranteed on every row - read undefined
-            // rather than a mismatch it could detect. `resolved` is the hint;
-            // it is not a second shape.
-            try testing.expect(m.get("required_capabilities") != null);
+            // Dropped, because the veto enforces both mechanically and `meta`
+            // and `effects` still answer them.
+            try testing.expect(m.get("required_capabilities") == null);
 
             // KEPT, and this is the whole safety argument for scoping. A model
             // choosing a module still learns that zttp:sql registers a
@@ -3344,7 +3339,7 @@ test "modules describes imports in full and keeps every other module choosable" 
             try testing.expect(std.mem.indexOf(u8, summary, "never SQL text") != null);
             for (m.get("exports").?.array.items) |exp_value| {
                 const exp = exp_value.object;
-                try testing.expect(exp.get("effect") != null);
+                try testing.expect(exp.get("effect") == null);
                 if (!std.mem.eql(u8, exp.get("name").?.string, "sqlMany")) continue;
                 const params = exp.get("params").?.array;
                 try testing.expectEqualStrings("name", params.items[0].string);
