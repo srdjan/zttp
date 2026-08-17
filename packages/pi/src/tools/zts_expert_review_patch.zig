@@ -122,9 +122,11 @@ fn buildPayload(
     }
 
     const items = try allocator.alloc(ui_payload.DiagnosticItem, result.violations.items.len);
-    errdefer allocator.free(items);
     for (items) |*item| item.* = undefined;
     var i: usize = 0;
+    // One errdefer owns `items`. A second one that also freed it ran in
+    // addition to this, not instead of it, so any failure in the loop below
+    // freed the same allocation twice.
     errdefer {
         while (i > 0) {
             i -= 1;
