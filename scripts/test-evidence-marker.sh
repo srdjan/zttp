@@ -218,6 +218,44 @@ changed = copy.deepcopy(convergence)
 changed.update({"intentPasses": 17, "intentChecked": 17, "intentPassPercent": 100})
 invoke("convergence", changed, False)
 
+# All 18 checks ran and all 18 failed. The denominator is intact, so every gate
+# above was satisfied and the page published intentPassPercent: 0 as a property
+# of the model. Nineteen veto-accepted handlers, none of which does what its
+# prompt asked, is a harness fault; so is zero green out of nineteen.
+changed = copy.deepcopy(convergence)
+changed.update({"intentPasses": 0, "intentChecked": 18, "intentPassPercent": 0})
+invoke("convergence", changed, False)
+changed = copy.deepcopy(convergence)
+changed.update(
+    {
+        "rawFirstDraftPasses": 0,
+        "rawFirstDraftPassPercent": 0,
+        "firstAttemptGreens": 0,
+        "firstAttemptGreenPercent": 0,
+        "finalGreens": 0,
+        "finalGreenPercent": 0,
+    }
+)
+invoke("convergence", changed, False)
+
+# And the floors sit below the worst real run, so neither can force a re-record
+# until the numbers flatter.
+changed = copy.deepcopy(convergence)
+changed.update(
+    {
+        "rawFirstDraftPasses": 1,
+        "rawFirstDraftPassPercent": 5,
+        "firstAttemptGreens": 1,
+        "firstAttemptGreenPercent": 5,
+        "finalGreens": 1,
+        "finalGreenPercent": 5,
+        "intentPasses": 1,
+        "intentChecked": 18,
+        "intentPassPercent": 5,
+    }
+)
+invoke("convergence", changed, True)
+
 for field, value in (
     ("rulesTotal", 0),
     ("rulesTripped", 0),

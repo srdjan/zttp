@@ -226,6 +226,17 @@ def validate_convergence(payload: dict[str, Any]) -> None:
     for name in ("emptyResponses", "timeoutFailures", "decodeFailures"):
         if payload[name] != 0:
             fail(f"publishable convergence marker reports {name}")
+    # A denominator says the checks ran, never that they measured anything. All
+    # 18 checks executing and all 18 failing keeps checked at 18, so this gate
+    # passed and the page published intentPassPercent: 0 as a model property
+    # when the likelier cause is a harness that stopped working. Nineteen
+    # veto-accepted handlers, none of which does what its prompt asked, is not
+    # a model result; nor is zero green out of nineteen. Both floors sit far
+    # below every measured run, so neither can force a re-record.
+    if final == 0:
+        fail("publishable convergence marker has no green case")
+    if passed == 0:
+        fail("publishable convergence marker has no passing intent check")
 
 
 def validated_code_set(payload: dict[str, Any], name: str) -> set[str]:

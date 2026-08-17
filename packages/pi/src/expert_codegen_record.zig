@@ -3911,6 +3911,24 @@ fn expertQualityGate(summary: codegen.CodegenSummary) bool {
     // Zero means no round-trip was counted at all, which is a broken
     // measurement rather than an unusually fast one.
     if (summary.median_roundtrips == 0) return false;
+    // The run produced signal, which a denominator on its own cannot say. The
+    // thresholds above are not coming back; this is the other claim, and
+    // dropping it left nothing between a bad model run and a broken harness.
+    //
+    // An intent harness that regressed - a missing binary, a changed
+    // intent.test.jsonl schema - runs all 18 checks and fails all 18. That
+    // leaves intent_checked at 18 and median_roundtrips non-zero, so the gate
+    // passed and docs/convergence.md published intentPassPercent: 0 as a
+    // measured property of the model.
+    //
+    // Nineteen handlers the veto accepted, none of which does what its prompt
+    // asked, is not a model result: the compiler already agreed they are
+    // programs. Nor is zero green out of nineteen, which is the same fault one
+    // stage earlier. Both floors sit far below every measured run - greens 16
+    // to 18, intent 15 to 18 - so neither can force a re-record until the
+    // numbers flatter.
+    if (summary.greens == 0) return false;
+    if (summary.intent_passes == 0) return false;
     return true;
 }
 
@@ -4211,6 +4229,23 @@ test "corpus evidence consensus and publication floor fail closed" {
     unsound = passing_quality;
     unsound.median_roundtrips = 0;
     try testing.expect(!expertQualityGate(unsound));
+    // Every intent check ran and every one failed. The denominator is intact,
+    // so the gate saw nothing wrong and the page published intentPassPercent: 0
+    // as a property of the model. Nineteen veto-accepted handlers, none of
+    // which does what its prompt asked, is a harness fault.
+    unsound = passing_quality;
+    unsound.intent_passes = 0;
+    try testing.expect(!expertQualityGate(unsound));
+    // The same fault one stage earlier: nothing reached green at all.
+    unsound = passing_quality;
+    unsound.greens = 0;
+    try testing.expect(!expertQualityGate(unsound));
+    // And the floors stay below the worst real run, so neither can force a
+    // re-record until the numbers flatter.
+    var worst_measured = measured;
+    worst_measured.greens = 1;
+    worst_measured.intent_passes = 1;
+    try testing.expect(expertQualityGate(worst_measured));
 }
 
 /// Fail when `docs/coverage.json` no longer describes this run.
