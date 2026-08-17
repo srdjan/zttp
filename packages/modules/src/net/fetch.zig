@@ -30,7 +30,6 @@ pub const FetchState = struct {
 pub const binding = sdk.ModuleBinding{
     .specifier = "zttp:fetch",
     .name = "fetch",
-    .summary = "Outbound HTTP to a literal URL. A handler that declares an egress host must reach it through these exports.",
     .required_capabilities = &.{ .network, .runtime_callback },
     .stateful = true,
     .exports = &.{

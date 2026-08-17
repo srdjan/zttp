@@ -6,7 +6,6 @@ const sdk = @import("zttp-sdk");
 pub const binding = sdk.ModuleBinding{
     .specifier = "zttp:http",
     .name = "http",
-    .summary = "Header helpers: each takes the raw header text it parses, and negotiate takes the supported types as a comma-separated string rather than an array.",
     .exports = &.{
         .{ .name = "parseCookies", .derives_from_args = true, .module_func = parseCookiesImpl, .arg_count = 1, .returns = .object, .param_types = &.{.string}, .param_names = &.{"cookieHeader"}, .effect = .none, .return_labels = .{ .user_input = true, .credential = true } },
         .{ .name = "setCookie", .derives_from_args = true, .module_func = setCookieImpl, .arg_count = 3, .returns = .string, .param_types = &.{ .string, .string, .object }, .param_names = &.{ "name", "value", "options" }, .effect = .none, .return_labels = .{ .internal = true }, .contract_extractions = &.{.{ .arg_position = 0, .category = .cookie_name }} },

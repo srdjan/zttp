@@ -2,7 +2,6 @@
   "schemaVersion": 1,
   "specifier": "zttp:durable",
   "source": "packages/zts/src/modules/workflow/durable.zig",
-  "summary": "run(key, fn) wraps the whole durable execution under an idempotency key, and every step inside it is named so a replay can match it. signal delivers to a run by its key, and waitSignal parks on a signal name inside that run.",
   "requiredCapabilities": [
     "runtime_callback"
   ],

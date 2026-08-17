@@ -61,7 +61,6 @@ pub const ServiceState = struct {
 pub const binding = sdk.ModuleBinding{
     .specifier = "zttp:service",
     .name = "service",
-    .summary = "serviceCall dispatches to a service named in the project's system.json, not to a URL: the first argument is that declared service name and the second is the route pattern on it.",
     // .network: serviceCall dispatches via the runtime's fetch path (HTTP).
     // .filesystem: install-time read of system.json for service registry.
     .required_capabilities = &.{ .network, .filesystem, .runtime_callback },

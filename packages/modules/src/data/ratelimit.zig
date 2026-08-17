@@ -17,7 +17,6 @@ const MODULE_STATE_SLOT: usize = 8; // module_slots.Slot.ratelimit
 pub const binding = sdk.ModuleBinding{
     .specifier = "zttp:ratelimit",
     .name = "ratelimit",
-    .summary = "Fixed-window per-key counters. rateCheck returns a Result whose error names rate_exceeded and carries retryAfter.",
     .required_capabilities = &.{.clock},
     .stateful = true,
     .exports = &.{

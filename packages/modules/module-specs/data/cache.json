@@ -2,7 +2,6 @@
   "schemaVersion": 1,
   "specifier": "zttp:cache",
   "source": "packages/modules/src/data/cache.zig",
-  "summary": "Every entry is addressed by a namespace and a key together. Namespaces share the LRU list and the global byte and entry budget but keep independent hit and miss counters. TTL is in seconds: zero or negative means already expired, and omitting it means no expiry.",
   "requiredCapabilities": [
     "clock",
     "policy_check"

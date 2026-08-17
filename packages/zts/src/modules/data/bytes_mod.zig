@@ -45,7 +45,6 @@ const JSObject = object.JSObject;
 pub const binding = mb.ModuleBinding{
     .specifier = "zttp:bytes",
     .name = "bytes",
-    .summary = "Pure operations over the immutable Bytes value: every export reads its arguments and returns a new value or a scalar, so a Bytes a caller still holds is never changed. Construction, slicing, concatenation, and the two decoders return a Result; the rest answer directly.",
     .required_capabilities = &.{},
     .exports = &.{
         .{ .name = "bytesFromOctets", .func = bytesFromOctetsNative, .arg_count = 1, .effect = .none, .returns = .result, .param_types = &.{.object}, .param_names = &.{"octets"}, .laws = &.{.pure}, .replay_pure = true, .derives_from_args = true },

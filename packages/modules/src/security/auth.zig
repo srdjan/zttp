@@ -16,7 +16,6 @@ const MAC_LEN = 32;
 pub const binding = sdk.ModuleBinding{
     .specifier = "zttp:auth",
     .name = "auth",
-    .summary = "jwtSign takes the claims already serialized as JSON text, not a claims object. verifyWebhookSignature takes the payload and secret before the signature to compare.",
     .required_capabilities = &.{ .crypto, .clock },
     .exports = &.{
         .{

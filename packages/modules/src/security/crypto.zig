@@ -24,7 +24,6 @@ const sdk = @import("zttp-sdk");
 pub const binding = sdk.ModuleBinding{
     .specifier = "zttp:crypto",
     .name = "crypto",
-    .summary = "hmacSha256 takes the key first and the message second.",
     .required_capabilities = &.{.crypto},
     .exports = &.{
         .{

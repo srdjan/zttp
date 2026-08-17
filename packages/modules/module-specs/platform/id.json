@@ -2,7 +2,6 @@
   "schemaVersion": 1,
   "specifier": "zttp:id",
   "source": "packages/modules/src/platform/id.zig",
-  "summary": "Identifier generation. Every export draws randomness, so none of them is deterministic.",
   "requiredCapabilities": [
     "clock",
     "random"

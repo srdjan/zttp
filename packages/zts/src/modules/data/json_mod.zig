@@ -53,7 +53,6 @@ pub var limits: Limits = .{};
 pub const binding = mb.ModuleBinding{
     .specifier = "zttp:json",
     .name = "json",
-    .summary = "parseJson and parseJsonBytes return a Result: object nodes are Dict<string, JsonValue> in wire order, null is data rather than an absence sentinel, and duplicate keys are refused rather than last-wins.",
     .required_capabilities = &.{},
     .exports = &.{
         .{ .name = "parseJson", .func = parseJsonNative, .arg_count = 1, .effect = .none, .returns = .result, .param_types = &.{.string}, .param_names = &.{"text"}, .laws = &.{.pure}, .replay_pure = true, .derives_from_args = true },

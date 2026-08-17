@@ -30,7 +30,6 @@ pub const QueueCallbacks = struct {
 pub const binding = mb.ModuleBinding{
     .specifier = "zttp:queue",
     .name = "queue",
-    .summary = "send and request address a queue by name; ack, nack, and reply address one delivered message by the id it arrived with. Every export returns a Result.",
     .required_capabilities = &.{.runtime_callback},
     .stateful = true,
     .contract_section = "queue",

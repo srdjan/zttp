@@ -2,7 +2,6 @@
   "schemaVersion": 1,
   "specifier": "zttp:url",
   "source": "packages/modules/src/http/url.zig",
-  "summary": "urlParse splits a whole URL; urlSearchParams takes only the query string, with or without its leading question mark.",
   "requiredCapabilities": [],
   "exports": [
     {

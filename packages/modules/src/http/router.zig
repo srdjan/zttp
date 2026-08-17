@@ -6,7 +6,6 @@ const sdk = @import("zttp-sdk");
 pub const binding = sdk.ModuleBinding{
     .specifier = "zttp:router",
     .name = "router",
-    .summary = "routerMatch takes the whole route table and the request, and answers which route matched.",
     .exports = &.{
         .{
             .name = "routerMatch",

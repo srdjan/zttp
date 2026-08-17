@@ -2,7 +2,6 @@
   "schemaVersion": 1,
   "specifier": "zttp:queue",
   "source": "packages/zts/src/modules/workflow/queue.zig",
-  "summary": "send and request address a queue by name; ack, nack, and reply address one delivered message by the id it arrived with. Every export returns a Result.",
   "requiredCapabilities": [
     "runtime_callback"
   ],

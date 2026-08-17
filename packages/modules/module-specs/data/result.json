@@ -2,7 +2,6 @@
   "schemaVersion": 1,
   "specifier": "zttp:result",
   "source": "packages/zts/src/modules/data/result_mod.zig",
-  "summary": "Free functions, not methods: the profile has no member form for a Result, so unwrapOr(r, d) is the spelling and r.unwrapOr(d) is refused.",
   "requiredCapabilities": [],
   "exports": [
     {

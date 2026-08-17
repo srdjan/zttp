@@ -52,7 +52,6 @@ const JSObject = object.JSObject;
 pub const binding = mb.ModuleBinding{
     .specifier = "zttp:result",
     .name = "result",
-    .summary = "Free functions, not methods: the profile has no member form for a Result, so unwrapOr(r, d) is the spelling and r.unwrapOr(d) is refused.",
     .required_capabilities = &.{},
     .exports = &.{
         .{ .name = "ok", .func = okNative, .arg_count = 1, .effect = .none, .returns = .result, .param_types = &.{.unknown}, .param_names = &.{"value"}, .laws = &.{.pure}, .replay_pure = true, .derives_from_args = true },

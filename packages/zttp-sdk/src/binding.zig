@@ -257,8 +257,18 @@ pub const ModuleBinding = struct {
     /// be registered with `sql(name, statement)` before any of the others can
     /// execute it lives between them, not in any one of them.
     ///
-    /// This is a use protocol, not prose documentation. Keep it to the
-    /// sentence a caller needs before the first call.
+    /// Optional on purpose, unlike `param_names`. A parameter always exists,
+    /// so an unnamed one is missing information and the compiler demands it.
+    /// A protocol beyond the signatures often does not exist, and saying so by
+    /// declaring nothing is the honest answer - most modules are fully
+    /// described by named signatures alone.
+    ///
+    /// Declaring one is not free. Every summary is bytes in every `modules`
+    /// and `meta` response, repeatedly, in exactly the cases that loop: filling
+    /// all 26 doubled the discovery payload from 7,213 to 14,616 bytes.
+    /// Measured, not estimated. So declare one only where a caller would get
+    /// the module wrong without it, and keep it to the sentence they need
+    /// before the first call. It is not documentation.
     summary: []const u8 = "",
     required_capabilities: []const ModuleCapability = &.{},
     stateful: bool = false,
@@ -291,9 +301,6 @@ pub fn validateBindings(comptime bindings: []const ModuleBinding) void {
         }
         if (findDuplicateRequiredCapability(binding.required_capabilities)) |capability| {
             @compileError("duplicate required capability '" ++ @tagName(capability) ++ "' in " ++ binding.specifier);
-        }
-        if (binding.summary.len == 0) {
-            @compileError("module must declare a summary: " ++ binding.specifier);
         }
         for (binding.exports) |f| {
             // Equality, not "empty or parallel". While the roster was being

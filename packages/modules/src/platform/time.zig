@@ -8,7 +8,6 @@ const epoch = std.time.epoch;
 pub const binding = sdk.ModuleBinding{
     .specifier = "zttp:time",
     .name = "time",
-    .summary = "Timestamps are epoch milliseconds, not seconds. Reading the clock is a capability, so these format and parse values a caller already has rather than reading it themselves.",
     .exports = &.{
         .{ .name = "formatIso", .derives_from_args = true, .module_func = formatIsoImpl, .arg_count = 1, .effect = .none, .returns = .string, .param_types = &.{.number}, .param_names = &.{"epochMs"}, .laws = &.{.pure} },
         .{ .name = "formatHttp", .derives_from_args = true, .module_func = formatHttpImpl, .arg_count = 1, .effect = .none, .returns = .string, .param_types = &.{.number}, .param_names = &.{"epochMs"}, .laws = &.{.pure} },

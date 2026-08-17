@@ -6,7 +6,6 @@ const sdk = @import("zttp-sdk");
 pub const binding = sdk.ModuleBinding{
     .specifier = "zttp:id",
     .name = "id",
-    .summary = "Identifier generation. Every export draws randomness, so none of them is deterministic.",
     .required_capabilities = &.{ .clock, .random },
     .exports = &.{
         // formatUuidV4 -> fillRandom only; v4 carries no timestamp.

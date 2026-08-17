@@ -37,7 +37,6 @@ pub const DurableCallbacks = struct {
 pub const binding = mb.ModuleBinding{
     .specifier = "zttp:durable",
     .name = "durable",
-    .summary = "run(key, fn) wraps the whole durable execution under an idempotency key, and every step inside it is named so a replay can match it. signal delivers to a run by its key, and waitSignal parks on a signal name inside that run.",
     .required_capabilities = &.{.runtime_callback},
     .stateful = true,
     .self_managed_io = true,

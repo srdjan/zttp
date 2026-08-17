@@ -156,7 +156,6 @@ const ScopeState = struct {
 pub const binding = mb.ModuleBinding{
     .specifier = "zttp:scope",
     .name = "scope",
-    .summary = "The request is already inside an implicit root scope. Nested scopes unwind in reverse registration order.",
     .required_capabilities = &.{.runtime_callback},
     .stateful = true,
     .contract_section = "scope",

@@ -2,7 +2,6 @@
   "schemaVersion": 1,
   "specifier": "zttp:http",
   "source": "packages/modules/src/http/http_mod.zig",
-  "summary": "Header helpers: each takes the raw header text it parses, and negotiate takes the supported types as a comma-separated string rather than an array.",
   "requiredCapabilities": [],
   "exports": [
     {

@@ -20,7 +20,6 @@ const MODULE_STATE_SLOT: usize = 5; // module_slots.Slot.cache
 pub const binding = sdk.ModuleBinding{
     .specifier = "zttp:cache",
     .name = "cache",
-    .summary = "Every entry is addressed by a namespace and a key together. Namespaces share the LRU list and the global byte and entry budget but keep independent hit and miss counters. TTL is in seconds: zero or negative means already expired, and omitting it means no expiry.",
     .required_capabilities = &.{ .clock, .policy_check },
     .stateful = true,
     .contract_section = "cache",

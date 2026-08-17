@@ -41,7 +41,6 @@ pub const MODULE_STATE_SLOT = @intFromEnum(@import("zts-base").module_slots.Slot
 pub const binding = mb.ModuleBinding{
     .specifier = "zttp:io",
     .name = "io",
-    .summary = "Both exports take an array of zero-argument functions and run their I/O concurrently. race returns the first success in the caller's array order, not the first to finish.",
     .required_capabilities = &.{.runtime_callback},
     .stateful = true,
     .exports = &.{

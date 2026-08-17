@@ -35,7 +35,6 @@ const JSObject = object.JSObject;
 pub const binding = mb.ModuleBinding{
     .specifier = "zttp:collections",
     .name = "collections",
-    .summary = "Pure operations over Dict<K, V>: dictSet and dictRemove return a new dictionary rather than changing the one passed in, so a Dict a caller still holds is never altered underneath it.",
     .required_capabilities = &.{},
     .exports = &.{
         .{ .name = "dictEmpty", .func = dictEmptyNative, .arg_count = 0, .required_arg_count = 0, .effect = .none, .returns = .dict, .param_types = &.{}, .laws = &.{.pure}, .replay_pure = true },

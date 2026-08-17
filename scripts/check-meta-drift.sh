@@ -52,14 +52,16 @@ EXPECTED_IDIOM_HASH="2a7059a7e3d4747c26af855ebd3a80b9fbb853bc5feb5ea16010bd300a5
 # The same boundary cut adds `restriction.raw-export-boundary-type`, so the
 # generated restriction matrix and the policy registry move together.
 EXPECTED_RESTRICTION_HASH="3409f9e0490c698e67dcd1e7a6e3465f0d14c50e0a611bbe9652025e80911f1b"
-# Moved 2026-08-17 when the module surface began publishing parameter names and
-# a per-module use protocol, and again when all 26 modules were filled. No
-# specifier joined or left; what changed is what a caller is told about the ones
-# already there, which is exactly what a client caches under this hash.
-# Discovery used to publish `sqlMany` with a name and an effect and nothing
-# else, and a model reading that wrote a SELECT statement into the argument that
-# takes a registered query name.
-EXPECTED_BUILTIN_HASH="77b015864a407147b8051e42e78f0453dd78147257364b135ba2dcef65aafd7d"
+# Moved 2026-08-17 when the module surface began publishing parameter names, and
+# again when the summaries were trimmed to the four modules whose use protocol
+# their signatures cannot carry. No specifier joined or left; what changed is
+# what a caller is told about the ones already there, which is exactly what a
+# client caches under this hash. Discovery used to publish `sqlMany` with a name
+# and an effect and nothing else, and a model reading that wrote a SELECT
+# statement into the argument that takes a registered query name. Summarising
+# all 26 modules doubled the discovery payload to 14,616 bytes; four leaves it
+# at 11,061 against a 7,213-byte baseline.
+EXPECTED_BUILTIN_HASH="0e7fbb7e3cfdc67519e86110b50846517959c7675c38b3871f2d826028d478e8"
 
 fail() {
   printf 'meta drift: %s\n' "$1" >&2

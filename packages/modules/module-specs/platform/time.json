@@ -2,7 +2,6 @@
   "schemaVersion": 1,
   "specifier": "zttp:time",
   "source": "packages/modules/src/platform/time.zig",
-  "summary": "Timestamps are epoch milliseconds, not seconds. Reading the clock is a capability, so these format and parse values a caller already has rather than reading it themselves.",
   "requiredCapabilities": [],
   "exports": [
     {
