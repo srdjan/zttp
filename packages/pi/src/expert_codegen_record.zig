@@ -804,6 +804,24 @@ const RecordCase = struct {
     /// currently fails is a valid, pinned corpus entry (it feeds the gap
     /// histogram) - not a broken test.
     expect_first_attempt_green: bool = true,
+    /// Whether the committed handler for this case is expected to pass its
+    /// declared runtime intent, locked in after recording exactly like
+    /// `expect_first_attempt_green` above.
+    ///
+    /// The durable-intent test used to require a pass from every case. That
+    /// made a corpus unpublishable the moment it honestly recorded an intent
+    /// failure - and docs/convergence.md pins
+    /// `workflow-nested-dispatch-avoidance` as an accepted failure by name, so
+    /// the corpus the protocol describes could not pass its own test.
+    ///
+    /// The artifact cannot answer this on its own: a case can apply an edit and
+    /// still miss its intent, and run 4 recorded exactly that shape, so the
+    /// presence of `expected/handler.ts` does not discriminate.
+    ///
+    /// A mismatch either way is a real signal. Pinned true and now failing
+    /// means the runtime broke a handler that worked. Pinned false and now
+    /// passing means the gap closed and the pin owes an update.
+    expect_committed_intent_pass: bool = true,
     /// Runtime evidence or an explicit reason this case cannot execute. The
     /// union prevents a missing spec from being represented as an executable
     /// case and prevents a runtime spec from carrying an unsupported reason.
@@ -1970,7 +1988,7 @@ test "jwt intent is independent of secret lookup order" {
     ) != null);
 }
 
-test "durable runtime intents pass their committed expected handlers" {
+test "durable runtime intents match their pinned committed outcome" {
     const names = [_][]const u8{
         "durable-order",
         "workflow-queued-call",
@@ -1985,6 +2003,7 @@ test "durable runtime intents pass their committed expected handlers" {
     defer testing.allocator.free(zttp_bin);
 
     var passed: usize = 0;
+    var checked: usize = 0;
     for (names) |name| {
         const rc = for (record_corpus) |candidate| {
             if (std.mem.eql(u8, candidate.name, name)) break candidate;
@@ -2021,20 +2040,36 @@ test "durable runtime intents pass their committed expected handlers" {
             tmp.abs_path,
             zttp_bin,
         );
-        if (outcome != .passed) {
-            var diagnostic = try tool_common.runCommand(
-                testing.allocator,
-                tmp.abs_path,
-                &.{ zttp_bin, "test", "intent.test.jsonl" },
+        const observed_pass = outcome == .passed;
+        if (observed_pass != rc.expect_committed_intent_pass) {
+            if (!observed_pass) {
+                var diagnostic = try tool_common.runCommand(
+                    testing.allocator,
+                    tmp.abs_path,
+                    &.{ zttp_bin, "test", "intent.test.jsonl" },
+                );
+                defer diagnostic.deinit(testing.allocator);
+                std.debug.print("[codegen-intent] committed handler failed: {s}\n", .{name});
+                std.debug.print("stdout:\n{s}\nstderr:\n{s}\n", .{ diagnostic.stdout, diagnostic.stderr });
+            }
+            std.debug.print(
+                "[codegen-intent] {s}: pinned expect_committed_intent_pass={} but observed {}." ++
+                    " If the recording measured this outcome, move the pin in the same commit" ++
+                    " as the cassettes and say what changed.\n",
+                .{ name, rc.expect_committed_intent_pass, observed_pass },
             );
-            defer diagnostic.deinit(testing.allocator);
-            std.debug.print("[codegen-intent] committed handler failed: {s}\n", .{name});
-            std.debug.print("stdout:\n{s}\nstderr:\n{s}\n", .{ diagnostic.stdout, diagnostic.stderr });
-            return error.RuntimeIntentFailed;
+            return error.RuntimeIntentPinMismatch;
         }
-        passed += 1;
+        checked += 1;
+        if (observed_pass) passed += 1;
     }
-    try testing.expectEqual(names.len, passed);
+    // Every named case reached its assertion. Without this the loop would
+    // satisfy the test by checking nothing if a case stopped resolving.
+    try testing.expectEqual(names.len, checked);
+    // And at least one committed handler genuinely runs. A corpus where every
+    // durable case is pinned as a failure would otherwise pass this test while
+    // proving the runtime executes nothing.
+    try testing.expect(passed > 0);
 }
 
 const LiveRecordingProgress = struct {
@@ -3811,12 +3846,39 @@ fn publishableEvidence(
         corpus_cases == expected;
 }
 
+/// Whether a run's numbers are sound enough to publish - not whether they are
+/// good.
+///
+/// This gated on the value of the very number it publishes: greens == 19, raw
+/// first-draft >= 14, median <= 4, intent 18 of 18. Measured against four full
+/// runs, every one of those is unreachable: greens ranged 16 to 18, raw 10 to
+/// 12, intent 15 to 18, and the median was 5 in all four. The row already on
+/// docs/convergence.md fails all of them too - 9 raw, median 5. The thresholds
+/// were written on 2026-08-16 and no publication has run since, so they were
+/// never tested against a real corpus, and they are aspiration rather than
+/// measurement.
+///
+/// Flooring the headline metric is also the wrong shape. docs/convergence.md
+/// publishes a first-draft pass rate and forbids re-recording "until it
+/// flatters"; a floor on that rate means the page can only ever carry good
+/// news, which makes it a claim rather than a measurement.
+///
+/// So what remains asserts that the measurement happened and covered the whole
+/// corpus. A number that is bad is published and explained. A number that is
+/// unsound is refused.
 fn expertQualityGate(summary: codegen.CodegenSummary) bool {
-    return summary.total == 19 and
-        summary.greens == 19 and
-        summary.raw_first_draft_passes >= 14 and
-        summary.median_roundtrips > 0 and summary.median_roundtrips <= 4 and
-        summary.intent_checked == 18 and summary.intent_passes == 18;
+    // Every case measured. A short corpus reports a rate over a denominator
+    // that is not the corpus.
+    if (summary.total != 19) return false;
+    // Every intent-declaring case actually ran its check. `intent_checked` is
+    // the denominator of the published intent rate, so a check that silently
+    // did not run would inflate it. One case is compiler-veto-only by design,
+    // which is why this is 18 and not 19.
+    if (summary.intent_checked != 18) return false;
+    // Zero means no round-trip was counted at all, which is a broken
+    // measurement rather than an unusually fast one.
+    if (summary.median_roundtrips == 0) return false;
+    return true;
 }
 
 fn neutralCatalogIdentity(
@@ -4089,21 +4151,33 @@ test "corpus evidence consensus and publication floor fail closed" {
         .median_roundtrips = 4,
     };
     try testing.expect(expertQualityGate(passing_quality));
-    var failing_quality = passing_quality;
-    failing_quality.greens = 18;
-    try testing.expect(!expertQualityGate(failing_quality));
-    failing_quality = passing_quality;
-    failing_quality.raw_first_draft_passes = 13;
-    try testing.expect(!expertQualityGate(failing_quality));
-    failing_quality = passing_quality;
-    failing_quality.median_roundtrips = 5;
-    try testing.expect(!expertQualityGate(failing_quality));
-    failing_quality = passing_quality;
-    failing_quality.intent_passes = 17;
-    try testing.expect(!expertQualityGate(failing_quality));
-    failing_quality = passing_quality;
-    failing_quality.intent_checked = 17;
-    try testing.expect(!expertQualityGate(failing_quality));
+
+    // A worse run publishes. These are the four measurements the gate used to
+    // refuse, at the values four real runs actually produced: greens 16 to 18,
+    // raw 10 to 12, intent 15 to 18, median 5 every time. Refusing them meant
+    // the page could only ever carry good news, and the row already published
+    // on it - 9 raw, median 5 - fails the same thresholds.
+    var measured = passing_quality;
+    measured.greens = 16;
+    measured.raw_first_draft_passes = 10;
+    measured.first_attempt_greens = 10;
+    measured.intent_passes = 15;
+    measured.median_roundtrips = 5;
+    try testing.expect(expertQualityGate(measured));
+
+    // An unsound measurement still refuses. A short corpus reports a rate over
+    // the wrong denominator.
+    var unsound = passing_quality;
+    unsound.total = 18;
+    try testing.expect(!expertQualityGate(unsound));
+    // An intent check that did not run would inflate the published intent rate.
+    unsound = passing_quality;
+    unsound.intent_checked = 17;
+    try testing.expect(!expertQualityGate(unsound));
+    // No round-trip counted at all is a broken run, not a fast one.
+    unsound = passing_quality;
+    unsound.median_roundtrips = 0;
+    try testing.expect(!expertQualityGate(unsound));
 }
 
 /// Fail when `docs/coverage.json` no longer describes this run.

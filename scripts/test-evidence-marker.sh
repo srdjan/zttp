@@ -196,16 +196,27 @@ for field, value in (
     changed[field] = value
     invoke("convergence", changed, False)
 
+# A measured result publishes whatever it says. Each of these was refused by a
+# threshold on the number being published, and each is a value a real run
+# produced: across four recorded runs greens ranged 16 to 18, raw 10 to 12,
+# intent 15 to 18, and the median was 5 every time. The row already on
+# docs/convergence.md - 9 raw, median 5 - was refused by the same thresholds.
 for updates in (
-    {"rawFirstDraftPasses": 13, "rawFirstDraftPassPercent": 68},
-    {"finalGreens": 18, "finalGreenPercent": 94},
+    {"rawFirstDraftPasses": 10, "rawFirstDraftPassPercent": 52},
+    {"finalGreens": 16, "finalGreenPercent": 84},
     {"medianRoundtrips": 5},
-    {"intentPasses": 17, "intentChecked": 18, "intentPassPercent": 94},
-    {"intentPasses": 17, "intentChecked": 17, "intentPassPercent": 100},
+    {"intentPasses": 15, "intentChecked": 18, "intentPassPercent": 83},
 ):
     changed = copy.deepcopy(convergence)
     changed.update(updates)
-    invoke("convergence", changed, False)
+    invoke("convergence", changed, True)
+
+# An intent check that never ran is still refused: it is the denominator of the
+# published intent rate, so a short count inflates the number rather than
+# lowering it.
+changed = copy.deepcopy(convergence)
+changed.update({"intentPasses": 17, "intentChecked": 17, "intentPassPercent": 100})
+invoke("convergence", changed, False)
 
 for field, value in (
     ("rulesTotal", 0),
