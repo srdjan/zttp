@@ -1328,14 +1328,27 @@ pub const HandlerVerifier = struct {
         const obj_tag = self.ir_view.getTag(member.object) orelse return;
         if (obj_tag != .identifier) return;
 
-        _ = self.getUnnarrowedOptional(member.object) orelse return;
+        const ob = self.getUnnarrowedOptional(member.object) orelse return;
+
+        // Optional chaining is a repair only where the narrowed value has the
+        // property. On `string | undefined` it is the opposite of a repair:
+        // `parsed?.ok` deletes the member_access this check reads, so ZTS309
+        // stops firing and `optionals_safe` answers PROVEN again while
+        // `.ok` is still undefined on a string and the handler still answers
+        // 401 to every request. Widening the check to every OptionalKind
+        // without splitting the help taught that repair.
+        const help = switch (ob.kind) {
+            .optional_object => "check before access: if (val) { ... val.prop ... }\n           or use optional chaining: val?.prop",
+            .optional_string => "this value is a string when it is present, so it has no such property; " ++
+                "check before use: if (val !== undefined) { ... val ... }",
+        };
 
         self.addDiagnostic(.{
             .severity = .err,
             .kind = .unchecked_optional_access,
             .node = node,
             .message = "property access on optional value without checking for undefined",
-            .help = "check before access: if (val) { ... val.prop ... }\n           or use optional chaining: val?.prop",
+            .help = help,
             .repair_intent = .insert_guard_before_line,
         });
     }
@@ -1712,11 +1725,15 @@ test "missing_return_path diagnostic carries repair_intent = add_trailing_return
 
 /// Run the verifier over a handler that reads a property off an un-narrowed
 /// optional produced by `producer`, and report whether ZTS309 fired.
-fn optionalAccessReported(
+/// The help text of the ZTS309 this producer raises, or null when it raises
+/// none. Help rather than a bool: the repair the diagnostic names is the half
+/// that decides whether the author's edit fixes the fault or only hides it.
+fn optionalAccessHelp(
     allocator: std.mem.Allocator,
     import_line: []const u8,
     producer: []const u8,
-) !bool {
+    help_buffer: []u8,
+) !?[]const u8 {
     const source = try std.fmt.allocPrint(allocator,
         \\{s}
         \\function handler(req) {{
@@ -1744,9 +1761,13 @@ fn optionalAccessReported(
     _ = try verifier.verify(handler_fn);
 
     for (verifier.getDiagnostics()) |diag| {
-        if (diag.kind == .unchecked_optional_access) return true;
+        if (diag.kind != .unchecked_optional_access) continue;
+        const help = diag.help orelse return error.TestExpectedHelp;
+        if (help.len > help_buffer.len) return error.TestHelpTooLong;
+        @memcpy(help_buffer[0..help.len], help);
+        return help_buffer[0..help.len];
     }
-    return false;
+    return null;
 }
 
 test "ZTS309 reports property access on an un-narrowed optional of either kind" {
@@ -1765,22 +1786,57 @@ test "ZTS309 reports property access on an un-narrowed optional of either kind" 
     // Both kinds are asserted here. Checking only the string case would pass
     // again if someone later restricted the rule to strings instead.
     const allocator = std.testing.allocator;
+    var help_buffer: [512]u8 = undefined;
 
-    try std.testing.expect(try optionalAccessReported(
+    try std.testing.expect(try optionalAccessHelp(
         allocator,
         "import { env } from \"zttp:env\";",
         "env(\"HOME\")",
-    ));
-    try std.testing.expect(try optionalAccessReported(
+        &help_buffer,
+    ) != null);
+    try std.testing.expect(try optionalAccessHelp(
         allocator,
         "import { sqlOne } from \"zttp:sql\";",
         "sqlOne(\"q\")",
-    ));
+        &help_buffer,
+    ) != null);
+}
+
+test "ZTS309 offers optional chaining only where it is a repair" {
+    // The widened rule kept the help written for optional objects, so a
+    // property read off `string | undefined` was answered with
+    // `or use optional chaining: val?.prop`. That edit deletes the
+    // member_access this check reads: ZTS309 stops firing, `optionals_safe`
+    // returns to PROVEN, and `.ok` is still undefined on a string - the exact
+    // runtime fault the test above cites as the reason the rule was widened.
+    //
+    // Asserted on both kinds. Checking only the string case would pass again
+    // if the chaining line were dropped from the object case too, where it is
+    // a real repair.
+    const allocator = std.testing.allocator;
+    var help_buffer: [512]u8 = undefined;
+
+    const string_help = try optionalAccessHelp(
+        allocator,
+        "import { env } from \"zttp:env\";",
+        "env(\"HOME\")",
+        &help_buffer,
+    ) orelse return error.TestExpectedDiagnostic;
+    try std.testing.expect(std.mem.indexOf(u8, string_help, "?.") == null);
+    try std.testing.expect(std.mem.indexOf(u8, string_help, "no such property") != null);
+
+    const object_help = try optionalAccessHelp(
+        allocator,
+        "import { sqlOne } from \"zttp:sql\";",
+        "sqlOne(\"q\")",
+        &help_buffer,
+    ) orelse return error.TestExpectedDiagnostic;
+    try std.testing.expect(std.mem.indexOf(u8, object_help, "val?.prop") != null);
 }
 
 test "ZTS309 stays silent once the optional is narrowed" {
     // The floor under the test above: a rule that fired on every member access
-    // would satisfy it while refusing correct programs. `optionalAccessReported`
+    // would satisfy it while refusing correct programs. `optionalAccessHelp`
     // builds the un-narrowed shape, so this one is written out in full.
     const allocator = std.testing.allocator;
     const source =
