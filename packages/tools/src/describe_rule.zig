@@ -215,6 +215,12 @@ const TypeCheckerRule = struct {
     name: []const u8,
     code: []const u8,
     description: []const u8,
+    /// What to do about it. Optional because a description that already says
+    /// the fix needs no second sentence - but a rule a model provably could not
+    /// act on needs one. ZTS204 is the measured case: workflow-queued-call
+    /// never applied an edit in four recorded runs, cycling on a mismatch whose
+    /// diagnostic said only that it was wrong.
+    help: ?[]const u8 = null,
 };
 
 const type_checker_rules = [_]TypeCheckerRule{
@@ -222,7 +228,16 @@ const type_checker_rules = [_]TypeCheckerRule{
     .{ .name = "missing_field", .code = "ZTS201", .description = "An object literal is missing a field required by the expected type." },
     .{ .name = "arg_count_mismatch", .code = "ZTS202", .description = "A call passes the wrong number of arguments for the callee's signature." },
     .{ .name = "arg_type_mismatch", .code = "ZTS203", .description = "A call argument's type does not match the parameter type in the callee's signature." },
-    .{ .name = "return_type_mismatch", .code = "ZTS204", .description = "A returned value's type does not match the function's declared return type." },
+    .{
+        .name = "return_type_mismatch",
+        .code = "ZTS204",
+        .description = "A returned value's type does not match the function's declared return type.",
+        .help = "Match the enclosing function's declared return type. A value handed back by a " ++
+            "virtual-module call is usually not the declared type itself - `call()` answers an " ++
+            "object, so `return Response.json(result)` rather than `return call(...)`. When the " ++
+            "mismatch is inside a callback, the call that takes that callback reports its type, " ++
+            "so the line to change is the callback's own return.",
+    },
     .{ .name = "non_exhaustive_match", .code = "ZTS205", .description = "A match expression does not cover every possible case of the matched value." },
     .{ .name = "unknown_virtual_module", .code = "ZTS206", .description = "An import names a zttp virtual module that the active module catalog does not publish." },
     .{ .name = "missing_virtual_module_export", .code = "ZTS207", .description = "An import names an export that the selected zttp virtual module does not publish." },
@@ -252,6 +267,10 @@ fn writeTypeCheckerJson(writer: anytype, rule: TypeCheckerRule) !void {
     try writeJsonString(writer, "type");
     try writer.writeAll(",\"description\":");
     try writeJsonString(writer, rule.description);
+    if (rule.help) |help| {
+        try writer.writeAll(",\"help\":");
+        try writeJsonString(writer, help);
+    }
     try writer.writeAll("}");
 }
 
@@ -260,6 +279,7 @@ fn writeTypeCheckerText(writer: anytype, rule: TypeCheckerRule) !void {
     try writer.print("Code: {s}\n", .{rule.code});
     try writer.print("Category: {s}\n", .{"type"});
     try writer.print("Description: {s}\n", .{rule.description});
+    if (rule.help) |help| try writer.print("Help: {s}\n", .{help});
 }
 
 /// Build the `--json` unknown-rule error object, matching the branch in

@@ -582,12 +582,21 @@ pub const TypeChecker = struct {
                     if (self.current_return_type != null_type_idx) {
                         const inferred = self.inferType(ret_val);
                         if (inferred != null_type_idx and !self.env.isAssignableTo(inferred, self.current_return_type)) {
+                            // Point at the line the author has to edit. When the
+                            // returned call takes its type from a callback -
+                            // `run(key, cb)` is `<T>(string, () => T) -> T` -
+                            // this statement's type IS the callback's, so the
+                            // mismatch is real here but the fix is inside the
+                            // callback. Reporting the outer line sent a model
+                            // rewriting it for four roundtrips.
+                            const reported = self.callbackReturnNode(ret_val) orelse node;
                             self.addDiagnostic(.{
                                 .severity = .err,
                                 .kind = .return_type_mismatch,
-                                .node = node,
+                                .node = reported,
                                 .message = "return type does not match declared return type",
-                                .help = null,
+                                .help = "the enclosing function's declared return type is what this value must match; " ++
+                                    "when it comes back from a virtual-module call, wrap it rather than returning it directly",
                             });
                         }
                     }
@@ -2505,6 +2514,42 @@ pub const TypeChecker = struct {
             if (param.type_idx != first_param.type_idx) return false;
         }
         return info.ret == first_info.ret;
+    }
+
+    /// The return inside a callback this call takes its type from, when there
+    /// is one.
+    ///
+    /// Only the location moves - never whether the diagnostic fires. A call
+    /// whose signature reads its return type from a callback argument
+    /// (`returns_from_param`, rendered as `<T>(.., () => T) -> T`) makes the
+    /// caller's return type equal to the callback's, so the statement that
+    /// mismatches and the statement that must change are different lines.
+    ///
+    /// Returns null for anything that is not a call carrying a function
+    /// argument, which leaves every other mismatch reported exactly where it
+    /// was.
+    fn callbackReturnNode(self: *const TypeChecker, expr: NodeIndex) ?NodeIndex {
+        if (self.ir_view.getTag(expr) != .call) return null;
+        const call = self.ir_view.getCall(expr) orelse return null;
+
+        for (0..call.args_count) |i| {
+            const arg = self.ir_view.getListIndex(call.args_start, @intCast(i));
+            const arg_tag = self.ir_view.getTag(arg) orelse continue;
+            if (arg_tag != .arrow_function and arg_tag != .function_expr) continue;
+            const func = self.ir_view.getFunction(arg) orelse continue;
+
+            // An expression-bodied arrow has no return statement; the body is
+            // the returned value, so that is the line to name.
+            const body_tag = self.ir_view.getTag(func.body) orelse continue;
+            if (body_tag != .block) return func.body;
+
+            const block = self.ir_view.getBlock(func.body) orelse continue;
+            for (0..block.stmts_count) |s| {
+                const stmt = self.ir_view.getListIndex(block.stmts_start, @intCast(s));
+                if (self.ir_view.getTag(stmt) == .return_stmt) return stmt;
+            }
+        }
+        return null;
     }
 
     fn inferMemberAccessType(self: *const TypeChecker, node: NodeIndex) TypeIndex {
@@ -6804,6 +6849,59 @@ test "a predicate whose body calls a function installs no guard" {
         2,
         null,
     );
+}
+
+test "a return mismatch through a callback points at the callback's return" {
+    // Measured on workflow-queued-call, which never applied an edit in any of
+    // four recorded runs. `run(key, cb)` is typed `<T>(string, () => T) -> T`,
+    // so the outer return's type IS the callback's, and the diagnostic landed
+    // on the outer `return run(...)` line while the line the author has to edit
+    // is the `return call(...)` inside the callback. The model spent four
+    // roundtrips rewriting the line it was pointed at.
+    //
+    // Asserted on the reported line, not merely on the error count: the count
+    // was already right, and pointing at the wrong line is the whole defect.
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { run } from "zttp:durable";
+        \\import { call } from "zttp:workflow";
+        \\export function handler(req: Request): Response {
+        \\  return run("k", () => {
+        \\    return call("greet", { path: "/greet" });
+        \\  });
+        \\}
+    ;
+
+    var strip_result = try @import("zts-engine").stripper.strip(allocator, source, .{});
+    defer strip_result.deinit();
+    var parser = try @import("zts-engine").parser.JsParser.init(allocator, strip_result.code);
+    defer parser.deinit();
+    const root = try parser.parse();
+    const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+    var env = TypeEnv.init(allocator, &pool);
+    defer env.deinit();
+    @import("module_types.zig").populateModuleTypes(&env, &pool, allocator);
+    abi_types.populateHandlerAbiTypes(&env, &pool, allocator);
+    env.populateFromTypeMap(&strip_result.type_map);
+
+    var checker = TypeChecker.init(allocator, ir_view, null, &env, null);
+    defer checker.deinit();
+    _ = try checker.check(root);
+
+    var saw = false;
+    for (checker.getDiagnostics()) |diag| {
+        if (diag.kind != .return_type_mismatch) continue;
+        saw = true;
+        const loc = ir_view.getLoc(diag.node) orelse return error.TestExpectedLocation;
+        // Line 5 is `return call(...)`; line 4 is `return run(...)`.
+        try std.testing.expectEqual(@as(u32, 5), loc.line);
+        // And it must say what to do, not only that something is wrong.
+        try std.testing.expect(diag.help != null);
+    }
+    try std.testing.expect(saw);
 }
 
 test "a predicate that returns a bare literal proves nothing" {
