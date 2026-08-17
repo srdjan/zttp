@@ -697,6 +697,10 @@ fn serializeResponseDiagnostics(
         .field_presence = diagnostics.field_presence,
         .parser_warnings = diagnostics.parser_warnings,
         .error_name = if (diagnostics.failure) |failure| @errorName(failure) else null,
+        // Named branch, not model bytes. InvalidChangeSetArgs on its own said
+        // only that a proposal was refused, which is not enough to fix
+        // anything; this says which of the ten refusals fired.
+        .change_set_rejection = if (diagnostics.change_set_rejection) |shape| @tagName(shape) else null,
     }, .{}, writer);
     try writer.writeByte('\n');
     return buffer.toOwnedSlice();
@@ -950,4 +954,55 @@ test "recorder exposes one provider runtime identity" {
 
 fn lessThanPath(_: void, left: []const u8, right: []const u8) bool {
     return std.mem.lessThan(u8, left, right);
+}
+
+test "a refused change set names which refusal fired" {
+    // The tag is only worth carrying if it reaches the row a reader opens.
+    // InvalidChangeSetArgs alone said a proposal was refused and nothing about
+    // which of ten refusals fired, and the body that would say is gone by the
+    // time this row is written - the capture refuses it and the record is
+    // metadata-only by design.
+    const allocator = std.testing.allocator;
+    const line = try serializeResponseDiagnostics(allocator, "refused-case", 3, .{
+        .provider = .deepseek,
+        .model = "deepseek-v4-flash",
+    }, .{
+        .latency_ms = 12,
+        .http_status = null,
+        .finish_reason = .tool_calls,
+        .completion_tokens = 652,
+        .field_presence = .{},
+        .parser_warnings = &.{},
+        .failure = error.InvalidChangeSetArgs,
+        .change_set_rejection = .change_host_authoritative_key,
+    });
+    defer allocator.free(line);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, line, .{});
+    defer parsed.deinit();
+    const root = parsed.value.object;
+    try std.testing.expectEqualStrings("InvalidChangeSetArgs", root.get("error_name").?.string);
+    try std.testing.expectEqualStrings(
+        "change_host_authoritative_key",
+        root.get("change_set_rejection").?.string,
+    );
+
+    // Absent, not empty, when nothing was refused - so a reader never mistakes
+    // a clean row for one whose shape went unrecorded.
+    const clean = try serializeResponseDiagnostics(allocator, "clean-case", 0, .{
+        .provider = .deepseek,
+        .model = "deepseek-v4-flash",
+    }, .{
+        .latency_ms = 5,
+        .http_status = null,
+        .finish_reason = .stop,
+        .completion_tokens = 10,
+        .field_presence = .{},
+        .parser_warnings = &.{},
+        .failure = null,
+    });
+    defer allocator.free(clean);
+    var clean_parsed = try std.json.parseFromSlice(std.json.Value, allocator, clean, .{});
+    defer clean_parsed.deinit();
+    try std.testing.expect(clean_parsed.value.object.get("change_set_rejection").? == .null);
 }

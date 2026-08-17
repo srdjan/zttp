@@ -6,6 +6,7 @@
 //! recorder succeeds.
 
 const model_request = @import("model_request.zig");
+const propose_change_set = @import("anthropic/propose_change_set.zig");
 
 pub const ResponseFieldPresence = struct {
     choices: bool = false,
@@ -69,6 +70,14 @@ pub const ResponseDiagnostics = struct {
     field_presence: ResponseFieldPresence,
     parser_warnings: []const ParserWarning,
     failure: ?anyerror,
+    /// Which `propose_change_set` refusal fired, when that is what failed.
+    ///
+    /// A tag, never content - it names a branch in `maybeRemap`, not anything
+    /// the model wrote, so the metadata-only guarantee above still holds. It
+    /// exists because `InvalidChangeSetArgs` alone cannot be acted on: ten
+    /// refusals shared it, and the body that would tell them apart is gone by
+    /// the time this record is written.
+    change_set_rejection: ?propose_change_set.RejectionShape = null,
 };
 
 /// The only request metadata visible to a diagnostic observer. Keep this

@@ -167,7 +167,7 @@ pub const Client = struct {
             if (diagnostics_enabled) {
                 var inspection: ResponseInspection = .{};
                 inspection.addWarning(.transport_failed);
-                self.recordResponseDiagnostics(&inspection, elapsedMs(started_ns), null, err);
+                self.recordResponseDiagnostics(&inspection, elapsedMs(started_ns), null, err, null);
             }
             return err;
         };
@@ -183,6 +183,7 @@ pub const Client = struct {
                         elapsedMs(started_ns),
                         http_failure.status_code,
                         err,
+                        null,
                     );
                 }
                 return err;
@@ -197,7 +198,7 @@ pub const Client = struct {
         ) catch |err| {
             if (diagnostics_enabled) {
                 inspection.addWarning(.sanitizer_rejected_response);
-                self.recordResponseDiagnostics(&inspection, latency_ms, null, err);
+                self.recordResponseDiagnostics(&inspection, latency_ms, null, err, null);
             }
             return err;
         };
@@ -205,20 +206,21 @@ pub const Client = struct {
             sink.record(&snapshot, response.bytes) catch |err| {
                 if (diagnostics_enabled) {
                     inspection.addWarning(.capture_rejected_response);
-                    self.recordResponseDiagnostics(&inspection, latency_ms, null, err);
+                    self.recordResponseDiagnostics(&inspection, latency_ms, null, err, null);
                 }
                 return err;
             };
         }
-        const result = decodeResponseValue(arena, response.value) catch |err| {
+        var change_set_rejection: ?propose_change_set.RejectionShape = null;
+        const result = decodeResponseValue(arena, response.value, &change_set_rejection) catch |err| {
             if (diagnostics_enabled) {
                 inspection.addWarning(.decoder_rejected_response);
-                self.recordResponseDiagnostics(&inspection, latency_ms, null, err);
+                self.recordResponseDiagnostics(&inspection, latency_ms, null, err, change_set_rejection);
             }
             return err;
         };
         if (diagnostics_enabled) {
-            self.recordResponseDiagnostics(&inspection, latency_ms, null, null);
+            self.recordResponseDiagnostics(&inspection, latency_ms, null, null, null);
         }
         return result;
     }
@@ -229,6 +231,7 @@ pub const Client = struct {
         latency_ms: ?u64,
         http_status: ?u16,
         failure: ?anyerror,
+        change_set_rejection: ?propose_change_set.RejectionShape,
     ) void {
         const sink = self.capture orelse return;
         sink.recordDiagnostics(.{
@@ -242,6 +245,7 @@ pub const Client = struct {
             .field_presence = inspection.field_presence,
             .parser_warnings = inspection.warningSlice(),
             .failure = failure,
+            .change_set_rejection = change_set_rejection,
         });
     }
 };
@@ -305,7 +309,7 @@ pub fn decodeResponse(
     response_body: []const u8,
 ) !loop.ModelCallResult {
     const response = try parseSanitizedResponse(arena, response_body);
-    return decodeResponseValue(arena, response.value);
+    return decodeResponseValue(arena, response.value, null);
 }
 
 /// The response with unneeded reasoning fields removed, plus the parsed value.
@@ -534,6 +538,7 @@ fn removeUnneededReasoning(value: *std.json.Value) void {
 fn decodeResponseValue(
     arena: std.mem.Allocator,
     root: std.json.Value,
+    change_set_rejection: ?*?propose_change_set.RejectionShape,
 ) !loop.ModelCallResult {
     if (root != .object) return ClientError.UnexpectedResponseShape;
     const choices_value = root.object.get("choices") orelse return ClientError.UnexpectedResponseShape;
@@ -578,7 +583,12 @@ fn decodeResponseValue(
                 .response = .{ .tool_calls = calls },
             };
             return .{
-                .reply = try propose_change_set.maybeRemap(arena, reply, finish_reason),
+                .reply = try propose_change_set.maybeRemapObserved(
+                    arena,
+                    reply,
+                    finish_reason,
+                    change_set_rejection,
+                ),
                 .usage = usage,
                 .stop_reason = finish_reason,
             };
