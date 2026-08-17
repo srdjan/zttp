@@ -644,7 +644,7 @@ const flow_meta = [_]struct {
         .description = "A value labeled {secret} reaches a Response body or header.",
         .example = "const key = env('SECRET_KEY'); return Response.json({ key: key });",
         .help = "Do not return secrets to clients; derive a public artifact or drop the label.",
-        .repair = .insert_guard_before_line,
+        .repair = null,
     },
     .{
         .kind = .credential_in_response,
@@ -652,7 +652,7 @@ const flow_meta = [_]struct {
         .description = "A value labeled {credential} reaches a Response body.",
         .example = "const token = jwtSign(claims, secret); return Response.json({ token: token });",
         .help = "Return only opaque session ids; never echo credentials issued by the handler.",
-        .repair = .insert_guard_before_line,
+        .repair = null,
     },
     .{
         .kind = .secret_in_log,
@@ -660,7 +660,7 @@ const flow_meta = [_]struct {
         .description = "A value labeled {secret} reaches console.log / warn / error.",
         .example = "const key = env('SECRET_KEY'); logInfo(key);",
         .help = "Strip or mask the secret before logging.",
-        .repair = .insert_guard_before_line,
+        .repair = null,
     },
     .{
         .kind = .credential_in_log,
@@ -668,7 +668,7 @@ const flow_meta = [_]struct {
         .description = "A value labeled {credential} reaches console.log / warn / error.",
         .example = "const auth = parseBearer(req.headers.get('Authorization')); logDebug(auth);",
         .help = "Log a hash or session id instead of the credential itself.",
-        .repair = .insert_guard_before_line,
+        .repair = null,
     },
     .{
         .kind = .secret_in_egress_url,
@@ -676,7 +676,7 @@ const flow_meta = [_]struct {
         .description = "A value labeled {secret} reaches a fetch URL.",
         .example = "const key = env('SECRET_KEY'); fetchSync(['https://api/?k=', key].join(''));",
         .help = "Send the secret in a request header or body field that is not part of the URL.",
-        .repair = .insert_guard_before_line,
+        .repair = null,
     },
     .{
         .kind = .credential_in_egress_url,
@@ -684,7 +684,7 @@ const flow_meta = [_]struct {
         .description = "A value labeled {credential} reaches a fetch URL.",
         .example = "fetchSync(['https://api/u?token=', authToken].join(''));",
         .help = "Use an Authorization header instead of placing credentials in URLs.",
-        .repair = .insert_guard_before_line,
+        .repair = null,
     },
     .{
         .kind = .secret_in_egress_body,
@@ -692,7 +692,7 @@ const flow_meta = [_]struct {
         .description = "A value labeled {secret} reaches a fetch request body.",
         .example = "fetchSync('https://api/echo', { method: 'POST', body: JSON.stringify({ key }) });",
         .help = "Forward the secret only to a host on the egress allow-list, or strip it.",
-        .repair = .insert_guard_before_line,
+        .repair = null,
     },
     .{
         .kind = .unvalidated_input_in_egress,
@@ -700,7 +700,7 @@ const flow_meta = [_]struct {
         .description = "A {user_input} value without {validated} reaches an egress call.",
         .example = "fetchSync(['https://api/echo?q=', String(req.url.searchParams.get('q'))].join(''));",
         .help = "Pass user input through validateJson / schemaCompile or strip it before egress.",
-        .repair = .insert_guard_before_line,
+        .repair = null,
     },
 };
 

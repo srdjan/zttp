@@ -85,9 +85,12 @@ pub const Diagnostic = struct {
     help: ?[]const u8,
     witness: ?Witness = null,
     /// Typed repair primitive the agent uses to pick an apply step directly.
-    /// All flow-checker diagnostics map to
-    /// the same `insert_guard_before_line` shape today — the agent inserts
-    /// a redact/mask/validate call ahead of the offending sink.
+    ///
+    /// Always null here, and a test over the kind set holds it that way. Every
+    /// flow diagnostic reports a labelled value reaching a sink; the label is
+    /// what fails the proof, and no conditional removes a label. The checker
+    /// used to offer `insert_guard_before_line` on all of them, which sent an
+    /// agent looking for a guard that could not exist.
     repair_intent: ?RepairIntent = null,
 };
 
@@ -1734,7 +1737,6 @@ pub const FlowChecker = struct {
                                 .node = node,
                                 .message = "unvalidated user input in Response.html (potential XSS)",
                                 .help = "use JSX with renderToString() for auto-escaping, or pass input through validateObject() first",
-                                .repair_intent = .insert_guard_before_line,
                             });
                             self.properties.injection_safe = false;
                         }
@@ -1953,7 +1955,6 @@ pub const FlowChecker = struct {
                         .node = node,
                         .message = self.messageWithReason("secret data flows into response body", .secret),
                         .help = "env vars with sensitive names (SECRET, PASSWORD, KEY, TOKEN) must not appear in responses",
-                        .repair_intent = .insert_guard_before_line,
                     });
                     self.properties.no_secret_leakage = false;
                 }
@@ -1970,7 +1971,6 @@ pub const FlowChecker = struct {
                         .node = node,
                         .message = self.messageWithReason("credential data flows into response body", .credential),
                         .help = "auth tokens and JWT payloads should not be returned to clients",
-                        .repair_intent = .insert_guard_before_line,
                     });
                     self.properties.no_credential_leakage = false;
                 }
@@ -1983,7 +1983,6 @@ pub const FlowChecker = struct {
                         .node = node,
                         .message = self.messageWithReason("secret data flows into console output", .secret),
                         .help = "env vars with sensitive names must not be logged",
-                        .repair_intent = .insert_guard_before_line,
                     });
                     self.properties.no_secret_leakage = false;
                 }
@@ -1994,7 +1993,6 @@ pub const FlowChecker = struct {
                         .node = node,
                         .message = self.messageWithReason("credential data flows into console output", .credential),
                         .help = "auth tokens and JWTs must not be logged",
-                        .repair_intent = .insert_guard_before_line,
                     });
                     self.properties.no_credential_leakage = false;
                 }
@@ -2007,7 +2005,6 @@ pub const FlowChecker = struct {
                         .node = node,
                         .message = self.messageWithReason("secret data flows into fetchSync URL", .secret),
                         .help = "secrets in URLs are logged by proxies and CDNs; pass secrets in headers or body instead",
-                        .repair_intent = .insert_guard_before_line,
                     });
                     self.properties.no_secret_leakage = false;
                 }
@@ -2018,7 +2015,6 @@ pub const FlowChecker = struct {
                         .node = node,
                         .message = self.messageWithReason("credential data flows into fetchSync URL", .credential),
                         .help = "pass auth tokens in headers, not URLs",
-                        .repair_intent = .insert_guard_before_line,
                     });
                     self.properties.no_credential_leakage = false;
                 }
@@ -2031,7 +2027,6 @@ pub const FlowChecker = struct {
                         .node = node,
                         .message = "unvalidated user input flows into fetchSync URL",
                         .help = "validate user input before using it in an egress URL to avoid SSRF / request forgery",
-                        .repair_intent = .insert_guard_before_line,
                     });
                     self.properties.input_validated = false;
                     self.properties.injection_safe = false;
@@ -2049,7 +2044,6 @@ pub const FlowChecker = struct {
                         .node = node,
                         .message = self.messageWithReason("secret data flows into fetchSync request body", .secret),
                         .help = "do not send env secrets to external services",
-                        .repair_intent = .insert_guard_before_line,
                     });
                     self.properties.no_secret_leakage = false;
                 }
@@ -2061,7 +2055,6 @@ pub const FlowChecker = struct {
                         .node = node,
                         .message = "unvalidated user input flows into fetchSync body",
                         .help = "pass user input through validateJson() or validateObject() before sending to external services",
-                        .repair_intent = .insert_guard_before_line,
                     });
                     self.properties.input_validated = false;
                     self.properties.injection_safe = false;
@@ -2083,7 +2076,6 @@ pub const FlowChecker = struct {
                         .node = node,
                         .message = self.messageWithReason("secret data flows into fetchSync request headers", .secret),
                         .help = "do not send env secrets to external services, even in headers",
-                        .repair_intent = .insert_guard_before_line,
                     });
                     self.properties.no_secret_leakage = false;
                 }
@@ -2094,7 +2086,6 @@ pub const FlowChecker = struct {
                         .node = node,
                         .message = self.messageWithReason("credential data flows into fetchSync request headers", .credential),
                         .help = "forwarding a caller's auth token to a third party can leak it; scope credentials per service",
-                        .repair_intent = .insert_guard_before_line,
                     });
                     self.properties.no_credential_leakage = false;
                 }
@@ -2105,7 +2096,6 @@ pub const FlowChecker = struct {
                         .node = node,
                         .message = "unvalidated user input flows into fetchSync request headers",
                         .help = "validate user input before placing it in an egress header to avoid header injection / request forgery",
-                        .repair_intent = .insert_guard_before_line,
                     });
                     self.properties.input_validated = false;
                     self.properties.injection_safe = false;
@@ -2128,7 +2118,6 @@ pub const FlowChecker = struct {
                         .node = node,
                         .message = self.messageWithReason("secret data flows into a fetch options object", .secret),
                         .help = "build the options object at the call site so each field can be checked, and do not send env secrets to external services",
-                        .repair_intent = .insert_guard_before_line,
                     });
                     self.properties.no_secret_leakage = false;
                 }
@@ -2139,7 +2128,6 @@ pub const FlowChecker = struct {
                         .node = node,
                         .message = self.messageWithReason("credential data flows into a fetch options object", .credential),
                         .help = "forwarding a caller's auth token to a third party can leak it; scope credentials per service",
-                        .repair_intent = .insert_guard_before_line,
                     });
                     self.properties.no_credential_leakage = false;
                 }
@@ -2150,7 +2138,6 @@ pub const FlowChecker = struct {
                         .node = node,
                         .message = "unvalidated user input flows into a fetch options object",
                         .help = "validate user input before sending it to an external service",
-                        .repair_intent = .insert_guard_before_line,
                     });
                     self.properties.input_validated = false;
                     self.properties.injection_safe = false;
@@ -3707,12 +3694,17 @@ test "propertyTagForKind: every DiagnosticKind variant maps to a non-null Proper
     }
 }
 
-test "secret_in_response diagnostic carries repair_intent = insert_guard_before_line" {
-    // Flow-checker diagnostics must populate the typed repair primitive so
-    // the agent picks an apply step directly.
-    // ZTS400 is representative of every ZTS4xx flow leak: the canonical
-    // repair is `insert_guard_before_line`, where the agent inserts a
-    // redact/mask/strip call ahead of the offending sink.
+test "a real secret leak offers no repair intent" {
+    // The end-to-end half of the invariant below: a ZTS400 produced by the
+    // actual checker on actual source, not a struct built in a test.
+    //
+    // This test previously asserted the opposite. The reasoning it carried -
+    // "the agent inserts a redact/mask/strip call ahead of the offending sink"
+    // - describes an edit `insert_guard_before_line` does not make: the
+    // primitive inserts a conditional, and no conditional removes a taint
+    // label. The claim went unchallenged while nothing consumed the intent.
+    // Once diagnostics began carrying it to the model, a recorded case burned
+    // its whole attempt budget trying to build the guard this promised.
     const allocator = std.testing.allocator;
     const source =
         \\import { env } from "zttp:env";
@@ -3742,10 +3734,7 @@ test "secret_in_response diagnostic carries repair_intent = insert_guard_before_
     for (checker.getDiagnostics()) |d| {
         if (d.kind == .secret_in_response) {
             saw_secret_leak = true;
-            try std.testing.expectEqual(
-                @as(?RepairIntent, .insert_guard_before_line),
-                d.repair_intent,
-            );
+            try std.testing.expectEqual(@as(?RepairIntent, null), d.repair_intent);
         }
     }
     try std.testing.expect(saw_secret_leak);
@@ -4966,4 +4955,50 @@ test "a shadowed Date does not carry the varying label" {
         \\}
     ;
     try std.testing.expect(try runDeterministic(std.testing.allocator, source));
+}
+
+test "no flow diagnostic offers a repair a guard cannot perform" {
+    // Every kind in this checker reports that a labelled value reached a sink.
+    // The label is what fails the proof, and `insert_guard_before_line` inserts
+    // a conditional - it cannot remove a label, and `.validated` is conferred
+    // only by a validator call (validateJson, validateObject, schemaCompile,
+    // renderToString), never by an `if`. So every repair intent this checker
+    // offered was one that could not clear the diagnostic offering it.
+    //
+    // That was survivable while the intent never reached the model. Once
+    // diagnostics started carrying `repair_intent` to the agent, a recorded
+    // case spent its whole attempt budget on it: "Hmm, what does
+    // insert_guard_before_line mean for secret taint? Possibly wrapping the
+    // response in a branch that verifies the secret? No..." and "A guard before
+    // line 24: e.g., check `values.appName === undefined`? That doesn't remove
+    // taint." A wrong repair is worse than none, because none is silent.
+    //
+    // Asserted over the enum rather than against a list of codes, so a kind
+    // added later cannot quietly acquire one.
+    inline for (@typeInfo(DiagnosticKind).@"enum".fields) |field| {
+        const kind = @field(DiagnosticKind, field.name);
+        const diagnostic: Diagnostic = .{
+            .severity = .err,
+            .kind = kind,
+            .node = 0,
+            .message = "probe",
+            .help = "probe",
+        };
+        if (diagnostic.repair_intent != null) {
+            std.debug.print("flow kind '{s}' carries a repair intent\n", .{field.name});
+            return error.FlowDiagnosticOffersUnperformableRepair;
+        }
+    }
+    // The default is null, so the loop above passes on an unpopulated struct
+    // too. Assert the field still exists and can hold the value the checker
+    // must never set, or this test drifts into checking nothing.
+    const guarded: Diagnostic = .{
+        .severity = .err,
+        .kind = .secret_in_response,
+        .node = 0,
+        .message = "probe",
+        .help = "probe",
+        .repair_intent = .insert_guard_before_line,
+    };
+    try std.testing.expectEqual(RepairIntent.insert_guard_before_line, guarded.repair_intent.?);
 }
