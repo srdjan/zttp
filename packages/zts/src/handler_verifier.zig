@@ -1316,13 +1316,19 @@ pub const HandlerVerifier = struct {
         });
     }
 
-    /// Check if a member_access is on an un-narrowed optional_object binding.
+    /// Check if a member_access is on an un-narrowed optional binding.
+    ///
+    /// Every `OptionalKind`, not just `optional_object`. Both members of that
+    /// enum are commented "must narrow before use", and reading a property off
+    /// either is the same runtime fault - `undefined.anything` throws whatever
+    /// the absent value would have been. Restricting this to objects meant a
+    /// property read off an un-narrowed optional string was reported by
+    /// nothing, and `optionals_safe` then answered PROVEN over it.
     fn checkOptionalObjectAccess(self: *HandlerVerifier, member: Node.MemberExpr, node: NodeIndex) void {
         const obj_tag = self.ir_view.getTag(member.object) orelse return;
         if (obj_tag != .identifier) return;
 
-        const ob = self.getUnnarrowedOptional(member.object) orelse return;
-        if (ob.kind != .optional_object) return;
+        _ = self.getUnnarrowedOptional(member.object) orelse return;
 
         self.addDiagnostic(.{
             .severity = .err,
@@ -1702,6 +1708,110 @@ test "missing_return_path diagnostic carries repair_intent = add_trailing_return
         }
     }
     try std.testing.expect(saw_missing_return);
+}
+
+/// Run the verifier over a handler that reads a property off an un-narrowed
+/// optional produced by `producer`, and report whether ZTS309 fired.
+fn optionalAccessReported(
+    allocator: std.mem.Allocator,
+    import_line: []const u8,
+    producer: []const u8,
+) !bool {
+    const source = try std.fmt.allocPrint(allocator,
+        \\{s}
+        \\function handler(req) {{
+        \\  const v = {s};
+        \\  return Response.json({{ got: v.anything }});
+        \\}}
+    , .{ import_line, producer });
+    defer allocator.free(source);
+
+    var strip_result = try @import("zts-engine").stripper.strip(allocator, source, .{});
+    defer strip_result.deinit();
+
+    var parser = try @import("zts-engine").parser.JsParser.init(allocator, strip_result.code);
+    defer parser.deinit();
+    var atoms = context.AtomTable.init(allocator);
+    defer atoms.deinit();
+    parser.setAtomTable(&atoms);
+
+    const root = try parser.parse();
+    const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    const handler_fn = findHandlerFunction(ir_view, root) orelse return error.TestExpectedHandler;
+
+    var verifier = HandlerVerifier.init(allocator, ir_view, &atoms, null, null);
+    defer verifier.deinit();
+    _ = try verifier.verify(handler_fn);
+
+    for (verifier.getDiagnostics()) |diag| {
+        if (diag.kind == .unchecked_optional_access) return true;
+    }
+    return false;
+}
+
+test "ZTS309 reports property access on an un-narrowed optional of either kind" {
+    // ZTS309 fired only when the binding's kind was `optional_object`, so a
+    // property read off an un-narrowed optional STRING was reported by nothing
+    // and `optionals_safe` answered PROVEN over it. That is a fail-open, not a
+    // missing feature: the rule already says "a property on an optional value",
+    // and `OptionalKind`'s own comments say both members must narrow before use.
+    //
+    // Measured, not hypothetical. A recorded corpus handler read `.ok` and
+    // `.value` off `parseBearer(header)`, which returns `string | undefined`.
+    // It compiled clean with optionals_safe PROVEN, and at runtime `.ok` is
+    // undefined on a string, so `!parsed.ok` was always true and the handler
+    // returned 401 for every request.
+    //
+    // Both kinds are asserted here. Checking only the string case would pass
+    // again if someone later restricted the rule to strings instead.
+    const allocator = std.testing.allocator;
+
+    try std.testing.expect(try optionalAccessReported(
+        allocator,
+        "import { env } from \"zttp:env\";",
+        "env(\"HOME\")",
+    ));
+    try std.testing.expect(try optionalAccessReported(
+        allocator,
+        "import { sqlOne } from \"zttp:sql\";",
+        "sqlOne(\"q\")",
+    ));
+}
+
+test "ZTS309 stays silent once the optional is narrowed" {
+    // The floor under the test above: a rule that fired on every member access
+    // would satisfy it while refusing correct programs. `optionalAccessReported`
+    // builds the un-narrowed shape, so this one is written out in full.
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { env } from "zttp:env";
+        \\function handler(req) {
+        \\  const v = env("HOME");
+        \\  if (v === undefined) { return Response.text("none"); }
+        \\  return Response.json({ got: v.length });
+        \\}
+    ;
+
+    var strip_result = try @import("zts-engine").stripper.strip(allocator, source, .{});
+    defer strip_result.deinit();
+
+    var parser = try @import("zts-engine").parser.JsParser.init(allocator, strip_result.code);
+    defer parser.deinit();
+    var atoms = context.AtomTable.init(allocator);
+    defer atoms.deinit();
+    parser.setAtomTable(&atoms);
+
+    const root = try parser.parse();
+    const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    const handler_fn = findHandlerFunction(ir_view, root) orelse return error.TestExpectedHandler;
+
+    var verifier = HandlerVerifier.init(allocator, ir_view, &atoms, null, null);
+    defer verifier.deinit();
+    _ = try verifier.verify(handler_fn);
+
+    for (verifier.getDiagnostics()) |diag| {
+        try std.testing.expect(diag.kind != .unchecked_optional_access);
+    }
 }
 
 const import_corpus = @import("tests/import_corpus.zig");
