@@ -807,10 +807,18 @@ fn post(arena: std.mem.Allocator, config: Config, body: []const u8) !TransportRe
     var decompress: std.http.Decompress = undefined;
     var decompress_buf: [std.compress.flate.max_window_len]u8 = undefined;
     const reader = response.readerDecompressing(&transfer_buf, &decompress, &decompress_buf);
-    const response_body = http_errors.readBody(reader, arena, max_response_body_bytes) catch |err| switch (err) {
+    const response_body = readBodyWithin(
+        reader,
+        arena,
+        max_response_body_bytes,
+        connection.stream_reader.stream.socket.handle,
+        silence_ceiling_ms,
+        request_timeout_ms,
+    ) catch |err| switch (err) {
         error.StreamTooLong => return ClientError.ResponseTooLarge,
         error.OutOfMemory => return error.OutOfMemory,
         error.RequestTimedOut => return error.RequestTimedOut,
+        error.DeepSeekGenerationStalled => return ClientError.DeepSeekGenerationStalled,
         else => return ClientError.DeepSeekServerUnavailable,
     };
     if (response.head.status != .ok) {
@@ -820,6 +828,44 @@ fn post(arena: std.mem.Allocator, config: Config, body: []const u8) !TransportRe
         } };
     }
     return .{ .ok = response_body };
+}
+
+/// Read the response body a chunk at a time, polling the socket whenever more
+/// is expected.
+///
+/// `http_errors.readBody` reads to end of stream in one call, so the only bound
+/// on a mid-body stall was `SO_RCVTIMEO` - which is the 15-minute generation
+/// ceiling, never the turn's remaining budget. The two polls above cover the
+/// wait before the head and the wait before the first body byte and nothing
+/// after, so a connection that went silent once bytes had started arriving sat
+/// there for the full ceiling with no output and no error, long past the
+/// deadline `setProviderRequestTimeout` was asked to enforce.
+///
+/// A short read is end of stream, so the loop only polls after a chunk that
+/// filled the buffer: the wait is taken where more data is genuinely expected,
+/// and the last chunk returns without one.
+fn readBodyWithin(
+    reader: *std.Io.Reader,
+    arena: std.mem.Allocator,
+    limit_bytes: usize,
+    fd: std.posix.fd_t,
+    silence_ceiling_ms: i32,
+    request_timeout_ms: i32,
+) ![]u8 {
+    var body: std.ArrayList(u8) = .empty;
+    errdefer body.deinit(arena);
+    var chunk: [4096]u8 = undefined;
+    while (true) {
+        const read = reader.readSliceShort(&chunk) catch |err| {
+            if (http_errors.isTimeout(err)) return error.RequestTimedOut;
+            return err;
+        };
+        if (body.items.len + read > limit_bytes) return error.StreamTooLong;
+        try body.appendSlice(arena, chunk[0..read]);
+        if (read < chunk.len) break;
+        try waitForReadable(fd, silence_ceiling_ms, request_timeout_ms);
+    }
+    return body.toOwnedSlice(arena);
 }
 
 /// Block until the socket has bytes to read, bounded by the silence ceiling.
@@ -1163,6 +1209,68 @@ test "the socket read timeout is never the first thing to expire" {
     try testing.expectEqual(
         socket_read_timeout_ms,
         effectiveRequestTimeoutMs(null, generation_ceiling_ms),
+    );
+}
+
+test "a mid-body stall expires on the silence ceiling, not on the socket" {
+    // The gap the two request-side polls left: they cover the wait before the
+    // head and the wait before the first body byte, and `readBody` then read to
+    // end of stream in one call. The only bound left on a stall after the first
+    // byte was SO_RCVTIMEO, which is the 15-minute generation ceiling, so an
+    // interactive turn with a 60s deadline sat silent for the whole ceiling.
+    const allocator = testing.allocator;
+
+    // A socket pair stands in for the connection: one end is readable while it
+    // holds a byte and blocks once drained, which is the shape a stall has.
+    if (@TypeOf(std.posix.system.socketpair) == void) return error.SkipZigTest;
+    var pipe_fds: [2]std.posix.fd_t = undefined;
+    switch (std.posix.errno(std.posix.system.socketpair(
+        std.posix.AF.UNIX,
+        std.posix.SOCK.STREAM,
+        0,
+        &pipe_fds,
+    ))) {
+        .SUCCESS => {},
+        else => return error.SkipZigTest,
+    }
+    defer std.Io.Threaded.closeFd(pipe_fds[0]);
+    defer std.Io.Threaded.closeFd(pipe_fds[1]);
+
+    // A body of exactly one chunk: the loop takes it, sees a full buffer, and
+    // polls because more is expected. Nothing arrives.
+    const stalled_payload = try allocator.alloc(u8, 4096);
+    defer allocator.free(stalled_payload);
+    @memset(stalled_payload, 'x');
+    var stalled_reader = std.Io.Reader.fixed(stalled_payload);
+    try testing.expectError(
+        ClientError.DeepSeekGenerationStalled,
+        readBodyWithin(&stalled_reader, allocator, 1 << 20, pipe_fds[0], 20, 1_000),
+    );
+
+    // With the ceiling at the budget the same silence is exhaustion, not a
+    // stall - the distinction the ceiling exists to draw.
+    var spent_reader = std.Io.Reader.fixed(stalled_payload);
+    try testing.expectError(
+        error.RequestTimedOut,
+        readBodyWithin(&spent_reader, allocator, 1 << 20, pipe_fds[0], 20, 20),
+    );
+
+    // The floor under both: a body that arrives is read whole, across chunks,
+    // and a poll between them does not truncate it.
+    _ = std.posix.system.write(pipe_fds[1], "ready", 5);
+    const whole_payload = try allocator.alloc(u8, 4096 * 2 + 7);
+    defer allocator.free(whole_payload);
+    for (whole_payload, 0..) |*byte, i| byte.* = @intCast(i % 251);
+    var whole_reader = std.Io.Reader.fixed(whole_payload);
+    const body = try readBodyWithin(&whole_reader, allocator, 1 << 20, pipe_fds[0], 20, 1_000);
+    defer allocator.free(body);
+    try testing.expectEqualSlices(u8, whole_payload, body);
+
+    // And the size limit still refuses a body over the cap.
+    var large_reader = std.Io.Reader.fixed(whole_payload);
+    try testing.expectError(
+        error.StreamTooLong,
+        readBodyWithin(&large_reader, allocator, 4096, pipe_fds[0], 20, 1_000),
     );
 }
 
