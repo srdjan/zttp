@@ -84,6 +84,24 @@ second metadata contract.
 | `simulate_edit` | implemented | `file`, `repairs` | |
 | `verify` | implemented | `file`, `properties`, `content` | `content` verifies supplied bytes without a write |
 
+### The `modules` payload has two row shapes
+
+`modules` resolves one entry file, so its `builtins[]` rows are scoped to what
+that file imports. Every row carries `specifier`, `name`, `summary`, `resolved`,
+and `exports`, and every export carries its `name`, `params`, and `returns`. A
+row whose `resolved` is `false` carries neither `required_capabilities` nor an
+`effect` on any of its exports: the veto enforces both mechanically, and `meta`
+and `effects` still answer them for a module the file has not imported.
+
+Read `resolved` before either key. This is the one place in the protocol where
+the shape of a row varies within a single `schema_version`, so a reader that
+takes `required_capabilities` on every row reads undefined rather than a version
+mismatch it can detect. Restoring the keys unconditionally was measured at 2451
+bytes of an 11636-byte payload, and it changes the recorded `zts_expert_query`
+tool results inside the `sibling-helper` and `egress-options-holes` cassettes -
+so any edit to this payload's bytes stales the codegen corpus and must be
+planned with a re-record.
+
 Every operation in the closed set is implemented as of 2026-08-03. The
 `operation_not_implemented` code stays in the protocol because the set is closed
 and a future member may land deferred: such an operation answers

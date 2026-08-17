@@ -1391,6 +1391,16 @@ fn writeModulesPayload(
     // its per-export effect - both enforced mechanically by the veto rather
     // than by the model remembering them, and both still available from `meta`
     // and `effects`.
+    //
+    // That makes a `builtins[]` row two shapes within one `schema_version`, and
+    // a reader must branch on `resolved` rather than assume the keys are there.
+    // The trade was taken deliberately, because the alternative costs the
+    // corpus: this payload's text is a recorded `zts_expert_query` tool result
+    // inside the `sibling-helper` and `egress-options-holes` cassettes, so any
+    // change to these bytes - restoring the two keys was measured at 2451 of
+    // 11636 - stales them and the replay gate refuses with
+    // `StaleCodegenCassette`. Plan a re-record before editing what this writes.
+    // Documented for consumers in docs/internals/agent-protocol-v2.md.
     try json.objectField("builtins");
     try json.beginArray();
     for (zts.builtinModules) |binding| {
