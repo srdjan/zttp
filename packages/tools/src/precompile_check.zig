@@ -857,8 +857,10 @@ fn signatureCorpusDigest(allocator: std.mem.Allocator, out_members: *usize) ![32
 /// callback, so the payload argument was real and undeclared. Then by
 /// `zttp:workflow.call`, which declared `.object` for a value built by
 /// `createFetchResponse` - a real Response - and now declares that shape.
+/// Then by `zttp:sql`'s `sqlMany` and `sqlExec`, which declared `.object` for
+/// an array of rows and for `{ rowsAffected, lastInsertRowId? }`.
 /// Parameter names are not part of this digest, which covers arity and types.
-const frozen_signature_digest = "be422b1d86e0fda36abfb4473494993062c8f188062f7fb0e8c42610d135c640";
+const frozen_signature_digest = "07fdba33c857e9cfccba8f9d3c2cedef915232b7cac8501267749eec58caaf7b";
 
 test "frozen signature corpus: the gate has an input before it has a verdict" {
     // The floor. A corpus that is empty, or an emitter that writes nothing,

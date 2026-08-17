@@ -65,6 +65,12 @@ pub const binding = sdk.ModuleBinding{
             .arg_count = 2,
             .effect = .read,
             .returns = .object,
+            // `.object` for a value that is an ARRAY of rows. The kind
+            // vocabulary has no array member, so the shape is spelled here -
+            // and the imprecision was not cosmetic: a recorded draft read `.ok`
+            // and `.value` off this result, which the checker proved safe and
+            // the runtime faulted on with error.TypeError.
+            .signature = .{ .params = &.{ "string", "object" }, .returns = "object[]" },
             .param_types = &.{ .string, .object },
             .param_names = &.{ "name", "params" },
             .required_arg_count = 1,
@@ -76,6 +82,11 @@ pub const binding = sdk.ModuleBinding{
             .arg_count = 2,
             .effect = .write,
             .returns = .object,
+            // The shape this module's own header states.
+            .signature = .{
+                .params = &.{ "string", "object" },
+                .returns = "{ rowsAffected: number; lastInsertRowId?: number }",
+            },
             .param_types = &.{ .string, .object },
             .param_names = &.{ "name", "params" },
             .required_arg_count = 1,

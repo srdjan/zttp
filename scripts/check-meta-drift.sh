@@ -62,7 +62,7 @@ EXPECTED_RESTRICTION_HASH="3409f9e0490c698e67dcd1e7a6e3465f0d14c50e0a611bbe96520
 # statement into the argument that takes a registered query name. Summarising
 # all 26 modules doubled the discovery payload to 14,616 bytes; four leaves it
 # at 11,061 against a 7,213-byte baseline.
-EXPECTED_BUILTIN_HASH="70e79d5581f1a84f272b3c039679d95aedc95e9551f65e8e6ae947666029242e"
+EXPECTED_BUILTIN_HASH="a866c20081b735604ce1b0e1253fa5f125275f2bfe4bbbf8e9398e08959e7f2b"
 
 fail() {
   printf 'meta drift: %s\n' "$1" >&2
