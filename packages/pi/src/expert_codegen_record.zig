@@ -1327,10 +1327,20 @@ const record_corpus = [_]RecordCase{
         // and `chargeId` - none of which a reader of the prompt could derive.
         // A case whose test asks for more than its prompt says measures
         // guessing, not convergence.
+        // Second pass. Stating the 201 and the body fields fixed those, and the
+        // case still failed four runs running on the one thing left ambiguous:
+        // the test asserts the step's recorded RESULT contains "reservationId",
+        // which needs the step to return an object carrying that key. "a
+        // reserve step returning a reservationId" reads as returning the id
+        // value, and that is what the model wrote twice - binding it to a
+        // variable of that name, which the recorded result never sees.
+        //
+        // Verified before recording: a handler whose steps return
+        // { reservationId } and { chargeId } passes this spec 3/3.
         .prompt = "Create a durable handler in handler.ts using zttp:durable that runs a " ++
-            "two-step order workflow via run() and step(): a `reserve` step returning a " ++
-            "reservationId, then a `charge` step returning a chargeId. Respond 201 with a " ++
-            "body carrying reserved and charged as true.",
+            "two-step order workflow via run() and step(): a `reserve` step returning " ++
+            "{ reservationId }, then a `charge` step returning { chargeId }. Respond 201 " ++
+            "with a body carrying reserved and charged as true.",
         .intent = .{ .runtime = .{
             .tests_jsonl =
             \\{"type":"runtime","durable":true,"workflowQueue":false}
@@ -1421,9 +1431,32 @@ const record_corpus = [_]RecordCase{
     },
     .{
         .name = "workflow-saga-compensation",
+        // The case named no service, and its support files are `runtime_files`,
+        // which `writeRuntimeFiles` materializes inside `runIntentCheck` - after
+        // the model has drafted. So `intent-system.json` and the three seeded
+        // handlers do not exist in the workspace while it writes, and the test
+        // asserts step results carrying markers only those handlers produce.
+        // The case was unpassable except by guessing three names it was never
+        // given, which run 1 happened to do and later runs did not.
+        //
+        // Naming them matches both siblings, which keep their support files
+        // runtime-only and name the service in the prompt: queued-call says
+        // "a greet child handler", nested-dispatch says "inventory" and
+        // "notify". Seeding at draft time instead would have made this the one
+        // workflow case that discovers its registry rather than being told it.
+        //
+        // Verified before recording: a handler dispatching these services on
+        // these paths, requiring no request body, and answering with the saga
+        // outcome passes this spec 2/2 - and `do:`/`undo:` step names are
+        // derived from each entry's `name`, so the prompt does not state them.
         .prompt = "Create a handler in handler.ts using zttp:workflow saga() for reserve, " ++
-            "charge, and ship steps. Include compensate functions for every non-last static " ++
-            "saga step so the saga compensation proof can pass.",
+            "charge, and ship steps, taking the run key from the idempotency-key header " ++
+            "and reading no request body. Each step dispatches to a co-located handler " ++
+            "with call(): reserve to \"inventory\" at /reserve, charge to \"billing\" at " ++
+            "/charge, ship to \"shipping\" at /ship. Include compensate functions for every " ++
+            "non-last static saga step so the saga compensation proof can pass - reserve " ++
+            "compensates to \"inventory\" at /release and charge to \"billing\" at /refund. " ++
+            "Answer with the saga outcome in the response body.",
         .intent = .{ .runtime = .{
             .zttp_json = "{\n  \"entry\": \"handler.ts\",\n  \"system\": \"intent-system.json\"\n}\n",
             .runtime_files = &saga_runtime_files,
@@ -3367,9 +3400,9 @@ const deepseek_coverage_baseline = [_][]const u8{
     "ZTS501",
     "ZTS502",
 };
-// Moved when durable-order and workflow-wait-signal had their prompts state the
-// contract their intent tests already asserted. The identity covers the
-// model-visible input, so a prompt edit moves it by construction.
+// Moved again when durable-order's step-result shape and
+// workflow-saga-compensation's service names were stated. The identity covers
+// the model-visible input, so a prompt edit moves it by construction.
 //
 // The list above still reads five of seventy-one, measured over the corpus this
 // identity replaced. It is NOT a measurement of the new corpus: no recording of
@@ -3377,7 +3410,7 @@ const deepseek_coverage_baseline = [_][]const u8{
 // `coverageBaseline` returns null and the ratchet silently stops applying.
 // Re-measure with `bash scripts/update-coverage.sh` once a corpus records, and
 // correct the list and this note from that run rather than from this one.
-const deepseek_coverage_headline_input_id = "4330e42f0ec264c3775846827fa3e23ca38280939d1adfc01f1761b5c3003f1b";
+const deepseek_coverage_headline_input_id = "95cdd383c2335680f9002d17700f197c3f1d8e08e84ff21b769c20bf0a8f7b57";
 
 /// Return the live coverage floor for one exact model-visible input and model.
 /// Expected outcomes and thresholds cannot reset this ratchet.
