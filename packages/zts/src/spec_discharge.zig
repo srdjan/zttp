@@ -109,11 +109,26 @@ pub fn suggestionFor(name: []const u8) ?[]const u8 {
     if (std.mem.eql(u8, name, "read_only")) {
         return "remove writing calls to zttp:cache / zttp:sql, or drop `read_only` from your proof-property set.";
     }
+    // Both name the `workflow.call` exception. Without it these two sent an
+    // author into a closed loop: the write that fails the property is often a
+    // `workflow.call`, "move it inside a `durable.step`" is the one edit ZTS509
+    // refuses, and making that edit anyway keeps both ZTS500s and adds ZTS509 -
+    // strictly worse, with nothing the suggestion describes left to try. A
+    // recorded model spent thirteen roundtrips there and applied no edit,
+    // reporting the contradiction it had found: "retry_safe wants writes wrapped
+    // in durable.step, and idempotent wants writes moved inside durable.step ...
+    // but ZTS509 forbids workflow.call inside step(). Those conflict."
     if (std.mem.eql(u8, name, "retry_safe")) {
-        return "wrap writes in `durable.step` so retried invocations replay deterministically.";
+        return "wrap writes in `durable.step` so retried invocations replay " ++
+            "deterministically. `workflow.call` / `saga` / `fanout` / `follow` cannot " ++
+            "move: ZTS509 requires them at `run()` scope, where they do not discharge " ++
+            "this property - drop `retry_safe` from the capsule instead.";
     }
     if (std.mem.eql(u8, name, "idempotent")) {
-        return "remove non-deterministic operations or move writes inside a `durable.step`.";
+        return "remove non-deterministic operations or move writes inside a " ++
+            "`durable.step`. `workflow.call` / `saga` / `fanout` / `follow` cannot " ++
+            "move: ZTS509 requires them at `run()` scope, where they do not discharge " ++
+            "this property - drop `idempotent` from the capsule instead.";
     }
     if (std.mem.eql(u8, name, "state_isolated")) {
         return "move module-scope mutations into the handler body or behind zttp:cache.";
@@ -1390,4 +1405,34 @@ test "dischargeCapsule recursive function fails every declared property" {
     try std.testing.expectEqual(@as(usize, 1), diags.items.len);
     try std.testing.expectEqual(SpecDiagnostic.Kind.not_discharged, diags.items[0].kind);
     try std.testing.expect(std.mem.indexOf(u8, diags.items[0].suggestion.?, "recursive") != null);
+}
+
+test "the durable suggestions name the write that cannot move" {
+    // A closed guidance loop, reproduced outside the corpus before it was
+    // fixed: take a handler that dispatches with `workflow.call` at `run()`
+    // scope, declare `idempotent` and `retry_safe`, and both suggestions say to
+    // move the write into a `durable.step`. Making that edit is the one thing
+    // ZTS509 refuses, and it leaves both ZTS500s standing while adding ZTS509 -
+    // strictly worse, and nothing the suggestion describes is left to try.
+    //
+    // A recorded model found the contradiction, said so, and still burned
+    // thirteen roundtrips without applying an edit.
+    const retry = suggestionFor("retry_safe") orelse return error.TestExpectedSuggestion;
+    const idem = suggestionFor("idempotent") orelse return error.TestExpectedSuggestion;
+
+    for ([_][]const u8{ retry, idem }) |text| {
+        // Names the exception, so following the first clause is not the only
+        // reading available.
+        try std.testing.expect(std.mem.indexOf(u8, text, "workflow.call") != null);
+        // Names the rule that refuses the move, so the two can be reconciled
+        // without guessing which one is wrong.
+        try std.testing.expect(std.mem.indexOf(u8, text, "ZTS509") != null);
+        // And says what to do instead, since for this shape there is no edit
+        // that discharges the property.
+        try std.testing.expect(std.mem.indexOf(u8, text, "drop") != null);
+    }
+    // The exception is specific to the durable pair. A property whose write can
+    // genuinely move into a step keeps the plain instruction.
+    const det = suggestionFor("deterministic") orelse return error.TestExpectedSuggestion;
+    try std.testing.expect(std.mem.indexOf(u8, det, "ZTS509") == null);
 }
