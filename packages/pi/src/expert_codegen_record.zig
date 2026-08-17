@@ -1463,6 +1463,12 @@ const record_corpus = [_]RecordCase{
         // draft was right and the compiler was wrong, and the round-trip the
         // model spent working around it is the cost of that.
         .expect_first_attempt_green = true,
+        // Measured, not chosen: the recording that produced the committed
+        // corpus applied no edit for this case, so there is no handler to run
+        // and the intent cannot pass. docs/convergence.md already pins this case
+        // as the precedent accepted failure. Flip this back when a recording
+        // measures it passing, and say what closed the gap.
+        .expect_committed_intent_pass = false,
     },
     .{
         .name = "workflow-saga-compensation",
@@ -2021,18 +2027,34 @@ test "durable runtime intents match their pinned committed outcome" {
             flow_case
         else
             return error.MissingRuntimeIntentArtifact;
-        const handler = for (flow_case.fixtures) |fixture| {
+        // A case that applied no edit has no expected workspace, which is the
+        // correct record of that outcome rather than a broken artifact. It
+        // cannot pass an intent check, so it is an observed failure and is
+        // compared against the pin like any other.
+        const handler: ?[]const u8 = for (flow_case.fixtures) |fixture| {
             if (fixture.role == .expected_workspace and
                 std.mem.eql(u8, fixture.path, "expected/handler.ts"))
             {
                 break fixture.bytes;
             }
-        } else return error.MissingExpectedHandler;
+        } else null;
+        if (handler == null) {
+            if (rc.expect_committed_intent_pass) {
+                std.debug.print(
+                    "[codegen-intent] {s}: pinned to pass but the recording applied no edit," ++
+                        " so the corpus holds no handler to run\n",
+                    .{name},
+                );
+                return error.RuntimeIntentPinMismatch;
+            }
+            checked += 1;
+            continue;
+        }
 
         var tmp = try IsolatedTmp.init(testing.allocator, "durable-intent");
         defer tmp.cleanup(testing.allocator);
         for (rc.seed_files) |seed| try tmp.writeFile(testing.allocator, seed.path, seed.bytes);
-        try tmp.writeFile(testing.allocator, intent.handler_path, handler);
+        try tmp.writeFile(testing.allocator, intent.handler_path, handler.?);
 
         const outcome = codegen.runIntentCheck(
             testing.allocator,
@@ -3617,11 +3639,10 @@ const anthropic_coverage_legacy_corpus_version = "83c9c0c040e8e6f1f659ddc7d853f9
 /// not lost coverage within one frozen sample, which is why the baseline binds
 /// the model-visible headline input as well as provider and model.
 const deepseek_coverage_baseline = [_][]const u8{
-    "ZTS305",
     "ZTS400",
     "ZTS500",
     "ZTS501",
-    "ZTS502",
+    "ZTS509",
 };
 // Moved again when a full audit of all 19 cases found three more assertions
 // stated nowhere the model could read: queued-call's echoed child body,
@@ -3629,12 +3650,14 @@ const deepseek_coverage_baseline = [_][]const u8{
 // payload contents. The identity covers
 // the model-visible input, so a prompt edit moves it by construction.
 //
-// The list above still reads five of seventy-one, measured over the corpus this
-// identity replaced. It is NOT a measurement of the new corpus: no recording of
-// the new prompts exists yet, and the pin has to move in this commit or
-// `coverageBaseline` returns null and the ratchet silently stops applying.
-// Re-measure with `bash scripts/update-coverage.sh` once a corpus records, and
-// correct the list and this note from that run rather than from this one.
+// The list above is now measured, not carried over: four of seventy-two, read
+// from the first corpus recorded against these prompts. Against the five it
+// replaced, ZTS305 and ZTS502 dropped out and ZTS509 appeared - the model wrote
+// no unused binding and no unknown spec name this time, and it did try moving a
+// `workflow.call` inside a `durable.step`, which is exactly the edit ZTS509
+// refuses. Those are model-behaviour changes within one frozen prompt set, not
+// lost compiler coverage, and the identity below binds the prompts so a prompt
+// edit moves the pin by construction.
 const deepseek_coverage_headline_input_id = "0012ad8ca6d5d08ac5023862378fe0c971b3672dadbc079256fb47d810033516";
 
 /// Return the live coverage floor for one exact model-visible input and model.
@@ -3681,10 +3704,20 @@ test "coverage baselines are input provider and model qualified" {
     changed_input.bytes[0] = if (changed_input.bytes[0] == '0') '1' else '0';
     try testing.expect(coverageBaseline(.deepseek, models.defaultForProvider(.deepseek).id, changed_input) == null);
     // The two sets are measurements of different models, not copies.
-    try testing.expect(anthropic_coverage_baseline.len == deepseek_coverage_baseline.len);
-    var identical = true;
-    for (anthropic_coverage_baseline, deepseek_coverage_baseline) |claude_code, deepseek_code| {
-        if (!std.mem.eql(u8, claude_code, deepseek_code)) identical = false;
+    //
+    // Equal length used to be asserted alongside this and is not the claim: two
+    // models can trip the same count and different rules, or different counts
+    // entirely, and the second is what happened - the DeepSeek list is now four
+    // where the Anthropic one is five. Pairing the slices to compare them also
+    // required equal length, so the assertion propped up its own comparison.
+    var identical = anthropic_coverage_baseline.len == deepseek_coverage_baseline.len;
+    if (identical) {
+        for (anthropic_coverage_baseline, 0..) |claude_code, index| {
+            if (!std.mem.eql(u8, claude_code, deepseek_coverage_baseline[index])) {
+                identical = false;
+                break;
+            }
+        }
     }
     try testing.expect(!identical);
 }
