@@ -1,6 +1,7 @@
 # InvalidChangeSetArgs: make it diagnosable before deciding anything else
 
-Status: proposed, not started. Written 2026-08-17.
+Status: both diagnosis steps landed 2026-08-17. Step 1 named the shape; step 2
+keeps the body. Step 3 - choosing a fix - waits on an observed occurrence.
 
 ## Why it matters
 
@@ -81,6 +82,16 @@ already holds every accepted response. It is what makes the next occurrence
 explainable rather than another statistic.
 
 Then decide retry-versus-feedback from one observed body.
+
+**Landed.** The body goes to
+`.zig-cache/codegen-record-diagnostics/<run>/<case>.rejected-<attempt>.json`,
+beside the metadata rows rather than in the staging tree, because the staging
+tree is swapped wholesale on promotion and a failed run never promotes. The
+attempt index in the file name is the index of the diagnostics row for the same
+failure, so the shape and the bytes read together. `CaptureSink.quarantine_fn`
+is the hook and it is wired only when the recorder has a diagnostics path, which
+is an ignored worktree location; a live interactive session has no such path and
+so writes nothing.
 
 ## Explicitly not doing
 

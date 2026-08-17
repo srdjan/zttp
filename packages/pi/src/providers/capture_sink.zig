@@ -88,6 +88,24 @@ pub const ResponseDiagnosticContext = struct {
     model: []const u8,
 };
 
+/// One response body the decoder refused, held for diagnosis.
+///
+/// This is the single deliberate exception to the metadata-only rule above, and
+/// it exists because that rule made a class of failure unexplainable: a refusal
+/// whose cause is in the bytes cannot be diagnosed from a tag naming the branch
+/// that fired. The exception is bounded on every side - it carries only a
+/// response the decoder already rejected, only the sanitized bytes that would
+/// have entered a cassette had they decoded, and a sink is free to write
+/// nothing. It never carries a prompt, a transcript, or user source.
+pub const RejectedResponse = struct {
+    /// The decoder error that refused this body.
+    failure: anyerror,
+    /// Which `propose_change_set` refusal fired, when that is what failed.
+    change_set_rejection: ?propose_change_set.RejectionShape,
+    /// Sanitized response bytes, borrowed for this call only.
+    body: []const u8,
+};
+
 pub const CaptureSink = struct {
     context: *anyopaque,
     record_fn: *const fn (
@@ -104,6 +122,15 @@ pub const CaptureSink = struct {
         diagnostic_context: ResponseDiagnosticContext,
         diagnostics: ResponseDiagnostics,
     ) anyerror!void = null,
+    /// Optional best-effort quarantine for a body the decoder refused. Like the
+    /// observer above, a failure here must never replace the transport, capture,
+    /// or parser result for the model call.
+    quarantine_fn: ?*const fn (
+        context: *anyopaque,
+        attempt_index: usize,
+        diagnostic_context: ResponseDiagnosticContext,
+        rejection: RejectedResponse,
+    ) anyerror!void = null,
     /// Strict capture cursor. It advances only after record_fn succeeds.
     next_call_index: usize = 0,
     /// Diagnostic sequence. It includes failures that happen before capture.
@@ -116,6 +143,24 @@ pub const CaptureSink = struct {
     ) !void {
         try self.record_fn(self.context, self.next_call_index, snapshot, raw_response);
         self.next_call_index += 1;
+    }
+
+    /// Hand a refused body to the sink under the attempt index the next
+    /// diagnostics row will carry, so the two can be read together. Call it
+    /// before `recordDiagnostics` for the same failure: this reads the cursor
+    /// and that one advances it.
+    pub fn quarantineRejectedResponse(
+        self: *CaptureSink,
+        diagnostic_context: ResponseDiagnosticContext,
+        rejection: RejectedResponse,
+    ) void {
+        const quarantine = self.quarantine_fn orelse return;
+        quarantine(
+            self.context,
+            self.next_diagnostic_attempt_index,
+            diagnostic_context,
+            rejection,
+        ) catch {};
     }
 
     pub fn recordDiagnostics(

@@ -189,6 +189,13 @@ pub const Recorder = struct {
                 recordResponseDiagnostics
             else
                 null,
+            // Only the diagnostics path is an ignored worktree location the
+            // operator already expects to hold run debris. With no such path
+            // there is nowhere a refused body may be written.
+            .quarantine_fn = if (self.options.diagnostics_path != null)
+                quarantineRejectedResponse
+            else
+                null,
         };
     }
 
@@ -535,6 +542,55 @@ pub const Recorder = struct {
             );
             return err;
         };
+    }
+
+    /// Write a refused response body beside the metadata diagnostics.
+    ///
+    /// The recorder holds everything in memory until `promote`, so a case that
+    /// fails takes its captured responses with it - including the one response
+    /// that would explain the failure. This writes that one body, and only that
+    /// one, to the ignored worktree the diagnostics already use. The file name
+    /// carries the case and the attempt index, which is the same index the
+    /// diagnostics row for this failure carries, so the two read together.
+    fn quarantineRejectedResponse(
+        context: *anyopaque,
+        attempt_index: usize,
+        _: capture_sink.ResponseDiagnosticContext,
+        rejection: capture_sink.RejectedResponse,
+    ) anyerror!void {
+        const self: *Recorder = @ptrCast(@alignCast(context));
+        const diagnostics_path = self.options.diagnostics_path orelse return;
+        // A body over the ceiling never reached the decoder: `recordModelExchange`
+        // refuses it first. Check anyway rather than write a file whose size the
+        // rest of the recorder would have rejected.
+        if (rejection.body.len > artifact.Limits.trace_or_response_bytes) {
+            return error.FlowLimitExceeded;
+        }
+        const parent = std.fs.path.dirname(diagnostics_path) orelse
+            return error.InvalidDiagnosticsPath;
+        const quarantine_path = try std.fmt.allocPrint(
+            self.allocator(),
+            "{s}/{s}.rejected-{d}.json",
+            .{ parent, self.options.case_name, attempt_index },
+        );
+        defer self.allocator().free(quarantine_path);
+        appendDiagnosticLine(self.allocator(), quarantine_path, rejection.body) catch |err| {
+            std.debug.print(
+                "[response-diagnostics] rejected body write failed: {s}\n",
+                .{@errorName(err)},
+            );
+            return err;
+        };
+        std.debug.print(
+            "[response-diagnostics] {s} refused attempt {d}" ++
+                " (shape={s}); body kept at {s}\n",
+            .{
+                @errorName(rejection.failure),
+                attempt_index,
+                if (rejection.change_set_rejection) |shape| @tagName(shape) else "none",
+                quarantine_path,
+            },
+        );
     }
 
     fn recordApproval(context: *anyopaque, preview: loop.ChangeSetApprovalPreview) anyerror!bool {
@@ -954,6 +1010,115 @@ test "recorder exposes one provider runtime identity" {
 
 fn lessThanPath(_: void, left: []const u8, right: []const u8) bool {
     return std.mem.lessThan(u8, left, right);
+}
+
+test "a refused body survives the case that failed on it" {
+    // The recorder holds captured responses in memory until promotion, so the
+    // one response that explains a failure dies with the case. This asserts the
+    // body reaches disk under the same attempt index its diagnostics row
+    // carries: a file that exists but cannot be tied to a row would leave the
+    // next occurrence as unexplainable as the last three were.
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const diagnostics_path = try diagnosticTestPath(allocator, tmp, "refused-case.jsonl");
+    defer allocator.free(diagnostics_path);
+
+    var recorder = try Recorder.init(allocator, .{
+        .case_name = "refused-case",
+        .evidence_class = .empirical_model,
+        .provider = .deepseek,
+        .model = "deepseek-v4-flash",
+        .diagnostics_path = diagnostics_path,
+        .workspace_allowlist = &.{},
+    });
+    defer recorder.deinit();
+    var sink = recorder.captureSink();
+    const context: capture_sink.ResponseDiagnosticContext = .{
+        .provider = .deepseek,
+        .model = "deepseek-v4-flash",
+    };
+    const clean: capture_sink.ResponseDiagnostics = .{
+        .latency_ms = 5,
+        .http_status = null,
+        .finish_reason = .stop,
+        .completion_tokens = 10,
+        .field_presence = .{},
+        .parser_warnings = &.{},
+        .failure = null,
+    };
+    // Two clean attempts first: a refusal in a real case arrives mid-turn, and
+    // an index that only ever reads zero would prove nothing about correlation.
+    sink.recordDiagnostics(context, clean);
+    sink.recordDiagnostics(context, clean);
+
+    const body =
+        "{\"choices\":[{\"finish_reason\":\"tool_calls\",\"message\":" ++
+        "{\"tool_calls\":[{\"function\":{\"name\":\"propose_change_set\"," ++
+        "\"arguments\":\"{\\\"changes\\\":[],\\\"why\\\":\\\"explained\\\"}\"}}]}}]}";
+    sink.quarantineRejectedResponse(context, .{
+        .failure = error.InvalidChangeSetArgs,
+        .change_set_rejection = .args_extra_top_level_key,
+        .body = body,
+    });
+    sink.recordDiagnostics(context, .{
+        .latency_ms = 48139,
+        .http_status = null,
+        .finish_reason = .tool_calls,
+        .completion_tokens = 5674,
+        .field_presence = .{},
+        .parser_warnings = &.{.decoder_rejected_response},
+        .failure = error.InvalidChangeSetArgs,
+        .change_set_rejection = .args_extra_top_level_key,
+    });
+
+    const parent = std.fs.path.dirname(diagnostics_path).?;
+    const quarantine_path = try std.fmt.allocPrint(
+        allocator,
+        "{s}/refused-case.rejected-2.json",
+        .{parent},
+    );
+    defer allocator.free(quarantine_path);
+    const written = try zts.file_io.readFile(allocator, quarantine_path, 64 * 1024);
+    defer allocator.free(written);
+    try std.testing.expectEqualStrings(body, written);
+
+    // The row at that same index has to name the refusal, or the body on disk
+    // belongs to nothing a reader can find.
+    const rows = try zts.file_io.readFile(allocator, diagnostics_path, 64 * 1024);
+    defer allocator.free(rows);
+    var lines = std.mem.splitScalar(u8, rows, '\n');
+    var refused_rows: usize = 0;
+    while (lines.next()) |line| {
+        if (line.len == 0) continue;
+        var parsed = try std.json.parseFromSlice(std.json.Value, allocator, line, .{});
+        defer parsed.deinit();
+        const root = parsed.value.object;
+        if (root.get("error_name").? == .null) continue;
+        refused_rows += 1;
+        try std.testing.expectEqual(@as(i64, 2), root.get("attempt_index").?.integer);
+        try std.testing.expectEqualStrings(
+            "args_extra_top_level_key",
+            root.get("change_set_rejection").?.string,
+        );
+    }
+    try std.testing.expectEqual(@as(usize, 1), refused_rows);
+}
+
+test "a refused body is written nowhere when the run has no diagnostics path" {
+    // The quarantine is the one place model bytes leave memory on a failure.
+    // Without the ignored worktree path the diagnostics already use, there is no
+    // location that was agreed on, so the hook must be absent rather than
+    // guessing at one.
+    var recorder = try Recorder.init(std.testing.allocator, .{
+        .case_name = "no-diagnostics",
+        .evidence_class = .empirical_model,
+        .provider = .deepseek,
+        .model = "deepseek-v4-flash",
+        .workspace_allowlist = &.{},
+    });
+    defer recorder.deinit();
+    try std.testing.expect(recorder.captureSink().quarantine_fn == null);
 }
 
 test "a refused change set names which refusal fired" {
