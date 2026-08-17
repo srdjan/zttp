@@ -2525,17 +2525,36 @@ pub const TypeChecker = struct {
     /// caller's return type equal to the callback's, so the statement that
     /// mismatches and the statement that must change are different lines.
     ///
-    /// Returns null for anything that is not a call carrying a function
-    /// argument, which leaves every other mismatch reported exactly where it
-    /// was.
+    /// Returns null for anything that is not a call whose declared return type
+    /// is read from a function argument, which leaves every other mismatch
+    /// reported exactly where it was.
+    ///
+    /// Carrying a lambda is not that condition. `mapResult(r, (v) => ...)`
+    /// declares `.returns = .result`, so its mismatch is at the outer return
+    /// and an edit inside the callback cannot fix it. Reading only the argument
+    /// tags relocated those too - the same wrong-attribution defect this
+    /// function exists to remove, for every higher-order helper.
     fn callbackReturnNode(self: *const TypeChecker, expr: NodeIndex) ?NodeIndex {
         if (self.ir_view.getTag(expr) != .call) return null;
         const call = self.ir_view.getCall(expr) orelse return null;
+
+        // `applyReturnFromParam` renders `returns_from_param` as a signature
+        // whose return type is a type variable and whose named argument is
+        // `() => T`. That shape, not the presence of a lambda, is what makes
+        // the caller's return type equal to the callback's.
+        if (self.ir_view.getTag(call.callee) != .identifier) return null;
+        const callee_binding = self.ir_view.getBinding(call.callee) orelse return null;
+        const sig = self.callableSignatureForBinding(callee_binding) orelse return null;
+        if (self.env.pool.getTag(sig.return_type) != .t_generic_param) return null;
 
         for (0..call.args_count) |i| {
             const arg = self.ir_view.getListIndex(call.args_start, @intCast(i));
             const arg_tag = self.ir_view.getTag(arg) orelse continue;
             if (arg_tag != .arrow_function and arg_tag != .function_expr) continue;
+            if (i >= sig.param_count) continue;
+            const param_type = sig.param_types[i];
+            if (self.env.pool.getTag(param_type) != .t_function) continue;
+            if (self.env.pool.getFunctionInfo(param_type).ret != sig.return_type) continue;
             const func = self.ir_view.getFunction(arg) orelse continue;
 
             // An expression-bodied arrow has no return statement; the body is
@@ -6904,6 +6923,54 @@ test "a return mismatch through a callback points at the callback's return" {
         try std.testing.expectEqual(@as(u32, 4), loc.line);
         // And it must say what to do, not only that something is wrong.
         try std.testing.expect(diag.help != null);
+    }
+    try std.testing.expect(saw);
+}
+
+test "a call that merely carries a callback keeps its mismatch at the outer return" {
+    // The counterpart to the test above, and the boundary the relocation must
+    // respect. `apply` declares `string`, not a type read from its argument, so
+    // the returned value is wrong at line 3 and no edit inside the callback can
+    // fix it. Reading only the argument tags relocated this one too, which is
+    // the same wrong-attribution defect - pointed at a line whose edit cannot
+    // clear the error - for every higher-order helper: mapResult, andThen,
+    // dictFold, and any the author writes.
+    const allocator = std.testing.allocator;
+    const source =
+        \\function apply(f: () => string): string { return f(); }
+        \\export function handler(req: Request): Response {
+        \\  return apply(() => {
+        \\    return "x";
+        \\  });
+        \\}
+    ;
+
+    var strip_result = try @import("zts-engine").stripper.strip(allocator, source, .{});
+    defer strip_result.deinit();
+    var parser = try @import("zts-engine").parser.JsParser.init(allocator, strip_result.code);
+    defer parser.deinit();
+    const root = try parser.parse();
+    const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+    var env = TypeEnv.init(allocator, &pool);
+    defer env.deinit();
+    @import("module_types.zig").populateModuleTypes(&env, &pool, allocator);
+    abi_types.populateHandlerAbiTypes(&env, &pool, allocator);
+    env.populateFromTypeMap(&strip_result.type_map);
+
+    var checker = TypeChecker.init(allocator, ir_view, null, &env, null);
+    defer checker.deinit();
+    _ = try checker.check(root);
+
+    var saw = false;
+    for (checker.getDiagnostics()) |diag| {
+        if (diag.kind != .return_type_mismatch) continue;
+        saw = true;
+        const loc = ir_view.getLoc(diag.node) orelse return error.TestExpectedLocation;
+        // Line 3 is `return apply(...)`; line 4 is the callback's return.
+        try std.testing.expectEqual(@as(u32, 3), loc.line);
     }
     try std.testing.expect(saw);
 }
