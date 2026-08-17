@@ -2414,43 +2414,103 @@ const RecordingRunSummary = struct {
     staged: usize,
     applied: usize,
     intents_passed: usize,
-    failures: usize,
+    /// Cases that never produced an artifact: a refused proposal, a timeout, a
+    /// decode failure. Distinct from a case that staged and recorded a model
+    /// failure - see `recordingRunCanActivate`.
+    recording_failures: usize,
 };
 
+/// Whether a run may replace the active corpus.
+///
+/// The question is whether the corpus is COMPLETE, not whether the model did
+/// well. Those were one condition and it made the corpus unrecordable: a run
+/// activated only when all nineteen cases applied an edit and passed intent,
+/// so a corpus could be recorded only in the runs where the model happened to
+/// be perfect. Five consecutive full runs failed this, each on a different two
+/// or three cases, while the published metric this corpus feeds is a
+/// first-draft PASS RATE - a number whose whole purpose is to be less than
+/// 100%. The historical rows show it: 2026-08-14 published 89% first-draft and
+/// 84% intent, and 2026-08-03 published 25%.
+///
+/// The recorder already treats a model failure as data. With
+/// `ZTTP_CODEGEN_REQUIRE_GREEN` unset it prints "failure will be measured and
+/// staged in quarantine", validates the replay, and stages the artifact - and
+/// `requireGreenRecording`'s own comment says that branch is what "keeps the
+/// measured-failure corpus behind docs/convergence.md and docs/coverage.md
+/// populated". Refusing to activate that run discarded the measurement the
+/// recorder had just taken.
+///
+/// So completeness is `staged == selected`, and that is exactly the integrity
+/// property: a case that fails to record is never staged, which is why run 3
+/// reported staged=17 against selected=19. A case that staged has a validated
+/// replay whether or not the model succeeded in it.
+///
+/// `ZTTP_CODEGEN_REQUIRE_GREEN=1` remains the opt-in strict mode: it refuses
+/// to stage a non-green case at all, so `staged == selected` then carries the
+/// old meaning without a second condition asserting it.
 fn recordingRunCanActivate(canonical_shape: bool, summary: RecordingRunSummary) bool {
     return canonical_shape and summary.selected == record_corpus.len and
-        summary.staged == summary.selected and summary.applied == summary.selected and
-        summary.intents_passed == summary.selected and summary.failures == 0;
+        summary.staged == summary.selected and summary.recording_failures == 0;
 }
 
-test "only a complete green unfiltered default-model recording can activate" {
+test "a complete recording activates whether or not the model succeeded in it" {
     const canonical = recordingShapeCanActivate(null, false, false, 19, "default", "default");
     try testing.expect(canonical);
+
+    // The green run activates, as before.
     try testing.expect(recordingRunCanActivate(canonical, .{
         .selected = 19,
         .staged = 19,
         .applied = 19,
         .intents_passed = 19,
-        .failures = 0,
+        .recording_failures = 0,
     }));
-    try testing.expect(!recordingShapeCanActivate("health", false, false, 1, "default", "default"));
-    try testing.expect(!recordingShapeCanActivate(null, true, false, 19, "default", "default"));
-    try testing.expect(!recordingShapeCanActivate(null, false, true, 19, "default", "default"));
-    try testing.expect(!recordingShapeCanActivate(null, false, false, 18, "default", "default"));
-    try testing.expect(!recordingShapeCanActivate(null, false, false, 19, "candidate", "default"));
-    try testing.expect(!recordingRunCanActivate(canonical, .{
+
+    // And so does the run that measured failures. This is the change: all
+    // nineteen cases produced a validated artifact, three of them recording a
+    // model that did not apply an edit or missed its intent. That corpus is
+    // complete, and the rate it publishes is what those three make true. Five
+    // consecutive runs were discarded for exactly this shape.
+    try testing.expect(recordingRunCanActivate(canonical, .{
         .selected = 19,
         .staged = 19,
-        .applied = 18,
-        .intents_passed = 19,
-        .failures = 1,
+        .applied = 17,
+        .intents_passed = 18,
+        .recording_failures = 0,
+    }));
+
+    // What still refuses: a case that produced no artifact. The corpus would
+    // be missing a case, and the replay would cover eighteen while claiming
+    // nineteen. Both the count and the flag are checked, because they come
+    // from different places and either alone has been wrong.
+    try testing.expect(!recordingRunCanActivate(canonical, .{
+        .selected = 19,
+        .staged = 17,
+        .applied = 17,
+        .intents_passed = 17,
+        .recording_failures = 2,
     }));
     try testing.expect(!recordingRunCanActivate(canonical, .{
         .selected = 19,
         .staged = 19,
         .applied = 19,
-        .intents_passed = 18,
-        .failures = 1,
+        .intents_passed = 19,
+        .recording_failures = 1,
+    }));
+
+    // Shape guards are unchanged: a filtered, truncated, single-case or
+    // non-default-model run never activates whatever its outcome.
+    try testing.expect(!recordingShapeCanActivate("health", false, false, 1, "default", "default"));
+    try testing.expect(!recordingShapeCanActivate(null, true, false, 19, "default", "default"));
+    try testing.expect(!recordingShapeCanActivate(null, false, true, 19, "default", "default"));
+    try testing.expect(!recordingShapeCanActivate(null, false, false, 18, "default", "default"));
+    try testing.expect(!recordingShapeCanActivate(null, false, false, 19, "candidate", "default"));
+    try testing.expect(!recordingRunCanActivate(false, .{
+        .selected = 19,
+        .staged = 19,
+        .applied = 19,
+        .intents_passed = 19,
+        .recording_failures = 0,
     }));
 }
 
@@ -3273,6 +3333,9 @@ test "record codegen baseline corpus (live, gated)" {
     var observed_runtime: RuntimeConsensus = .{};
     var failures: std.ArrayList(RecordingFailure) = .empty;
     defer failures.deinit(allocator);
+    // Cases that produced no artifact at all. Counted apart from the failures
+    // list, which also holds model outcomes measured after a case staged.
+    var recording_failures: usize = 0;
     for (record_corpus, 0..) |rc, i| {
         if (!recordCaseSelected(i, limit, only_case, rc.name)) continue;
         total += 1;
@@ -3283,6 +3346,7 @@ test "record codegen baseline corpus (live, gated)" {
         const case_started_ms = zts.realtimeNowMs() catch 0;
         const outcome = recordLiveCase(&context, rc, total, selected_case_count) catch |err| {
             const kind = classifyRecordingFailure(err);
+            recording_failures += 1;
             try failures.append(allocator, .{
                 .case_name = rc.name,
                 .kind = kind,
@@ -3407,20 +3471,35 @@ test "record codegen baseline corpus (live, gated)" {
         );
         return;
     }
-    const complete_green_run = recordingRunCanActivate(canonical_full_run, .{
+    const can_activate = recordingRunCanActivate(canonical_full_run, .{
         .selected = total,
         .staged = staged,
         .applied = greens,
         .intents_passed = intent_passes,
-        .failures = failures.items.len,
+        .recording_failures = recording_failures,
     });
-    if (failures.items.len != 0 or staged != selected_case_count or
-        greens != selected_case_count or intent_passes != selected_case_count)
-    {
-        std.debug.print("[codegen-record] incomplete run quarantined at {s}\n", .{stage_root});
+    if (recording_failures != 0 or staged != selected_case_count) {
+        std.debug.print(
+            "[codegen-record] incomplete run quarantined at {s} " ++
+                "({d} case(s) produced no artifact, {d} of {d} staged)\n",
+            .{ stage_root, recording_failures, staged, selected_case_count },
+        );
         return error.CodegenRecordingRunFailed;
     }
-    if (!complete_green_run) {
+    // Measured model failures do not block activation - they are the
+    // measurement - but they are the headline of the run and are said plainly.
+    if (greens != selected_case_count or intent_passes != selected_case_count) {
+        std.debug.print(
+            "[codegen-record] activating a corpus that measures {d} unapplied and " ++
+                "{d} intent-failing case(s) of {d}; the published rate reports them\n",
+            .{
+                selected_case_count - greens,
+                selected_case_count - intent_passes,
+                selected_case_count,
+            },
+        );
+    }
+    if (!can_activate) {
         std.debug.print(
             "[codegen-record] partial, filtered, or non-default-model run quarantined at {s}\n",
             .{stage_root},

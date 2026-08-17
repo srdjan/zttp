@@ -583,3 +583,18 @@ No re-rolling. A surprising outcome is pinned and explained, not re-recorded
 until it flatters - the `workflow-nested-dispatch-avoidance` row above is the
 precedent, and it is the reason that case is pinned as an accepted failure rather
 than quietly re-drawn.
+
+What a run must satisfy to replace the corpus is completeness, not success:
+every selected case produced a validated, replayable artifact. A case whose
+model failed to apply an edit or missed its declared intent still staged one,
+and the rate published above is what those cases make true. Only a case that
+produced no artifact at all - a refused proposal, a timeout, a decode failure -
+blocks activation, because the corpus would then be missing a case while
+claiming to hold it.
+
+That rule follows from the paragraph above. For five consecutive runs the
+recorder instead required every case to reach green, which made re-running
+until the draw came out clean the only path to a published number - the exact
+re-rolling this protocol forbids. Set `ZTTP_CODEGEN_REQUIRE_GREEN=1` to record
+under the strict rule deliberately; it refuses to stage a non-green case, so
+the corpus it produces contains only successes and says so.
