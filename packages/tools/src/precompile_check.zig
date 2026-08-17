@@ -390,6 +390,7 @@ pub fn refreshSpecDiagnostics(allocator: std.mem.Allocator, result: *CheckResult
         contract.properties,
         contract.modules.items,
         contract.declared_specs_implicit,
+        contract.property_provenance,
     );
     errdefer {
         for (refreshed.items) |*d| d.deinit(allocator);
@@ -578,6 +579,16 @@ fn specDiagnosticMessageAlloc(
 ) ![]u8 {
     const base = specDiagnosticMessage(diag);
     const subject = specDiagnosticSubject(diag) orelse return allocator.dupe(u8, base);
+    // The exact site that demoted the property, when the classifier recorded
+    // one. Naming the spec turns twelve candidates into one; naming the line
+    // turns one property into one edit.
+    if (diag.cause) |cause| {
+        return std.fmt.allocPrint(
+            allocator,
+            "{s} (failing spec: {s}; demoted at line {d}:{d} by `{s}`)",
+            .{ base, subject, cause.line, cause.column, cause.snippet },
+        );
+    }
     return std.fmt.allocPrint(allocator, "{s} (failing spec: {s})", .{ base, subject });
 }
 
@@ -1056,6 +1067,20 @@ test "a spec diagnostic names the spec it is about" {
         "handler returns no Proof<T, P> capsule; the default proof profile " ++
             "demands a property this handler does not hold",
         implicit,
+    );
+
+    // The classifier's demotion site, when it recorded one. Naming the spec
+    // narrows twelve candidates to one; naming the line makes it one edit.
+    const with_cause = try specDiagnosticMessageAlloc(allocator, .{
+        .kind = .not_discharged,
+        .spec_name = "deterministic",
+        .cause = .{ .line = 2, .column = 34, .snippet = "Date.now()" },
+    });
+    defer allocator.free(with_cause);
+    try std.testing.expectEqualStrings(
+        "declared Proof capsule was not discharged by handler proof " ++
+            "(failing spec: deterministic; demoted at line 2:34 by `Date.now()`)",
+        with_cause,
     );
 
     // An Effects diagnostic carries the literal "Effects" as its spec_name,

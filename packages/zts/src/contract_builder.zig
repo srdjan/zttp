@@ -728,6 +728,7 @@ pub const ContractBuilder = struct {
             contract.properties,
             contract.modules.items,
             declared_specs_implicit,
+            contract.property_provenance,
         );
     }
 

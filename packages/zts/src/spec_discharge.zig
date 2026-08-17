@@ -255,6 +255,10 @@ pub fn dischargeSpecs(
     /// "declare a narrow Proof capsule" remedy instead of the per-property hint, and is
     /// flagged so downstream surfaces stop claiming a spec was "declared".
     implicit_default: bool,
+    /// Per-property demotion sites from the classifier, when the build has
+    /// them. Null keeps the pre-provenance behaviour for callers that discharge
+    /// without a contract.
+    provenance: ?contract_types.PropertyProvenance,
 ) !std.ArrayList(SpecDiagnostic) {
     var out: std.ArrayList(SpecDiagnostic) = .empty;
     errdefer {
@@ -341,7 +345,7 @@ pub fn dischargeSpecs(
             // Defer to the single collapsed diagnostic below.
             try undischarged.append(allocator, spec.?.name);
         } else {
-            try appendNotDischarged(allocator, &out, name);
+            try appendNotDischarged(allocator, &out, name, provenance);
         }
     }
 
@@ -371,6 +375,7 @@ fn appendNotDischarged(
     allocator: std.mem.Allocator,
     out: *std.ArrayList(SpecDiagnostic),
     name: []const u8,
+    provenance: ?contract_types.PropertyProvenance,
 ) !void {
     const spec_name = try allocator.dupe(u8, name);
     errdefer allocator.free(spec_name);
@@ -383,6 +388,11 @@ fn appendNotDischarged(
         .kind = .not_discharged,
         .spec_name = spec_name,
         .suggestion = suggestion,
+        // The site that demoted this property, when the classifier recorded
+        // one. `SpecDiagnostic.cause` has existed since the type was written
+        // and nothing ever set it, so the exact line that broke a proof was
+        // computed and then dropped one struct short of every reader.
+        .cause = if (provenance) |p| p.causeFor(name) else null,
         .implicit_default = false,
     });
 }
@@ -768,7 +778,7 @@ test "dischargeSpecs all-discharged returns empty" {
     const declared: [3][]const u8 = .{ "idempotent", "deterministic", "state_isolated" };
     const modules: [0][]const u8 = .{};
 
-    var diags = try dischargeSpecs(allocator, &declared, props, &modules, false);
+    var diags = try dischargeSpecs(allocator, &declared, props, &modules, false, null);
     defer {
         for (diags.items) |*d| @constCast(d).deinit(allocator);
         diags.deinit(allocator);
@@ -794,7 +804,7 @@ test "dischargeSpecs unmet idempotent emits ZTS401 not_discharged" {
     const declared: [1][]const u8 = .{"idempotent"};
     const modules: [0][]const u8 = .{};
 
-    var diags = try dischargeSpecs(allocator, &declared, props, &modules, false);
+    var diags = try dischargeSpecs(allocator, &declared, props, &modules, false, null);
     defer {
         for (diags.items) |*d| @constCast(d).deinit(allocator);
         diags.deinit(allocator);
@@ -819,7 +829,7 @@ test "dischargeSpecs read_only with cache import emits ZTS402" {
     const declared: [1][]const u8 = .{"read_only"};
     const modules: [1][]const u8 = .{"zttp:cache"};
 
-    var diags = try dischargeSpecs(allocator, &declared, props, &modules, false);
+    var diags = try dischargeSpecs(allocator, &declared, props, &modules, false, null);
     defer {
         for (diags.items) |*d| @constCast(d).deinit(allocator);
         diags.deinit(allocator);
@@ -848,7 +858,7 @@ test "dischargeSpecs unknown name emits ZTS403" {
     const declared: [2][]const u8 = .{ "made_up_name", "idempotent" };
     const modules: [0][]const u8 = .{};
 
-    var diags = try dischargeSpecs(allocator, &declared, props, &modules, false);
+    var diags = try dischargeSpecs(allocator, &declared, props, &modules, false, null);
     defer {
         for (diags.items) |*d| @constCast(d).deinit(allocator);
         diags.deinit(allocator);
@@ -878,7 +888,7 @@ test "dischargeSpecs implicit default profile gives the narrow Proof remedy" {
     const modules: [1][]const u8 = .{"zttp:cache"};
 
     // The implicit path passes the full v1 set as `declared` with the flag.
-    var diags = try dischargeSpecs(allocator, &v1_spec_names, props, &modules, true);
+    var diags = try dischargeSpecs(allocator, &v1_spec_names, props, &modules, true, null);
     defer {
         for (diags.items) |*d| @constCast(d).deinit(allocator);
         diags.deinit(allocator);
@@ -923,7 +933,7 @@ test "dischargeSpecs implicit default omits import-forbidden read_only from the 
     };
     const modules: [1][]const u8 = .{"zttp:sql"};
 
-    var diags = try dischargeSpecs(allocator, &v1_spec_names, props, &modules, true);
+    var diags = try dischargeSpecs(allocator, &v1_spec_names, props, &modules, true, null);
     defer {
         for (diags.items) |*d| @constCast(d).deinit(allocator);
         diags.deinit(allocator);
@@ -971,7 +981,7 @@ test "dischargeSpecs proof-less pure handler collapses to one ZTS500 naming real
     };
     const modules: [0][]const u8 = .{};
 
-    var diags = try dischargeSpecs(allocator, &v1_spec_names, props, &modules, true);
+    var diags = try dischargeSpecs(allocator, &v1_spec_names, props, &modules, true, null);
     defer {
         for (diags.items) |*d| @constCast(d).deinit(allocator);
         diags.deinit(allocator);
@@ -1132,7 +1142,7 @@ test "dischargeSpecs ZTS402 suppresses ZTS401 for the same spec" {
     const declared: [1][]const u8 = .{"read_only"};
     const modules: [1][]const u8 = .{"zttp:cache"};
 
-    var diags = try dischargeSpecs(allocator, &declared, props, &modules, false);
+    var diags = try dischargeSpecs(allocator, &declared, props, &modules, false, null);
     defer {
         for (diags.items) |*d| @constCast(d).deinit(allocator);
         diags.deinit(allocator);
@@ -1177,7 +1187,7 @@ test "dischargeSpecs recognises pure/stateless/result_safe/optional_safe" {
     const declared: [4][]const u8 = .{ "pure", "stateless", "result_safe", "optional_safe" };
     const modules: [0][]const u8 = .{};
 
-    var diags = try dischargeSpecs(allocator, &declared, props_all_false, &modules, false);
+    var diags = try dischargeSpecs(allocator, &declared, props_all_false, &modules, false, null);
     defer {
         for (diags.items) |*d| @constCast(d).deinit(allocator);
         diags.deinit(allocator);
@@ -1206,7 +1216,7 @@ test "cost_bounded spec discharges against the property" {
     const declared: [1][]const u8 = .{"cost_bounded"};
     const modules: [0][]const u8 = .{};
 
-    var diags = try dischargeSpecs(allocator, &declared, props, &modules, false);
+    var diags = try dischargeSpecs(allocator, &declared, props, &modules, false, null);
     defer {
         for (diags.items) |*d| @constCast(d).deinit(allocator);
         diags.deinit(allocator);
@@ -1230,7 +1240,7 @@ test "undischarged cost_bounded suggestion names the discharge levers" {
     const declared: [1][]const u8 = .{"cost_bounded"};
     const modules: [0][]const u8 = .{};
 
-    var diags = try dischargeSpecs(allocator, &declared, props, &modules, false);
+    var diags = try dischargeSpecs(allocator, &declared, props, &modules, false, null);
     defer {
         for (diags.items) |*d| @constCast(d).deinit(allocator);
         diags.deinit(allocator);
@@ -1258,7 +1268,7 @@ test "dischargeSpecs ZTS502 unknown name carries a nearest-match suggestion" {
     const declared: [1][]const u8 = .{"idemptoent"};
     const modules: [0][]const u8 = .{};
 
-    var diags = try dischargeSpecs(allocator, &declared, props, &modules, false);
+    var diags = try dischargeSpecs(allocator, &declared, props, &modules, false, null);
     defer {
         for (diags.items) |*d| @constCast(d).deinit(allocator);
         diags.deinit(allocator);
@@ -1283,7 +1293,7 @@ test "dischargeSpecs ZTS502 with far-off name yields no suggestion" {
     const declared: [1][]const u8 = .{"completely_unrelated_name"};
     const modules: [0][]const u8 = .{};
 
-    var diags = try dischargeSpecs(allocator, &declared, props, &modules, false);
+    var diags = try dischargeSpecs(allocator, &declared, props, &modules, false, null);
     defer {
         for (diags.items) |*d| @constCast(d).deinit(allocator);
         diags.deinit(allocator);
@@ -1306,7 +1316,7 @@ test "dischargeSpecs ZTS501 incompatible carries an actionable suggestion" {
     const declared: [1][]const u8 = .{"read_only"};
     const modules: [1][]const u8 = .{"zttp:sql"};
 
-    var diags = try dischargeSpecs(allocator, &declared, props, &modules, false);
+    var diags = try dischargeSpecs(allocator, &declared, props, &modules, false, null);
     defer {
         for (diags.items) |*d| @constCast(d).deinit(allocator);
         diags.deinit(allocator);
