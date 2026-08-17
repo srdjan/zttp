@@ -11,6 +11,17 @@ pub const DiagnosticItem = struct {
     column: u32,
     message: []u8,
     introduced_by_patch: ?bool = null,
+    /// The checker's own fix for this diagnostic, when it computed one.
+    ///
+    /// It reached one step short of here and stopped: the compiler builds a
+    /// per-spec suggestion, `edit_simulate` copies it onto the violation, and
+    /// the tool that renders violations for the model had nowhere to put it. So
+    /// "remove Date.now() / Math.random() ..." was computed on every failing
+    /// call and shown to nobody, while the model spent roundtrips inferring it.
+    ///
+    /// Optional because most producers have no fix to offer; absent is not the
+    /// same as an empty one.
+    help: ?[]u8 = null,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -31,6 +42,18 @@ pub const DiagnosticItem = struct {
             .message = try allocator.dupe(u8, message),
             .introduced_by_patch = introduced_by_patch,
         };
+    }
+
+    /// Attach the checker's fix. Separate from `init` so the seven producers
+    /// with no fix to offer keep their call unchanged.
+    pub fn setHelp(
+        self: *DiagnosticItem,
+        allocator: std.mem.Allocator,
+        help: ?[]const u8,
+    ) !void {
+        const text = help orelse return;
+        if (self.help) |old| allocator.free(old);
+        self.help = try allocator.dupe(u8, text);
     }
 
     pub fn clone(self: DiagnosticItem, allocator: std.mem.Allocator) !DiagnosticItem {
@@ -649,6 +672,10 @@ pub fn writeJson(writer: *std.Io.Writer, payload: UiPayload) !void {
                     try writer.writeAll(",\"introduced_by_patch\":");
                     try writer.writeAll(if (introduced_by_patch) "true" else "false");
                 }
+                if (item.help) |help| {
+                    try writer.writeAll(",\"suggestion\":");
+                    try json_writer.writeString(writer, help);
+                }
                 try writer.writeByte('}');
             }
             try writer.writeByte(']');
@@ -868,6 +895,7 @@ pub fn writeLegible(writer: *std.Io.Writer, payload: UiPayload) !bool {
                     "  {s} {s}:{d}:{d} {s}\n",
                     .{ item.code, item.path, item.line, item.column, item.message },
                 );
+                if (item.help) |help| try writer.print("    help: {s}\n", .{help});
             }
             return true;
         },
@@ -950,6 +978,7 @@ pub fn parse(allocator: std.mem.Allocator, value: std.json.Value) !UiPayload {
                 getString(item_obj, "message") orelse return error.InvalidUiPayload,
                 getBool(item_obj, "introduced_by_patch"),
             );
+            try items[i].setHelp(allocator, getString(item_obj, "suggestion"));
         }
         return .{ .diagnostics = .{
             .summary = try allocator.dupe(u8, summary),

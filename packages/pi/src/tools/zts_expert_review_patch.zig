@@ -144,6 +144,10 @@ fn buildPayload(
             violation.message,
             violation.introduced_by_patch,
         );
+        // The checker already computed the fix and `edit_simulate` carried it
+        // this far. Dropping it here is what left a model inferring "remove
+        // Date.now()" from a properties snapshot instead of reading it.
+        try items[i].setHelp(allocator, violation.help);
     }
     return .{ .diagnostics = .{
         .summary = try std.fmt.allocPrint(
@@ -204,4 +208,43 @@ test "diff_only flag off keeps preexisting in body but still passes veto" {
 
     try testing.expect(result.ok);
     try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"introduced_by_patch\":false") != null);
+}
+
+test "the model text names the failing spec and carries its fix" {
+    // Both halves of what a looping model was missing, asserted on `llm_text`,
+    // which is the model's actual input. The suggestion was already here; the
+    // spec name was not, and without it a handler declaring twelve properties
+    // was told one of them failed and never which.
+    const payload =
+        \\{"file":"handler.ts","content":"function handler(req: Request): Proof<Response, \"deterministic\"> { return Response.json({ at: Date.now() }); }"}
+    ;
+    var result = try execute(testing.allocator, &.{payload});
+    defer result.deinit(testing.allocator);
+
+    try testing.expect(!result.ok);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "failing spec: deterministic") != null);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "Date.now()") != null);
+}
+
+test "the terminal payload carries the fix the model text already had" {
+    // A separate surface with its own gap: `DiagnosticItem` had nowhere to put
+    // the checker's fix, so the REPL showed a code and a sentence while the
+    // model got the fix. This asserts the payload, not `llm_text` - an earlier
+    // version of this test asserted `llm_text` and so passed with the payload
+    // field removed, checking nothing it claimed to.
+    const payload =
+        \\{"file":"handler.ts","content":"function handler(req: Request): Proof<Response, \"deterministic\"> { return Response.json({ at: Date.now() }); }"}
+    ;
+    var result = try execute(testing.allocator, &.{payload});
+    defer result.deinit(testing.allocator);
+
+    const ui = result.ui_payload orelse return error.TestExpectedUiPayload;
+    switch (ui) {
+        .diagnostics => |diagnostics| {
+            try testing.expectEqual(@as(usize, 1), diagnostics.items.len);
+            const help = diagnostics.items[0].help orelse return error.TestExpectedHelp;
+            try testing.expect(std.mem.indexOf(u8, help, "Date.now()") != null);
+        },
+        else => return error.TestExpectedDiagnosticsPayload,
+    }
 }
