@@ -77,9 +77,22 @@ pub const Config = struct {
     purpose: model_request.Purpose = .normal,
     cache_policy: model_request.CachePolicy = .enabled,
     request_timeout_ms: ?u64 = null,
+    /// How long one request may sit silent before it is called stalled, apart
+    /// from `request_timeout_ms`, which is whatever the turn has left.
+    ///
+    /// The two are different questions and one number answered both: a turn
+    /// whose budget is gone and a single request that hung read identically,
+    /// because the poll below was bounded by the remaining budget alone. Set
+    /// this below that budget and the two separate - a poll that expires with
+    /// budget still on the clock reports `DeepSeekGenerationStalled`, which the
+    /// caller may reissue, while an expiry that reaches the budget stays
+    /// `RequestTimedOut` and ends the turn as before. Null keeps one number
+    /// answering both, which is right for interactive use.
+    stall_timeout_ms: ?u64 = null,
 };
 
 pub const ClientError = error{
+    DeepSeekGenerationStalled,
     DeepSeekServerUnavailable,
     EmptyResponse,
     InvalidDeepSeekBaseUrl,
@@ -734,6 +747,9 @@ fn post(arena: std.mem.Allocator, config: Config, body: []const u8) !TransportRe
         else => return ClientError.DeepSeekServerUnavailable,
     };
     const request_timeout_ms = effectiveRequestTimeoutMs(config.request_timeout_ms, generation_ceiling_ms);
+    const silence_ceiling_ms = effectiveStallCeilingMs(config.stall_timeout_ms, request_timeout_ms);
+    // The socket keeps the full budget. Only the polls below are shortened, so
+    // a stall is detected without changing when a blocking read gives up.
     http_errors.setReadTimeoutMs(connection.stream_reader.stream.socket.handle, @intCast(request_timeout_ms));
     const authorization = try std.fmt.allocPrint(arena, "Bearer {s}", .{config.api_key});
     const headers = [_]std.http.Header{
@@ -758,12 +774,20 @@ fn post(arena: std.mem.Allocator, config: Config, body: []const u8) !TransportRe
     request_body.end() catch return ClientError.DeepSeekServerUnavailable;
     request.connection.?.flush() catch return ClientError.DeepSeekServerUnavailable;
 
-    try waitForReadable(connection.stream_reader.stream.socket.handle, request_timeout_ms);
+    try waitForReadable(
+        connection.stream_reader.stream.socket.handle,
+        silence_ceiling_ms,
+        request_timeout_ms,
+    );
     var response = request.receiveHead(&.{}) catch return ClientError.DeepSeekServerUnavailable;
     // The head arrives before generation starts, so the long silence is here,
     // between the head and the first body byte. Poll for it rather than letting
     // a blocking read sit on the socket past its timeout.
-    try waitForReadable(connection.stream_reader.stream.socket.handle, request_timeout_ms);
+    try waitForReadable(
+        connection.stream_reader.stream.socket.handle,
+        silence_ceiling_ms,
+        request_timeout_ms,
+    );
     var transfer_buf: [4096]u8 = undefined;
     var decompress: std.http.Decompress = undefined;
     var decompress_buf: [std.compress.flate.max_window_len]u8 = undefined;
@@ -783,24 +807,41 @@ fn post(arena: std.mem.Allocator, config: Config, body: []const u8) !TransportRe
     return .{ .ok = response_body };
 }
 
-/// Block until the socket has bytes to read, bounded by the generation
-/// ceiling. Used before the head and again before the body: a blocking read
-/// that outlives `SO_RCVTIMEO` panics instead of erroring, so the wait is done
-/// here where a timeout is a typed error.
-fn waitForReadable(fd: std.posix.fd_t, timeout_ms: i32) !void {
+/// Block until the socket has bytes to read, bounded by the silence ceiling.
+/// Used before the head and again before the body: a blocking read that
+/// outlives `SO_RCVTIMEO` panics instead of erroring, so the wait is done here
+/// where a timeout is a typed error.
+///
+/// Which error it is depends on what was still on the clock. A ceiling shorter
+/// than the request budget expiring means this one request went quiet while the
+/// turn could still afford another, which is a stall the caller may reissue.
+/// A ceiling that reaches the budget expiring means the budget itself is gone,
+/// and reissuing would only fail again with nothing left to spend.
+fn waitForReadable(fd: std.posix.fd_t, silence_ceiling_ms: i32, request_timeout_ms: i32) !void {
     var fds = [_]std.posix.pollfd{.{
         .fd = fd,
         .events = std.posix.POLL.IN,
         .revents = 0,
     }};
-    const ready = std.posix.poll(&fds, timeout_ms) catch
+    const ready = std.posix.poll(&fds, silence_ceiling_ms) catch
         return ClientError.DeepSeekServerUnavailable;
-    if (ready == 0) return error.RequestTimedOut;
+    if (ready != 0) return;
+    if (silence_ceiling_ms < request_timeout_ms) return ClientError.DeepSeekGenerationStalled;
+    return error.RequestTimedOut;
 }
 
 fn effectiveRequestTimeoutMs(request_timeout_ms: ?u64, ceiling_ms: i32) i32 {
     const ceiling: u64 = @intCast(ceiling_ms);
     return @intCast(@max(@as(u64, 1), @min(request_timeout_ms orelse ceiling, ceiling)));
+}
+
+/// The silence ceiling never exceeds the budget it sits inside. A configured
+/// value at or above the budget collapses to the budget, which is the same
+/// single-number behaviour as configuring nothing.
+fn effectiveStallCeilingMs(stall_timeout_ms: ?u64, request_timeout_ms: i32) i32 {
+    const configured = stall_timeout_ms orelse return request_timeout_ms;
+    const budget: u64 = @intCast(request_timeout_ms);
+    return @intCast(@max(@as(u64, 1), @min(configured, budget)));
 }
 
 // -----------------------------------------------------------------------
@@ -1163,6 +1204,33 @@ test "a refused change set hands its body to the sink" {
     const transport = try extraTopLevelKeyPost(arena.allocator(), client.config, "");
     const sanitized = try sanitizeResponse(arena.allocator(), transport.ok);
     try testing.expectEqualStrings(sanitized, probe.capturedBody());
+}
+
+test "a silence ceiling separates a stalled request from a spent budget" {
+    // One number answered both questions and the two failures were then
+    // indistinguishable: a turn whose 600s budget drained across fifteen calls
+    // and a single generation that hung for the whole 600s both reported
+    // RequestTimedOut, and only one of them is worth reissuing.
+    const budget_ms: i32 = 600_000;
+    const stall_ms: u64 = 300_000;
+
+    // Inside the budget, so an expiry still leaves the turn something to spend.
+    try testing.expectEqual(@as(i32, 300_000), effectiveStallCeilingMs(stall_ms, budget_ms));
+
+    // Once the turn has less left than the ceiling, the ceiling is the budget,
+    // and an expiry is exhaustion rather than a stall.
+    try testing.expectEqual(@as(i32, 120_000), effectiveStallCeilingMs(stall_ms, 120_000));
+
+    // Configuring nothing keeps the single-number behaviour interactive use has.
+    try testing.expectEqual(@as(i32, 600_000), effectiveStallCeilingMs(null, budget_ms));
+
+    // A ceiling at or above the budget is the same as none, so it can never
+    // report a stall the turn cannot actually afford to retry.
+    try testing.expectEqual(@as(i32, 600_000), effectiveStallCeilingMs(600_000, budget_ms));
+    try testing.expectEqual(@as(i32, 600_000), effectiveStallCeilingMs(900_000, budget_ms));
+
+    // Zero would be an instant, permanent stall on a healthy socket.
+    try testing.expectEqual(@as(i32, 1), effectiveStallCeilingMs(0, budget_ms));
 }
 
 test "a decoded turn quarantines nothing" {

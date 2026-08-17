@@ -2110,14 +2110,38 @@ const LiveRecordingProgress = struct {
 
 const recorder_transport_attempts: u8 = 3;
 
+/// How long one recorded request may sit silent before it is called stalled.
+///
+/// Measured, not chosen: across 3,037 successful attempts in seven run
+/// directories the median took 5.6s, the 99th percentile 85s, and the slowest
+/// 191s. Nothing healthy has ever come close to five minutes, so a request
+/// still silent at that point is not a slow answer. The one occurrence this
+/// exists for spent the whole 600s turn budget on its first call, and the same
+/// case recorded in about a minute when it was re-run alone.
+///
+/// The value only has to sit above every real generation and below the turn
+/// budget. It does not have to be tight: an occurrence costs five minutes
+/// either way, and the alternative was losing the whole run.
+const recorder_silence_ceiling_ms: u64 = 5 * 60 * 1000;
+
 /// Live recording is a long, expensive sequence of otherwise independent
 /// model requests. A connection that closes before a response is decoded has
 /// produced no replayable model event and no tool effect, so the exact pending
-/// request can be retried safely. Keep this policy at the recorder boundary:
-/// ordinary interactive sessions continue to surface transport failures.
+/// request can be retried safely. The same holds for a request that goes silent
+/// past the ceiling above, which is why it is a distinct error rather than the
+/// timeout the turn reports when its budget is spent: no response was decoded,
+/// so a reissue is not a re-roll of an answer the model already gave.
+///
+/// Keep this policy at the recorder boundary: ordinary interactive sessions
+/// continue to surface transport failures.
 const RecorderModelClient = struct {
     inner: loop.ModelClient,
     progress: LiveRecordingProgress,
+
+    fn retriable(err: anyerror) bool {
+        return err == error.DeepSeekServerUnavailable or
+            err == error.DeepSeekGenerationStalled;
+    }
 
     fn request(
         context: *anyopaque,
@@ -2129,17 +2153,18 @@ const RecorderModelClient = struct {
         var attempt: u8 = 1;
         while (true) {
             const result = self.inner.request(arena, transcript, extra_user_text) catch |err| {
-                if (err != error.DeepSeekServerUnavailable or attempt >= recorder_transport_attempts) {
+                if (!retriable(err) or attempt >= recorder_transport_attempts) {
                     return err;
                 }
                 attempt += 1;
                 std.debug.print(
-                    "[codegen-record] [{d}/{d}] {s}: transient transport failure; " ++
+                    "[codegen-record] [{d}/{d}] {s}: {s}; " ++
                         "retrying the same model request ({d}/{d})\n",
                     .{
                         self.progress.case_index,
                         self.progress.case_count,
                         self.progress.case_name,
+                        @errorName(err),
                         attempt,
                         recorder_transport_attempts,
                     },
@@ -2164,7 +2189,7 @@ const RecorderModelClient = struct {
     }
 };
 
-test "live recorder retries a transient DeepSeek transport failure only" {
+test "live recorder retries a transient DeepSeek transport failure" {
     const FakeClient = struct {
         calls: usize = 0,
         failures_left: usize,
@@ -2241,6 +2266,65 @@ test "live recorder does not retry a non-transport failure" {
 
     try testing.expectError(
         error.InvalidChangeSetArgs,
+        retrying.asModelClient().request(testing.allocator, &transcript, null),
+    );
+    try testing.expectEqual(@as(usize, 1), fake.calls);
+}
+
+const StallingClient = struct {
+    calls: usize = 0,
+    stalls_left: usize,
+    failure: anyerror = error.DeepSeekGenerationStalled,
+
+    fn request(
+        context: *anyopaque,
+        _: std.mem.Allocator,
+        _: *const transcript_mod.Transcript,
+        _: ?[]const u8,
+    ) anyerror!loop.ModelCallResult {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        self.calls += 1;
+        if (self.stalls_left > 0) {
+            self.stalls_left -= 1;
+            return self.failure;
+        }
+        return .{ .reply = .{ .response = .{ .final_text = "recorded" } } };
+    }
+};
+
+test "live recorder reissues a request that went silent" {
+    // A stalled request decoded nothing, so reissuing it is not a re-roll of an
+    // answer the model already gave. One occurrence cost a full run: jwt-auth
+    // spent its entire 600s turn on its first call and then recorded in about a
+    // minute when it was re-run alone.
+    var fake: StallingClient = .{ .stalls_left = 2 };
+    var retrying: RecorderModelClient = .{
+        .inner = .{ .context = &fake, .request_fn = StallingClient.request },
+        .progress = .{ .case_index = 1, .case_count = 1, .case_name = "probe" },
+    };
+    var transcript: transcript_mod.Transcript = .{};
+    defer transcript.deinit(testing.allocator);
+
+    const result = try retrying.asModelClient().request(testing.allocator, &transcript, null);
+    try testing.expectEqualStrings("recorded", result.reply.response.final_text);
+    try testing.expectEqual(@as(usize, 3), fake.calls);
+}
+
+test "live recorder does not reissue a request whose turn budget is spent" {
+    // The distinction the silence ceiling exists to draw. RequestTimedOut means
+    // the turn has nothing left to spend, so every reissue would return the same
+    // error without reaching the provider - three calls to reach one failure the
+    // first call already knew.
+    var fake: StallingClient = .{ .stalls_left = 2, .failure = error.RequestTimedOut };
+    var retrying: RecorderModelClient = .{
+        .inner = .{ .context = &fake, .request_fn = StallingClient.request },
+        .progress = .{ .case_index = 1, .case_count = 1, .case_name = "probe" },
+    };
+    var transcript: transcript_mod.Transcript = .{};
+    defer transcript.deinit(testing.allocator);
+
+    try testing.expectError(
+        error.RequestTimedOut,
         retrying.asModelClient().request(testing.allocator, &transcript, null),
     );
     try testing.expectEqual(@as(usize, 1), fake.calls);
@@ -2391,6 +2475,9 @@ fn classifyRecordingFailure(err: anyerror) RecordingFailureKind {
         error.EmptyResponse => .empty_response,
         error.RequestTimedOut,
         error.RecordedTurnHitTimeBudget,
+        // Reported only after every reissue also went silent, so by the time it
+        // reaches here it has cost the turn its budget like any other timeout.
+        error.DeepSeekGenerationStalled,
         => .timeout,
         error.InvalidResponseJson,
         error.MalformedToolCall,
@@ -3100,6 +3187,10 @@ test "record codegen baseline corpus (live, gated)" {
     });
     defer session.deinit(allocator);
     if (session.activeProvider() != corpus_provider) return error.UnsupportedRecordingProvider;
+    // A recording turn holds one wall-clock budget for the whole case, so a
+    // single hung request could spend all of it and end the run. Give a silent
+    // request its own ceiling so it fails while the turn can still reissue it.
+    session.setProviderStallTimeout(recorder_silence_ceiling_ms);
 
     const request_config = try requestConfigForSession(&session);
     const model_revision = try cachedModelRevision(allocator, corpus_provider, corpus_model);

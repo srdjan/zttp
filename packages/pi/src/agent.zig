@@ -617,6 +617,21 @@ pub const AgentSession = struct {
         self.setProviderRequestTimeout(@intCast(deadline - now_ms));
     }
 
+    /// Bound how long one request may sit silent, apart from the turn budget.
+    ///
+    /// DeepSeek only, because it is the only backend where a stall and an
+    /// exhausted turn are worth telling apart: it is non-streaming, so a healthy
+    /// request is silent for as long as the model takes, and a recording that
+    /// loses a turn to one hung request loses every case in the run. The local
+    /// backend already fails at its own generation ceiling and has no turn
+    /// budget to protect.
+    pub fn setProviderStallTimeout(self: *AgentSession, timeout_ms: ?u64) void {
+        switch (self.backend) {
+            .deepseek => |*client| client.config.stall_timeout_ms = timeout_ms,
+            .stub, .local, .anthropic, .openai => {},
+        }
+    }
+
     fn setProviderRequestTimeout(self: *AgentSession, timeout_ms: ?u64) void {
         switch (self.backend) {
             .stub => {},
