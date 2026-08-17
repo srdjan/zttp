@@ -159,7 +159,7 @@ fn workflowRoute(kind: TaskKind) []const u8 {
         \\Use compiler diagnostics as the source of truth. Read the target, run `zts_expert_verify_paths`, call `pi_repair_plan`, dry-run supported plans with `pi_apply_repair_plan` or `pi_goal_candidate`, and edit manually only for unsupported repair intents.
         ,
         .spec_goal =>
-        \\Drive proof work through the proof tools. Start with `pi_specs_status`, `pi_witnesses`, and `pi_repair_plan`; inspect `proof.proofTrace.durable_workflow_*` when durable retry/idempotency is involved, use `pi_goal_candidate` or `pi_apply_repair_plan` for supported repairs, then `pi_goal_check` to confirm the requested goals.
+        \\Drive proof work through the proof tools. `zts_expert_review_patch` names the failing spec and its suggested fix in each ZTS500 diagnostic, so read that before planning; then `pi_repair_plan`, inspect `proof.proofTrace.durable_workflow_*` when durable retry/idempotency is involved, use `pi_goal_candidate` or `pi_apply_repair_plan` for supported repairs, then `pi_goal_check` to confirm the requested goals.
         ,
         .workflow_authoring =>
         \\Author workflow code from the shipped ZigTS grammar. Call `zts_expert_query` operation `modules` for `zttp:durable`/`zttp:workflow`, use `req.headers.get("idempotency-key")` for durable run keys, keep `workflow.call`/`fanout`/`follow` at step depth 0 inside `run()` and never inside `step()` (ZTS509), check ZTS510 before saga drafts, confirm the child handler resolves with `zts_expert_system_proof` (a single-file veto cannot see a dangling child), then submit one `propose_change_set` and inspect `proof.proofTrace.durable_workflow_*` after the host veto/proof card.

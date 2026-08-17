@@ -89,7 +89,6 @@ const prologue =
     \\  Read/list/search workspace            -> workspace_read_file,
     \\                                           workspace_list_files,
     \\                                           workspace_search_text
-    \\  Which declared spec is failing, and why -> pi_specs_status
     \\  Goal proof and semantic repair         -> pi_goal_check,
     \\                                           pi_repair_plan,
     \\                                           pi_goal_candidate
@@ -197,31 +196,37 @@ test "stable core contains workflow and live protocol routing only" {
     try testing.expect(prompt.len <= PROTECTED_CORE_CAP_BYTES);
 }
 
-test "the routing index names the tool that says which spec is failing" {
-    // Measured gap, not a style preference. Across the three corpus cases that
-    // burned their 18-roundtrip budget without applying an edit -
-    // egress-options, parallel-secret and workflow-queued-call - the recorded
-    // transcripts show `pi_specs_status` invoked zero times each, against 14 to
-    // 15 `zts_expert_query` calls. All three were looping on ZTS500, declaring
-    // twelve-property proof capsules they could not discharge, and
-    // `pi_specs_status` is the tool that returns which declared spec failed and
-    // a suggestion per spec. It was registered and offered the whole time; the
-    // always-sent routing index simply never named it.
+test "the routing index never names a tool the model cannot call" {
+    // `pi_specs_status` was routed here and is `.local_only`, so it is absent
+    // from the tool array every request carries. The model was told to call a
+    // tool it could not see, on every request, and called it zero times across
+    // all nineteen corpus cases - which read as the model ignoring good advice
+    // rather than as advice it was unable to take.
     //
-    // This is the routing half of the fix on purpose. Naming the tool in
-    // ZTS500's help text would likely help more and would move the policy hash,
-    // which makes every published convergence row non-comparable - so it is a
-    // separate decision, taken after this one is measured.
+    // Asserted as an invariant over the registry rather than against that one
+    // name, because the same line costs nothing to write again. Anything not
+    // model-visible must not appear in the prompt at all: a name the model
+    // cannot act on is worse than silence, since it spends attention and
+    // implies a capability that is not there.
+    const registry_mod = @import("tool_registry.zig");
+    var registry = try registry_mod.buildRegistry(testing.allocator);
+    defer registry.deinit(testing.allocator);
+
     const prompt = try buildSystemPrompt(testing.allocator);
     defer testing.allocator.free(prompt);
 
-    try testing.expect(std.mem.indexOf(u8, prompt, "pi_specs_status") != null);
-    // The routing index is what the model reads to pick a tool, so the mention
-    // has to be there and not merely somewhere in the prompt.
-    const routing_at = std.mem.indexOf(u8, prompt, "Host workflow routing:") orelse
-        return error.TestExpectedRoutingIndex;
-    try testing.expect(std.mem.indexOf(u8, prompt[routing_at..], "pi_specs_status") != null);
-    try testing.expect(prompt.len <= PROTECTED_CORE_CAP_BYTES);
+    var checked: usize = 0;
+    for (registry.list()) |tool| {
+        if (tool.allowedOn(.model)) continue;
+        checked += 1;
+        if (std.mem.indexOf(u8, prompt, tool.name) != null) {
+            std.debug.print("prompt routes to non-model tool '{s}'\n", .{tool.name});
+            return error.PromptRoutesToUnreachableTool;
+        }
+    }
+    // A registry with no local-only tools would satisfy the loop above while
+    // checking nothing.
+    try testing.expect(checked > 0);
 }
 
 test "stable core contains no hidden syntax or policy identity" {
