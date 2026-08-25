@@ -228,6 +228,26 @@ zttp ledger stats
 staked metrics: expert success rate, median round-trips to a first green proof,
 and median proven-path ratio.
 
+## Tool Contract Gate
+
+`zttp expert --gate-log <path>` appends one JSON line per turn recording how
+every model tool call was graded against its declared `input_schema`. The gate
+observes only: no call is blocked, retried, or rewritten because of a verdict,
+and the schema verdict stays separate from the tool's own execution result.
+
+`zttp gate-report` reads that log and prints the measured contract pass rate per
+tool and the measured turn volume per niche per day:
+
+```bash
+zttp expert --gate-log /tmp/gate.jsonl
+zttp gate-report /tmp/gate.jsonl
+```
+
+A niche is the pair of a task class and a hash over the sorted tool schemas, so
+a schema change starts a new niche instead of silently invalidating the history
+of the old one. Records carry tool names, counts, enums, hashes, and booleans.
+They never carry prompt text, tool-argument text, or paths.
+
 ## Spec Ratchet And Witnesses
 
 `zttp ratchet show` compiles a handler and prints its declared and proven spec

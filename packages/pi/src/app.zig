@@ -17,6 +17,8 @@ const models_registry = @import("providers/models.zig");
 const local_client = @import("providers/local/client.zig");
 const tools_common = @import("tools/common.zig");
 const tool_registry = @import("tool_registry.zig");
+const gate_record = @import("gate_record.zig");
+const gate_report = @import("gate_report.zig");
 
 /// Re-exported so the runtime-side witness replay implementation can
 /// share the canonical `Verdict` type and function pointer signature.
@@ -68,7 +70,7 @@ pub const buildRegistry = tool_registry.buildRegistry;
 
 /// Long flags whose next token is a value. `zts_main.zig` consults this
 /// list so it can skip the value while scanning for stray positional args.
-pub const value_taking_flags = [_][]const u8{ "--session-id", "--print", "--mode", "--tools", "--fork", "--goal", "--max-iters", "--handler", "--provider", "--model" };
+pub const value_taking_flags = [_][]const u8{ "--session-id", "--print", "--mode", "--tools", "--fork", "--goal", "--max-iters", "--handler", "--provider", "--model", "--gate-log" };
 
 var captured_argv: ?[]const []const u8 = null;
 
@@ -105,6 +107,48 @@ pub fn run(allocator: std.mem.Allocator) !void {
     }
 
     repl.run(allocator, &registry, flags, flags.policy) catch |err| return handleModeError(err);
+}
+
+/// Append-only JSONL destination for gate records.
+///
+/// A write failure is dropped by `GateSink.record`, which is deliberate: the
+/// instrument must never change the turn it measures.
+pub const FileGateSink = struct {
+    file: std.Io.File,
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    sink: gate_record.GateSink,
+
+    pub fn init(file: std.Io.File, io: std.Io, allocator: std.mem.Allocator) FileGateSink {
+        return .{
+            .file = file,
+            .io = io,
+            .allocator = allocator,
+            .sink = .{ .context = undefined, .record_fn = writeRecord },
+        };
+    }
+
+    /// Call once after `init`. The sink holds a pointer to its owner, and a
+    /// value cannot take its own address before it has one.
+    pub fn bind(self: *FileGateSink) void {
+        self.sink.context = self;
+    }
+
+    fn writeRecord(context: *anyopaque, record: gate_record.TurnRecord) anyerror!void {
+        const self: *FileGateSink = @ptrCast(@alignCast(context));
+        var buf = TextBuffer.init(self.allocator);
+        defer buf.deinit();
+        try gate_record.writeJsonl(record, buf.writer());
+        // Streaming, not positional: the log is append-only and every record
+        // must land after the last one without the sink tracking an offset.
+        try self.file.writeStreamingAll(self.io, buf.written());
+    }
+};
+
+/// Print the measured contract pass rate per tool and the measured turn volume
+/// per niche per day from a gate log.
+pub fn runGateReportCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
+    try gate_report.runWithArgs(allocator, argv);
 }
 
 pub fn runLedgerCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
@@ -284,6 +328,7 @@ pub fn flagErrorMessage(err: anyerror) []const u8 {
     return switch (err) {
         error.MutuallyExclusiveApprovalFlags => "error: --yes and --no-edit are mutually exclusive\n",
         error.MissingSessionId => "error: --session-id requires a value\n",
+        error.MissingGateLogPath => "error: --gate-log requires a path value\n",
         error.MutuallyExclusiveResumeFlags => "error: --resume and --session-id are mutually exclusive\n",
         error.MissingPrintPrompt => "error: --print requires a value\n",
         error.MissingModeValue => "error: --mode requires a value (json|rpc)\n",
@@ -381,6 +426,8 @@ pub const ExpertFlags = struct {
     /// registry id; session construction then checks it against the resolved
     /// provider. Null keeps that provider's registry default.
     model: ?[]const u8 = null,
+    /// Append one gate record per turn to this path. Null disables recording.
+    gate_log: ?[]const u8 = null,
 };
 
 fn takeArg(i: *usize, argv: []const []const u8, missing: anyerror) ![]const u8 {
@@ -422,6 +469,14 @@ pub fn parseExpertFlags(argv: []const []const u8) !ExpertFlags {
         }
         if (std.mem.eql(u8, arg, "--session-id")) {
             out.session_id = try takeArg(&i, argv, error.MissingSessionId);
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--gate-log")) {
+            out.gate_log = try takeArg(&i, argv, error.MissingGateLogPath);
+            continue;
+        }
+        if (std.mem.startsWith(u8, arg, "--gate-log=")) {
+            out.gate_log = arg["--gate-log=".len..];
             continue;
         }
         if (std.mem.startsWith(u8, arg, "--session-id=")) {
@@ -1066,4 +1121,50 @@ test "an analyze tool may not take a workspace path" {
             }
         }
     }
+}
+
+test "parseExpertFlags: --gate-log captures a path" {
+    const argv = [_][]const u8{ "--gate-log", "/tmp/gate.jsonl" };
+    const flags = try parseExpertFlags(argv[0..]);
+    try std.testing.expectEqualStrings("/tmp/gate.jsonl", flags.gate_log.?);
+}
+
+test "parseExpertFlags: gate_log defaults to null" {
+    const flags = try parseExpertFlags(&.{});
+    try std.testing.expect(flags.gate_log == null);
+}
+
+test "FileGateSink appends one JSONL line per record" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = std.testing.io;
+    const file = try tmp.dir.createFile(io, "gate.jsonl", .{ .read = true });
+    defer file.close(io);
+
+    var file_sink = FileGateSink.init(file, io, std.testing.allocator);
+    file_sink.bind();
+    var hash: gate_record.ToolSetHash = undefined;
+    @memset(&hash, 0x00);
+    const record = gate_record.TurnRecord{
+        .session_id = "s",
+        .turn_index = 0,
+        .unix_ms = 1_700_000_000_000,
+        .task_class = "tool_call",
+        .tool_set_hash = hash,
+        .model_id = "m",
+        .adapter_id = null,
+        .tool_calls_total = 0,
+        .tool_calls_gate_passed = 0,
+        .first_failure = null,
+        .calls = &.{},
+        .prompt_tokens = 0,
+        .generated_tokens = 0,
+        .wall_ns = 0,
+    };
+    file_sink.sink.record(record);
+    file_sink.sink.record(record);
+
+    const contents = try tmp.dir.readFileAlloc(io, "gate.jsonl", std.testing.allocator, .limited(64 * 1024));
+    defer std.testing.allocator.free(contents);
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, contents, "\n"));
 }

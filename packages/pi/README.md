@@ -383,3 +383,28 @@ uses. Reopen if a future UI needs a typed payload for rendering.
   `pi_app` fits alongside `zts`, `zttp`, and `zttp-runtime`.
 - [../../docs/internals/zts-expert-contract.md](../../docs/internals/zts-expert-contract.md)
   - the v1 JSON contract for the `zts` tool commands pi invokes.
+
+## Contract gate and the baseline instrument
+
+Every model tool call is graded against its declared `input_schema` before it
+runs. Six checks in cost order: declared name, JSON parse, object shape,
+required parameters present, no undeclared parameter, type match, enum
+membership.
+
+The gate observes. It never blocks, retries, or rewrites a call, and its
+verdict stays separate from the compiler veto and from the tool's own execution
+result. The two signals are independent on purpose: a call can satisfy a schema
+and still fail when it runs.
+
+Records carry tool names, counts, enums, hashes, and booleans. They never carry
+prompt text, tool-argument text, or paths.
+
+```sh
+zttp expert --gate-log /tmp/gate.jsonl
+zttp gate-report /tmp/gate.jsonl
+```
+
+The report prints the contract pass rate per tool and the turn volume per niche
+per day. A niche is the pair of a task class and a hash over the sorted tool
+schemas, so a schema change starts a new niche instead of silently invalidating
+the history of the old one.

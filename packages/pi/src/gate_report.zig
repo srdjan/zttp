@@ -231,6 +231,30 @@ pub fn render(report: Report, writer: *std.Io.Writer) !void {
     }
 }
 
+/// `zttp gate-report <path>`: read a gate log and print the two measured
+/// numbers M0 exists to produce.
+pub fn runWithArgs(allocator: std.mem.Allocator, argv: []const []const u8) !void {
+    if (argv.len < 1) return error.MissingGateLogPath;
+    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    const io = io_backend.io();
+
+    const contents = try std.Io.Dir.cwd().readFileAlloc(io, argv[0], allocator, .limited(256 * 1024 * 1024));
+    defer allocator.free(contents);
+
+    var report = try aggregate(allocator, contents);
+    defer report.deinit(allocator);
+
+    var buf = TextBuffer.init(allocator);
+    defer buf.deinit();
+    try render(report, buf.writer());
+
+    var stdout_buffer: [4096]u8 = undefined;
+    var stdout = std.Io.File.stdout().writer(io, &stdout_buffer);
+    try stdout.interface.writeAll(buf.written());
+    try stdout.interface.flush();
+}
+
 const testing = std.testing;
 
 const two_turns =
