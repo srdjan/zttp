@@ -23,6 +23,8 @@ const workspace_snapshot = @import("workspace_snapshot.zig");
 const aggregate_proof = @import("aggregate_proof.zig");
 const change_transaction = @import("change_transaction.zig");
 const change_set_receipt = @import("change_set_receipt.zig");
+const contract_gate = @import("contract_gate.zig");
+const gate_record = @import("gate_record.zig");
 
 pub const ModelCallResult = struct {
     reply: turn.AssistantReply,
@@ -231,6 +233,12 @@ pub const TurnResult = struct {
     draft_quality: codegen_types.DraftQuality = .not_green,
     veto_retry_count: u32 = 0,
     tool_call_count: u32 = 0,
+    /// Tool calls whose arguments satisfied the declared schema. The gate is an
+    /// instrument: this count never changes which tools ran.
+    tool_calls_gate_passed: u32 = 0,
+    /// The first failing gate check in this turn, in call order. Null when
+    /// every call passed and when the turn made no call.
+    first_gate_failure: ?contract_gate.FailureReason = null,
     /// True when this turn applied a compiler-authored repair candidate with no
     /// model round-trip (the model's draft failed veto, the deterministic lane
     /// produced a fix that passed the full veto, and it landed through the
@@ -276,6 +284,19 @@ pub const RunOptions = struct {
     /// harness inherits this same default so measurement and production share
     /// one options struct.
     turn_timeout_ms: u64 = 300_000,
+    /// Best-effort instrument. Null disables recording entirely.
+    gate_sink: ?*gate_record.GateSink = null,
+    /// Host-assigned task class for the niche key. The loop copies it verbatim
+    /// and never derives it.
+    task_class: []const u8 = "unclassified",
+    /// Resident model identity for the niche record. Empty when unknown.
+    model_id: []const u8 = "",
+    /// Session identity for the niche record. Empty when the caller runs
+    /// without a session (`--no-session`, tests, the eval harness).
+    session_id: []const u8 = "",
+    /// Turn ordinal within the session, for the gate record. Zero when the
+    /// caller does not track it.
+    turn_index: u32 = 0,
 };
 
 /// Verification attempts granted to interactive and `--print` turns. Higher
@@ -429,6 +450,44 @@ fn projectToolResult(
     };
 }
 
+/// Gate state accumulated across one turn. It is owned by `runTurnWith` and
+/// borrowed by the turn body, so the record it feeds is still valid when the
+/// sink runs, whichever of the body's exits was taken.
+const GateState = struct {
+    passed: u32 = 0,
+    first_failure: ?contract_gate.FailureReason = null,
+    calls: std.ArrayListUnmanaged(gate_record.CallOutcome) = .empty,
+    tool_set_hash: gate_record.ToolSetHash = std.mem.zeroes(gate_record.ToolSetHash),
+    started_ns: u64 = 0,
+};
+
+/// Publish the turn's gate counts and, when a sink is attached, one record.
+///
+/// `adapter_id` is null in M0 because no adapter exists yet. The LoRA
+/// inference milestone fills it.
+fn emitGateRecord(result: *TurnResult, options: RunOptions, gate: *const GateState) void {
+    result.tool_calls_gate_passed = gate.passed;
+    result.first_gate_failure = gate.first_failure;
+    const sink = options.gate_sink orelse return;
+    const now_ns = zts.monotonicNowNs() catch gate.started_ns;
+    sink.record(.{
+        .session_id = options.session_id,
+        .turn_index = options.turn_index,
+        .unix_ms = zts.realtimeNowMs() catch 0,
+        .task_class = options.task_class,
+        .tool_set_hash = gate.tool_set_hash,
+        .model_id = options.model_id,
+        .adapter_id = null,
+        .tool_calls_total = result.tool_call_count,
+        .tool_calls_gate_passed = gate.passed,
+        .first_failure = gate.first_failure,
+        .calls = gate.calls.items,
+        .prompt_tokens = result.usage.input_tokens,
+        .generated_tokens = result.usage.output_tokens,
+        .wall_ns = now_ns -| gate.started_ns,
+    });
+}
+
 pub fn runTurnWith(
     allocator: std.mem.Allocator,
     client: ModelClient,
@@ -436,6 +495,26 @@ pub fn runTurnWith(
     transcript: *transcript_mod.Transcript,
     user_text: []const u8,
     options: RunOptions,
+) !TurnResult {
+    var gate: GateState = .{
+        .tool_set_hash = gate_record.toolSetHash(allocator, registry.list()) catch
+            std.mem.zeroes(gate_record.ToolSetHash),
+        .started_ns = zts.monotonicNowNs() catch 0,
+    };
+    defer gate.calls.deinit(allocator);
+    var result = try runTurnBody(allocator, client, registry, transcript, user_text, options, &gate);
+    emitGateRecord(&result, options, &gate);
+    return result;
+}
+
+fn runTurnBody(
+    allocator: std.mem.Allocator,
+    client: ModelClient,
+    registry: *const registry_mod.Registry,
+    transcript: *transcript_mod.Transcript,
+    user_text: []const u8,
+    options: RunOptions,
+    gate: *GateState,
 ) !TurnResult {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
@@ -732,6 +811,45 @@ pub fn runTurnWith(
             .invoke_tool_batch => |calls| {
                 try transcript.append(allocator, .{ .assistant_tool_use = calls });
 
+                // Grade before the refusal branch below, so a batch the host
+                // refuses is still counted: a schema verdict is a property of
+                // what the model emitted, not of what the host did with it.
+                for (calls) |call| {
+                    var gate_arena = std.heap.ArenaAllocator.init(ta);
+                    const declared: ?*const registry_mod.ToolDef = blk: {
+                        const found = registry.findByName(call.name) orelse break :blk null;
+                        // A trusted-only or RPC-only tool was never shown to the
+                        // model, so a call naming it is undeclared, not merely
+                        // mis-typed. `findByName` alone cannot tell them apart.
+                        break :blk if (found.allowedOn(.model)) found else null;
+                    };
+                    // An allocation failure inside the gate degrades to a pass.
+                    // An instrument must never abort the turn it measures.
+                    const verdict = contract_gate.check(
+                        gate_arena.allocator(),
+                        declared,
+                        call.args_json,
+                    ) catch contract_gate.Verdict{ .pass = {} };
+                    gate_arena.deinit();
+
+                    const gate_pass = verdict == .pass;
+                    const failure: ?contract_gate.FailureReason = switch (verdict) {
+                        .pass => null,
+                        .fail => |f| f.reason,
+                    };
+                    if (gate_pass) {
+                        gate.passed += 1;
+                    } else if (gate.first_failure == null) {
+                        gate.first_failure = failure;
+                    }
+                    try gate.calls.append(allocator, .{
+                        .tool_name = call.name,
+                        .gate_pass = gate_pass,
+                        .failure = failure,
+                        .execution_ok = null,
+                    });
+                }
+
                 const mixed_propose_change_set = containsProposeChangeSet(calls) and calls.len > 1;
                 const over_budget = calls.len > options.max_tool_batch_size or
                     tool_calls_used + calls.len > options.max_tool_calls_per_turn;
@@ -756,9 +874,13 @@ pub fn runTurnWith(
                 }
 
                 tool_calls_used += calls.len;
-                for (calls) |call| {
+                for (calls, 0..) |call, index| {
                     var result = try invokeToolRecovering(ta, registry, call);
                     defer result.deinit(ta);
+                    // Separate from the gate verdict and never merged with it:
+                    // a schema-satisfying call can still fail when it runs. A
+                    // graded call that never ran keeps a null outcome.
+                    gate.calls.items[gate.calls.items.len - calls.len + index].execution_ok = result.ok;
                     const projected = try projectToolResult(
                         ta,
                         registry,
@@ -1634,6 +1756,195 @@ test "tool batch path: invoke_tool_batch -> tool_result -> final model text" {
         else => return error.TestFailed,
     }
     try testing.expectEqual(Tag.assistant_tool_use, @as(Tag, tr.at(2).*));
+}
+
+fn gateProbeDecodeJson(
+    allocator: std.mem.Allocator,
+    args_json: []const u8,
+) ![]const []const u8 {
+    _ = allocator;
+    _ = args_json;
+    return &.{};
+}
+
+/// Requires `path`, but executes successfully whatever it is given. A call that
+/// omits `path` therefore fails the gate and succeeds at execution, which is
+/// exactly the pair the gate must be able to report separately.
+const gate_probe_tool: registry_mod.ToolDef = .{
+    .name = "gate_probe",
+    .label = "gate probe",
+    .effect = .analyze,
+    .context_policy = .exact,
+    .model_exposure = .visible,
+    .description = "Test probe with one required parameter",
+    .input_schema = "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}",
+    .decode_json = gateProbeDecodeJson,
+    .execute = stubExecute,
+};
+
+/// Copies the per-call slice on the way in. The loop owns that memory for the
+/// length of the turn only, so a collector that outlives the turn must take its
+/// own copy. A real sink serializes inside `record` and needs no copy.
+const GateCollector = struct {
+    records: std.ArrayListUnmanaged(gate_record.TurnRecord) = .empty,
+    allocator: std.mem.Allocator,
+
+    fn record(context: *anyopaque, r: gate_record.TurnRecord) anyerror!void {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        var copy = r;
+        copy.calls = try self.allocator.dupe(gate_record.CallOutcome, r.calls);
+        errdefer self.allocator.free(copy.calls);
+        try self.records.append(self.allocator, copy);
+    }
+
+    fn deinit(self: *@This()) void {
+        for (self.records.items) |r| self.allocator.free(r.calls);
+        self.records.deinit(self.allocator);
+    }
+};
+
+test "gate instrument: a schema-violating tool call is recorded but still executes" {
+    var collector = GateCollector{ .allocator = testing.allocator };
+    defer collector.deinit();
+    var sink = gate_record.GateSink{ .context = &collector, .record_fn = GateCollector.record };
+
+    const replies = [_]turn.AssistantReply{
+        .{
+            .response = .{ .tool_calls = &[_]turn.ToolCall{
+                .{ .id = "toolu_ok", .name = "gate_probe", .args_json = "{\"path\":\"src\"}" },
+                .{ .id = "toolu_bad", .name = "gate_probe", .args_json = "{}" },
+            } },
+        },
+        .{ .response = .{ .final_text = "done" } },
+    };
+    var seq: SequenceClient = .{ .replies = &replies };
+    var tr: transcript_mod.Transcript = .{};
+    defer tr.deinit(testing.allocator);
+    var registry: registry_mod.Registry = .{};
+    defer registry.deinit(testing.allocator);
+    try registry.register(testing.allocator, gate_probe_tool);
+
+    const result = try runTurnWith(
+        testing.allocator,
+        seq.asClient(),
+        &registry,
+        &tr,
+        "probe twice",
+        .{ .gate_sink = &sink, .task_class = "tool_call", .session_id = "s1" },
+    );
+
+    try testing.expectEqual(turn.TurnState.done, result.final_state);
+    try testing.expectEqual(@as(u32, 2), result.tool_call_count);
+    try testing.expectEqual(@as(u32, 1), result.tool_calls_gate_passed);
+    try testing.expectEqual(contract_gate.FailureReason.missing_required, result.first_gate_failure.?);
+
+    try testing.expectEqual(@as(usize, 1), collector.records.items.len);
+    const rec = collector.records.items[0];
+    try testing.expectEqual(@as(u32, 2), rec.tool_calls_total);
+    try testing.expectEqual(@as(u32, 1), rec.tool_calls_gate_passed);
+    try testing.expectEqual(contract_gate.FailureReason.missing_required, rec.first_failure.?);
+    try testing.expectEqualStrings("tool_call", rec.task_class);
+    try testing.expectEqualStrings("s1", rec.session_id);
+
+    // Both calls ran. The gate blocked nothing.
+    try testing.expectEqual(@as(usize, 2), rec.calls.len);
+    try testing.expect(rec.calls[0].gate_pass);
+    try testing.expectEqual(true, rec.calls[0].execution_ok.?);
+    try testing.expect(!rec.calls[1].gate_pass);
+    try testing.expectEqual(contract_gate.FailureReason.missing_required, rec.calls[1].failure.?);
+    // The decisive assertion: gate failed, execution succeeded, and the record
+    // reports both without merging them.
+    try testing.expectEqual(true, rec.calls[1].execution_ok.?);
+}
+
+test "gate instrument: a turn with no tool call records zero of zero" {
+    var collector = GateCollector{ .allocator = testing.allocator };
+    defer collector.deinit();
+    var sink = gate_record.GateSink{ .context = &collector, .record_fn = GateCollector.record };
+
+    const replies = [_]turn.AssistantReply{
+        .{ .response = .{ .final_text = "no tool needed" } },
+    };
+    var seq: SequenceClient = .{ .replies = &replies };
+    var tr: transcript_mod.Transcript = .{};
+    defer tr.deinit(testing.allocator);
+    var registry: registry_mod.Registry = .{};
+    defer registry.deinit(testing.allocator);
+
+    _ = try runTurnWith(
+        testing.allocator,
+        seq.asClient(),
+        &registry,
+        &tr,
+        "just answer",
+        .{ .gate_sink = &sink, .task_class = "tool_call" },
+    );
+
+    try testing.expectEqual(@as(usize, 1), collector.records.items.len);
+    const rec = collector.records.items[0];
+    try testing.expectEqual(@as(u32, 0), rec.tool_calls_total);
+    try testing.expectEqual(@as(u32, 0), rec.tool_calls_gate_passed);
+    try testing.expect(rec.first_failure == null);
+    try testing.expectEqual(@as(usize, 0), rec.calls.len);
+}
+
+test "gate instrument: an undeclared tool name is graded as undeclared_tool" {
+    var collector = GateCollector{ .allocator = testing.allocator };
+    defer collector.deinit();
+    var sink = gate_record.GateSink{ .context = &collector, .record_fn = GateCollector.record };
+
+    const replies = [_]turn.AssistantReply{
+        .{
+            .response = .{ .tool_calls = &[_]turn.ToolCall{
+                .{ .id = "toolu_ghost", .name = "not_registered", .args_json = "{}" },
+            } },
+        },
+        .{ .response = .{ .final_text = "done" } },
+    };
+    var seq: SequenceClient = .{ .replies = &replies };
+    var tr: transcript_mod.Transcript = .{};
+    defer tr.deinit(testing.allocator);
+    var registry: registry_mod.Registry = .{};
+    defer registry.deinit(testing.allocator);
+    try registry.register(testing.allocator, stub_tool);
+
+    _ = try runTurnWith(
+        testing.allocator,
+        seq.asClient(),
+        &registry,
+        &tr,
+        "call a ghost",
+        .{ .gate_sink = &sink, .task_class = "tool_call" },
+    );
+
+    const rec = collector.records.items[0];
+    try testing.expectEqual(contract_gate.FailureReason.undeclared_tool, rec.first_failure.?);
+    // The pre-existing recovery path still reported the failure to the model.
+    try testing.expectEqual(false, rec.calls[0].execution_ok.?);
+}
+
+test "gate instrument: a null sink leaves the turn unchanged" {
+    const replies = [_]turn.AssistantReply{
+        .{
+            .response = .{ .tool_calls = &[_]turn.ToolCall{
+                .{ .id = "toolu_stub", .name = "stub", .args_json = "{}" },
+            } },
+        },
+        .{ .response = .{ .final_text = "inspection complete" } },
+    };
+    var seq: SequenceClient = .{ .replies = &replies };
+    var tr: transcript_mod.Transcript = .{};
+    defer tr.deinit(testing.allocator);
+    var registry: registry_mod.Registry = .{};
+    defer registry.deinit(testing.allocator);
+    try registry.register(testing.allocator, stub_tool);
+
+    const result = try runTurnWith(testing.allocator, seq.asClient(), &registry, &tr, "run the stub", .{});
+    try testing.expectEqual(turn.TurnState.done, result.final_state);
+    // Counting still happens with no sink attached, so the fields are usable
+    // by callers that do not want a log.
+    try testing.expectEqual(@as(u32, 1), result.tool_calls_gate_passed);
+    try testing.expect(result.first_gate_failure == null);
 }
 
 test "retry: one bad draft then one good draft lands a proof card" {
