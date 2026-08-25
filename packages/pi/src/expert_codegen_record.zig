@@ -1521,6 +1521,22 @@ const record_corpus = [_]RecordCase{
             ,
         } },
         .expect_first_attempt_green = true,
+        // Flipped to false on the 2026-08-25 re-record. The draft compensated:
+        // it answered 503 with {"ok":false,"failed":"ship","compensated":true},
+        // which is the saga outcome the prompt asked for. What it did not do is
+        // put the literal string "outcome" in the body, and the spec's first
+        // assertion is `bodyContains:"outcome"` - a word the prompt never says
+        // it wants as a key. The test stops at that assertion, so the step and
+        // compensation events after it were not reached and this recording
+        // measures nothing about them.
+        //
+        // Pinned rather than re-recorded, for the reason the sibling entry
+        // gives: recording again until the earlier draft came back would be
+        // selecting the sample that flatters the rate. Closing this needs the
+        // spec and the prompt to agree on the answer's shape, which changes the
+        // request identity and so belongs to a deliberate re-record, not to
+        // this one.
+        .expect_committed_intent_pass = false,
     },
     .{
         .name = "workflow-wait-signal",
