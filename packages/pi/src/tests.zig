@@ -4,6 +4,7 @@ comptime {
     _ = @import("registry/tool.zig");
     _ = @import("contract_gate.zig");
     _ = @import("gate_record.zig");
+    _ = @import("gate_report.zig");
     _ = @import("registry/registry.zig");
     _ = @import("tools/zts_expert_query.zig");
     _ = @import("tools/zts_expert_meta.zig");
