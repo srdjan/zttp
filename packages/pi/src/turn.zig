@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const ui_payload = @import("ui_payload.zig");
+const contract_gate = @import("contract_gate.zig");
 
 /// Per-request token accounting returned by the model provider.
 pub const Usage = struct {
@@ -56,6 +57,11 @@ pub const ChangeSet = struct {
     /// The loop records the proposal as a synthetic tool pair, so the
     /// continuation has to move with it until that transcript entry is created.
     reasoning_content: ?[]const u8 = null,
+    /// Contract-gate verdict on the originating `propose_change_set` call,
+    /// carried from the provider layer because the raw arguments do not
+    /// survive the remap. Observation only: the veto, not this field, decides
+    /// whether the edit lands.
+    gate_verdict: contract_gate.Verdict = .pass,
 
     pub fn len(self: ChangeSet) usize {
         return 1 + self.additional.len;

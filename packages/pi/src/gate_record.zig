@@ -12,6 +12,9 @@ const contract_gate = @import("contract_gate.zig");
 const ToolDef = @import("registry/tool.zig").ToolDef;
 const json_writer = @import("providers/json_writer.zig");
 const TextBuffer = @import("text_buffer.zig").TextBuffer;
+const propose_change_set = @import("providers/anthropic/propose_change_set.zig");
+
+pub const RejectionShape = propose_change_set.RejectionShape;
 
 pub const record_schema_version: u32 = 1;
 
@@ -56,6 +59,40 @@ pub fn hashToHex(hash: ToolSetHash) [64]u8 {
         out[i * 2 + 1] = digits[byte & 0x0f];
     }
     return out;
+}
+
+/// Map a provider-shape refusal onto schema vocabulary.
+///
+/// Exhaustive with no `else`, so a future shape is a compile error rather than
+/// a silently miscounted call.
+///
+/// Null means no verdict at all. `truncated` is the only such shape: a response
+/// cut off at the token cap is a transport outcome, and counting it as a schema
+/// violation would inflate the measured contract failure rate with something
+/// the model never chose.
+///
+/// `changes_empty` and `changes_too_many` are lossy on purpose. They are
+/// `max_changes` cardinality bounds rather than declared schema, so no
+/// `FailureReason` names them precisely and `type_mismatch` is the closest
+/// honest bucket. Keep the shape tag beside the mapped reason so a report can
+/// still tell them apart without a re-record.
+pub fn failureForRejection(shape: RejectionShape) ?contract_gate.FailureReason {
+    return switch (shape) {
+        .truncated => null,
+        .args_not_json => .args_not_json,
+        .args_not_object => .args_not_object,
+        .args_extra_top_level_key => .undeclared_parameter,
+        .changes_missing => .missing_required,
+        .changes_not_array => .type_mismatch,
+        .changes_empty => .type_mismatch,
+        .changes_too_many => .type_mismatch,
+        .change_not_object => .type_mismatch,
+        .change_file_missing => .missing_required,
+        .change_content_missing => .missing_required,
+        .change_host_authoritative_key => .undeclared_parameter,
+        .change_extra_field => .undeclared_parameter,
+        .change_field_type => .type_mismatch,
+    };
 }
 
 pub const CallOutcome = struct {
@@ -168,6 +205,40 @@ fn probe(name: []const u8, schema: []const u8) ToolDef {
         .decode_json = undefined,
         .execute = undefined,
     };
+}
+
+test "every rejection shape maps to a gate failure or to no verdict" {
+    // A fifteenth shape must fail here rather than be silently miscounted.
+    inline for (std.enums.values(RejectionShape)) |shape| {
+        const mapped = failureForRejection(shape);
+        if (shape == .truncated) {
+            try testing.expect(mapped == null);
+        } else {
+            try testing.expect(mapped != null);
+        }
+    }
+}
+
+test "a missing change content maps to missing_required" {
+    try testing.expectEqual(
+        contract_gate.FailureReason.missing_required,
+        failureForRejection(.change_content_missing).?,
+    );
+}
+
+test "truncation is a transport outcome, not a schema failure" {
+    try testing.expect(failureForRejection(.truncated) == null);
+}
+
+test "a cardinality bound maps to type_mismatch and keeps its own tag" {
+    try testing.expectEqual(
+        contract_gate.FailureReason.type_mismatch,
+        failureForRejection(.changes_empty).?,
+    );
+    try testing.expectEqual(
+        contract_gate.FailureReason.type_mismatch,
+        failureForRejection(.changes_too_many).?,
+    );
 }
 
 test "tool set hash is stable under registration order" {

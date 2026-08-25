@@ -4,6 +4,8 @@
 const std = @import("std");
 const turn = @import("../../turn.zig");
 const tool_catalog = @import("../tool_catalog.zig");
+const contract_gate = @import("../../contract_gate.zig");
+const ToolDef = @import("../../registry/tool.zig").ToolDef;
 
 pub const tool_name = tool_catalog.propose_change_set.name;
 pub const tool_description = tool_catalog.propose_change_set.description;
@@ -142,6 +144,7 @@ pub fn maybeRemapObserved(
                     .content = first.content,
                     .additional = additional,
                     .reasoning_content = calls[0].reasoning_content,
+                    .gate_verdict = gradeProposal(arena, calls[0].args_json),
                 } },
             };
         },
@@ -149,7 +152,49 @@ pub fn maybeRemapObserved(
     }
 }
 
+/// Grade the accepted call against the declared schema, so the change-set seam
+/// reports the same verdict vocabulary as the tool-batch seam.
+///
+/// A call that satisfies the validation above should satisfy the schema too, so
+/// a failure here means the two disagree. That is a defect worth surfacing
+/// rather than hiding. A gate allocation failure degrades to a pass: the
+/// instrument must never change the reply it observes.
+fn gradeProposal(arena: std.mem.Allocator, args_json: []const u8) contract_gate.Verdict {
+    const def: ToolDef = .{
+        .name = tool_name,
+        .label = tool_name,
+        .description = tool_description,
+        .effect = .write_workspace,
+        .context_policy = .exact,
+        .model_exposure = .visible,
+        .input_schema = input_schema_literal,
+        .decode_json = undefined,
+        .execute = undefined,
+    };
+    return contract_gate.check(arena, &def, args_json) catch .pass;
+}
+
 const testing = std.testing;
+
+test "a well-formed proposal carries a passing gate verdict" {
+    // The declared schema and the hand-written validation here must agree. A
+    // failure means one of them drifted, which is worth surfacing rather than
+    // hiding behind a remap that succeeded anyway.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const calls = [_]turn.ToolCall{.{
+        .id = "toolu_changes",
+        .name = tool_name,
+        .args_json =
+        \\{"changes":[{"file":"src/a.ts","content":"a"}]}
+        ,
+    }};
+    const out = try maybeRemap(arena.allocator(), .{ .response = .{ .tool_calls = &calls } }, null);
+    switch (out.response) {
+        .change_set => |set| try testing.expect(set.gate_verdict == .pass),
+        else => return error.TestFailed,
+    }
+}
 
 test "single proposal becomes an ordered change set" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);

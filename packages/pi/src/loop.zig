@@ -478,7 +478,9 @@ fn emitGateRecord(result: *TurnResult, options: RunOptions, gate: *const GateSta
         .tool_set_hash = gate.tool_set_hash,
         .model_id = options.model_id,
         .adapter_id = null,
-        .tool_calls_total = result.tool_call_count,
+        // Every graded call, not only the executed ones: a refused batch and a
+        // remapped change set are still calls the model emitted.
+        .tool_calls_total = @intCast(@min(gate.calls.items.len, std.math.maxInt(u32))),
         .tool_calls_gate_passed = gate.passed,
         .first_failure = gate.first_failure,
         .calls = gate.calls.items,
@@ -615,6 +617,34 @@ fn runTurnBody(
                 next_event = .{ .model_replied = result.reply };
             },
             .run_change_set_veto => |proposal| {
+                // propose_change_set never reaches the tool-batch arm: the
+                // provider layer remaps it and the raw arguments are gone by
+                // here, so the verdict rides on the proposal instead. Without
+                // this the instrument would omit the tool the expert exists to
+                // call, and every change-set turn would encode the way a turn
+                // that made no call encodes.
+                const gate_call_index = gate.calls.items.len;
+                {
+                    const verdict = proposal.gate_verdict;
+                    const gate_pass = verdict == .pass;
+                    if (gate_pass) {
+                        gate.passed += 1;
+                    } else if (gate.first_failure == null) {
+                        gate.first_failure = switch (verdict) {
+                            .pass => null,
+                            .fail => |f| f.reason,
+                        };
+                    }
+                    try gate.calls.append(allocator, .{
+                        .tool_name = propose_change_set.tool_name,
+                        .gate_pass = gate_pass,
+                        .failure = switch (verdict) {
+                            .pass => null,
+                            .fail => |f| f.reason,
+                        },
+                        .execution_ok = null,
+                    });
+                }
                 const call_id = try std.fmt.allocPrint(ta, "propose_change_set-{d}", .{transcript.len()});
                 var workspace_lock = change_transaction.WorkspaceLock.acquire(ta, options.workspace_root) catch |err| {
                     if (err == error.OutOfMemory) return err;
@@ -680,6 +710,7 @@ fn runTurnBody(
                 // a just-freed tail allocation before that transition.
                 switch (proof_result) {
                     .rejected => |rejection| {
+                        gate.calls.items[gate_call_index].execution_ok = false;
                         const body = try std.fmt.allocPrint(
                             ta,
                             veto_reject_preamble ++ " Fix every flagged violation below:\n\n{s}: {s}",
@@ -767,6 +798,7 @@ fn runTurnBody(
                         } };
                     },
                     .accepted => |*proof| {
+                        gate.calls.items[gate_call_index].execution_ok = true;
                         try appendEditToolResult(
                             allocator,
                             transcript,
@@ -2500,4 +2532,49 @@ test "budget-exhausted prompt carries a concrete next step" {
     // EXP-9: the bare "budget exhausted" line must end with an actionable step.
     try testing.expect(budget_exhausted_next_step.len > 0);
     try testing.expect(std.mem.indexOf(u8, budget_exhausted_next_step, "zttp check") != null);
+}
+
+test "gate instrument: a proposed change set is counted as one tool call" {
+    var collector = GateCollector{ .allocator = testing.allocator };
+    defer collector.deinit();
+    var sink = gate_record.GateSink{ .context = &collector, .record_fn = GateCollector.record };
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const workspace_root = try tmpWorkspacePath(testing.allocator, &tmp);
+    defer testing.allocator.free(workspace_root);
+
+    var canned: CannedClient = .{ .reply = .{
+        .response = .{ .change_set = .{
+            .file = "src/handler.ts",
+            .content = clean_handler,
+        } },
+    } };
+    var tr: transcript_mod.Transcript = .{};
+    defer tr.deinit(testing.allocator);
+    var registry: registry_mod.Registry = .{};
+    defer registry.deinit(testing.allocator);
+
+    _ = try runTurnWith(
+        testing.allocator,
+        canned.asClient(),
+        &registry,
+        &tr,
+        "add an ok response",
+        .{ .workspace_root = workspace_root, .gate_sink = &sink, .task_class = "change_set" },
+    );
+
+    const rec = collector.records.items[0];
+    try testing.expectEqual(@as(u32, 1), rec.tool_calls_total);
+    try testing.expectEqual(@as(usize, 1), rec.calls.len);
+    try testing.expectEqualStrings("propose_change_set", rec.calls[0].tool_name);
+    try testing.expect(rec.calls[0].gate_pass);
+    try testing.expectEqual(true, rec.calls[0].execution_ok.?);
+
+    // The decisive negative: a change-set turn must not encode the way a turn
+    // that made no tool call encodes.
+    var buf = TextBuffer.init(testing.allocator);
+    defer buf.deinit();
+    try gate_record.writeJsonl(rec, buf.writer());
+    try testing.expect(std.mem.indexOf(u8, buf.written(), "\"tool_calls_total\":0") == null);
 }
