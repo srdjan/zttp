@@ -84,23 +84,27 @@ second metadata contract.
 | `simulate_edit` | implemented | `file`, `repairs` | |
 | `verify` | implemented | `file`, `properties`, `content` | `content` verifies supplied bytes without a write |
 
-### The `modules` payload has two row shapes
+### Every `modules` row has the same shape
 
 `modules` resolves one entry file, so its `builtins[]` rows are scoped to what
-that file imports. Every row carries `specifier`, `name`, `summary`, `resolved`,
-and `exports`, and every export carries its `name`, `params`, and `returns`. A
-row whose `resolved` is `false` carries neither `required_capabilities` nor an
-`effect` on any of its exports: the veto enforces both mechanically, and `meta`
-and `effects` still answer them for a module the file has not imported.
+that file imports. Scoping changes what a row says, never which keys it has.
+Every row carries `specifier`, `name`, `summary`, `resolved`,
+`required_capabilities`, and `exports`, and every export carries its `name`,
+`effect`, `params`, and `returns`, whether or not the entry file imports the
+module.
 
-Read `resolved` before either key. This is the one place in the protocol where
-the shape of a row varies within a single `schema_version`, so a reader that
-takes `required_capabilities` on every row reads undefined rather than a version
-mismatch it can detect. Restoring the keys unconditionally was measured at 2451
-bytes of an 11636-byte payload, and it changes the recorded `zts_expert_query`
-tool results inside the `sibling-helper` and `egress-options-holes` cassettes -
-so any edit to this payload's bytes stales the codegen corpus and must be
-planned with a re-record.
+`resolved` is the hint, not a second shape: it says whether the entry file
+imports this module, so a reader never has to infer that from a missing key.
+The keys were once dropped from an unresolved row, which made the shape of a
+row conditional while `schema_version` stayed 2 - a reader written against v2
+read undefined rather than a version mismatch it could detect. Measured on a
+one-import entry file, emitting them unconditionally takes the payload from
+11636 to 14393 bytes.
+
+This payload's text is a recorded `zts_expert_query` tool result inside the
+`sibling-helper` and `egress-options-holes` cassettes, so any edit to what it
+writes stales the codegen corpus and must be planned with a re-record. See
+[Recording the codegen cassettes](cassette-recording.md).
 
 Every operation in the closed set is implemented as of 2026-08-03. The
 `operation_not_implemented` code stays in the protocol because the set is closed

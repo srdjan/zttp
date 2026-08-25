@@ -1375,32 +1375,29 @@ fn writeModulesPayload(
     }
     try json.endArray();
 
-    // Scoped to what the file imports, which `meta` is deliberately not.
+    // Every builtin, in one shape. `resolved` says which of them the entry file
+    // imports; it is the only field this loop varies, and it is a fact about
+    // the file, not a second row schema.
     //
-    // This operation resolves one entry file; `meta` owns the whole catalog.
-    // Emitting all 26 modules in full here cost 10,406 of the response's 11,061
-    // bytes to describe modules the file does not import, paid on every call,
-    // in exactly the cases that loop.
+    // Scoping was tried twice and gave both fields back. Emitting a bare
+    // specifier list for an unimported module saved 10,406 of an 11,061-byte
+    // response and cost correctness: a model reading it wrote a SELECT
+    // statement into the argument that takes a registered query name, so every
+    // module got its summary and its `name(params)` signature back. What was
+    // left scoped after that was `required_capabilities` and per-export
+    // `effect`, and that made a `builtins[]` row two shapes within one
+    // `schema_version` - a reader written against v2, where both keys were
+    // guaranteed on every row, read undefined rather than a version mismatch
+    // it could detect, and `resolved` only helps a reader that already knows
+    // to look for it. Measured on a one-import entry file, giving those two
+    // back takes the payload from 11636 to 14393 bytes.
     //
-    // What an unimported module keeps is not negotiable down to a bare index.
-    // A specifier list is what discovery published before parameter names, and
-    // a model reading it wrote a SELECT statement into the argument that takes
-    // a registered query name. So every module keeps its summary and the
-    // `name(params)` signature of every export: that is the fact whose absence
-    // was measured. What an unimported module drops is its capability set and
-    // its per-export effect - both enforced mechanically by the veto rather
-    // than by the model remembering them, and both still available from `meta`
-    // and `effects`.
-    //
-    // That makes a `builtins[]` row two shapes within one `schema_version`, and
-    // a reader must branch on `resolved` rather than assume the keys are there.
-    // The trade was taken deliberately, because the alternative costs the
-    // corpus: this payload's text is a recorded `zts_expert_query` tool result
-    // inside the `sibling-helper` and `egress-options-holes` cassettes, so any
-    // change to these bytes - restoring the two keys was measured at 2451 of
-    // 11636 - stales them and the replay gate refuses with
-    // `StaleCodegenCassette`. Plan a re-record before editing what this writes.
-    // Documented for consumers in docs/internals/agent-protocol-v2.md.
+    // These bytes are corpus input. This payload's text is a recorded
+    // `zts_expert_query` tool result inside the `sibling-helper` and
+    // `egress-options-holes` cassettes, so any change to what this writes
+    // stales them and the replay gate refuses with `StaleCodegenCassette`.
+    // Plan a re-record before editing it; see
+    // docs/internals/cassette-recording.md.
     try json.objectField("builtins");
     try json.beginArray();
     for (zts.builtinModules) |binding| {
@@ -1411,27 +1408,23 @@ fn writeModulesPayload(
         try json.objectField("name");
         try json.write(binding.name);
         try writeModuleSummary(json, binding);
-        // Says which of the two shapes this entry is, so a reader never has to
-        // infer it from a missing key and never mistakes a scoped entry for a
-        // module that declares no capabilities.
+        // Whether the entry file imports this module. A reader never has to
+        // infer that from a missing key, and never mistakes an unimported
+        // entry for a module that declares no capabilities.
         try json.objectField("resolved");
         try json.write(imported);
-        if (imported) {
-            try json.objectField("required_capabilities");
-            try json.beginArray();
-            for (binding.required_capabilities) |cap| try json.write(@tagName(cap));
-            try json.endArray();
-        }
+        try json.objectField("required_capabilities");
+        try json.beginArray();
+        for (binding.required_capabilities) |cap| try json.write(@tagName(cap));
+        try json.endArray();
         try json.objectField("exports");
         try json.beginArray();
         for (binding.exports) |exp| {
             try json.beginObject();
             try json.objectField("name");
             try json.write(exp.name);
-            if (imported) {
-                try json.objectField("effect");
-                try json.write(@tagName(exp.effect));
-            }
+            try json.objectField("effect");
+            try json.write(@tagName(exp.effect));
             try writeExportParams(json, exp);
             // Universal, like params: a chooser needs to know what a module
             // answers before importing it, and the absence of exactly this
@@ -3286,12 +3279,12 @@ test "module discovery names each parameter and the module use protocol" {
     try testing.expect(found_sql_many);
 }
 
-// `modules` resolves one entry file, so it describes the file's own imports in
-// full and every other module in the shape a chooser needs. The scoping is only
-// safe because of what it KEEPS: a bare specifier list is what discovery
-// published before parameter names, and the measured consequence was a model
-// writing SQL text into the argument that takes a registered query name. So the
-// assertions below are mostly about the unimported entry, not the imported one.
+// `modules` resolves one entry file and describes every builtin in one shape,
+// marking which of them the file imports. The assertions below are mostly
+// about an unimported entry, because that is the row an earlier scoping cut
+// down: a bare specifier list is what discovery published before parameter
+// names, and the measured consequence was a model writing SQL text into the
+// argument that takes a registered query name.
 test "modules describes imports in full and keeps every other module choosable" {
     const a = testing.allocator;
     var tmp = std.testing.tmpDir(.{});
@@ -3337,9 +3330,12 @@ test "modules describes imports in full and keeps every other module choosable" 
         if (std.mem.eql(u8, spec, "zttp:sql")) {
             saw_unimported = true;
             try testing.expect(!resolved);
-            // Dropped, because the veto enforces both mechanically and `meta`
-            // and `effects` still answer them.
-            try testing.expect(m.get("required_capabilities") == null);
+            // Present, exactly as on a resolved row. Omitting these made the
+            // shape of a row conditional while `schema_version` stayed 2, so a
+            // v2 reader - where the keys were guaranteed on every row - read
+            // undefined rather than a mismatch it could detect. `resolved` is
+            // the hint; it is not a second shape.
+            try testing.expect(m.get("required_capabilities") != null);
 
             // KEPT, and this is the whole safety argument for scoping. A model
             // choosing a module still learns that zttp:sql registers a
@@ -3349,7 +3345,7 @@ test "modules describes imports in full and keeps every other module choosable" 
             try testing.expect(std.mem.indexOf(u8, summary, "never SQL text") != null);
             for (m.get("exports").?.array.items) |exp_value| {
                 const exp = exp_value.object;
-                try testing.expect(exp.get("effect") == null);
+                try testing.expect(exp.get("effect") != null);
                 if (!std.mem.eql(u8, exp.get("name").?.string, "sqlMany")) continue;
                 const params = exp.get("params").?.array;
                 try testing.expectEqualStrings("name", params.items[0].string);
