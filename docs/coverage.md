@@ -8,7 +8,7 @@ What the offline suite proves, and what it does not.
 > and replay, the loop, veto, apply, retry, salvage, compiler repair, and the
 > hole loop execute correctly over their declared fixtures. And the
 > corpus is load-bearing: of the compiler's 72 advertised rules,
-> 4 are tripped by at least one case. It proves nothing about what a
+> 5 are tripped by at least one case. It proves nothing about what a
 > model will draft. Raw first-draft pass, first-attempt green, median
 > round-trips, and intent pass
 > exist only as recordings of a live model, an offline run is structurally unable
@@ -33,7 +33,7 @@ publishing first-draft, intent, or round-trip measurements still requires the
 named model. Developing and verifying the harness, veto, salvage, repair, and
 hole-loop machinery does not.
 
-Recorded 2026-08-17 over corpus `0012ad8ca6d5`. The replay fails
+Recorded 2026-08-25 over corpus `0012ad8ca6d5`. The replay fails
 when this page drifts from the run, so it is regenerated in the same commit as
 whatever moved it, and `git log docs/coverage.json` is the history.
 
@@ -41,9 +41,9 @@ whatever moved it, and `git log docs/coverage.json` is the history.
 
 | Rules advertised | Tripped by at least one case | Untripped |
 |---|---|---|
-| 72 | 4 | 68 |
+| 72 | 5 | 67 |
 
-Tripped: `ZTS400`, `ZTS500`, `ZTS501`, `ZTS509`
+Tripped: `ZTS400`, `ZTS500`, `ZTS501`, `ZTS502`, `ZTS509`
 
 The list above is a fair description of what these prompts ask for and a poor
 description of what the compiler proves. It is the mechanical form of an
@@ -56,11 +56,11 @@ was wrong the first time the count moved. Nothing in this section restates a
 number the generator computes; the codes are printed, and a reader who wants the
 breakdown reads them.
 
-Untripped: `ZTS300`, `ZTS301`, `ZTS302`, `ZTS303`, `ZTS304`, `ZTS305`, `ZTS306`, `ZTS307`, `ZTS308`, `ZTS309`, `ZTS310`, `ZTS502`, `ZTS600`, `ZTS629`, `ZTS601`, `ZTS061`, `ZTS602`, `ZTS603`, `ZTS604`, `ZTS605`, `ZTS608`, `ZTS609`, `ZTS610`, `ZTS623`, `ZTS611`, `ZTS612`, `ZTS621`, `ZTS613`, `ZTS614`, `ZTS616`, `ZTS620`, `ZTS622`, `ZTS625`, `ZTS626`, `ZTS627`, `ZTS628`, `ZTS624`, `ZTS606`, `ZTS503`, `ZTS504`, `ZTS505`, `ZTS506`, `ZTS508`, `ZTS607`, `ZTS510`, `ZTS511`, `ZTS512`, `POL001`, `POL002`, `POL003`, `POL004`, `POL005`, `POL006`, `POL007`, `POL008`, `PROP01`, `PROP02`, `PROP03`, `PROP04`, `PROP05`, `PROP06`, `ZTS401`, `ZTS402`, `ZTS403`, `ZTS404`, `ZTS405`, `ZTS406`, `ZTS407`
+Untripped: `ZTS300`, `ZTS301`, `ZTS302`, `ZTS303`, `ZTS304`, `ZTS305`, `ZTS306`, `ZTS307`, `ZTS308`, `ZTS309`, `ZTS310`, `ZTS600`, `ZTS629`, `ZTS601`, `ZTS061`, `ZTS602`, `ZTS603`, `ZTS604`, `ZTS605`, `ZTS608`, `ZTS609`, `ZTS610`, `ZTS623`, `ZTS611`, `ZTS612`, `ZTS621`, `ZTS613`, `ZTS614`, `ZTS616`, `ZTS620`, `ZTS622`, `ZTS625`, `ZTS626`, `ZTS627`, `ZTS628`, `ZTS624`, `ZTS606`, `ZTS503`, `ZTS504`, `ZTS505`, `ZTS506`, `ZTS508`, `ZTS607`, `ZTS510`, `ZTS511`, `ZTS512`, `POL001`, `POL002`, `POL003`, `POL004`, `POL005`, `POL006`, `POL007`, `POL008`, `PROP01`, `PROP02`, `PROP03`, `PROP04`, `PROP05`, `PROP06`, `ZTS401`, `ZTS402`, `ZTS403`, `ZTS404`, `ZTS405`, `ZTS406`, `ZTS407`
 
 ## Codes the registry does not carry
 
-`ZTS001`, `ZTS105`, `ZTS203`, `ZTS204`
+`ZTS001`, `ZTS056`, `ZTS105`
 
 These are real diagnostics the corpus trips that no `rule_registry` entry
 carries - the parser, stripper, bool-checker, and type-checker families. The

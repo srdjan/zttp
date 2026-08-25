@@ -1,5 +1,5 @@
 {
-  "runId": "672045d43e6d-1786998857603-934",
+  "runId": "fbfac94c0da6-1787671920454-69308",
   "complete": true,
   "publishable": true,
   "publicationMode": true,
@@ -25,7 +25,7 @@
   "securityProbeHash": "331b2826a8e9c8496720c24b05ff0a5923073a469010e951885214f9109c7792",
   "thresholdHash": "7c8a65863f5fe1e294fb71ded1ca6e26ea28a224281055e34f63b4511507c343",
   "manifestHash": "b1a729d52dae19439252fe91baf0d03c0abe1feb89ea6a81dfecf4b07893583e",
-  "resultRunHash": "2927a4c257ca72252be7e2fbe8ca3428e94c21575449038e23af9917eba5fe9a",
+  "resultRunHash": "d8c6cc191263455a8f0c13cb08253e9a5159e25b2a08d36084c59259d99f6d7d",
   "promptPersonaHash": "5ae842d6cd259973f4dabb373887b0c067fbbd0adbc8b1b3b43a7d6146bb2cb4",
   "providerNeutralCatalogHash": "b190e14269c9c021d71467bcdbc174141df2e7c5df5bbe5be3cb9e55092b354f",
   "providerSerializedCatalogHash": "fe8d3a3bb01106b66571e8e500bf4f5d85aed40fa4449543599275e9e6af6a99",
@@ -35,14 +35,15 @@
   "semanticsHash": "83b822bd0dee8e5f9a9231501f0f95b34fa48a0f08c671ade7a8bee822b877b8",
   "diagnosticHash": "1abb05ce9aa00790cceea8dd2b50cd9be2f733dc98abfe224fff61038dec91d0",
   "policyHash": "0f7250ffdb2b899515f9f23bd5fc21e6db9baaa7b1274b2c90b63b8dbb3aa6d0",
-  "sourceCommit": "672045d43e6d3f498fa2665414250e3e22eb7a15",
-  "sourceDirty": false,
+  "sourceCommit": "fbfac94c0da6a9db3dfe2d4362065d2304668816",
+  "sourceDirty": true,
   "rulesTotal": 72,
-  "rulesTripped": 4,
+  "rulesTripped": 5,
   "tripped": [
     "ZTS400",
     "ZTS500",
     "ZTS501",
+    "ZTS502",
     "ZTS509"
   ],
   "untripped": [
@@ -57,7 +58,6 @@
     "ZTS308",
     "ZTS309",
     "ZTS310",
-    "ZTS502",
     "ZTS600",
     "ZTS629",
     "ZTS601",
@@ -117,9 +117,8 @@
   ],
   "offRegistry": [
     "ZTS001",
-    "ZTS105",
-    "ZTS203",
-    "ZTS204"
+    "ZTS056",
+    "ZTS105"
   ],
-  "recorded": "2026-08-17"
+  "recorded": "2026-08-25"
 }
