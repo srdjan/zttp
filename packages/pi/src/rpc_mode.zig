@@ -26,6 +26,7 @@ const std = @import("std");
 const agent = @import("agent.zig");
 const app = @import("app.zig");
 const loop = @import("loop.zig");
+const gate_record = @import("gate_record.zig");
 const registry_mod = @import("registry/registry.zig");
 const transcript_mod = @import("transcript.zig");
 const session_events = @import("session/events.zig");
@@ -67,6 +68,13 @@ pub fn run(
         .model = flags.model,
     });
     defer session.deinit(allocator);
+
+    // Owned here so it outlives every turn in this run, and never moved after
+    // `attachGateLog` returns: the sink, its writer, and the io backend all
+    // point into it.
+    var gate_log: ?gate_record.GateLog = null;
+    defer if (gate_log) |*log| log.deinit();
+    try agent.attachGateLog(allocator, &session, &gate_log, flags.gate_log);
 
     try runWithSession(allocator, &session, registry, policy, null, null);
 }

@@ -191,6 +191,82 @@ pub const GateSink = struct {
     }
 };
 
+/// Append-only JSONL destination for gate records.
+///
+/// A write failure is dropped by `GateSink.record`, which is deliberate: the
+/// instrument must never change the turn it measures.
+pub const FileGateSink = struct {
+    file: std.Io.File,
+    io: std.Io,
+    sink: GateSink,
+    out_buffer: [4 * 1024]u8 = undefined,
+    out: std.Io.File.Writer = undefined,
+
+    pub fn init(file: std.Io.File, io: std.Io) FileGateSink {
+        return .{
+            .file = file,
+            .io = io,
+            .sink = .{ .context = undefined, .record_fn = writeRecord },
+        };
+    }
+
+    /// Call once after `init`, when the value has reached its final address:
+    /// the sink holds a pointer to its owner and the writer holds a pointer to
+    /// the owner's buffer, and neither can be taken before there is an address
+    /// to take.
+    ///
+    /// Seeds the write position from the file's current size, so reopening an
+    /// existing log appends to it instead of overwriting the measurement it
+    /// already holds.
+    pub fn bind(self: *FileGateSink) !void {
+        self.sink.context = self;
+        self.out = self.file.writer(self.io, &self.out_buffer);
+        const info = try self.file.stat(self.io);
+        self.out.pos = info.size;
+    }
+
+    fn writeRecord(context: *anyopaque, record: TurnRecord) anyerror!void {
+        const self: *FileGateSink = @ptrCast(@alignCast(context));
+        try writeJsonl(record, &self.out.interface);
+        try self.out.interface.flush();
+    }
+};
+
+/// Everything a `--gate-log` run needs: the io backend, the open file, and the
+/// sink the loop writes through.
+///
+/// Two-phase for the same reason `FileGateSink.bind` is: the sink, the writer,
+/// and the io backend all hold pointers into this value, so nothing may be
+/// bound before it reaches its final address. Call `open` once, after
+/// placement, and do not move the value afterwards.
+pub const GateLog = struct {
+    backend: std.Io.Threaded,
+    impl: FileGateSink = undefined,
+    is_open: bool = false,
+
+    pub fn init(allocator: std.mem.Allocator) GateLog {
+        return .{ .backend = std.Io.Threaded.init(allocator, .{ .environ = .empty }) };
+    }
+
+    pub fn open(self: *GateLog, path: []const u8) !void {
+        const io = self.backend.io();
+        const file = try std.Io.Dir.cwd().createFile(io, path, .{ .truncate = false });
+        errdefer file.close(io);
+        self.impl = FileGateSink.init(file, io);
+        try self.impl.bind();
+        self.is_open = true;
+    }
+
+    pub fn sink(self: *GateLog) *GateSink {
+        return &self.impl.sink;
+    }
+
+    pub fn deinit(self: *GateLog) void {
+        if (self.is_open) self.impl.file.close(self.backend.io());
+        self.backend.deinit();
+    }
+};
+
 const testing = std.testing;
 
 fn probe(name: []const u8, schema: []const u8) ToolDef {
@@ -239,6 +315,58 @@ test "a cardinality bound maps to type_mismatch and keeps its own tag" {
         contract_gate.FailureReason.type_mismatch,
         failureForRejection(.changes_too_many).?,
     );
+}
+
+fn emptyRecord(hash: ToolSetHash) TurnRecord {
+    return .{
+        .session_id = "s",
+        .turn_index = 0,
+        .unix_ms = 1_700_000_000_000,
+        .task_class = "tool_call",
+        .tool_set_hash = hash,
+        .model_id = "m",
+        .adapter_id = null,
+        .tool_calls_total = 0,
+        .tool_calls_gate_passed = 0,
+        .first_failure = null,
+        .calls = &.{},
+        .prompt_tokens = 0,
+        .generated_tokens = 0,
+        .wall_ns = 0,
+    };
+}
+
+test "a reopened gate log is appended to, never overwritten" {
+    // A run that truncated the log would destroy the measurement the previous
+    // run recorded, and the loss would be silent.
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(testing.io, &root_buffer);
+    const path = try std.fs.path.join(
+        testing.allocator,
+        &.{ root_buffer[0..root_len], "gate.jsonl" },
+    );
+    defer testing.allocator.free(path);
+
+    var hash: ToolSetHash = undefined;
+    @memset(&hash, 0x00);
+
+    for (0..2) |_| {
+        var log = GateLog.init(testing.allocator);
+        defer log.deinit();
+        try log.open(path);
+        log.sink().record(emptyRecord(hash));
+    }
+
+    const contents = try tmp.dir.readFileAlloc(
+        testing.io,
+        "gate.jsonl",
+        testing.allocator,
+        .limited(64 * 1024),
+    );
+    defer testing.allocator.free(contents);
+    try testing.expectEqual(@as(usize, 2), std.mem.count(u8, contents, "\n"));
 }
 
 test "tool set hash is stable under registration order" {

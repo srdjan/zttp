@@ -109,41 +109,8 @@ pub fn run(allocator: std.mem.Allocator) !void {
     repl.run(allocator, &registry, flags, flags.policy) catch |err| return handleModeError(err);
 }
 
-/// Append-only JSONL destination for gate records.
-///
-/// A write failure is dropped by `GateSink.record`, which is deliberate: the
-/// instrument must never change the turn it measures.
-pub const FileGateSink = struct {
-    file: std.Io.File,
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    sink: gate_record.GateSink,
-
-    pub fn init(file: std.Io.File, io: std.Io, allocator: std.mem.Allocator) FileGateSink {
-        return .{
-            .file = file,
-            .io = io,
-            .allocator = allocator,
-            .sink = .{ .context = undefined, .record_fn = writeRecord },
-        };
-    }
-
-    /// Call once after `init`. The sink holds a pointer to its owner, and a
-    /// value cannot take its own address before it has one.
-    pub fn bind(self: *FileGateSink) void {
-        self.sink.context = self;
-    }
-
-    fn writeRecord(context: *anyopaque, record: gate_record.TurnRecord) anyerror!void {
-        const self: *FileGateSink = @ptrCast(@alignCast(context));
-        var buf = TextBuffer.init(self.allocator);
-        defer buf.deinit();
-        try gate_record.writeJsonl(record, buf.writer());
-        // Streaming, not positional: the log is append-only and every record
-        // must land after the last one without the sink tracking an offset.
-        try self.file.writeStreamingAll(self.io, buf.written());
-    }
-};
+/// Re-exported so `--gate-log` callers keep one name for the sink.
+pub const FileGateSink = gate_record.FileGateSink;
 
 /// Print the measured contract pass rate per tool and the measured turn volume
 /// per niche per day from a gate log.
@@ -1141,8 +1108,8 @@ test "FileGateSink appends one JSONL line per record" {
     const file = try tmp.dir.createFile(io, "gate.jsonl", .{ .read = true });
     defer file.close(io);
 
-    var file_sink = FileGateSink.init(file, io, std.testing.allocator);
-    file_sink.bind();
+    var file_sink = FileGateSink.init(file, io);
+    try file_sink.bind();
     var hash: gate_record.ToolSetHash = undefined;
     @memset(&hash, 0x00);
     const record = gate_record.TurnRecord{

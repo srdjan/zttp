@@ -12,6 +12,7 @@ const transcript_mod = @import("transcript.zig");
 const agent = @import("agent.zig");
 const commands = @import("commands.zig");
 const loop = @import("loop.zig");
+const gate_record = @import("gate_record.zig");
 const app = @import("app.zig");
 const ledger = @import("ledger.zig");
 const session_events = @import("session/events.zig");
@@ -799,6 +800,13 @@ pub fn run(
         .approval_policy_tag = policy_tag,
     });
     defer session.deinit(allocator);
+
+    // Owned here so it outlives every turn in this run, and never moved after
+    // `attachGateLog` returns: the sink, its writer, and the io backend all
+    // point into it.
+    var gate_log: ?gate_record.GateLog = null;
+    defer if (gate_log) |*log| log.deinit();
+    try agent.attachGateLog(allocator, &session, &gate_log, flags.gate_log);
 
     if (is_tty) writeBanner(allocator, &session);
 

@@ -41,6 +41,7 @@ const persister = @import("session/persister.zig");
 const reconstructor = @import("session/reconstructor.zig");
 const project_context = @import("context/project_context.zig");
 const expert_workflow = @import("expert_workflow.zig");
+const gate_record = @import("gate_record.zig");
 const change_transaction = @import("change_transaction.zig");
 const change_set = @import("change_set.zig");
 const workspace_snapshot = @import("workspace_snapshot.zig");
@@ -321,6 +322,14 @@ pub const AgentSession = struct {
     resolved_provider: ?Provider = null,
     resolved_model: ?*const models_registry.Model = null,
     identity_override_disclosed: bool = false,
+
+    /// Borrowed contract-gate destination for `--gate-log`. The caller owns the
+    /// `GateLog` it points into and must outlive the session. Null records
+    /// nothing.
+    gate_sink: ?*gate_record.GateSink = null,
+    /// Turn ordinal carried into each gate record, so a niche's turns can be
+    /// ordered without re-reading the events log.
+    gate_turn_index: u32 = 0,
 
     session_id: ?[]u8 = null,
     session_dir: ?[]u8 = null,
@@ -1433,6 +1442,25 @@ pub fn runOneTurn(
     );
 }
 
+/// Point a session's contract-gate records at `path`, opening the log if one
+/// was asked for. A null path attaches nothing and records nothing.
+///
+/// `storage` is caller-owned and must outlive every turn the session runs: the
+/// sink, its writer, and the io backend all hold pointers into it, so it must
+/// not be moved after this returns. The caller is also responsible for
+/// `deinit`, which closes the file.
+pub fn attachGateLog(
+    allocator: std.mem.Allocator,
+    session: *AgentSession,
+    storage: *?gate_record.GateLog,
+    path: ?[]const u8,
+) !void {
+    const log_path = path orelse return;
+    storage.* = gate_record.GateLog.init(allocator);
+    try storage.*.?.open(log_path);
+    session.gate_sink = storage.*.?.sink();
+}
+
 pub fn runOneTurnWithClient(
     allocator: std.mem.Allocator,
     session: *AgentSession,
@@ -1458,6 +1486,13 @@ pub fn runOneTurnWithClient(
             .replay_mode = replay,
             .max_attempts = loop.interactive_max_attempts,
             .receipt_durability = if (session.events_path == null) .workspace else .session_journal,
+            .gate_sink = session.gate_sink,
+            // Host-assigned, never derived by the loop. Reuses the classifier
+            // the host already runs rather than inventing a second vocabulary.
+            .task_class = expert_workflow.taskKindName(expert_workflow.classify(user_text).kind),
+            .model_id = session.currentModel() orelse "",
+            .session_id = session.session_id orelse "",
+            .turn_index = session.gate_turn_index,
         },
     ) catch |err| {
         if (session.events_path != null) {
@@ -1483,6 +1518,7 @@ pub fn runOneTurnWithClient(
     };
     session.token_totals.add(turn_result.usage);
     session.metrics.record(turn_result);
+    session.gate_turn_index +|= 1;
     const tr = &session.transcript;
     std.debug.assert(tr.len() >= 1);
 
@@ -5069,4 +5105,116 @@ test "a loopback endpoint override is reported as local, a remote one is not" {
     const dest = destinationForSession(&session);
     try testing.expect(dest == .openai_custom);
     try testing.expect(!dest.isLocal());
+}
+
+test "gate log: a session turn carries its identity into the record" {
+    const Collector = struct {
+        records: std.ArrayListUnmanaged(gate_record.TurnRecord) = .empty,
+        allocator: std.mem.Allocator,
+
+        fn record(context: *anyopaque, r: gate_record.TurnRecord) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            var copy = r;
+            copy.session_id = try self.allocator.dupe(u8, r.session_id);
+            errdefer self.allocator.free(copy.session_id);
+            copy.task_class = try self.allocator.dupe(u8, r.task_class);
+            try self.records.append(self.allocator, copy);
+        }
+
+        fn deinit(self: *@This()) void {
+            for (self.records.items) |r| {
+                self.allocator.free(r.session_id);
+                self.allocator.free(r.task_class);
+            }
+            self.records.deinit(self.allocator);
+        }
+    };
+
+    var collector = Collector{ .allocator = testing.allocator };
+    defer collector.deinit();
+    var sink = gate_record.GateSink{ .context = &collector, .record_fn = Collector.record };
+
+    var session = AgentSession.initStub();
+    defer session.deinit(testing.allocator);
+    session.session_id = try testing.allocator.dupe(u8, "sess-42");
+    session.gate_sink = &sink;
+
+    var registry: Registry = .{};
+    defer registry.deinit(testing.allocator);
+    var stub: StubClient = .{};
+
+    for (0..2) |_| {
+        const rendered = try runOneTurnWithClient(
+            testing.allocator,
+            &session,
+            &registry,
+            stub.asClient(),
+            "add a handler that returns ok",
+            null,
+        );
+        testing.allocator.free(rendered);
+    }
+
+    try testing.expectEqual(@as(usize, 2), collector.records.items.len);
+    try testing.expectEqualStrings("sess-42", collector.records.items[0].session_id);
+    // Host-assigned, from the classifier the host already runs.
+    try testing.expect(collector.records.items[0].task_class.len > 0);
+    // The ordinal advances, so a niche's turns can be ordered.
+    try testing.expectEqual(@as(u32, 0), collector.records.items[0].turn_index);
+    try testing.expectEqual(@as(u32, 1), collector.records.items[1].turn_index);
+}
+
+test "gate log: an attached log receives one line per turn" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(testing.io, &root_buffer);
+    const path = try std.fs.path.join(
+        testing.allocator,
+        &.{ root_buffer[0..root_len], "gate.jsonl" },
+    );
+    defer testing.allocator.free(path);
+
+    var session = AgentSession.initStub();
+    defer session.deinit(testing.allocator);
+
+    var gate_log: ?gate_record.GateLog = null;
+    defer if (gate_log) |*log| log.deinit();
+    try attachGateLog(testing.allocator, &session, &gate_log, path);
+
+    var registry: Registry = .{};
+    defer registry.deinit(testing.allocator);
+    var stub: StubClient = .{};
+
+    for (0..2) |_| {
+        const rendered = try runOneTurnWithClient(
+            testing.allocator,
+            &session,
+            &registry,
+            stub.asClient(),
+            "add a handler that returns ok",
+            null,
+        );
+        testing.allocator.free(rendered);
+    }
+
+    const contents = try tmp.dir.readFileAlloc(
+        testing.io,
+        "gate.jsonl",
+        testing.allocator,
+        .limited(64 * 1024),
+    );
+    defer testing.allocator.free(contents);
+    try testing.expectEqual(@as(usize, 2), std.mem.count(u8, contents, "\n"));
+    try testing.expect(std.mem.indexOf(u8, contents, "\"turn_index\":1") != null);
+}
+
+test "gate log: a null path attaches nothing" {
+    var session = AgentSession.initStub();
+    defer session.deinit(testing.allocator);
+    var gate_log: ?gate_record.GateLog = null;
+    defer if (gate_log) |*log| log.deinit();
+    try attachGateLog(testing.allocator, &session, &gate_log, null);
+    try testing.expect(gate_log == null);
+    try testing.expect(session.gate_sink == null);
 }
