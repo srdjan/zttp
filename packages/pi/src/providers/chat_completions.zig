@@ -76,7 +76,25 @@ pub fn buildRequestBodyFromSnapshot(
     try writer.print(",\"max_tokens\":{d},\"stream\":false,\"messages\":[", .{snapshot.config.max_output_tokens});
     try writeMessage(writer, "system", snapshot.config.system_prompt);
 
-    for (snapshot.item_groups) |group| {
+    // A DeepSeek reply that both says something and calls a tool is one message
+    // carrying `content`, `reasoning_content`, and `tool_calls`. The transcript
+    // splits it: `callModel` appends the preamble as its own `model_text` item
+    // before the tool calls land. Written out as two assistant messages, the
+    // preamble half has no `reasoning_content`, and DeepSeek in thinking mode
+    // answers 400 "The `reasoning_content` in the thinking mode must be passed
+    // back to the API." - measured against a captured recorder request on
+    // 2026-08-25, on a corpus that recorded cleanly on 2026-08-17. So the two
+    // halves are rejoined here, into the shape the provider itself returned.
+    //
+    // A `model_text` the provider is not about to follow with tool calls stays
+    // its own message. Final-answer reasoning is scrubbed on the way in and
+    // never reaches the transcript, so there is nothing to pass back for it;
+    // that shape is only reachable when a later turn re-sends a completed
+    // answer, which this corpus never does.
+    var pending_preamble: ?[]const u8 = null;
+    var group_index: usize = 0;
+    while (group_index < snapshot.item_groups.len) : (group_index += 1) {
+        const group = snapshot.item_groups[group_index];
         const group_items = snapshot.items[group.start..][0..group.len];
         if (group_items.len == 0) return error.InvalidSnapshot;
         switch (group_items[0]) {
@@ -87,6 +105,12 @@ pub fn buildRequestBodyFromSnapshot(
             },
             .model_text => |body| {
                 if (group_items.len != 1) return error.InvalidSnapshot;
+                if (snapshot.config.provider == .deepseek and
+                    nextGroupIsToolUse(snapshot, group_index))
+                {
+                    pending_preamble = body;
+                    continue;
+                }
                 try writer.writeByte(',');
                 try writeMessage(writer, "assistant", body);
             },
@@ -105,7 +129,12 @@ pub fn buildRequestBodyFromSnapshot(
             .tool_use => {
                 try writer.writeAll(",{\"role\":\"assistant\",\"content\":");
                 if (snapshot.config.provider == .deepseek) {
-                    try writer.writeAll("\"\"");
+                    if (pending_preamble) |text| {
+                        try writeJsonString(writer, text);
+                    } else {
+                        try writer.writeAll("\"\"");
+                    }
+                    pending_preamble = null;
                     if (group_items[0].tool_use.reasoning_content) |reasoning| {
                         try writer.writeAll(",\"reasoning_content\":");
                         try writeJsonString(writer, reasoning);
@@ -161,6 +190,18 @@ pub fn buildRequestBodyFromSnapshot(
     }
     try writer.writeByte('}');
     return buf.toOwnedSlice();
+}
+
+/// Whether the group after `index` is an assistant tool-call group, which is
+/// what makes a preceding `model_text` a preamble rather than an answer.
+fn nextGroupIsToolUse(
+    snapshot: *const model_request.ModelRequestSnapshot,
+    index: usize,
+) bool {
+    if (index + 1 >= snapshot.item_groups.len) return false;
+    const next = snapshot.item_groups[index + 1];
+    if (next.len == 0) return false;
+    return snapshot.items[next.start] == .tool_use;
 }
 
 fn writeMessage(writer: anytype, role: []const u8, body: []const u8) !void {
@@ -260,6 +301,115 @@ test "DeepSeek tool turns preserve opaque reasoning and omit tool_choice" {
 
     try testing.expect(std.mem.indexOf(u8, body, "\"content\":\"\",\"reasoning_content\":\"opaque continuation\"") != null);
     try testing.expect(std.mem.indexOf(u8, body, "\"tool_choice\"") == null);
+}
+
+test "a DeepSeek preamble rejoins the tool-call message it introduced" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const ta = arena.allocator();
+
+    var transcript: transcript_mod.Transcript = .{};
+    defer transcript.deinit(ta);
+    try transcript.append(ta, .{ .user_text = "read the handler" });
+    try transcript.append(ta, .{ .model_text = "I will read it first." });
+    const calls = [_]turn.ToolCall{.{
+        .id = "call_1",
+        .name = "workspace_read_file",
+        .args_json = "{\"path\":\"handler.ts\"}",
+        .reasoning_content = "opaque continuation",
+    }};
+    try transcript.append(ta, .{ .assistant_tool_use = &calls });
+    try transcript.append(ta, .{ .tool_result = .{
+        .tool_use_id = "call_1",
+        .tool_name = "workspace_read_file",
+        .ok = true,
+        .llm_text = "export default {}",
+    } });
+
+    const body = try buildRequestBody(ta, .{
+        .provider = .deepseek,
+        .model = "deepseek-v4-flash",
+        .max_tokens = 128,
+        .system_prompt = "be exact",
+        .tools_json = "[]",
+    }, &transcript, null);
+
+    // The exact shape the provider returned: one assistant message carrying the
+    // preamble, the continuation, and the calls. Asserted as the value expected,
+    // not as the absence of the old one - a body that stopped emitting the
+    // preamble at all would satisfy an absence check.
+    try testing.expect(std.mem.indexOf(
+        u8,
+        body,
+        "{\"role\":\"assistant\",\"content\":\"I will read it first.\"," ++
+            "\"reasoning_content\":\"opaque continuation\",\"tool_calls\":[{\"id\":\"call_1\"",
+    ) != null);
+    // And exactly one assistant message, so the split half is gone rather than
+    // duplicated.
+    try testing.expectEqual(
+        @as(usize, 1),
+        std.mem.count(u8, body, "\"role\":\"assistant\""),
+    );
+}
+
+test "a local preamble stays its own message" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const ta = arena.allocator();
+
+    var transcript: transcript_mod.Transcript = .{};
+    defer transcript.deinit(ta);
+    try transcript.append(ta, .{ .model_text = "I will read it first." });
+    const calls = [_]turn.ToolCall{.{
+        .id = "call_1",
+        .name = "workspace_read_file",
+        .args_json = "{\"path\":\"handler.ts\"}",
+    }};
+    try transcript.append(ta, .{ .assistant_tool_use = &calls });
+
+    const body = try buildRequestBody(ta, .{
+        .provider = .local,
+        .model = "local-model",
+        .max_tokens = 128,
+        .system_prompt = "be exact",
+        .tools_json = "[]",
+    }, &transcript, null);
+
+    // The rejoin is DeepSeek's requirement, and folding here would change the
+    // local corpus's wire bytes for nothing.
+    try testing.expect(std.mem.indexOf(
+        u8,
+        body,
+        "{\"role\":\"assistant\",\"content\":\"I will read it first.\"}",
+    ) != null);
+    try testing.expect(std.mem.indexOf(u8, body, "\"content\":null,\"tool_calls\":") != null);
+}
+
+test "a DeepSeek answer with no tool call after it stays its own message" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const ta = arena.allocator();
+
+    var transcript: transcript_mod.Transcript = .{};
+    defer transcript.deinit(ta);
+    try transcript.append(ta, .{ .user_text = "is it pure?" });
+    try transcript.append(ta, .{ .model_text = "Yes, it is pure." });
+
+    const body = try buildRequestBody(ta, .{
+        .provider = .deepseek,
+        .model = "deepseek-v4-flash",
+        .max_tokens = 128,
+        .system_prompt = "be exact",
+        .tools_json = "[]",
+    }, &transcript, null);
+
+    // Nothing to rejoin it to, and no reasoning to pass back: final-answer
+    // reasoning is scrubbed before the transcript ever sees it.
+    try testing.expect(std.mem.indexOf(
+        u8,
+        body,
+        "{\"role\":\"assistant\",\"content\":\"Yes, it is pure.\"}",
+    ) != null);
 }
 
 test "buildRequestBody omits the tools field when no catalog is supplied" {
