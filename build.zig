@@ -514,6 +514,10 @@ pub fn build(b: *std.Build) void {
     const idiom_table_step = b.step("test-idiom-table", "Check spec 4.2.1's idiom table against the registry");
     idiom_table_step.dependOn(&idiom_table.step);
 
+    const canonical_style = b.addSystemCommand(&.{ "/bin/bash", "scripts/check-canonical-style.sh" });
+    const canonical_style_step = b.step("test-canonical-style", "Check the canonical-style skill's examples against the rule registry");
+    canonical_style_step.dependOn(&canonical_style.step);
+
     const grammar_drift = b.addSystemCommand(&.{ "/bin/bash", "scripts/check-grammar-drift.sh" });
     const grammar_drift_step = b.step("test-grammar-drift", "Check spec section 8's grammar against the registry");
     grammar_drift_step.dependOn(&grammar_drift.step);

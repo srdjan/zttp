@@ -12,7 +12,7 @@ ZigTS already cuts most of TypeScript. The one-way profile cuts further: for eve
 | Local callback | Arrow function only when passed directly as a value |
 | Binding | `const` by default; `let` only when reassigned |
 | Absent value | `undefined` only |
-| Branching | `if`/`else` for guards, `match` for closed alternatives - no ternary |
+| Branching | `if`/`else` for guards, `match` for closed alternatives, `c ? a : b` for a two-way choice between pure values |
 | Iteration | `for (const item of items)` over a finite collection |
 | Errors | `Result<T>` values plus explicit `.ok` checks |
 | External effects | `Effects<T, "...">` on public helpers that touch capabilities |
@@ -23,29 +23,27 @@ ZigTS already cuts most of TypeScript. The one-way profile cuts further: for eve
 | Arithmetic update | `x = x + 1`; never `x += 1` or `x++` |
 | Function call args | Positional. No `f(...args)` spread |
 | Object spread | Leading position only: `{...base, x: 1}` - never `{x: 1, ...base}` |
-| Destructuring | One level deep; no rename. `const {a} = obj; const b = a;` not `const {a: b} = obj` |
+| Destructuring | Refused. Bind the source to a name, then read each member explicitly: `const a = obj.a;` |
 | Default parameter | Explicit `undefined` check in the body, not `(a: T = default)` |
 | Optional parameter | `(a: T | undefined)`, not `(a?: T)` |
 | Array type | `T[]` or `readonly T[]`, never `Array<T>` or `ReadonlyArray<T>` |
 | Ignored result | Evaluate the call as a statement; use `undefined` for absence, never `void` |
 | Match catch-all | `default:`, never `when _:` |
 | Inert statements | Remove `debugger;` and standalone `;` statements |
-| Template interpolation | `${identifier}` or `${obj.literalField}` only; hoist anything else to a `const` |
+| Text construction | Refused: template interpolation and string `+`. Build a string array with explicit `String(...)` conversions and call `.join("")` |
 | Fallback | `??` for nullish defaults. Never `||` unless both operands are boolean |
 
-Most rows have a corresponding diagnostic and the compiler rejects violations. Destructure rename (`{a: b}`) remains an advisory style rule in this slice. Truthy `||` fallback is already rejected by the boolean-only operator contract.
+Most rows have a corresponding diagnostic and the compiler rejects violations. Truthy `||` fallback is already rejected by the boolean-only operator contract.
 
 ## Before / after pairs
 
 ### Avoidable `let` (ZTS604)
 ```ts
 // before
-let region = env("REGION") ?? "iad";
-return Response.text(region);
+let x = 1; return x;
 
 // after
-const region = env("REGION") ?? "iad";
-return Response.text(region);
+const x = 1; return x;
 ```
 
 ### Arrow helper that is reused (ZTS608)
@@ -70,20 +68,38 @@ export function handler(req: Request): Response {
 }
 ```
 
-### Ternary expression (ZTS612)
+### Effectful ternary arm (ZTS612)
+
+A two-way choice between pure values is the canonical spelling, not a form to
+avoid: idiom `idiom.two-way-pure-selection` prefers `c ? a : b` over a two-arm
+match. `const status = ok ? 200 : 500;` is idiomatic and trips nothing. The rule
+fires only when an arm does work rather than naming a value.
+
 ```ts
 // before
-const status = ok ? 200 : 500;
+const status = ready ? load() : fallback;
 
-// after - lift the choice into a named helper
-function pickStatus(ok: boolean): number {
-  if (ok) { return 200; }
-  return 500;
+// after - bind the effectful call first
+const loaded = load();
+const status = pickStatus(ready, loaded, fallback);
+// or use match over the condition for an effectful two-way choice
+```
+
+### Chained ternary (ZTS621)
+
+A conditional expression may not be an arm of another conditional expression.
+
+```ts
+// before
+const tier = a ? 1 : b ? 2 : 3;
+
+// after - one scrutinee under match, or an if/else chain in a named function
+function pickTier(a: boolean, b: boolean): number {
+  if (a) { return 1; }
+  if (b) { return 2; }
+  return 3;
 }
-const status = pickStatus(ok);
-// or, when the result is returned directly:
-if (ok) { return Response.json({}, {status: 200}); }
-return Response.json({}, {status: 500});
+const tier = pickTier(a, b);
 ```
 
 ### Compound assignment (ZTS613)
@@ -107,10 +123,10 @@ const next = {...base, status: "ok"};
 ### Spread in function call (ZTS616)
 ```ts
 // before
-return send(...args);
+send(...args);
 
 // after
-return send(args[0], args[1], args[2]);
+send(args[0], args[1], args[2]);
 // or widen the signature: function send(args: SendArgs): Response
 ```
 

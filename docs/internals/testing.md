@@ -130,13 +130,14 @@ it: `smoke-v1`, `scripts/test-examples.sh`,
 `zts module-spec-render --check`, the policy-hash and expert-subsystem
 assertions, and `zig fmt --check`. `scripts/verify.sh` runs all of them.
 
-It also runs six gates that need the built binary, which is why they are
-scripts rather than build steps. `ci.yml` runs the same six:
+It also runs seven registry-drift and determinism gates, most of which need the
+built binary. `ci.yml` runs the same seven:
 
 | Gate | Asserts |
 |---|---|
 | `check-normalize-idempotent.sh` | a second `normalize` of the corpus produces identical bytes, and names every file the printer refused |
 | `check-idiom-table.sh` | spec 4.2.1's table matches `idiom_registry.zig` row for row |
+| `check-canonical-style.sh` | every ZTS code the `canonical-style` skill cites exists, and each labelled "before" snippet contains that rule's own `rule_registry` example (source-only; no binary needed) |
 | `check-grammar-drift.sh` | spec section 8's productions match `grammar_registry.zig` in document order |
 | `check-decision-registry.sh` | every decision kind `meta` publishes is emitted somewhere |
 | `check-meta-drift.sh` | the six registry hashes `meta` publishes match their pins |

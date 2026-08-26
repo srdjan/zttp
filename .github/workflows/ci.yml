@@ -108,6 +108,7 @@ jobs:
         run: |
           bash scripts/check-normalize-idempotent.sh
           bash scripts/check-idiom-table.sh
+          bash scripts/check-canonical-style.sh
           bash scripts/check-grammar-drift.sh
           bash scripts/check-decision-registry.sh
           bash scripts/check-meta-drift.sh

@@ -67,6 +67,9 @@ bash scripts/check-normalize-idempotent.sh
 step "bash scripts/check-idiom-table.sh  (spec 4.2.1 table against the registry)"
 bash scripts/check-idiom-table.sh
 
+step "bash scripts/check-canonical-style.sh  (the canonical-style skill's examples against the rule registry)"
+bash scripts/check-canonical-style.sh
+
 step "bash scripts/check-grammar-drift.sh  (spec section 8 grammar against the registry)"
 bash scripts/check-grammar-drift.sh
 
