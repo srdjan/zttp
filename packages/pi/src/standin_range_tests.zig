@@ -490,6 +490,7 @@ test "stand-in gate: continuation prefixes match the messages the loop authors" 
     );
 }
 
+const unseeded_rules = @import("unseeded_rules");
 const defect_seeds = @import("standin/defect_seeds.zig");
 const hole_seeds = @import("standin/hole_seeds.zig");
 const pi_goal_candidate = @import("tools/pi_goal_candidate.zig");
@@ -784,6 +785,70 @@ test "stand-in gate: every defect seed reproduces its declared veto class throug
         // verified" as though that were a measurement rather than a broken run.
         try testing.expect(codes.items.len > 0);
 
+        // Every advertised rule the seeds do not verify must be accounted for.
+        //
+        // The verified count alone leaves the remainder unexplained, and a
+        // reader fills that in with "nobody has written those seeds yet". For
+        // most of the remainder that is false: the code names a diagnostic
+        // nothing in the tree ever constructs, so no draft can trip it and no
+        // corpus draw can either. Publishing 53 of 72 without saying which of
+        // the other 19 are unwritten and which are unreachable invites the
+        // wrong reading of both halves.
+        //
+        // Enforced in both directions. An advertised rule that is neither
+        // seeded nor listed fails, so the remainder can never grow silently;
+        // and a listed code a seed now verifies fails, so closing a gap forces
+        // the row out instead of leaving a stale claim behind.
+        var unseeded = try parseUnseededAllow(testing.allocator);
+        defer unseeded.deinit(testing.allocator);
+
+        // Floors. Both checks below are set differences, and an empty input on
+        // either side satisfies one of them while proving nothing.
+        try testing.expect(unseeded.rows.items.len >= 10);
+        try testing.expect(zts.PolicyCatalog.rules().len >= 60);
+
+        for (zts.PolicyCatalog.rules()) |rule| {
+            var seeded = false;
+            for (codes.items) |code| {
+                if (std.mem.eql(u8, code, rule.code)) seeded = true;
+            }
+            if (seeded) continue;
+            if (unseeded.find(rule.code) == null) {
+                std.debug.print(
+                    "[standin-gate] {s} is advertised, no seed verifies it, and" ++
+                        " scripts/unseeded-rules.allow does not say why\n",
+                    .{rule.code},
+                );
+                return error.UnaccountedAdvertisedRule;
+            }
+        }
+
+        for (unseeded.rows.items) |row| {
+            if (zts.PolicyCatalog.findByCode(row.code) == null) {
+                std.debug.print(
+                    "[standin-gate] scripts/unseeded-rules.allow lists {s}," ++
+                        " which is not an advertised rule\n",
+                    .{row.code},
+                );
+                return error.UnseededRowIsNotARule;
+            }
+            for (codes.items) |code| {
+                if (std.mem.eql(u8, code, row.code)) {
+                    std.debug.print(
+                        "[standin-gate] {s} is verified by a seed, so its row in" ++
+                            " scripts/unseeded-rules.allow is stale; delete the row\n",
+                        .{row.code},
+                    );
+                    return error.StaleUnseededRow;
+                }
+            }
+        }
+
+        std.debug.print(
+            "[standin-gate] rule accounting {d} advertised = {d} seed-verified + {d} accounted unseeded\n",
+            .{ zts.PolicyCatalog.rules().len, codes.items.len, unseeded.rows.items.len },
+        );
+
         var buf: std.Io.Writer.Allocating = .init(testing.allocator);
         defer buf.deinit();
         try std.json.Stringify.value(.{
@@ -791,9 +856,62 @@ test "stand-in gate: every defect seed reproduces its declared veto class throug
             .rulesTotal = zts.PolicyCatalog.rules().len,
             .verifiedRules = codes.items.len,
             .verified = codes.items,
+            .unseeded = unseeded.rows.items,
         }, .{}, &buf.writer);
         std.debug.print("[seed-coverage] {s}\n", .{buf.written()});
     }
+}
+
+/// One row of `scripts/unseeded-rules.allow`: an advertised rule no seed
+/// verifies, and the slug naming what would have to change before one could.
+const UnseededRow = struct {
+    code: []const u8,
+    reason: []const u8,
+};
+
+const UnseededAllow = struct {
+    rows: std.ArrayList(UnseededRow),
+
+    fn deinit(self: *UnseededAllow, allocator: std.mem.Allocator) void {
+        self.rows.deinit(allocator);
+    }
+
+    fn find(self: *const UnseededAllow, code: []const u8) ?UnseededRow {
+        for (self.rows.items) |row| {
+            if (std.mem.eql(u8, row.code, code)) return row;
+        }
+        return null;
+    }
+};
+
+/// Parse the allowlist. Slices point into the embedded file, which outlives
+/// every caller, so the rows own nothing.
+///
+/// A malformed row is a hard error rather than a skip: a typo that silently
+/// dropped a row would let an unaccounted rule pass as accounted, which is the
+/// one thing this list exists to prevent.
+fn parseUnseededAllow(allocator: std.mem.Allocator) !UnseededAllow {
+    var rows: std.ArrayList(UnseededRow) = .empty;
+    errdefer rows.deinit(allocator);
+
+    var lines = std.mem.splitScalar(u8, unseeded_rules.contents, '\n');
+    while (lines.next()) |raw| {
+        const body = if (std.mem.indexOfScalar(u8, raw, '#')) |hash| raw[0..hash] else raw;
+        const line = std.mem.trim(u8, body, " \t\r");
+        if (line.len == 0) continue;
+
+        var fields = std.mem.tokenizeAny(u8, line, " \t");
+        const code = fields.next() orelse return error.MalformedUnseededRow;
+        const reason = fields.next() orelse return error.MalformedUnseededRow;
+        if (fields.next() != null) return error.MalformedUnseededRow;
+
+        for (rows.items) |existing| {
+            if (std.mem.eql(u8, existing.code, code)) return error.DuplicateUnseededRow;
+        }
+        try rows.append(allocator, .{ .code = code, .reason = reason });
+    }
+
+    return .{ .rows = rows };
 }
 
 const source_grammar = @import("standin/source_grammar.zig");

@@ -127,7 +127,7 @@ import json, sys
 d = json.load(sys.stdin)
 d["recorded"] = sys.argv[1]
 seed = json.loads(sys.argv[2])
-for key in ("seedsTotal", "rulesTotal", "verifiedRules", "verified"):
+for key in ("seedsTotal", "rulesTotal", "verifiedRules", "verified", "unseeded"):
     if key not in seed:
         raise SystemExit("error: seed-coverage marker is missing " + key)
 # The two producers must agree on the denominator, or the page would print two
@@ -136,10 +136,18 @@ if seed["rulesTotal"] != d["rulesTotal"]:
     raise SystemExit("error: seed suite and corpus disagree on rulesTotal")
 if not seed["verified"]:
     raise SystemExit("error: seed-coverage marker verified nothing")
+# The remainder, and why each rule is in it. The stand-in gate refuses to print
+# this marker unless every advertised rule is either verified above or carries a
+# row, so the two lists partition the registry by construction rather than by
+# the renderer trusting them to.
+unseeded = seed["unseeded"]
+if len(seed["verified"]) + len(unseeded) != seed["rulesTotal"]:
+    raise SystemExit("error: seed-coverage verified and unseeded do not partition the registry")
 d["seedSuite"] = {
     "seedsTotal": seed["seedsTotal"],
     "verifiedRules": seed["verifiedRules"],
     "verified": seed["verified"],
+    "unseeded": unseeded,
 }
 union = json.loads(sys.argv[3])
 if union["corpusVersion"] != d["corpusVersion"]:
@@ -167,6 +175,10 @@ seed = d["seedSuite"]
 seed_codes = seed["verified"]
 seed_verified = seed["verifiedRules"]
 seed_total = seed["seedsTotal"]
+seed_unseeded = seed["unseeded"]
+by_reason = {}
+for row in seed_unseeded:
+    by_reason.setdefault(row["reason"], []).append(row["code"])
 seed_only = len([c for c in seed_codes if c in untripped])
 corpus_only = len([c for c in tripped if c not in seed_codes])
 overlap_count = len(set(tripped) & set(seed_codes))
@@ -297,6 +309,30 @@ advertised rules, and taking the corpus union above instead of this single run
 raises that to {union_all} - the closest thing to a combined answer this
 repository can produce, and still two claims added up rather than one
 measurement.
+
+## The rules no seed reaches
+
+The {len(seed_unseeded)} advertised rules the section above leaves out, and why each is
+out. This is not a backlog. Only a rule whose reason is a defect in the seed
+suite could be closed by writing another seed, and none of these are:
+
+| Reason | Rules | What it means |
+|---|---|---|
+| `no-producer` | {codes(by_reason.get("no-producer", []))} | The registry carries the code and no code path constructs a diagnostic with it, so nothing can emit it |
+| `shadowed` | {codes(by_reason.get("shadowed", []))} | Another checker refuses the construct first, so this rule's diagnostic never reaches the stream |
+| `non-default` | {codes(by_reason.get("non-default", []))} | Emitted only under an opt-in mode the veto does not run |
+
+The `no-producer` group is the load-bearing one, and it is the reason this
+section exists rather than a sentence saying the remainder is unwritten work.
+Each of those codes is advertised by `zts describe-rule`, counted in the {total}
+denominator every figure on this page divides by, and unreachable: no seed can
+trip it and no recorded draft ever will. A reader who takes {seed_verified} of {total} as
+"{total - seed_verified} still to write" is wrong about {len(by_reason.get("no-producer", []))} of them.
+
+The rows live in `scripts/unseeded-rules.allow` with the probe behind each one.
+The stand-in gate enforces the list in both directions: an advertised rule that
+is neither seeded nor listed fails, and so does a row for a code a seed has
+since covered. Neither list can drift from the registry without failing a build.
 
 ## Codes the registry does not carry
 

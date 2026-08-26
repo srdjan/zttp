@@ -346,6 +346,17 @@ pub fn build(b: *std.Build) void {
         @embedFile("packages/pi/docs/standin-range.md"),
     );
 
+    // The accounting list behind docs/coverage.md's unseeded remainder. Kept as
+    // a text file rather than a Zig table so it reads like the repository's
+    // other allowlists, and reaches the gate the same way the range document
+    // does.
+    const unseeded_rules = b.addOptions();
+    unseeded_rules.addOption(
+        []const u8,
+        "contents",
+        @embedFile("scripts/unseeded-rules.allow"),
+    );
+
     var host_test_runs: [host_test_roots.len]*std.Build.Step.Run = undefined;
     for (host_test_roots, 0..) |root, i| {
         const owner_dep = switch (root.owner) {
@@ -367,6 +378,7 @@ pub fn build(b: *std.Build) void {
             tests.root_module.addImport("zts_cli", pi_zts_cli_host_mod);
         }
         if (root.standin_only) tests.root_module.addOptions("standin_range_doc", standin_range_doc);
+        if (root.standin_only) tests.root_module.addOptions("unseeded_rules", unseeded_rules);
         host_test_runs[i] = b.addRunArtifact(tests);
         b.step(root.step, root.desc).dependOn(&host_test_runs[i].step);
     }
