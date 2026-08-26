@@ -8,10 +8,16 @@ tripped by at least one corpus case. This document says what would change that,
 what each option costs, and which of the 70 untripped rules each option reaches.
 It proposes no recording run. It exists so that the next one is aimed.
 
-Revised 2026-08-26 after that day's re-record moved the number from 5 to 2. The
-revision is not a correction: the count fell because a fresh recording of the
-same frozen prompts tripped fewer rules, which is the single most useful thing
-this document now says. See "The number is unstable" below.
+Revised twice on 2026-08-26. First after that day's re-record moved the number
+from 5 to 2 - not a correction, but the count falling because a fresh recording
+of the same frozen prompts tripped fewer rules, which is the single most useful
+thing this document now says. See "The number is unstable" below.
+
+Then a correction, and a load-bearing one: the first draft claimed a case could
+guarantee its rule by seeding the violating construct. It cannot. That claim was
+this document's central proposal, and refuting it moved the recommended work
+from new corpus cases to extending the defect-seed suite. Both the wrong claim
+and the check that killed it are kept below.
 
 ## What the number counts
 
@@ -21,18 +27,32 @@ diagnostic tool result inside a recorded cassette transcript
 compiler can enforce" and not "rules a handler can violate". It is "rules the
 compiler reported to a model during a recorded session".
 
-That mechanism has a consequence worth stating plainly, because it changes what
-kind of work this is. Coverage is reached through the compiler's report, not
-through the model's draft. A case whose `seed_files` already contain the
-violating construct produces the diagnostic the moment the workspace is checked,
-whichever way the model then chooses to write the fix. Coverage is therefore
-designable rather than a bet on model habit.
+An earlier draft of this document argued that a case whose `seed_files` carry
+the violating construct would produce the diagnostic whichever way the model
+wrote the fix, making coverage designable rather than a bet on model habit.
+**That is false, and the check that settles it is below.** It is left here
+rather than quietly deleted because it is the obvious idea and the next reader
+will have it too.
 
-This has not been verified end to end. The claim rests on reading
-`collectCodes`, and the step it does not cover is whether a seeded file's
-diagnostics reach the transcript in `whole_file` mode without the model choosing
-to ask. That is checkable against the stand-in with no API key and no spend, and
-it is the first task below for exactly that reason.
+The veto is differential. `aggregate_proof.firstNewDiagnostic` is a multiset
+comparison of candidate diagnostics against a baseline materialized from the
+same workspace, so a diagnostic the seed already carried has equal counts on
+both sides and is never new. `standin/defect_seeds.zig` documents exactly this
+in its own header, as the reason its seed sources must be veto-clean: "a seed
+that already carried its own defect would make the defect pre-existing, the bad
+draft would pass, and the arm would test nothing while reporting a clean run."
+`sibling-helper`, the one corpus case that seeds a file, seeds a clean one - its
+codes come from what the model drafts against it.
+
+`collectCodes` accepts a code from three places, and `isDiagnosticResult` names
+them: a `zts_expert_review_patch` result, a `zts_check` result, or a failed
+`propose_change_set` carrying the veto reject preamble. The first two happen
+when the model chooses to ask. The third requires a new diagnostic, which
+requires the model to write one.
+
+So every path to a counted code runs through model behaviour. Published coverage
+cannot be designed. It can be nudged - a prompt can invite the mistake - and it
+can be measured, but a case cannot guarantee its rule.
 
 The two tripped rules today are `ZTS400` and `ZTS500`.
 
@@ -71,10 +91,9 @@ union.
 
 More importantly, the three codes that flicker - `ZTS501`, `ZTS502`, `ZTS509` -
 are *proof* that the existing prompts can reach them. No argument is needed about
-whether a model would write the violation; one already did, twice. They are the
-strongest available case for the seeded approach in step 1: a case that seeds the
-violating construct trips its rule every run, turning three codes that currently
-come and go into three that hold.
+whether a model would write the violation; one already did. Since seeding cannot
+pin them, they are instead the clearest example of why the published number needs
+a companion that does not depend on a draw - which is lever 1 below.
 
 ## The 70 untripped rules, partitioned
 
@@ -87,12 +106,14 @@ untripped code appears exactly once; the four groups sum to 70.
 
 Untripped only as of the 2026-08-26 recording. Each was tripped by at least one
 earlier recording of these same prompts, so no new prompt is needed to reach
-them. A seeded case would make them hold every run rather than come and go.
+them - only a draw that makes the mistake again. Nothing a case can supply will
+pin them, which is the whole argument for lever 1.
 
-### Group A: reachable from a prompt or a seed alone (30)
+### Group A: reachable from an ordinary prompt (30)
 
-Nothing new is needed beyond a case. These are constructs a model writes from
-ordinary TypeScript habit, or defects a seed file can carry directly.
+Nothing new is needed beyond a case whose task invites the construct. These are
+things a model writes from ordinary TypeScript habit. Whether any given
+recording trips them remains a draw.
 
 Canonical profile, 12: `ZTS604` `ZTS608` `ZTS609` `ZTS612` `ZTS621` `ZTS613`
 `ZTS614` `ZTS616` `ZTS620` `ZTS624` `ZTS625` `ZTS626`
@@ -155,15 +176,33 @@ depends on whether an advisory reaches the transcript, which is unverified.
 
 ## Two levers, and what each costs
 
-**Lever 1: an offline per-rule firing suite.** No such suite exists. Nothing in
-the repository asserts that each of the 72 registry rules fires on a handler that
-violates it; `PolicyCatalog.rules()` is iterated in exactly two places, both
-inside the coverage counter itself. A fixture per rule, checked offline, would
-prove the enforcement claim the coverage page is currently read as making. It
-needs no API key, no recording, and no model. It does not move the published
-coverage number and should not: that number is about the corpus, and this suite
-is about the compiler. Both claims are worth having, and conflating them is what
-makes 5 of 72 read as worse than it is.
+**Lever 1: extend the defect-seed suite toward per-rule coverage.** This is the
+lever, and it already exists in miniature. `packages/pi/src/standin/defect_seeds.zig`
+pairs a veto-clean `seed_source` with a `bad_draft` that introduces exactly one
+code, and `standin_range_tests.zig` re-derives each seed's class by running the
+real veto rather than trusting the declaration. Running `zig build test-standin`
+reports it:
+
+```
+[standin-gate] defect seeds 6; 5 carry a registry code, 1 do not
+[standin-gate] veto classes 6/6 seeds reproduce their declaration
+```
+
+Those five are `ZTS303`, `ZTS304`, `ZTS308`, `ZTS604` and `ZTS613` - all of them
+in the untripped list below. Five registry rules already have deterministic
+offline evidence that they fire; it simply is not the evidence the coverage page
+reports, because `replayCorpusTurn` counts only the 19 cassettes.
+
+So the work is extending a working pattern from 6 seeds toward 72, not inventing
+a suite. It needs no API key, no recording, and no model. It does not move the
+published coverage number and should not: that number is about the corpus, and
+this suite is about the compiler. Both claims are worth having, and conflating
+them is what makes 2 of 72 read as worse than it is.
+
+The honest ceiling on this lever is worth naming: a defect seed proves a rule
+fires on a draft the harness supplies, which is a statement about the compiler
+and the veto. It says nothing about whether a model would ever write that
+draft. That is the other claim, and only lever 2 measures it.
 
 **Lever 2: new corpus cases.** This moves the published number and requires
 recording. `docs/plans/2026-08-17-033-corpus-recording-campaign.md` measures a
@@ -173,19 +212,26 @@ so it is a whole-corpus re-record, not an incremental one.
 
 ## Proposed sequence
 
-1. Verify the seeding mechanism against the stand-in: does a `seed_files`
-   diagnostic reach the transcript in `whole_file` mode? Free, no model. Every
-   estimate below depends on the answer, and if it is no, groups A and C shrink
-   to whatever a prompt can coax out of a model and this plan needs rewriting.
-2. Build the offline per-rule firing suite (lever 1). Independent of the answer
-   to step 1, and it is the artifact that separates "the compiler enforces this"
-   from "the corpus exercised this".
-3. Draft candidate cases for group C's policy eight and group A's canonical
-   twelve, and dry-run them against the stand-in. Still free. This is where the
-   case count per rule stops being a guess.
-4. Only then decide how many cases to add, and fold the recording into the same
-   session that lands the parked `verifiers-fields-pending-record` branch, so one
-   run pays for both.
+Step 1 as originally written - verify whether a seeded diagnostic reaches the
+transcript - is done, and the answer was no. It is recorded above rather than
+removed, because the negative result is what reshaped the rest of this list.
+
+1. Extend `defect_seeds.zig` past its current six, starting with the twelve
+   canonical-profile codes in group A. Two are already covered (`ZTS604`,
+   `ZTS613`), so the pattern is proven on exactly this family. Free, no model.
+   The existing gate re-derives every class from the real veto, so each new seed
+   is checked rather than declared.
+2. Publish that suite's count as its own figure, separate from corpus coverage,
+   and say in `docs/coverage.md` which question each answers. The current page
+   invites one number to be read as both.
+3. Compute the union of tripped codes across recordings of one corpus identity.
+   Three runs of `0012ad8ca6d5` give 5 where any single row gives 2 to 5.
+   Nothing computes this today, and it is the fairer answer to "what does the
+   corpus exercise".
+4. Only then consider new corpus cases. Group C's policy eight is still the best
+   ratio - eight rules for plausibly two cases - and remains a nudge rather than
+   a guarantee. Fold any recording into a session that has another reason to
+   run.
 
 ## What is measured and what is not
 
@@ -195,11 +241,13 @@ history in "The number is unstable" is read from the coverage pages and the
 baseline comment in `expert_codegen_record.zig`, each of which was generated
 from its own recording. The partition above
 was computed against the registry rather than counted by hand, and every code
-appears exactly once. The absence of a per-rule firing suite was established by
-search. The policy configuration shape was read from `policy.zig`. The 24-minute
+appears exactly once. That a seeded diagnostic does not reach the transcript was
+established from `firstNewDiagnostic`, the `defect_seeds.zig` header, and
+`sibling-helper`'s clean seed, three independent confirmations. The defect-seed
+counts are quoted from a `zig build test-standin` run, not from reading the
+file. The policy configuration shape was read from `policy.zig`. The 24-minute
 run figure is quoted from plan 033, not re-measured here.
 
-Not measured: how many cases each group needs, what a case costs to author, and
-whether a seeded diagnostic reaches the transcript. Step 1 above exists to close
-the last of those, and steps 2 and 3 exist to close the first two before anyone
-commits to a number.
+Not measured: how many seeds or cases each group needs, and what one costs to
+author. Step 1 above is the cheapest way to find out, because the first few new
+defect seeds will price the rest.
