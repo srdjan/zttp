@@ -58,6 +58,30 @@ breakdown reads them.
 
 Untripped: `ZTS300`, `ZTS301`, `ZTS302`, `ZTS303`, `ZTS304`, `ZTS305`, `ZTS306`, `ZTS307`, `ZTS308`, `ZTS309`, `ZTS310`, `ZTS501`, `ZTS502`, `ZTS600`, `ZTS629`, `ZTS601`, `ZTS061`, `ZTS602`, `ZTS603`, `ZTS604`, `ZTS605`, `ZTS608`, `ZTS609`, `ZTS610`, `ZTS623`, `ZTS611`, `ZTS612`, `ZTS621`, `ZTS613`, `ZTS614`, `ZTS616`, `ZTS620`, `ZTS622`, `ZTS625`, `ZTS626`, `ZTS627`, `ZTS628`, `ZTS624`, `ZTS606`, `ZTS503`, `ZTS504`, `ZTS505`, `ZTS506`, `ZTS508`, `ZTS607`, `ZTS509`, `ZTS510`, `ZTS511`, `ZTS512`, `POL001`, `POL002`, `POL003`, `POL004`, `POL005`, `POL006`, `POL007`, `POL008`, `PROP01`, `PROP02`, `PROP03`, `PROP04`, `PROP05`, `PROP06`, `ZTS401`, `ZTS402`, `ZTS403`, `ZTS404`, `ZTS405`, `ZTS406`, `ZTS407`
 
+## What this corpus has ever reached
+
+The row above is one draw. The same prompts, seeds, provider, model and
+compiler have measured a different set each time they were recorded, because a
+rule is counted only when the model happens to make the mistake that trips it.
+Across the 4 published runs of corpus `0012ad8ca6d5`, the
+tripped set took 3 distinct shapes, the smallest naming
+2 rules and the largest 5.
+
+| Union across runs | Smallest single run | Largest single run |
+|---|---|---|
+| 5 | 2 | 5 |
+
+Ever tripped: `ZTS400`, `ZTS500`, `ZTS501`, `ZTS502`, `ZTS509`
+
+This is the fairer answer to "what do these prompts reach", and no single row
+can give it. It is computed by `scripts/coverage-union.sh` from
+`git log docs/coverage.json`, which is this page's own history; a shallow clone
+is refused rather than published as a complete union.
+
+It still measures the model, not the compiler. A rule absent here is one no
+recorded draft has ever violated, which is not the same as one the compiler
+would let pass - that is the next section.
+
 ## Rules observed firing at all
 
 A different question, kept on its own so the two are not read as one figure.
@@ -82,8 +106,9 @@ That is the question the section above answers, and only a recording can.
 Neither number bounds the other. 15 of the rules verified here are
 untripped by the corpus, 2 tripped by the corpus have no seed, and
 the two sets share 0. Together they name 17 of the 72
-advertised rules, which is the closest thing to a combined answer this
-repository can currently produce - and it is still two claims added up, not one
+advertised rules, and taking the corpus union above instead of this single run
+raises that to 20 - the closest thing to a combined answer this
+repository can produce, and still two claims added up rather than one
 measurement.
 
 ## Codes the registry does not carry

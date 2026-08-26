@@ -102,6 +102,21 @@ if [[ "$seed_lines" != "1" ]]; then
 fi
 seed_payload="$(sed -n 's/^\[seed-coverage\] //p' "$seed_log")"
 
+# The union across every published run of this corpus identity. A single row is
+# a sample: the same prompts, seeds, provider, model and compiler have measured
+# 4, 5 and 2 rules on different draws. `scripts/coverage-union.sh` reads
+# `git log docs/coverage.json`, which this page already names as its history,
+# and refuses a shallow clone rather than publishing a truncated union as a
+# complete one. The pending run's own codes are passed in because they are not
+# in git yet.
+echo ">> unioning this corpus identity across its published runs"
+union_version="$(printf '%s' "$payload" | python3 -c 'import json,sys; print(json.load(sys.stdin)["corpusVersion"])')"
+union_codes="$(printf '%s' "$payload" | python3 -c 'import json,sys; print(" ".join(json.load(sys.stdin)["tripped"]))')"
+if ! union_payload="$(bash scripts/coverage-union.sh "$union_version" $union_codes)"; then
+  echo "error: the corpus union could not be computed; generated evidence is unchanged" >&2
+  exit 1
+fi
+
 # No commit field. convergence.md carries one because its rows accumulate and a
 # reader needs to know which build produced each. This page is a single
 # current-state answer, and the replay fails when it drifts from the run, so it
@@ -126,8 +141,16 @@ d["seedSuite"] = {
     "verifiedRules": seed["verifiedRules"],
     "verified": seed["verified"],
 }
+union = json.loads(sys.argv[3])
+if union["corpusVersion"] != d["corpusVersion"]:
+    raise SystemExit("error: the union was computed for a different corpus identity")
+# The union contains this run by construction, so it can never be smaller.
+# A union below the current count means the codes were never merged in.
+if union["unionCount"] < d["rulesTripped"]:
+    raise SystemExit("error: the union is smaller than the tripped set of this very run")
+d["corpusUnion"] = union
 print(json.dumps(d, indent=2))
-' "$(date -u +%Y-%m-%d)" "$seed_payload" > "$json_tmp"
+' "$(date -u +%Y-%m-%d)" "$seed_payload" "$union_payload" > "$json_tmp"
 
 python3 - "$json_tmp" "$md_tmp" <<'PY'
 import json, sys
@@ -148,6 +171,16 @@ seed_only = len([c for c in seed_codes if c in untripped])
 corpus_only = len([c for c in tripped if c not in seed_codes])
 overlap_count = len(set(tripped) & set(seed_codes))
 union_count = len(set(tripped) | set(seed_codes))
+
+cu = d["corpusUnion"]
+union_codes = cu["union"]
+union_total = cu["unionCount"]
+union_observations = cu["observations"]
+union_distinct = cu["distinctSets"]
+union_min = cu["smallestSet"]
+union_max = cu["largestSet"]
+version_short = d["corpusVersion"][:12]
+union_all = len(set(union_codes) | set(seed_codes))
 
 def codes(names):
     return ", ".join("`%s`" % n for n in names) if names else "none"
@@ -212,6 +245,30 @@ breakdown reads them.
 
 Untripped: {codes(untripped)}
 
+## What this corpus has ever reached
+
+The row above is one draw. The same prompts, seeds, provider, model and
+compiler have measured a different set each time they were recorded, because a
+rule is counted only when the model happens to make the mistake that trips it.
+Across the {union_observations} published runs of corpus `{version_short}`, the
+tripped set took {union_distinct} distinct shapes, the smallest naming
+{union_min} rules and the largest {union_max}.
+
+| Union across runs | Smallest single run | Largest single run |
+|---|---|---|
+| {union_total} | {union_min} | {union_max} |
+
+Ever tripped: {codes(union_codes)}
+
+This is the fairer answer to "what do these prompts reach", and no single row
+can give it. It is computed by `scripts/coverage-union.sh` from
+`git log docs/coverage.json`, which is this page's own history; a shallow clone
+is refused rather than published as a complete union.
+
+It still measures the model, not the compiler. A rule absent here is one no
+recorded draft has ever violated, which is not the same as one the compiler
+would let pass - that is the next section.
+
 ## Rules observed firing at all
 
 A different question, kept on its own so the two are not read as one figure.
@@ -236,8 +293,9 @@ That is the question the section above answers, and only a recording can.
 Neither number bounds the other. {seed_only} of the rules verified here are
 untripped by the corpus, {corpus_only} tripped by the corpus have no seed, and
 the two sets share {overlap_count}. Together they name {union_count} of the {total}
-advertised rules, which is the closest thing to a combined answer this
-repository can currently produce - and it is still two claims added up, not one
+advertised rules, and taking the corpus union above instead of this single run
+raises that to {union_all} - the closest thing to a combined answer this
+repository can produce, and still two claims added up rather than one
 measurement.
 
 ## Codes the registry does not carry
