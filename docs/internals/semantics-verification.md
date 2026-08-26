@@ -75,21 +75,37 @@ number, bool, or string value model with JS coercion.
 
 Each excluded law must yield a counterexample (`sat`). If an excluded law
 actually holds (`unsat`), the build fails with `ZTS757`. If `z3` cannot
-evaluate the model, the build fails with `ZTS758`. A timeout is inconclusive
-and non-fatal at the command level, so a future law that cannot be refuted
-cannot wedge plain `spec-check --audit`.
+evaluate the model, the build fails with `ZTS758`. A row the solver runs on
+and cannot refute inside its budget fails with `ZTS759`: nothing checked that
+row, so reporting it as a pass would describe an unchecked boundary as a
+checked one. The two causes are a budget below the row's real cost, which a
+measurement fixes, and a row that is genuinely not refutable, which means the
+exclusion is wrong. Mechanism 5 treats an undecided obligation the same way,
+under `ZTS760`.
 
-The audit is opt-in through `spec-check --audit` because its f64 associativity
-refutation is slow. Interactive `spec-check` stays fast.
+Each row carries its own solver budget (`semantics.Law.audit_timeout_ms`,
+defaulting to `semantics_audit.default_audit_timeout_ms`). Refutation cost is
+not uniform: measured on z3 5.1.0, `add_associative` takes 28.8 to 29.8
+seconds while the other three excluded laws return in under a third of a
+second. A single shared ceiling has to be sized for the slowest row and then
+applies to all of them, and a ceiling set close to a measured cost produces a
+gate that passes on an idle machine and fails on a loaded one.
+
+The audit is opt-in through `spec-check --audit` because that one f64
+associativity refutation dominates the run. Interactive `spec-check` stays
+fast.
 
 ## The Release Gate
 
-`scripts/verify.sh` runs `scripts/check-semantics-spec.sh`, which is stricter
-than the command. It re-reads the `--json` summary and requires a complete
-audit: `z3` present, every excluded law refuted, and zero inconclusive results.
-A silent `z3`-absent skip or a timeout therefore cannot pass the gate with
-false confidence. An explicit `ZTTP_Z3` opt-out (`off`, `none`, `0`, or
-`disable`) is honored as an intentional skip and reported as such.
+`scripts/verify.sh` runs `scripts/check-semantics-spec.sh`. It re-reads the
+`--json` summary and requires a complete audit: `z3` present, every excluded
+law refuted, and zero inconclusive results. The command reaches the same
+verdict on the same run - it used to be the more lenient of the two, printing
+PASS for a run the gate rejected, which put the softer opinion on the surface a
+human reads. The script's checks are now a restatement of the command's exit
+status rather than a second opinion. An explicit `ZTTP_Z3` opt-out (`off`,
+`none`, `0`, or `disable`) is honored as an intentional skip and reported as
+such.
 
 ## Generated Artifacts
 

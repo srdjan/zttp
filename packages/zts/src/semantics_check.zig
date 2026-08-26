@@ -403,16 +403,30 @@ pub const SmtResult = struct {
     arena: std.heap.ArenaAllocator,
     available: bool = false,
     proved: usize = 0,
-    /// Obligations the solver could neither prove nor refute (undecided, or the
-    /// solver could not run). Non-fatal: reported, not a failure.
+    /// Obligations the solver ran on and could neither prove nor refute
+    /// (undecided fragment, or the solver errored mid-run). Each one also
+    /// appends a ZTS760 failure, so this counter is the summary line's number
+    /// and the failure list is what says which obligations they were. Zero when
+    /// no solver ran at all - that is `available == false`, a skip, not a
+    /// verdict.
     unproven: usize = 0,
     total: usize = 0,
     failures: std.ArrayList(Counterexample) = .empty,
 
-    /// A failure is a genuine counterexample (ZTS755) or an unencodable
-    /// obligation (ZTS756). `unproven` is NOT a failure.
+    /// A failure is a genuine counterexample (ZTS755), an unencodable
+    /// obligation (ZTS756), or an obligation the solver ran on without deciding
+    /// (ZTS760). An undecided obligation is a hole in the claim "every
+    /// obligation is proved", and one verdict has to hold for every consumer:
+    /// `scripts/check-semantics-spec.sh` already rejects `unproven > 0`, and a
+    /// command that called the same run a PASS would be a second, softer
+    /// opinion on the same data - on the surface a human actually reads.
+    ///
+    /// `unproven` is checked directly and not just through `failures`: the two
+    /// are written together, and reading both here means a result that ever
+    /// counted an undecided obligation cannot report OK, whatever happened to
+    /// the list.
     pub fn ok(self: *const SmtResult) bool {
-        return self.failures.items.len == 0;
+        return self.failures.items.len == 0 and self.unproven == 0;
     }
     pub fn deinit(self: *SmtResult) void {
         self.arena.deinit();
@@ -464,9 +478,19 @@ fn proveSmtObligations(
                 .message = try a.dupe(u8, "SMT found a counterexample: the two sides are not equivalent"),
             }),
             // Could not decide (undecidable fragment) or could not run (solver
-            // errored mid-run). Same situation as no z3: unproven, reported, not
-            // a failure - the prover never falsely reports "equivalent".
-            .unknown, .solver_error => result.unproven += 1,
+            // errored mid-run). The prover never falsely reports "equivalent",
+            // so this is not unsoundness - it is an unproved obligation, and the
+            // spec-check claim is that every obligation is proved. Counted and
+            // failed under its own code so the verdict, the count, and the
+            // per-obligation list all say the same thing.
+            .unknown, .solver_error => {
+                result.unproven += 1;
+                try result.failures.append(a, .{
+                    .code = .smt_unproven,
+                    .where = try a.dupe(u8, ob.where),
+                    .message = try a.dupe(u8, "SMT could not decide this obligation within its budget (undecided, or the solver errored mid-run)"),
+                });
+            },
         }
     }
 }
@@ -482,8 +506,11 @@ fn proveSmtObligations(
 //   - counterexample (sat) -> refuted: the exclusion is confirmed (good).
 //   - equivalent (unsat)   -> FATAL: the "non-law" actually holds, so excluding
 //                             it was wrong or the value model drifted (ZTS757).
-//   - unknown              -> inconclusive, non-fatal (a hard refutation that hit
-//                             the per-query timeout; reported, not a failure).
+//   - unknown              -> FATAL (ZTS759): the solver ran and could not refute
+//                             the row inside its budget, so the boundary this
+//                             row names went unchecked. Either the budget is too
+//                             small for the row's measured cost, or the row is
+//                             not refutable and the exclusion is wrong.
 //   - solver_error         -> FATAL (ZTS758): z3 could not evaluate the faithful
 //                             model (errored / lacks the FP or String theory), so
 //                             the audit did NOT run. Failing loud here is the
@@ -495,12 +522,25 @@ pub const AuditResult = struct {
     arena: std.heap.ArenaAllocator,
     available: bool = false,
     refuted: usize = 0,
+    /// Excluded laws the solver ran on and could not refute within the row's
+    /// budget. Each one also appends a ZTS759 failure; this counter is the
+    /// summary line's number and the failure list names the rows.
     inconclusive: usize = 0,
     total: usize = 0,
     failures: std.ArrayList(Counterexample) = .empty,
 
+    /// An inconclusive row is a failure. The audit's whole claim is that the
+    /// declared soundness boundary is machine-checked, and a row that timed out
+    /// is a row nothing checked. `scripts/check-semantics-spec.sh` has always
+    /// rejected `inconclusive > 0`; this used to pass at the command level, so
+    /// the same run printed PASS to a human and failed the gate. One verdict,
+    /// and it is the strict one.
+    ///
+    /// `inconclusive` is checked directly as well as through `failures`, so a
+    /// result that counted an unrefuted row cannot report OK even if the list
+    /// were empty.
     pub fn ok(self: *const AuditResult) bool {
-        return self.failures.items.len == 0;
+        return self.failures.items.len == 0 and self.inconclusive == 0;
     }
     pub fn deinit(self: *AuditResult) void {
         self.arena.deinit();
@@ -544,8 +584,21 @@ pub fn runAudit(allocator: std.mem.Allocator, solve: ?SolveFn) !AuditResult {
                 .where = try a.dupe(u8, law.name),
                 .message = try a.dupe(u8, "an excluded law actually holds under the faithful model - it should not be excluded"),
             }),
-            // timeout / genuinely could not decide: inconclusive, non-fatal.
-            .unknown => result.inconclusive += 1,
+            // The solver ran and could not refute this row inside its budget.
+            // Not unsoundness - nothing false was claimed - but nothing was
+            // checked either, so it fails under its own code rather than
+            // letting an unchecked boundary print as a pass. Two causes, both
+            // worth surfacing: a budget too small for a row's real cost (raise
+            // that row's `audit_timeout_ms` from a measurement), or a row that
+            // is genuinely not refutable, which means the exclusion is wrong.
+            .unknown => {
+                result.inconclusive += 1;
+                try result.failures.append(a, .{
+                    .code = .audit_inconclusive,
+                    .where = try a.dupe(u8, law.name),
+                    .message = try a.dupe(u8, "the solver could not refute this excluded law within its budget - raise the row's audit_timeout_ms from a measurement, or the exclusion is wrong"),
+                });
+            },
             // the solver could NOT evaluate the faithful model (z3 errored, lacks
             // the FP/String theory, or could not spawn). This means the audit did
             // not run for this law - fail loud rather than silently passing, so a
@@ -767,14 +820,22 @@ test "runSmt records a counterexample as a loud failure" {
     try std.testing.expectEqual(semantics.SpecCode.smt_counterexample, r.failures.items[0].code);
 }
 
-test "runSmt treats solver unknown as unproven, not a failure" {
+test "runSmt fails an undecided obligation and names it" {
+    // An undecided obligation is an unproved one. Passing it would print PASS
+    // to a human for a run scripts/check-semantics-spec.sh rejects.
     var r = try runSmt(std.testing.allocator, fakeAllUnknown);
     defer r.deinit();
     try std.testing.expect(r.available);
-    try std.testing.expect(r.ok()); // unknown is non-fatal
+    try std.testing.expect(!r.ok());
     try std.testing.expectEqual(r.total, r.unproven);
     try std.testing.expectEqual(@as(usize, 0), r.proved);
-    try std.testing.expectEqual(@as(usize, 0), r.failures.items.len);
+    // Floor: an empty obligation set would satisfy every line above.
+    try std.testing.expect(r.total > 0);
+    // The count, the code, and the per-obligation list say the same thing.
+    try std.testing.expectEqual(r.total, r.failures.items.len);
+    for (r.failures.items) |f| {
+        try std.testing.expectEqual(semantics.SpecCode.smt_unproven, f.code);
+    }
 }
 
 test "runAudit skips cleanly when no solver is injected" {
@@ -804,13 +865,23 @@ test "runAudit fails loud when an excluded law actually holds" {
     try std.testing.expectEqual(semantics.SpecCode.excluded_law_holds, r.failures.items[0].code);
 }
 
-test "runAudit treats solver unknown as inconclusive, not a failure" {
+test "runAudit fails an inconclusive row and names it" {
+    // A row the solver could not refute is a row nothing checked. Passing it
+    // would print PASS to a human for a run the release gate rejects.
     var r = try runAudit(std.testing.allocator, fakeAllUnknown);
     defer r.deinit();
     try std.testing.expect(r.available);
-    try std.testing.expect(r.ok()); // inconclusive is non-fatal
+    try std.testing.expect(!r.ok());
     try std.testing.expectEqual(r.total, r.inconclusive);
     try std.testing.expectEqual(@as(usize, 0), r.refuted);
+    // Assert the value expected, not just "some failure": the count, the code,
+    // and the per-row list all have to say the same thing, or the summary line
+    // and the failure list are two different verdicts again.
+    try std.testing.expect(r.total > 0);
+    try std.testing.expectEqual(r.total, r.failures.items.len);
+    for (r.failures.items) |f| {
+        try std.testing.expectEqual(semantics.SpecCode.audit_inconclusive, f.code);
+    }
 }
 
 test "runAudit fails loud when the solver errors (cannot evaluate the model)" {

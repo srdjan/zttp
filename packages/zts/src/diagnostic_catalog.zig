@@ -114,6 +114,8 @@ pub const SemanticsKind = enum {
     smt_unencodable,
     excluded_law_holds,
     audit_solver_error,
+    audit_inconclusive,
+    smt_unproven,
 
     pub fn code(self: SemanticsKind) []const u8 {
         return semanticsCode(self);
@@ -379,6 +381,8 @@ pub fn semanticsCode(kind: SemanticsKind) []const u8 {
         .smt_unencodable => "ZTS756",
         .excluded_law_holds => "ZTS757",
         .audit_solver_error => "ZTS758",
+        .audit_inconclusive => "ZTS759",
+        .smt_unproven => "ZTS760",
     };
 }
 

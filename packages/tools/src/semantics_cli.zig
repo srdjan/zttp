@@ -126,9 +126,11 @@ pub fn runSpecCheckCommand(_: std.mem.Allocator, argv: []const []const u8) !void
         if (std.mem.eql(u8, arg, "--json")) {
             json_mode = true;
         } else if (std.mem.eql(u8, arg, "--audit")) {
-            // The exclusion audit's f64-associativity refutation is slow (~5s),
-            // so it is opt-in: off keeps interactive spec-check fast; CI
-            // (scripts/verify.sh) passes --audit to gate the soundness boundary.
+            // Opt-in because the f64-associativity refutation dominates the run:
+            // measured 28.8-29.8s on z3 5.1.0 against under a second for every
+            // other excluded law (semantics.zig carries the runs). Off keeps
+            // interactive spec-check fast; CI (scripts/verify.sh) passes --audit
+            // to gate the soundness boundary.
             want_audit = true;
         } else if (isHelpToken(arg)) {
             // no separate help screen
@@ -167,7 +169,9 @@ pub fn runSpecCheckCommand(_: std.mem.Allocator, argv: []const []const u8) !void
 
     // Exclusion audit: faithful-model refutation of the declared excluded laws
     // (the dual of mechanism 5). Opt-in (--audit) because the f64-associativity
-    // refutation is slow; reuses the same injected solver when requested.
+    // refutation costs ~30s; reuses the same injected solver when requested.
+    // Each row carries its own budget, so one slow row does not set the ceiling
+    // for the rest (semantics.Law.audit_timeout_ms).
     var audit = zts.semantics_check.runAudit(allocator, if (want_audit and z3_present) smt_solver.solve else null) catch {
         const msg = "spec-check: audit internal error\n";
         _ = std.c.write(std.c.STDERR_FILENO, msg, msg.len);
@@ -212,7 +216,9 @@ fn writeSpecCheckText(allocator: std.mem.Allocator, buf: *std.ArrayList(u8), rep
     try appendFmt(allocator, buf, "  differential:      {d}/{d} cases vs real codegen\n", .{ corpus.cases_passed, corpus.cases_total });
     if (smt.available) {
         if (smt.unproven > 0) {
-            try appendFmt(allocator, buf, "  smt equivalence:   {d}/{d} proved, {d} unproven (solver could not decide/run) (z3)\n", .{ smt.proved, smt.total, smt.unproven });
+            // FAIL, not a note: an undecided obligation is an unproved one, and
+            // the release gate rejects it. The command says the same thing.
+            try appendFmt(allocator, buf, "  smt equivalence:   {d}/{d} proved, {d} UNPROVEN - FAIL (solver could not decide/run) (z3)\n", .{ smt.proved, smt.total, smt.unproven });
         } else {
             try appendFmt(allocator, buf, "  smt equivalence:   {d}/{d} proved (z3)\n", .{ smt.proved, smt.total });
         }
@@ -224,7 +230,9 @@ fn writeSpecCheckText(allocator: std.mem.Allocator, buf: *std.ArrayList(u8), rep
         try appendFmt(allocator, buf, "  exclusion audit:   not run ({d} excluded laws; pass --audit to enable)\n", .{audit.total});
     } else if (audit.available) {
         if (audit.inconclusive > 0) {
-            try appendFmt(allocator, buf, "  exclusion audit:   {d}/{d} refuted, {d} inconclusive (faithful model, z3)\n", .{ audit.refuted, audit.total, audit.inconclusive });
+            // An inconclusive row is a row nothing checked, so it reads as a
+            // failure here exactly as it does in scripts/check-semantics-spec.sh.
+            try appendFmt(allocator, buf, "  exclusion audit:   {d}/{d} refuted, {d} INCONCLUSIVE - FAIL (faithful model, z3)\n", .{ audit.refuted, audit.total, audit.inconclusive });
         } else {
             try appendFmt(allocator, buf, "  exclusion audit:   {d}/{d} excluded laws refuted (faithful model, z3)\n", .{ audit.refuted, audit.total });
         }
