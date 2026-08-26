@@ -96,6 +96,117 @@ const clean_checked_optional =
     \\
 ;
 
+const clean_bool =
+    \\function handler(req: Request): Proof<Response, "deterministic"> {
+    \\  const ready = true;
+    \\  if (ready) { return Response.json({ ready: 1 }); }
+    \\  return Response.json({ ready: 0 });
+    \\}
+    \\
+;
+
+const clean_ternary =
+    \\function pick(): number {
+    \\  return 7;
+    \\}
+    \\
+    \\function handler(req: Request): Proof<Response, "deterministic"> {
+    \\  const ready = true;
+    \\  const picked = pick();
+    \\  const status = ready ? picked : 5;
+    \\  return Response.json({ status: status });
+    \\}
+    \\
+;
+
+const clean_tier =
+    \\function pickTier(a: boolean, b: boolean): number {
+    \\  if (a) { return 1; }
+    \\  if (b) { return 2; }
+    \\  return 3;
+    \\}
+    \\
+    \\function handler(req: Request): Proof<Response, "deterministic"> {
+    \\  const tier = pickTier(true, false);
+    \\  return Response.json({ tier: tier });
+    \\}
+    \\
+;
+
+const clean_spread =
+    \\function handler(req: Request): Proof<Response, "deterministic"> {
+    \\  const base = { a: 1 };
+    \\  const next = { ...base, status: "ok" };
+    \\  return Response.json({ next: next });
+    \\}
+    \\
+;
+
+const clean_send =
+    \\function send(a: number): number {
+    \\  return a + a;
+    \\}
+    \\
+    \\function handler(req: Request): Proof<Response, "deterministic"> {
+    \\  const args = [1];
+    \\  const sent = send(args[0]);
+    \\  return Response.json({ sent: sent });
+    \\}
+    \\
+;
+
+const clean_named_helper =
+    \\function double(x: number): number {
+    \\  return x + x;
+    \\}
+    \\
+    \\function handler(req: Request): Proof<Response, "deterministic"> {
+    \\  const a = double(2);
+    \\  const b = double(3);
+    \\  return Response.json({ a: a, b: b });
+    \\}
+    \\
+;
+
+// The handler itself, exported. A helper would need a record alias on its
+// signature to clear ZTS061, and the exported handler is both simpler and the
+// exact shape rule_registry gives as ZTS609's example.
+const clean_exported_handler =
+    \\export function handler(req: Request): Proof<Response, "deterministic"> {
+    \\  return Response.json({ ok: 1 });
+    \\}
+    \\
+;
+
+const clean_nullable =
+    \\structural MaybeName = string | null;
+    \\
+    \\function nameOf(): MaybeName {
+    \\  return null;
+    \\}
+    \\
+    \\function handler(req: Request): Proof<Response, "deterministic"> {
+    \\  const n = nameOf();
+    \\  if (n === null) { return Response.json({ name: "anon" }); }
+    \\  return Response.json({ name: n });
+    \\}
+    \\
+;
+
+const clean_match =
+    \\structural Msg = { kind: string, text: string };
+    \\
+    \\function handler(req: Request): Proof<Response, "deterministic"> {
+    \\  const msg: Msg = { kind: "echo", text: "hi" };
+    \\  const out = match (msg) {
+    \\    when { kind: "echo", text }: text
+    \\    default: "none"
+    \\  };
+    \\  return Response.json({ out: out });
+    \\}
+    \\
+;
+
 pub const seeds = [_]DefectSeed{
     .{
         .id = "let-binding",
@@ -244,6 +355,297 @@ pub const seeds = [_]DefectSeed{
         \\
         ,
         .ask = "Fix the ZTS308 compiler error in handler.ts",
+    },
+    .{
+        .id = "redundant-bool-compare",
+        .code = "ZTS620",
+        .class = .salvaged,
+        .seed_source = clean_bool,
+        .bad_draft =
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const ready = true;
+        \\  if (ready === true) { return Response.json({ ready: 9 }); }
+        \\  return Response.json({ ready: 0 });
+        \\}
+        \\
+        ,
+        .good_draft =
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const ready = true;
+        \\  if (ready) { return Response.json({ ready: 8 }); }
+        \\  return Response.json({ ready: 0 });
+        \\}
+        \\
+        ,
+        .ask = "Fix the ZTS620 compiler error in handler.ts",
+    },
+    .{
+        .id = "chained-ternary",
+        .code = "ZTS621",
+        .class = .salvaged,
+        .seed_source = clean_tier,
+        .bad_draft =
+        \\function pickTier(a: boolean, b: boolean): number {
+        \\  if (a) { return 1; }
+        \\  if (b) { return 2; }
+        \\  return 3;
+        \\}
+        \\
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const a = true;
+        \\  const b = false;
+        \\  const tier = a ? 1 : b ? 2 : 3;
+        \\  return Response.json({ tier: tier });
+        \\}
+        \\
+        ,
+        .good_draft =
+        \\function pickTier(a: boolean, b: boolean): number {
+        \\  if (a) { return 1; }
+        \\  if (b) { return 2; }
+        \\  return 3;
+        \\}
+        \\
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const tier = pickTier(false, true);
+        \\  return Response.json({ tier: tier });
+        \\}
+        \\
+        ,
+        .ask = "Fix the ZTS621 compiler error in handler.ts",
+    },
+    .{
+        .id = "arrow-helper",
+        .code = "ZTS608",
+        .class = .salvaged,
+        .seed_source = clean_named_helper,
+        .bad_draft =
+        \\const double = (x: number): number => x + x;
+        \\
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const a = double(8);
+        \\  const b = double(9);
+        \\  return Response.json({ a: a, b: b });
+        \\}
+        \\
+        ,
+        .good_draft =
+        \\function double(x: number): number {
+        \\  return x + x;
+        \\}
+        \\
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const a = double(4);
+        \\  const b = double(5);
+        \\  return Response.json({ a: a, b: b });
+        \\}
+        \\
+        ,
+        .ask = "Fix the ZTS608 compiler error in handler.ts",
+    },
+    .{
+        .id = "exported-arrow-const",
+        .code = "ZTS609",
+        .class = .salvaged,
+        .seed_source = clean_exported_handler,
+        .bad_draft =
+        \\export const handler = (req: Request): Proof<Response, "deterministic"> => Response.json({ ok: 9 });
+        \\
+        ,
+        .good_draft =
+        \\export function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  return Response.json({ ok: 6 });
+        \\}
+        \\
+        ,
+        .ask = "Fix the ZTS609 compiler error in handler.ts",
+    },
+    .{
+        .id = "effectful-ternary",
+        .code = "ZTS612",
+        .class = .model_retry,
+        .seed_source = clean_ternary,
+        .bad_draft =
+        \\function pick(): number {
+        \\  return 7;
+        \\}
+        \\
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const ready = true;
+        \\  const status = ready ? pick() : 5;
+        \\  return Response.json({ status: status });
+        \\}
+        \\
+        ,
+        .good_draft =
+        \\function pick(): number {
+        \\  return 7;
+        \\}
+        \\
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const ready = true;
+        \\  const picked = pick();
+        \\  const status = ready ? picked : 6;
+        \\  return Response.json({ status: status });
+        \\}
+        \\
+        ,
+        .ask = "Fix the ZTS612 compiler error in handler.ts",
+    },
+    .{
+        .id = "non-leading-spread",
+        .code = "ZTS614",
+        .class = .model_retry,
+        .seed_source = clean_spread,
+        .bad_draft =
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const base = { a: 1 };
+        \\  const next = { status: "ok", ...base };
+        \\  return Response.json({ next: next });
+        \\}
+        \\
+        ,
+        .good_draft =
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const base = { a: 2 };
+        \\  const next = { ...base, status: "ok" };
+        \\  return Response.json({ next: next });
+        \\}
+        \\
+        ,
+        .ask = "Fix the ZTS614 compiler error in handler.ts",
+    },
+    .{
+        .id = "call-spread",
+        .code = "ZTS616",
+        .class = .model_retry,
+        .seed_source = clean_send,
+        .bad_draft =
+        \\function send(a: number): number {
+        \\  return a + a;
+        \\}
+        \\
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const args = [1];
+        \\  const sent = send(...args);
+        \\  return Response.json({ sent: sent });
+        \\}
+        \\
+        ,
+        .good_draft =
+        \\function send(a: number): number {
+        \\  return a + a;
+        \\}
+        \\
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const args = [4];
+        \\  const sent = send(args[0]);
+        \\  return Response.json({ sent: sent });
+        \\}
+        \\
+        ,
+        .ask = "Fix the ZTS616 compiler error in handler.ts",
+    },
+    .{
+        .id = "nullish-on-null",
+        .code = "ZTS624",
+        .class = .model_retry,
+        .seed_source = clean_nullable,
+        .bad_draft =
+        \\structural MaybeName = string | null;
+        \\
+        \\function nameOf(): MaybeName {
+        \\  return null;
+        \\}
+        \\
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const n = nameOf();
+        \\  const name = n ?? "anon";
+        \\  return Response.json({ name: name });
+        \\}
+        \\
+        ,
+        .good_draft =
+        \\structural MaybeName = string | null;
+        \\
+        \\function nameOf(): MaybeName {
+        \\  return null;
+        \\}
+        \\
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const n = nameOf();
+        \\  if (n === null) { return Response.json({ name: "nobody" }); }
+        \\  return Response.json({ name: n });
+        \\}
+        \\
+        ,
+        .ask = "Fix the ZTS624 compiler error in handler.ts",
+    },
+    .{
+        .id = "redundant-pattern-rename",
+        .code = "ZTS625",
+        .class = .model_retry,
+        .seed_source = clean_match,
+        .bad_draft =
+        \\structural Msg = { kind: string, text: string };
+        \\
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const msg: Msg = { kind: "echo", text: "hi" };
+        \\  const out = match (msg) {
+        \\    when { kind: "echo", text: text }: text
+        \\    default: "none"
+        \\  };
+        \\  return Response.json({ out: out });
+        \\}
+        \\
+        ,
+        .good_draft =
+        \\structural Msg = { kind: string, text: string };
+        \\
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const msg: Msg = { kind: "echo", text: "hey" };
+        \\  const out = match (msg) {
+        \\    when { kind: "echo", text }: text
+        \\    default: "none"
+        \\  };
+        \\  return Response.json({ out: out });
+        \\}
+        \\
+        ,
+        .ask = "Fix the ZTS625 compiler error in handler.ts",
+    },
+    .{
+        .id = "scrutinee-field-read",
+        .code = "ZTS626",
+        .class = .model_retry,
+        .seed_source = clean_match,
+        .bad_draft =
+        \\structural Msg = { kind: string, text: string };
+        \\
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const msg: Msg = { kind: "echo", text: "hi" };
+        \\  const out = match (msg) {
+        \\    when { kind: "echo" }: msg.text
+        \\    default: "none"
+        \\  };
+        \\  return Response.json({ out: out });
+        \\}
+        \\
+        ,
+        .good_draft =
+        \\structural Msg = { kind: string, text: string };
+        \\
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const msg: Msg = { kind: "echo", text: "yo" };
+        \\  const out = match (msg) {
+        \\    when { kind: "echo", text }: text
+        \\    default: "none"
+        \\  };
+        \\  return Response.json({ out: out });
+        \\}
+        \\
+        ,
+        .ask = "Fix the ZTS626 compiler error in handler.ts",
     },
 };
 
