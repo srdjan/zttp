@@ -6,6 +6,8 @@
 #
 #   [codegen-convergence] - a measurement of a live model, carrying its name.
 #   [proof-coverage]      - a fact about the corpus and the compiler.
+#   [seed-coverage]       - which rules were observed firing at all, from the
+#                           defect-seed suite, with no model involved.
 #
 # Each is printed by the cassette replay and lifted out of the complete
 # `test-expert-app` output only after that build succeeds. The publisher
@@ -91,12 +93,18 @@ check_marker() {
 
 convergence_marker='[codegen-convergence]'
 coverage_marker='[proof-coverage]'
+seed_marker='[seed-coverage]'
 convergence_publisher="scripts/update-convergence.sh"
 coverage_publisher="scripts/update-coverage.sh"
 producer="packages/pi/src/expert_codegen_record.zig"
+# The seed figure has its own producer on purpose: it is printed by the gate
+# that verifies it, so a marker can only appear after every seed reproduced its
+# declared class through the real veto.
+seed_producer="packages/pi/src/standin_range_tests.zig"
 
 check_marker "$convergence_marker" "$producer" "$convergence_publisher"
 check_marker "$coverage_marker" "$producer" "$coverage_publisher"
+check_marker "$seed_marker" "$seed_producer" "$coverage_publisher"
 
 # And neither publisher may read the other's marker. A coverage line has no
 # model column to fill, and a convergence line says nothing about what the
@@ -108,8 +116,14 @@ fi
 if grep -q -F "$convergence_marker" "$coverage_publisher"; then
   fail "$coverage_publisher reads $convergence_marker"
 fi
+# The seed figure is a compiler claim with no model in it. A convergence row has
+# a model column to fill, so lifting a seed count into that page would publish a
+# number about the compiler under a model's name.
+if grep -q -F "$seed_marker" "$convergence_publisher"; then
+  fail "$convergence_publisher reads $seed_marker"
+fi
 
 bash scripts/test-evidence-marker.sh
 
-printf 'convergence emitter OK: %s and %s each have one producer (%s) and one publisher\n' \
-  "$convergence_marker" "$coverage_marker" "$producer"
+printf 'convergence emitter OK: %s and %s have one producer (%s); %s has one producer (%s); each has one publisher\n' \
+  "$convergence_marker" "$coverage_marker" "$producer" "$seed_marker" "$seed_producer"

@@ -700,6 +700,48 @@ test "stand-in gate: every defect seed reproduces its declared veto class throug
         "[standin-gate] veto classes {d}/{d} seeds reproduce their declaration\n",
         .{ defect_seeds.seeds.len, defect_seeds.seeds.len },
     );
+
+    // The publishable figure, emitted only here and only after every assertion
+    // above passed, so the marker means "these rules were observed firing"
+    // rather than "this table lists them". `scripts/update-coverage.sh` lifts
+    // it; `scripts/check-convergence-emitter.sh` holds it to this one producer.
+    //
+    // Deliberately not routed through `scripts/extract-evidence-marker.py`:
+    // that validates a complete publishable *model run* and requires a runId,
+    // provider, model and the identity hashes. This is a claim about the
+    // compiler with no model in it, and borrowing that schema would dress it up
+    // as something it is not.
+    {
+        var codes: std.ArrayList([]const u8) = .empty;
+        defer codes.deinit(testing.allocator);
+        for (defect_seeds.seeds) |seed| {
+            if (zts.PolicyCatalog.findByCode(seed.code) == null) continue;
+            var seen = false;
+            for (codes.items) |existing| {
+                if (std.mem.eql(u8, existing, seed.code)) seen = true;
+            }
+            if (!seen) try codes.append(testing.allocator, seed.code);
+        }
+        std.mem.sort([]const u8, codes.items, {}, struct {
+            fn less(_: void, x: []const u8, y: []const u8) bool {
+                return std.mem.lessThan(u8, x, y);
+            }
+        }.less);
+
+        // Floor: an emptied seed table would otherwise publish "0 of 72
+        // verified" as though that were a measurement rather than a broken run.
+        try testing.expect(codes.items.len > 0);
+
+        var buf: std.Io.Writer.Allocating = .init(testing.allocator);
+        defer buf.deinit();
+        try std.json.Stringify.value(.{
+            .seedsTotal = defect_seeds.seeds.len,
+            .rulesTotal = zts.PolicyCatalog.rules().len,
+            .verifiedRules = codes.items.len,
+            .verified = codes.items,
+        }, .{}, &buf.writer);
+        std.debug.print("[seed-coverage] {s}\n", .{buf.written()});
+    }
 }
 
 const source_grammar = @import("standin/source_grammar.zig");

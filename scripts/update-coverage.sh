@@ -78,6 +78,30 @@ if [[ "$current_commit" != "$marker_commit" || "$current_dirty" != "$marker_dirt
   exit 1
 fi
 
+# The seed suite answers the other question this page has to keep apart: not
+# "which rules did a model's drafts trip", but "which rules were observed
+# firing at all". It is produced by the stand-in gate, which verifies each seed
+# against the real veto before printing, so the marker means the rules were
+# observed rather than merely listed.
+#
+# Deliberately not read through extract-evidence-marker.py: that validates a
+# complete publishable model run and requires a runId, provider, model and the
+# identity hashes, none of which a compiler-only claim has.
+echo ">> verifying the defect-seed suite"
+seed_log="$evidence_tmp/standin.log"
+if ! zig build test-standin >"$seed_log" 2>&1; then
+  cat "$seed_log" >&2
+  echo "error: the defect-seed gate failed; generated evidence is unchanged" >&2
+  exit 1
+fi
+
+seed_lines="$(grep -c '^\[seed-coverage\] ' "$seed_log" || true)"
+if [[ "$seed_lines" != "1" ]]; then
+  echo "error: expected exactly one [seed-coverage] line, found $seed_lines" >&2
+  exit 1
+fi
+seed_payload="$(sed -n 's/^\[seed-coverage\] //p' "$seed_log")"
+
 # No commit field. convergence.md carries one because its rows accumulate and a
 # reader needs to know which build produced each. This page is a single
 # current-state answer, and the replay fails when it drifts from the run, so it
@@ -87,8 +111,23 @@ printf '%s' "$payload" | python3 -c '
 import json, sys
 d = json.load(sys.stdin)
 d["recorded"] = sys.argv[1]
+seed = json.loads(sys.argv[2])
+for key in ("seedsTotal", "rulesTotal", "verifiedRules", "verified"):
+    if key not in seed:
+        raise SystemExit("error: seed-coverage marker is missing " + key)
+# The two producers must agree on the denominator, or the page would print two
+# different totals for one registry.
+if seed["rulesTotal"] != d["rulesTotal"]:
+    raise SystemExit("error: seed suite and corpus disagree on rulesTotal")
+if not seed["verified"]:
+    raise SystemExit("error: seed-coverage marker verified nothing")
+d["seedSuite"] = {
+    "seedsTotal": seed["seedsTotal"],
+    "verifiedRules": seed["verifiedRules"],
+    "verified": seed["verified"],
+}
 print(json.dumps(d, indent=2))
-' "$(date -u +%Y-%m-%d)" > "$json_tmp"
+' "$(date -u +%Y-%m-%d)" "$seed_payload" > "$json_tmp"
 
 python3 - "$json_tmp" "$md_tmp" <<'PY'
 import json, sys
@@ -100,6 +139,15 @@ total = d["rulesTotal"]
 tripped = d["tripped"]
 untripped = d["untripped"]
 off = d["offRegistry"]
+
+seed = d["seedSuite"]
+seed_codes = seed["verified"]
+seed_verified = seed["verifiedRules"]
+seed_total = seed["seedsTotal"]
+seed_only = len([c for c in seed_codes if c in untripped])
+corpus_only = len([c for c in tripped if c not in seed_codes])
+overlap_count = len(set(tripped) & set(seed_codes))
+union_count = len(set(tripped) | set(seed_codes))
 
 def codes(names):
     return ", ".join("`%s`" % n for n in names) if names else "none"
@@ -163,6 +211,34 @@ number the generator computes; the codes are printed, and a reader who wants the
 breakdown reads them.
 
 Untripped: {codes(untripped)}
+
+## Rules observed firing at all
+
+A different question, kept on its own so the two are not read as one figure.
+The section above counts rules a recorded model's drafts happened to trip. This
+one counts rules the compiler was *observed* rejecting, from the defect-seed
+suite in `packages/pi/src/standin/defect_seeds.zig`: each seed pairs a
+veto-clean baseline with a draft that introduces exactly one code, and the
+stand-in gate re-derives the outcome through the real veto before this number
+is printed.
+
+| Rules advertised | Verified firing by a seed | Seeds |
+|---|---|---|
+| {total} | {seed_verified} | {seed_total} |
+
+Verified: {codes(seed_codes)}
+
+No model is involved, so this figure does not move when a recording draws
+differently. It also proves less: a seed shows the compiler rejects a draft the
+harness supplied, and says nothing about whether a model would ever write one.
+That is the question the section above answers, and only a recording can.
+
+Neither number bounds the other. {seed_only} of the rules verified here are
+untripped by the corpus, {corpus_only} tripped by the corpus have no seed, and
+the two sets share {overlap_count}. Together they name {union_count} of the {total}
+advertised rules, which is the closest thing to a combined answer this
+repository can currently produce - and it is still two claims added up, not one
+measurement.
 
 ## Codes the registry does not carry
 

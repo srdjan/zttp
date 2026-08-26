@@ -58,6 +58,34 @@ breakdown reads them.
 
 Untripped: `ZTS300`, `ZTS301`, `ZTS302`, `ZTS303`, `ZTS304`, `ZTS305`, `ZTS306`, `ZTS307`, `ZTS308`, `ZTS309`, `ZTS310`, `ZTS501`, `ZTS502`, `ZTS600`, `ZTS629`, `ZTS601`, `ZTS061`, `ZTS602`, `ZTS603`, `ZTS604`, `ZTS605`, `ZTS608`, `ZTS609`, `ZTS610`, `ZTS623`, `ZTS611`, `ZTS612`, `ZTS621`, `ZTS613`, `ZTS614`, `ZTS616`, `ZTS620`, `ZTS622`, `ZTS625`, `ZTS626`, `ZTS627`, `ZTS628`, `ZTS624`, `ZTS606`, `ZTS503`, `ZTS504`, `ZTS505`, `ZTS506`, `ZTS508`, `ZTS607`, `ZTS509`, `ZTS510`, `ZTS511`, `ZTS512`, `POL001`, `POL002`, `POL003`, `POL004`, `POL005`, `POL006`, `POL007`, `POL008`, `PROP01`, `PROP02`, `PROP03`, `PROP04`, `PROP05`, `PROP06`, `ZTS401`, `ZTS402`, `ZTS403`, `ZTS404`, `ZTS405`, `ZTS406`, `ZTS407`
 
+## Rules observed firing at all
+
+A different question, kept on its own so the two are not read as one figure.
+The section above counts rules a recorded model's drafts happened to trip. This
+one counts rules the compiler was *observed* rejecting, from the defect-seed
+suite in `packages/pi/src/standin/defect_seeds.zig`: each seed pairs a
+veto-clean baseline with a draft that introduces exactly one code, and the
+stand-in gate re-derives the outcome through the real veto before this number
+is printed.
+
+| Rules advertised | Verified firing by a seed | Seeds |
+|---|---|---|
+| 72 | 15 | 16 |
+
+Verified: `ZTS303`, `ZTS304`, `ZTS308`, `ZTS604`, `ZTS608`, `ZTS609`, `ZTS612`, `ZTS613`, `ZTS614`, `ZTS616`, `ZTS620`, `ZTS621`, `ZTS624`, `ZTS625`, `ZTS626`
+
+No model is involved, so this figure does not move when a recording draws
+differently. It also proves less: a seed shows the compiler rejects a draft the
+harness supplied, and says nothing about whether a model would ever write one.
+That is the question the section above answers, and only a recording can.
+
+Neither number bounds the other. 15 of the rules verified here are
+untripped by the corpus, 2 tripped by the corpus have no seed, and
+the two sets share 0. Together they name 17 of the 72
+advertised rules, which is the closest thing to a combined answer this
+repository can currently produce - and it is still two claims added up, not one
+measurement.
+
 ## Codes the registry does not carry
 
 `ZTS056`, `ZTS105`, `ZTS203`
