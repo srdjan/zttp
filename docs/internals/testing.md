@@ -220,6 +220,15 @@ weaken a verdict, and a row nothing matches fails the same gate. A swallow
 there does not surface as a failure, it surfaces as a pass. Run `zig build
 test-proof-swallow`.
 
+Adding an advertised rule needs either a seed in
+`packages/pi/src/standin/defect_seeds.zig` that is observed tripping it, or a
+row in `scripts/unseeded-rules.allow` giving the reason a seed cannot reach it,
+and a row for a code a seed now verifies fails the same gate. Both directions
+run inside `zig build test-standin`. This one is not about a build edge: it is
+what stops `docs/coverage.md` publishing "53 of 72" while leaving a reader to
+assume the other 19 are unwritten work when 17 of them name a diagnostic no
+code path constructs.
+
 A root that pins its own test filter needs a gate that enforces the naming rule
 the filter depends on. `test-standin` is the only one today: it filters on the
 literal `stand-in`, and `packages/pi/src/standin_range_tests.zig` reads both
