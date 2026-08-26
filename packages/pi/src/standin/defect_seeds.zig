@@ -333,6 +333,286 @@ const clean_secret_and_egress =
     \\
 ;
 
+// ---------------------------------------------------------------------------
+// Baselines for the rule-coverage seeds below. Each is veto-clean and stable
+// under the canonicalizer, which the gate asserts before it reads any draft.
+// ---------------------------------------------------------------------------
+
+const clean_plain_ok =
+    \\function handler(req: Request): Proof<Response, "deterministic"> {
+    \\  return Response.json({ ok: 1 });
+    \\}
+    \\
+;
+
+const clean_read_only =
+    \\function handler(req: Request): Proof<Response, "read_only"> {
+    \\  return Response.json({ v: "ok" });
+    \\}
+    \\
+;
+
+const clean_count =
+    \\function handler(req: Request): Proof<Response, "deterministic"> {
+    \\  const count = 1;
+    \\  return Response.json({ count: count });
+    \\}
+    \\
+;
+
+const clean_exported_only_handler =
+    \\export function handler(req: Request): Proof<Response, "deterministic"> {
+    \\  return Response.json({ ok: 1 });
+    \\}
+    \\
+;
+
+const clean_annotated_helper =
+    \\function scale(x: number): number {
+    \\  return x + x;
+    \\}
+    \\
+    \\function handler(req: Request): Proof<Response, "deterministic"> {
+    \\  const v = scale(1);
+    \\  return Response.json({ v: v });
+    \\}
+    \\
+;
+
+const clean_match_default =
+    \\function handler(req: Request): Proof<Response, "deterministic"> {
+    \\  const n = 3;
+    \\  const out = match (n) {
+    \\    when 1: "one"
+    \\    default: "other"
+    \\  };
+    \\  return Response.json({ out: out });
+    \\}
+    \\
+;
+
+const clean_crypto_budget =
+    \\import { sha256 } from "zttp:crypto";
+    \\
+    \\function handler(req: Request): Proof<Effects<Response, "crypto">, "deterministic"> {
+    \\  return Response.text(sha256("zttp"));
+    \\}
+    \\
+;
+
+const clean_handler_log_budget =
+    \\import { logInfo } from "zttp:log";
+    \\
+    \\structural Narrow<T> = Proof<T,
+    \\    | "deterministic"
+    \\    | "state_isolated"
+    \\    | "result_safe"
+    \\    | "optional_safe"
+    \\    | "no_secret_leakage"
+    \\    | "no_credential_leakage"
+    \\    | "input_validated"
+    \\    | "injection_safe"
+    \\    | "canonical"
+    \\    | "cost_bounded"
+    \\>;
+    \\
+    \\function handler(req: Request): Narrow<Effects<Response, "stderr" | "clock">> {
+    \\  logInfo("hit", { n: 1 });
+    \\  return Response.text("ok");
+    \\}
+    \\
+;
+
+const clean_helper_log_ceiling =
+    \\import { sha256 } from "zttp:crypto";
+    \\import { logInfo } from "zttp:log";
+    \\
+    \\structural Narrow<T> = Proof<T,
+    \\    | "deterministic"
+    \\    | "state_isolated"
+    \\    | "result_safe"
+    \\    | "optional_safe"
+    \\    | "no_secret_leakage"
+    \\    | "no_credential_leakage"
+    \\    | "input_validated"
+    \\    | "injection_safe"
+    \\    | "canonical"
+    \\    | "cost_bounded"
+    \\>;
+    \\
+    \\structural Digest = { value: string };
+    \\
+    \\export function digest(input: Digest): Proof<Effects<Digest, "crypto" | "stderr" | "clock">, "deterministic"> {
+    \\  sha256(input.value);
+    \\  logInfo("digest", { n: 1 });
+    \\  return input;
+    \\}
+    \\
+    \\function handler(req: Request): Narrow<Effects<Response, "crypto" | "stderr" | "clock">> {
+    \\  const d = digest({ value: "zttp" });
+    \\  return Response.text(d.value);
+    \\}
+    \\
+;
+
+const clean_exported_helper_capsule =
+    \\import { sha256 } from "zttp:crypto";
+    \\
+    \\structural Narrow<T> = Proof<T,
+    \\    | "deterministic"
+    \\    | "state_isolated"
+    \\    | "result_safe"
+    \\    | "optional_safe"
+    \\    | "no_secret_leakage"
+    \\    | "no_credential_leakage"
+    \\    | "input_validated"
+    \\    | "injection_safe"
+    \\    | "canonical"
+    \\    | "cost_bounded"
+    \\>;
+    \\
+    \\structural Digest = { value: string };
+    \\
+    \\export function digest(input: Digest): Proof<Effects<Digest, "crypto">, "deterministic"> {
+    \\  sha256(input.value);
+    \\  return input;
+    \\}
+    \\
+    \\function handler(req: Request): Narrow<Effects<Response, "crypto">> {
+    \\  const d = digest({ value: "zttp" });
+    \\  return Response.text(d.value);
+    \\}
+    \\
+;
+
+const clean_internal_no_ceiling =
+    \\import { sha256 } from "zttp:crypto";
+    \\
+    \\structural Narrow<T> = Proof<T,
+    \\    | "deterministic"
+    \\    | "state_isolated"
+    \\    | "result_safe"
+    \\    | "optional_safe"
+    \\    | "no_secret_leakage"
+    \\    | "no_credential_leakage"
+    \\    | "input_validated"
+    \\    | "injection_safe"
+    \\    | "canonical"
+    \\    | "cost_bounded"
+    \\>;
+    \\
+    \\function digest(s: string): string {
+    \\  sha256(s);
+    \\  return s;
+    \\}
+    \\
+    \\function handler(req: Request): Narrow<Effects<Response, "crypto">> {
+    \\  return Response.text(digest("zttp"));
+    \\}
+    \\
+;
+
+const clean_deterministic_helper =
+    \\function stamp(): number {
+    \\  return 7;
+    \\}
+    \\
+    \\function handler(req: Request): Proof<Response, "deterministic"> {
+    \\  const t = stamp();
+    \\  return Response.json({ t: t, n: 1 });
+    \\}
+    \\
+;
+
+const clean_resolvable_callee =
+    \\import { sha256 } from "zttp:crypto";
+    \\
+    \\structural Maker = { make: () => string };
+    \\
+    \\function build(): Maker {
+    \\  return { make: () => sha256("zttp") };
+    \\}
+    \\
+    \\function handler(req: Request): Proof<Effects<Response, "crypto">, "state_isolated"> {
+    \\  const m = build();
+    \\  return Response.text(m.make());
+    \\}
+    \\
+;
+
+const clean_secret_and_headers =
+    \\import { env } from "zttp:env";
+    \\import { fetch } from "zttp:fetch";
+    \\
+    \\function handler(req: Request): Proof<Response, "deterministic"> {
+    \\  const token = env("SECRET_KEY") ?? "";
+    \\  const r = fetch("https://api.example.com/v1", { headers: { "x-tag": "static" } });
+    \\  if (token === "") { return Response.json({ ok: 0 }); }
+    \\  return Response.json({ s: r.status });
+    \\}
+    \\
+;
+
+const clean_credential_and_headers =
+    \\import { fetch } from "zttp:fetch";
+    \\
+    \\function handler(req: Request): Proof<Response, "deterministic"> {
+    \\  const auth = req.headers.authorization ?? "";
+    \\  const r = fetch("https://api.example.com/v1", { headers: { "x-tag": "static" } });
+    \\  if (auth === "") { return Response.json({ ok: 0 }); }
+    \\  return Response.json({ s: r.status });
+    \\}
+    \\
+;
+
+const clean_html_no_input =
+    \\function handler(req: Request): Proof<Response, "deterministic"> {
+    \\  const q = req.url;
+    \\  if (q === "") { return Response.html("<p>none</p>"); }
+    \\  return Response.html("<p>static</p>");
+    \\}
+    \\
+;
+
+const clean_durable_step =
+    \\import { run, step } from "zttp:durable";
+    \\
+    \\function handler(req: Request): Proof<object, "state_isolated"> {
+    \\  return run("step-demo", () => step("one", () => { return { ok: 1 }; }));
+    \\}
+    \\
+;
+
+const clean_saga_compensated =
+    \\import { run } from "zttp:durable";
+    \\import { call, saga } from "zttp:workflow";
+    \\
+    \\function handler(req: Request): Proof<object, "state_isolated"> {
+    \\  return run("saga-demo", () => saga([
+    \\    {
+    \\      name: "reserve",
+    \\      run: () => call("greet", { path: "/reserve" }),
+    \\      compensate: () => call("greet", { path: "/release" }),
+    \\    },
+    \\    { name: "ship", run: () => call("greet", { path: "/ship" }) },
+    \\  ]));
+    \\}
+    \\
+;
+
+const clean_dict_entries =
+    \\import { dictEntries, dictFromEntries } from "zttp:collections";
+    \\
+    \\function handler(req: Request): Proof<Response, "deterministic"> {
+    \\  const built = dictFromEntries([["a", 1], ["b", 2]]);
+    \\  if (!built.ok) { return Response.json({ error: "bad" }, { status: 400 }); }
+    \\  const d = built.value;
+    \\  if (!isDict(d)) { return Response.json({ error: "not-a-dict" }, { status: 400 }); }
+    \\  const pairs = dictEntries(d);
+    \\  return Response.json({ n: pairs.length });
+    \\}
+    \\
+;
 pub const seeds = [_]DefectSeed{
     .{
         .id = "let-binding",
@@ -1083,6 +1363,983 @@ pub const seeds = [_]DefectSeed{
         \\
         ,
         .ask = "Fix the ZTS406 compiler error in handler.ts",
+    },
+    .{
+        .id = "proof-name-unknown",
+        .code = "ZTS502",
+        .class = .model_retry,
+        .seed_source = clean_plain_ok,
+        .bad_draft =
+        \\function handler(req: Request): Proof<Response, "banana"> {
+        \\  return Response.json({ ok: 1 });
+        \\}
+        \\
+        ,
+        .good_draft =
+        \\function handler(req: Request): Proof<Response, "read_only"> {
+        \\  return Response.json({ ok: 2 });
+        \\}
+        \\
+        ,
+        .ask = "Fix the ZTS502 compiler error in handler.ts",
+    },
+    .{
+        .id = "spec-contradicts-module",
+        .code = "ZTS501",
+        .class = .model_retry,
+        .seed_source = clean_read_only,
+        .bad_draft =
+        \\import { cacheSet } from "zttp:cache";
+        \\
+        \\function handler(req: Request): Proof<Response, "read_only"> {
+        \\  cacheSet("ns", "k", "v");
+        \\  return Response.json({ v: "ok" });
+        \\}
+        \\
+        ,
+        .good_draft =
+        \\function handler(req: Request): Proof<Response, "read_only"> {
+        \\  return Response.json({ v: "stored" });
+        \\}
+        \\
+        ,
+        .ask = "Fix the ZTS501 compiler error in handler.ts",
+    },
+    .{
+        .id = "proof-not-discharged",
+        .code = "ZTS500",
+        .class = .model_retry,
+        .seed_source = clean_count,
+        .bad_draft =
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const count = Date.now();
+        \\  return Response.json({ count: count });
+        \\}
+        \\
+        ,
+        .good_draft =
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const count = 2;
+        \\  return Response.json({ count: count });
+        \\}
+        \\
+        ,
+        .ask = "Fix the ZTS500 compiler error in handler.ts",
+    },
+    .{
+        .id = "ambient-not-published",
+        .code = "ZTS629",
+        .class = .model_retry,
+        .seed_source = clean_count,
+        .bad_draft =
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const count = globalThis;
+        \\  return Response.json({ count: 1 });
+        \\}
+        \\
+        ,
+        .good_draft =
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const count = 3;
+        \\  return Response.json({ count: count });
+        \\}
+        \\
+        ,
+        .ask = "Fix the ZTS629 compiler error in handler.ts",
+    },
+    .{
+        .id = "exported-open-type",
+        .code = "ZTS061",
+        .class = .model_retry,
+        .seed_source = clean_exported_only_handler,
+        .bad_draft =
+        \\export function widen(x: object): object {
+        \\  return x;
+        \\}
+        \\
+        \\export function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  return Response.json({ ok: 1 });
+        \\}
+        \\
+        ,
+        .good_draft =
+        \\export function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  return Response.json({ ok: 2 });
+        \\}
+        \\
+        ,
+        .ask = "Fix the ZTS061 compiler error in handler.ts",
+    },
+    .{
+        .id = "missing-annotations",
+        .code = "ZTS601",
+        .class = .model_retry,
+        .seed_source = clean_annotated_helper,
+        .bad_draft =
+        \\function scale(x): number {
+        \\  return x + x;
+        \\}
+        \\
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const v = scale(1);
+        \\  return Response.json({ v: v });
+        \\}
+        \\
+        ,
+        .good_draft =
+        \\function scale(x: number): number {
+        \\  return x + x + x;
+        \\}
+        \\
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const v = scale(1);
+        \\  return Response.json({ v: v });
+        \\}
+        \\
+        ,
+        .ask = "Fix the ZTS601 compiler error in handler.ts",
+    },
+    .{
+        .id = "match-not-exhaustive",
+        .code = "ZTS603",
+        .class = .model_retry,
+        .seed_source = clean_match_default,
+        .bad_draft =
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const n = 3;
+        \\  const out = match (n) {
+        \\    when 1: "one"
+        \\    when 2: "two"
+        \\  };
+        \\  return Response.json({ out: out });
+        \\}
+        \\
+        ,
+        .good_draft =
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const n = 3;
+        \\  const out = match (n) {
+        \\    when 1: "one"
+        \\    when 2: "two"
+        \\    default: "other"
+        \\  };
+        \\  return Response.json({ out: out });
+        \\}
+        \\
+        ,
+        .ask = "Fix the ZTS603 compiler error in handler.ts",
+    },
+    .{
+        .id = "call-result-unknown",
+        .code = "ZTS600",
+        .class = .model_retry,
+        .seed_source = clean_crypto_budget,
+        .bad_draft =
+        \\import { sha256 } from "zttp:crypto";
+        \\
+        \\function handler(req: Request): Proof<Effects<Response, "crypto">, "deterministic"> {
+        \\  const f = () => sha256("zttp");
+        \\  return Response.text(f());
+        \\}
+        \\
+        ,
+        .good_draft =
+        \\import { sha256 } from "zttp:crypto";
+        \\
+        \\function handler(req: Request): Proof<Effects<Response, "crypto">, "deterministic"> {
+        \\  return Response.text(sha256("zttp-fixed"));
+        \\}
+        \\
+        ,
+        .ask = "Fix the ZTS600 compiler error in handler.ts",
+    },
+    .{
+        .id = "ceiling-not-literal",
+        .code = "ZTS511",
+        .class = .model_retry,
+        .seed_source = clean_crypto_budget,
+        .bad_draft =
+        \\import { sha256 } from "zttp:crypto";
+        \\
+        \\function handler(req: Request): Proof<Effects<Response, string>, "deterministic"> {
+        \\  return Response.text(sha256("zttp"));
+        \\}
+        \\
+        ,
+        .good_draft =
+        \\import { sha256 } from "zttp:crypto";
+        \\
+        \\function handler(req: Request): Proof<Effects<Response, "crypto">, "deterministic"> {
+        \\  return Response.text(sha256("zttp-ok"));
+        \\}
+        \\
+        ,
+        .ask = "Fix the ZTS511 compiler error in handler.ts",
+    },
+    .{
+        .id = "handler-outside-budget",
+        .code = "ZTS506",
+        .class = .model_retry,
+        .seed_source = clean_handler_log_budget,
+        .bad_draft =
+        \\import { logInfo } from "zttp:log";
+        \\
+        \\structural Narrow<T> = Proof<T,
+        \\    | "deterministic"
+        \\    | "state_isolated"
+        \\    | "result_safe"
+        \\    | "optional_safe"
+        \\    | "no_secret_leakage"
+        \\    | "no_credential_leakage"
+        \\    | "input_validated"
+        \\    | "injection_safe"
+        \\    | "canonical"
+        \\    | "cost_bounded"
+        \\>;
+        \\
+        \\function handler(req: Request): Narrow<Effects<Response, "clock">> {
+        \\  logInfo("hit", { n: 1 });
+        \\  return Response.text("ok");
+        \\}
+        \\
+        ,
+        .good_draft =
+        \\import { logInfo } from "zttp:log";
+        \\
+        \\structural Narrow<T> = Proof<T,
+        \\    | "deterministic"
+        \\    | "state_isolated"
+        \\    | "result_safe"
+        \\    | "optional_safe"
+        \\    | "no_secret_leakage"
+        \\    | "no_credential_leakage"
+        \\    | "input_validated"
+        \\    | "injection_safe"
+        \\    | "canonical"
+        \\    | "cost_bounded"
+        \\>;
+        \\
+        \\function handler(req: Request): Narrow<Effects<Response, "stderr" | "clock">> {
+        \\  logInfo("hit", { n: 2 });
+        \\  return Response.text("ok");
+        \\}
+        \\
+        ,
+        .ask = "Fix the ZTS506 compiler error in handler.ts",
+    },
+    .{
+        .id = "ceiling-unknown-capability",
+        .code = "ZTS504",
+        .class = .model_retry,
+        .seed_source = clean_handler_log_budget,
+        .bad_draft =
+        \\import { logInfo } from "zttp:log";
+        \\
+        \\structural Narrow<T> = Proof<T,
+        \\    | "deterministic"
+        \\    | "state_isolated"
+        \\    | "result_safe"
+        \\    | "optional_safe"
+        \\    | "no_secret_leakage"
+        \\    | "no_credential_leakage"
+        \\    | "input_validated"
+        \\    | "injection_safe"
+        \\    | "canonical"
+        \\    | "cost_bounded"
+        \\>;
+        \\
+        \\function handler(req: Request): Narrow<Effects<Response, "stderr" | "clock" | "databse">> {
+        \\  logInfo("hit", { n: 1 });
+        \\  return Response.text("ok");
+        \\}
+        \\
+        ,
+        .good_draft =
+        \\import { logInfo } from "zttp:log";
+        \\
+        \\structural Narrow<T> = Proof<T,
+        \\    | "deterministic"
+        \\    | "state_isolated"
+        \\    | "result_safe"
+        \\    | "optional_safe"
+        \\    | "no_secret_leakage"
+        \\    | "no_credential_leakage"
+        \\    | "input_validated"
+        \\    | "injection_safe"
+        \\    | "canonical"
+        \\    | "cost_bounded"
+        \\>;
+        \\
+        \\function handler(req: Request): Narrow<Effects<Response, "stderr" | "clock">> {
+        \\  logInfo("hit", { n: 3 });
+        \\  return Response.text("ok");
+        \\}
+        \\
+        ,
+        .ask = "Fix the ZTS504 compiler error in handler.ts",
+    },
+    .{
+        .id = "helper-outside-ceiling",
+        .code = "ZTS503",
+        .class = .model_retry,
+        .seed_source = clean_helper_log_ceiling,
+        .bad_draft =
+        \\import { sha256 } from "zttp:crypto";
+        \\import { logInfo } from "zttp:log";
+        \\
+        \\structural Narrow<T> = Proof<T,
+        \\    | "deterministic"
+        \\    | "state_isolated"
+        \\    | "result_safe"
+        \\    | "optional_safe"
+        \\    | "no_secret_leakage"
+        \\    | "no_credential_leakage"
+        \\    | "input_validated"
+        \\    | "injection_safe"
+        \\    | "canonical"
+        \\    | "cost_bounded"
+        \\>;
+        \\
+        \\structural Digest = { value: string };
+        \\
+        \\export function digest(input: Digest): Proof<Effects<Digest, "crypto" | "clock">, "deterministic"> {
+        \\  sha256(input.value);
+        \\  logInfo("digest", { n: 1 });
+        \\  return input;
+        \\}
+        \\
+        \\function handler(req: Request): Narrow<Effects<Response, "crypto" | "stderr" | "clock">> {
+        \\  const d = digest({ value: "zttp" });
+        \\  return Response.text(d.value);
+        \\}
+        \\
+        ,
+        .good_draft =
+        \\import { sha256 } from "zttp:crypto";
+        \\import { logInfo } from "zttp:log";
+        \\
+        \\structural Narrow<T> = Proof<T,
+        \\    | "deterministic"
+        \\    | "state_isolated"
+        \\    | "result_safe"
+        \\    | "optional_safe"
+        \\    | "no_secret_leakage"
+        \\    | "no_credential_leakage"
+        \\    | "input_validated"
+        \\    | "injection_safe"
+        \\    | "canonical"
+        \\    | "cost_bounded"
+        \\>;
+        \\
+        \\structural Digest = { value: string };
+        \\
+        \\export function digest(input: Digest): Proof<Effects<Digest, "crypto" | "stderr" | "clock">, "deterministic"> {
+        \\  sha256(input.value);
+        \\  logInfo("digest", { n: 2 });
+        \\  return input;
+        \\}
+        \\
+        \\function handler(req: Request): Narrow<Effects<Response, "crypto" | "stderr" | "clock">> {
+        \\  const d = digest({ value: "zttp" });
+        \\  return Response.text(d.value);
+        \\}
+        \\
+        ,
+        .ask = "Fix the ZTS503 compiler error in handler.ts",
+    },
+    .{
+        .id = "helper-outside-handler-budget",
+        .code = "ZTS607",
+        .class = .model_retry,
+        .seed_source = clean_helper_log_ceiling,
+        .bad_draft =
+        \\import { sha256 } from "zttp:crypto";
+        \\import { logInfo } from "zttp:log";
+        \\
+        \\structural Narrow<T> = Proof<T,
+        \\    | "deterministic"
+        \\    | "state_isolated"
+        \\    | "result_safe"
+        \\    | "optional_safe"
+        \\    | "no_secret_leakage"
+        \\    | "no_credential_leakage"
+        \\    | "input_validated"
+        \\    | "injection_safe"
+        \\    | "canonical"
+        \\    | "cost_bounded"
+        \\>;
+        \\
+        \\structural Digest = { value: string };
+        \\
+        \\export function digest(input: Digest): Proof<Effects<Digest, "crypto" | "stderr" | "clock">, "deterministic"> {
+        \\  sha256(input.value);
+        \\  logInfo("digest", { n: 1 });
+        \\  return input;
+        \\}
+        \\
+        \\function handler(req: Request): Narrow<Effects<Response, "crypto" | "clock">> {
+        \\  const d = digest({ value: "zttp" });
+        \\  return Response.text(d.value);
+        \\}
+        \\
+        ,
+        .good_draft =
+        \\import { sha256 } from "zttp:crypto";
+        \\import { logInfo } from "zttp:log";
+        \\
+        \\structural Narrow<T> = Proof<T,
+        \\    | "deterministic"
+        \\    | "state_isolated"
+        \\    | "result_safe"
+        \\    | "optional_safe"
+        \\    | "no_secret_leakage"
+        \\    | "no_credential_leakage"
+        \\    | "input_validated"
+        \\    | "injection_safe"
+        \\    | "canonical"
+        \\    | "cost_bounded"
+        \\>;
+        \\
+        \\structural Digest = { value: string };
+        \\
+        \\export function digest(input: Digest): Proof<Effects<Digest, "crypto" | "stderr" | "clock">, "deterministic"> {
+        \\  sha256(input.value);
+        \\  logInfo("digest", { n: 3 });
+        \\  return input;
+        \\}
+        \\
+        \\function handler(req: Request): Narrow<Effects<Response, "crypto" | "stderr" | "clock">> {
+        \\  const d = digest({ value: "zttp" });
+        \\  return Response.text(d.value);
+        \\}
+        \\
+        ,
+        .ask = "Fix the ZTS607 compiler error in handler.ts",
+    },
+    .{
+        .id = "ceiling-never-reached",
+        .code = "ZTS505",
+        .class = .model_retry,
+        .seed_source = clean_exported_helper_capsule,
+        .bad_draft =
+        \\import { sha256 } from "zttp:crypto";
+        \\
+        \\structural Narrow<T> = Proof<T,
+        \\    | "deterministic"
+        \\    | "state_isolated"
+        \\    | "result_safe"
+        \\    | "optional_safe"
+        \\    | "no_secret_leakage"
+        \\    | "no_credential_leakage"
+        \\    | "input_validated"
+        \\    | "injection_safe"
+        \\    | "canonical"
+        \\    | "cost_bounded"
+        \\>;
+        \\
+        \\structural Digest = { value: string };
+        \\
+        \\export function digest(input: Digest): Proof<Effects<Digest, "crypto">, "deterministic"> {
+        \\  return input;
+        \\}
+        \\
+        \\function handler(req: Request): Narrow<Effects<Response, "crypto">> {
+        \\  const d = digest({ value: "zttp" });
+        \\  return Response.text(d.value);
+        \\}
+        \\
+        ,
+        .good_draft =
+        \\import { sha256 } from "zttp:crypto";
+        \\
+        \\structural Narrow<T> = Proof<T,
+        \\    | "deterministic"
+        \\    | "state_isolated"
+        \\    | "result_safe"
+        \\    | "optional_safe"
+        \\    | "no_secret_leakage"
+        \\    | "no_credential_leakage"
+        \\    | "input_validated"
+        \\    | "injection_safe"
+        \\    | "canonical"
+        \\    | "cost_bounded"
+        \\>;
+        \\
+        \\structural Digest = { value: string };
+        \\
+        \\export function digest(input: Digest): Proof<Effects<Digest, "crypto">, "deterministic"> {
+        \\  sha256(input.value);
+        \\  return input;
+        \\}
+        \\
+        \\function handler(req: Request): Narrow<Effects<Response, "crypto">> {
+        \\  const d = digest({ value: "zttp-ok" });
+        \\  return Response.text(d.value);
+        \\}
+        \\
+        ,
+        .ask = "Fix the ZTS505 compiler error in handler.ts",
+    },
+    .{
+        .id = "exported-helper-no-ceiling",
+        .code = "ZTS610",
+        .class = .model_retry,
+        .seed_source = clean_exported_helper_capsule,
+        .bad_draft =
+        \\import { sha256 } from "zttp:crypto";
+        \\
+        \\structural Narrow<T> = Proof<T,
+        \\    | "deterministic"
+        \\    | "state_isolated"
+        \\    | "result_safe"
+        \\    | "optional_safe"
+        \\    | "no_secret_leakage"
+        \\    | "no_credential_leakage"
+        \\    | "input_validated"
+        \\    | "injection_safe"
+        \\    | "canonical"
+        \\    | "cost_bounded"
+        \\>;
+        \\
+        \\structural Digest = { value: string };
+        \\
+        \\export function digest(input: Digest): Proof<Digest, "deterministic"> {
+        \\  sha256(input.value);
+        \\  return input;
+        \\}
+        \\
+        \\function handler(req: Request): Narrow<Effects<Response, "crypto">> {
+        \\  const d = digest({ value: "zttp" });
+        \\  return Response.text(d.value);
+        \\}
+        \\
+        ,
+        .good_draft =
+        \\import { sha256 } from "zttp:crypto";
+        \\
+        \\structural Narrow<T> = Proof<T,
+        \\    | "deterministic"
+        \\    | "state_isolated"
+        \\    | "result_safe"
+        \\    | "optional_safe"
+        \\    | "no_secret_leakage"
+        \\    | "no_credential_leakage"
+        \\    | "input_validated"
+        \\    | "injection_safe"
+        \\    | "canonical"
+        \\    | "cost_bounded"
+        \\>;
+        \\
+        \\structural Digest = { value: string };
+        \\
+        \\export function digest(input: Digest): Proof<Effects<Digest, "crypto">, "deterministic"> {
+        \\  sha256(input.value);
+        \\  return input;
+        \\}
+        \\
+        \\function handler(req: Request): Narrow<Effects<Response, "crypto">> {
+        \\  const d = digest({ value: "zttp-fixed" });
+        \\  return Response.text(d.value);
+        \\}
+        \\
+        ,
+        .ask = "Fix the ZTS610 compiler error in handler.ts",
+    },
+    .{
+        .id = "exported-helper-no-capsule",
+        .code = "ZTS611",
+        .class = .model_retry,
+        .seed_source = clean_exported_helper_capsule,
+        .bad_draft =
+        \\import { sha256 } from "zttp:crypto";
+        \\
+        \\structural Narrow<T> = Proof<T,
+        \\    | "deterministic"
+        \\    | "state_isolated"
+        \\    | "result_safe"
+        \\    | "optional_safe"
+        \\    | "no_secret_leakage"
+        \\    | "no_credential_leakage"
+        \\    | "input_validated"
+        \\    | "injection_safe"
+        \\    | "canonical"
+        \\    | "cost_bounded"
+        \\>;
+        \\
+        \\structural Digest = { value: string };
+        \\
+        \\export function digest(input: Digest): Effects<Digest, "crypto"> {
+        \\  sha256(input.value);
+        \\  return input;
+        \\}
+        \\
+        \\function handler(req: Request): Narrow<Effects<Response, "crypto">> {
+        \\  const d = digest({ value: "zttp" });
+        \\  return Response.text(d.value);
+        \\}
+        \\
+        ,
+        .good_draft =
+        \\import { sha256 } from "zttp:crypto";
+        \\
+        \\structural Narrow<T> = Proof<T,
+        \\    | "deterministic"
+        \\    | "state_isolated"
+        \\    | "result_safe"
+        \\    | "optional_safe"
+        \\    | "no_secret_leakage"
+        \\    | "no_credential_leakage"
+        \\    | "input_validated"
+        \\    | "injection_safe"
+        \\    | "canonical"
+        \\    | "cost_bounded"
+        \\>;
+        \\
+        \\structural Digest = { value: string };
+        \\
+        \\export function digest(input: Digest): Proof<Effects<Digest, "crypto">, "deterministic"> {
+        \\  sha256(input.value);
+        \\  return input;
+        \\}
+        \\
+        \\function handler(req: Request): Narrow<Effects<Response, "crypto">> {
+        \\  const d = digest({ value: "zttp-declared" });
+        \\  return Response.text(d.value);
+        \\}
+        \\
+        ,
+        .ask = "Fix the ZTS611 compiler error in handler.ts",
+    },
+    .{
+        .id = "internal-declares-ceiling",
+        .code = "ZTS623",
+        .class = .model_retry,
+        .seed_source = clean_internal_no_ceiling,
+        .bad_draft =
+        \\import { sha256 } from "zttp:crypto";
+        \\
+        \\structural Narrow<T> = Proof<T,
+        \\    | "deterministic"
+        \\    | "state_isolated"
+        \\    | "result_safe"
+        \\    | "optional_safe"
+        \\    | "no_secret_leakage"
+        \\    | "no_credential_leakage"
+        \\    | "input_validated"
+        \\    | "injection_safe"
+        \\    | "canonical"
+        \\    | "cost_bounded"
+        \\>;
+        \\
+        \\function digest(s: string): Effects<string, "crypto"> {
+        \\  sha256(s);
+        \\  return s;
+        \\}
+        \\
+        \\function handler(req: Request): Narrow<Effects<Response, "crypto">> {
+        \\  return Response.text(digest("zttp"));
+        \\}
+        \\
+        ,
+        .good_draft =
+        \\import { sha256 } from "zttp:crypto";
+        \\
+        \\structural Narrow<T> = Proof<T,
+        \\    | "deterministic"
+        \\    | "state_isolated"
+        \\    | "result_safe"
+        \\    | "optional_safe"
+        \\    | "no_secret_leakage"
+        \\    | "no_credential_leakage"
+        \\    | "input_validated"
+        \\    | "injection_safe"
+        \\    | "canonical"
+        \\    | "cost_bounded"
+        \\>;
+        \\
+        \\function digest(s: string): string {
+        \\  sha256(s);
+        \\  return s;
+        \\}
+        \\
+        \\function handler(req: Request): Narrow<Effects<Response, "crypto">> {
+        \\  return Response.text(digest("zttp-ok"));
+        \\}
+        \\
+        ,
+        .ask = "Fix the ZTS623 compiler error in handler.ts",
+    },
+    .{
+        .id = "helper-breaks-property",
+        .code = "ZTS606",
+        .class = .model_retry,
+        .seed_source = clean_deterministic_helper,
+        .bad_draft =
+        \\function stamp(): number {
+        \\  return Date.now();
+        \\}
+        \\
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const t = stamp();
+        \\  return Response.json({ t: t, n: 1 });
+        \\}
+        \\
+        ,
+        .good_draft =
+        \\function stamp(): number {
+        \\  return 8;
+        \\}
+        \\
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const t = stamp();
+        \\  return Response.json({ t: t, n: 2 });
+        \\}
+        \\
+        ,
+        .ask = "Fix the ZTS606 compiler error in handler.ts",
+    },
+    .{
+        .id = "effect-row-lower-bound",
+        .code = "ZTS512",
+        .class = .model_retry,
+        .seed_source = clean_resolvable_callee,
+        .bad_draft =
+        \\import { sha256 } from "zttp:crypto";
+        \\
+        \\structural Maker = { make: () => string };
+        \\
+        \\function build(): Maker {
+        \\  return { make: () => sha256("zttp") };
+        \\}
+        \\
+        \\function handler(req: Request): Proof<Effects<Response, "crypto">, "state_isolated"> {
+        \\  const m = build();
+        \\  const f = m.make;
+        \\  return Response.text(f());
+        \\}
+        \\
+        ,
+        .good_draft =
+        \\import { sha256 } from "zttp:crypto";
+        \\
+        \\structural Maker = { make: () => string };
+        \\
+        \\function build(): Maker {
+        \\  return { make: () => sha256("zttp-ok") };
+        \\}
+        \\
+        \\function handler(req: Request): Proof<Effects<Response, "crypto">, "state_isolated"> {
+        \\  const m = build();
+        \\  return Response.text(m.make());
+        \\}
+        \\
+        ,
+        .ask = "Fix the ZTS512 compiler error in handler.ts",
+    },
+    .{
+        .id = "secret-in-egress-headers",
+        .code = "ZTS404",
+        .class = .model_retry,
+        .seed_source = clean_secret_and_headers,
+        .bad_draft =
+        \\import { env } from "zttp:env";
+        \\import { fetch } from "zttp:fetch";
+        \\
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const token = env("SECRET_KEY") ?? "";
+        \\  const r = fetch("https://api.example.com/v1", { headers: { "x-tag": token } });
+        \\  return Response.json({ s: r.status });
+        \\}
+        \\
+        ,
+        .good_draft =
+        \\import { env } from "zttp:env";
+        \\import { fetch } from "zttp:fetch";
+        \\
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const token = env("SECRET_KEY") ?? "";
+        \\  const r = fetch("https://api.example.com/v1", { headers: { "x-tag": "redacted" } });
+        \\  if (token === "") { return Response.json({ ok: 0 }); }
+        \\  return Response.json({ s: r.status });
+        \\}
+        \\
+        ,
+        .ask = "Fix the ZTS404 compiler error in handler.ts",
+    },
+    .{
+        .id = "credential-in-egress-headers",
+        .code = "ZTS405",
+        .class = .model_retry,
+        .seed_source = clean_credential_and_headers,
+        .bad_draft =
+        \\import { fetch } from "zttp:fetch";
+        \\
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const auth = req.headers.authorization ?? "";
+        \\  const r = fetch("https://api.example.com/v1", { headers: { "x-tag": auth } });
+        \\  return Response.json({ s: r.status });
+        \\}
+        \\
+        ,
+        .good_draft =
+        \\import { fetch } from "zttp:fetch";
+        \\
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const auth = req.headers.authorization ?? "";
+        \\  const r = fetch("https://api.example.com/v1", { headers: { "x-tag": "scoped" } });
+        \\  if (auth === "") { return Response.json({ ok: 0 }); }
+        \\  return Response.json({ s: r.status });
+        \\}
+        \\
+        ,
+        .ask = "Fix the ZTS405 compiler error in handler.ts",
+    },
+    .{
+        .id = "unvalidated-input-in-html",
+        .code = "ZTS407",
+        .class = .model_retry,
+        .seed_source = clean_html_no_input,
+        .bad_draft =
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const q = req.url;
+        \\  return Response.html(["<p>", q, "</p>"].join(""));
+        \\}
+        \\
+        ,
+        .good_draft =
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const q = req.url;
+        \\  if (q === "") { return Response.html("<p>none</p>"); }
+        \\  return Response.html("<p>page</p>");
+        \\}
+        \\
+        ,
+        .ask = "Fix the ZTS407 compiler error in handler.ts",
+    },
+    .{
+        .id = "workflow-call-in-step",
+        .code = "ZTS509",
+        .class = .model_retry,
+        .seed_source = clean_durable_step,
+        .bad_draft =
+        \\import { run, step } from "zttp:durable";
+        \\import { call } from "zttp:workflow";
+        \\
+        \\function handler(req: Request): Proof<object, "state_isolated"> {
+        \\  return run("step-demo", () => step("one", () => call("greet", { path: "/ship" })));
+        \\}
+        \\
+        ,
+        .good_draft =
+        \\import { run, step } from "zttp:durable";
+        \\
+        \\function handler(req: Request): Proof<object, "state_isolated"> {
+        \\  return run("step-demo", () => step("one", () => { return { ok: 2 }; }));
+        \\}
+        \\
+        ,
+        .ask = "Fix the ZTS509 compiler error in handler.ts",
+    },
+    .{
+        .id = "saga-step-no-compensate",
+        .code = "ZTS510",
+        .class = .model_retry,
+        .seed_source = clean_saga_compensated,
+        .bad_draft =
+        \\import { run } from "zttp:durable";
+        \\import { call, saga } from "zttp:workflow";
+        \\
+        \\function handler(req: Request): Proof<object, "state_isolated"> {
+        \\  return run("saga-demo", () => saga([
+        \\    { name: "reserve", run: () => call("greet", { path: "/reserve" }) },
+        \\    { name: "ship", run: () => call("greet", { path: "/ship" }) },
+        \\  ]));
+        \\}
+        \\
+        ,
+        .good_draft =
+        \\import { run } from "zttp:durable";
+        \\import { call, saga } from "zttp:workflow";
+        \\
+        \\function handler(req: Request): Proof<object, "state_isolated"> {
+        \\  return run("saga-demo", () => saga([
+        \\    {
+        \\      name: "reserve",
+        \\      run: () => call("greet", { path: "/reserve" }),
+        \\      compensate: () => call("greet", { path: "/release" }),
+        \\    },
+        \\    { name: "ship", run: () => call("greet", { path: "/deliver" }) },
+        \\  ]));
+        \\}
+        \\
+        ,
+        .ask = "Fix the ZTS510 compiler error in handler.ts",
+    },
+    .{
+        .id = "dict-entry-round-trip",
+        .code = "ZTS627",
+        .class = .model_retry,
+        .seed_source = clean_dict_entries,
+        .bad_draft =
+        \\import { dictEntries, dictFromEntries } from "zttp:collections";
+        \\
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const built = dictFromEntries([["a", 1], ["b", 2]]);
+        \\  if (!built.ok) { return Response.json({ error: "bad" }, { status: 400 }); }
+        \\  const d = built.value;
+        \\  if (!isDict(d)) { return Response.json({ error: "not-a-dict" }, { status: 400 }); }
+        \\  const doubled = dictFromEntries(dictEntries(d).map((p) => [p[0], p[1] * 2]));
+        \\  return Response.json({ ok: doubled.ok });
+        \\}
+        \\
+        ,
+        .good_draft =
+        \\import { dictEntries, dictFromEntries } from "zttp:collections";
+        \\
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const built = dictFromEntries([["a", 1], ["b", 2]]);
+        \\  if (!built.ok) { return Response.json({ error: "bad" }, { status: 400 }); }
+        \\  const d = built.value;
+        \\  if (!isDict(d)) { return Response.json({ error: "not-a-dict" }, { status: 400 }); }
+        \\  const pairs = dictEntries(d);
+        \\  return Response.json({ first: pairs[0][0] });
+        \\}
+        \\
+        ,
+        .ask = "Fix the ZTS627 compiler error in handler.ts",
+    },
+    .{
+        .id = "dict-entries-reduce",
+        .code = "ZTS628",
+        .class = .model_retry,
+        .seed_source = clean_dict_entries,
+        .bad_draft =
+        \\import { dictEntries, dictFromEntries } from "zttp:collections";
+        \\
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const built = dictFromEntries([["a", 1], ["b", 2]]);
+        \\  if (!built.ok) { return Response.json({ error: "bad" }, { status: 400 }); }
+        \\  const d = built.value;
+        \\  if (!isDict(d)) { return Response.json({ error: "not-a-dict" }, { status: 400 }); }
+        \\  const total = dictEntries(d).reduce((acc, p) => acc + p[1], 0);
+        \\  return Response.json({ total: total });
+        \\}
+        \\
+        ,
+        .good_draft =
+        \\import { dictEntries, dictFromEntries } from "zttp:collections";
+        \\
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const built = dictFromEntries([["a", 1], ["b", 2]]);
+        \\  if (!built.ok) { return Response.json({ error: "bad" }, { status: 400 }); }
+        \\  const d = built.value;
+        \\  if (!isDict(d)) { return Response.json({ error: "not-a-dict" }, { status: 400 }); }
+        \\  const pairs = dictEntries(d);
+        \\  return Response.json({ first: pairs[0][0] });
+        \\}
+        \\
+        ,
+        .ask = "Fix the ZTS628 compiler error in handler.ts",
     },
 };
 

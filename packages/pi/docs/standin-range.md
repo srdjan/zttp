@@ -4,7 +4,7 @@
 
 Range version: `step-6-v2`
 
-Range hash: `8b8c833b6969ab91dfc3125567dcb7aa153c1d7c32e9d56a997da57b3e10b8f5`
+Range hash: `93d9345ecf25c5d2eb10e43c443991373d04d437ff217eb5f9c06dc6f516c04e`
 
 The deterministic playbook server supports the entries below. Use `zig build zttp-standin -- --range` to print this document.
 
@@ -125,6 +125,32 @@ Drafts the stand-in emits expecting the veto to reject them, so the rejection ha
 | `secret-in-log` | `ZTS402` | model_retry |
 | `credential-in-log` | `ZTS403` | model_retry |
 | `secret-in-egress-body` | `ZTS406` | model_retry |
+| `proof-name-unknown` | `ZTS502` | model_retry |
+| `spec-contradicts-module` | `ZTS501` | model_retry |
+| `proof-not-discharged` | `ZTS500` | model_retry |
+| `ambient-not-published` | `ZTS629` | model_retry |
+| `exported-open-type` | `ZTS061` | model_retry |
+| `missing-annotations` | `ZTS601` | model_retry |
+| `match-not-exhaustive` | `ZTS603` | model_retry |
+| `call-result-unknown` | `ZTS600` | model_retry |
+| `ceiling-not-literal` | `ZTS511` | model_retry |
+| `handler-outside-budget` | `ZTS506` | model_retry |
+| `ceiling-unknown-capability` | `ZTS504` | model_retry |
+| `helper-outside-ceiling` | `ZTS503` | model_retry |
+| `helper-outside-handler-budget` | `ZTS607` | model_retry |
+| `ceiling-never-reached` | `ZTS505` | model_retry |
+| `exported-helper-no-ceiling` | `ZTS610` | model_retry |
+| `exported-helper-no-capsule` | `ZTS611` | model_retry |
+| `internal-declares-ceiling` | `ZTS623` | model_retry |
+| `helper-breaks-property` | `ZTS606` | model_retry |
+| `effect-row-lower-bound` | `ZTS512` | model_retry |
+| `secret-in-egress-headers` | `ZTS404` | model_retry |
+| `credential-in-egress-headers` | `ZTS405` | model_retry |
+| `unvalidated-input-in-html` | `ZTS407` | model_retry |
+| `workflow-call-in-step` | `ZTS509` | model_retry |
+| `saga-step-no-compensate` | `ZTS510` | model_retry |
+| `dict-entry-round-trip` | `ZTS627` | model_retry |
+| `dict-entries-reduce` | `ZTS628` | model_retry |
 
 ## Hole seeds
 
