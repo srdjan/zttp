@@ -404,7 +404,7 @@ fn parseSection(
     return section;
 }
 
-fn categoryLiteralLabel(category: PolicyCategory) []const u8 {
+pub fn categoryLiteralLabel(category: PolicyCategory) []const u8 {
     return switch (category) {
         .env => "env var",
         .egress => "outbound host",
@@ -413,7 +413,7 @@ fn categoryLiteralLabel(category: PolicyCategory) []const u8 {
     };
 }
 
-fn categoryDynamicLabel(category: PolicyCategory) []const u8 {
+pub fn categoryDynamicLabel(category: PolicyCategory) []const u8 {
     return switch (category) {
         .env => "env",
         .egress => "outbound host",

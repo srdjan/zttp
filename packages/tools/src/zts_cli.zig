@@ -231,10 +231,17 @@ fn runCheckCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void
 
     const system_path = explicit_system_path orelse discovered_system;
 
+    const policy_source = edit_simulate.discoverProjectPolicySource(
+        allocator,
+        if (handler_path) |path| path else null,
+    );
+    defer if (policy_source) |src| allocator.free(src);
+
     var result = precompile.runCheckOnlyWithOptions(allocator, target, .{
         .sql_schema_path = sql_schema_path,
         .json_mode = json_mode,
         .system_path = system_path,
+        .policy_source = policy_source,
     }) catch |err| switch (err) {
         error.MissingSqlSchema => {
             if (json_mode) try writeMissingSqlSchemaJson(allocator, target);

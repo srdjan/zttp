@@ -33,6 +33,9 @@ pub const CheckResult = struct {
     flow_errors: u32 = 0,
     flow_warnings: u32 = 0,
     canonical_errors: u32 = 0,
+    /// Capability-policy violations (POL0xx). Only ever non-zero when the
+    /// caller supplied a policy; a project that declares none cannot fail this.
+    policy_errors: u32 = 0,
     exhaustive_returns: bool = false,
     results_safe: bool = false,
     optionals_safe: bool = false,
@@ -59,7 +62,7 @@ pub const CheckResult = struct {
     proof_trace_json: ?[]u8 = null,
 
     pub fn totalErrors(self: *const CheckResult) u32 {
-        return self.parse_errors + self.bool_errors + self.type_errors + self.strict_errors + self.verify_errors + self.flow_errors + self.canonical_errors + self.specErrors();
+        return self.parse_errors + self.bool_errors + self.type_errors + self.strict_errors + self.verify_errors + self.flow_errors + self.canonical_errors + self.policy_errors + self.specErrors();
     }
 
     pub fn totalWarnings(self: *const CheckResult) u32 {

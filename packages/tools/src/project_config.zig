@@ -10,6 +10,9 @@ pub const ProjectConfig = struct {
     host: []const u8 = "127.0.0.1",
     static_dir: ?[]const u8 = null,
     sqlite: ?[]const u8 = null,
+    /// Path to the capability-policy JSON this project's handlers are checked
+    /// against. Resolved like `sqlite`: relative to the manifest directory.
+    policy: ?[]const u8 = null,
     durable_dir: ?[]const u8 = null,
     system: ?[]const u8 = null,
     outbound_http: bool = false,
@@ -22,6 +25,7 @@ pub const ProjectConfig = struct {
         allocator.free(self.host);
         if (self.static_dir) |path| allocator.free(path);
         if (self.sqlite) |path| allocator.free(path);
+        if (self.policy) |path| allocator.free(path);
         if (self.durable_dir) |path| allocator.free(path);
         if (self.system) |path| allocator.free(path);
         for (self.outbound_hosts) |host| allocator.free(host);
@@ -46,6 +50,11 @@ pub const ProjectConfig = struct {
 
     pub fn resolvedSqlitePath(self: *const ProjectConfig, allocator: std.mem.Allocator) !?[]u8 {
         const path = self.sqlite orelse return null;
+        return try self.resolvePath(allocator, path);
+    }
+
+    pub fn resolvedPolicyPath(self: *const ProjectConfig, allocator: std.mem.Allocator) !?[]u8 {
+        const path = self.policy orelse return null;
         return try self.resolvePath(allocator, path);
     }
 
@@ -119,6 +128,7 @@ pub fn loadAbsolute(
         .host = host,
         .static_dir = try dupOptionalStringField(allocator, obj, "staticDir"),
         .sqlite = try dupOptionalStringField(allocator, obj, "sqlite"),
+        .policy = try dupOptionalStringField(allocator, obj, "policy"),
         .durable_dir = try dupOptionalStringField(allocator, obj, "durableDir"),
         .system = try dupOptionalStringField(allocator, obj, "system"),
         .outbound_http = try parseBoolField(obj, "outboundHttp", false),

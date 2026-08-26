@@ -24,6 +24,10 @@ pub const Edit = struct {
     file: []const u8,
     content: []const u8,
     before: ?[]const u8,
+    /// Capability policy JSON, inline. `runVeto` discovers it from the
+    /// project when this is null; the defect-seed suite sets it directly for a
+    /// handler that never touches disk.
+    policy_source: ?[]const u8 = null,
 };
 
 /// Structured veto summary extracted from `edit_simulate.simulate`.
@@ -106,7 +110,28 @@ pub fn runVeto(
 ) !VetoResult {
     const discovered_schema = discoverSqlSchemaPath(allocator, edit.file);
     defer if (discovered_schema) |path| allocator.free(path);
-    return runVetoWithSchema(allocator, edit, discovered_schema);
+
+    // An inline policy wins: it is the seed suite saying "check against exactly
+    // this", and there is no project to discover from. Otherwise read the one
+    // the project declares, anchored at the edited file for the same reason the
+    // schema is - a loop started outside the handler's project would otherwise
+    // check it against a different zttp.json than the rest of the analysis.
+    var discovered_policy: ?[]u8 = null;
+    defer if (discovered_policy) |src| allocator.free(src);
+    if (edit.policy_source == null) {
+        discovered_policy = discoverPolicySource(allocator, edit.file);
+    }
+
+    var resolved = edit;
+    if (resolved.policy_source == null) resolved.policy_source = discovered_policy;
+    return runVetoWithSchema(allocator, resolved, discovered_schema);
+}
+
+/// The project's capability policy for this edit. Shared with `zts check` and
+/// the `edit-simulate` CLI so all three reach the same verdict; see
+/// `edit_simulate.discoverProjectPolicySource`.
+pub fn discoverPolicySource(allocator: std.mem.Allocator, start_path: ?[]const u8) ?[]u8 {
+    return edit_simulate.discoverProjectPolicySource(allocator, start_path);
 }
 
 /// Resolve the project's SQL schema from the nearest zttp.json, walking up
@@ -143,6 +168,7 @@ pub fn runVetoWithSchema(
         .content = edit.content,
         .before = edit.before,
         .sql_schema_path = sql_schema_path,
+        .policy_source = edit.policy_source,
     };
 
     var result = edit_simulate.simulate(allocator, input) catch |err| switch (err) {

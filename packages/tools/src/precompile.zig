@@ -910,6 +910,12 @@ pub const CheckOptions = struct {
     json_mode: bool = false,
     system_path: ?[]const u8 = null,
     skip_contract: bool = false,
+    /// Capability policy JSON source. When present, the contract is validated
+    /// against it and each violation becomes a coded POL diagnostic rather than
+    /// the `error.PolicyViolation` the build path raises: a check reports, it
+    /// does not abort. Null means no policy, which is what a project that
+    /// declares none has, and the POL rules stay silent.
+    policy_source: ?[]const u8 = null,
 };
 
 pub fn runCheckOnly(
@@ -1527,6 +1533,25 @@ fn runCheckOnPreparedSource(
         null,
         &resolved,
     );
+
+    // Stage 8b: capability policy. Reported, not thrown.
+    //
+    // `buildContractWithPolicy` is deliberately called with no policy above:
+    // its `enforcePolicyForContract` raises `error.PolicyViolation`, which is
+    // right for a build (refuse to emit an artifact) and wrong for a check,
+    // which has to report every finding it can see. The same
+    // `handler_policy.validateContract` runs here and each violation becomes a
+    // coded POL diagnostic instead.
+    //
+    // Without this the allow-list was invisible to `zts check`, to
+    // `zts edit-simulate`, and therefore to the expert veto: a handler reading
+    // an env var the project forbids passed all three with exit 0, and POL001
+    // through POL008 were codes nothing ever emitted.
+    if (opts.policy_source) |policy_source| {
+        if (result.contract) |*contract_ref| {
+            try appendPolicyDiagnostics(allocator, &result, contract_ref, policy_source, handler_path);
+        }
+    }
 
     if (result.contract) |*c| {
         if (c.properties) |*props| {
@@ -2927,6 +2952,73 @@ fn enforcePolicyForContract(
         }
     }
     return error.PolicyViolation;
+}
+
+/// The check-path counterpart of `enforcePolicyForContract`.
+///
+/// Same validation, different verdict shape: a build refuses to emit, a check
+/// reports and keeps going, so every violation reaches the author (and the
+/// veto) at once rather than the first one aborting the run.
+///
+/// A policy that will not parse is itself a diagnostic. Returning silently
+/// would make a typo in `zttp.json` read as "no violations", which is the
+/// fail-open this whole path exists to close.
+fn appendPolicyDiagnostics(
+    allocator: std.mem.Allocator,
+    result: *CheckResult,
+    contract: *const HandlerContract,
+    policy_source: []const u8,
+    handler_path: []const u8,
+) !void {
+    var policy = handler_policy.parsePolicyJson(allocator, policy_source) catch {
+        const message = try allocator.dupe(u8, "capability policy is not valid JSON, or its sections are not objects");
+        errdefer allocator.free(message);
+        try result.json_diagnostics.append(allocator, .{
+            .code = diagnostic_catalog.driverCode(.compiler_io_failure),
+            .severity = "error",
+            .message = message,
+            .file = handler_path,
+            .line = 0,
+            .column = 0,
+            .suggestion = "check the `policy` entry in zttp.json points at a well-formed policy file",
+            .message_owned = true,
+        });
+        result.policy_errors += 1;
+        return;
+    };
+    defer policy.deinit(allocator);
+
+    var report = try handler_policy.validateContract(allocator, contract, &policy);
+    defer report.deinit(allocator);
+
+    for (report.violations.items) |violation| {
+        const kind = diagnostic_catalog.policyKind(violation.category, violation.kind);
+        const message = switch (violation.kind) {
+            .literal_not_allowed => try std.fmt.allocPrint(
+                allocator,
+                "{s} '{s}' is not in the capability policy allow-list",
+                .{ handler_policy.categoryLiteralLabel(violation.category), violation.value orelse "" },
+            ),
+            .dynamic_not_allowed => try std.fmt.allocPrint(
+                allocator,
+                "dynamic {s} access is not allowed by the capability policy",
+                .{handler_policy.categoryDynamicLabel(violation.category)},
+            ),
+        };
+        errdefer allocator.free(message);
+
+        try result.json_diagnostics.append(allocator, .{
+            .code = diagnostic_catalog.policyCode(kind),
+            .severity = "error",
+            .message = message,
+            .file = handler_path,
+            .line = 0,
+            .column = 0,
+            .suggestion = "add it to the policy file, or remove the access from the handler",
+            .message_owned = true,
+        });
+        result.policy_errors += 1;
+    }
 }
 
 fn printSandboxReport(contract: *const HandlerContract) void {

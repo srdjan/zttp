@@ -29,6 +29,12 @@ pub const EditSimulateInput = struct {
     sql_schema_path: ?[]const u8 = null,
     /// Optional system manifest for cross-handler type and policy context.
     system_path: ?[]const u8 = null,
+    /// Capability policy JSON, as source rather than a path. Boundary callers
+    /// that own a workspace read it from the `policy` entry in the nearest
+    /// `zttp.json`; the defect-seed suite supplies it inline for a handler that
+    /// exists only as a string. When null, no policy is enforced and the POL
+    /// rules cannot fire - the same shape as a project that declares none.
+    policy_source: ?[]const u8 = null,
     // When either is null, simulation discovers it the way `zts check` does,
     // walking up from `file`. That walk is not purely file-rooted:
     // `project_config.findStartDir` reverts to process cwd for a path with no
@@ -106,14 +112,16 @@ pub fn simulate(
     // them to `/tmp` severed relative imports, so a valid sibling helper was
     // treated as an unknown external call and four Proof properties failed in
     // edit-simulate even though `zts check` accepted the same handler.
-    var new_check = try precompile.runCheckOnlyFromSource(
+    var new_check = try precompile.runCheckOnlyFromSourceWithOptions(
         allocator,
         input.content,
         input.file,
-        schema_path,
-        true,
-        system_path,
-        false,
+        .{
+            .sql_schema_path = schema_path,
+            .json_mode = true,
+            .system_path = system_path,
+            .policy_source = input.policy_source,
+        },
     );
     defer new_check.deinit(allocator);
 
@@ -121,14 +129,16 @@ pub fn simulate(
     defer if (baseline_counts) |*bk| bk.deinit(allocator);
 
     if (input.before) |before_content| {
-        var old_check = try precompile.runCheckOnlyFromSource(
+        var old_check = try precompile.runCheckOnlyFromSourceWithOptions(
             allocator,
             before_content,
             input.file,
-            schema_path,
-            true,
-            system_path,
-            false,
+            .{
+                .sql_schema_path = schema_path,
+                .json_mode = true,
+                .system_path = system_path,
+                .policy_source = input.policy_source,
+            },
         );
         defer old_check.deinit(allocator);
 
@@ -384,10 +394,12 @@ fn runWithArgsWriter(allocator: std.mem.Allocator, argv: []const []const u8, wri
 pub const ProjectPaths = struct {
     sqlite: ?[]u8 = null,
     system: ?[]u8 = null,
+    policy: ?[]u8 = null,
 
     pub fn deinit(self: *ProjectPaths, allocator: std.mem.Allocator) void {
         if (self.sqlite) |p| allocator.free(p);
         if (self.system) |p| allocator.free(p);
+        if (self.policy) |p| allocator.free(p);
         self.* = .{};
     }
 };
@@ -418,7 +430,30 @@ pub fn discoverProjectPaths(allocator: std.mem.Allocator, start_path: ?[]const u
     var paths: ProjectPaths = .{ .sqlite = try cfg.resolvedSqlitePath(allocator) };
     errdefer paths.deinit(allocator);
     paths.system = try cfg.resolvedSystemPath(allocator);
+    paths.policy = try cfg.resolvedPolicyPath(allocator);
     return paths;
+}
+
+/// Read the project's capability policy: the `policy` entry in the nearest
+/// `zttp.json` walking up from `start_path`, resolved against the project root
+/// and loaded. Returns null when there is no project, no `policy` entry, or the
+/// file cannot be read. Caller frees.
+///
+/// One resolver for every boundary that owns project context - `zts check`,
+/// the `edit-simulate` CLI, and the expert veto - for the reason
+/// `discoverProjectSystemPath` already gives: a hand-written copy per caller is
+/// how `check` and `edit-simulate` drifted into different verdicts for the same
+/// handler.
+///
+/// An unreadable policy degrades to "no policy" rather than failing the run,
+/// matching how a broken manifest degrades to schema-less analysis. A policy
+/// that exists and will not PARSE is a diagnostic instead of a silence, and is
+/// handled where the source is read.
+pub fn discoverProjectPolicySource(allocator: std.mem.Allocator, start_path: ?[]const u8) ?[]u8 {
+    var paths = discoverProjectPaths(allocator, start_path) catch return null;
+    defer paths.deinit(allocator);
+    const path = paths.policy orelse return null;
+    return file_io.readFile(allocator, path, 1024 * 1024) catch null;
 }
 
 /// Single-path wrapper for the callers that analyze without a system manifest.
@@ -429,6 +464,8 @@ pub fn discoverProjectSqlSchemaPath(allocator: std.mem.Allocator, start_path: ?[
     var paths = discoverProjectPaths(allocator, start_path) catch return null;
     if (paths.system) |p| allocator.free(p);
     paths.system = null;
+    if (paths.policy) |p| allocator.free(p);
+    paths.policy = null;
     return paths.sqlite;
 }
 
