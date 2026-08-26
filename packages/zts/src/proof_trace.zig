@@ -274,11 +274,100 @@ comptime {
     }
 }
 
+/// One field of a `verify` result's `evidence` object.
+pub const ResultField = struct {
+    name: []const u8,
+    /// The JSON type the wire writes for this field.
+    json_type: []const u8,
+    /// When the field carries a value rather than `null`.
+    presence: []const u8,
+};
+
+/// The `verify` input fields a property needs, spec 4.8's "required inputs".
+///
+/// Uniform across the registry, and that is a fact about the compiler rather
+/// than a simplification: one analysis run over one file decides every property
+/// at once, so no property can ask for an input another does not. `content` is
+/// the optional in-memory override for `file`, not a second source.
+/// `agent_protocol` pins this list against the `verify` operation's own
+/// `input_fields`, so the two spellings of "what verify takes" cannot drift.
+pub const verify_inputs = [_][]const u8{ "file", "properties", "content" };
+
+/// Every grade `verify` can answer a registered property with, most assured
+/// first. `unknown_property` is deliberately absent: it is the answer to a name
+/// that is not in this registry, so no row here can ever be graded with it.
+pub const verify_grades = [_][]const u8{ "proven", "not_proven", "not_decided" };
+
+const contract_prerequisite = "the file analyzes far enough to produce a handler contract; without one every property grades not_decided";
+
+fn prerequisitesFor(comptime kind: ProofKind) []const []const u8 {
+    return switch (kind) {
+        .structural => &.{contract_prerequisite},
+        .path_enumeration => &.{
+            contract_prerequisite,
+            "symbolic path enumeration ran; the trace reports how many paths it covered and whether that set was exhaustive",
+        },
+        .flow_trace => &.{
+            contract_prerequisite,
+            "the flow checker ran; a defended source-to-sink path is what lets a holding property carry `resisted`",
+        },
+    };
+}
+
+const common_result_fields = [_]ResultField{
+    .{ .name = "kind", .json_type = "string", .presence = "always; the family of reasoning that actually decided this file" },
+    .{ .name = "summary", .json_type = "string|null", .presence = "always present, null only when the trace carried no summary" },
+};
+
+fn resultSchemaFor(comptime kind: ProofKind) []const ResultField {
+    const counterexample_field: ResultField = switch (kind) {
+        .flow_trace => .{
+            .name = "counterexample",
+            .json_type = "object|null",
+            .presence = "when the property does not hold and a flow chain was derived: a flow_chain walking the tainted value from source to sink, plus the request that drives it",
+        },
+        .structural, .path_enumeration => .{
+            .name = "counterexample",
+            .json_type = "object|null",
+            .presence = "when the property does not hold and a single breaking construct was located: an offending_node with its line, column, snippet, and fix",
+        },
+    };
+    const resisted_field: ResultField = switch (kind) {
+        .flow_trace => .{
+            .name = "resisted",
+            .json_type = "object|null",
+            .presence = "when the property holds and a defended path was captured: the attack input, the source-guard-sink chain, and why it cannot succeed",
+        },
+        .structural, .path_enumeration => .{
+            .name = "resisted",
+            .json_type = "null",
+            .presence = "never; only a flow property captures a defended path",
+        },
+    };
+    return &(common_result_fields ++ [_]ResultField{ counterexample_field, resisted_field });
+}
+
 /// One row of the verifier discovery registry: a property a client may ask
-/// `verify` about, and the family of reasoning that decides it.
+/// `verify` about, the family of reasoning that decides it, and - spec 4.8's
+/// MUST - what a request has to supply, what has to hold first, which grades
+/// the answer can carry, and the shape of the evidence beside it.
+///
+/// The last four are derived from `kind` rather than written per row. A
+/// property's inputs, prerequisites, grades, and evidence shape are properties
+/// of how it is proved, not of which property it is, so writing them out
+/// fifteen times would be fifteen chances to disagree with the code that emits
+/// them.
 pub const Verifier = struct {
     id: []const u8,
     kind: ProofKind,
+    /// The `verify` input fields this property needs.
+    inputs: []const []const u8,
+    /// What must hold before the grade can be anything but `not_decided`.
+    prerequisites: []const []const u8,
+    /// Every grade this property can be answered with, most assured first.
+    grades: []const []const u8,
+    /// The fields of this property's `evidence` object.
+    result_schema: []const ResultField,
 };
 
 /// Every property the compiler can decide, in `property_info` order.
@@ -295,7 +384,15 @@ pub const Verifier = struct {
 pub const verifiers = blk: {
     var rows: [property_info.len]Verifier = undefined;
     for (property_info, 0..) |p, i| {
-        rows[i] = .{ .id = wirePropertyName(p.name), .kind = proofKind(p.family) };
+        const kind = proofKind(p.family);
+        rows[i] = .{
+            .id = wirePropertyName(p.name),
+            .kind = kind,
+            .inputs = &verify_inputs,
+            .prerequisites = prerequisitesFor(kind),
+            .grades = &verify_grades,
+            .result_schema = resultSchemaFor(kind),
+        };
     }
     const frozen = rows;
     break :blk frozen;

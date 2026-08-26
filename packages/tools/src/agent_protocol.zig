@@ -1188,6 +1188,29 @@ fn writeFullMetaPayload(json: *std.json.Stringify) !bool {
         try json.write(v.id);
         try json.objectField("kind");
         try json.write(v.kind.asString());
+        // Spec 4.8: a verifier row publishes what a request must supply, what
+        // has to hold before the answer means anything, the grades it can carry,
+        // and the shape of the evidence beside it. "An agent never chooses among
+        // undocumented verification commands."
+        try json.objectField("inputs");
+        try writeStringArray(json, v.inputs);
+        try json.objectField("prerequisites");
+        try writeStringArray(json, v.prerequisites);
+        try json.objectField("grades");
+        try writeStringArray(json, v.grades);
+        try json.objectField("result_schema");
+        try json.beginArray();
+        for (v.result_schema) |f| {
+            try json.beginObject();
+            try json.objectField("name");
+            try json.write(f.name);
+            try json.objectField("type");
+            try json.write(f.json_type);
+            try json.objectField("presence");
+            try json.write(f.presence);
+            try json.endObject();
+        }
+        try json.endArray();
         try json.endObject();
     }
     try json.endArray();
@@ -1866,6 +1889,12 @@ fn writeVerifyPayload(
 
     try json.endArray();
     try json.endObject();
+}
+
+fn writeStringArray(json: *std.json.Stringify, items: []const []const u8) !void {
+    try json.beginArray();
+    for (items) |item| try json.write(item);
+    try json.endArray();
 }
 
 fn writeVerifyResult(
@@ -4261,6 +4290,93 @@ test "meta publishes the verifier registry it will answer about" {
     // The section retires in the same change that makes it answerable.
     for (parsed.value.object.get("payload").?.object.get("deferred_sections").?.array.items) |section| {
         try testing.expect(!std.mem.eql(u8, section.object.get("name").?.string, "verifiers"));
+    }
+}
+
+test "every verifier row publishes spec 4.8's required inputs, prerequisites, grades, and result schema" {
+    // Spec 4.8: "`meta.payload.verifiers` MUST enumerate each property
+    // identifier, required inputs, prerequisites, possible assurance grades,
+    // and result schema. An agent never chooses among undocumented
+    // verification commands." Published for EVERY row, not just the first, and
+    // asserted non-empty: four empty arrays would satisfy "the field exists"
+    // while documenting nothing.
+    const a = testing.allocator;
+    const out = try respond(a,
+        \\{"schema_version":2,"operation":"meta","project_root":"."}
+    );
+    defer a.free(out);
+    var parsed = try parse(a, out);
+    defer parsed.deinit();
+
+    const verifiers = parsed.value.object.get("payload").?.object.get("verifiers").?.array;
+    try testing.expect(verifiers.items.len > 0);
+    try testing.expectEqual(zts.proof_trace.verifiers.len, verifiers.items.len);
+
+    for (verifiers.items) |item| {
+        const row = item.object;
+        for ([_][]const u8{ "inputs", "prerequisites", "grades" }) |field| {
+            const arr = row.get(field).?.array;
+            try testing.expect(arr.items.len > 0);
+            for (arr.items) |entry| try testing.expect(entry.string.len > 0);
+        }
+        const schema = row.get("result_schema").?.array;
+        try testing.expect(schema.items.len > 0);
+        for (schema.items) |field| {
+            try testing.expect(field.object.get("name").?.string.len > 0);
+            try testing.expect(field.object.get("type").?.string.len > 0);
+            try testing.expect(field.object.get("presence").?.string.len > 0);
+        }
+    }
+}
+
+test "a verifier's published inputs are the verify operation's own input fields" {
+    // Two spellings of "what verify takes" - the operation schema and the
+    // verifier registry - and a client may read either. Pinning them to each
+    // other here means the pair cannot drift into disagreeing about a required
+    // input, which is the failure spec 4.8's sentence exists to prevent.
+    const verify_op = for (&operations) |*op| {
+        if (op.op == .verify) break op;
+    } else return error.TestExpected;
+
+    try testing.expect(verify_op.input_fields.len > 0);
+    try testing.expectEqual(verify_op.input_fields.len, zts.proof_trace.verify_inputs.len);
+    for (verify_op.input_fields, zts.proof_trace.verify_inputs) |declared, published| {
+        try testing.expectEqualStrings(declared, published);
+    }
+}
+
+test "a verifier's published grades are the grades verify can actually answer with" {
+    // The registry says which grades a registered property can carry. If
+    // `writeVerifyResult` learns a fifth grade and this list does not, the
+    // published schema describes an answer the wire no longer gives.
+    // `unknown_property` is excluded on purpose: it is the answer to a name
+    // outside the registry, so no registry row can ever be graded with it.
+    const a = testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "h.ts", .data =
+        \\function handler(req: Request): Response {
+        \\  return Response.json({ ok: true });
+        \\}
+        \\
+    });
+    const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", a);
+    defer a.free(root);
+
+    const req = try std.fmt.allocPrint(a,
+        \\{{"schema_version":2,"operation":"verify","project_root":"{s}","input":{{"file":"h.ts","properties":["not_a_property"]}}}}
+    , .{root});
+    defer a.free(req);
+    const out = try respond(a, req);
+    defer a.free(out);
+    var parsed = try parse(a, out);
+    defer parsed.deinit();
+    const results = parsed.value.object.get("payload").?.object.get("results").?.array;
+    try testing.expectEqual(@as(usize, 1), results.items.len);
+    const grade = results.items[0].object.get("grade").?.string;
+    try testing.expectEqualStrings("unknown_property", grade);
+    for (zts.proof_trace.verify_grades) |g| {
+        try testing.expect(!std.mem.eql(u8, g, grade));
     }
 }
 
