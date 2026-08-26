@@ -4,7 +4,7 @@
 
 Range version: `step-6-v2`
 
-Range hash: `93d9345ecf25c5d2eb10e43c443991373d04d437ff217eb5f9c06dc6f516c04e`
+Range hash: `754b866c36dbf85d78f38df4b1ef3db3697bf9e208191ff105c27d88faa5c037`
 
 The deterministic playbook server supports the entries below. Use `zig build zttp-standin -- --range` to print this document.
 
@@ -151,6 +151,7 @@ Drafts the stand-in emits expecting the veto to reject them, so the rejection ha
 | `saga-step-no-compensate` | `ZTS510` | model_retry |
 | `dict-entry-round-trip` | `ZTS627` | model_retry |
 | `dict-entries-reduce` | `ZTS628` | model_retry |
+| `unused-import` | `ZTS306` | model_retry |
 
 ## Hole seeds
 

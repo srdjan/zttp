@@ -208,6 +208,21 @@ const BindingState = struct {
     }
 };
 
+/// One name bound by an import specifier, and whether anything names it back.
+///
+/// `used` rather than a count: the question is only "did anything reference
+/// this", and a count would invite reporting "used once" as if that meant
+/// something.
+const ImportBindingState = struct {
+    scope_id: ir.ScopeId,
+    slot: u16,
+    /// The specifier node, so the diagnostic points at the binding the author
+    /// wrote rather than at the whole import statement.
+    decl_node: NodeIndex,
+    name_atom: u16,
+    used: bool,
+};
+
 // ---------------------------------------------------------------------------
 // Known tracked functions from virtual modules
 // ---------------------------------------------------------------------------
@@ -313,6 +328,12 @@ pub const HandlerVerifier = struct {
     // Dead variable tracking
     all_bindings: std.ArrayList(BindingState),
 
+    // Dead import tracking (Check 5). Kept apart from `all_bindings` because
+    // the two report different codes and are counted over different scopes:
+    // a variable is dead if the handler body never names it, an import is
+    // dead if NO function in the module does.
+    import_bindings: std.ArrayList(ImportBindingState),
+
     // State isolation (Check 7)
     handler_scope_id: ?ir.ScopeId = null,
     has_module_mutation: bool = false,
@@ -339,6 +360,7 @@ pub const HandlerVerifier = struct {
             .optional_bindings = .empty,
             .optional_function_slots = .empty,
             .all_bindings = .empty,
+            .import_bindings = .empty,
             .allocation_failed = false,
         };
     }
@@ -351,6 +373,7 @@ pub const HandlerVerifier = struct {
         self.optional_bindings.deinit(self.allocator);
         self.optional_function_slots.deinit(self.allocator);
         self.all_bindings.deinit(self.allocator);
+        self.import_bindings.deinit(self.allocator);
     }
 
     // -----------------------------------------------------------------------
@@ -389,6 +412,11 @@ pub const HandlerVerifier = struct {
 
         // Phase 5: Report unused variables (scope-aware tracking)
         self.reportUnusedVariables();
+
+        // Phase 6: Report unused imports (module-scoped, see markUsedImports)
+        self.collectImportBindings();
+        self.markUsedImports();
+        self.reportUnusedImports();
         if (self.type_checker) |tc| try tc.ensureHealthy();
         if (self.allocation_failed) return error.OutOfMemory;
 
@@ -567,6 +595,78 @@ pub const HandlerVerifier = struct {
                     .kind = produces.toOptionalKind().?,
                 }) catch self.markAllocationFailure(),
             }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Check 5: Dead Imports
+    // -----------------------------------------------------------------------
+
+    /// Collect every name an import specifier binds.
+    ///
+    /// Scans the node array rather than walking from a root, because the
+    /// verifier is handed a handler function and never the program node.
+    fn collectImportBindings(self: *HandlerVerifier) void {
+        const count = self.ir_view.nodeCount();
+        var idx: NodeIndex = 0;
+        while (idx < count) : (idx += 1) {
+            if (self.ir_view.getTag(idx) != .import_specifier) continue;
+            const spec = self.ir_view.getImportSpec(idx) orelse continue;
+            self.import_bindings.append(self.allocator, .{
+                .scope_id = spec.local_binding.scope_id,
+                .slot = spec.local_binding.slot,
+                .decl_node = idx,
+                .name_atom = spec.local_binding.name_atom,
+                .used = false,
+            }) catch self.markAllocationFailure();
+        }
+    }
+
+    /// Mark an import used if any identifier anywhere in the module names it.
+    ///
+    /// Deliberately the whole node array and not the handler body. The rest of
+    /// this verifier is handler-scoped, which is right for a dead *variable* -
+    /// a local the handler never names is dead whatever the rest of the module
+    /// does. An import is module-scoped: `import { sha256 }` referenced only
+    /// inside a helper the handler calls is used, and counting it over the
+    /// handler body alone would report every helper's imports as dead.
+    ///
+    /// Scanning all nodes also counts references from unreachable code, which
+    /// over-approximates "used". That is the safe direction: it suppresses a
+    /// warning, and never invents one.
+    fn markUsedImports(self: *HandlerVerifier) void {
+        if (self.import_bindings.items.len == 0) return;
+        const count = self.ir_view.nodeCount();
+        var idx: NodeIndex = 0;
+        while (idx < count) : (idx += 1) {
+            if (self.ir_view.getTag(idx) != .identifier) continue;
+            const binding = self.ir_view.getBinding(idx) orelse continue;
+            const target = bindingKey(binding.scope_id, binding.slot);
+            for (self.import_bindings.items) |*imported| {
+                if (bindingKey(imported.scope_id, imported.slot) == target) {
+                    imported.used = true;
+                    break;
+                }
+            }
+        }
+    }
+
+    fn reportUnusedImports(self: *HandlerVerifier) void {
+        for (self.import_bindings.items) |imported| {
+            if (imported.used) continue;
+
+            // Same suppression convention as an unused variable.
+            if (self.resolveAtomName(imported.name_atom)) |name| {
+                if (name.len > 0 and name[0] == '_') continue;
+            }
+
+            self.addDiagnostic(.{
+                .severity = .warning,
+                .kind = .unused_import,
+                .node = imported.decl_node,
+                .message = "imported binding is never used",
+                .help = "remove the unused import, or prefix with '_' to suppress this warning",
+            });
         }
     }
 

@@ -1,5 +1,5 @@
 {
-  "runId": "c76dd391df6f-1787761916686-58502",
+  "runId": "04ad0e15a7e0-1787769180381-3145",
   "complete": true,
   "publishable": true,
   "publicationMode": true,
@@ -25,7 +25,7 @@
   "securityProbeHash": "331b2826a8e9c8496720c24b05ff0a5923073a469010e951885214f9109c7792",
   "thresholdHash": "7c8a65863f5fe1e294fb71ded1ca6e26ea28a224281055e34f63b4511507c343",
   "manifestHash": "b1a729d52dae19439252fe91baf0d03c0abe1feb89ea6a81dfecf4b07893583e",
-  "resultRunHash": "b69918e1cae2a41378d2c6efa1aa9688960046776cd2cae4bd4830eba01eebec",
+  "resultRunHash": "6a3bfbabf8974cb87a6c92407054d76133ac658b38ca399841b681e4b1966a21",
   "promptPersonaHash": "5ae842d6cd259973f4dabb373887b0c067fbbd0adbc8b1b3b43a7d6146bb2cb4",
   "providerNeutralCatalogHash": "b190e14269c9c021d71467bcdbc174141df2e7c5df5bbe5be3cb9e55092b354f",
   "providerSerializedCatalogHash": "fe8d3a3bb01106b66571e8e500bf4f5d85aed40fa4449543599275e9e6af6a99",
@@ -35,7 +35,7 @@
   "semanticsHash": "83b822bd0dee8e5f9a9231501f0f95b34fa48a0f08c671ade7a8bee822b877b8",
   "diagnosticHash": "94a6c88ca49ebe88ec363062bc6dc48cbf21b4f7855af0aefcda2cb6a65e19e5",
   "policyHash": "0f7250ffdb2b899515f9f23bd5fc21e6db9baaa7b1274b2c90b63b8dbb3aa6d0",
-  "sourceCommit": "c76dd391df6fff564054be5b1d325d1412dfbaa7",
+  "sourceCommit": "04ad0e15a7e0d095d18e3e091765f6dedac536df",
   "sourceDirty": true,
   "rulesTotal": 72,
   "rulesTripped": 2,
@@ -122,14 +122,15 @@
   ],
   "recorded": "2026-08-26",
   "seedSuite": {
-    "seedsTotal": 54,
-    "verifiedRules": 53,
+    "seedsTotal": 55,
+    "verifiedRules": 54,
     "verified": [
       "ZTS061",
       "ZTS302",
       "ZTS303",
       "ZTS304",
       "ZTS305",
+      "ZTS306",
       "ZTS308",
       "ZTS309",
       "ZTS310",
@@ -185,15 +186,7 @@
         "reason": "no-producer"
       },
       {
-        "code": "POL002",
-        "reason": "no-producer"
-      },
-      {
         "code": "POL003",
-        "reason": "no-producer"
-      },
-      {
-        "code": "POL004",
         "reason": "no-producer"
       },
       {
@@ -201,16 +194,24 @@
         "reason": "no-producer"
       },
       {
-        "code": "POL006",
-        "reason": "no-producer"
-      },
-      {
         "code": "POL007",
         "reason": "no-producer"
       },
       {
+        "code": "POL002",
+        "reason": "shadowed"
+      },
+      {
+        "code": "POL004",
+        "reason": "shadowed"
+      },
+      {
+        "code": "POL006",
+        "reason": "shadowed"
+      },
+      {
         "code": "POL008",
-        "reason": "no-producer"
+        "reason": "shadowed"
       },
       {
         "code": "PROP01",
@@ -245,10 +246,6 @@
         "reason": "no-producer"
       },
       {
-        "code": "ZTS306",
-        "reason": "no-producer"
-      },
-      {
         "code": "ZTS307",
         "reason": "shadowed"
       },
@@ -260,7 +257,7 @@
   },
   "corpusUnion": {
     "corpusVersion": "0012ad8ca6d5d08ac5023862378fe0c971b3672dadbc079256fb47d810033516",
-    "observations": 7,
+    "observations": 8,
     "distinctSets": 3,
     "smallestSet": 2,
     "largestSet": 5,

@@ -38,13 +38,27 @@
 # only APP_NAME, and a handler reading JWT_SECRET, passes `zts check` with 0
 # errors and exit 0.
 POL001 no-producer
-POL002 no-producer
 POL003 no-producer
-POL004 no-producer
 POL005 no-producer
-POL006 no-producer
 POL007 no-producer
-POL008 no-producer
+
+# The four `dynamic_not_allowed` codes are a different case, and their earlier
+# `no-producer` reason was wrong. `validateContract` raises them from
+# `contract.env.dynamic` and its three siblings, which are set while the
+# contract is built - but the contract is never built for such a handler.
+# `strict_checker.zig:1532` reports any non-literal argument to a capability
+# export as ZTS602 at error severity, and `precompile.zig:1410` returns on
+# strict errors before the contract stage. Probe: a computed argument to
+# `env`, `cacheGet` and `fetch` each report ZTS602 and nothing else. Four
+# evasive shapes - an aliased import, a ternary argument, an argument from a
+# call, and an indirect callee held in a record field - are all caught too.
+# So the language refuses all dynamic capability access unconditionally, which
+# is strictly broader than any allow-list, and the policy knob is vacuous in
+# both directions.
+POL002 shadowed
+POL004 shadowed
+POL006 shadowed
+POL008 shadowed
 
 # PROP01-PROP06 are the same shape one layer over. `property_diagnostics.zig`
 # defines PropertyViolation with no code field at all, so the violations
@@ -58,16 +72,20 @@ PROP04 no-producer
 PROP05 no-producer
 PROP06 no-producer
 
-# ZTS300, ZTS301 and ZTS306 are declared in handler_verifier's DiagnosticKind
-# and constructed nowhere. Each appears exactly twice in that file: once in the
-# enum, once in the test that asserts the variants are distinct. Their seeded
-# neighbours show the difference - `.unused_variable` (ZTS305) has a real
-# construction site, and `.unused_import` beside it does not. Probe: an import
-# bound and never used, and an if with a non-returning else, are both accepted;
-# the else shape reports ZTS302, which a seed already covers.
+# ZTS300 and ZTS301 are declared in handler_verifier's DiagnosticKind and
+# constructed nowhere. Each appears exactly twice in that file: once in the
+# enum, once in the test that asserts the variants are distinct. Probe: an if
+# with a non-returning else is accepted, and the shape that does fail reports
+# ZTS302, which a seed already covers.
+#
+# ZTS306 was in this group and is not any more. It was the one row here whose
+# rule described a check worth having rather than a duplicate, so it got a
+# producer instead of a deletion: `collectImportBindings`, `markUsedImports`
+# and `reportUnusedImports` in handler_verifier.zig. It found two genuinely
+# dead imports in `packages/tools/tests/fixtures/contract/modules_all.ts` and
+# one in this suite's own `clean_literal_access` baseline on its first run.
 ZTS300 no-producer
 ZTS301 no-producer
-ZTS306 no-producer
 
 # ZTS307 has a construction site, but nothing reaches it through the veto. The
 # rule is a verifier warning about a match with no default arm; the strict

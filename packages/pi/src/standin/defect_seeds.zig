@@ -235,8 +235,6 @@ const clean_collect =
 ;
 
 const clean_literal_access =
-    \\import { env } from "zttp:env";
-    \\
     \\function handler(req: Request): Proof<Response, "deterministic"> {
     \\  const obj = { a: 1 };
     \\  const v = obj.a;
@@ -613,6 +611,13 @@ const clean_dict_entries =
     \\}
     \\
 ;
+const clean_no_imports =
+    \\function handler(req: Request): Proof<Response, "deterministic"> {
+    \\  return Response.json({ ok: 1 });
+    \\}
+    \\
+;
+
 pub const seeds = [_]DefectSeed{
     .{
         .id = "let-binding",
@@ -1141,8 +1146,6 @@ pub const seeds = [_]DefectSeed{
         \\
         ,
         .good_draft =
-        \\import { env } from "zttp:env";
-        \\
         \\function handler(req: Request): Proof<Response, "deterministic"> {
         \\  const obj = { a: 3 };
         \\  const v = obj.a;
@@ -2340,6 +2343,27 @@ pub const seeds = [_]DefectSeed{
         \\
         ,
         .ask = "Fix the ZTS628 compiler error in handler.ts",
+    },
+    .{
+        .id = "unused-import",
+        .code = "ZTS306",
+        .class = .model_retry,
+        .seed_source = clean_no_imports,
+        .bad_draft =
+        \\import { sha256 } from "zttp:crypto";
+        \\
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  return Response.json({ ok: 1 });
+        \\}
+        \\
+        ,
+        .good_draft =
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  return Response.json({ ok: 2 });
+        \\}
+        \\
+        ,
+        .ask = "Fix the ZTS306 compiler error in handler.ts",
     },
 };
 

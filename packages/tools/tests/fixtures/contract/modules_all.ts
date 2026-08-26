@@ -3,8 +3,8 @@
 
 import { parseBearer, jwtVerify, jwtSign } from "zttp:auth";
 import { env } from "zttp:env";
-import { schemaCompile, validateJson, coerceJson } from "zttp:validate";
-import { cacheGet, cacheSet, cacheStats } from "zttp:cache";
+import { schemaCompile, validateJson } from "zttp:validate";
+import { cacheSet, cacheStats } from "zttp:cache";
 import { sha256 } from "zttp:crypto";
 
 structural RequestBody = {
