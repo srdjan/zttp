@@ -3,10 +3,15 @@
 Status: scoping only, not started. Written 2026-08-26. No model calls were made
 to produce it.
 
-`docs/coverage.md` reports that of the compiler's 72 advertised rules, 5 are
+`docs/coverage.md` reports that of the compiler's 72 advertised rules, 2 are
 tripped by at least one corpus case. This document says what would change that,
-what each option costs, and which of the 67 untripped rules each option reaches.
+what each option costs, and which of the 70 untripped rules each option reaches.
 It proposes no recording run. It exists so that the next one is aimed.
+
+Revised 2026-08-26 after that day's re-record moved the number from 5 to 2. The
+revision is not a correction: the count fell because a fresh recording of the
+same frozen prompts tripped fewer rules, which is the single most useful thing
+this document now says. See "The number is unstable" below.
 
 ## What the number counts
 
@@ -29,14 +34,60 @@ diagnostics reach the transcript in `whole_file` mode without the model choosing
 to ask. That is checkable against the stand-in with no API key and no spend, and
 it is the first task below for exactly that reason.
 
-The five tripped rules today are `ZTS400`, `ZTS500`, `ZTS501`, `ZTS502`, and
-`ZTS509`. Four of the five are spec and proof rules, which is a fair description
-of what these prompts ask for: they ask for handlers that declare properties.
+The two tripped rules today are `ZTS400` and `ZTS500`.
 
-## The 67 untripped rules, partitioned
+## The number is unstable
+
+Three recordings of the *same* frozen prompt set, same provider, same model,
+have now measured three different coverage numbers. Read from
+`git log docs/coverage.json`:
+
+| recorded | tripped | codes |
+|---|---|---|
+| 2026-08-17 | 4 | `ZTS400` `ZTS500` `ZTS501` `ZTS509` |
+| 2026-08-25 | 5 | `ZTS400` `ZTS500` `ZTS501` `ZTS502` `ZTS509` |
+| 2026-08-26 | 2 | `ZTS400` `ZTS500` |
+
+The headline input identity is `0012ad8ca6d5` in all three, so nothing about the
+prompts, the seeds, or the compiler moved. Five distinct codes appear across the
+three runs and only two appear in all of them.
+
+Note the shape: 4, then 5, then 2. This is not a number that has been sliding
+and it is not a regression to explain away - it is not monotone at all, because
+a rule is counted when the model happens to make the mistake that trips it. The
+count measures draft quality inversely, and the 2026-08-26 run also produced the
+best intent rate of the three, at 94%.
+
+(An earlier five, recorded 2026-08-16, is excluded above: it was measured over
+corpus `19dc67a54ec3`, a different prompt set, so it is not a sample of the same
+thing.)
+
+Two consequences, and they are the reason this document exists.
+
+A coverage number taken from one recording is a sample, not a property of the
+corpus, and the honest denominator for "what does the corpus exercise" is the
+union across runs rather than any single row. Nothing currently computes that
+union.
+
+More importantly, the three codes that flicker - `ZTS501`, `ZTS502`, `ZTS509` -
+are *proof* that the existing prompts can reach them. No argument is needed about
+whether a model would write the violation; one already did, twice. They are the
+strongest available case for the seeded approach in step 1: a case that seeds the
+violating construct trips its rule every run, turning three codes that currently
+come and go into three that hold.
+
+## The 70 untripped rules, partitioned
 
 The partition is by what a case would have to supply, not by rule family. Every
-untripped code appears exactly once; the three groups sum to 67.
+untripped code appears exactly once; the four groups sum to 70.
+
+### Group 0: demonstrated reachable by an earlier recording (3)
+
+`ZTS501` `ZTS502` `ZTS509`
+
+Untripped only as of the 2026-08-26 recording. Each was tripped by at least one
+earlier recording of these same prompts, so no new prompt is needed to reach
+them. A seeded case would make them hold every run rather than come and go.
 
 ### Group A: reachable from a prompt or a seed alone (30)
 
@@ -138,8 +189,11 @@ so it is a whole-corpus re-record, not an incremental one.
 
 ## What is measured and what is not
 
-Measured: the 72-rule denominator and the 5-rule numerator are read from
-`docs/coverage.json`, generated from corpus `0012ad8ca6d5`. The partition above
+Measured: the 72-rule denominator and the 2-rule numerator are read from
+`docs/coverage.json`, generated from corpus `0012ad8ca6d5`. The three-run
+history in "The number is unstable" is read from the coverage pages and the
+baseline comment in `expert_codegen_record.zig`, each of which was generated
+from its own recording. The partition above
 was computed against the registry rather than counted by hand, and every code
 appears exactly once. The absence of a per-rule firing suite was established by
 search. The policy configuration shape was read from `policy.zig`. The 24-minute
