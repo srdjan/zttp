@@ -207,6 +207,74 @@ const clean_match =
     \\
 ;
 
+const clean_plain =
+    \\function handler(req: Request): Proof<Response, "deterministic"> {
+    \\  return Response.json({ ok: 1 });
+    \\}
+    \\
+;
+
+const clean_local_count =
+    \\function handler(req: Request): Proof<Response, "deterministic"> {
+    \\  const count = 1;
+    \\  return Response.json({ count: count });
+    \\}
+    \\
+;
+
+const clean_collect =
+    \\function handler(req: Request): Proof<Response, "deterministic"> {
+    \\  const items = [1, 2];
+    \\  const out = [];
+    \\  for (const item of items) {
+    \\    out.push(item);
+    \\  }
+    \\  return Response.json({ out: out });
+    \\}
+    \\
+;
+
+const clean_literal_access =
+    \\import { env } from "zttp:env";
+    \\
+    \\function handler(req: Request): Proof<Response, "deterministic"> {
+    \\  const obj = { a: 1 };
+    \\  const v = obj.a;
+    \\  return Response.json({ v: v });
+    \\}
+    \\
+;
+
+const clean_literal_capability =
+    \\import { env } from "zttp:env";
+    \\
+    \\function handler(req: Request): Proof<Response, "deterministic"> {
+    \\  const v = env("APP_NAME") ?? "x";
+    \\  return Response.json({ v: v });
+    \\}
+    \\
+;
+
+const clean_narrowed_optional =
+    \\import { env } from "zttp:env";
+    \\
+    \\function handler(req: Request): Proof<Response, "deterministic"> {
+    \\  const name = env("APP_NAME");
+    \\  if (name === undefined) { return Response.json({ n: 0 }); }
+    \\  return Response.json({ n: name.length });
+    \\}
+    \\
+;
+
+const clean_all_paths_return =
+    \\function handler(req: Request): Proof<Response, "deterministic"> {
+    \\  const ready = true;
+    \\  if (ready) { return Response.json({ ok: 1 }); }
+    \\  return Response.json({ ok: 0 });
+    \\}
+    \\
+;
+
 pub const seeds = [_]DefectSeed{
     .{
         .id = "let-binding",
@@ -646,6 +714,179 @@ pub const seeds = [_]DefectSeed{
         \\
         ,
         .ask = "Fix the ZTS626 compiler error in handler.ts",
+    },
+    .{
+        .id = "unused-variable",
+        .code = "ZTS305",
+        .class = .model_retry,
+        .seed_source = clean_plain,
+        .bad_draft =
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const unused = 42;
+        \\  return Response.json({ ok: 1 });
+        \\}
+        \\
+        ,
+        .good_draft =
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  return Response.json({ ok: 5 });
+        \\}
+        \\
+        ,
+        .ask = "Fix the ZTS305 compiler error in handler.ts",
+    },
+    .{
+        .id = "module-scope-mutation",
+        .code = "ZTS310",
+        .class = .model_retry,
+        .seed_source = clean_local_count,
+        .bad_draft =
+        \\let count = 0;
+        \\
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  count = count + 1;
+        \\  return Response.json({ count: count });
+        \\}
+        \\
+        ,
+        .good_draft =
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const count = 7;
+        \\  return Response.json({ count: count });
+        \\}
+        \\
+        ,
+        .ask = "Fix the ZTS310 compiler error in handler.ts",
+    },
+    .{
+        .id = "loop-mutation",
+        .code = "ZTS622",
+        .class = .model_retry,
+        .seed_source = clean_collect,
+        .bad_draft =
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const items = [1, 2];
+        \\  for (const item of items) {
+        \\    items.push(item);
+        \\  }
+        \\  return Response.json({ items: items });
+        \\}
+        \\
+        ,
+        .good_draft =
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const items = [3, 4];
+        \\  const out = [];
+        \\  for (const item of items) {
+        \\    out.push(item);
+        \\  }
+        \\  return Response.json({ out: out });
+        \\}
+        \\
+        ,
+        .ask = "Fix the ZTS622 compiler error in handler.ts",
+    },
+    .{
+        .id = "computed-access",
+        .code = "ZTS605",
+        .class = .model_retry,
+        .seed_source = clean_literal_access,
+        .bad_draft =
+        \\import { env } from "zttp:env";
+        \\
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const obj = { a: 1 };
+        \\  const key = env("KEY") ?? "a";
+        \\  const v = obj[key];
+        \\  return Response.json({ v: v });
+        \\}
+        \\
+        ,
+        .good_draft =
+        \\import { env } from "zttp:env";
+        \\
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const obj = { a: 3 };
+        \\  const v = obj.a;
+        \\  return Response.json({ v: v });
+        \\}
+        \\
+        ,
+        .ask = "Fix the ZTS605 compiler error in handler.ts",
+    },
+    .{
+        .id = "dynamic-capability",
+        .code = "ZTS602",
+        .class = .model_retry,
+        .seed_source = clean_literal_capability,
+        .bad_draft =
+        \\import { env } from "zttp:env";
+        \\
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const key = req.url;
+        \\  const v = env(key) ?? "x";
+        \\  return Response.json({ v: v });
+        \\}
+        \\
+        ,
+        .good_draft =
+        \\import { env } from "zttp:env";
+        \\
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const v = env("APP_NAME") ?? "y";
+        \\  return Response.json({ v: v });
+        \\}
+        \\
+        ,
+        .ask = "Fix the ZTS602 compiler error in handler.ts",
+    },
+    .{
+        .id = "optional-property",
+        .code = "ZTS309",
+        .class = .compiler_repair,
+        .seed_source = clean_narrowed_optional,
+        .bad_draft =
+        \\import { env } from "zttp:env";
+        \\
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const name = env("APP_NAME");
+        \\  return Response.json({ n: name.length });
+        \\}
+        \\
+        ,
+        .good_draft =
+        \\import { env } from "zttp:env";
+        \\
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const name = env("APP_NAME");
+        \\  if (name === undefined) return Response.json({ error: "missing value" }, { status: 400 });
+        \\  return Response.json({ n: name.length });
+        \\}
+        \\
+        ,
+        .ask = "Fix the ZTS309 compiler error in handler.ts",
+    },
+    .{
+        .id = "missing-path-return",
+        .code = "ZTS302",
+        .class = .compiler_repair,
+        .seed_source = clean_all_paths_return,
+        .bad_draft =
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const ready = true;
+        \\  if (ready) { return Response.json({ ok: 1 }); }
+        \\}
+        \\
+        ,
+        .good_draft =
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const ready = true;
+        \\  if (ready) { return Response.json({ ok: 1 }); }
+        \\  return Response.text("Not Found", { status: 404 });
+        \\}
+        \\
+        ,
+        .ask = "Fix the ZTS302 compiler error in handler.ts",
     },
 };
 
