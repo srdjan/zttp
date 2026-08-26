@@ -63,7 +63,7 @@ Untripped: `ZTS300`, `ZTS301`, `ZTS302`, `ZTS303`, `ZTS304`, `ZTS305`, `ZTS306`,
 The row above is one draw. The same prompts, seeds, provider, model and
 compiler have measured a different set each time they were recorded, because a
 rule is counted only when the model happens to make the mistake that trips it.
-Across the 5 published runs of corpus `0012ad8ca6d5`, the
+Across the 6 published runs of corpus `0012ad8ca6d5`, the
 tripped set took 3 distinct shapes, the smallest naming
 2 rules and the largest 5.
 
@@ -94,20 +94,20 @@ is printed.
 
 | Rules advertised | Verified firing by a seed | Seeds |
 |---|---|---|
-| 72 | 22 | 23 |
+| 72 | 27 | 28 |
 
-Verified: `ZTS302`, `ZTS303`, `ZTS304`, `ZTS305`, `ZTS308`, `ZTS309`, `ZTS310`, `ZTS602`, `ZTS604`, `ZTS605`, `ZTS608`, `ZTS609`, `ZTS612`, `ZTS613`, `ZTS614`, `ZTS616`, `ZTS620`, `ZTS621`, `ZTS622`, `ZTS624`, `ZTS625`, `ZTS626`
+Verified: `ZTS302`, `ZTS303`, `ZTS304`, `ZTS305`, `ZTS308`, `ZTS309`, `ZTS310`, `ZTS400`, `ZTS401`, `ZTS402`, `ZTS403`, `ZTS406`, `ZTS602`, `ZTS604`, `ZTS605`, `ZTS608`, `ZTS609`, `ZTS612`, `ZTS613`, `ZTS614`, `ZTS616`, `ZTS620`, `ZTS621`, `ZTS622`, `ZTS624`, `ZTS625`, `ZTS626`
 
 No model is involved, so this figure does not move when a recording draws
 differently. It also proves less: a seed shows the compiler rejects a draft the
 harness supplied, and says nothing about whether a model would ever write one.
 That is the question the section above answers, and only a recording can.
 
-Neither number bounds the other. 22 of the rules verified here are
-untripped by the corpus, 2 tripped by the corpus have no seed, and
-the two sets share 0. Together they name 24 of the 72
+Neither number bounds the other. The corpus leaves 26 of the rules
+verified here untripped; it trips 1 that no seed covers; and the two
+sets share 1. Together they name 28 of the 72
 advertised rules, and taking the corpus union above instead of this single run
-raises that to 27 - the closest thing to a combined answer this
+raises that to 31 - the closest thing to a combined answer this
 repository can produce, and still two claims added up rather than one
 measurement.
 

@@ -290,9 +290,9 @@ differently. It also proves less: a seed shows the compiler rejects a draft the
 harness supplied, and says nothing about whether a model would ever write one.
 That is the question the section above answers, and only a recording can.
 
-Neither number bounds the other. {seed_only} of the rules verified here are
-untripped by the corpus, {corpus_only} tripped by the corpus have no seed, and
-the two sets share {overlap_count}. Together they name {union_count} of the {total}
+Neither number bounds the other. The corpus leaves {seed_only} of the rules
+verified here untripped; it trips {corpus_only} that no seed covers; and the two
+sets share {overlap_count}. Together they name {union_count} of the {total}
 advertised rules, and taking the corpus union above instead of this single run
 raises that to {union_all} - the closest thing to a combined answer this
 repository can produce, and still two claims added up rather than one

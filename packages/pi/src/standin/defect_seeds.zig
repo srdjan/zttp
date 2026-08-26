@@ -275,6 +275,64 @@ const clean_all_paths_return =
     \\
 ;
 
+const clean_secret_unleaked =
+    \\import { env } from "zttp:env";
+    \\
+    \\function handler(req: Request): Proof<Response, "deterministic"> {
+    \\  const token = env("API_TOKEN") ?? "";
+    \\  if (token === "") { return Response.json({ ok: 0 }); }
+    \\  return Response.json({ ok: 1 });
+    \\}
+    \\
+;
+
+const clean_credential_unleaked =
+    \\function handler(req: Request): Proof<Response, "deterministic"> {
+    \\  const auth = req.headers.authorization ?? "";
+    \\  if (auth === "") { return Response.json({ ok: 0 }); }
+    \\  return Response.json({ ok: 1 });
+    \\}
+    \\
+;
+
+const clean_secret_and_log =
+    \\import { env } from "zttp:env";
+    \\import { logInfo } from "zttp:log";
+    \\
+    \\function handler(req: Request): Proof<Response, "deterministic"> {
+    \\  const token = env("API_TOKEN") ?? "";
+    \\  logInfo("checked", { n: 1 });
+    \\  if (token === "") { return Response.json({ ok: 0 }); }
+    \\  return Response.json({ ok: 1 });
+    \\}
+    \\
+;
+
+const clean_credential_and_log =
+    \\import { logInfo } from "zttp:log";
+    \\
+    \\function handler(req: Request): Proof<Response, "deterministic"> {
+    \\  const auth = req.headers.authorization ?? "";
+    \\  logInfo("checked", { n: 1 });
+    \\  if (auth === "") { return Response.json({ ok: 0 }); }
+    \\  return Response.json({ ok: 1 });
+    \\}
+    \\
+;
+
+const clean_secret_and_egress =
+    \\import { env } from "zttp:env";
+    \\import { fetch } from "zttp:fetch";
+    \\
+    \\function handler(req: Request): Proof<Response, "deterministic"> {
+    \\  const token = env("API_TOKEN") ?? "";
+    \\  const r = fetch("https://api.example.com/v1", { method: "POST", body: "ping" });
+    \\  if (token === "") { return Response.json({ ok: 0 }); }
+    \\  return Response.json({ s: r.status });
+    \\}
+    \\
+;
+
 pub const seeds = [_]DefectSeed{
     .{
         .id = "let-binding",
@@ -887,6 +945,144 @@ pub const seeds = [_]DefectSeed{
         \\
         ,
         .ask = "Fix the ZTS302 compiler error in handler.ts",
+    },
+    .{
+        .id = "secret-in-response",
+        .code = "ZTS400",
+        .class = .model_retry,
+        .seed_source = clean_secret_unleaked,
+        .bad_draft =
+        \\import { env } from "zttp:env";
+        \\
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const token = env("API_TOKEN") ?? "";
+        \\  return Response.json({ token: token });
+        \\}
+        \\
+        ,
+        .good_draft =
+        \\import { env } from "zttp:env";
+        \\
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const token = env("API_TOKEN") ?? "";
+        \\  if (token === "") { return Response.json({ ok: 3 }); }
+        \\  return Response.json({ ok: 4 });
+        \\}
+        \\
+        ,
+        .ask = "Fix the ZTS400 compiler error in handler.ts",
+    },
+    .{
+        .id = "credential-in-response",
+        .code = "ZTS401",
+        .class = .model_retry,
+        .seed_source = clean_credential_unleaked,
+        .bad_draft =
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const auth = req.headers.authorization ?? "";
+        \\  return Response.json({ auth: auth });
+        \\}
+        \\
+        ,
+        .good_draft =
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const auth = req.headers.authorization ?? "";
+        \\  if (auth === "") { return Response.json({ ok: 3 }); }
+        \\  return Response.json({ ok: 4 });
+        \\}
+        \\
+        ,
+        .ask = "Fix the ZTS401 compiler error in handler.ts",
+    },
+    .{
+        .id = "secret-in-log",
+        .code = "ZTS402",
+        .class = .model_retry,
+        .seed_source = clean_secret_and_log,
+        .bad_draft =
+        \\import { env } from "zttp:env";
+        \\import { logInfo } from "zttp:log";
+        \\
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const token = env("API_TOKEN") ?? "";
+        \\  logInfo(token, { n: 1 });
+        \\  if (token === "") { return Response.json({ ok: 0 }); }
+        \\  return Response.json({ ok: 1 });
+        \\}
+        \\
+        ,
+        .good_draft =
+        \\import { env } from "zttp:env";
+        \\import { logInfo } from "zttp:log";
+        \\
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const token = env("API_TOKEN") ?? "";
+        \\  logInfo("checked", { n: 2 });
+        \\  if (token === "") { return Response.json({ ok: 0 }); }
+        \\  return Response.json({ ok: 1 });
+        \\}
+        \\
+        ,
+        .ask = "Fix the ZTS402 compiler error in handler.ts",
+    },
+    .{
+        .id = "credential-in-log",
+        .code = "ZTS403",
+        .class = .model_retry,
+        .seed_source = clean_credential_and_log,
+        .bad_draft =
+        \\import { logInfo } from "zttp:log";
+        \\
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const auth = req.headers.authorization ?? "";
+        \\  logInfo(auth, { n: 1 });
+        \\  if (auth === "") { return Response.json({ ok: 0 }); }
+        \\  return Response.json({ ok: 1 });
+        \\}
+        \\
+        ,
+        .good_draft =
+        \\import { logInfo } from "zttp:log";
+        \\
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const auth = req.headers.authorization ?? "";
+        \\  logInfo("checked", { n: 2 });
+        \\  if (auth === "") { return Response.json({ ok: 0 }); }
+        \\  return Response.json({ ok: 1 });
+        \\}
+        \\
+        ,
+        .ask = "Fix the ZTS403 compiler error in handler.ts",
+    },
+    .{
+        .id = "secret-in-egress-body",
+        .code = "ZTS406",
+        .class = .model_retry,
+        .seed_source = clean_secret_and_egress,
+        .bad_draft =
+        \\import { env } from "zttp:env";
+        \\import { fetch } from "zttp:fetch";
+        \\
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const token = env("API_TOKEN") ?? "";
+        \\  const r = fetch("https://api.example.com/v1", { method: "POST", body: token });
+        \\  return Response.json({ s: r.status });
+        \\}
+        \\
+        ,
+        .good_draft =
+        \\import { env } from "zttp:env";
+        \\import { fetch } from "zttp:fetch";
+        \\
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const token = env("API_TOKEN") ?? "";
+        \\  const r = fetch("https://api.example.com/v1", { method: "POST", body: "pong" });
+        \\  if (token === "") { return Response.json({ ok: 0 }); }
+        \\  return Response.json({ s: r.status });
+        \\}
+        \\
+        ,
+        .ask = "Fix the ZTS406 compiler error in handler.ts",
     },
 };
 
