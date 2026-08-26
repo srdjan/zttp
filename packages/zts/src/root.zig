@@ -331,6 +331,18 @@ pub const PolicyCatalog = struct {
     pub fn isCanonicalProfileCode(code: []const u8) bool {
         return rule_registry.isCanonicalProfileCode(code);
     }
+
+    /// Whether something actually discharges a rule's repair intent.
+    ///
+    /// A `RuleEntry.repair` names the primitive a repair would use; it does not
+    /// say that one runs. `repair_validator` carries that as a per-intent
+    /// status, and only `implemented` means a rewrite exists. Exposed here so a
+    /// caller can tell "this rule has a canonical repair" from "this rule would
+    /// have one" without reaching into the validator.
+    pub fn repairIsImplemented(intent: rule_registry.RepairIntent) bool {
+        const row = repair_validator.find(intent) orelse return false;
+        return row.status == .implemented;
+    }
 };
 
 test "stable PolicyCatalog exposes borrowed rule queries" {

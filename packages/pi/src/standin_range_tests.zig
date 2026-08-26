@@ -701,6 +701,58 @@ test "stand-in gate: every defect seed reproduces its declared veto class throug
         .{ defect_seeds.seeds.len, defect_seeds.seeds.len },
     );
 
+    // The repair table's `.status = .implemented` is an assertion that something
+    // actually discharges an intent, and nothing tested it end to end. These
+    // seeds do, from the outcome side: a code whose intent is implemented is one
+    // the canonicalizer rewrites, which is exactly what `salvaged` means, and a
+    // code whose intent is planned or absent has nothing to rewrite it. Measured
+    // across all 16 seeds before it was written down, and it holds in both
+    // directions with no exception.
+    //
+    // A repair that lands without its status moving, or a status that claims
+    // more than it delivers, breaks this and is named here rather than
+    // discovered later as a rule the corpus mysteriously never salvages.
+    {
+        var implemented_seeds: usize = 0;
+        var unimplemented_seeds: usize = 0;
+        for (defect_seeds.seeds) |seed| {
+            const rule = zts.PolicyCatalog.findByCode(seed.code) orelse continue;
+            const intent = rule.repair orelse {
+                unimplemented_seeds += 1;
+                if (seed.class == .salvaged) {
+                    std.debug.print(
+                        "[standin-gate] seed {s} ({s}) is salvaged but its rule declares no repair intent\n",
+                        .{ seed.id, seed.code },
+                    );
+                    return error.SalvagedWithoutRepairIntent;
+                }
+                continue;
+            };
+            const implemented = zts.PolicyCatalog.repairIsImplemented(intent);
+            if (implemented) implemented_seeds += 1 else unimplemented_seeds += 1;
+            if (implemented != (seed.class == .salvaged)) {
+                std.debug.print(
+                    "[standin-gate] seed {s} ({s}): repair intent {s} implemented={} but the seed is {s}\n",
+                    .{
+                        seed.id,
+                        seed.code,
+                        @tagName(intent),
+                        implemented,
+                        @tagName(seed.class),
+                    },
+                );
+                return error.RepairStatusDisagreesWithVetoClass;
+            }
+        }
+        // Floors: one side empty would make the other direction vacuous.
+        try testing.expect(implemented_seeds > 0);
+        try testing.expect(unimplemented_seeds > 0);
+        std.debug.print(
+            "[standin-gate] repair status agrees with veto class for {d} implemented and {d} unimplemented seeds\n",
+            .{ implemented_seeds, unimplemented_seeds },
+        );
+    }
+
     // The publishable figure, emitted only here and only after every assertion
     // above passed, so the marker means "these rules were observed firing"
     // rather than "this table lists them". `scripts/update-coverage.sh` lifts
