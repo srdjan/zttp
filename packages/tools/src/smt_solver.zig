@@ -238,7 +238,9 @@ test "solve refutes a faithful-model non-law when z3 is present" {
     if (!available(a)) return error.SkipZigTest;
     const lhs = [_]zts.semantics.Term{ .{ .child = 0 }, .{ .child = 1 }, .{ .binop = .add } };
     const rhs = [_]zts.semantics.Term{ .{ .child = 1 }, .{ .child = 0 }, .{ .binop = .add } };
-    const q = try zts.encodeRefutation(a, &lhs, &rhs);
+    // The fast row's own budget: this test asserts the encoder and z3 agree on
+    // the refute direction, not that a slow row fits its ceiling.
+    const q = try zts.encodeRefutation(a, &lhs, &rhs, zts.default_audit_timeout_ms);
     defer a.free(q);
     try std.testing.expectEqual(Verdict.counterexample, solve(q, a));
 }

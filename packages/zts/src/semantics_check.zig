@@ -523,7 +523,11 @@ pub fn runAudit(allocator: std.mem.Allocator, solve: ?SolveFn) !AuditResult {
     result.available = true;
 
     for (semantics.excluded_laws) |law| {
-        const query = semantics_audit.encodeRefutation(scratch, law.lhs, law.rhs) catch {
+        // Per-row budget: refutation cost across this table spans two orders of
+        // magnitude, so one shared ceiling would be sized for the slowest row
+        // and then handed to every other one. See `semantics_audit.preamble`.
+        const budget = law.audit_timeout_ms orelse semantics_audit.default_audit_timeout_ms;
+        const query = semantics_audit.encodeRefutation(scratch, law.lhs, law.rhs, budget) catch {
             try result.failures.append(a, .{
                 .code = .smt_unencodable,
                 .where = try a.dupe(u8, law.name),
@@ -826,7 +830,7 @@ test "every excluded law encodes for the faithful audit (catches malformity with
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     for (semantics.excluded_laws) |law| {
-        const q = try semantics_audit.encodeRefutation(arena.allocator(), law.lhs, law.rhs);
+        const q = try semantics_audit.encodeRefutation(arena.allocator(), law.lhs, law.rhs, law.audit_timeout_ms orelse semantics_audit.default_audit_timeout_ms);
         try std.testing.expect(q.len > 0);
         try std.testing.expect(std.mem.indexOf(u8, q, "(check-sat)") != null);
     }

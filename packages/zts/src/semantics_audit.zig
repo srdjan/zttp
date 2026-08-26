@@ -21,8 +21,8 @@
 //! confirmed); `unsat` would mean the two sides ARE always equal (the law holds,
 //! so excluding it was wrong - the driver fails loud). Pure and wasm-safe: no I/O,
 //! the solver is injected from the native CLI like the ℤ check. A per-query
-//! `:timeout` is emitted so a hard refutation degrades to `unknown` (inconclusive)
-//! rather than hanging.
+//! `:timeout`, taken from the row's own measured budget, is emitted so a hard
+//! refutation degrades to `unknown` (inconclusive) rather than hanging.
 //!
 //! Scope (the bounded "exclusion-audit" tier): this refutes the declared
 //! excluded laws. It does NOT add a reachability/type-precondition layer to let
@@ -47,17 +47,21 @@ const Term = semantics.Term;
 /// round-nearest-ties-to-even, JS's number rounding mode. `s2n`/`n2s` are the
 /// uninterpreted string<->number coercions (their exact values do not matter for
 /// the refutations, only that the type tags mix).
-// :timeout is a ceiling, not a fixed cost - the string/type-mix refutations
-// (commutativity, not-involution) return in milliseconds; only the f64
-// associativity counterexample search is slow (~5s, measured), so the ceiling is
-// set well above it (6x, with margin for slower/loaded machines) to get a clean
-// refutation rather than an inconclusive timeout. This matters because the
-// verify.sh gate now FAILS on an inconclusive audit (refuted < total), so a
-// timeout there is a hard error, not a silent skip; the command level stays
-// lenient (a genuinely un-refutable future law burns the ceiling once and reports
-// inconclusive, non-fatal).
+// The `:timeout` is a ceiling, not a fixed cost, and it is emitted per query
+// from the row's own budget rather than baked into this preamble. Refutation
+// cost is not uniform across the table: the string/type-mix refutations return
+// in well under a second, while the f64 associativity counterexample search
+// measured 28.8-29.8 seconds on z3 5.1.0 (see the numbers beside each
+// `excluded_laws` row). One shared ceiling has to be sized for that slowest row
+// and then applies to every row, so a later law that is genuinely undecidable
+// burns the whole budget before reporting.
+//
+// Sizing matters because `spec-check --audit` fails on an inconclusive audit at
+// both the gate and the command level: a timeout is a hard error, not a silent
+// skip. A ceiling within a second of the measured solve time is a gate that
+// fails on a loaded machine and passes on an idle one, which is worse than no
+// gate.
 const preamble =
-    \\(set-option :timeout 30000)
     \\(set-logic ALL)
     \\(declare-datatypes ((Val 0)) (((num (n Float64)) (bl (b Bool)) (st (s String)))))
     \\(declare-fun s2n (String) Float64)
@@ -165,10 +169,25 @@ const Builder = struct {
     }
 };
 
+/// The budget for a row that declares none. Sized for the type-mix refutations,
+/// which measured under a third of a second: a row that needs more says so, and
+/// a row that needs more without saying so should report inconclusive quickly
+/// rather than hold the gate for minutes.
+pub const default_audit_timeout_ms: u32 = 15_000;
+
 /// Encode `lhs == rhs` (JS `===`) over the faithful Val model, asserting the
 /// negation. `sat` => a counterexample exists (the equivalence is NOT a law);
 /// `unsat` => the two sides are always equal (it IS a law).
-pub fn encodeRefutation(caller: std.mem.Allocator, lhs: []const Term, rhs: []const Term) EncodeError![]u8 {
+///
+/// `timeout_ms` is the row's solver budget. It is a parameter rather than a
+/// constant because the table's refutation costs differ by two orders of
+/// magnitude; see `preamble` above.
+pub fn encodeRefutation(
+    caller: std.mem.Allocator,
+    lhs: []const Term,
+    rhs: []const Term,
+    timeout_ms: u32,
+) EncodeError![]u8 {
     var arena_state = std.heap.ArenaAllocator.init(caller);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -178,6 +197,7 @@ pub fn encodeRefutation(caller: std.mem.Allocator, lhs: []const Term, rhs: []con
     const r = try b.build(rhs);
 
     var out: std.ArrayList(u8) = .empty;
+    try out.appendSlice(arena, try std.fmt.allocPrint(arena, "(set-option :timeout {d})\n", .{timeout_ms}));
     try out.appendSlice(arena, preamble);
     for (b.leaves.items) |leaf| {
         try out.appendSlice(arena, try std.fmt.allocPrint(arena, "(declare-const {s} Val)\n", .{leaf}));
@@ -196,7 +216,7 @@ test "refutation query shares leaves and uses polymorphic vadd" {
     // add commutativity: c0 c1 add  vs  c1 c0 add
     const lhs = [_]Term{ .{ .child = 0 }, .{ .child = 1 }, .{ .binop = .add } };
     const rhs = [_]Term{ .{ .child = 1 }, .{ .child = 0 }, .{ .binop = .add } };
-    const q = try encodeRefutation(a, &lhs, &rhs);
+    const q = try encodeRefutation(a, &lhs, &rhs, default_audit_timeout_ms);
     defer a.free(q);
     try std.testing.expect(std.mem.indexOf(u8, q, "(vadd c0 c1)") != null);
     try std.testing.expect(std.mem.indexOf(u8, q, "(vadd c1 c0)") != null);
@@ -212,21 +232,49 @@ test "not involution emits vnot and a strict-equality root" {
     const a = std.testing.allocator;
     const lhs = [_]Term{ .{ .child = 0 }, .{ .unop = .not }, .{ .unop = .not } };
     const rhs = [_]Term{.{ .child = 0 }};
-    const q = try encodeRefutation(a, &lhs, &rhs);
+    const q = try encodeRefutation(a, &lhs, &rhs, default_audit_timeout_ms);
     defer a.free(q);
     try std.testing.expect(std.mem.indexOf(u8, q, "(vnot (vnot c0))") != null);
+}
+
+test "each excluded law's query carries that row's own budget, not a shared one" {
+    // The gate fails on an inconclusive audit, so a ceiling near a row's solve
+    // time is a gate that flips with machine load. Pin two things: the budget
+    // the row declares is the budget the query carries, and the slow row's
+    // budget clears its measured cost with room. `add_associative` measured
+    // 28.8-29.8s on z3 5.1.0 (semantics.zig carries the runs).
+    const a = std.testing.allocator;
+    const measured_assoc_ms: u32 = 29_820;
+    var saw_slow_row = false;
+    for (semantics.excluded_laws) |law| {
+        const budget = law.audit_timeout_ms orelse default_audit_timeout_ms;
+        const q = try encodeRefutation(a, law.lhs, law.rhs, budget);
+        defer a.free(q);
+        const want = try std.fmt.allocPrint(a, "(set-option :timeout {d})", .{budget});
+        defer a.free(want);
+        // Assert the value expected, not merely that some timeout is present:
+        // a shared ceiling would still satisfy "a :timeout exists".
+        try std.testing.expect(std.mem.indexOf(u8, q, want) != null);
+        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, q, ":timeout"));
+        if (std.mem.eql(u8, law.name, "add_associative")) {
+            saw_slow_row = true;
+            try std.testing.expect(budget >= 3 * measured_assoc_ms);
+        }
+    }
+    // Floor: the loop above checks nothing if the row it is about is gone.
+    try std.testing.expect(saw_slow_row);
 }
 
 test "an un-instantiated parametric placeholder is rejected" {
     const a = std.testing.allocator;
     const terms = [_]Term{ .{ .child = 0 }, .{ .child = 1 }, .binop_self };
-    try std.testing.expectError(error.Uninstantiated, encodeRefutation(a, &terms, &terms));
+    try std.testing.expectError(error.Uninstantiated, encodeRefutation(a, &terms, &terms, default_audit_timeout_ms));
 }
 
 test "a malformed RPN is rejected" {
     const a = std.testing.allocator;
     const terms = [_]Term{ .{ .child = 0 }, .{ .child = 1 } };
-    try std.testing.expectError(error.Malformed, encodeRefutation(a, &terms, &terms));
+    try std.testing.expectError(error.Malformed, encodeRefutation(a, &terms, &terms, default_audit_timeout_ms));
 }
 
 test "excluded-law leaves stay unconstrained (refutation covers the full reachable Val domain)" {
@@ -241,7 +289,7 @@ test "excluded-law leaves stay unconstrained (refutation covers the full reachab
     // query is the root `(not (seq ...))` - no per-leaf constraint is emitted.
     const a = std.testing.allocator;
     for (semantics.excluded_laws) |law| {
-        const q = try encodeRefutation(a, law.lhs, law.rhs);
+        const q = try encodeRefutation(a, law.lhs, law.rhs, law.audit_timeout_ms orelse default_audit_timeout_ms);
         defer a.free(q);
         try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, q, "(assert "));
     }

@@ -675,8 +675,13 @@ test "stable pathsMatch compatibility alias remains callable" {
 /// writes.
 pub const analyzeSqlStatement = sql_analysis.analyzeStatement;
 
-/// Encode a semantics refutation for the SMT layer.
+/// Encode a semantics refutation for the SMT layer. `timeout_ms` is the law
+/// row's solver budget; a caller with no row of its own passes
+/// `default_audit_timeout_ms`.
 pub const encodeRefutation = semantics_audit.encodeRefutation;
+
+/// The audit solver budget for a law row that declares none.
+pub const default_audit_timeout_ms = semantics_audit.default_audit_timeout_ms;
 
 /// Render a module semantics spec as TypeScript.
 pub const renderSpecTs = semantics_render.renderSpecTs;

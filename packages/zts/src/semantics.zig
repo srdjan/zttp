@@ -524,6 +524,19 @@ pub const Law = struct {
     name: []const u8,
     lhs: []const Term,
     rhs: []const Term,
+    /// Solver budget for this row's audit query, in milliseconds. `null` takes
+    /// `semantics_audit.default_audit_timeout_ms`. It is a per-row property
+    /// because refutation cost is not uniform: three of the four excluded laws
+    /// refute on a type mix and return in under a second, while the f64
+    /// associativity counterexample search is two orders of magnitude slower
+    /// (see the measurements beside each row). A single shared ceiling has to
+    /// be set for the slowest row, which then hands every later row the same
+    /// long rope and lets a genuinely undecidable one burn it in full.
+    ///
+    /// Deliberately outside `semanticsHash`: the hash covers what the registry
+    /// CLAIMS (names and denotations), and a solver budget changes how long the
+    /// machine may look for the answer, never what the answer is.
+    audit_timeout_ms: ?u32 = null,
 };
 
 // No unconditioned algebraic law survives the engine's polymorphic, coercing
@@ -545,11 +558,21 @@ pub const algebraic_laws = [_]Law{};
 /// interprets them as non-laws.
 pub const excluded_laws = [_]Law{
     // associativity of +  - holds over ℤ, fails on f64 rounding past 2^53.
+    // Two orders of magnitude slower to refute than every other row here: the
+    // counterexample needs three unconstrained `Val`s to land on a rounding
+    // witness past 2^53. Measured 2026-08-26 on z3 5.1.0, idle, seven runs:
+    // 28.78 28.81 28.91 29.07 29.16 29.76 29.82 seconds, and the same figures
+    // under a 600-second ceiling, so that is the solve cost and not a timeout
+    // artifact. 180 seconds is ~6x the slowest of those.
     .{
         .name = "add_associative",
+        .audit_timeout_ms = 180_000,
         .lhs = &.{ .{ .child = 0 }, .{ .child = 1 }, .{ .binop = .add }, .{ .child = 2 }, .{ .binop = .add } },
         .rhs = &.{ .{ .child = 0 }, .{ .child = 1 }, .{ .child = 2 }, .{ .binop = .add }, .{ .binop = .add } },
     },
+    // The three rows below refute on a type mix rather than a numeric search and
+    // take the default budget. Measured the same day and the same way:
+    // add_commutative 0.32s, not_involution and neg_involution under 0.01s.
     // commutativity of +  - generic `+` concatenates strings: "a"+"b" != "b"+"a".
     .{
         .name = "add_commutative",
