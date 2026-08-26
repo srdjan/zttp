@@ -1521,22 +1521,26 @@ const record_corpus = [_]RecordCase{
             ,
         } },
         .expect_first_attempt_green = true,
-        // Flipped to false on the 2026-08-25 re-record. The draft compensated:
-        // it answered 503 with {"ok":false,"failed":"ship","compensated":true},
-        // which is the saga outcome the prompt asked for. What it did not do is
-        // put the literal string "outcome" in the body, and the spec's first
-        // assertion is `bodyContains:"outcome"` - a word the prompt never says
-        // it wants as a key. The test stops at that assertion, so the step and
-        // compensation events after it were not reached and this recording
-        // measures nothing about them.
+        // Back to true on the 2026-08-26 re-record, having been false since
+        // 2026-08-25. The pin records what one recording measured, so it moves
+        // when a recording measures something else, in the same commit as the
+        // cassettes.
         //
-        // Pinned rather than re-recorded, for the reason the sibling entry
-        // gives: recording again until the earlier draft came back would be
-        // selecting the sample that flatters the rate. Closing this needs the
-        // spec and the prompt to agree on the answer's shape, which changes the
-        // request identity and so belongs to a deliberate re-record, not to
-        // this one.
-        .expect_committed_intent_pass = false,
+        // The 2026-08-25 draft compensated correctly - it answered 503 with
+        // {"ok":false,"failed":"ship","compensated":true} - but omitted the
+        // literal key "outcome", which is the spec's first assertion and a word
+        // the prompt never says it wants. The test stopped there, so that
+        // recording measured nothing about the step and compensation events
+        // after it. This draft satisfies the assertion and the run reaches
+        // them, so the case is intent-qualified.
+        //
+        // The underlying mismatch is not fixed: the spec still asserts a key
+        // shape the prompt does not state, so which side of the pin this case
+        // lands on is a property of the draft rather than of the handler being
+        // right. Closing it needs the spec and the prompt to agree on the
+        // answer's shape, which changes the request identity and so belongs to
+        // a deliberate re-record, not to this one.
+        .expect_committed_intent_pass = true,
     },
     .{
         .name = "workflow-wait-signal",
@@ -3648,17 +3652,15 @@ const anthropic_coverage_baseline = [_][]const u8{
 };
 const anthropic_coverage_legacy_corpus_version = "83c9c0c040e8e6f1f659ddc7d853f9f21bc4c0e1db1837f8cedfb11bad1baf08";
 
-/// Five of seventy-one, measured 2026-08-16 over the complete post-cutover
-/// 19-case DeepSeek corpus. The corpus now asks jwt-auth to return only public
-/// confirmation, so it no longer trips the old corpus's ZTS401 credential leak;
-/// workflow helper capsules now trip ZTS502 instead. That is a corpus change,
-/// not lost coverage within one frozen sample, which is why the baseline binds
-/// the model-visible headline input as well as provider and model.
+/// Two of seventy-two, measured 2026-08-26 over the 19-case DeepSeek corpus
+/// recorded that day, and also the intersection of the three recordings made
+/// against this prompt set. Read from the recording rather than carried over:
+/// the probe that produced it narrowed this list, ran the replay, and took the
+/// tripped set the generator printed. No code appeared that was not already
+/// here.
 const deepseek_coverage_baseline = [_][]const u8{
     "ZTS400",
     "ZTS500",
-    "ZTS501",
-    "ZTS509",
 };
 // Moved again when a full audit of all 19 cases found three more assertions
 // stated nowhere the model could read: queued-call's echoed child body,
@@ -3666,14 +3668,33 @@ const deepseek_coverage_baseline = [_][]const u8{
 // payload contents. The identity covers
 // the model-visible input, so a prompt edit moves it by construction.
 //
-// The list above is now measured, not carried over: four of seventy-two, read
-// from the first corpus recorded against these prompts. Against the five it
-// replaced, ZTS305 and ZTS502 dropped out and ZTS509 appeared - the model wrote
-// no unused binding and no unknown spec name this time, and it did try moving a
-// `workflow.call` inside a `durable.step`, which is exactly the edit ZTS509
-// refuses. Those are model-behaviour changes within one frozen prompt set, not
-// lost compiler coverage, and the identity below binds the prompts so a prompt
-// edit moves the pin by construction.
+// The list above is measured, not carried over. Three recordings now exist
+// against the prompt set the identity below names, and `git log
+// docs/coverage.json` is the source for each measured set:
+//
+//   2026-08-17  4  ZTS400 ZTS500 ZTS501 ZTS509
+//   2026-08-25  5  ZTS400 ZTS500 ZTS501 ZTS502 ZTS509
+//   2026-08-26  2  ZTS400 ZTS500
+//
+// (The 2026-08-16 measurement of five is not comparable: it was recorded over
+// corpus 19dc67a54ec3, a different prompt set.)
+//
+// ZTS501, ZTS502 and ZTS509 all vary run to run on identical input. On
+// 2026-08-26 no draft declared a spec contradicting an imported module, none
+// used an unknown spec name, and none tried moving a `workflow.call` inside a
+// `durable.step`. Cleaner drafts, and the run measured its best intent rate to
+// match. Nothing about the compiler changed.
+//
+// The sequence 4, 5, 2 is the point, and it is worth stating rather than
+// leaving in the numbers: this is not a ratchet that has slipped, it is a
+// quantity that is not monotone because it measures the mistakes one model
+// happened to make on one draw. Five distinct codes appear across the three
+// runs and only these two appear in all of them, so this pin is their
+// intersection - a floor under model behaviour, not under compiler coverage,
+// and re-pinning it cannot make it the second. What the corpus does not
+// exercise is scoped in
+// docs/plans/2026-08-26-034-rule-coverage-widening-scope.md; closing it needs
+// cases built for the purpose, not a better draw.
 const deepseek_coverage_headline_input_id = "0012ad8ca6d5d08ac5023862378fe0c971b3672dadbc079256fb47d810033516";
 
 /// Return the live coverage floor for one exact model-visible input and model.

@@ -1,5 +1,5 @@
 {
-  "runId": "fbfac94c0da6-1787671920454-69308",
+  "runId": "120f2d537baf-1787728514752-92946",
   "complete": true,
   "publishable": true,
   "publicationMode": true,
@@ -25,26 +25,23 @@
   "securityProbeHash": "331b2826a8e9c8496720c24b05ff0a5923073a469010e951885214f9109c7792",
   "thresholdHash": "7c8a65863f5fe1e294fb71ded1ca6e26ea28a224281055e34f63b4511507c343",
   "manifestHash": "b1a729d52dae19439252fe91baf0d03c0abe1feb89ea6a81dfecf4b07893583e",
-  "resultRunHash": "d8c6cc191263455a8f0c13cb08253e9a5159e25b2a08d36084c59259d99f6d7d",
+  "resultRunHash": "6bca17eb75a6e4ce340c5936403afdb54692b7c8d9230aa002d0942553c747f9",
   "promptPersonaHash": "5ae842d6cd259973f4dabb373887b0c067fbbd0adbc8b1b3b43a7d6146bb2cb4",
   "providerNeutralCatalogHash": "b190e14269c9c021d71467bcdbc174141df2e7c5df5bbe5be3cb9e55092b354f",
   "providerSerializedCatalogHash": "fe8d3a3bb01106b66571e8e500bf4f5d85aed40fa4449543599275e9e6af6a99",
   "schemaHash": "c22a5b048fc30217b1c03f2cfd822628173528697dbf7d87b28d80960c72d8cc",
-  "metaHash": "1f1bf0f44395d9c81af5d73dfd7ce12872631ec05c2769159ba41478c317c597",
+  "metaHash": "43cdf91247c883394b011d28373409b3f44e7a34afe42c040872c23495b41eab",
   "grammarHash": "8c555c6dfe5afb98cf73d034a548dd5f18db5a6b540f334a43f0ac871f4d73be",
   "semanticsHash": "83b822bd0dee8e5f9a9231501f0f95b34fa48a0f08c671ade7a8bee822b877b8",
-  "diagnosticHash": "1abb05ce9aa00790cceea8dd2b50cd9be2f733dc98abfe224fff61038dec91d0",
+  "diagnosticHash": "94a6c88ca49ebe88ec363062bc6dc48cbf21b4f7855af0aefcda2cb6a65e19e5",
   "policyHash": "0f7250ffdb2b899515f9f23bd5fc21e6db9baaa7b1274b2c90b63b8dbb3aa6d0",
-  "sourceCommit": "fbfac94c0da6a9db3dfe2d4362065d2304668816",
+  "sourceCommit": "120f2d537baf39a30d6a2a49bc0f09d3be69ec6d",
   "sourceDirty": true,
   "rulesTotal": 72,
-  "rulesTripped": 5,
+  "rulesTripped": 2,
   "tripped": [
     "ZTS400",
-    "ZTS500",
-    "ZTS501",
-    "ZTS502",
-    "ZTS509"
+    "ZTS500"
   ],
   "untripped": [
     "ZTS300",
@@ -58,6 +55,8 @@
     "ZTS308",
     "ZTS309",
     "ZTS310",
+    "ZTS501",
+    "ZTS502",
     "ZTS600",
     "ZTS629",
     "ZTS601",
@@ -90,6 +89,7 @@
     "ZTS506",
     "ZTS508",
     "ZTS607",
+    "ZTS509",
     "ZTS510",
     "ZTS511",
     "ZTS512",
@@ -116,9 +116,9 @@
     "ZTS407"
   ],
   "offRegistry": [
-    "ZTS001",
     "ZTS056",
-    "ZTS105"
+    "ZTS105",
+    "ZTS203"
   ],
-  "recorded": "2026-08-25"
+  "recorded": "2026-08-26"
 }
