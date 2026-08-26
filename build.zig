@@ -294,6 +294,11 @@ pub fn build(b: *std.Build) void {
         // through the `zts_cli` module. Same rationale as canonicalize.
         .{ .owner = .tools, .src = "src/zts_cli.zig", .step = "test-zts-cli", .desc = "Run analyzer dispatch + machine-command module tests", .project_config = true },
         .{ .owner = .tools, .src = "src/deploy_manifest.zig", .step = "test-deploy-manifest", .desc = "Run deploy manifest renderer tests" },
+        // collected_via_named_module: training_export.zig is reached only
+        // through the `zts_cli` command table, and the `zts_cli` root does not
+        // analyze it, so this root is what runs its tests. Verified 2026-08-26
+        // by test count: the zts_cli suite stayed at 140 with the file added.
+        .{ .owner = .tools, .src = "src/training_export.zig", .step = "test-training-export", .desc = "Run ZTS training-export bundle tests", .project_config = true },
         // collected_via_named_module: agent_identity.zig is re-exported by
         // zts_cli.zig but not yet referenced by any analyzed code, and Zig only
         // collects tests from files it analyzes - so the `zts_cli` root runs
@@ -733,6 +738,15 @@ pub fn build(b: *std.Build) void {
     runtime_purity_cmd.addFileArg(cli_exe.getEmittedBin());
     runtime_purity_cmd.addFileArg(runtime_exe.getEmittedBin());
     runtime_purity_cmd.addFileArg(zts_exe.getEmittedBin());
+    // Emit the sealed ZTS training contract bundle. The script supplies commit
+    // and worktree state; the exporter refuses a dirty tree.
+    const training_export_cmd = b.addSystemCommand(&.{ "/bin/bash", "scripts/zts-training-export.sh" });
+    training_export_cmd.addFileArg(zts_exe.getEmittedBin());
+    training_export_cmd.has_side_effects = true;
+    if (b.args) |args| training_export_cmd.addArgs(args);
+    const training_export_step = b.step("zts-training-export", "Emit the sealed ZTS training contract bundle");
+    training_export_step.dependOn(&training_export_cmd.step);
+
     const runtime_purity_step = b.step("test-runtime-purity", "Assert the deployed runtime and analyzer carry no agent/provider surface");
     runtime_purity_step.dependOn(&runtime_purity_cmd.step);
 

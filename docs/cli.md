@@ -313,6 +313,7 @@ zttp spec-check [--json]
 zttp spec-hash [--json]
 zttp spec-render [--out path] [--check path]
 zttp module-spec-render [--check] [--json]
+zttp zts-training-export --out <dir> --commit <sha> --worktree clean|dirty
 zttp verify-paths <file>... [--json]
 zttp verify-modules <file>... [--strict] [--json]
 zttp verify-modules --builtins --strict --json
@@ -333,6 +334,31 @@ any other `schema_version` gets a frozen three-key negotiation response, so
 version discovery is one deterministic round trip.
 
 Exit codes for gating: `check` returns 0 (ok), 1 (errors), or 2 (warnings only, no errors). `prove` and `prove-behavior` return 0 (safe), 1 (breaking), or 2 (usage or error). `spec-check` validates the semantics registry against the IR/bytecode tables and returns 0 (conform), 1 (divergence, with a `ZTS75x` counterexample), or 2 (error); `spec-hash` prints the registry hash for CI assertions, the way `describe-rule --hash` prints the policy hash. `spec-render --check <path>` returns 0 when the committed readable spec matches the registry, or 1 when it is stale. See [Semantics Verification](internals/semantics-verification.md) for the five mechanisms, the SMT layer, the exclusion audit, and the generated artifacts these commands own.
+
+### Training Export
+
+`zttp zts-training-export` writes the sealed training contract bundle: the rule
+catalog, the admitted feature set, the restrictions and the proofs they unlock,
+the virtual module exports, the published examples, and the rendered semantics
+spec, plus a `manifest.json` that binds every identity hash this compiler
+publishes and a SHA-256 for each emitted file.
+
+The bundle is the only channel by which a training pipeline may learn what this
+compiler enforces. Held-out evaluation material is excluded by construction: the
+exporter renders from registries compiled into the binary and never opens the
+recorded corpora, so there is no filter that could fail open.
+
+`--commit` and `--worktree` are required. The command reads no git state of its
+own, so a bundle that cannot name its source is refused rather than emitted with
+the field blank, and a dirty worktree is refused outright. Run `zig build
+zts-training-export` to have `scripts/zts-training-export.sh` supply both from
+git, write the bundle, and then verify every digest the manifest claims against
+the bytes on disk.
+
+`bundle_id` covers the compiler authority only - schema, versions, soundness
+epoch, every identity hash, and the sorted file digests. Provenance is recorded
+but not hashed into it, so two clean checkouts of the same commit on two
+machines produce the same bundle id.
 
 ### Canonicalize And Normalize
 

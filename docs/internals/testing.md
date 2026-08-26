@@ -30,6 +30,7 @@ there without a row here fails `zig build test-docs-drift`:
 | `test-expert` | `packages/tools/src/expert.zig` |
 | `test-zts-cli` | `packages/tools/src/zts_cli.zig` |
 | `test-deploy-manifest` | `packages/tools/src/deploy_manifest.zig` |
+| `test-training-export` | `packages/tools/src/training_export.zig` |
 | `test-agent-identity` | `packages/tools/src/agent_identity.zig` |
 | `test-module-graph-record` | `packages/tools/src/module_graph_record.zig` |
 | `test-agent-protocol` | `packages/tools/src/agent_protocol.zig` |
