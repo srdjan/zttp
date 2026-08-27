@@ -144,6 +144,28 @@ pub fn capsuleReplayProbe(
     return .{ .total = tally.total, .regressed = tally.regressed };
 }
 
+/// The project's configured capability policy, for a boundary that is about to
+/// publish a verdict. A configured policy that cannot be read is a refusal, not
+/// an absent policy, so both callers stop rather than analyze without it.
+/// Caller frees.
+fn loadConfiguredPolicy(
+    allocator: std.mem.Allocator,
+    project: ?*const project_config_mod.ProjectConfig,
+    context: []const u8,
+) !?[]u8 {
+    const cfg = project orelse return null;
+    return cfg.readPolicySource(allocator) catch |err| {
+        if (!builtin.is_test) {
+            std.debug.print(
+                "{s} could not load configured capability policy '{s}': {s}\n",
+                .{ context, cfg.policy orelse "", @errorName(err) },
+            );
+            std.debug.print("Next: repair the policy entry in zttp.json or restore the policy file.\n", .{});
+        }
+        return error.CheckFailed;
+    };
+}
+
 /// Resolve the handler + system path the recording session used, then write
 /// the capsule manifest. Split out so `devCommand` stays readable.
 fn recordProofManifest(allocator: std.mem.Allocator, argv: []const []const u8, capsule_name: []const u8) !void {
@@ -175,19 +197,11 @@ fn recordProofManifest(allocator: std.mem.Allocator, argv: []const []const u8, c
     else
         null;
     defer if (discovered_system) |p| allocator.free(p);
-    const policy_source = if (project) |*cfg|
-        cfg.readPolicySource(allocator) catch |err| {
-            if (!builtin.is_test) {
-                std.debug.print(
-                    "proof recording could not load configured capability policy '{s}': {s}\n",
-                    .{ cfg.policy orelse "", @errorName(err) },
-                );
-                std.debug.print("Next: repair the policy entry in zttp.json or restore the policy file.\n", .{});
-            }
-            return error.CheckFailed;
-        }
-    else
-        null;
+    const policy_source = try loadConfiguredPolicy(
+        allocator,
+        if (project) |*cfg| cfg else null,
+        "proof recording",
+    );
     defer if (policy_source) |source| allocator.free(source);
 
     try proof_cli.writeManifest(
@@ -350,19 +364,12 @@ fn runDevPreflight(allocator: std.mem.Allocator, argv: []const []const u8, comma
     const sqlite_path = explicit_sqlite orelse discovered_sqlite;
     const system_path = explicit_system orelse discovered_system;
 
-    const policy_source = if (project) |*cfg|
-        cfg.readPolicySource(allocator) catch |err| {
-            if (!builtin.is_test) {
-                std.debug.print(
-                    "zttp {s} preflight could not load configured capability policy '{s}': {s}\n",
-                    .{ command, cfg.policy orelse "", @errorName(err) },
-                );
-                std.debug.print("Next: repair the policy entry in zttp.json or restore the policy file.\n", .{});
-            }
-            return error.CheckFailed;
-        }
-    else
-        null;
+    var preflight_label: [64]u8 = undefined;
+    const policy_source = try loadConfiguredPolicy(
+        allocator,
+        if (project) |*cfg| cfg else null,
+        std.fmt.bufPrint(&preflight_label, "zttp {s} preflight", .{command}) catch "zttp preflight",
+    );
     defer if (policy_source) |source| allocator.free(source);
 
     var check = precompile.runCheckOnlyWithOptions(allocator, target, .{

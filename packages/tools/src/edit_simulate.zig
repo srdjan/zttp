@@ -98,17 +98,21 @@ pub fn simulate(
     // `zts check`) does. Without this, every in-process tool that simulates a
     // zttp:sql handler (the repair-apply lane, review patch, ast rewrite,
     // feature apply) throws MissingSqlSchema even though the project has a
-    // configured schema. The veto and CLI already pass non-null paths, so
-    // discovery only runs for the path-less in-process callers.
-    var discovered: ProjectPaths = if (input.sql_schema_path == null or input.system_path == null or input.policy_source == null)
+    // configured schema. A caller that already owns the schema, the system
+    // manifest, and the policy passes all three and skips discovery.
+    var discovered: ProjectPaths = if (input.sql_schema_path == null or
+        input.system_path == null or
+        input.policy_source == null)
         try discoverProjectPaths(allocator, input.file)
     else
         .{};
     defer discovered.deinit(allocator);
     const schema_path = input.sql_schema_path orelse discovered.sqlite;
     const system_path = input.system_path orelse discovered.system;
-    const discovered_policy_source = if (input.policy_source == null and discovered.policy != null)
-        try file_io.readFile(allocator, discovered.policy.?, 1024 * 1024)
+    const discovered_policy_source: ?[]u8 = if (input.policy_source != null)
+        null
+    else if (discovered.policy) |path|
+        try file_io.readFile(allocator, path, 1024 * 1024)
     else
         null;
     defer if (discovered_policy_source) |source| allocator.free(source);
