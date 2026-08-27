@@ -4,7 +4,7 @@
 
 Range version: `step-6-v2`
 
-Range hash: `754b866c36dbf85d78f38df4b1ef3db3697bf9e208191ff105c27d88faa5c037`
+Range hash: `9c27a7f8dd63456fec9a6d755f9b98a9f7dad89d1b0e9227503f601f4488ebf4`
 
 The deterministic playbook server supports the entries below. Use `zig build zttp-standin -- --range` to print this document.
 
@@ -152,6 +152,10 @@ Drafts the stand-in emits expecting the veto to reject them, so the rejection ha
 | `dict-entry-round-trip` | `ZTS627` | model_retry |
 | `dict-entries-reduce` | `ZTS628` | model_retry |
 | `unused-import` | `ZTS306` | model_retry |
+| `env-not-allowed` | `POL001` | model_retry |
+| `egress-not-allowed` | `POL003` | model_retry |
+| `cache-not-allowed` | `POL005` | model_retry |
+| `sql-query-not-allowed` | `POL007` | model_retry |
 
 ## Hole seeds
 

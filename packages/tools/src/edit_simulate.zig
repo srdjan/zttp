@@ -376,13 +376,24 @@ fn runWithArgsWriter(allocator: std.mem.Allocator, argv: []const []const u8, wri
     // would otherwise walk to `/` and return nothing - turning every zttp:sql
     // simulation into MissingSqlSchema.
     var paths = discoverProjectPaths(allocator, input.file) catch ProjectPaths{};
-    if (paths.sqlite == null and paths.system == null) {
+    if (paths.sqlite == null and paths.system == null and paths.policy == null) {
         paths.deinit(allocator);
         paths = discoverProjectPaths(allocator, null) catch ProjectPaths{};
     }
     defer paths.deinit(allocator);
     input.sql_schema_path = paths.sqlite;
     input.system_path = paths.system;
+
+    // The policy is read here rather than in `simulate`, for the same reason
+    // the paths are: one walk per invocation, rooted at the edited file, so
+    // this command and `zts check` cannot reach different verdicts for the
+    // same handler.
+    const policy_source = if (paths.policy) |path|
+        file_io.readFile(allocator, path, 1024 * 1024) catch null
+    else
+        null;
+    defer if (policy_source) |src| allocator.free(src);
+    input.policy_source = policy_source;
 
     var result = try simulate(allocator, input);
     defer result.deinit(allocator);

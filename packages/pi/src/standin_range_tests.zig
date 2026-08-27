@@ -549,16 +549,36 @@ test "stand-in gate: defect seeds are well formed and select by their own code" 
 
 test "stand-in gate: every defect seed reproduces its declared veto class through the real veto" {
     for (defect_seeds.seeds) |seed| {
+        // A seed whose drafts import `zttp:sql` needs a schema on disk: the
+        // analyzer resolves query names against a file, and a schema-less
+        // zttp:sql edit is refused with guidance before any rule can fire.
+        // Written per seed and removed with it, so nothing leaks between seeds
+        // and a seed without one is unaffected.
+        var schema_dir: ?std.testing.TmpDir = null;
+        defer if (schema_dir) |*dir| dir.cleanup();
+        // `realPathFileAlloc` returns a sentinel-terminated slice; freeing it
+        // as a plain `[]u8` drops the sentinel byte and trips the debug
+        // allocator's size check.
+        var schema_path_buf: ?[:0]u8 = null;
+        defer if (schema_path_buf) |buf| testing.allocator.free(buf);
+        if (seed.sql_schema) |schema_source| {
+            schema_dir = std.testing.tmpDir(.{});
+            try schema_dir.?.dir.writeFile(testing.io, .{ .sub_path = "schema.sql", .data = schema_source });
+            schema_path_buf = try std.Io.Dir.realPathFileAlloc(schema_dir.?.dir, testing.io, "schema.sql", testing.allocator);
+        }
+        const schema_path: ?[]const u8 = schema_path_buf;
+
         // The seed must be clean. The veto is differential (`ok` is
         // `new_count == 0`), so a seed already carrying its own defect makes the
         // defect pre-existing, the bad draft passes, and the arm tests nothing
         // while reporting a clean run. This is the assertion that stops it.
         {
-            var clean = try veto.runVeto(testing.allocator, .{
+            var clean = try veto.runVetoWithSchema(testing.allocator, .{
                 .file = "handler.ts",
                 .content = seed.seed_source,
                 .before = null,
-            });
+                .policy_source = seed.policy_json,
+            }, schema_path);
             defer clean.deinit(testing.allocator);
             // `ok` alone is too weak: salvage-on-reject normalizes a
             // canonical-band defect and reports a pass, so a baseline carrying
@@ -578,11 +598,12 @@ test "stand-in gate: every defect seed reproduces its declared veto class throug
         // reaches it in the arm, and leaving it unchecked is how a class change
         // ships a broken second draft.
         {
-            var good = try veto.runVeto(testing.allocator, .{
+            var good = try veto.runVetoWithSchema(testing.allocator, .{
                 .file = "handler.ts",
                 .content = seed.good_draft,
                 .before = seed.seed_source,
-            });
+                .policy_source = seed.policy_json,
+            }, schema_path);
             defer good.deinit(testing.allocator);
             if (!good.outcome.ok or good.report.new != 0) {
                 std.debug.print(
@@ -604,6 +625,8 @@ test "stand-in gate: every defect seed reproduces its declared veto class throug
                 .file = "handler.ts",
                 .content = seed.bad_draft,
                 .before = seed.seed_source,
+                .policy_source = seed.policy_json,
+                .sql_schema_path = schema_path,
             });
             defer raw.deinit(testing.allocator);
 
@@ -625,11 +648,12 @@ test "stand-in gate: every defect seed reproduces its declared veto class throug
 
         // The bad draft, measured against the seed as baseline: this is what the
         // arm actually submits.
-        var bad = try veto.runVeto(testing.allocator, .{
+        var bad = try veto.runVetoWithSchema(testing.allocator, .{
             .file = "handler.ts",
             .content = seed.bad_draft,
             .before = seed.seed_source,
-        });
+            .policy_source = seed.policy_json,
+        }, schema_path);
         defer bad.deinit(testing.allocator);
 
         switch (seed.class) {
@@ -684,11 +708,12 @@ test "stand-in gate: every defect seed reproduces its declared veto class throug
                 }
                 try testing.expectEqualStrings(seed.good_draft, candidate.proposed_content.?);
 
-                var repaired = try veto.runVeto(testing.allocator, .{
+                var repaired = try veto.runVetoWithSchema(testing.allocator, .{
                     .file = "handler.ts",
                     .content = candidate.proposed_content.?,
                     .before = seed.seed_source,
-                });
+                    .policy_source = seed.policy_json,
+                }, schema_path);
                 defer repaired.deinit(testing.allocator);
                 if (!repaired.outcome.ok or repaired.report.new != 0) {
                     return error.CompilerRepairCandidateFailsBindingVeto;

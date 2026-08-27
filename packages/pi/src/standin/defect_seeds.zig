@@ -54,6 +54,21 @@ pub const DefectSeed = struct {
     good_draft: []const u8,
     /// The ask that selects this seed. Must classify to `violation_fix`.
     ask: []const u8,
+    /// Capability policy JSON this seed's drafts are checked against.
+    ///
+    /// The POL rules compare a handler's contract to an allow-list, so a seed
+    /// for one has to carry the allow-list: there is no workspace behind these
+    /// drafts to discover it from. Null for every other seed, which is the
+    /// shape of a project that declares no policy, and leaves the POL rules
+    /// silent exactly as they are today.
+    policy_json: ?[]const u8 = null,
+    /// SQL schema source for a seed whose drafts import `zttp:sql`.
+    ///
+    /// The analyzer resolves query names against a schema FILE, so the gate
+    /// writes this to a temporary path and passes that path down. A zttp:sql
+    /// draft with no schema is refused with guidance before any rule fires, so
+    /// without this a POL007 seed could never reach the policy check.
+    sql_schema: ?[]const u8 = null,
 };
 
 const clean_total =
@@ -613,6 +628,62 @@ const clean_dict_entries =
 ;
 const clean_no_imports =
     \\function handler(req: Request): Proof<Response, "deterministic"> {
+    \\  return Response.json({ ok: 1 });
+    \\}
+    \\
+;
+
+/// The allow-list the POL seeds below are measured against. One policy for all
+/// four, so a seed that trips its own category cannot be passing because the
+/// other three sections are absent.
+const pol_policy =
+    \\{ "env": { "allow": ["APP_NAME"] }, "egress": { "allow_hosts": ["allowed.example.com"] }, "cache": { "allow_namespaces": ["allowed_ns"] }, "sql": { "allow_queries": ["allowedQuery"] } }
+    \\
+;
+
+/// Schema for the POL007 seed. `zttp:sql` query names resolve against a schema
+/// file, and a schema-less zttp:sql edit is refused with guidance before any
+/// rule fires, so without this the seed could never reach the policy check.
+const pol_sql_schema =
+    \\CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT NOT NULL);
+    \\
+;
+
+const env_not_allowed_clean =
+    \\import { env } from "zttp:env";
+    \\
+    \\function handler(req: Request): Proof<Response, "deterministic"> {
+    \\  const v = env("APP_NAME") ?? "x1";
+    \\  return Response.json({ v: v });
+    \\}
+    \\
+;
+
+const egress_not_allowed_clean =
+    \\import { fetch } from "zttp:fetch";
+    \\
+    \\function handler(req: Request): Proof<Response, "deterministic"> {
+    \\  const r = fetch("https://allowed.example.com/v1");
+    \\  return Response.json({ s: r.status });
+    \\}
+    \\
+;
+
+const cache_not_allowed_clean =
+    \\import { cacheGet } from "zttp:cache";
+    \\
+    \\function handler(req: Request): Proof<Response, "state_isolated"> {
+    \\  const v = cacheGet("allowed_ns", "k1") ?? "x";
+    \\  return Response.json({ v: v });
+    \\}
+    \\
+;
+
+const sql_query_not_allowed_clean =
+    \\import { sql } from "zttp:sql";
+    \\
+    \\function handler(req: Request): Proof<Response, "state_isolated"> {
+    \\  sql("allowedQuery", "SELECT id FROM users WHERE id = :id");
     \\  return Response.json({ ok: 1 });
     \\}
     \\
@@ -2364,6 +2435,111 @@ pub const seeds = [_]DefectSeed{
         \\
         ,
         .ask = "Fix the ZTS306 compiler error in handler.ts",
+    },
+    .{
+        .id = "env-not-allowed",
+        .code = "POL001",
+        .class = .model_retry,
+        .seed_source = env_not_allowed_clean,
+        .bad_draft =
+        \\import { env } from "zttp:env";
+        \\
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const v = env("OTHER_NAME") ?? "x1";
+        \\  return Response.json({ v: v });
+        \\}
+        \\
+        ,
+        .good_draft =
+        \\import { env } from "zttp:env";
+        \\
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const v = env("APP_NAME") ?? "x2";
+        \\  return Response.json({ v: v });
+        \\}
+        \\
+        ,
+        .ask = "Fix the POL001 compiler error in handler.ts",
+        .policy_json = pol_policy,
+    },
+    .{
+        .id = "egress-not-allowed",
+        .code = "POL003",
+        .class = .model_retry,
+        .seed_source = egress_not_allowed_clean,
+        .bad_draft =
+        \\import { fetch } from "zttp:fetch";
+        \\
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const r = fetch("https://forbidden.example.com/v1");
+        \\  return Response.json({ s: r.status });
+        \\}
+        \\
+        ,
+        .good_draft =
+        \\import { fetch } from "zttp:fetch";
+        \\
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const r = fetch("https://allowed.example.com/v2");
+        \\  return Response.json({ s: r.status });
+        \\}
+        \\
+        ,
+        .ask = "Fix the POL003 compiler error in handler.ts",
+        .policy_json = pol_policy,
+    },
+    .{
+        .id = "cache-not-allowed",
+        .code = "POL005",
+        .class = .model_retry,
+        .seed_source = cache_not_allowed_clean,
+        .bad_draft =
+        \\import { cacheGet } from "zttp:cache";
+        \\
+        \\function handler(req: Request): Proof<Response, "state_isolated"> {
+        \\  const v = cacheGet("forbidden_ns", "k1") ?? "x";
+        \\  return Response.json({ v: v });
+        \\}
+        \\
+        ,
+        .good_draft =
+        \\import { cacheGet } from "zttp:cache";
+        \\
+        \\function handler(req: Request): Proof<Response, "state_isolated"> {
+        \\  const v = cacheGet("allowed_ns", "k2") ?? "x";
+        \\  return Response.json({ v: v });
+        \\}
+        \\
+        ,
+        .ask = "Fix the POL005 compiler error in handler.ts",
+        .policy_json = pol_policy,
+    },
+    .{
+        .id = "sql-query-not-allowed",
+        .code = "POL007",
+        .class = .model_retry,
+        .seed_source = sql_query_not_allowed_clean,
+        .bad_draft =
+        \\import { sql } from "zttp:sql";
+        \\
+        \\function handler(req: Request): Proof<Response, "state_isolated"> {
+        \\  sql("forbiddenQuery", "SELECT id FROM users WHERE id = :id");
+        \\  return Response.json({ ok: 1 });
+        \\}
+        \\
+        ,
+        .good_draft =
+        \\import { sql } from "zttp:sql";
+        \\
+        \\function handler(req: Request): Proof<Response, "state_isolated"> {
+        \\  sql("allowedQuery", "SELECT id FROM users WHERE id = :id");
+        \\  return Response.json({ ok: 2 });
+        \\}
+        \\
+        ,
+        .ask = "Fix the POL007 compiler error in handler.ts",
+        .policy_json = pol_policy,
+        .sql_schema = pol_sql_schema,
     },
 };
 

@@ -29,19 +29,13 @@
 # `non-default`, the handler was written, `zts edit-simulate` was run against a
 # clean baseline, and the codes it did report are named in the finding.
 
-# POL001-POL008 name capability-policy violations, and the policy check does
-# run: `enforcePolicyForContract` in packages/tools/src/precompile.zig rejects a
-# handler whose contract exceeds a configured allow-list. But it returns
-# error.PolicyViolation and prints handler_policy.formatViolations, whose two
-# format strings carry no code. `diagnostic_catalog.policyCode` has no caller
-# outside the catalog table it feeds. Probe: a workspace whose zttp.json allows
-# only APP_NAME, and a handler reading JWT_SECRET, passes `zts check` with 0
-# errors and exit 0.
-POL001 no-producer
-POL003 no-producer
-POL005 no-producer
-POL007 no-producer
-
+# POL001, POL003, POL005 and POL007 were in this file with a `no-producer`
+# reason and are seeded now. The reason was accurate when written and the fix
+# was in the product, not the suite: the allow-list was enforced only at build
+# time, through a path that raises `error.PolicyViolation` and prints prose
+# carrying no code, so `zts check` and the veto never saw it. `zttp.json` now
+# carries a `policy` key and the check path reports coded POL diagnostics.
+#
 # The four `dynamic_not_allowed` codes are a different case, and their earlier
 # `no-producer` reason was wrong. `validateContract` raises them from
 # `contract.env.dynamic` and its three siblings, which are set while the

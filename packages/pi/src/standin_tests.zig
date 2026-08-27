@@ -107,6 +107,29 @@ fn runSeedArm(
     defer tmp.cleanup(allocator);
     try tmp.writeFile(allocator, "handler.ts", seed.seed_source);
 
+    // A seed that carries project context gets a real project to carry it.
+    // Writing the manifest and letting the veto discover the policy exercises
+    // the path a user actually has - `zttp.json` -> `policy` -> the check -
+    // rather than handing the policy straight to the analyzer, which would
+    // prove the rule fires and nothing about whether a project can reach it.
+    if (seed.policy_json) |policy_json| {
+        try tmp.writeFile(allocator, "policy.json", policy_json);
+        if (seed.sql_schema) |schema| {
+            try tmp.writeFile(allocator, "schema.sql", schema);
+            try tmp.writeFile(
+                allocator,
+                "zttp.json",
+                "{ \"entry\": \"handler.ts\", \"policy\": \"policy.json\", \"sqlite\": \"schema.sql\" }\n",
+            );
+        } else {
+            try tmp.writeFile(
+                allocator,
+                "zttp.json",
+                "{ \"entry\": \"handler.ts\", \"policy\": \"policy.json\" }\n",
+            );
+        }
+    }
+
     var server = try server_mod.Server.init(allocator, 0, null);
     defer server.deinit();
     try server.start();

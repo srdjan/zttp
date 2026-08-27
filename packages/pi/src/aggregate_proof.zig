@@ -73,10 +73,16 @@ pub const Result = union(enum) {
 const ContextPaths = struct {
     schema_relative: ?[]u8 = null,
     system_relative: ?[]u8 = null,
+    /// The project's capability policy, if it declares one. Held relative to
+    /// the workspace root like the other two, so baseline and candidate each
+    /// read the copy inside their own materialized snapshot rather than a path
+    /// that escapes it.
+    policy_relative: ?[]u8 = null,
 
     fn deinit(self: *ContextPaths, allocator: std.mem.Allocator) void {
         if (self.schema_relative) |path| allocator.free(path);
         if (self.system_relative) |path| allocator.free(path);
+        if (self.policy_relative) |path| allocator.free(path);
         self.* = .{};
     }
 };
@@ -133,6 +139,10 @@ pub fn prove(
         defer if (before_system) |path| allocator.free(path);
         const after_system = try mappedOptionalPath(allocator, &candidate, context.system_relative);
         defer if (after_system) |path| allocator.free(path);
+        const before_policy = try mappedPolicySource(allocator, &baseline, context.policy_relative);
+        defer if (before_policy) |src| allocator.free(src);
+        const after_policy = try mappedPolicySource(allocator, &candidate, context.policy_relative);
+        defer if (after_policy) |src| allocator.free(src);
 
         if (fileExists(allocator, before_path)) {
             const properties = collectCheckDiagnostics(
@@ -142,6 +152,7 @@ pub fn prove(
                 before_path,
                 before_schema,
                 before_system,
+                before_policy,
             ) catch |err| {
                 if (err == error.OutOfMemory) return err;
                 return rejectedFmt(allocator, "baseline_analysis_failed", "baseline analysis failed for {s}: {s}", .{ relative_root, @errorName(err) });
@@ -155,6 +166,7 @@ pub fn prove(
             after_path,
             after_schema,
             after_system,
+            after_policy,
         ) catch |err| {
             if (err == error.OutOfMemory) return err;
             return rejectedFmt(allocator, "candidate_analysis_failed", "candidate analysis failed for {s}: {s}", .{ relative_root, @errorName(err) });
@@ -259,15 +271,32 @@ fn discoverConsistentContext(
         defer if (schema_relative) |path| allocator.free(path);
         const system_relative = try relativeOptionalContext(allocator, candidate.root, paths.system);
         defer if (system_relative) |path| allocator.free(path);
+        const policy_relative = try relativeOptionalContext(allocator, candidate.root, paths.policy);
+        defer if (policy_relative) |path| allocator.free(path);
         if (index == 0) {
             result.schema_relative = if (schema_relative) |path| try allocator.dupe(u8, path) else null;
             result.system_relative = if (system_relative) |path| try allocator.dupe(u8, path) else null;
+            result.policy_relative = if (policy_relative) |path| try allocator.dupe(u8, path) else null;
         } else {
             if (!optionalEqual(result.schema_relative, schema_relative)) return error.InconsistentSqlContext;
             if (!optionalEqual(result.system_relative, system_relative)) return error.InconsistentSystemContext;
+            if (!optionalEqual(result.policy_relative, policy_relative)) return error.InconsistentPolicyContext;
         }
     }
     return result;
+}
+
+/// Read the policy out of a materialized snapshot. Each side reads its own
+/// copy, so a change set that edits the policy is measured against the policy
+/// each side actually had.
+fn mappedPolicySource(
+    allocator: std.mem.Allocator,
+    materialized: *const workspace_snapshot.Materialized,
+    policy_relative: ?[]const u8,
+) !?[]u8 {
+    const path = try mappedOptionalPath(allocator, materialized, policy_relative) orelse return null;
+    defer allocator.free(path);
+    return zts.file_io.readFile(allocator, path, 1024 * 1024) catch null;
 }
 
 fn relativeOptionalContext(
@@ -412,18 +441,27 @@ fn collectCheckDiagnostics(
     handler_path: []const u8,
     schema_path: ?[]const u8,
     system_path: ?[]const u8,
+    policy_source: ?[]const u8,
 ) !?ui_payload.PropertiesSnapshot {
-    var check = zts_cli.precompile.runCheckOnly(allocator, handler_path, schema_path, true, system_path) catch |full_error| {
+    var check = zts_cli.precompile.runCheckOnlyWithOptions(allocator, handler_path, .{
+        .sql_schema_path = schema_path,
+        .json_mode = true,
+        .system_path = system_path,
+        .policy_source = policy_source,
+    }) catch |full_error| {
         const source = try zts.file_io.readFile(allocator, handler_path, change_set.max_file_bytes);
         defer allocator.free(source);
-        var fallback = zts_cli.precompile.runCheckOnlyFromSource(
+        var fallback = zts_cli.precompile.runCheckOnlyFromSourceWithOptions(
             allocator,
             source,
             handler_path,
-            schema_path,
-            true,
-            system_path,
-            true,
+            .{
+                .sql_schema_path = schema_path,
+                .json_mode = true,
+                .system_path = system_path,
+                .skip_contract = true,
+                .policy_source = policy_source,
+            },
         ) catch return full_error;
         defer fallback.deinit(allocator);
         if (fallback.json_diagnostics.items.len == 0) return full_error;
