@@ -48,13 +48,17 @@ jobs:
         with:
           version: ${{ env.ZIG_VERSION }}
 
-      - name: Install z3
+      # ripgrep is a search backend for the expert workspace tools, and the
+      # recorded codegen corpus holds the bytes rg produces. A runner without it
+      # takes the in-process fallback, whose bytes differ, and four cassettes
+      # then replay as stale.
+      - name: Install z3 and ripgrep
         run: |
           if [ "$RUNNER_OS" = "macOS" ]; then
-            brew install z3
+            brew install z3 ripgrep
           else
             sudo apt-get update
-            sudo apt-get install -y z3
+            sudo apt-get install -y z3 ripgrep
           fi
 
       - name: Run authoritative verifier
