@@ -28,6 +28,16 @@ For releases prior to v0.16 see git tags and [RELEASE_CHECKLIST.md](RELEASE_CHEC
   loop, and its contract capability are gone. Handlers that imported it no
   longer compile. The built-in module surface is 26 specifiers.
 
+- **Three fail-closed tightenings refuse input that 0.18.0 accepted.**
+  - A `zttp.json` whose `policy` entry names a missing, unreadable, or
+    malformed file is an error at every analyzer boundary, instead of falling
+    back to unrestricted analysis. Repair the path or drop the entry.
+  - An edge config with `timeoutMs: 0` is rejected at startup. Set a positive
+    value, or omit the field for the `30000` default.
+  - `zttp proofs verify` rejects a bundle manifest that omits `contract`, names
+    a component other than `contract`, `binary`, or `replay`, reuses a path, or
+    carries an uppercase sha256. Rebuild with `zttp proofs bundle`.
+
 ### Added
 
 - **DeepSeek provider for `zttp expert`.** `--provider deepseek` and
