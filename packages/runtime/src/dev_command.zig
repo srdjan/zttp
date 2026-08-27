@@ -163,13 +163,41 @@ fn recordProofManifest(allocator: std.mem.Allocator, argv: []const []const u8, c
         return error.NoProjectConfig;
     defer allocator.free(handler_path);
 
-    const system_path = if (explicit_path == null and project != null)
-        try project.?.resolvedSystemPath(allocator)
+    const explicit_sqlite = optionValue(argv, "--sqlite");
+    const explicit_system = optionValue(argv, "--system");
+    const discovered_sqlite = if (explicit_sqlite == null)
+        if (project) |*cfg| try cfg.resolvedSqlitePath(allocator) else null
     else
         null;
-    defer if (system_path) |p| allocator.free(p);
+    defer if (discovered_sqlite) |p| allocator.free(p);
+    const discovered_system = if (explicit_system == null)
+        if (project) |*cfg| try cfg.resolvedSystemPath(allocator) else null
+    else
+        null;
+    defer if (discovered_system) |p| allocator.free(p);
+    const policy_source = if (project) |*cfg|
+        cfg.readPolicySource(allocator) catch |err| {
+            if (!builtin.is_test) {
+                std.debug.print(
+                    "proof recording could not load configured capability policy '{s}': {s}\n",
+                    .{ cfg.policy orelse "", @errorName(err) },
+                );
+                std.debug.print("Next: repair the policy entry in zttp.json or restore the policy file.\n", .{});
+            }
+            return error.CheckFailed;
+        }
+    else
+        null;
+    defer if (policy_source) |source| allocator.free(source);
 
-    try proof_cli.writeManifest(allocator, capsule_name, handler_path, system_path);
+    try proof_cli.writeManifest(
+        allocator,
+        capsule_name,
+        handler_path,
+        explicit_sqlite orelse discovered_sqlite,
+        explicit_system orelse discovered_system,
+        policy_source,
+    );
 }
 
 pub fn studioCommand(allocator: std.mem.Allocator, program_path: []const u8, argv: []const []const u8) !void {
@@ -322,7 +350,26 @@ fn runDevPreflight(allocator: std.mem.Allocator, argv: []const []const u8, comma
     const sqlite_path = explicit_sqlite orelse discovered_sqlite;
     const system_path = explicit_system orelse discovered_system;
 
-    var check = precompile.runCheckOnly(allocator, target, sqlite_path, false, system_path) catch |err| {
+    const policy_source = if (project) |*cfg|
+        cfg.readPolicySource(allocator) catch |err| {
+            if (!builtin.is_test) {
+                std.debug.print(
+                    "zttp {s} preflight could not load configured capability policy '{s}': {s}\n",
+                    .{ command, cfg.policy orelse "", @errorName(err) },
+                );
+                std.debug.print("Next: repair the policy entry in zttp.json or restore the policy file.\n", .{});
+            }
+            return error.CheckFailed;
+        }
+    else
+        null;
+    defer if (policy_source) |source| allocator.free(source);
+
+    var check = precompile.runCheckOnlyWithOptions(allocator, target, .{
+        .sql_schema_path = sqlite_path,
+        .system_path = system_path,
+        .policy_source = policy_source,
+    }) catch |err| {
         if (!builtin.is_test) {
             std.debug.print("zttp {s} preflight could not run for {s}: {}\n", .{ command, target, err });
             std.debug.print("Next: run `zttp check {s}` for full diagnostics.\n", .{target});
@@ -559,6 +606,43 @@ test "runDevPreflight reports analyzer failure before starting dev loop" {
         .data =
         \\function handler(req) {
         \\    return Response.text("ok");
+        \\}
+        ,
+    });
+
+    try testing.expectError(error.CheckFailed, runDevPreflight(testing.allocator, &.{}, "dev"));
+}
+
+test "runDevPreflight rejects a handler outside the project capability policy" {
+    const testing = std.testing;
+
+    var io_backend = std.Io.Threaded.init(testing.allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    const io = io_backend.io();
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const old_cwd = try @import("proof_ledger.zig").chdirTmpForTest(&tmp);
+    defer testing.allocator.free(old_cwd);
+    defer std.Io.Threaded.chdir(old_cwd) catch {};
+
+    try tmp.dir.createDirPath(io, "src");
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "zttp.json",
+        .data = "{\"entry\":\"src/handler.ts\",\"policy\":\"policy.json\"}",
+    });
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "policy.json",
+        .data = "{\"env\":{\"allow\":[\"APP_NAME\"]}}",
+    });
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "src/handler.ts",
+        .data =
+        \\import { env } from "zttp:env";
+        \\
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const value = env("OTHER_NAME") ?? "fallback";
+        \\  return Response.json({ value: value });
         \\}
         ,
     });

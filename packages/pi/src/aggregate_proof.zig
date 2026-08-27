@@ -139,9 +139,25 @@ pub fn prove(
         defer if (before_system) |path| allocator.free(path);
         const after_system = try mappedOptionalPath(allocator, &candidate, context.system_relative);
         defer if (after_system) |path| allocator.free(path);
-        const before_policy = try mappedPolicySource(allocator, &baseline, context.policy_relative);
+        const before_policy = mappedPolicySource(allocator, &baseline, context.policy_relative) catch |err| {
+            if (err == error.OutOfMemory) return err;
+            return rejectedFmt(
+                allocator,
+                "policy_context_failed",
+                "baseline capability policy could not be loaded: {s}",
+                .{@errorName(err)},
+            );
+        };
         defer if (before_policy) |src| allocator.free(src);
-        const after_policy = try mappedPolicySource(allocator, &candidate, context.policy_relative);
+        const after_policy = mappedPolicySource(allocator, &candidate, context.policy_relative) catch |err| {
+            if (err == error.OutOfMemory) return err;
+            return rejectedFmt(
+                allocator,
+                "policy_context_failed",
+                "candidate capability policy could not be loaded: {s}",
+                .{@errorName(err)},
+            );
+        };
         defer if (after_policy) |src| allocator.free(src);
 
         if (fileExists(allocator, before_path)) {
@@ -296,7 +312,7 @@ fn mappedPolicySource(
 ) !?[]u8 {
     const path = try mappedOptionalPath(allocator, materialized, policy_relative) orelse return null;
     defer allocator.free(path);
-    return zts.file_io.readFile(allocator, path, 1024 * 1024) catch null;
+    return try zts.file_io.readFile(allocator, path, 1024 * 1024);
 }
 
 fn relativeOptionalContext(
@@ -698,6 +714,41 @@ test "aggregate proof accepts coordinated source changes that fail separately" {
     var rejected = try prove(testing.allocator, &single, &single_snapshot);
     defer rejected.deinit(testing.allocator);
     try testing.expect(rejected == .rejected);
+}
+
+test "aggregate proof rejects a configured policy it cannot load" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(testing.io, "src");
+    try tmp.dir.writeFile(testing.io, .{
+        .sub_path = "zttp.json",
+        .data = "{\"entry\":\"src/handler.ts\",\"policy\":\"missing-policy.json\"}",
+    });
+    try tmp.dir.writeFile(testing.io, .{
+        .sub_path = "src/handler.ts",
+        .data = "export function handler(req: Request): Proof<Response, \"state_isolated\"> { return Response.text(\"old\"); }\n",
+    });
+    const root_z = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", testing.allocator);
+    defer testing.allocator.free(root_z);
+    const root = try testing.allocator.dupe(u8, root_z);
+    defer testing.allocator.free(root);
+    var prepared = try change_set.prepare(testing.allocator, root, .{
+        .file = "src/handler.ts",
+        .content = "export function handler(req: Request): Proof<Response, \"state_isolated\"> { return Response.text(\"new\"); }\n",
+    });
+    defer prepared.deinit(testing.allocator);
+    var snapshot = try workspace_snapshot.Snapshot.capture(testing.allocator, &prepared);
+    defer snapshot.deinit(testing.allocator);
+
+    var result = try prove(testing.allocator, &prepared, &snapshot);
+    defer result.deinit(testing.allocator);
+    switch (result) {
+        .accepted => return error.TestUnexpectedResult,
+        .rejected => |rejection| {
+            try testing.expectEqualStrings("policy_context_failed", rejection.code);
+            try testing.expect(std.mem.indexOf(u8, rejection.message, "baseline") != null);
+        },
+    }
 }
 
 test "proof identity binds ordered candidates and full read set" {

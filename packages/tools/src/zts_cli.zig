@@ -234,7 +234,14 @@ fn runCheckCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void
     const policy_source = edit_simulate.discoverProjectPolicySource(
         allocator,
         if (handler_path) |path| path else null,
-    );
+    ) catch {
+        if (json_mode) {
+            try writePolicyLoadFailureJson(allocator, target);
+        } else {
+            try writePolicyLoadFailureText(allocator, target);
+        }
+        std.process.exit(1);
+    };
     defer if (policy_source) |src| allocator.free(src);
 
     var result = precompile.runCheckOnlyWithOptions(allocator, target, .{
@@ -362,6 +369,55 @@ fn writeMissingSqlSchemaJson(allocator: std.mem.Allocator, target: []const u8) !
     if (buf.items.len > 0) {
         _ = std.c.write(std.c.STDOUT_FILENO, buf.items.ptr, buf.items.len);
     }
+}
+
+fn writePolicyLoadFailureJson(allocator: std.mem.Allocator, target: []const u8) !void {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+
+    try writePolicyLoadFailureJsonToWriter(&aw.writer, target);
+
+    buf = aw.toArrayList();
+    if (buf.items.len > 0) {
+        _ = std.c.write(std.c.STDOUT_FILENO, buf.items.ptr, buf.items.len);
+    }
+}
+
+fn writePolicyLoadFailureJsonToWriter(writer: anytype, target: []const u8) !void {
+    const diagnostics = [_]json_diag.JsonDiagnostic{.{
+        .code = zts.DiagnosticCatalog.driverCode(.compiler_io_failure),
+        .severity = "error",
+        .message = "configured capability policy could not be loaded",
+        .file = target,
+        .line = 1,
+        .column = 1,
+        .suggestion = "repair the policy entry in zttp.json or restore the policy file",
+    }};
+    try json_diag.writeErrorJson(writer, null, diagnostics[0..], null, null);
+}
+
+fn writePolicyLoadFailureText(allocator: std.mem.Allocator, target: []const u8) !void {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+
+    try writePolicyLoadFailureTextToWriter(&aw.writer, target);
+
+    buf = aw.toArrayList();
+    if (buf.items.len > 0) {
+        _ = std.c.write(std.c.STDERR_FILENO, buf.items.ptr, buf.items.len);
+    }
+}
+
+fn writePolicyLoadFailureTextToWriter(writer: anytype, target: []const u8) !void {
+    try writer.print(
+        "\ncheck: {s}\n\n  Capability policy diagnostics:\n" ++
+            "    ZTS000 (error) {s}:1:1  configured capability policy could not be loaded\n" ++
+            "      help: repair the policy entry in zttp.json or restore the policy file\n\n" ++
+            "  1 errors, 0 warnings\n",
+        .{ target, target },
+    );
 }
 
 fn writeMissingSqlSchemaJsonToWriter(writer: anytype, target: []const u8) !void {
@@ -692,6 +748,26 @@ test "missing sql schema json uses diagnostic envelope" {
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "\"success\":false") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "\"code\":\"ZTS700\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "--sql-schema") != null);
+}
+
+test "policy load failures are actionable in json and text modes" {
+    var json_buf: std.ArrayList(u8) = .empty;
+    defer json_buf.deinit(std.testing.allocator);
+    var json_aw: std.Io.Writer.Allocating = .fromArrayList(std.testing.allocator, &json_buf);
+    try writePolicyLoadFailureJsonToWriter(&json_aw.writer, "handler.ts");
+    json_buf = json_aw.toArrayList();
+    try std.testing.expect(std.mem.indexOf(u8, json_buf.items, "\"success\":false") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json_buf.items, "\"code\":\"ZTS000\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json_buf.items, "policy entry in zttp.json") != null);
+
+    var text_buf: std.ArrayList(u8) = .empty;
+    defer text_buf.deinit(std.testing.allocator);
+    var text_aw: std.Io.Writer.Allocating = .fromArrayList(std.testing.allocator, &text_buf);
+    try writePolicyLoadFailureTextToWriter(&text_aw.writer, "handler.ts");
+    text_buf = text_aw.toArrayList();
+    try std.testing.expect(std.mem.indexOf(u8, text_buf.items, "Capability policy diagnostics") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text_buf.items, "ZTS000") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text_buf.items, "handler.ts") != null);
 }
 
 test {

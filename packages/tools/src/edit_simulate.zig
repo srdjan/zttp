@@ -100,13 +100,19 @@ pub fn simulate(
     // feature apply) throws MissingSqlSchema even though the project has a
     // configured schema. The veto and CLI already pass non-null paths, so
     // discovery only runs for the path-less in-process callers.
-    var discovered: ProjectPaths = if (input.sql_schema_path == null or input.system_path == null)
-        discoverProjectPaths(allocator, input.file) catch ProjectPaths{}
+    var discovered: ProjectPaths = if (input.sql_schema_path == null or input.system_path == null or input.policy_source == null)
+        try discoverProjectPaths(allocator, input.file)
     else
         .{};
     defer discovered.deinit(allocator);
     const schema_path = input.sql_schema_path orelse discovered.sqlite;
     const system_path = input.system_path orelse discovered.system;
+    const discovered_policy_source = if (input.policy_source == null and discovered.policy != null)
+        try file_io.readFile(allocator, discovered.policy.?, 1024 * 1024)
+    else
+        null;
+    defer if (discovered_policy_source) |source| allocator.free(source);
+    const policy_source = input.policy_source orelse discovered_policy_source;
 
     // Analyze the proposed bytes under the original file identity. Writing
     // them to `/tmp` severed relative imports, so a valid sibling helper was
@@ -120,7 +126,7 @@ pub fn simulate(
             .sql_schema_path = schema_path,
             .json_mode = true,
             .system_path = system_path,
-            .policy_source = input.policy_source,
+            .policy_source = policy_source,
         },
     );
     defer new_check.deinit(allocator);
@@ -137,7 +143,7 @@ pub fn simulate(
                 .sql_schema_path = schema_path,
                 .json_mode = true,
                 .system_path = system_path,
-                .policy_source = input.policy_source,
+                .policy_source = policy_source,
             },
         );
         defer old_check.deinit(allocator);
@@ -295,15 +301,16 @@ pub fn runWithArgs(allocator: std.mem.Allocator, argv: []const []const u8) !void
     defer buf.deinit(allocator);
     var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
 
-    try runWithArgsWriter(allocator, argv, &aw.writer);
+    const verdict_available = try runWithArgsWriter(allocator, argv, &aw.writer);
 
     buf = aw.toArrayList();
     if (buf.items.len > 0) {
         _ = std.c.write(std.c.STDOUT_FILENO, buf.items.ptr, buf.items.len);
     }
+    if (!verdict_available) std.process.exit(1);
 }
 
-fn runWithArgsWriter(allocator: std.mem.Allocator, argv: []const []const u8, writer: *std.Io.Writer) !void {
+fn runWithArgsWriter(allocator: std.mem.Allocator, argv: []const []const u8, writer: *std.Io.Writer) !bool {
     var stdin_json = false;
     var handler_path: ?[]const u8 = null;
     var before_path: ?[]const u8 = null;
@@ -328,7 +335,7 @@ fn runWithArgsWriter(allocator: std.mem.Allocator, argv: []const []const u8, wri
         }
         if (std.mem.eql(u8, arg, "--help")) {
             printHelp();
-            return;
+            return true;
         }
         if (!std.mem.startsWith(u8, arg, "-") and handler_path == null) {
             handler_path = arg;
@@ -375,10 +382,16 @@ fn runWithArgsWriter(allocator: std.mem.Allocator, argv: []const []const u8, wri
     // draft at /tmp or an absolute path in a sibling checkout does exist and
     // would otherwise walk to `/` and return nothing - turning every zttp:sql
     // simulation into MissingSqlSchema.
-    var paths = discoverProjectPaths(allocator, input.file) catch ProjectPaths{};
+    var paths = discoverProjectPaths(allocator, input.file) catch {
+        try writeProjectContextFailure(writer, input.file);
+        return false;
+    };
     if (paths.sqlite == null and paths.system == null and paths.policy == null) {
         paths.deinit(allocator);
-        paths = discoverProjectPaths(allocator, null) catch ProjectPaths{};
+        paths = discoverProjectPaths(allocator, null) catch {
+            try writeProjectContextFailure(writer, input.file);
+            return false;
+        };
     }
     defer paths.deinit(allocator);
     input.sql_schema_path = paths.sqlite;
@@ -389,7 +402,10 @@ fn runWithArgsWriter(allocator: std.mem.Allocator, argv: []const []const u8, wri
     // this command and `zts check` cannot reach different verdicts for the
     // same handler.
     const policy_source = if (paths.policy) |path|
-        file_io.readFile(allocator, path, 1024 * 1024) catch null
+        file_io.readFile(allocator, path, 1024 * 1024) catch {
+            try writeProjectContextFailure(writer, input.file);
+            return false;
+        }
     else
         null;
     defer if (policy_source) |src| allocator.free(src);
@@ -399,6 +415,19 @@ fn runWithArgsWriter(allocator: std.mem.Allocator, argv: []const []const u8, wri
     defer result.deinit(allocator);
 
     try writeResultJson(writer, &result);
+    return true;
+}
+
+fn writeProjectContextFailure(writer: anytype, file: []const u8) !void {
+    try writer.writeAll("{\"violations\":[{\"code\":");
+    try writeJsonString(writer, zts.DiagnosticCatalog.driverCode(.compiler_io_failure));
+    try writer.writeAll(",\"severity\":\"error\",\"message\":");
+    try writeJsonString(writer, "configured project analysis context could not be loaded");
+    try writer.writeAll(",\"line\":1,\"column\":1,\"introduced_by_patch\":true,\"suggestion\":");
+    try writeJsonString(writer, "repair zttp.json and restore its referenced analysis files");
+    try writer.writeAll(",\"file\":");
+    try writeJsonString(writer, file);
+    try writer.writeAll("}],\"total\":1,\"new\":1,\"preexisting\":0}\n");
 }
 
 /// The two `zttp.json` entries the analyzer reads. Caller frees via `deinit`.
@@ -447,8 +476,9 @@ pub fn discoverProjectPaths(allocator: std.mem.Allocator, start_path: ?[]const u
 
 /// Read the project's capability policy: the `policy` entry in the nearest
 /// `zttp.json` walking up from `start_path`, resolved against the project root
-/// and loaded. Returns null when there is no project, no `policy` entry, or the
-/// file cannot be read. Caller frees.
+/// and loaded. Returns null when there is no project or no `policy` entry.
+/// Discovery and read failures propagate so callers that publish a verdict
+/// cannot silently analyze without a configured policy. Caller frees.
 ///
 /// One resolver for every boundary that owns project context - `zts check`,
 /// the `edit-simulate` CLI, and the expert veto - for the reason
@@ -456,15 +486,11 @@ pub fn discoverProjectPaths(allocator: std.mem.Allocator, start_path: ?[]const u
 /// how `check` and `edit-simulate` drifted into different verdicts for the same
 /// handler.
 ///
-/// An unreadable policy degrades to "no policy" rather than failing the run,
-/// matching how a broken manifest degrades to schema-less analysis. A policy
-/// that exists and will not PARSE is a diagnostic instead of a silence, and is
-/// handled where the source is read.
-pub fn discoverProjectPolicySource(allocator: std.mem.Allocator, start_path: ?[]const u8) ?[]u8 {
-    var paths = discoverProjectPaths(allocator, start_path) catch return null;
+pub fn discoverProjectPolicySource(allocator: std.mem.Allocator, start_path: ?[]const u8) !?[]u8 {
+    var paths = try discoverProjectPaths(allocator, start_path);
     defer paths.deinit(allocator);
     const path = paths.policy orelse return null;
-    return file_io.readFile(allocator, path, 1024 * 1024) catch null;
+    return try file_io.readFile(allocator, path, 1024 * 1024);
 }
 
 /// Single-path wrapper for the callers that analyze without a system manifest.
@@ -707,7 +733,7 @@ test "runWithArgs accepts redundant --json flag" {
     var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
 
     // The redundant --json must be accepted (not error.InvalidArgument).
-    try runWithArgsWriter(allocator, &.{ path, "--json" }, &aw.writer);
+    _ = try runWithArgsWriter(allocator, &.{ path, "--json" }, &aw.writer);
 
     buf = aw.toArrayList();
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "\"violations\"") != null);
@@ -796,6 +822,41 @@ test "simulate preserves sibling module proof context" {
     try std.testing.expect(properties.read_only);
     try std.testing.expect(properties.retry_safe);
     try std.testing.expect(properties.idempotent);
+}
+
+test "simulate refuses a configured policy it cannot load" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.createDirPath(std.testing.io, "src");
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "zttp.json",
+        .data = "{\"entry\":\"src/handler.ts\",\"policy\":\"missing-policy.json\"}",
+    });
+    const source =
+        \\function handler(req: Request): Guardrails<Response> {
+        \\  return Response.text("ok");
+        \\}
+    ;
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "src/handler.ts", .data = source });
+
+    const handler_path = try tmp.dir.realPathFileAlloc(std.testing.io, "src/handler.ts", std.testing.allocator);
+    defer std.testing.allocator.free(handler_path);
+
+    try std.testing.expectError(error.FileNotFound, simulate(std.testing.allocator, .{
+        .file = handler_path,
+        .content = source,
+    }));
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(std.testing.allocator, &buf);
+    const verdict_available = try runWithArgsWriter(std.testing.allocator, &.{handler_path}, &aw.writer);
+    buf = aw.toArrayList();
+    try std.testing.expect(!verdict_available);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "\"code\":\"ZTS000\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "\"new\":1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "missing-policy.json") == null);
 }
 
 test "simulate vetoes a nonexistent virtual module export" {

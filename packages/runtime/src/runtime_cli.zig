@@ -13,6 +13,7 @@ const feature_options = @import("runtime_feature_options");
 const project_config_mod = @import("project_config");
 const self_extract = @import("self_extract.zig");
 const live_reload_mod = @import("runtime_features.zig").live_reload;
+const serve_policy = @import("serve_policy.zig");
 const shared = @import("cli_shared.zig");
 const workflow_queue_cli = @import("workflow_queue_cli.zig");
 const durable_dead_runs_cli = @import("durable_dead_runs_cli.zig");
@@ -341,6 +342,25 @@ fn serveCommandWithDebugPanicPath(
         config.studio_demo_root = ".";
     }
 
+    var configured_policy = switch (config.handler) {
+        .file_path => |path| try serve_policy.discoverConfiguredPolicy(allocator, path),
+        else => null,
+    };
+    defer if (configured_policy) |*policy| policy.deinit(allocator);
+    if (configured_policy) |*policy| {
+        const handler_path = switch (config.handler) {
+            .file_path => |path| path,
+            else => unreachable,
+        };
+        try serve_policy.validateConfiguredPolicy(
+            allocator,
+            handler_path,
+            config.runtime_config.sqlite_path,
+            config.runtime_config.system_config_path,
+            policy.source,
+        );
+    }
+
     if (config.runtime_config.replay_file_path != null) {
         replay_runner.run(allocator, config.executionSpec()) catch |err| {
             if (err != error.ReplayVerificationFailed) {
@@ -406,6 +426,9 @@ fn serveCommandWithDebugPanicPath(
             .{
                 .prove = feature_flags.prove_enabled,
                 .force_swap = feature_flags.force_swap,
+                .sql_schema_path = config.runtime_config.sqlite_path,
+                .system_path = config.runtime_config.system_config_path,
+                .policy_path = if (configured_policy) |*policy| policy.path else null,
                 .quest = .{ .enabled = feature_flags.quest_enabled, .explicit = feature_flags.quest_explicit },
             },
         );
@@ -956,6 +979,44 @@ test "parseServeArgs parses internal debug panic path flag" {
 
     const config = try parseServeArgs(arena.allocator(), &.{ "handler.ts", "--_debug-panic-path", "/flag" });
     try std.testing.expectEqualStrings("/flag", config.runtime_config.debug_panic_path.?);
+}
+
+test "serve policy validation never bypasses a configured policy" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "handler.ts",
+        .data =
+        \\import { env } from "zttp:env";
+        \\
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const value = env("OTHER_NAME") ?? "fallback";
+        \\  return Response.json({ value: value });
+        \\}
+        ,
+    });
+    const handler_path = try tmp.dir.realPathFileAlloc(std.testing.io, "handler.ts", allocator);
+    defer allocator.free(handler_path);
+    const config = ServerConfig{
+        .handler = .{ .file_path = handler_path },
+        .runtime_config = .{},
+    };
+
+    const expected_error = if (feature_options.enable_live_reload)
+        error.PolicyViolation
+    else
+        error.PolicyValidationUnavailable;
+    try std.testing.expectError(
+        expected_error,
+        serve_policy.validateConfiguredPolicy(
+            allocator,
+            handler_path,
+            config.runtime_config.sqlite_path,
+            config.runtime_config.system_config_path,
+            "{\"env\":{\"allow\":[\"APP_NAME\"]}}",
+        ),
+    );
 }
 
 test "parseCommonServeFlag: returns false for unrelated flag" {

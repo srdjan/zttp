@@ -63,21 +63,32 @@ pub fn doctorCommand(allocator: std.mem.Allocator, argv: []const []const u8) !vo
         const sqlite_path = try cfg.resolvedSqlitePath(allocator);
         defer if (sqlite_path) |path| allocator.free(path);
 
-        if (entry_ok) {
-            var check = runDoctorAnalyzerForProject(allocator, cfg, entry, sqlite_path) catch |err| {
+        const policy_path = try cfg.resolvedPolicyPath(allocator);
+        defer if (policy_path) |path| allocator.free(path);
+        const policy_ready = if (policy_path) |path| doctorPathExists(io, path) else true;
+        if (policy_path) |path| {
+            if (!policy_ready) failures += 1;
+            printDoctorPath("policy", path, policy_ready);
+        } else {
+            printDoctorSkip("policy", "not configured");
+        }
+
+        if (entry_ok and policy_ready) {
+            if (runDoctorAnalyzerForProject(allocator, cfg, entry, sqlite_path)) |check_value| {
+                var check = check_value;
+                defer check.deinit(allocator);
+                if (check.totalErrors() > 0) {
+                    failures += 1;
+                    printDoctorCheckFailure(&check);
+                } else {
+                    std.debug.print("[ok]   check    handler passes analyzer\n", .{});
+                }
+            } else |err| {
                 failures += 1;
                 printDoctorAnalyzerError(err);
-                return error.CheckFailed;
-            };
-            defer check.deinit(allocator);
-            if (check.totalErrors() > 0) {
-                failures += 1;
-                printDoctorCheckFailure(&check);
-            } else {
-                std.debug.print("[ok]   check    handler passes analyzer\n", .{});
             }
         } else {
-            printDoctorSkip("check", "entry missing");
+            printDoctorSkip("check", if (!entry_ok) "entry missing" else "configured policy missing");
         }
 
         if (try cfg.resolvedStaticDir(allocator)) |static_dir| {
@@ -165,9 +176,9 @@ pub fn printDoctorHelp() void {
         \\runtime options that affect local development.
         \\
         \\Checks:
-        \\  manifest, entry, static directory, system file, tests fixture,
-        \\  sqlite/durable settings, outbound HTTP configuration, and the
-        \\  default expert model provider.
+        \\  manifest, entry, capability policy, static directory, system file,
+        \\  tests fixture, sqlite/durable settings, outbound HTTP configuration,
+        \\  and the default expert model provider.
         \\
         \\Examples:
         \\  zttp doctor
@@ -185,7 +196,13 @@ pub fn runDoctorAnalyzerForProject(
 ) !precompile.CheckResult {
     const system_for_check = try cfg.resolvedSystemPath(allocator);
     defer if (system_for_check) |path| allocator.free(path);
-    return try precompile.runCheckOnly(allocator, entry, sqlite_path, false, system_for_check);
+    const policy_source = try cfg.readPolicySource(allocator);
+    defer if (policy_source) |source| allocator.free(source);
+    return try precompile.runCheckOnlyWithOptions(allocator, entry, .{
+        .sql_schema_path = sqlite_path,
+        .system_path = system_for_check,
+        .policy_source = policy_source,
+    });
 }
 
 fn printDoctorAnalyzerError(err: anyerror) void {
@@ -206,8 +223,9 @@ pub fn printCheckStageFailures(check: *const precompile.CheckResult, prefix: []c
     if (check.strict_errors > 0) std.debug.print("{s}strict   {d} error(s)\n", .{ prefix, check.strict_errors });
     if (check.verify_errors > 0) std.debug.print("{s}verify   {d} error(s)\n", .{ prefix, check.verify_errors });
     if (check.flow_errors > 0) std.debug.print("{s}flow     {d} error(s)\n", .{ prefix, check.flow_errors });
+    if (check.policy_errors > 0) std.debug.print("{s}policy   {d} error(s)\n", .{ prefix, check.policy_errors });
     const spec_errors = check.totalErrors() -|
-        (check.parse_errors + check.bool_errors + check.type_errors + check.strict_errors + check.verify_errors + check.flow_errors);
+        (check.parse_errors + check.bool_errors + check.type_errors + check.strict_errors + check.verify_errors + check.flow_errors + check.policy_errors);
     if (spec_errors > 0) std.debug.print("{s}spec     {d} error(s)\n", .{ prefix, spec_errors });
 }
 

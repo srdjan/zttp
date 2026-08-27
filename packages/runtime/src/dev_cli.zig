@@ -352,7 +352,11 @@ fn cmdBuild(ctx: cli_help.Ctx) anyerror!void {
             printNoProjectConfigDiagnostic(ctx.command);
             std.process.exit(1);
         }
-        if (err == error.MissingArgument or err == error.UnknownOption) {
+        if (err == error.MissingArgument or
+            err == error.UnknownOption or
+            err == error.PolicyContextFailed or
+            err == error.PolicyViolation)
+        {
             std.process.exit(1);
         }
         return err;
@@ -420,6 +424,8 @@ fn cmdDeploy(ctx: cli_help.Ctx) anyerror!void {
             error.NoBytecode,
             error.FileNotFound,
             error.AccessDenied,
+            error.PolicyContextFailed,
+            error.PolicyViolation,
             => std.process.exit(1),
             else => return err,
         }

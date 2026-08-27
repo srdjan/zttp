@@ -114,8 +114,8 @@ later release.
 
 `zttp doctor` validates the project discovered from the current directory, a
 handler path, or a `zttp.json` path, and prints a checklist for the manifest,
-entry, static directory, system file, test fixture, sqlite and durable
-settings, and outbound HTTP configuration:
+entry, capability policy, static directory, system file, test fixture, sqlite
+and durable settings, and outbound HTTP configuration:
 
 ```bash
 zttp doctor

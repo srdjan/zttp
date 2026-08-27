@@ -248,6 +248,9 @@ pub fn buildWatchSet(allocator: std.mem.Allocator, argv: []const []const u8) !Wa
         if (try cfg.resolvedSystemPath(allocator)) |system_path| {
             try paths.append(allocator, system_path);
         }
+        if (try cfg.resolvedPolicyPath(allocator)) |policy_path| {
+            try paths.append(allocator, policy_path);
+        }
     } else if (explicit_path) |path| {
         if (looksLikeHandlerFile(path)) {
             const abs = try std.fs.path.resolve(allocator, &.{path});
@@ -298,6 +301,34 @@ test "parse size" {
     try std.testing.expectEqual(@as(usize, 1024 * 1024), try parseSize("1m"));
     try std.testing.expectEqual(@as(usize, 1024 * 1024), try parseSize("1mb"));
     try std.testing.expectEqual(@as(usize, 100), try parseSize("100"));
+}
+
+test "watch set includes the configured capability policy" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.createDirPath(std.testing.io, "src");
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "zttp.json",
+        .data = "{\"entry\":\"src/handler.ts\",\"policy\":\"policy.json\"}",
+    });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "src/handler.ts", .data = "" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "policy.json", .data = "{}" });
+
+    const handler_path = try tmp.dir.realPathFileAlloc(std.testing.io, "src/handler.ts", allocator);
+    defer allocator.free(handler_path);
+    var watch_set = try buildWatchSet(allocator, &.{handler_path});
+    defer watch_set.deinit(allocator);
+
+    var found_policy = false;
+    for (watch_set.paths) |path| {
+        if (std.mem.eql(u8, std.fs.path.basename(path), "policy.json")) {
+            found_policy = true;
+            break;
+        }
+    }
+    try std.testing.expect(found_policy);
 }
 
 test "stripInlineSource strips TS annotations ENG7" {

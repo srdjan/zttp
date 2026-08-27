@@ -264,6 +264,22 @@ Omit a section to leave that capability unrestricted. If a section is
 present, dynamic access in that category is rejected because zttp
 cannot fully enumerate it.
 
+Projects can apply the same policy during local analysis by naming the file in
+`zttp.json`. The path is resolved relative to the manifest:
+
+```json
+{
+  "entry": "src/handler.ts",
+  "policy": "policy.json"
+}
+```
+
+Project-backed `check`, `dev`, `studio`, `serve`, `test`, `doctor`, `compile`,
+`build`, and `deploy` commands use that configured policy. So do `zts check`, edit
+simulation, expert verification, live-reload candidates, and recorded proof
+capsules. A missing, unreadable, or malformed policy is an error; no command
+substitutes an unrestricted policy and publishes a clean verdict or artifact.
+
 ## OpenAPI and TypeScript SDK (`-Dopenapi`, `-Dsdk=ts`)
 
 The same proven route facts can be emitted as OpenAPI and as a
@@ -392,6 +408,9 @@ diff. `--force-swap` overrides the block.
 Without `--prove`, `--watch` hot-reloads without contract proof.
 Compilation errors keep the old handler running. Durable handlers
 refuse live swap because replay state depends on handler identity.
+The configured capability-policy file is part of the watch set and is read
+again for every candidate. Tightening it blocks newly forbidden code without a
+restart; a missing or malformed policy keeps the previous handler running.
 
 ## Author-declared proofs (`Proof<T, P>`)
 

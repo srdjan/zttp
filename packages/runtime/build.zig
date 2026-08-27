@@ -107,6 +107,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     zruntime.addImport("zts", zts_mod);
+    zruntime.addImport("project_config", project_config_mod);
     zruntime.addImport("zttp_proof_review", proof_review_mod);
     zruntime.addOptions("runtime_feature_options", runtime_features);
 

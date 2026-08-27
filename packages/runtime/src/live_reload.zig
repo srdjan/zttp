@@ -46,9 +46,24 @@ pub const LiveReloadConfig = struct {
     sql_schema_path: ?[]const u8 = null,
     /// system.json path for service linking
     system_path: ?[]const u8 = null,
+    /// Capability policy resolved from the nearest zttp.json. Each candidate
+    /// reload reads this path again so a policy edit takes effect immediately.
+    policy_path: ?[]const u8 = null,
     /// First-run guided proof quest for scaffolded projects.
     quest: proof_quest.Config = .{},
 };
+
+fn readConfiguredPolicySource(
+    allocator: std.mem.Allocator,
+    policy_path: ?[]const u8,
+) !?[]u8 {
+    const path = policy_path orelse return null;
+    return try zts.file_io.readFile(allocator, path, 1024 * 1024);
+}
+
+fn shouldSkipContract(config: *const LiveReloadConfig) bool {
+    return !config.prove and config.policy_path == null;
+}
 
 pub const LiveReloadState = struct {
     allocator: std.mem.Allocator,
@@ -169,14 +184,23 @@ pub const LiveReloadState = struct {
     /// `json_mode = true` so structured diagnostics flow into studio; the
     /// terminal HUD reformats them itself via `printDiagnosticLines`.
     fn runAnalysisFromSource(self: *LiveReloadState, source: []const u8, skip_contract: bool) ?AnalysisResult {
-        var result = precompile.runCheckOnlyFromSource(
+        const policy_source = readConfiguredPolicySource(self.allocator, self.config.policy_path) catch |err| {
+            printReload("Failed to read configured capability policy: {}. Keeping previous handler.\n", .{err});
+            return null;
+        };
+        defer if (policy_source) |bytes| self.allocator.free(bytes);
+
+        var result = precompile.runCheckOnlyFromSourceWithOptions(
             self.allocator,
             source,
             self.handler_path,
-            self.config.sql_schema_path,
-            true,
-            self.config.system_path,
-            skip_contract,
+            .{
+                .sql_schema_path = self.config.sql_schema_path,
+                .json_mode = true,
+                .system_path = self.config.system_path,
+                .skip_contract = skip_contract,
+                .policy_source = policy_source,
+            },
         ) catch return null;
 
         // Deep-copy diagnostics first so that on failure here, `result.deinit`
@@ -233,6 +257,7 @@ pub const LiveReloadState = struct {
         if (result.strict_errors > 0) return "strict";
         if (result.verify_errors > 0) return "verify";
         if (result.flow_errors > 0) return "flow";
+        if (result.policy_errors > 0) return "policy";
         if (result.totalErrors() > 0) return "spec";
         return "analysis";
     }
@@ -249,7 +274,7 @@ pub const LiveReloadState = struct {
 
         var timer = compat.Timer.start() catch null;
 
-        var analysis = self.runAnalysisFromSource(new_code.?, !self.config.prove) orelse {
+        var analysis = self.runAnalysisFromSource(new_code.?, shouldSkipContract(&self.config)) orelse {
             if (self.server.studio) |*studio| studio.updateError("recompilation failed");
             printReload("Recompilation failed. Keeping previous handler.\n", .{});
             return;
@@ -1094,6 +1119,44 @@ test "LiveReloadConfig defaults" {
     try std.testing.expect(!config.prove);
     try std.testing.expect(!config.force_swap);
     try std.testing.expectEqual(@as(i64, 250), config.poll_interval_ms);
+    try std.testing.expect(config.policy_path == null);
+    try std.testing.expect(shouldSkipContract(&config));
+}
+
+test "live reload builds a contract when a capability policy is configured" {
+    var config = LiveReloadConfig{ .policy_path = "policy.json" };
+    try std.testing.expect(!shouldSkipContract(&config));
+
+    config = .{ .prove = true };
+    try std.testing.expect(!shouldSkipContract(&config));
+}
+
+test "live reload reads the configured policy for every analysis" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "policy.json",
+        .data = "{\"env\":{\"allow\":[\"FIRST\"]}}",
+    });
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "policy.json", allocator);
+    defer allocator.free(path);
+
+    const first = (try readConfiguredPolicySource(allocator, path)) orelse
+        return error.TestExpectedPolicy;
+    defer allocator.free(first);
+    try std.testing.expect(std.mem.indexOf(u8, first, "FIRST") != null);
+
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "policy.json",
+        .data = "{\"env\":{\"allow\":[\"SECOND\"]}}",
+    });
+    const second = (try readConfiguredPolicySource(allocator, path)) orelse
+        return error.TestExpectedPolicy;
+    defer allocator.free(second);
+    try std.testing.expect(std.mem.indexOf(u8, second, "SECOND") != null);
+    try std.testing.expect(std.mem.indexOf(u8, second, "FIRST") == null);
 }
 
 test "writeDiagnosticLines: ZTS001 renders framed restriction rationale" {

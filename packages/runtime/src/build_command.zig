@@ -156,15 +156,86 @@ pub fn compileCommand(allocator: std.mem.Allocator, argv: []const []const u8) !v
         .err => |err| return failCompileCommandArgs(err),
     };
 
+    var compile_context = try discoverExplicitCompileContext(allocator, opts.handler_path);
+    defer compile_context.deinit(allocator);
+
     try buildArtifact(allocator, .{
         .handler_path = opts.handler_path,
         .output_path = opts.output_path,
+        .sql_schema_path = compile_context.sql_schema_path,
+        .system_path = compile_context.system_path,
+        .policy = compile_context.policyPtr(),
         .attest_requested = opts.attest_requested,
     });
 }
 
+const ProjectCompileContext = struct {
+    sql_schema_path: ?[]u8 = null,
+    system_path: ?[]u8 = null,
+    policy: ?zts.HandlerPolicy = null,
+
+    fn init(
+        allocator: std.mem.Allocator,
+        project: *const project_config_mod.ProjectConfig,
+    ) !ProjectCompileContext {
+        var context: ProjectCompileContext = .{};
+        errdefer context.deinit(allocator);
+
+        context.sql_schema_path = try project.resolvedSqlitePath(allocator);
+        context.system_path = try project.resolvedSystemPath(allocator);
+
+        const policy_source = project.readPolicySource(allocator) catch |err| {
+            std.debug.print(
+                "Configured capability policy '{s}' could not be loaded: {s}\n",
+                .{ project.policy orelse "", @errorName(err) },
+            );
+            return error.PolicyContextFailed;
+        };
+        defer if (policy_source) |source| allocator.free(source);
+        if (policy_source) |source| {
+            context.policy = zts.handler_policy.parsePolicyJson(allocator, source) catch |err| {
+                std.debug.print(
+                    "Configured capability policy '{s}' is invalid: {s}\n",
+                    .{ project.policy orelse "", @errorName(err) },
+                );
+                return error.PolicyContextFailed;
+            };
+        }
+        return context;
+    }
+
+    fn deinit(self: *ProjectCompileContext, allocator: std.mem.Allocator) void {
+        if (self.sql_schema_path) |path| allocator.free(path);
+        if (self.system_path) |path| allocator.free(path);
+        if (self.policy) |*policy| policy.deinit(allocator);
+        self.* = .{};
+    }
+
+    fn policyPtr(self: *const ProjectCompileContext) ?*const zts.HandlerPolicy {
+        return if (self.policy) |*policy| policy else null;
+    }
+};
+
+/// Resolve project-owned analysis inputs for an explicit handler path. A
+/// handler outside a project remains a supported standalone compile, while a
+/// handler below zttp.json must use the same schema, system, and capability
+/// policy as `build` and `deploy --local`.
+fn discoverExplicitCompileContext(
+    allocator: std.mem.Allocator,
+    handler_path: []const u8,
+) !ProjectCompileContext {
+    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+
+    var project = try project_config_mod.discover(allocator, io_backend.io(), handler_path);
+    defer if (project) |*config| config.deinit(allocator);
+    const config = if (project) |*value| value else return .{};
+    return try ProjectCompileContext.init(allocator, config);
+}
+
 const ProjectArtifact = struct {
     project: project_config_mod.ProjectConfig,
+    compile_context: ProjectCompileContext,
     handler_path: []u8,
     output_path: []u8,
     project_name: []const u8,
@@ -172,6 +243,7 @@ const ProjectArtifact = struct {
     fn deinit(self: *ProjectArtifact, allocator: std.mem.Allocator) void {
         allocator.free(self.handler_path);
         allocator.free(self.output_path);
+        self.compile_context.deinit(allocator);
         self.project.deinit(allocator);
     }
 };
@@ -190,6 +262,9 @@ fn prepareProjectArtifact(
     errdefer if (project_opt) |*p| p.deinit(allocator);
     var project = project_opt orelse return error.NoProjectConfig;
     errdefer project.deinit(allocator);
+
+    var compile_context = try ProjectCompileContext.init(allocator, &project);
+    errdefer compile_context.deinit(allocator);
 
     const handler_path = try project.resolvedEntry(allocator);
     errdefer allocator.free(handler_path);
@@ -221,6 +296,7 @@ fn prepareProjectArtifact(
 
     return .{
         .project = project,
+        .compile_context = compile_context,
         .handler_path = handler_path,
         .output_path = output_path,
         .project_name = project_name,
@@ -291,6 +367,9 @@ pub fn buildCommand(allocator: std.mem.Allocator, argv: []const []const u8) !voi
     try buildArtifact(allocator, .{
         .handler_path = artifact.handler_path,
         .output_path = artifact.output_path,
+        .sql_schema_path = artifact.compile_context.sql_schema_path,
+        .system_path = artifact.compile_context.system_path,
+        .policy = artifact.compile_context.policyPtr(),
         .attest_requested = opts.attest_requested,
     });
 
@@ -397,6 +476,9 @@ pub fn localDeployCommand(allocator: std.mem.Allocator, argv: []const []const u8
     try buildArtifact(allocator, .{
         .handler_path = artifact.handler_path,
         .output_path = artifact.output_path,
+        .sql_schema_path = artifact.compile_context.sql_schema_path,
+        .system_path = artifact.compile_context.system_path,
+        .policy = artifact.compile_context.policyPtr(),
         .ledger_service_name = artifact.project_name,
         .attest_requested = opts.attest_requested,
     });
@@ -629,6 +711,12 @@ fn appendDeployLedgerEntry(
 pub const BuildRequest = struct {
     handler_path: []const u8,
     output_path: []const u8,
+    /// Project analysis inputs. All three public build paths resolve them from
+    /// the nearest zttp.json; standalone `compile` leaves them null only when
+    /// no project manifest exists above the explicit handler.
+    sql_schema_path: ?[]const u8 = null,
+    system_path: ?[]const u8 = null,
+    policy: ?*const zts.HandlerPolicy = null,
     /// Service name to record in the proof ledger entry. Null when the
     /// build is not part of a named project (`compile`/`build` paths);
     /// set to the project name on the `deploy --local` path.
@@ -665,7 +753,7 @@ pub const BuildReceipt = struct {
 pub const BuildCapabilities = struct {
     context: ?*anyopaque = null,
     read_source: *const fn (?*anyopaque, std.mem.Allocator, []const u8) anyerror![]u8 = readSourceCapability,
-    compile: *const fn (?*anyopaque, std.mem.Allocator, []const u8, []const u8) anyerror!precompile.CompiledHandler = compileCapability,
+    compile: *const fn (?*anyopaque, std.mem.Allocator, BuildCompileInput) anyerror!precompile.CompiledHandler = compileCapability,
     resolve_runtime_binary: *const fn (?*anyopaque, std.mem.Allocator) anyerror![]const u8 = resolveRuntimeBinaryCapability,
     write_tail: *const fn (?*anyopaque, std.mem.Allocator, ArtifactTailInput) anyerror!void = writeTailCapability,
     codesign: *const fn (?*anyopaque, std.mem.Allocator, []const u8) void = codesignCapability,
@@ -676,15 +764,25 @@ fn readSourceCapability(_: ?*anyopaque, allocator: std.mem.Allocator, path: []co
     return zts.file_io.readFile(allocator, path, 10 * 1024 * 1024);
 }
 
+const BuildCompileInput = struct {
+    source: []const u8,
+    handler_path: []const u8,
+    sql_schema_path: ?[]const u8,
+    system_path: ?[]const u8,
+    policy: ?*const zts.HandlerPolicy,
+};
+
 fn compileCapability(
     _: ?*anyopaque,
     allocator: std.mem.Allocator,
-    source: []const u8,
-    handler_path: []const u8,
+    input: BuildCompileInput,
 ) anyerror!precompile.CompiledHandler {
-    return precompile.compileHandler(allocator, source, handler_path, .{
+    return precompile.compileHandler(allocator, input.source, input.handler_path, .{
         .emit_verify = true,
         .emit_contract = true,
+        .sql_schema_path = input.sql_schema_path,
+        .system_path = input.system_path,
+        .policy = if (input.policy) |policy| policy.* else null,
     });
 }
 
@@ -744,7 +842,13 @@ fn runBuild(
     std.log.info("Compiling {s}...", .{handler_path});
     shared.step("Compiling handler...");
 
-    var compiled = caps.compile(caps.context, allocator, source, handler_path) catch |err| {
+    var compiled = caps.compile(caps.context, allocator, .{
+        .source = source,
+        .handler_path = handler_path,
+        .sql_schema_path = request.sql_schema_path,
+        .system_path = request.system_path,
+        .policy = request.policy,
+    }) catch |err| {
         // precompile already prints per-error lines to stderr; only surface
         // the remediation hint so the dev knows where to look.
         std.debug.print(
@@ -1384,6 +1488,9 @@ const BuildProbe = struct {
     ledger_calls: usize = 0,
     tail_saw_contract: bool = false,
     tail_saw_attest: bool = false,
+    compile_saw_sql_schema: bool = false,
+    compile_saw_system: bool = false,
+    compile_saw_policy: bool = false,
     ledger_service: ?[]const u8 = null,
     ledger_sha_hex: ?[64]u8 = null,
 
@@ -1400,11 +1507,13 @@ const BuildProbe = struct {
     fn compile(
         context: ?*anyopaque,
         allocator: std.mem.Allocator,
-        _: []const u8,
-        _: []const u8,
+        input: BuildCompileInput,
     ) anyerror!precompile.CompiledHandler {
         const self = of(context);
         self.compile_calls += 1;
+        self.compile_saw_sql_schema = input.sql_schema_path != null;
+        self.compile_saw_system = input.system_path != null;
+        self.compile_saw_policy = input.policy != null;
         if (self.compile_error) |err| return err;
         return .{
             .bytecode = try allocator.dupe(u8, self.bytecode),
@@ -1458,9 +1567,13 @@ const BuildProbe = struct {
 
 test "a deploy build signs, codesigns, and records one ledger row" {
     var probe = BuildProbe{};
+    var policy = zts.HandlerPolicy{};
     const receipt = try runBuild(std.testing.allocator, .{
         .handler_path = "handler.ts",
         .output_path = ".zttp/deploy/demo",
+        .sql_schema_path = "schema.sql",
+        .system_path = "system.json",
+        .policy = &policy,
         .ledger_service_name = "demo",
         .attest_requested = true,
     }, probe.capabilities());
@@ -1470,6 +1583,9 @@ test "a deploy build signs, codesigns, and records one ledger row" {
     try std.testing.expectEqual(@as(usize, 1), probe.tail_calls);
     try std.testing.expectEqual(@as(usize, 1), probe.codesign_calls);
     try std.testing.expectEqual(@as(usize, 1), probe.ledger_calls);
+    try std.testing.expect(probe.compile_saw_sql_schema);
+    try std.testing.expect(probe.compile_saw_system);
+    try std.testing.expect(probe.compile_saw_policy);
     try std.testing.expect(probe.tail_saw_contract);
     try std.testing.expect(probe.tail_saw_attest);
     try std.testing.expectEqualStrings("demo", probe.ledger_service.?);
@@ -1526,4 +1642,71 @@ test "a compile failure stops before the artifact is written" {
     try std.testing.expectEqual(@as(usize, 0), probe.tail_calls);
     try std.testing.expectEqual(@as(usize, 0), probe.codesign_calls);
     try std.testing.expectEqual(@as(usize, 0), probe.ledger_calls);
+}
+
+test "explicit compile discovers and enforces project capability policy" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.createDirPath(std.testing.io, "src");
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "zttp.json",
+        .data = "{\"entry\":\"src/handler.ts\",\"policy\":\"policy.json\"}",
+    });
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "policy.json",
+        .data = "{\"env\":{\"allow\":[\"APP_NAME\"]}}",
+    });
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "src/handler.ts",
+        .data = "function handler(req) { return Response.text('ok'); }",
+    });
+
+    const handler_path = try tmp.dir.realPathFileAlloc(std.testing.io, "src/handler.ts", allocator);
+    defer allocator.free(handler_path);
+    var context = try discoverExplicitCompileContext(allocator, handler_path);
+    defer context.deinit(allocator);
+    const policy = context.policyPtr() orelse return error.TestExpectedPolicy;
+
+    const source =
+        \\import { env } from "zttp:env";
+        \\
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const value = env("OTHER_NAME") ?? "fallback";
+        \\  return Response.json({ value: value });
+        \\}
+    ;
+    try std.testing.expectError(error.PolicyViolation, compileCapability(null, allocator, .{
+        .source = source,
+        .handler_path = handler_path,
+        .sql_schema_path = context.sql_schema_path,
+        .system_path = context.system_path,
+        .policy = policy,
+    }));
+}
+
+test "project build compiler enforces configured capability policy" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { env } from "zttp:env";
+        \\
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const value = env("OTHER_NAME") ?? "fallback";
+        \\  return Response.json({ value: value });
+        \\}
+    ;
+    var policy = try zts.handler_policy.parsePolicyJson(
+        allocator,
+        "{\"env\":{\"allow\":[\"APP_NAME\"]}}",
+    );
+    defer policy.deinit(allocator);
+
+    try std.testing.expectError(error.PolicyViolation, compileCapability(null, allocator, .{
+        .source = source,
+        .handler_path = "handler.ts",
+        .sql_schema_path = null,
+        .system_path = null,
+        .policy = &policy,
+    }));
 }

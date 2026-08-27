@@ -58,6 +58,15 @@ pub const ProjectConfig = struct {
         return try self.resolvePath(allocator, path);
     }
 
+    /// Load the configured capability policy. Null means the manifest declares
+    /// no policy; a configured path that cannot be read is an error so callers
+    /// cannot publish a policy-free verdict by accident. Caller frees.
+    pub fn readPolicySource(self: *const ProjectConfig, allocator: std.mem.Allocator) !?[]u8 {
+        const path = try self.resolvedPolicyPath(allocator) orelse return null;
+        defer allocator.free(path);
+        return try zts.file_io.readFile(allocator, path, 1024 * 1024);
+    }
+
     pub fn resolvedDurableDir(self: *const ProjectConfig, allocator: std.mem.Allocator) !?[]u8 {
         const path = self.durable_dir orelse return null;
         return try self.resolvePath(allocator, path);

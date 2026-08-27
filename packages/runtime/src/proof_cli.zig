@@ -375,10 +375,18 @@ pub fn writeManifest(
     allocator: std.mem.Allocator,
     capsule_name: []const u8,
     handler_path: []const u8,
+    sql_schema_path: ?[]const u8,
     system_path: ?[]const u8,
+    policy_source: ?[]const u8,
 ) !void {
-    var check = try precompile.runCheckOnly(allocator, handler_path, null, false, system_path);
+    var check = try precompile.runCheckOnlyWithOptions(allocator, handler_path, .{
+        .sql_schema_path = sql_schema_path,
+        .system_path = system_path,
+        .policy_source = policy_source,
+    });
     defer check.deinit(allocator);
+
+    if (check.totalErrors() > 0) return error.VerificationFailed;
 
     const contract = if (check.contract) |*c| c else return Error.HandlerNotFound;
 

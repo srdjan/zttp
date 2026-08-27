@@ -119,7 +119,10 @@ pub fn runVeto(
     var discovered_policy: ?[]u8 = null;
     defer if (discovered_policy) |src| allocator.free(src);
     if (edit.policy_source == null) {
-        discovered_policy = discoverPolicySource(allocator, edit.file);
+        discovered_policy = discoverPolicySource(allocator, edit.file) catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            else => return try failedVetoWithGuidance(allocator, policy_load_guidance, false),
+        };
     }
 
     var resolved = edit;
@@ -130,8 +133,8 @@ pub fn runVeto(
 /// The project's capability policy for this edit. Shared with `zts check` and
 /// the `edit-simulate` CLI so all three reach the same verdict; see
 /// `edit_simulate.discoverProjectPolicySource`.
-pub fn discoverPolicySource(allocator: std.mem.Allocator, start_path: ?[]const u8) ?[]u8 {
-    return edit_simulate.discoverProjectPolicySource(allocator, start_path);
+pub fn discoverPolicySource(allocator: std.mem.Allocator, start_path: ?[]const u8) !?[]u8 {
+    return try edit_simulate.discoverProjectPolicySource(allocator, start_path);
 }
 
 /// Resolve the project's SQL schema from the nearest zttp.json, walking up
@@ -408,6 +411,15 @@ const sql_schema_load_guidance =
     "missing, unreadable, or not a valid schema. Do not retry this edit " ++
     "unchanged. Ask the user to fix the \"sqlite\" path or restore the schema " ++
     "file, then retry.";
+
+/// A policy is configured but cannot be loaded. The edit has not been checked
+/// against its declared capability boundary, so accepting it would be a false
+/// proof.
+const policy_load_guidance =
+    "This edit could not be checked against the project's configured capability " ++
+    "policy because the policy or zttp.json is missing, unreadable, or invalid. " ++
+    "The edit was rejected without a proof. Do not retry it unchanged. Ask the " ++
+    "user to repair the policy configuration, then retry.";
 
 /// A failed veto carrying actionable guidance instead of an analyzer error
 /// that would crash the turn. The guidance string must be a static literal
