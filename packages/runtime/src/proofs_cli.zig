@@ -50,6 +50,7 @@ pub fn isExpectedUserError(err: anyerror) bool {
         error.MissingOutArg,
         error.SuspiciousPath,
         error.NoBundleJson,
+        error.InvalidManifest,
         error.Sha256Mismatch,
         error.MissingComponent,
         error.NotAGitRepo,
@@ -205,6 +206,14 @@ fn verifyCommand(
                 stdout.flush() catch {};
                 stderr.flush() catch {};
                 std.process.exit(1);
+            },
+            error.InvalidManifest => {
+                try stderr.writeAll(
+                    "zttp proofs verify: bundle.json is structurally invalid; " ++
+                        "expected a contract component and optional binary or replay components " ++
+                        "with unique relative paths and lowercase sha256 values\n",
+                );
+                return err;
             },
             else => return err,
         }
@@ -1106,6 +1115,32 @@ test "proofs replay reports a missing capsule as an expected user error" {
     const result = runWith(testing.allocator, &.{ "replay", "no-such-capsule" }, &out.writer, &err.writer);
     try testing.expectError(proof_cli.Error.CapsuleNotFound, result);
     try testing.expect(isExpectedUserError(proof_cli.Error.CapsuleNotFound));
+}
+
+test "verify explains a manifest without a contract component" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const old_cwd = try chdirTmpForTest(&tmp);
+    defer testing.allocator.free(old_cwd);
+    defer std.Io.Threaded.chdir(old_cwd) catch {};
+
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, "bundle");
+    try zts.file_io.writeFile(testing.allocator, "bundle/trace.jsonl", "valid-replay");
+    try zts.file_io.writeFile(
+        testing.allocator,
+        "bundle/bundle.json",
+        "{\"components\":{\"replay\":{\"path\":\"trace.jsonl\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}}}",
+    );
+
+    var out = std.Io.Writer.Allocating.init(testing.allocator);
+    defer out.deinit();
+    var err = std.Io.Writer.Allocating.init(testing.allocator);
+    defer err.deinit();
+
+    const result = runWith(testing.allocator, &.{ "verify", "bundle" }, &out.writer, &err.writer);
+    try testing.expectError(error.InvalidManifest, result);
+    try testing.expect(isExpectedUserError(error.InvalidManifest));
+    try testing.expect(std.mem.indexOf(u8, err.writer.buffered(), "expected a contract component") != null);
 }
 
 test "diff: renders b's card with a as baseline" {

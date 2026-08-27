@@ -628,10 +628,22 @@ pub fn run(
             // deletion removed all of its routes -> breaking (must land in
             // results, which worstVerdict ranks). A deleted non-handler is noise.
             if (before) |before_src| {
-                if (sourceIsHandler(gpa, before_src, path)) {
-                    try results.append(arena, .{ .path = try arena.dupe(u8, path), .verdict = .breaking });
-                } else {
-                    try skipped.append(arena, .{ .path = path, .reason = "deleted_non_handler" });
+                const source_kind = classifySource(gpa, before_src, path) catch |err| {
+                    try stderr.print(
+                        "zttp proofs gate: analysis failed for deleted `{s}`: {s}\n",
+                        .{ path, @errorName(err) },
+                    );
+                    return 2;
+                };
+                switch (source_kind) {
+                    .handler => try results.append(arena, .{
+                        .path = try arena.dupe(u8, path),
+                        .verdict = .breaking,
+                    }),
+                    .non_handler => try skipped.append(arena, .{
+                        .path = path,
+                        .reason = "deleted_non_handler",
+                    }),
                 }
             } else {
                 try skipped.append(arena, .{ .path = path, .reason = "unreadable" });
@@ -639,10 +651,22 @@ pub fn run(
             continue;
         }
 
-        // A newly added handler has no before contract: it cannot break an
-        // existing caller, so it reads as additive.
         if (before == null) {
-            try results.append(arena, .{ .path = path, .verdict = .additive });
+            // A new file is additive only after the analyzer proves it is a
+            // valid handler. Treating every added TypeScript file as additive
+            // lets malformed source bypass the same fail-closed boundary used
+            // for modified and deleted files.
+            const source_kind = classifySource(gpa, after.?, path) catch |err| {
+                try stderr.print(
+                    "zttp proofs gate: analysis failed for added `{s}`: {s}\n",
+                    .{ path, @errorName(err) },
+                );
+                return 2;
+            };
+            switch (source_kind) {
+                .handler => try results.append(arena, .{ .path = path, .verdict = .additive }),
+                .non_handler => try skipped.append(arena, .{ .path = path, .reason = "no_contract" }),
+            }
             continue;
         }
 
@@ -702,14 +726,35 @@ fn readAfter(arena: std.mem.Allocator, cwd: []const u8, head: ?[]const u8, path:
     };
 }
 
-/// True when `src` compiles to a contract exposing routes/behaviors, i.e. it is
-/// a request handler rather than a library/config module. Used to decide whether
-/// a DELETED file removed real routes (breaking) or was just noise.
-fn sourceIsHandler(gpa: std.mem.Allocator, src: []const u8, path: []const u8) bool {
-    var result = zts_cli.precompile.runCheckOnlyFromSource(gpa, src, path, null, true, null, false) catch return false;
+const SourceKind = enum { handler, non_handler };
+
+/// Classify only successfully analyzed source. A compiler failure must not be
+/// mistaken for a library module because that would make a deleted handler look
+/// safe to the gate.
+fn classifySource(gpa: std.mem.Allocator, src: []const u8, path: []const u8) !SourceKind {
+    var result = zts_cli.precompile.runCheckOnlyFromSource(gpa, src, path, null, true, null, false) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        else => return error.UnanalysableSource,
+    };
     defer result.deinit(gpa);
-    if (result.contract) |*c| return isHandlerContract(c);
-    return false;
+    if (hasAnalysisErrors(&result)) return error.UnanalysableSource;
+    if (result.contract) |*contract| {
+        if (!isHandlerContract(contract)) return .non_handler;
+        if (result.totalErrors() > 0) return error.UnanalysableSource;
+        return .handler;
+    }
+    return .non_handler;
+}
+
+fn hasAnalysisErrors(result: *const zts_cli.precompile.CheckResult) bool {
+    return result.parse_errors > 0 or
+        result.bool_errors > 0 or
+        result.type_errors > 0 or
+        result.strict_errors > 0 or
+        result.verify_errors > 0 or
+        result.flow_errors > 0 or
+        result.canonical_errors > 0 or
+        result.policy_errors > 0;
 }
 
 /// Compile before/after to contracts, diff them, and project the result into
@@ -731,11 +776,21 @@ fn analyzeHandler(
     var after_result = try zts_cli.precompile.runCheckOnlyFromSource(gpa, after_src, path, null, true, null, false);
     defer after_result.deinit(gpa);
 
+    if (hasAnalysisErrors(&before_result) or hasAnalysisErrors(&after_result)) {
+        return error.UnanalysableSource;
+    }
+
     const before_contract: ?*const zts.HandlerContract = if (before_result.contract) |*c| c else null;
     const after_contract: ?*const zts.HandlerContract = if (after_result.contract) |*c| c else null;
 
     const before_is_handler = before_contract != null and isHandlerContract(before_contract.?);
     const after_is_handler = after_contract != null and isHandlerContract(after_contract.?);
+
+    if ((before_is_handler and before_result.totalErrors() > 0) or
+        (after_is_handler and after_result.totalErrors() > 0))
+    {
+        return error.UnanalysableSource;
+    }
 
     // A `.ts`/`.tsx` file that exposes no routes/behaviors on EITHER side is a
     // library/config module, not a request handler. Skip it (only adds
@@ -781,6 +836,153 @@ fn analyzeHandler(
 // ---------------------------------------------------------------------------
 
 const testing = std.testing;
+
+test "classifySource distinguishes handlers, libraries, and failed analysis" {
+    try testing.expectEqual(
+        SourceKind.handler,
+        try classifySource(
+            testing.allocator,
+            "function handler(req: Request): Proof<Response, \"pure\"> { return Response.text('ok'); }",
+            "handler.ts",
+        ),
+    );
+    try testing.expectEqual(
+        SourceKind.non_handler,
+        try classifySource(testing.allocator, "export const answer: number = 42;", "library.ts"),
+    );
+    try testing.expectError(
+        error.UnanalysableSource,
+        classifySource(testing.allocator, "function handler(", "broken.ts"),
+    );
+}
+
+test "gate fails closed when a deleted TypeScript file cannot be analyzed" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path_len = try tmp.dir.realPath(testing.io, &path_buf);
+    const repo_path = path_buf[0..path_len];
+
+    const commands = [_][]const []const u8{
+        &.{ "git", "init", "-q" },
+        &.{ "git", "add", "handler.ts" },
+        &.{ "git", "-c", "user.name=zttp test", "-c", "user.email=test@example.invalid", "commit", "-qm", "base" },
+    };
+    try tmp.dir.writeFile(testing.io, .{
+        .sub_path = "handler.ts",
+        .data = "function handler(",
+    });
+    for (commands) |command| {
+        const git = try runGit(testing.allocator, repo_path, command);
+        defer testing.allocator.free(git.stdout);
+        try testing.expect(git.ok);
+    }
+    try tmp.dir.deleteFile(testing.io, "handler.ts");
+
+    const old_cwd = try @import("../proof_ledger.zig").chdirTmpForTest(&tmp);
+    defer testing.allocator.free(old_cwd);
+    defer std.Io.Threaded.chdir(old_cwd) catch {};
+
+    var out = std.Io.Writer.Allocating.init(testing.allocator);
+    defer out.deinit();
+    var err = std.Io.Writer.Allocating.init(testing.allocator);
+    defer err.deinit();
+    const code = try run(
+        testing.allocator,
+        .{ .base = "HEAD", .format = .json, .no_sign = true },
+        &out.writer,
+        &err.writer,
+    );
+
+    try testing.expectEqual(@as(u8, 2), code);
+    try testing.expectEqual(@as(usize, 0), out.writer.buffered().len);
+    try testing.expect(std.mem.indexOf(u8, err.writer.buffered(), "analysis failed for deleted `handler.ts`") != null);
+    try testing.expect(std.mem.indexOf(u8, err.writer.buffered(), "UnanalysableSource") != null);
+}
+
+test "gate analyzes newly added TypeScript before classifying it" {
+    const Case = struct {
+        source: []const u8,
+        expected_code: u8,
+        expected_output: []const u8,
+        expected_error: ?[]const u8 = null,
+    };
+    const cases = [_]Case{
+        .{
+            .source = "function handler(",
+            .expected_code = 2,
+            .expected_output = "",
+            .expected_error = "analysis failed for added `candidate.ts`",
+        },
+        .{
+            .source = "function handler(req: Request): Proof<Response, \"pure\"> { return Response.text('ok'); }",
+            .expected_code = 0,
+            .expected_output = "\"verdict\":\"additive\"",
+        },
+        .{
+            .source = "export const answer: number = 42;",
+            .expected_code = 0,
+            .expected_output = "\"handlersChecked\":0",
+        },
+    };
+
+    for (cases) |case| {
+        var tmp = testing.tmpDir(.{});
+        defer tmp.cleanup();
+
+        var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const path_len = try tmp.dir.realPath(testing.io, &path_buf);
+        const repo_path = path_buf[0..path_len];
+        const setup_commands = [_][]const []const u8{
+            &.{ "git", "init", "-q" },
+            &.{
+                "git",
+                "-c",
+                "user.name=zttp test",
+                "-c",
+                "user.email=test@example.invalid",
+                "commit",
+                "--allow-empty",
+                "-qm",
+                "base",
+            },
+        };
+        for (setup_commands) |command| {
+            const git = try runGit(testing.allocator, repo_path, command);
+            defer testing.allocator.free(git.stdout);
+            try testing.expect(git.ok);
+        }
+        try tmp.dir.writeFile(testing.io, .{ .sub_path = "candidate.ts", .data = case.source });
+        const add = try runGit(testing.allocator, repo_path, &.{ "git", "add", "candidate.ts" });
+        defer testing.allocator.free(add.stdout);
+        try testing.expect(add.ok);
+
+        const old_cwd = try @import("../proof_ledger.zig").chdirTmpForTest(&tmp);
+        defer testing.allocator.free(old_cwd);
+        defer std.Io.Threaded.chdir(old_cwd) catch {};
+
+        var out = std.Io.Writer.Allocating.init(testing.allocator);
+        defer out.deinit();
+        var err = std.Io.Writer.Allocating.init(testing.allocator);
+        defer err.deinit();
+        const code = try run(
+            testing.allocator,
+            .{ .base = "HEAD", .format = .json, .no_sign = true },
+            &out.writer,
+            &err.writer,
+        );
+        try testing.expectEqual(case.expected_code, code);
+        if (case.expected_output.len == 0) {
+            try testing.expectEqual(@as(usize, 0), out.writer.buffered().len);
+        } else {
+            try testing.expect(std.mem.indexOf(u8, out.writer.buffered(), case.expected_output) != null);
+        }
+        if (case.expected_error) |needle| {
+            try testing.expect(std.mem.indexOf(u8, err.writer.buffered(), needle) != null);
+        }
+    }
+}
 
 test "worstVerdict: one breaking handler makes the repo breaking" {
     const results = [_]HandlerResult{

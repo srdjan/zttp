@@ -146,12 +146,24 @@ fn writeManifest(writer: *std.Io.Writer, m: ManifestFields) !void {
 pub fn verify(allocator: std.mem.Allocator, bundle_dir_path: []const u8, stdout: *std.Io.Writer, stderr: *std.Io.Writer) !void {
     try rejectSuspiciousPath(bundle_dir_path);
 
-    const manifest_path = try std.fs.path.join(allocator, &.{ bundle_dir_path, "bundle.json" });
-    defer allocator.free(manifest_path);
+    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    const io = io_backend.io();
+    var bundle_dir = std.Io.Dir.cwd().openDir(io, bundle_dir_path, .{ .follow_symlinks = false }) catch |err| switch (err) {
+        error.SymLinkLoop => return error.SuspiciousPath,
+        else => {
+            try stderr.print("zttp proofs verify: cannot open bundle directory '{s}'\n", .{bundle_dir_path});
+            return error.NoBundleJson;
+        },
+    };
+    defer bundle_dir.close(io);
 
-    const manifest_bytes = zts.file_io.readFile(allocator, manifest_path, 16 * 1024 * 1024) catch {
-        try stderr.print("zttp proofs verify: cannot read manifest at '{s}'\n", .{manifest_path});
-        return error.NoBundleJson;
+    const manifest_bytes = readBundleManifest(allocator, io, bundle_dir, 16 * 1024 * 1024, stderr) catch |err| switch (err) {
+        error.SuspiciousPath => return err,
+        else => {
+            try stderr.print("zttp proofs verify: cannot read manifest at '{s}/bundle.json'\n", .{bundle_dir_path});
+            return error.NoBundleJson;
+        },
     };
     defer allocator.free(manifest_bytes);
 
@@ -160,13 +172,13 @@ pub fn verify(allocator: std.mem.Allocator, bundle_dir_path: []const u8, stdout:
         for (verdicts.items) |v| allocator.free(v.name);
         verdicts.deinit(allocator);
     }
-    try verifyComponents(allocator, bundle_dir_path, manifest_bytes, &verdicts, stderr);
+    try verifyComponents(allocator, io, bundle_dir, manifest_bytes, &verdicts, stderr);
 
     // Fail closed: a manifest the component scanner could not parse (e.g. `{}`
     // or a format it does not recognize) yields zero verdicts, and an empty
     // loop would otherwise print "verified" and exit 0 having checked nothing.
     if (verdicts.items.len == 0) {
-        try stderr.print("zttp proofs verify: no components found in manifest '{s}'\n", .{manifest_path});
+        try stderr.print("zttp proofs verify: no components found in manifest '{s}/bundle.json'\n", .{bundle_dir_path});
         return error.NoComponentsVerified;
     }
 
@@ -185,78 +197,201 @@ pub fn verify(allocator: std.mem.Allocator, bundle_dir_path: []const u8, stdout:
     try stdout.writeAll("\nBundle verified: every component sha256 matches the manifest.\n");
 }
 
+fn readBundleManifest(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    bundle_dir: std.Io.Dir,
+    max_bytes: usize,
+    stderr: *std.Io.Writer,
+) ![]u8 {
+    const name = "bundle.json";
+    const stat = bundle_dir.statFile(io, name, .{ .follow_symlinks = false }) catch return error.FileNotFound;
+    if (stat.kind == .sym_link) {
+        try stderr.writeAll("zttp proofs verify: bundle.json must not be a symlink\n");
+        return error.SuspiciousPath;
+    }
+    if (stat.kind != .file or stat.size > max_bytes) return error.InvalidManifest;
+    const size = std.math.cast(usize, stat.size) orelse return error.InvalidManifest;
+    const file = bundle_dir.openFile(io, name, .{ .follow_symlinks = false }) catch |err| switch (err) {
+        error.SymLinkLoop => return error.SuspiciousPath,
+        else => return err,
+    };
+    defer file.close(io);
+
+    const bytes = try allocator.alloc(u8, size);
+    errdefer allocator.free(bytes);
+    var buffer: [4096]u8 = undefined;
+    var reader = file.reader(io, &buffer);
+    reader.interface.readSliceAll(bytes) catch return error.FileReadFailed;
+    _ = reader.interface.takeByte() catch |err| switch (err) {
+        error.EndOfStream => return bytes,
+        else => return error.FileReadFailed,
+    };
+    return error.InvalidManifest;
+}
+
 fn verifyComponents(
     allocator: std.mem.Allocator,
-    bundle_dir_path: []const u8,
+    io: std.Io,
+    bundle_dir: std.Io.Dir,
     manifest_bytes: []const u8,
     out: *std.ArrayList(ComponentVerdict),
     stderr: *std.Io.Writer,
 ) !void {
-    var offset: usize = 0;
-    while (findNextComponent(manifest_bytes, offset)) |entry| : (offset = entry.next_offset) {
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, manifest_bytes, .{}) catch {
+        try stderr.writeAll("zttp proofs verify: bundle manifest is not valid JSON\n");
+        return error.InvalidManifest;
+    };
+    defer parsed.deinit();
+    const root = switch (parsed.value) {
+        .object => |object| object,
+        else => return error.InvalidManifest,
+    };
+    const components_value = root.get("components") orelse return error.InvalidManifest;
+    const components = switch (components_value) {
+        .object => |object| object,
+        else => return error.InvalidManifest,
+    };
+    if (components.count() == 0 or components.count() > 3) return error.InvalidManifest;
+    _ = components.get("contract") orelse return error.InvalidManifest;
+
+    var paths: [3][]const u8 = undefined;
+    var path_count: usize = 0;
+    var iterator = components.iterator();
+    while (iterator.next()) |component| {
+        const name = component.key_ptr.*;
+        if (!isSupportedComponent(name)) return error.InvalidManifest;
+        const fields = switch (component.value_ptr.*) {
+            .object => |object| object,
+            else => return error.InvalidManifest,
+        };
+        if (fields.count() != 2) return error.InvalidManifest;
+        const path_value = fields.get("path") orelse return error.InvalidManifest;
+        const sha_value = fields.get("sha256") orelse return error.InvalidManifest;
+        const path = switch (path_value) {
+            .string => |value| value,
+            else => return error.InvalidManifest,
+        };
+        const expected_sha = switch (sha_value) {
+            .string => |value| parseSha256(value) orelse return error.InvalidManifest,
+            else => return error.InvalidManifest,
+        };
+        for (paths[0..path_count]) |seen| {
+            if (std.mem.eql(u8, seen, path)) return error.InvalidManifest;
+        }
+        paths[path_count] = path;
+        path_count += 1;
+
         // The manifest is untrusted input: an absolute or `..`-containing
         // component path would make the verifier hash arbitrary files.
-        if (!static_mod.isPathSafe(entry.path)) {
-            try stderr.print("zttp proofs verify: component path '{s}' escapes the bundle directory\n", .{entry.path});
+        if (!static_mod.isPathSafe(path)) {
+            try stderr.print("zttp proofs verify: component path '{s}' escapes the bundle directory\n", .{path});
             return error.SuspiciousPath;
         }
-        const file_full = try std.fs.path.join(allocator, &.{ bundle_dir_path, entry.path });
-        defer allocator.free(file_full);
-
-        const file_bytes = zts.file_io.readFile(allocator, file_full, 256 * 1024 * 1024) catch {
-            return error.MissingComponent;
+        const actual = hashBundleFile(io, bundle_dir, path, 256 * 1024 * 1024, stderr) catch |err| switch (err) {
+            error.SuspiciousPath => return err,
+            else => return error.MissingComponent,
         };
-        defer allocator.free(file_bytes);
 
-        const actual = sha256Hex(file_bytes);
-        const name_dup = try allocator.dupe(u8, entry.name);
+        const name_dup = try allocator.dupe(u8, name);
+        errdefer allocator.free(name_dup);
         try out.append(allocator, .{
             .name = name_dup,
-            .pass = std.mem.eql(u8, &actual, &entry.expected_sha),
-            .expected_sha = entry.expected_sha,
+            .pass = std.mem.eql(u8, &actual, &expected_sha),
+            .expected_sha = expected_sha,
             .actual_sha = actual,
         });
     }
 }
 
-const ManifestEntry = struct {
-    name: []const u8,
-    path: []const u8,
-    expected_sha: [64]u8,
-    next_offset: usize,
-};
+fn hashBundleFile(
+    io: std.Io,
+    bundle_dir: std.Io.Dir,
+    relative_path: []const u8,
+    max_bytes: usize,
+    stderr: *std.Io.Writer,
+) ![64]u8 {
+    if (!static_mod.isPathSafe(relative_path)) {
+        try stderr.print("zttp proofs verify: component path '{s}' escapes the bundle directory\n", .{relative_path});
+        return error.SuspiciousPath;
+    }
 
-/// Minimal manifest scanner: finds the next `"<name>": { "path": "...", "sha256": "..." }`
-/// entry starting at or after `start`. Returns null when no further entry
-/// exists. The scanner is tolerant of whitespace but strict about the
-/// expected key names and shape.
-fn findNextComponent(manifest: []const u8, start: usize) ?ManifestEntry {
-    if (start >= manifest.len) return null;
-    const path_idx = std.mem.indexOfPos(u8, manifest, start, "\"path\":") orelse return null;
-    const name_close = std.mem.lastIndexOf(u8, manifest[0..path_idx], "\"") orelse return null;
-    const name_open_search = manifest[0..name_close];
-    const name_open = std.mem.lastIndexOf(u8, name_open_search, "\"") orelse return null;
-    const name = manifest[name_open + 1 .. name_close];
+    var parts = std.mem.splitAny(u8, relative_path, "/\\");
+    var component = parts.next() orelse return error.SuspiciousPath;
+    if (component.len == 0) return error.SuspiciousPath;
+    var current = bundle_dir;
+    var current_owned = false;
+    defer if (current_owned) current.close(io);
 
-    const path_value_open = std.mem.indexOfScalarPos(u8, manifest, path_idx + "\"path\":".len, '"') orelse return null;
-    const path_value_close = std.mem.indexOfScalarPos(u8, manifest, path_value_open + 1, '"') orelse return null;
-    const path = manifest[path_value_open + 1 .. path_value_close];
+    while (parts.next()) |next| {
+        if (next.len == 0) return error.SuspiciousPath;
+        const stat = current.statFile(io, component, .{ .follow_symlinks = false }) catch return error.FileNotFound;
+        if (stat.kind == .sym_link) {
+            try stderr.print("zttp proofs verify: component path '{s}' contains a symlink\n", .{relative_path});
+            return error.SuspiciousPath;
+        }
+        if (stat.kind != .directory) return error.NotDir;
+        const child = current.openDir(io, component, .{ .follow_symlinks = false }) catch |err| switch (err) {
+            error.SymLinkLoop, error.NotDir => {
+                try stderr.print("zttp proofs verify: component path '{s}' contains an invalid directory\n", .{relative_path});
+                return error.SuspiciousPath;
+            },
+            else => return err,
+        };
+        if (current_owned) current.close(io);
+        current = child;
+        current_owned = true;
+        component = next;
+    }
 
-    const sha_key = std.mem.indexOfPos(u8, manifest, path_value_close, "\"sha256\":") orelse return null;
-    const sha_open = std.mem.indexOfScalarPos(u8, manifest, sha_key + "\"sha256\":".len, '"') orelse return null;
-    const sha_close = std.mem.indexOfScalarPos(u8, manifest, sha_open + 1, '"') orelse return null;
-    const sha_bytes = manifest[sha_open + 1 .. sha_close];
-    if (sha_bytes.len != 64) return null;
-
-    var sha_buf: [64]u8 = undefined;
-    @memcpy(&sha_buf, sha_bytes);
-
-    return .{
-        .name = name,
-        .path = path,
-        .expected_sha = sha_buf,
-        .next_offset = sha_close + 1,
+    const final_stat = current.statFile(io, component, .{ .follow_symlinks = false }) catch return error.FileNotFound;
+    if (final_stat.kind == .sym_link) {
+        try stderr.print("zttp proofs verify: component path '{s}' contains a symlink\n", .{relative_path});
+        return error.SuspiciousPath;
+    }
+    const file = current.openFile(io, component, .{ .follow_symlinks = false }) catch |err| switch (err) {
+        error.SymLinkLoop => {
+            try stderr.print("zttp proofs verify: component path '{s}' contains a symlink\n", .{relative_path});
+            return error.SuspiciousPath;
+        },
+        else => return err,
     };
+    defer file.close(io);
+
+    const stat = try file.stat(io);
+    if (stat.kind != .file) return error.NotFile;
+    if (stat.size > max_bytes) return error.FileTooBig;
+
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    var total: usize = 0;
+    var buffer: [64 * 1024]u8 = undefined;
+    var reader = file.reader(io, &buffer);
+    while (true) {
+        const count = reader.interface.readSliceShort(&buffer) catch return error.FileReadFailed;
+        if (count == 0) break;
+        if (count > max_bytes -| total) return error.FileTooBig;
+        total += count;
+        hasher.update(buffer[0..count]);
+    }
+    var digest: [32]u8 = undefined;
+    hasher.final(&digest);
+    return std.fmt.bytesToHex(digest, .lower);
+}
+
+fn isSupportedComponent(name: []const u8) bool {
+    return std.mem.eql(u8, name, "contract") or
+        std.mem.eql(u8, name, "binary") or
+        std.mem.eql(u8, name, "replay");
+}
+
+fn parseSha256(value: []const u8) ?[64]u8 {
+    if (value.len != 64) return null;
+    for (value) |byte| {
+        if (!std.ascii.isDigit(byte) and !(byte >= 'a' and byte <= 'f')) return null;
+    }
+    var result: [64]u8 = undefined;
+    @memcpy(&result, value);
+    return result;
 }
 
 fn rejectSuspiciousPath(path: []const u8) !void {
@@ -297,35 +432,14 @@ test "rejectSuspiciousPath blocks parent traversal and system roots" {
     try rejectSuspiciousPath("./out/bundle");
 }
 
-test "findNextComponent reads contract entry from a minimal manifest" {
-    const manifest =
-        \\{
-        \\  "toolVersion": "zttp-bundle-1",
-        \\  "components": {
-        \\    "contract": { "path": "handler.contract.json", "sha256": "abc1230000000000000000000000000000000000000000000000000000000abc" }
-        \\  }
-        \\}
-    ;
-    const entry = findNextComponent(manifest, 0) orelse return error.TestUnexpectedNull;
-    try std.testing.expectEqualStrings("contract", entry.name);
-    try std.testing.expectEqualStrings("handler.contract.json", entry.path);
-    try std.testing.expectEqualStrings("abc1230000000000000000000000000000000000000000000000000000000abc", &entry.expected_sha);
-}
-
-test "findNextComponent walks multiple entries via next_offset" {
-    const manifest =
-        \\{
-        \\  "components": {
-        \\    "contract": { "path": "handler.contract.json", "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
-        \\    "binary": { "path": "binary", "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" }
-        \\  }
-        \\}
-    ;
-    const first = findNextComponent(manifest, 0) orelse return error.TestUnexpectedNull;
-    try std.testing.expectEqualStrings("contract", first.name);
-    const second = findNextComponent(manifest, first.next_offset) orelse return error.TestUnexpectedNull;
-    try std.testing.expectEqualStrings("binary", second.name);
-    try std.testing.expect(findNextComponent(manifest, second.next_offset) == null);
+test "bundle manifest accepts only supported names and lowercase digests" {
+    try std.testing.expect(isSupportedComponent("contract"));
+    try std.testing.expect(isSupportedComponent("binary"));
+    try std.testing.expect(isSupportedComponent("replay"));
+    try std.testing.expect(!isSupportedComponent("extra"));
+    try std.testing.expect(parseSha256("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa") != null);
+    try std.testing.expect(parseSha256("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA") == null);
+    try std.testing.expect(parseSha256("short") == null);
 }
 
 const test_chdir = @import("../proof_ledger.zig").chdirTmpForTest;
@@ -391,6 +505,143 @@ test "verify rejects an absolute manifest component path" {
     try std.testing.expect(std.mem.indexOf(u8, err.writer.buffered(), abs_secret) != null);
 }
 
+test "verify rejects a symlink component without hashing its target" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const old_cwd = try test_chdir(&tmp);
+    defer std.testing.allocator.free(old_cwd);
+    defer std.Io.Threaded.chdir(old_cwd) catch {};
+
+    try zts.file_io.writeFile(std.testing.allocator, "secret", "outside-the-bundle");
+    try ensureDir(std.testing.allocator, "bundle");
+    try tmp.dir.symLink(std.testing.io, "../secret", "bundle/handler.contract.json", .{});
+    const secret_sha = sha256Hex("outside-the-bundle");
+    const manifest = try std.fmt.allocPrint(
+        std.testing.allocator,
+        "{{\n  \"components\": {{\n    \"contract\": {{ \"path\": \"handler.contract.json\", \"sha256\": \"{s}\" }}\n  }}\n}}\n",
+        .{secret_sha},
+    );
+    defer std.testing.allocator.free(manifest);
+    try zts.file_io.writeFile(std.testing.allocator, "bundle/bundle.json", manifest);
+
+    var out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer out.deinit();
+    var err = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer err.deinit();
+    try std.testing.expectError(error.SuspiciousPath, verify(std.testing.allocator, "bundle", &out.writer, &err.writer));
+    try std.testing.expect(std.mem.indexOf(u8, out.writer.buffered(), "OK") == null);
+    try std.testing.expect(std.mem.indexOf(u8, out.writer.buffered(), "actual") == null);
+    try std.testing.expect(std.mem.indexOf(u8, err.writer.buffered(), "handler.contract.json") != null);
+}
+
+test "verify rejects an intermediate directory symlink" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const old_cwd = try test_chdir(&tmp);
+    defer std.testing.allocator.free(old_cwd);
+    defer std.Io.Threaded.chdir(old_cwd) catch {};
+
+    try ensureDir(std.testing.allocator, "bundle");
+    try ensureDir(std.testing.allocator, "outside");
+    try zts.file_io.writeFile(std.testing.allocator, "bundle/handler.contract.json", "contract");
+    try zts.file_io.writeFile(std.testing.allocator, "outside/trace.jsonl", "outside-the-bundle");
+    try tmp.dir.symLink(std.testing.io, "../outside", "bundle/replay", .{ .is_directory = true });
+    const secret_sha = sha256Hex("outside-the-bundle");
+    const contract_sha = sha256Hex("contract");
+    const manifest = try std.fmt.allocPrint(
+        std.testing.allocator,
+        "{{\n  \"components\": {{\n    \"contract\": {{ \"path\": \"handler.contract.json\", \"sha256\": \"{s}\" }},\n    \"replay\": {{ \"path\": \"replay/trace.jsonl\", \"sha256\": \"{s}\" }}\n  }}\n}}\n",
+        .{ contract_sha, secret_sha },
+    );
+    defer std.testing.allocator.free(manifest);
+    try zts.file_io.writeFile(std.testing.allocator, "bundle/bundle.json", manifest);
+
+    var out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer out.deinit();
+    var err = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer err.deinit();
+    try std.testing.expectError(error.SuspiciousPath, verify(std.testing.allocator, "bundle", &out.writer, &err.writer));
+    try std.testing.expect(std.mem.indexOf(u8, out.writer.buffered(), "OK") == null);
+    try std.testing.expect(std.mem.indexOf(u8, err.writer.buffered(), "replay/trace.jsonl") != null);
+}
+
+test "verify rejects duplicate component paths" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const old_cwd = try test_chdir(&tmp);
+    defer std.testing.allocator.free(old_cwd);
+    defer std.Io.Threaded.chdir(old_cwd) catch {};
+
+    try ensureDir(std.testing.allocator, "bundle");
+    try zts.file_io.writeFile(std.testing.allocator, "bundle/component", "same-file");
+    const sha = sha256Hex("same-file");
+    const manifest = try std.fmt.allocPrint(
+        std.testing.allocator,
+        "{{\"components\":{{\"contract\":{{\"path\":\"component\",\"sha256\":\"{s}\"}},\"binary\":{{\"path\":\"component\",\"sha256\":\"{s}\"}}}}}}",
+        .{ sha, sha },
+    );
+    defer std.testing.allocator.free(manifest);
+    try zts.file_io.writeFile(std.testing.allocator, "bundle/bundle.json", manifest);
+
+    var out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer out.deinit();
+    var err = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer err.deinit();
+    try std.testing.expectError(error.InvalidManifest, verify(std.testing.allocator, "bundle", &out.writer, &err.writer));
+    try std.testing.expect(std.mem.indexOf(u8, out.writer.buffered(), "OK") == null);
+}
+
+test "verify rejects unsupported manifest components" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const old_cwd = try test_chdir(&tmp);
+    defer std.testing.allocator.free(old_cwd);
+    defer std.Io.Threaded.chdir(old_cwd) catch {};
+
+    try ensureDir(std.testing.allocator, "bundle");
+    try zts.file_io.writeFile(std.testing.allocator, "bundle/component", "data");
+    const sha = sha256Hex("data");
+    const manifest = try std.fmt.allocPrint(
+        std.testing.allocator,
+        "{{\"components\":{{\"extra\":{{\"path\":\"component\",\"sha256\":\"{s}\"}}}}}}",
+        .{sha},
+    );
+    defer std.testing.allocator.free(manifest);
+    try zts.file_io.writeFile(std.testing.allocator, "bundle/bundle.json", manifest);
+
+    var out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer out.deinit();
+    var err = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer err.deinit();
+    try std.testing.expectError(error.InvalidManifest, verify(std.testing.allocator, "bundle", &out.writer, &err.writer));
+}
+
+test "verify rejects a supported manifest without a contract" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const old_cwd = try test_chdir(&tmp);
+    defer std.testing.allocator.free(old_cwd);
+    defer std.Io.Threaded.chdir(old_cwd) catch {};
+
+    try ensureDir(std.testing.allocator, "bundle");
+    try zts.file_io.writeFile(std.testing.allocator, "bundle/trace.jsonl", "valid-replay");
+    const sha = sha256Hex("valid-replay");
+    const manifest = try std.fmt.allocPrint(
+        std.testing.allocator,
+        "{{\"components\":{{\"replay\":{{\"path\":\"trace.jsonl\",\"sha256\":\"{s}\"}}}}}}",
+        .{sha},
+    );
+    defer std.testing.allocator.free(manifest);
+    try zts.file_io.writeFile(std.testing.allocator, "bundle/bundle.json", manifest);
+
+    var out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer out.deinit();
+    var err = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer err.deinit();
+    try std.testing.expectError(error.InvalidManifest, verify(std.testing.allocator, "bundle", &out.writer, &err.writer));
+    try std.testing.expect(std.mem.indexOf(u8, out.writer.buffered(), "Bundle verified") == null);
+}
+
 test "verify passes a bundle written by writeBundle" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -399,6 +650,7 @@ test "verify passes a bundle written by writeBundle" {
     defer std.Io.Threaded.chdir(old_cwd) catch {};
 
     try zts.file_io.writeFile(std.testing.allocator, "contract.json", "{\"routes\":[]}");
+    try zts.file_io.writeFile(std.testing.allocator, "trace.jsonl", "{\"event\":\"ok\"}\n");
 
     var out = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer out.deinit();
@@ -406,6 +658,7 @@ test "verify passes a bundle written by writeBundle" {
     defer err.deinit();
     try writeBundle(std.testing.allocator, .{
         .contract_path = "contract.json",
+        .replay_path = "trace.jsonl",
         .out_dir = "bundle",
     }, &out.writer, &err.writer);
 
