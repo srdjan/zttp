@@ -80,3 +80,11 @@ brag-output-*/
 # impossible to publish from a clean checkout.
 __pycache__/
 *.pyc
+
+# Render verification for the archify diagrams: the screenshots and the
+# report `archify visual-check` writes beside the HTML. Regenerated on every
+# diagram render; the diagram source (*.archify.json) and the rendered page
+# are the tracked artifacts.
+*.visual-check.html
+*.visual-check.json
+*.visual-check.*.png
