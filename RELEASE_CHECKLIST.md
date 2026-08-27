@@ -11,7 +11,7 @@ gates, and keep release notes user-facing.
 
 ## Validation
 
-- [ ] `bash scripts/verify.sh`
+- [ ] `bash scripts/verify.sh --release`
 - [ ] `zig build wasm` and exercise one accepted and one rejected handler
       through the exported `alloc` / `analyze` / `free` ABI.
 - [ ] `zig build smoke-getting-started` (macOS beta gate)

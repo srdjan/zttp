@@ -69,6 +69,12 @@ const verify_script_markers = [_][]const u8{
 
 const release_permission_marker = "contents: write";
 
+// Release-evidence provenance is a release gate, not a per-commit one: it fails
+// until coverage and convergence are republished from a source commit the tree
+// still matches. `ci.yml` runs the plain verifier; only the release workflow
+// passes `--release`, and this asserts it still does.
+const release_only_verify_marker = "bash scripts/verify.sh --release";
+
 pub const ReleaseDoctorOptions = struct {
     json: bool = false,
     out_path: ?[]const u8 = null,
@@ -615,6 +621,7 @@ fn releaseGateRequirementsPresent(build_zig: []const u8, ci_yml: []const u8, rel
         containsAll(ci_yml, &ci_gate_markers) and
         containsAll(release_yml, &ci_gate_markers) and
         containsAll(release_yml, &release_verify_commands) and
+        std.mem.indexOf(u8, release_yml, release_only_verify_marker) != null and
         std.mem.indexOf(u8, release_yml, release_permission_marker) != null and
         containsAll(verify_sh, &verify_script_markers);
 }
@@ -648,7 +655,7 @@ test "release gate requirements require semantics and doctor wiring" {
         "test-module-governance test-capability-audit test-docs-drift test-evidence-marker";
     const ci_yml = "bash scripts/verify.sh\n";
     const release_yml =
-        ci_yml ++
+        "bash scripts/verify.sh --release\n" ++
         "zig build smoke-getting-started\nzig build smoke-demo\nzig build smoke-studio\n" ++
         "zig build bench-check\nzig build release-check\ncontents: write\n";
     const verify_sh =
@@ -667,6 +674,15 @@ test "release gate requirements require semantics and doctor wiring" {
     try std.testing.expect(!releaseGateRequirementsPresent(build_zig, ci_yml, "zig build test\n", verify_sh));
     try std.testing.expect(!releaseGateRequirementsPresent(build_zig, "zig build test\n", release_yml, verify_sh));
     try std.testing.expect(!releaseGateRequirementsPresent(build_zig, ci_yml, release_yml, "zig build test\n"));
+
+    // The release workflow must run the release form. A release.yml that runs
+    // only the per-commit verifier never reaches the evidence-provenance gate,
+    // and the passport would still report every gate wired.
+    const per_commit_release_yml =
+        ci_yml ++
+        "zig build smoke-getting-started\nzig build smoke-demo\nzig build smoke-studio\n" ++
+        "zig build bench-check\nzig build release-check\ncontents: write\n";
+    try std.testing.expect(!releaseGateRequirementsPresent(build_zig, ci_yml, per_commit_release_yml, verify_sh));
 }
 
 // ---------------------------------------------------------------------------
@@ -869,7 +885,7 @@ fn writeReleaseDoctorFixture(io: std.Io, tmp: *std.testing.TmpDir, opts: Release
     try tmp.dir.writeFile(io, .{
         .sub_path = ".github/workflows/release.yml",
         .data =
-        \\bash scripts/verify.sh
+        \\bash scripts/verify.sh --release
         \\zig build smoke-getting-started
         \\zig build smoke-demo
         \\zig build smoke-studio

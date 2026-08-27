@@ -21,11 +21,29 @@
 # correctness suite always runs first regardless.
 #
 # Usage (from anywhere; the script cd's to the repo root):
-#   bash scripts/verify.sh
+#   bash scripts/verify.sh             # the per-commit gate, run by ci.yml
+#   bash scripts/verify.sh --release   # adds the release-only gates
+#
+# Release-evidence provenance is a RELEASE gate and not a per-commit one. It
+# fails until docs/coverage.json and docs/convergence.json are republished from
+# a source commit the tree still matches, which every ordinary source commit
+# breaks. Running it on every pull request would make main red between a commit
+# and the next corpus republish, so only `--release` runs it.
 
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
+
+release_mode=false
+for arg in "$@"; do
+  case "$arg" in
+    --release) release_mode=true ;;
+    *)
+      echo "usage: bash scripts/verify.sh [--release]" >&2
+      exit 2
+      ;;
+  esac
+done
 
 step() {
   printf '\n========================================\n'
@@ -124,12 +142,18 @@ echo "$META" | jq -e '.rule_count >= 25' >/dev/null
 echo "$META" | jq -e '.policy_hash | length == 64' >/dev/null
 echo "expert subsystem OK"
 
-step "zig build release-provenance  (clean, current release evidence)"
-zig build release-provenance
+if [ "$release_mode" = true ]; then
+  step "zig build release-provenance  (clean, current release evidence)"
+  zig build release-provenance
+fi
 
 step "zig fmt --check build.zig packages/  (ci.yml: Check formatting)"
 zig fmt --check build.zig packages/
 
 printf '\n========================================\n'
-printf '>> verify.sh: all CI test-job steps passed\n'
+if [ "$release_mode" = true ]; then
+  printf '>> verify.sh: all CI and release gates passed\n'
+else
+  printf '>> verify.sh: all CI test-job steps passed\n'
+fi
 printf '========================================\n'
