@@ -17,14 +17,23 @@ zig build -Dhandler=handler.ts         # precompile a handler
 ## Test
 
 ```bash
-zig build test                         # all unit + integration suites
-zig build test-zts                   # engine only
-zig build test-zruntime                # runtime only
+bash scripts/verify.sh                 # the full gate; CI runs exactly this
+zig build test                         # the aggregate unit suite (not the full gate)
+zig build test-zts                     # engine only
+zig build test-zruntime                # runtime only, a standalone root
 bash scripts/test-examples.sh          # end-to-end example handlers
 zig build bench                        # Zig-native microbenchmarks
 ```
 
-Run the relevant `test*` step before opening a PR. If you touched the compile-time checkers or the rule registry, also run:
+`zig build test` leaves out the standalone runtime root, the smoke and
+panic-isolation steps, the example handlers, and the shell-driven registry
+gates. `scripts/verify.sh` runs all of them, and `ci.yml` runs it as its single
+step, so a PR that passed only `zig build test` can still go red.
+[Test Steps](docs/internals/testing.md) maps which step runs what.
+
+Run the relevant `test*` step while iterating and `scripts/verify.sh` before
+opening a PR. If you touched the compile-time checkers or the rule registry,
+also run:
 
 ```bash
 zig build release

@@ -5,6 +5,13 @@
 for step. This document says which steps each one runs, which steps `zig build
 test` deliberately leaves out, and why.
 
+`bash scripts/verify.sh --release` adds one step the per-commit gate does not
+run: `zig build release-provenance`, which checks that `docs/coverage.json` and
+`docs/convergence.json` were published from a clean source commit the tree still
+matches apart from generated evidence. Every ordinary source commit fails that
+check until the corpus is replayed and both pages republished, so it belongs to
+the release path (`release.yml`, `RELEASE_CHECKLIST.md`) rather than to CI.
+
 The authority is `build.zig`. When the two disagree, `build.zig` is right and
 this document is stale.
 

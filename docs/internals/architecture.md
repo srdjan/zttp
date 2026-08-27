@@ -165,6 +165,11 @@ currently serving handler active. Accepted swaps rederive the runtime
 capability policy and handler-pool lifecycle policy from the new contract
 before new runtime generations are acquired.
 
+A capability policy named by `zttp.json` joins the watch set and is read again
+for every candidate, so tightening it blocks newly forbidden code without a
+restart. A candidate that violates the current policy, and a policy that cannot
+be read, both keep the previous handler serving.
+
 ## Deploy Artifact
 
 `zttp deploy` builds a self-contained local binary under

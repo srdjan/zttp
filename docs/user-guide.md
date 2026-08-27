@@ -414,6 +414,9 @@ the analyzer. It checks:
 - module-scope mutations that can leak request state are rejected;
 - declared `Proof<T, P>` obligations are discharged;
 - virtual-module imports derive a least-privilege runtime policy;
+- a capability policy named by the `policy` entry in `zttp.json` is enforced
+  against the handler, and a policy that cannot be read stops the command
+  instead of producing an unrestricted verdict;
 - flow checks catch secret, credential, validation, injection, and PII issues
   where enough structure is visible.
 

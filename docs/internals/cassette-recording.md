@@ -12,19 +12,38 @@ also owns both build steps described here.
 
 ## When a re-record is owed
 
-A cassette pins the exact request that produced it. Each recorded turn carries
-a `request_context_sha256` over the provider, the model id, the output and
+A cassette pins the exact request that produced it, under three digests.
+`request_context_sha256` covers the provider, the model id, the output and
 reserve token budgets, the streaming mode, the request purpose, the cache
-policy, the system prompt digest, and the tool schema digest. Replay recomputes
-that digest from the live build and refuses a cassette whose digest no longer
-matches, reporting `model_context_mismatch` and failing with
+policy, the system prompt digest, and the tool schema digest.
+`transcript_sha256` covers the conversation the turn had reached, tool results
+included. `wire_request_sha256` covers the serialized request body itself.
+Replay recomputes all three from the live build and refuses a cassette whose
+digests no longer match, reporting `model_context_mismatch` or
+`transcript_or_transient_prompt_mismatch` and failing with
 `error.StaleCodegenCassette`.
 
-So an edit to the expert persona, to any embedded skill or example it carries,
-or to any registered tool's name, description, or input schema makes every
-cassette stale at once. That is not a defect in the pins. The recorded turn is
-what one model did against one prompt, and re-pinning it against a different
-prompt would publish a number no run produced.
+An edit to the expert persona, to any skill or prompt template it embeds from
+`packages/pi/src/skills/` and `packages/pi/src/prompts/`, or to any registered
+tool's name, description, or input schema makes every cassette stale at once
+through the first digest.
+
+The other two are the ones a compiler change reaches, because anything the
+compiler publishes into a tool result is part of the transcript: the module
+registry payload, the inline handlers in
+`packages/tools/src/example_registry.zig` behind `meta.payload.examples`, and
+the compiler version string. Measured on 2026-08-27, bumping
+`packages/zts/src/root.zig` from 0.18.0 to 0.19.0 staled 16 of 19 cases, because
+`compiler_version` reaches the transcript through the `zts_expert_query` meta
+tool result. Every version bump therefore owes a full re-record. Bump last, and
+treat the bump and the re-record as one change.
+
+Handler files under `examples/` are not embedded and do not stale the corpus.
+`example_registry.zig` carries its own inline handlers.
+
+None of this is a defect in the pins. The recorded turn is what one model did
+against one prompt, and re-pinning it against a different prompt would publish
+a number no run produced.
 
 A cassette can also run out of steps. If a compiler change makes the veto
 reject a draft that used to pass, the turn retries and asks for one more model
@@ -265,10 +284,23 @@ respectively. `scripts/check-convergence-emitter.sh` holds each marker to one
 producer and one publisher, so neither page can be written from the other's
 measurement.
 
-Never edit the generated Markdown or JSON by hand. Commit the cassettes and the
-regenerated pages together, from a clean tree: `update-convergence.sh` marks a
-row `-dirty` when the working tree is not clean, and a number published from
-uncommitted work cannot be reproduced from its commit.
+Never edit the generated Markdown or JSON by hand. Both publishers refuse to run
+when the working tree is not clean, and refuse a replay whose marker recorded
+dirty source, because a number published from uncommitted work cannot be
+reproduced from its commit. Run them one at a time: the coverage pages have to
+be committed before `update-convergence.sh` sees a clean tree.
+
+A recording that moves a case's runtime intent outcome also moves its
+`expect_committed_intent_pass` pin, and the gate that checks it requires the pin
+to move in the same commit as the cassettes.
+
+Publish last. `zig build release-provenance` accepts the two pages only when
+every commit after the one they name touches nothing but `docs/coverage.json`,
+`docs/coverage.md`, `docs/convergence.json`, and `docs/convergence.md`. So the
+cassettes, the pins, and every other source and doc change land first, and the
+two publisher runs are the final commits of a release. Publishing earlier costs
+one full republish cycle per later commit, and each cycle appends another row to
+`docs/convergence.md`.
 
 ## See also
 

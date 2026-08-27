@@ -108,7 +108,11 @@ exposing a binary publicly. Two boundaries are easy to miss:
 - `dev` and `serve` from source are not a sandbox. They run handler code with
   your user's permissions for fast iteration. The enforced surfaces are the
   precompiled (`-Dhandler=`) and `deploy` binaries, which carry and enforce the
-  contract-derived capability allowlist (egress, env, cache, SQL).
+  contract-derived capability allowlist (egress, env, cache, SQL). A `policy`
+  entry in `zttp.json` narrows that allowlist at analysis time instead: every
+  project-backed command checks the handler against it, and a policy that
+  cannot be read is an error rather than an unrestricted verdict. See
+  [Contracts and Sandboxing](docs/contracts-and-sandboxing.md).
 - No TLS. The runtime serves plain HTTP and binds `127.0.0.1` by default.
   Terminate TLS at a reverse proxy and set the host explicitly before exposing a
   deployed binary to public traffic.
