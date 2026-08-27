@@ -72,3 +72,11 @@ demos/
 .playwright-mcp/
 brag-output/
 brag-output-*/
+
+# Python bytecode cache. The build runs scripts/*.py, and CPython writes this
+# beside them. Left untracked it makes `git status --porcelain` non-empty, which
+# is what the evidence publishers read as "the source is dirty" - so an
+# unignored __pycache__ made docs/coverage.json and docs/convergence.json
+# impossible to publish from a clean checkout.
+__pycache__/
+*.pyc
