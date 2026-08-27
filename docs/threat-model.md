@@ -58,6 +58,15 @@ repository is in scope.
   (opcode legality, operand bounds, constant pool, stack discipline, jump
   targets) is dispatched into the VM. Rejected bytecode is dropped before
   any VM state is allocated.
+- A configured capability policy that cannot be read, parsed, or applied stops
+  the command. No analyzer boundary substitutes an unrestricted policy and then
+  publishes a verdict, a contract, an artifact, or a proof capsule.
+- A proof bundle is untrusted input. `zttp proofs verify` accepts only the
+  `contract`, `binary`, and `replay` components, requires a `contract`, and
+  requires each component to carry a distinct relative path and a lowercase
+  sha256. Every path segment is opened without following symlinks, so a
+  component that resolves outside the bundle directory is refused rather than
+  hashed.
 
 ## Known Footguns
 
