@@ -1372,7 +1372,16 @@ const record_corpus = [_]RecordCase{
         // published rate. Closing it means either stubbing `uuid` in the spec
         // or telling the prompt where the ids come from, and both edit the
         // model-visible input, so both belong to a deliberate re-record.
-        .expect_committed_intent_pass = false,
+        //
+        // Fourth pass, 2026-08-27, and the pin moves back to true. Neither the
+        // prompt nor the spec changed; this draw wrote `{ reservationId:
+        // "res-1" }` and `{ chargeId: "chg-1" }` instead of sourcing the ids
+        // from `uuid`, so both step results serialized with their keys. That is
+        // the exact counterfactual the third pass measured. Which side of the
+        // pin this case lands on is still a property of the draft rather than
+        // of the handler being right, and the `uuid` stub gap that decides it
+        // is unchanged.
+        .expect_committed_intent_pass = true,
         .prompt = "Create a durable handler in handler.ts using zttp:durable that runs a " ++
             "two-step order workflow via run() and step(): a `reserve` step returning " ++
             "{ reservationId }, then a `charge` step returning { chargeId }. Respond 201 " ++
@@ -1578,7 +1587,15 @@ const record_corpus = [_]RecordCase{
         // right. Closing it needs the spec and the prompt to agree on the
         // answer's shape, which changes the request identity and so belongs to
         // a deliberate re-record, not to this one.
-        .expect_committed_intent_pass = true,
+        //
+        // Back to false on the 2026-08-27 re-record, for that same unclosed
+        // mismatch. This draft answers `Response.json(outcome)`, and the body
+        // the runtime builds for a compensated saga is
+        // `{"ok":false,"failed":"ship","compensated":true}`
+        // (`runtime_workflow.zig`), which carries no literal `outcome` key. So
+        // `bodyContains:"outcome"` fails first and the run measures nothing
+        // about the step and compensation events after it.
+        .expect_committed_intent_pass = false,
     },
     .{
         .name = "workflow-wait-signal",
@@ -1768,6 +1785,13 @@ const record_corpus = [_]RecordCase{
             ,
         } },
         .expect_first_attempt_green = true,
+        // Pinned false on the 2026-08-27 re-record. The turn ended
+        // `veto_exhausted`: every draft in the attempt budget tripped ZTS214, a
+        // nominal type name used in call position, so no edit was applied and
+        // there is no handler for the intent spec to run. The failure is
+        // upstream of the spec, which is why it also shows as
+        // RecordedEditNotApplied rather than a failed assertion.
+        .expect_committed_intent_pass = false,
     },
     .{
         // Fence: walking a helper imported from a sibling file. Every other case
