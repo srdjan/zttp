@@ -118,6 +118,38 @@ pub const HttpResponse = struct {
         self.body_owner = null;
     }
 
+    /// Copy every byte this response points at onto `allocator`, so the copy
+    /// outlives the runtime that produced it. Needed by the owned execution
+    /// path: the response is built from the runtime's lifetime arena, and
+    /// releasing the slot may destroy that arena before the caller deinits.
+    /// `prebuilt_raw` is dropped rather than copied - it points into the
+    /// runtime's pattern memory and only the borrowed send path reads it.
+    pub fn cloneDetached(self: *const HttpResponse, allocator: std.mem.Allocator) !HttpResponse {
+        var out = HttpResponse.init(allocator);
+        errdefer out.deinit();
+
+        out.status = self.status;
+        try out.headers.ensureTotalCapacity(allocator, self.headers.items.len);
+        for (self.headers.items) |header| {
+            const key = try allocator.dupe(u8, header.key);
+            errdefer allocator.free(key);
+            const value = try allocator.dupe(u8, header.value);
+            out.headers.appendAssumeCapacity(.{
+                .key = key,
+                .value = value,
+                .key_owned = true,
+                .value_owned = true,
+            });
+        }
+
+        if (self.body.len > 0) {
+            out.body = try allocator.dupe(u8, self.body);
+            out.body_owned = true;
+        }
+
+        return out;
+    }
+
     /// Debug-only check that the response no longer borrows runtime-managed state.
     pub fn assertDetachedFromRuntime(self: *const HttpResponse) void {
         if (!std.debug.runtime_safety) return;

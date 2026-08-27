@@ -343,7 +343,7 @@ pub const HandlerPool = struct {
         var last_err: ?anyerror = null;
         while (attempt < 2) : (attempt += 1) {
             const rt = try self.ensureRuntime(base_rt);
-            const result = self.callHandlerGuarded(rt, request, request_id, false) catch |err| {
+            var result = self.callHandlerGuarded(rt, request, request_id, false) catch |err| {
                 if (err == error.HandlerPanicked) {
                     slot_disposed = true;
                     self.quarantineSlot(base_rt);
@@ -367,7 +367,13 @@ pub const HandlerPool = struct {
             if (!rt.owns_resources) {
                 result.assertDetachedFromRuntime();
             }
-            return result;
+            // The response bytes come from the runtime's lifetime arena, and the
+            // deferred release above may destroy that arena (recycle policy,
+            // failed arena audit, timeout). The caller deinits the response
+            // after this function returns, so re-home it on the pool allocator
+            // first: it outlives every slot.
+            defer result.deinit();
+            return try result.cloneDetached(self.allocator);
         }
         return last_err orelse error.HandlerNotCallable;
     }
@@ -1220,6 +1226,41 @@ test "HandlerPool basic operations" {
 
     try std.testing.expectEqualStrings("ok", response.body);
 }
+// An owned response outlives the slot that produced it: the caller deinits it
+// after `executeHandler` has already released the runtime, and a release may
+// destroy the slot (recycle policy, arena audit, timeout). Freeing response
+// bytes into a destroyed runtime arena is a use-after-free.
+test "owned response outlives a recycled runtime slot" {
+    const allocator = std.testing.allocator;
+    // Body comes from the request, so this misses the static-pattern fast path
+    // and takes the extraction path that allocates owned headers and body.
+    const handler_code = "function handler(req) { return Response.text(req.url); }";
+    var pool = try HandlerPool.init(allocator, .{}, handler_code, "<handler>", 1, 0);
+    defer pool.deinit();
+    // Every release drops the slot, which destroys its lifetime arena.
+    pool.setPoolingPolicy(.ephemeral);
+
+    var request = HttpRequestOwned{
+        .method = try allocator.dupe(u8, "GET"),
+        .url = try allocator.dupe(u8, "/echo"),
+        .headers = .empty,
+        .body = null,
+    };
+    defer request.deinit(allocator);
+
+    var response = try pool.executeHandler(request.asView());
+    defer response.deinit();
+
+    try std.testing.expectEqualStrings("/echo", response.body);
+    try std.testing.expect(response.headers.items.len > 0);
+    // The slot is already gone, so a response homed on its lifetime arena would
+    // free into destroyed memory. Reading the bytes back cannot prove that (the
+    // read is undefined behavior, not a reliable crash), so assert the home
+    // directly: the response must free through the pool's allocator.
+    try std.testing.expectEqual(allocator.ptr, response.allocator.ptr);
+    try std.testing.expectEqual(allocator.vtable, response.allocator.vtable);
+}
+
 // Uses testing.allocator directly so leaks fail rather than being absorbed
 // by an arena.
 test "HandlerPool teardown leaves no leaks under testing.allocator" {
