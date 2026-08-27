@@ -442,16 +442,16 @@ test "stand-in request parsing keeps the turn through a veto rejection and its r
     // nudge as its ask, which is what happened before the prefix table existed.
     const body =
         \\{"model":"standin","input":[
-        \\  {"role":"user","content":[{"type":"input_text","text":"Fix the ZTS300 compiler error in handler.ts"}]},
+        \\  {"role":"user","content":[{"type":"input_text","text":"Fix the ZTS303 compiler error in handler.ts"}]},
         \\  {"role":"user","content":[{"type":"input_text","text":"[expert workflow] kind=violation_fix"}]},
         \\  {"type":"function_call_output","call_id":"call-0","output":"{\"ok\":true,\"complete\":true,\"offset\":0,\"content\":\"function handler() {}\"}"},
-        \\  {"type":"function_call_output","call_id":"call-1","output":"The compiler rejected this edit. Fix every flagged violation below:\n\nZTS300"},
+        \\  {"type":"function_call_output","call_id":"call-1","output":"The compiler rejected this edit. Fix every flagged violation below:\n\nZTS303"},
         \\  {"role":"user","content":[{"type":"input_text","text":"Your previous edit failed compiler verification (attempt 1/5). Emit a new, complete edit."}]}
         \\]}
     ;
 
     const parsed = try parse(arena.allocator(), body);
-    try testing.expectEqualStrings("Fix the ZTS300 compiler error in handler.ts", parsed.ask);
+    try testing.expectEqualStrings("Fix the ZTS303 compiler error in handler.ts", parsed.ask);
     try testing.expectEqual(@as(usize, 2), parsed.step_index);
     try testing.expectEqualStrings("function handler() {}", parsed.source.?);
     try testing.expectEqual(@as(usize, 1), parsed.rejected_drafts);

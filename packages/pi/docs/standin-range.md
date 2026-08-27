@@ -4,7 +4,7 @@
 
 Range version: `step-6-v2`
 
-Range hash: `9c27a7f8dd63456fec9a6d755f9b98a9f7dad89d1b0e9227503f601f4488ebf4`
+Range hash: `6ff384e61ac7c2c853c07300c39db35fa926c8aac02a1e3eff781da193e5c379`
 
 The deterministic playbook server supports the entries below. Use `zig build zttp-standin -- --range` to print this document.
 
@@ -65,9 +65,9 @@ This server is a scripted responder, not a model. Its drafts and defect seeds ar
 - Task kind: `violation_fix`
 - Result: workspace edit
 - Behavior: Inspect the violation and repair facts, then propose one complete handler edit.
-- Canonical prompt: Fix the ZTS300 compiler error in handler.ts
+- Canonical prompt: Fix the ZTS303 compiler error in handler.ts
 - Example paraphrases:
-  - Fix the ZTS300 compiler error
+  - Fix the ZTS303 compiler error
   - Repair this handler's compiler error
 
 ## `fill-hole`

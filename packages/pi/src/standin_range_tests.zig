@@ -48,6 +48,39 @@ test "stand-in gate: prompt catalog and playbooks map both ways" {
     }
 }
 
+test "stand-in gate: advertised diagnostic codes exist in the live registry" {
+    for (range.entries) |entry| {
+        try expectLiveDiagnosticCodes(entry.canonical_prompt);
+        for (entry.paraphrases) |paraphrase| try expectLiveDiagnosticCodes(paraphrase);
+    }
+    for (expert_eval.cases) |case| try expectLiveDiagnosticCodes(case.prompt);
+}
+
+fn expectLiveDiagnosticCodes(text: []const u8) !void {
+    var index: usize = 0;
+    while (index + 3 < text.len) {
+        const is_code = std.mem.startsWith(u8, text[index..], "ZTS") or
+            std.mem.startsWith(u8, text[index..], "POL");
+        if (!is_code) {
+            index += 1;
+            continue;
+        }
+
+        var end = index + 3;
+        while (end < text.len and std.ascii.isDigit(text[end])) : (end += 1) {}
+        if (end == index + 3) {
+            index += 3;
+            continue;
+        }
+        const code = text[index..end];
+        if (zts.PolicyCatalog.findByCode(code) == null) {
+            std.debug.print("[standin-gate] advertised diagnostic code is not live: {s}\n", .{code});
+            return error.UnknownAdvertisedDiagnostic;
+        }
+        index = end;
+    }
+}
+
 // The range's edge is what the false-fire gates measure, and every one of them
 // asserts an absence. Covering a reserved kind deletes the negative that stands
 // on it; covering all of them leaves the gates iterating nothing and reporting a
@@ -348,16 +381,7 @@ fn sequenceSource(entry_id: []const u8) []const u8 {
         return "function handler(req: Request): Response { return Response.json({ ok: true }); }\n";
     }
     if (std.mem.eql(u8, entry_id, "fix")) {
-        return
-        \\import { validateJson } from "zttp:validate";
-        \\
-        \\function handler(req: Request): Response {
-        \\    const result = validateJson("item", req.body ?? "");
-        \\    const data = result.value;
-        \\    return Response.json({ data: data });
-        \\}
-        \\
-        ;
+        return (defect_seeds.findById("unchecked-result") orelse unreachable).seed_source;
     }
     if (std.mem.eql(u8, entry_id, "explain") or std.mem.eql(u8, entry_id, "review")) {
         return "function handler(req: Request): Response { return Response.json({ ok: true }); }\n";

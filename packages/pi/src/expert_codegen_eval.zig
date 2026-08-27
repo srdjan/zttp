@@ -739,13 +739,13 @@ test "summarize aggregates pass rate and failing-code histogram" {
 }
 
 test "code collection matches whole tokens, not prefixes" {
-    // The case this exists for: a diagnostic for ZTS300 must not be counted as
+    // The case this exists for: a diagnostic for ZTS303 must not be counted as
     // coverage of a shorter code that is its prefix, or the corpus reports
     // exercising rules nothing exercised.
-    try testing.expect(containsCodeToken("error ZTS300: bad", "ZTS300"));
-    try testing.expect(!containsCodeToken("error ZTS300: bad", "ZTS30"));
-    try testing.expect(!containsCodeToken("error XZTS300", "ZTS300"));
-    try testing.expect(containsCodeToken("ZTS300", "ZTS300"));
+    try testing.expect(containsCodeToken("error ZTS303: bad", "ZTS303"));
+    try testing.expect(!containsCodeToken("error ZTS303: bad", "ZTS30"));
+    try testing.expect(!containsCodeToken("error XZTS303", "ZTS303"));
+    try testing.expect(containsCodeToken("ZTS303", "ZTS303"));
     try testing.expect(containsCodeToken("see POL001 and POL0012", "POL001"));
     try testing.expect(!containsCodeToken("POL0012 only", "POL001"));
 }

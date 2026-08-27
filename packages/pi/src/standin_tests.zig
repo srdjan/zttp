@@ -637,7 +637,7 @@ test "stand-in gate: every source edit draft passes the real parser and compiler
             .must_contain = "env(\"APP_NAME\")",
         },
         .{
-            .ask = "Fix the ZTS300 compiler error in handler.ts",
+            .ask = "Fix the compiler error in handler.ts",
             .step_index = 3,
             .source = violation_handler,
             .file = "handler.ts",
@@ -822,7 +822,7 @@ test "stand-in violation fix preserves source around the inserted guard" {
         \\
     ;
     const body = try playbook.renderResponse(allocator, .{
-        .ask = "Fix the ZTS300 compiler error in handler.ts",
+        .ask = "Fix the compiler error in handler.ts",
         .step_index = 3,
         .source = source,
     });
@@ -863,7 +863,7 @@ test "stand-in violation fix returns a miss for an already guarded source" {
         \\
     ;
     const body = try playbook.renderResponse(allocator, .{
-        .ask = "Fix the ZTS300 compiler error in handler.ts",
+        .ask = "Fix the compiler error in handler.ts",
         .step_index = 3,
         .source = source,
     });
@@ -887,16 +887,7 @@ fn runCoverageCase(allocator: std.mem.Allocator, entry: range.Entry) !void {
         // The hole arm needs a hole to fill, and the seed is the same source the
         // dedicated arm tests use, so the two cannot describe different files.
         .hole_fill => (hole_seeds.findById("single-hole") orelse return error.MissingHoleSeed).source,
-        .violation_fix =>
-        \\import { validateJson } from "zttp:validate";
-        \\
-        \\function handler(req: Request): Proof<Response, "deterministic"> {
-        \\    const result = validateJson("item", req.body ?? "");
-        \\    const data = result.value;
-        \\    return Response.json({ data: data });
-        \\}
-        \\
-        ,
+        .violation_fix => (defect_seeds.findByAsk(entry.canonical_prompt) orelse return error.MissingDefectSeed).seed_source,
         else => "function handler(req: Request): Response {\n    return Response.json({ ok: true });\n}\n",
     };
     try tmp.writeFile(allocator, "handler.ts", original_handler);
@@ -972,7 +963,11 @@ fn runCoverageCase(allocator: std.mem.Allocator, entry: range.Entry) !void {
         },
         .change_set => {
             try testing.expect(result.applied_change_set);
-            try testing.expect(result.rawFirstDraftVetoPass());
+            if (std.mem.eql(u8, entry.id, "fix")) {
+                try testing.expect(!result.rawFirstDraftVetoPass());
+            } else {
+                try testing.expect(result.rawFirstDraftVetoPass());
+            }
             try testing.expect(result.firstAttemptGreen());
             if (std.mem.eql(u8, entry.id, "add-route")) {
                 try testing.expect(std.mem.indexOf(u8, handler, "\"GET /health\": handleGetHealth") != null);

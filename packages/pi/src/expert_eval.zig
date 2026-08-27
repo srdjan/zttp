@@ -54,7 +54,7 @@ pub const cases = [_]EvalCase{
     },
     .{
         .name = "violation-fix",
-        .prompt = "Fix the ZTS300 compiler error",
+        .prompt = "Fix the ZTS303 compiler error",
         .expected_kind = .violation_fix,
         .expected_confidence = .high,
         .note_must_contain = "pi_repair_plan",

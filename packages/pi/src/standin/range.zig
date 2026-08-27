@@ -11,7 +11,7 @@ pub const version = "step-6-v2";
 // hash after review found it outside: emptying it changed no published number
 // while both false-fire gates silently fell to zero iterations. The declared
 // range itself did not change when this value did.
-pub const content_hash = "9c27a7f8dd63456fec9a6d755f9b98a9f7dad89d1b0e9227503f601f4488ebf4";
+pub const content_hash = "6ff384e61ac7c2c853c07300c39db35fa926c8aac02a1e3eff781da193e5c379";
 
 pub const Action = enum {
     answer,
@@ -87,9 +87,9 @@ pub const entries = [_]Entry{
     .{
         .id = "fix",
         .kind = .violation_fix,
-        .canonical_prompt = "Fix the ZTS300 compiler error in handler.ts",
+        .canonical_prompt = "Fix the ZTS303 compiler error in handler.ts",
         .paraphrases = &.{
-            "Fix the ZTS300 compiler error",
+            "Fix the ZTS303 compiler error",
             "Repair this handler's compiler error",
         },
         .action = .change_set,
