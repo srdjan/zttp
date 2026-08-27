@@ -4,7 +4,7 @@
 
 **Profile name:** `zts-model-1`
 
-**Grounded against:** ZTS 0.18.0, policy 2026.04.2, 2026-08-16
+**Grounded against:** ZTS 0.19.0, policy 2026.04.2, 2026-08-27
 
 **Revision:** 5, 2026-08-16. Revision 2 applied the multi-lens design review:
 stronger `match`, effect-aware `Result` combinators, a completed pure

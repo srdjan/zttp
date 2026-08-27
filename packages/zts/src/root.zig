@@ -876,9 +876,9 @@ test "stable RepairPolicy exposes validator catalog and discharge" {
 /// Version information
 pub const version = struct {
     pub const major = 0;
-    pub const minor = 18;
+    pub const minor = 19;
     pub const patch = 0;
-    pub const string = "0.18.0";
+    pub const string = "0.19.0";
 };
 
 /// Create a new standalone context (not pooled)
@@ -921,7 +921,10 @@ test {
 // engine_root.zig, the module that owns them.
 
 test "version" {
-    try std.testing.expectEqualStrings("0.18.0", version.string);
+    try std.testing.expectEqual(@as(comptime_int, 0), version.major);
+    try std.testing.expectEqual(@as(comptime_int, 19), version.minor);
+    try std.testing.expectEqual(@as(comptime_int, 0), version.patch);
+    try std.testing.expectEqualStrings("0.19.0", version.string);
 }
 
 test "ContractProof projects proof metadata through the stable surface" {

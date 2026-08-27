@@ -40,7 +40,7 @@ Response:
   "schema_version": 2,
   "operation": "check",
   "profile_id": "zts-model-1",
-  "compiler_version": "0.18.0",
+  "compiler_version": "0.19.0",
   "policy_version": "2026.04.2",
   "policy_hash": "...",
   "module_graph_hash": "...",
@@ -127,7 +127,7 @@ A request naming any `schema_version` other than 2 receives a frozen response:
 {
   "schema_version_unsupported": true,
   "supported_schema_versions": [2],
-  "compiler_version": "0.18.0"
+  "compiler_version": "0.19.0"
 }
 ```
 
