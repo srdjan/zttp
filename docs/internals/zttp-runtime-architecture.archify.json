@@ -1,0 +1,320 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "zttp Runtime Architecture",
+    "locale": "en",
+    "output": "zttp-runtime-architecture.html",
+    "quality_profile": "showcase",
+    "repository": {
+      "url": "https://github.com/srdjan/zigttp.git",
+      "revision": "c11fad69fe15047d50725b609c8ca1b8babb9ff7"
+    }
+  },
+  "components": [
+    {
+      "id": "http_client",
+      "type": "external",
+      "label": "HTTP Client",
+      "sublabel": "Untrusted ingress",
+      "pos": [30, 260],
+      "size": [120, 72]
+    },
+    {
+      "id": "http_server",
+      "type": "backend",
+      "label": "HTTP Server",
+      "sublabel": "Parse and route",
+      "tag": "server.zig",
+      "sources": [
+        {
+          "path": "packages/runtime/src/server.zig",
+          "line": 560,
+          "label": "request ingress"
+        }
+      ],
+      "pos": [190, 260],
+      "size": [140, 72]
+    },
+    {
+      "id": "contract_gate",
+      "type": "security",
+      "label": "Validated Contract Gate",
+      "sublabel": "Routes + policy",
+      "tag": "fail closed",
+      "sources": [
+        {
+          "path": "packages/runtime/src/contract_runtime.zig",
+          "line": 261,
+          "label": "typed validation gate"
+        },
+        {
+          "path": "packages/runtime/src/server.zig",
+          "line": 1950,
+          "label": "startup promotion"
+        }
+      ],
+      "pos": [370, 256],
+      "size": [150, 80]
+    },
+    {
+      "id": "handler_pool",
+      "type": "backend",
+      "label": "HandlerPool",
+      "sublabel": "Lease + recycle",
+      "tag": "LockFreePool",
+      "sources": [
+        {
+          "path": "packages/runtime/src/runtime_pool.zig",
+          "line": 30,
+          "label": "pool owner"
+        }
+      ],
+      "pos": [560, 260],
+      "size": [140, 72]
+    },
+    {
+      "id": "execution_context",
+      "type": "backend",
+      "label": "HandlerInstance",
+      "sublabel": "Context + arena",
+      "tag": "per request",
+      "sources": [
+        {
+          "path": "packages/runtime/src/handler_instance.zig",
+          "line": 362,
+          "label": "pooled context"
+        },
+        {
+          "path": "packages/zts/src/context.zig",
+          "line": 342,
+          "label": "hybrid allocator"
+        }
+      ],
+      "pos": [740, 256],
+      "size": [160, 80]
+    },
+    {
+      "id": "execution_engine",
+      "type": "backend",
+      "label": "Handler Execution",
+      "sublabel": "AOT / bytecode",
+      "tag": "zts engine",
+      "sources": [
+        {
+          "path": "packages/runtime/src/handler_instance.zig",
+          "line": 1366,
+          "label": "handler invocation"
+        }
+      ],
+      "pos": [940, 256],
+      "size": [160, 80]
+    },
+    {
+      "id": "response_guard",
+      "type": "security",
+      "label": "Response Guard",
+      "sublabel": "Headers + HTTP emit",
+      "tag": "trusted egress",
+      "sources": [
+        {
+          "path": "packages/runtime/src/runtime_natives.zig",
+          "line": 165,
+          "label": "header validation"
+        },
+        {
+          "path": "packages/runtime/src/server.zig",
+          "line": 743,
+          "label": "response send"
+        }
+      ],
+      "pos": [1140, 256],
+      "size": [155, 80]
+    },
+    {
+      "id": "capability_gate",
+      "type": "security",
+      "label": "Virtual Module Gate",
+      "sublabel": "Scoped capabilities",
+      "tag": "zttp:*",
+      "sources": [
+        {
+          "path": "packages/zts/src/modules/internal/resolver.zig",
+          "line": 92,
+          "label": "module registration"
+        }
+      ],
+      "pos": [940, 480],
+      "size": [160, 76]
+    },
+    {
+      "id": "host_adapters",
+      "type": "backend",
+      "label": "Host Adapters",
+      "sublabel": "Fetch / SQL / env",
+      "tag": "explicit effects",
+      "sources": [
+        {
+          "path": "packages/zts/src/builtin_modules.zig",
+          "line": 163,
+          "label": "module registry"
+        },
+        {
+          "path": "packages/modules/src/root.zig",
+          "line": 1,
+          "label": "SDK-pure modules"
+        }
+      ],
+      "pos": [1140, 480],
+      "size": [155, 76]
+    },
+    {
+      "id": "external_systems",
+      "type": "external",
+      "label": "External Dependencies",
+      "sublabel": "HTTP / SQL / OS",
+      "pos": [1138, 690],
+      "size": [160, 80]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "Trusted zttp runtime process",
+      "wraps": [
+        "http_server",
+        "contract_gate",
+        "handler_pool",
+        "execution_context",
+        "execution_engine",
+        "response_guard",
+        "capability_gate",
+        "host_adapters"
+      ],
+      "pad": 34
+    },
+    {
+      "kind": "security-group",
+      "label": "Per-request isolated sandbox",
+      "wraps": [
+        "execution_context",
+        "execution_engine"
+      ],
+      "pad": 22
+    },
+    {
+      "kind": "security-group",
+      "label": "Capability-checked native boundary",
+      "wraps": [
+        "capability_gate",
+        "host_adapters"
+      ],
+      "pad": 22
+    }
+  ],
+  "connections": [
+    {
+      "id": "client_request",
+      "from": "http_client",
+      "to": "http_server",
+      "label": "HTTP/1.1 request",
+      "variant": "emphasis",
+      "labelAt": [170, 350]
+    },
+    {
+      "id": "parsed_request",
+      "from": "http_server",
+      "to": "contract_gate",
+      "label": "parsed request",
+      "variant": "emphasis",
+      "labelAt": [350, 350]
+    },
+    {
+      "id": "allowed_route",
+      "from": "contract_gate",
+      "to": "handler_pool",
+      "label": "allowed route",
+      "variant": "security",
+      "labelAt": [540, 350]
+    },
+    {
+      "id": "leased_runtime",
+      "from": "handler_pool",
+      "to": "execution_context",
+      "label": "leased slot",
+      "variant": "emphasis",
+      "labelAt": [720, 350]
+    },
+    {
+      "id": "request_object",
+      "from": "execution_context",
+      "to": "execution_engine",
+      "label": "Request object",
+      "variant": "emphasis",
+      "labelAt": [920, 350]
+    },
+    {
+      "id": "response_value",
+      "from": "execution_engine",
+      "to": "response_guard",
+      "label": "Response value",
+      "variant": "emphasis",
+      "labelAt": [1120, 350]
+    },
+    {
+      "id": "module_call",
+      "from": "execution_engine",
+      "to": "capability_gate",
+      "label": "zttp:* call",
+      "variant": "security",
+      "labelAt": [1020, 410]
+    },
+    {
+      "id": "authorized_effect",
+      "from": "capability_gate",
+      "to": "host_adapters",
+      "label": "authorized effect",
+      "variant": "security",
+      "labelAt": [1120, 570]
+    },
+    {
+      "id": "external_io",
+      "from": "host_adapters",
+      "to": "external_systems",
+      "label": "network / SQL / OS",
+      "variant": "dashed",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelAt": [1235, 630]
+    }
+  ],
+  "cards": [
+    {
+      "dot": "rose",
+      "title": "Trust model",
+      "items": [
+        "Clients and external systems remain outside the runtime process boundary",
+        "Only a ValidatedRuntimeContract reaches the request path",
+        "Handler effects cross an active module scope and capability check"
+      ]
+    },
+    {
+      "dot": "cyan",
+      "title": "Request lifecycle",
+      "items": [
+        "Ingress parsing enforces request limits before handler execution",
+        "HandlerPool leases one isolated Context and resets its request arena",
+        "Response headers are validated before the server writes bytes"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "Integrity and faults",
+      "items": [
+        "Self-extract payload carries bytecode, contract, policy, and optional JWS",
+        "Startup rejects capability, policy, source-profile, or artifact hash drift",
+        "Timeouts and panics recycle or quarantine the affected runtime slot"
+      ]
+    }
+  ]
+}
