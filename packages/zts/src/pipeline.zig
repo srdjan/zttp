@@ -135,7 +135,6 @@ pub const ResolvedModule = struct {
     type_checker: ?TypeChecker,
     strict_checker: ?StrictChecker,
     bool_error_count: u32,
-    type_error_count: u32,
     strict_error_count: u32,
 
     pub fn deinit(self: *ResolvedModule) void {
@@ -156,6 +155,14 @@ pub const ResolvedModule = struct {
     pub fn strictDiagnostics(self: *const ResolvedModule) []const strict_checker_mod.Diagnostic {
         if (self.strict_checker) |*sc| return sc.getDiagnostics();
         return &.{};
+    }
+
+    pub fn typeErrorCount(self: *const ResolvedModule) u32 {
+        var error_count: u32 = 0;
+        for (self.typeDiagnostics()) |diagnostic| {
+            if (diagnostic.severity == .err) error_count += 1;
+        }
+        return error_count;
     }
 
     pub fn formatBoolDiagnostics(
@@ -189,7 +196,6 @@ pub fn resolve(
     opts: ResolveOptions,
 ) !ResolvedModule {
     var type_checker_opt: ?TypeChecker = null;
-    var type_errors: u32 = 0;
     if (opts.type_env) |env| {
         var tc = TypeChecker.init(
             allocator,
@@ -199,7 +205,7 @@ pub fn resolve(
             opts.service_type_context,
         );
         errdefer tc.deinit();
-        type_errors = try tc.check(parsed.root);
+        _ = try tc.check(parsed.root);
         type_checker_opt = tc;
     }
     errdefer if (type_checker_opt) |*tc| tc.deinit();
@@ -214,7 +220,7 @@ pub fn resolve(
     var strict_errors: u32 = 0;
     if (opts.strict) {
         const env_ptr: ?*const TypeEnv = if (type_checker_opt) |*tc| tc.env else null;
-        const tc_ptr: ?*const TypeChecker = if (type_checker_opt) |*tc| tc else null;
+        const tc_ptr: ?*TypeChecker = if (type_checker_opt) |*tc| tc else null;
         var sc = StrictChecker.init(
             allocator,
             parsed.ir_view,
@@ -239,7 +245,6 @@ pub fn resolve(
         .type_checker = type_checker_opt,
         .strict_checker = strict_checker_opt,
         .bool_error_count = bool_errors,
-        .type_error_count = type_errors,
         .strict_error_count = strict_errors,
     };
 }
@@ -294,11 +299,11 @@ pub const CheckOptions = struct {
 
 pub fn check(
     allocator: std.mem.Allocator,
-    resolved: *const ResolvedModule,
+    resolved: *ResolvedModule,
     handler_func: NodeIndex,
     opts: CheckOptions,
 ) !CheckedModule {
-    const tc_ptr: ?*const TypeChecker = if (resolved.type_checker) |*tc| tc else null;
+    const tc_ptr: ?*TypeChecker = if (resolved.type_checker) |*tc| tc else null;
     const env_ptr: ?*const TypeEnv = if (resolved.type_checker) |*tc| tc.env else null;
 
     var verifier = HandlerVerifier.init(
@@ -416,7 +421,7 @@ pub const ExtractContractOptions = struct {
     /// session from `type_map` as before. It also does not apply when
     /// `type_check` is overridden, because a caller that replaced the check
     /// wants it to run.
-    resolved: ?*const ResolvedModule = null,
+    resolved: ?*ResolvedModule = null,
 };
 
 fn runContractTypeCheck(type_checker: *TypeChecker, root: NodeIndex) anyerror!u32 {
@@ -497,7 +502,7 @@ fn buildContractOn(
     filename: []const u8,
     opts: ExtractContractOptions,
     type_env: *const TypeEnv,
-    type_checker: *const TypeChecker,
+    type_checker: *TypeChecker,
     handler_fn: ?NodeIndex,
     handler_loc: ?ir_mod.SourceLocation,
 ) !HandlerContract {
@@ -604,13 +609,17 @@ pub fn extractContract(
     defer resolved.deinit();
 
     if (resolved.bool_error_count > 0 or
-        resolved.type_error_count > 0 or
+        resolved.typeErrorCount() > 0 or
         resolved.strict_error_count > 0)
     {
         return error.SoundModeViolation;
     }
 
-    return extractContractFromParsed(allocator, parsed, filename, contract_opts);
+    contract_opts.resolved = &resolved;
+    var contract = try extractContractFromParsed(allocator, parsed, filename, contract_opts);
+    errdefer contract.deinit(allocator);
+    if (resolved.typeErrorCount() > 0) return error.SoundModeViolation;
+    return contract;
 }
 
 fn hasFileImports(ir_view: IrView) bool {
@@ -688,14 +697,16 @@ fn extractMultiModuleContract(
         });
         defer resolved.deinit();
         if (resolved.bool_error_count > 0 or
-            resolved.type_error_count > 0 or
+            resolved.typeErrorCount() > 0 or
             resolved.strict_error_count > 0)
         {
             return error.SoundModeViolation;
         }
 
+        module_opts.resolved = &resolved;
         var module_contract = try extractContractFromParsed(allocator, parsed, module.path, module_opts);
         defer module_contract.deinit(allocator);
+        if (resolved.typeErrorCount() > 0) return error.SoundModeViolation;
         try handler_contract_mod.mergeModuleContract(allocator, &merged, &module_contract, is_entry);
     }
 
@@ -861,7 +872,66 @@ test "pipeline.resolve runs BoolChecker on clean source" {
     defer resolved.deinit();
 
     try testing.expectEqual(@as(u32, 0), resolved.bool_error_count);
-    try testing.expectEqual(@as(u32, 0), resolved.type_error_count);
+    try testing.expectEqual(@as(u32, 0), resolved.typeErrorCount());
+    try testing.expectEqual(@as(usize, 0), resolved.typeDiagnostics().len);
+}
+
+test "contract schema inference does not leak branch-insensitive service response errors" {
+    const allocator = testing.allocator;
+    const source =
+        \\import { serviceCall } from "zttp:service";
+        \\const user = serviceCall("users", "GET /api/users/:id", {
+        \\  params: { id: "123" }
+        \\});
+        \\if (user.status === 200) {
+        \\  const payload = user.json();
+        \\}
+    ;
+
+    var parsed_state = try parseSourceForTest(allocator, source);
+    defer parsed_state.js_parser.deinit();
+    const view = IrView.fromIRStore(&parsed_state.js_parser.nodes, &parsed_state.js_parser.constants);
+    const parsed = ParsedModule.fromExisting(view, parsed_state.root, null);
+
+    var type_map = TypeMap.init(source);
+    defer type_map.deinit(allocator);
+    var storage: TypeEnvStorage = .{};
+    defer storage.deinit(allocator);
+    try storage.init(allocator, &type_map);
+
+    var responses = [_]service_types_mod.ResponseVariant{
+        .{ .status = 200, .schema_json = "{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"string\"}},\"required\":[\"id\"]}", .dynamic = true },
+        .{ .status = 404, .content_type = "application/json", .schema_json = "{\"type\":\"object\",\"properties\":{\"error\":{\"type\":\"string\"}},\"required\":[\"error\"]}" },
+    };
+    var routes = [_]service_types_mod.RouteInfo{.{
+        .service_name = "users",
+        .handler_path = "users.ts",
+        .method = "GET",
+        .path = "/api/users/:id",
+        .required_path_params = &.{"id"},
+        .required_query_params = &.{},
+        .required_header_params = &.{},
+        .response_dynamic = true,
+        .responses = &responses,
+    }};
+    const service_context = ServiceTypeContext{ .routes = &routes };
+
+    var resolved = try resolve(allocator, parsed, .{
+        .type_env = storage.envPtr(),
+        .service_type_context = &service_context,
+    });
+    defer resolved.deinit();
+    try testing.expectEqual(@as(u32, 0), resolved.typeErrorCount());
+    try testing.expectEqual(@as(usize, 0), resolved.typeDiagnostics().len);
+
+    var contract = try extractContractFromParsed(allocator, parsed, "gateway.ts", .{
+        .type_map = &type_map,
+        .service_type_context = &service_context,
+        .resolved = &resolved,
+    });
+    defer contract.deinit(allocator);
+
+    try testing.expectEqual(@as(u32, 0), resolved.typeErrorCount());
     try testing.expectEqual(@as(usize, 0), resolved.typeDiagnostics().len);
 }
 

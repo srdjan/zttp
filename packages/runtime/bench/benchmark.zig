@@ -545,7 +545,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
             return;
         };
 
-        runtime.loadCodeNoHandler(bench.code, bench.name) catch |err| {
+        runtime.loadCodeNoHandler(bench.code, "<builtin-benchmark>") catch |err| {
             results[i].success = false;
             results[i].error_name = @errorName(err);
             if (!options.quiet and !options.json) {

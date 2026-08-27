@@ -85,6 +85,19 @@ const containsString = json_utils.containsString;
 const writeJsonString = json_utils.writeJsonString;
 const extractHost = handler_contract.extractHost;
 
+/// Type annotations are recorded before TSX lowering, while IR source
+/// locations come from the lowered program. Resolve the named top-level
+/// handler first and keep the location lookup for anonymous/legacy shapes.
+fn handlerSignature(
+    env: *const TypeEnv,
+    handler_loc: ?ir.SourceLocation,
+) ?type_env_mod.FunctionSig {
+    if (env.getSourceFnSigByName("handler")) |sig| return sig;
+    const loc = handler_loc orelse return null;
+    if (loc.line == 0) return null;
+    return env.getFnSigByLoc(loc.line);
+}
+
 fn currentPolicyHashRaw() [32]u8 {
     const hex = rule_registry.policyHash();
     var out: [32]u8 = undefined;
@@ -100,7 +113,7 @@ pub const ContractBuilder = struct {
     ir_view: IrView,
     atoms: ?*atom_table.AtomTable,
     type_env: ?*const TypeEnv,
-    type_checker: ?*const TypeChecker,
+    type_checker: ?*TypeChecker,
     /// Partner virtual-module manifests registered for this compile session.
     /// Borrowed; the registry must outlive the builder.
     manifest_registry: ?*const manifest_registry_mod.Registry = null,
@@ -209,7 +222,7 @@ pub const ContractBuilder = struct {
         ir_view: IrView,
         atoms: ?*atom_table.AtomTable,
         type_env: ?*const TypeEnv,
-        type_checker: ?*const TypeChecker,
+        type_checker: ?*TypeChecker,
     ) ContractBuilder {
         return .{
             .allocator = allocator,
@@ -667,17 +680,13 @@ pub const ContractBuilder = struct {
         defer raw_names.deinit(self.allocator);
 
         if (self.type_env) |env| {
-            if (handler_loc) |loc| {
-                if (loc.line != 0) {
-                    if (env.getFnSigByLoc(loc.line)) |sig| {
-                        if (sig.return_type != type_pool_mod.null_type_idx) {
-                            // A payload this cannot read leaves `raw_names`
-                            // empty, which selects the full v1 set below -
-                            // the widest, strictest reading, so there is no
-                            // fail-open to report here.
-                            _ = try env.extractProofMembers(sig.return_type, &raw_names);
-                        }
-                    }
+            if (handlerSignature(env, handler_loc)) |sig| {
+                if (sig.return_type != type_pool_mod.null_type_idx) {
+                    // A payload this cannot read leaves `raw_names`
+                    // empty, which selects the full v1 set below -
+                    // the widest, strictest reading, so there is no
+                    // fail-open to report here.
+                    _ = try env.extractProofMembers(sig.return_type, &raw_names);
                 }
             }
         }
@@ -1152,10 +1161,7 @@ pub const ContractBuilder = struct {
         handler_loc: ?ir.SourceLocation,
     ) !void {
         const env = self.type_env orelse return;
-        const loc = handler_loc orelse return;
-        if (loc.line == 0) return;
-
-        const sig = env.getFnSigByLoc(loc.line) orelse return;
+        const sig = handlerSignature(env, handler_loc) orelse return;
         if (sig.return_type == type_pool_mod.null_type_idx) return;
 
         var raw: std.ArrayListUnmanaged([]const u8) = .empty;
@@ -4080,7 +4086,8 @@ pub const ContractBuilder = struct {
     fn extractResponseSchemaJson(self: *ContractBuilder, node_idx: NodeIndex) !?[]u8 {
         if (self.type_checker == null or self.type_env == null) return null;
 
-        const inferred = self.type_checker.?.inferType(node_idx);
+        const inferred = self.type_checker.?.inferTypeWithoutDiagnostics(node_idx);
+        try self.type_checker.?.ensureHealthy();
         if (inferred != type_pool_mod.null_type_idx) {
             if (try api_schema.schemaFromType(self.allocator, self.type_env.?, inferred)) |schema_json| {
                 return schema_json;

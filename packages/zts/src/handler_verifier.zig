@@ -306,7 +306,7 @@ pub const HandlerVerifier = struct {
     ir_view: IrView,
     atoms: ?*context.AtomTable,
     type_env: ?*const TypeEnv,
-    type_checker: ?*const TypeChecker,
+    type_checker: ?*TypeChecker,
     diagnostics: std.ArrayList(Diagnostic),
 
     // Result checking state
@@ -343,7 +343,7 @@ pub const HandlerVerifier = struct {
         ir_view: IrView,
         atoms: ?*context.AtomTable,
         type_env: ?*const TypeEnv,
-        type_checker: ?*const TypeChecker,
+        type_checker: ?*TypeChecker,
     ) HandlerVerifier {
         return .{
             .allocator = allocator,
@@ -1178,7 +1178,7 @@ pub const HandlerVerifier = struct {
 
     fn resolveMatchDiscriminantType(self: *const HandlerVerifier, node: NodeIndex) TypeIndex {
         if (self.type_checker) |tc| {
-            const inferred = tc.inferType(node);
+            const inferred = tc.inferTypeWithoutDiagnostics(node);
             if (inferred != null_type_idx) return inferred;
         }
 

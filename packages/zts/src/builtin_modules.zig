@@ -14,7 +14,10 @@ const file_io = @import("file_io.zig");
 const contract_types = @import("zts-contracts").contract_types;
 const module_authorization = @import("zts-base").module_authorization;
 const std = @import("std");
+const build_options = @import("build_options");
 const modules = @import("zttp-modules");
+const object = @import("object.zig");
+const value = @import("value.zig");
 
 // Namespaced to avoid shadowing the `<name>_binding` locals used in the
 // governance-assertion tests at the bottom of this file.
@@ -54,8 +57,9 @@ const durable_mod = @import("modules/workflow/durable.zig");
 const workflow_mod = @import("modules/workflow/workflow.zig");
 const queue_mod = @import("modules/workflow/queue.zig");
 
-/// All in-tree virtual module bindings, in registration order.
-pub const builtins = [_]ModuleBinding{
+/// All in-tree virtual module bindings, in registration order. This private
+/// array retains the native implementation pointers used by the runtime.
+const runtime_builtins = [_]ModuleBinding{
     ported.env,
     ported.crypto,
     ported.router,
@@ -83,6 +87,65 @@ pub const builtins = [_]ModuleBinding{
     service_mod.binding,
     fetch_mod.binding,
 };
+
+/// The freestanding analyzer consumes module names, signatures, effects, and
+/// proof metadata, but never invokes a native module implementation. Project
+/// every built-in implementation pointer to one wasm-safe error stub so the
+/// emitted registry retains no runtime implementation or state callback.
+fn analyzerOnlyStub(
+    _: *anyopaque,
+    _: value.JSValue,
+    _: []const value.JSValue,
+) anyerror!value.JSValue {
+    return error.AnalyzerOnly;
+}
+
+fn analyzerFunctionBindings(
+    comptime exports: []const mb.FunctionBinding,
+) [exports.len]mb.FunctionBinding {
+    var projected: [exports.len]mb.FunctionBinding = undefined;
+    for (exports, 0..) |binding, i| {
+        inline for (@typeInfo(mb.FunctionBinding).@"struct".fields) |field| {
+            if (comptime std.mem.eql(u8, field.name, "func")) {
+                @field(projected[i], field.name) = @as(object.NativeFn, analyzerOnlyStub);
+            } else if (comptime std.mem.eql(u8, field.name, "module_func")) {
+                @field(projected[i], field.name) = null;
+            } else {
+                @field(projected[i], field.name) = @field(binding, field.name);
+            }
+        }
+    }
+    return projected;
+}
+
+fn analyzerModuleBindings(
+    comptime bindings: []const ModuleBinding,
+) [bindings.len]ModuleBinding {
+    @setEvalBranchQuota(100_000);
+    var projected: [bindings.len]ModuleBinding = undefined;
+    for (bindings, 0..) |binding, i| {
+        const exports = analyzerFunctionBindings(binding.exports);
+        inline for (@typeInfo(ModuleBinding).@"struct".fields) |field| {
+            if (comptime std.mem.eql(u8, field.name, "exports")) {
+                @field(projected[i], field.name) = &exports;
+            } else if (comptime std.mem.eql(u8, field.name, "state_init") or
+                std.mem.eql(u8, field.name, "state_deinit"))
+            {
+                @field(projected[i], field.name) = null;
+            } else {
+                @field(projected[i], field.name) = @field(binding, field.name);
+            }
+        }
+    }
+    return projected;
+}
+
+/// Analyzer builds keep the full registry metadata without retaining native
+/// implementation or state-lifecycle pointers.
+pub const builtins = if (build_options.analyzer_only)
+    analyzerModuleBindings(&runtime_builtins)
+else
+    runtime_builtins;
 
 /// Unified module registry: core built-ins plus explicitly registered extensions.
 pub const all = builtins ++ extension_bindings.all;

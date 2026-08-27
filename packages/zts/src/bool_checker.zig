@@ -154,7 +154,7 @@ pub const BoolChecker = struct {
     /// Full TypePool inference is the authority for boolean assignability.
     /// Direct checker tests may omit it, in which case the smaller local
     /// lattice still fails closed rather than admitting an unknown value.
-    authoritative_type_checker: ?*const type_checker_mod.TypeChecker = null,
+    authoritative_type_checker: ?*type_checker_mod.TypeChecker = null,
     /// Sticky failure for proof-relevant maps and diagnostic storage. The
     /// walkers are intentionally void-returning; `check` converts any failed
     /// state update into OutOfMemory before exposing counts. Formatting-only
@@ -884,7 +884,7 @@ pub const BoolChecker = struct {
 
     fn requireBoolean(self: *BoolChecker, node: NodeIndex, context_name: []const u8) void {
         const is_boolean = if (self.authoritative_type_checker) |checker| blk: {
-            const inferred = checker.inferType(node);
+            const inferred = checker.inferTypeWithoutDiagnostics(node);
             if (inferred == type_pool_mod.null_type_idx) break :blk false;
             break :blk checker.env.isAssignableTo(inferred, checker.env.pool.idx_boolean);
         } else self.inferType(node) == .boolean;

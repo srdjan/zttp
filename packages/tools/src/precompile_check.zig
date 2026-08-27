@@ -517,6 +517,20 @@ pub fn formatProofCard(writer: anytype, r: *const CheckResult, filename: []const
         }
     }
 
+    if (hasPolicyDiagnostic(r.json_diagnostics.items)) {
+        writer.print("\n  Capability policy diagnostics:\n", .{}) catch return;
+        for (r.json_diagnostics.items) |d| {
+            if (!isPolicyDiagnostic(d.code)) continue;
+            writer.print(
+                "    {s} ({s}) {s}:{d}:{d}  {s}\n",
+                .{ d.code, d.severity, d.file, d.line, d.column, d.message },
+            ) catch return;
+            if (d.suggestion) |suggestion| {
+                writer.print("      help: {s}\n", .{suggestion}) catch return;
+            }
+        }
+    }
+
     // Spec/Effects diagnostics live in contract.spec_diagnostics, not in
     // json_diagnostics, so the human card must render them here or the printed
     // error lines fall short of the footer count (e.g. a Spec-less handler
@@ -644,6 +658,18 @@ fn isCanonicalDiagnostic(code: []const u8) bool {
 fn hasCanonicalDiagnostic(diagnostics: []const json_diag.JsonDiagnostic) bool {
     for (diagnostics) |d| {
         if (isCanonicalDiagnostic(d.code)) return true;
+    }
+    return false;
+}
+
+fn isPolicyDiagnostic(code: []const u8) bool {
+    const rule = zts.PolicyCatalog.findByCode(code) orelse return false;
+    return rule.category == .policy;
+}
+
+fn hasPolicyDiagnostic(diagnostics: []const json_diag.JsonDiagnostic) bool {
+    for (diagnostics) |d| {
+        if (isPolicyDiagnostic(d.code)) return true;
     }
     return false;
 }

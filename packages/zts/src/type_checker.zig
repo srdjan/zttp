@@ -163,6 +163,10 @@ pub const TypeChecker = struct {
     /// and diagnostic state. Message-only formatting may retain a static
     /// fallback because the core diagnostic is still stored.
     allocation_failed: bool = false,
+    /// Secondary analyzers may ask for a type outside the statement walk's
+    /// live narrowing context. Those queries must not create compiler
+    /// diagnostics, although allocation failures remain sticky.
+    report_inference_diagnostics: bool = true,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -229,6 +233,18 @@ pub const TypeChecker = struct {
             if (diag.severity == .err) error_count += 1;
         }
         return error_count;
+    }
+
+    /// Let secondary analyzers query the authoritative type session without
+    /// turning a branch-insensitive query into a new compiler verdict. The
+    /// statement walk has already checked the expression with its live
+    /// narrowing context. Operational failures remain sticky and are checked
+    /// by the owning pipeline after the secondary analyzer returns.
+    pub fn inferTypeWithoutDiagnostics(self: *TypeChecker, node: NodeIndex) TypeIndex {
+        const previous = self.report_inference_diagnostics;
+        self.report_inference_diagnostics = false;
+        defer self.report_inference_diagnostics = previous;
+        return self.inferType(node);
     }
 
     /// Reject proof/type results after either the checker or its shared pool
@@ -2586,7 +2602,7 @@ pub const TypeChecker = struct {
             if (self.env.pool.lookupRecordField(obj_type, prop_name)) |field| {
                 return field.type_idx;
             }
-            @constCast(self).addDiagnostic(.{
+            self.addInferenceDiagnostic(.{
                 .severity = .err,
                 .kind = .missing_field,
                 .node = node,
@@ -2613,7 +2629,7 @@ pub const TypeChecker = struct {
                 const first_info = self.env.pool.getFunctionInfo(field_types[0]);
                 for (field_types[1..count]) |field_type| {
                     if (!self.functionsCompatible(field_type, first_info)) {
-                        @constCast(self).addDiagnostic(.{
+                        self.addInferenceDiagnostic(.{
                             .severity = .err,
                             .kind = .type_mismatch,
                             .node = node,
@@ -3930,6 +3946,15 @@ pub const TypeChecker = struct {
             if (diag.allocated) self.allocator.free(diag.message);
             self.markAllocationFailure();
         };
+    }
+
+    fn addInferenceDiagnostic(self: *const TypeChecker, diag: Diagnostic) void {
+        const mutable = @constCast(self);
+        if (!mutable.report_inference_diagnostics) {
+            if (diag.allocated) mutable.allocator.free(diag.message);
+            return;
+        }
+        mutable.addDiagnostic(diag);
     }
 
     /// Report ZTS212 when a declared annotation names an alias whose cycle no

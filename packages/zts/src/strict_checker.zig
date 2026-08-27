@@ -170,7 +170,7 @@ pub const StrictChecker = struct {
     ir_view: IrView,
     atoms: ?*context.AtomTable,
     type_env: ?*const TypeEnv,
-    type_checker: ?*const TypeChecker,
+    type_checker: ?*TypeChecker,
     diagnostics: std.ArrayList(Diagnostic),
     assigned_bindings: std.AutoHashMapUnmanaged(u32, void),
     annotated_function_bindings: std.AutoHashMapUnmanaged(u32, void),
@@ -204,7 +204,7 @@ pub const StrictChecker = struct {
         ir_view: IrView,
         atoms: ?*context.AtomTable,
         type_env: ?*const TypeEnv,
-        type_checker: ?*const TypeChecker,
+        type_checker: ?*TypeChecker,
     ) StrictChecker {
         return .{
             .allocator = allocator,
@@ -1041,7 +1041,7 @@ pub const StrictChecker = struct {
         // value of literal type `true` is a boolean - `x === true` is still
         // exactly `x`.
         const tc = self.type_checker orelse return;
-        if (tc.env.pool.widenLiteral(tc.inferType(value_node)) != tc.env.pool.idx_boolean) return;
+        if (tc.env.pool.widenLiteral(tc.inferTypeWithoutDiagnostics(value_node)) != tc.env.pool.idx_boolean) return;
 
         // `=== true` / `!== false` reduce to `x`; `=== false` / `!== true`
         // reduce to `!x`.
@@ -1345,7 +1345,7 @@ pub const StrictChecker = struct {
     fn checkAbsenceOperator(self: *StrictChecker, node: NodeIndex, operand: NodeIndex, spelling: []const u8) void {
         const tc = self.type_checker orelse return;
         const pool = tc.env.pool;
-        const operand_type = tc.inferType(operand);
+        const operand_type = tc.inferTypeWithoutDiagnostics(operand);
         // No inferred type is not the same answer as `unknown`. Inference
         // produced nothing here, so there is no claim to make either way.
         if (operand_type == null_type_idx) return;
@@ -1549,7 +1549,7 @@ pub const StrictChecker = struct {
         }
 
         if (self.type_checker) |tc| {
-            const inferred = tc.inferType(node);
+            const inferred = tc.inferTypeWithoutDiagnostics(node);
             if (inferred == null_type_idx or inferred == tc.env.pool.idx_unknown) {
                 if (self.isUserFunctionOrUnknownCall(call.callee)) {
                     self.addDiagnostic(.{
@@ -1908,7 +1908,7 @@ pub const StrictChecker = struct {
     fn matchIsCovered(self: *const StrictChecker, match: ir.Node.MatchExpr) bool {
         if (self.matchHasDefault(match)) return true;
         const tc = self.type_checker orelse return false;
-        const disc_type = tc.inferType(match.discriminant);
+        const disc_type = tc.inferTypeWithoutDiagnostics(match.discriminant);
         if (disc_type == null_type_idx) return false;
         const analysis = match_analysis_mod.MatchAnalysis.init(self.allocator, self.ir_view, tc.env.pool);
         return analysis.isMatchExhaustive(disc_type, match);

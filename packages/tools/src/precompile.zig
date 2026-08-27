@@ -467,6 +467,11 @@ fn collectImportedFnLabels(
     handler_path: []const u8,
 ) std.ArrayList(zts.pipeline.ImportedFnLabels) {
     var out: std.ArrayList(zts.pipeline.ImportedFnLabels) = .empty;
+    // Browser analysis receives one source buffer and has no filesystem. Keep
+    // the conservative empty answer while compiling the POSIX reader entirely
+    // out of the freestanding build.
+    if (comptime builtin.target.os.tag == .freestanding) return out;
+
     const base_dir = std.fs.path.dirname(handler_path) orelse ".";
 
     for (facts.imports.items) |rec| {
@@ -1356,7 +1361,7 @@ fn runCheckOnPreparedSource(
 
     if (type_env_storage.envPtr() != null) {
         const tc_diags = resolved.typeDiagnostics();
-        result.type_errors = @intCast(resolved.type_error_count);
+        result.type_errors = @intCast(resolved.typeErrorCount());
         if (tc_diags.len > 0) {
             if (json_mode) {
                 for (tc_diags) |diag| {
@@ -1890,7 +1895,7 @@ pub fn compileHandler(
                 debugPrint("{s}", .{tc_output.items});
             }
         }
-        if (resolved.type_error_count > 0) {
+        if (resolved.typeErrorCount() > 0) {
             if (!builtin.is_test) debugPrint("\nType check failed for {s}\n", .{filename});
             return error.SoundModeViolation;
         }
@@ -1936,7 +1941,7 @@ pub fn compileHandler(
         const handler_fn = zts.findHandlerFunction(ir_view, root);
 
         const verifier_env: ?*const zts.TypeEnv = type_env_storage.envPtr();
-        const verifier_type_checker: ?*const zts.TypeChecker =
+        const verifier_type_checker: ?*zts.TypeChecker =
             if (resolved.type_checker) |*tc| tc else null;
 
         if (handler_fn) |hf| {
@@ -2080,9 +2085,12 @@ pub fn compileHandler(
     // Copy the serialized data to owned memory
     const serialized = writer.getWritten();
     const bytecode_data = try allocator.dupe(u8, serialized);
+    errdefer allocator.free(bytecode_data);
 
     var aot: ?AotAnalysis = null;
+    errdefer if (aot) |*analysis| analysis.deinit(allocator);
     var transpiled_source: ?[]const u8 = null;
+    errdefer if (transpiled_source) |bytes| allocator.free(bytes);
 
     if (emit_aot) {
         // Try transpiler first (general-purpose IR-to-Zig)
@@ -2144,6 +2152,7 @@ pub fn compileHandler(
     // analysis for route extraction even if the transpiler succeeded.
     // even if the transpiler succeeded (transpiler doesn't produce a dispatch table).
     var contract: ?HandlerContract = null;
+    errdefer if (contract) |*built| built.deinit(allocator);
     if (needs_contract) {
         // Run AOT analysis for route extraction if not already done
         var temp_aot = if (aot == null) try analyzeAot(allocator, &js_parser, &atoms, root) else null;
@@ -2179,8 +2188,11 @@ pub fn compileHandler(
     // Generate exhaustive test cases from path analysis.
     // Also runs when emitting a contract, to populate behavioral paths.
     var generated_tests_jsonl: ?[]const u8 = null;
+    errdefer if (generated_tests_jsonl) |bytes| allocator.free(bytes);
     var violations_jsonl: ?[]const u8 = null;
+    errdefer if (violations_jsonl) |bytes| allocator.free(bytes);
     var violations_summary: ?[]const u8 = null;
+    errdefer if (violations_summary) |bytes| allocator.free(bytes);
     if (generate_tests or (emit_contract and contract != null)) {
         const ir_view = zts.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
         const handler_fn = findHandlerFunction(ir_view, root);
@@ -2677,7 +2689,7 @@ fn buildContractWithPolicy(
     /// The resolved type session for this compile, when the caller ran one.
     /// Contract extraction then builds on the checker that already ran instead
     /// of constructing a second identical one and re-checking the same root.
-    resolved: ?*const zts.pipeline.ResolvedModule,
+    resolved: ?*zts.pipeline.ResolvedModule,
 ) !HandlerContract {
     const contract_view = zts.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
     const parsed = zts.pipeline.ParsedModule.fromExisting(contract_view, root, atoms);
@@ -4086,6 +4098,37 @@ test "formatProofCard: canonical public helper diagnostics are visible in text m
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "Effects<...>") != null);
 }
 
+test "formatProofCard: capability policy diagnostics are visible in text mode" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { env } from "zttp:env";
+        \\
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const value = env("OTHER_NAME") ?? "x";
+        \\  return Response.json({ value: value });
+        \\}
+    ;
+    const policy_source =
+        \\{ "env": { "allow": ["APP_NAME"] } }
+    ;
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "policy-text.ts", .{
+        .policy_source = policy_source,
+    });
+    defer result.deinit(allocator);
+    try std.testing.expectEqual(@as(u32, 1), result.policy_errors);
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+    formatProofCard(&aw.writer, &result, "policy-text.ts");
+    buf = aw.toArrayList();
+
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "Capability policy diagnostics") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "POL001") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "OTHER_NAME") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "add it to the policy file") != null);
+}
+
 test "runCheckOnlyWithOptions: json mode emits ZTS000 for an unreadable handler" {
     const allocator = std.testing.allocator;
     // A missing handler in JSON mode must produce a structured ZTS000 result,
@@ -5432,6 +5475,31 @@ test "runCheckOnlyFromSource: explicit Spec narrows active spec set" {
     try std.testing.expectEqual(@as(usize, 1), contract.declared_specs.items.len);
     try std.testing.expectEqualStrings("deterministic", contract.declared_specs.items[0]);
     try std.testing.expectEqual(@as(usize, 0), contract.spec_diagnostics.items.len);
+}
+
+test "runCheckOnlyFromSource: TSX lowering preserves a handler Proof alias" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\structural Guardrails<T> = Proof<T, "deterministic">;
+        \\function Page(): JSX.Element {
+        \\  return (
+        \\    <html>
+        \\      <body>ready</body>
+        \\    </html>
+        \\  );
+        \\}
+        \\function handler(req: Request): Guardrails<Response> {
+        \\  return Response.html(renderToString(<Page />));
+        \\}
+    ;
+    var result = try runCheckOnlyFromSource(allocator, source, "declared-only.tsx", null, true, null, false);
+    defer result.deinit(allocator);
+
+    const contract = result.contract orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), contract.declared_specs.items.len);
+    try std.testing.expectEqualStrings("deterministic", contract.declared_specs.items[0]);
+    try std.testing.expect(!contract.declared_specs_implicit);
+    try std.testing.expectEqual(@as(u32, 0), result.totalErrors());
 }
 
 test "runCheckOnlyFromSource: explicit unknown Spec suppresses defaults and emits ZTS502" {

@@ -1074,7 +1074,7 @@ pub const HandlerInstance = struct {
                     std.log.err("{s}", .{tc_output.items});
                 }
             }
-            if (resolved.type_error_count > 0) {
+            if (resolved.typeErrorCount() > 0) {
                 return error.SoundModeViolation;
             }
         }
