@@ -109,6 +109,8 @@ pub fn parseConfig(allocator: std.mem.Allocator, bytes: []const u8, root_dir: []
 
     if (parsed.value != .object) return error.InvalidEdgeConfig;
     const obj = parsed.value.object;
+    const timeout_ms = try parseU32Field(obj, "timeoutMs", 30_000);
+    if (timeout_ms == 0) return error.InvalidEdgeConfig;
     const listener = try parseListener(allocator, obj.get("listener"));
     const handlers = try parseHandlers(allocator, obj.get("handlers"), root_dir);
     errdefer {
@@ -119,7 +121,6 @@ pub fn parseConfig(allocator: std.mem.Allocator, bytes: []const u8, root_dir: []
         };
         tmp.deinit(allocator);
     }
-    const timeout_ms = try parseU32Field(obj, "timeoutMs", 30_000);
     for (handlers) |*handler| {
         if (handler.runtime_config.request_timeout_ms == 0) {
             handler.runtime_config.request_timeout_ms = timeout_ms;
@@ -155,12 +156,15 @@ pub const EdgeServer = struct {
     listener: ?net.Server = null,
     targets: []TargetRuntime = &.{},
     routes: []RouteRuntime = &.{},
-    running: bool = false,
+    connection_pool: ?*ConnectionPool = null,
+    running: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     request_count: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
 
     const Self = @This();
 
     pub fn init(allocator: std.mem.Allocator, config: EdgeConfig) !Self {
+        if (config.timeout_ms == 0) return error.InvalidEdgeConfig;
+
         var io_backend = Io.Threaded.init(allocator, .{ .environ = .empty });
         errdefer io_backend.deinit();
 
@@ -192,8 +196,11 @@ pub const EdgeServer = struct {
     }
 
     pub fn deinit(self: *Self) void {
-        self.running = false;
+        self.running.store(false, .release);
         if (self.listener) |*listener| listener.deinit(self.io_backend.io());
+        self.listener = null;
+        if (self.connection_pool) |pool| pool.deinit();
+        self.connection_pool = null;
         for (self.routes) |*route| route.deinit(self.allocator);
         self.allocator.free(self.routes);
         for (self.targets) |*target| target.deinit(self.allocator);
@@ -208,37 +215,51 @@ pub const EdgeServer = struct {
     }
 
     pub fn start(self: *Self) !void {
+        if (self.running.load(.acquire)) return error.AlreadyStarted;
         if (self.config.listener.protocol == .https) return error.TlsTerminationNotImplemented;
 
         const io = self.io_backend.io();
         const address = try net.IpAddress.parseIp4(self.config.listener.host, self.config.listener.port);
         self.listener = try address.listen(io, .{ .reuse_address = true });
-        self.running = true;
+        errdefer {
+            if (self.listener) |*listener| listener.deinit(io);
+            self.listener = null;
+        }
+        const worker_count = defaultConnectionWorkerCount();
+        self.connection_pool = try ConnectionPool.init(self.allocator, self, worker_count);
+        self.running.store(true, .release);
         std.log.info("Edge listening on http://{s}:{d}", .{ self.config.listener.host, self.config.listener.port });
         std.log.info("   Handlers: {d}", .{self.targets.len});
         std.log.info("   Routes: {d}", .{self.routes.len});
+        std.log.info("   Connection pool: {d} workers", .{worker_count});
     }
 
     fn acceptLoop(self: *Self) !void {
         const io = self.io_backend.io();
         var listener = self.listener orelse return error.NotStarted;
-        while (self.running) {
+        while (self.running.load(.acquire)) {
             const stream = listener.accept(io) catch |err| {
                 if (err == error.ConnectionAborted) continue;
                 return err;
             };
             const fd = stream.socket.handle;
-            const thread = std.Thread.spawn(.{}, connectionThread, .{ self, fd }) catch {
+            const pool = self.connection_pool orelse {
                 std.Io.Threaded.closeFd(fd);
-                continue;
+                return error.NotStarted;
             };
-            thread.detach();
+            if (!pool.submit(fd)) std.Io.Threaded.closeFd(fd);
         }
     }
 
     fn connectionThread(self: *Self, fd: std.posix.fd_t) void {
         defer std.Io.Threaded.closeFd(fd);
-        std.posix.setsockopt(fd, std.posix.IPPROTO.TCP, std.posix.TCP.NODELAY, &std.mem.toBytes(@as(c_int, 1))) catch {};
+        _ = std.posix.system.setsockopt(
+            fd,
+            std.posix.IPPROTO.TCP,
+            std.posix.TCP.NODELAY,
+            &std.mem.toBytes(@as(c_int, 1)),
+            @sizeOf(c_int),
+        );
 
         // Bound slow clients so a partial-header connection cannot hold this
         // thread open indefinitely (the read path drops it on WouldBlock).
@@ -298,6 +319,140 @@ pub const EdgeServer = struct {
 
     pub fn matchRoute(self: *Self, method: []const u8, host: []const u8, path: []const u8) ?*RouteRuntime {
         return selectRoute(self.routes, method, host, path);
+    }
+};
+
+/// Fixed workers plus a bounded queue keep accepted connections under one
+/// server-owned lifetime. Deinit joins every worker before route and handler
+/// state is released.
+const ConnectionPool = struct {
+    workers: []std.Thread,
+    queue: BoundedQueue,
+    running: std.atomic.Value(bool),
+    server: *EdgeServer,
+    allocator: std.mem.Allocator,
+
+    const queue_size = 4096;
+    const WorkItem = struct { stream_fd: std.posix.fd_t };
+
+    const BoundedQueue = struct {
+        items: [queue_size]WorkItem,
+        head: usize,
+        tail: usize,
+        count: usize,
+        mutex: compat.Mutex,
+        ready: std.Io.Semaphore,
+
+        fn init() BoundedQueue {
+            return .{
+                .items = undefined,
+                .head = 0,
+                .tail = 0,
+                .count = 0,
+                .mutex = .{},
+                .ready = .{},
+            };
+        }
+
+        fn push(self: *BoundedQueue, item: WorkItem) bool {
+            self.mutex.lock();
+            if (self.count >= queue_size) {
+                self.mutex.unlock();
+                return false;
+            }
+            self.items[self.tail] = item;
+            self.tail = (self.tail + 1) % queue_size;
+            self.count += 1;
+            self.mutex.unlock();
+            self.ready.post(std.Options.debug_io);
+            return true;
+        }
+
+        fn pop(self: *BoundedQueue, running: *std.atomic.Value(bool)) ?WorkItem {
+            while (true) {
+                self.ready.waitUncancelable(std.Options.debug_io);
+
+                self.mutex.lock();
+                if (self.count > 0) {
+                    const item = self.items[self.head];
+                    self.head = (self.head + 1) % queue_size;
+                    self.count -= 1;
+                    self.mutex.unlock();
+                    return item;
+                }
+                self.mutex.unlock();
+
+                if (!running.load(.acquire)) return null;
+            }
+        }
+
+        fn wakeWorkers(self: *BoundedQueue, worker_count: usize) void {
+            for (0..worker_count) |_| self.ready.post(std.Options.debug_io);
+        }
+
+        fn drainAndClose(self: *BoundedQueue) void {
+            self.mutex.lock();
+            defer self.mutex.unlock();
+
+            while (self.count > 0) {
+                const item = self.items[self.head];
+                self.head = (self.head + 1) % queue_size;
+                self.count -= 1;
+                std.Io.Threaded.closeFd(item.stream_fd);
+            }
+            self.tail = self.head;
+        }
+    };
+
+    fn init(
+        allocator: std.mem.Allocator,
+        server: *EdgeServer,
+        worker_count: usize,
+    ) !*ConnectionPool {
+        if (worker_count == 0) return error.InvalidWorkerCount;
+        const self = try allocator.create(ConnectionPool);
+        errdefer allocator.destroy(self);
+        const workers = try allocator.alloc(std.Thread, worker_count);
+        errdefer allocator.free(workers);
+
+        self.* = .{
+            .workers = workers,
+            .queue = BoundedQueue.init(),
+            .running = std.atomic.Value(bool).init(true),
+            .server = server,
+            .allocator = allocator,
+        };
+
+        for (workers, 0..) |*worker, index| {
+            worker.* = std.Thread.spawn(.{}, workerFn, .{self}) catch {
+                self.running.store(false, .release);
+                self.queue.wakeWorkers(index);
+                for (workers[0..index]) |started| started.join();
+                return error.ThreadSpawnFailed;
+            };
+        }
+        return self;
+    }
+
+    fn deinit(self: *ConnectionPool) void {
+        self.running.store(false, .release);
+        self.queue.wakeWorkers(self.workers.len);
+        for (self.workers) |worker| worker.join();
+        self.queue.drainAndClose();
+        self.allocator.free(self.workers);
+        self.allocator.destroy(self);
+    }
+
+    fn submit(self: *ConnectionPool, stream_fd: std.posix.fd_t) bool {
+        if (!self.running.load(.acquire)) return false;
+        return self.queue.push(.{ .stream_fd = stream_fd });
+    }
+
+    fn workerFn(self: *ConnectionPool) void {
+        while (self.running.load(.acquire)) {
+            const item = self.queue.pop(&self.running) orelse return;
+            self.server.connectionThread(item.stream_fd);
+        }
     }
 };
 
@@ -911,6 +1066,11 @@ fn defaultPoolSize() usize {
     return std.math.clamp(cpu_count * 4, 8, 128);
 }
 
+fn defaultConnectionWorkerCount() usize {
+    const cpu_count = std.Thread.getCpuCount() catch 4;
+    return std.math.clamp(cpu_count * 2, 2, 128);
+}
+
 test "edge config parses routes and targets" {
     const json =
         \\{
@@ -935,6 +1095,59 @@ test "edge config parses routes and targets" {
     try std.testing.expectEqual(@as(u32, 1234), config.handlers[0].runtime_config.request_timeout_ms);
     try std.testing.expectEqual(@as(usize, 2), config.routes.len);
     try std.testing.expectEqualStrings("api", config.routes[0].targets[0].handler);
+}
+
+test "edge config rejects a zero connection timeout" {
+    const json =
+        \\{
+        \\  "timeoutMs": 0,
+        \\  "handlers": [{"name":"api","entry":"src/api.ts"}],
+        \\  "routes": [{"pathPrefix":"/","target":"api"}]
+        \\}
+    ;
+    try std.testing.expectError(
+        error.InvalidEdgeConfig,
+        parseConfig(std.testing.allocator, json, "/tmp/app"),
+    );
+}
+
+test "edge connection queue rejects work at capacity" {
+    var queue = ConnectionPool.BoundedQueue.init();
+    for (0..ConnectionPool.queue_size) |index| {
+        try std.testing.expect(queue.push(.{ .stream_fd = @intCast(index) }));
+    }
+    try std.testing.expect(!queue.push(.{ .stream_fd = 0 }));
+}
+
+test "edge connection pool serves a probe and joins its worker" {
+    var server = EdgeServer{
+        .allocator = std.testing.allocator,
+        .config = .{
+            .listener = .{ .host = "127.0.0.1", .port = 0 },
+            .handlers = &.{},
+            .routes = &.{},
+            .timeout_ms = 1_000,
+        },
+        .io_backend = Io.Threaded.init(std.testing.allocator, .{ .environ = .empty }),
+    };
+    defer server.io_backend.deinit();
+
+    const pool = try ConnectionPool.init(std.testing.allocator, &server, 1);
+    defer pool.deinit();
+
+    const fds = try io_mod.createUnixSocketPair();
+    var server_fd_owned = true;
+    defer if (server_fd_owned) std.Io.Threaded.closeFd(fds[0]);
+    defer std.Io.Threaded.closeFd(fds[1]);
+
+    try io_mod.writeAllFd(fds[1], "GET /healthz HTTP/1.1\r\nHost: example.test\r\n\r\n");
+    try std.testing.expect(pool.submit(fds[0]));
+    server_fd_owned = false;
+
+    var response: [512]u8 = undefined;
+    const response_len = try std.posix.read(fds[1], &response);
+    try std.testing.expect(std.mem.startsWith(u8, response[0..response_len], "HTTP/1.1 200 OK\r\n"));
+    try std.testing.expect(std.mem.endsWith(u8, response[0..response_len], "ok\n"));
 }
 
 test "edge handler timeout maps to gateway timeout" {

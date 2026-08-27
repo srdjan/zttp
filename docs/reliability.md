@@ -12,7 +12,8 @@ reported.
 | Handler execution timeout | 30 seconds | Set with `ServerConfig.timeout_ms` or edge `timeoutMs`. Slow handlers return `504 Gateway Timeout` and invalidate the pool slot. |
 | JavaScript memory | no explicit limit | Set per runtime with `-m` / `--memory`. |
 | Runtime pool size | `cpu_count * 2`, clamped 8-128 | Set with `-n` / `--pool`. |
-| Connection workers | `cpu_count * 2` | A fixed pool, not one thread per connection. Not configurable from the CLI. |
+| Connection workers | `cpu_count * 2`, clamped 2-128 | A fixed pool, not one thread per connection. Not configurable from the CLI. |
+| Accepted connection queue | 4,096 | The edge closes a newly accepted connection when the bounded queue is full. |
 | Value stack | 1 MB | 131,072 JSValue slots. |
 | Call-stack depth | 1,024 frames | Deep recursion raises a typed error. |
 | Saved-state depth | 1,024 | Exceeding the cap raises a typed error. |

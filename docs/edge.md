@@ -102,7 +102,7 @@ picks the target with the fewest in-flight requests.
 |----------------|---------|--------------------|-------------------------------------------------|
 | `maxBodySize`  | integer | `1048576` (1 MiB)  | Reject larger bodies with 413                   |
 | `maxHeaders`   | integer | `64`               | Reject larger header counts with 400            |
-| `timeoutMs`    | integer | `30000`            | Request read/write timeout and default handler execution timeout |
+| `timeoutMs`    | integer | `30000`            | Positive request read/write timeout and default handler execution timeout; `0` is rejected at startup |
 
 Timeout responses are split by where the request stalls:
 
@@ -110,6 +110,11 @@ Timeout responses are split by where the request stalls:
 - A handler that exceeds its execution deadline returns `504 Gateway Timeout`.
 - Waiting longer than `poolWaitTimeoutMs` for an available handler pool slot
   returns `503 Service Unavailable`.
+
+Accepted connections run on a fixed worker pool sized at twice the detected CPU
+count, clamped to 2-128 workers. A bounded queue holds at most 4,096 accepted
+connections; the edge closes a newly accepted connection when that queue is
+full instead of creating another thread.
 
 ## Per-handler verification
 
