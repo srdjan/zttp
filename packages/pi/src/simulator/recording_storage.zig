@@ -374,7 +374,7 @@ fn syncDirectoryTree(allocator: std.mem.Allocator, io: std.Io, root: std.Io.Dir)
     defer walker.deinit();
     while (try walker.next(io)) |entry| {
         if (entry.kind != .directory) continue;
-        var dir = try root.openDir(io, entry.path, .{ .follow_symlinks = false });
+        var dir = try root.openDir(io, entry.path, .{ .iterate = true, .follow_symlinks = false });
         defer dir.close(io);
         try syncDir(dir);
     }
@@ -382,11 +382,13 @@ fn syncDirectoryTree(allocator: std.mem.Allocator, io: std.Io, root: std.Io.Dir)
 }
 
 fn syncNamedDirectory(root: std.Io.Dir, io: std.Io, path: []const u8) !void {
-    var dir = try root.openDir(io, path, .{ .follow_symlinks = false });
+    var dir = try root.openDir(io, path, .{ .iterate = true, .follow_symlinks = false });
     defer dir.close(io);
     try syncDir(dir);
 }
 
+// Every caller opens `dir` with `iterate` set: Linux opens a directory with
+// `O_PATH` otherwise, and `fsync` on an `O_PATH` descriptor fails with EBADF.
 fn syncDir(dir: std.Io.Dir) !void {
     if (std.c.fsync(dir.handle) != 0) return error.DirectorySyncFailed;
 }

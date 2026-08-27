@@ -546,10 +546,14 @@ fn syncFile(allocator: std.mem.Allocator, path: []const u8) !void {
     if (std.c.fsync(fd) != 0) return error.SyncFailure;
 }
 
+// `iterate` is what keeps the descriptor off `O_PATH`. Linux opens a
+// directory with `O_PATH` unless iteration is requested, and `fsync` on an
+// `O_PATH` descriptor fails with EBADF; macOS has no `O_PATH`, so the same code
+// syncs there and refuses every transaction on Linux.
 fn syncDirectory(allocator: std.mem.Allocator, path: []const u8) !void {
     var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
     defer io_backend.deinit();
-    var dir = try std.Io.Dir.openDirAbsolute(io_backend.io(), path, .{});
+    var dir = try std.Io.Dir.openDirAbsolute(io_backend.io(), path, .{ .iterate = true });
     defer dir.close(io_backend.io());
     if (std.c.fsync(dir.handle) != 0) return error.DirectorySyncFailure;
 }
@@ -718,7 +722,9 @@ fn deleteTransactionDirectory(allocator: std.mem.Allocator, transaction_dir: []c
     const name = std.fs.path.basename(transaction_dir);
     var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
     defer io_backend.deinit();
-    var parent = try std.Io.Dir.openDirAbsolute(io_backend.io(), parent_path, .{});
+    // `iterate` keeps the descriptor off `O_PATH` so the fsync below works on
+    // Linux; see `syncDirectory`.
+    var parent = try std.Io.Dir.openDirAbsolute(io_backend.io(), parent_path, .{ .iterate = true });
     defer parent.close(io_backend.io());
     try parent.deleteTree(io_backend.io(), name);
     if (std.c.fsync(parent.handle) != 0) return error.DirectorySyncFailure;

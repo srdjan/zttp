@@ -2856,9 +2856,11 @@ fn requireDirectory(io: std.Io, path: []const u8) !bool {
     return true;
 }
 
+// `iterate` keeps the descriptor off Linux's `O_PATH`, where `fsync` fails
+// with EBADF.
 fn syncParent(io: std.Io, path: []const u8) !void {
     const parent = std.fs.path.dirname(path) orelse return error.CorpusSwapMissingParent;
-    var dir = try std.Io.Dir.openDirAbsolute(io, parent, .{ .follow_symlinks = false });
+    var dir = try std.Io.Dir.openDirAbsolute(io, parent, .{ .iterate = true, .follow_symlinks = false });
     defer dir.close(io);
     if (std.c.fsync(dir.handle) != 0) return error.DirectorySyncFailed;
 }
@@ -2866,7 +2868,7 @@ fn syncParent(io: std.Io, path: []const u8) !void {
 fn deleteTreeAbsolute(io: std.Io, path: []const u8) !void {
     const parent = std.fs.path.dirname(path) orelse return error.CorpusSwapMissingParent;
     const base = std.fs.path.basename(path);
-    var dir = try std.Io.Dir.openDirAbsolute(io, parent, .{ .follow_symlinks = false });
+    var dir = try std.Io.Dir.openDirAbsolute(io, parent, .{ .iterate = true, .follow_symlinks = false });
     defer dir.close(io);
     try dir.deleteTree(io, base);
     if (std.c.fsync(dir.handle) != 0) return error.DirectorySyncFailed;
