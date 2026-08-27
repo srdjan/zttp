@@ -364,14 +364,17 @@ fn hashBundleFile(
 
     var hasher = std.crypto.hash.sha2.Sha256.init(.{});
     var total: usize = 0;
-    var buffer: [64 * 1024]u8 = undefined;
-    var reader = file.reader(io, &buffer);
+    // The reader's own buffer must not also be the read destination: a
+    // component past one chunk then copies a slice onto itself.
+    var reader_buffer: [4096]u8 = undefined;
+    var chunk: [64 * 1024]u8 = undefined;
+    var reader = file.reader(io, &reader_buffer);
     while (true) {
-        const count = reader.interface.readSliceShort(&buffer) catch return error.FileReadFailed;
+        const count = reader.interface.readSliceShort(&chunk) catch return error.FileReadFailed;
         if (count == 0) break;
         if (count > max_bytes -| total) return error.FileTooBig;
         total += count;
-        hasher.update(buffer[0..count]);
+        hasher.update(chunk[0..count]);
     }
     var digest: [32]u8 = undefined;
     hasher.final(&digest);
@@ -670,4 +673,35 @@ test "verify passes a bundle written by writeBundle" {
     const text = verify_out.writer.buffered();
     try std.testing.expect(std.mem.indexOf(u8, text, "OK") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "Bundle verified") != null);
+}
+
+test "verify hashes a component larger than one read buffer" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const old_cwd = try test_chdir(&tmp);
+    defer std.testing.allocator.free(old_cwd);
+    defer std.Io.Threaded.chdir(old_cwd) catch {};
+
+    // Three chunks past the 64 KiB read buffer, so a reader that reads into
+    // its own buffer corrupts the digest instead of matching the manifest.
+    const big = try std.testing.allocator.alloc(u8, 200 * 1024);
+    defer std.testing.allocator.free(big);
+    for (big, 0..) |*byte, index| byte.* = @intCast(index % 251);
+    try zts.file_io.writeFile(std.testing.allocator, "contract.json", big);
+
+    var out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer out.deinit();
+    var err = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer err.deinit();
+    try writeBundle(std.testing.allocator, .{
+        .contract_path = "contract.json",
+        .out_dir = "bundle",
+    }, &out.writer, &err.writer);
+
+    var verify_out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer verify_out.deinit();
+    var verify_err = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer verify_err.deinit();
+    try verify(std.testing.allocator, "bundle", &verify_out.writer, &verify_err.writer);
+    try std.testing.expect(std.mem.indexOf(u8, verify_out.writer.buffered(), "Bundle verified") != null);
 }
