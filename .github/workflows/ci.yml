@@ -41,6 +41,8 @@ jobs:
     steps:
       # actions/checkout@v4
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          fetch-depth: 0
       # mlugg/setup-zig@v2
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29
         with:
@@ -55,67 +57,5 @@ jobs:
             sudo apt-get install -y z3
           fi
 
-      - name: Run aggregate tests
-        run: |
-          if [ "$RUNNER_OS" = "macOS" ]; then
-            zig build test -j1
-          else
-            zig build test
-          fi
-
-      - name: Run focused runtime tests
-        run: zig build test-zruntime
-
-      - name: Build release binaries
-        run: zig build -Doptimize=ReleaseFast
-
-      - name: Run v1 user-flow smoke
-        run: zig build smoke-v1
-
-      - name: Run panic isolation smoke
-        run: zig build test-panic-isolation
-
-      - name: Run studio workbench unit tests
-        run: zig build test-cli -Dstudio
-
-      - name: Run example handler tests
-        run: bash scripts/test-examples.sh
-
-      - name: Run installer archive safety tests
-        run: bash scripts/test-install-archive-safety.sh
-
-      - name: Assert policy hash unchanged
-        run: |
-          if [ ! -f policy-hash.txt ]; then
-            echo "::error::policy-hash.txt is missing - the policy hash baseline must be committed"
-            echo "Run: ./zig-out/bin/zts describe-rule --hash > policy-hash.txt"
-            exit 1
-          fi
-          EXPECTED=$(cat policy-hash.txt)
-          ACTUAL=$(./zig-out/bin/zts describe-rule --hash)
-          if [ "$ACTUAL" != "$EXPECTED" ]; then
-            echo "::error::Policy hash mismatch - rules changed without updating policy-hash.txt"
-            echo "Expected: $EXPECTED"
-            echo "Actual:   $ACTUAL"
-            echo "Run: ./zig-out/bin/zts describe-rule --hash > policy-hash.txt"
-            exit 1
-          fi
-
-      - name: Run semantics spec gate
-        run: bash scripts/check-semantics-spec.sh
-
-      - name: Run registry and normalization gates
-        run: |
-          bash scripts/check-normalize-idempotent.sh
-          bash scripts/check-idiom-table.sh
-          bash scripts/check-canonical-style.sh
-          bash scripts/check-grammar-drift.sh
-          bash scripts/check-decision-registry.sh
-          bash scripts/check-meta-drift.sh
-          bash scripts/check-agent-determinism.sh
-
-      - name: Verify expert subsystem
-        run: |
-          META=$(./zig-out/bin/zts meta --json)
-          echo "$META" | jq -e '.rule_count >= 25'
-          echo "$META" | jq -e '.policy_hash | length == 64'
+      - name: Run authoritative verifier
+        run: bash scripts/verify.sh

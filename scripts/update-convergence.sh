@@ -35,6 +35,11 @@ for filtered_var in ZTTP_CODEGEN_ONLY ZTTP_CODEGEN_LIMIT ZTTP_CODEGEN_TOOLS; do
   fi
 done
 
+if [[ -n "$(git status --porcelain --untracked-files=normal 2>/dev/null)" ]]; then
+  echo "error: convergence publication requires a clean working tree" >&2
+  exit 1
+fi
+
 evidence_tmp="$(mktemp -d "${TMPDIR:-/tmp}/zttp-convergence.XXXXXX")"
 cleanup() {
   rm -rf "$evidence_tmp"
@@ -86,8 +91,8 @@ if [[ "$current_commit" != "$marker_commit" || "$current_dirty" != "$marker_dirt
 fi
 commit="${marker_commit:0:8}"
 if [[ "$marker_dirty" == true ]]; then
-  commit="$commit-dirty"
-  echo ">> warning: working tree is dirty; the row will be marked $commit" >&2
+  echo "error: the replay recorded dirty source; generated evidence is unchanged" >&2
+  exit 1
 fi
 
 printf '%s' "$payload" | python3 -c '

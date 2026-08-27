@@ -31,6 +31,11 @@ for filtered_var in ZTTP_CODEGEN_ONLY ZTTP_CODEGEN_LIMIT ZTTP_CODEGEN_TOOLS; do
   fi
 done
 
+if [[ -n "$(git status --porcelain --untracked-files=normal 2>/dev/null)" ]]; then
+  echo "error: coverage publication requires a clean working tree" >&2
+  exit 1
+fi
+
 evidence_tmp="$(mktemp -d "${TMPDIR:-/tmp}/zttp-coverage.XXXXXX")"
 cleanup() {
   rm -rf "$evidence_tmp"
@@ -75,6 +80,10 @@ if [[ -n "$(git status --porcelain --untracked-files=normal 2>/dev/null)" ]]; th
 fi
 if [[ "$current_commit" != "$marker_commit" || "$current_dirty" != "$marker_dirty" ]]; then
   echo "error: source state changed after replay; generated evidence is unchanged" >&2
+  exit 1
+fi
+if [[ "$marker_dirty" == true ]]; then
+  echo "error: the replay recorded dirty source; generated evidence is unchanged" >&2
   exit 1
 fi
 

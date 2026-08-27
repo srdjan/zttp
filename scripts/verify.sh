@@ -46,6 +46,9 @@ zig build test-zruntime
 step "zig build -Doptimize=ReleaseFast  (release binaries)"
 zig build -Doptimize=ReleaseFast
 
+step "zig build wasm  (browser proof analyzer)"
+zig build wasm
+
 step "zig build smoke-v1  (v1 user-flow smoke)"
 zig build smoke-v1
 
@@ -120,6 +123,9 @@ META=$(./zig-out/bin/zts meta --json)
 echo "$META" | jq -e '.rule_count >= 25' >/dev/null
 echo "$META" | jq -e '.policy_hash | length == 64' >/dev/null
 echo "expert subsystem OK"
+
+step "zig build release-provenance  (clean, current release evidence)"
+zig build release-provenance
 
 step "zig fmt --check build.zig packages/  (ci.yml: Check formatting)"
 zig fmt --check build.zig packages/

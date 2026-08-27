@@ -409,6 +409,29 @@ pub fn build(b: *std.Build) void {
     const capability_audit_step = b.step("test-capability-audit", "Run capability helper audit");
     capability_audit_step.dependOn(&capability_audit.step);
 
+    // Authoritative release-evidence provenance gate. It is Zig-native so the
+    // release path has no language/toolchain dependency beyond this build.
+    const release_provenance_mod = b.createModule(.{
+        .root_source_file = b.path("tooling/release_provenance.zig"),
+        .target = b.graph.host,
+        .optimize = optimize,
+    });
+    const release_provenance_exe = b.addExecutable(.{
+        .name = "release-provenance",
+        .root_module = release_provenance_mod,
+    });
+    const release_provenance_cmd = b.addRunArtifact(release_provenance_exe);
+    release_provenance_cmd.has_side_effects = true;
+    const release_provenance_step = b.step("release-provenance", "Validate release evidence provenance");
+    release_provenance_step.dependOn(&release_provenance_cmd.step);
+    const release_provenance_tests = b.addTest(.{
+        .filters = test_filters,
+        .root_module = release_provenance_mod,
+    });
+    const run_release_provenance_tests = b.addRunArtifact(release_provenance_tests);
+    const release_provenance_test_step = b.step("test-release-provenance", "Run release provenance tests");
+    release_provenance_test_step.dependOn(&run_release_provenance_tests.step);
+
     // Release-readiness passport: repository tooling, deliberately not part of
     // any installed binary. It reads this repository's own files, so it means
     // nothing inside a user project; it shipped as `zttp doctor --release`
@@ -420,6 +443,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     release_check_mod.addImport("zts", zts_host_mod);
+    release_check_mod.addImport("release_provenance", release_provenance_mod);
     const release_check_exe = b.addExecutable(.{
         .name = "release-check",
         .root_module = release_check_mod,
@@ -434,6 +458,32 @@ pub fn build(b: *std.Build) void {
     const run_release_check_tests = b.addRunArtifact(release_check_tests);
     const release_check_test_step = b.step("test-release-check", "Run release-passport tests");
     release_check_test_step.dependOn(&run_release_check_tests.step);
+
+    // Validate the actual passport exported by the scripted demo through the
+    // canonical framed-event reader instead of a shell or Python reimplementation.
+    const demo_passport_check_mod = b.createModule(.{
+        .root_source_file = pi_host_dep.path("src/demo_passport_check.zig"),
+        .target = b.graph.host,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    demo_passport_check_mod.addImport("zts", zts_host_mod);
+    const demo_passport_check_exe = b.addExecutable(.{
+        .name = "demo-passport-check",
+        .root_module = demo_passport_check_mod,
+    });
+    const demo_passport_check_cmd = b.addRunArtifact(demo_passport_check_exe);
+    demo_passport_check_cmd.has_side_effects = true;
+    if (b.args) |args| demo_passport_check_cmd.addArgs(args);
+    const demo_passport_check_step = b.step("demo-passport-check", "Validate an exported proof passport");
+    demo_passport_check_step.dependOn(&demo_passport_check_cmd.step);
+    const demo_passport_check_tests = b.addTest(.{
+        .filters = test_filters,
+        .root_module = demo_passport_check_mod,
+    });
+    const run_demo_passport_check_tests = b.addRunArtifact(demo_passport_check_tests);
+    const demo_passport_check_test_step = b.step("test-demo-passport-check", "Run proof-passport checker tests");
+    demo_passport_check_test_step.dependOn(&run_demo_passport_check_tests.step);
 
     // Repository-only AST metric. The live command receives the tracked Zig
     // source list from a NUL-safe script; its unit tests pin the AST definition
@@ -512,6 +562,11 @@ pub fn build(b: *std.Build) void {
     const convergence_emitter = b.addSystemCommand(&.{ "/bin/bash", "scripts/check-convergence-emitter.sh" });
     const convergence_emitter_step = b.step("test-convergence-emitter", "Check the convergence marker has one producer and one consumer");
     convergence_emitter_step.dependOn(&convergence_emitter.step);
+
+    const evidence_marker = b.addSystemCommand(&.{ "/bin/bash", "scripts/test-evidence-marker.sh" });
+    evidence_marker.step.dependOn(&run_release_provenance_tests.step);
+    const evidence_marker_step = b.step("test-evidence-marker", "Check release evidence marker and publisher boundaries");
+    evidence_marker_step.dependOn(&evidence_marker.step);
 
     const expert_qualification_boundary = b.addSystemCommand(&.{
         "python3",
@@ -1038,6 +1093,8 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&proof_swallow.step);
     test_step.dependOn(&zts_layering.step);
     test_step.dependOn(&run_release_check_tests.step);
+    test_step.dependOn(&run_release_provenance_tests.step);
+    test_step.dependOn(&run_demo_passport_check_tests.step);
     test_step.dependOn(production_branch_metric_test_step);
     test_step.dependOn(comptime_cli_step);
     test_step.dependOn(generic_intersection_cli_step);
@@ -1052,6 +1109,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(docs_drift_step);
     test_step.dependOn(&doc_links.step);
     test_step.dependOn(&convergence_emitter.step);
+    test_step.dependOn(&evidence_marker.step);
     test_step.dependOn(&expert_qualification_boundary.step);
     test_step.dependOn(&run_module_governance.step);
     test_step.dependOn(zts_test_step);

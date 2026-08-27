@@ -2,9 +2,8 @@
 //!
 //! Self-contained pipeline: parses options, collects a set of
 //! release-readiness checks, renders the result as text or JSON, and returns
-//! a verdict (ready / ready_with_known_issues / blocked). Each check reads
-//! existing files in this repository only - no benchmark or test suite
-//! invocation - so it is safe to run repeatedly.
+//! a verdict (ready / ready_with_known_issues / blocked). Checks read existing
+//! repository files; provenance delegates to its authoritative Zig gate.
 //!
 //! This shipped as `zttp doctor --release` until it moved here. Every check
 //! reads paths that exist in this repository and nowhere else (README.md,
@@ -15,20 +14,13 @@
 
 const std = @import("std");
 const zts = @import("zts");
+const release_provenance = @import("release_provenance");
 
 const release_verify_commands = [_][]const u8{
-    "zig fmt --check build.zig packages/",
-    "zig build test",
-    "zig build test-zruntime",
-    "zig build -Doptimize=ReleaseFast",
-    "zig build smoke-v1",
-    "zig build test-panic-isolation",
+    "bash scripts/verify.sh",
     "zig build smoke-getting-started",
     "zig build smoke-demo",
     "zig build smoke-studio",
-    "bash scripts/test-examples.sh",
-    "bash scripts/test-install-archive-safety.sh",
-    "bash scripts/check-semantics-spec.sh",
     "zig build bench-check",
     "zig build release-check",
 };
@@ -42,42 +34,40 @@ const build_gate_markers = [_][]const u8{
     "test-module-governance",
     "test-capability-audit",
     "test-docs-drift",
+    "test-evidence-marker",
 };
 
-// `test-docs-drift` and `test-doc-links` are deliberately absent here and in
-// the verify list below: both are dependencies of the `test` step, and
-// scripts/verify.sh says in its header not to re-add them as separate steps.
 const ci_gate_markers = [_][]const u8{
-    "zig fmt --check build.zig packages/",
-    "zig build test",
-    "zig build test-zruntime",
-    "zig build -Doptimize=ReleaseFast",
-    "zig build smoke-v1",
-    "zig build test-panic-isolation",
-    "bash scripts/test-examples.sh",
-    "bash scripts/test-install-archive-safety.sh",
-    "bash scripts/check-semantics-spec.sh",
+    "bash scripts/verify.sh",
 };
 
+// `test-docs-drift` and `test-doc-links` are dependencies of `zig build test`.
+// The verifier must carry every other repository gate explicitly.
 const verify_script_markers = [_][]const u8{
     "zig build test",
     "zig build test-zruntime",
     "zig build -Doptimize=ReleaseFast",
+    "zig build wasm",
     "zig build smoke-v1",
     "zig build test-panic-isolation",
+    "zig build test-cli -Dstudio",
     "bash scripts/test-examples.sh",
+    "bash scripts/check-normalize-idempotent.sh",
+    "bash scripts/check-idiom-table.sh",
+    "bash scripts/check-canonical-style.sh",
+    "bash scripts/check-grammar-drift.sh",
+    "bash scripts/check-decision-registry.sh",
+    "bash scripts/check-meta-drift.sh",
+    "bash scripts/check-agent-determinism.sh",
     "bash scripts/test-install-archive-safety.sh",
     "bash scripts/check-semantics-spec.sh",
+    "zts module-spec-render --check",
     "zts meta --json",
+    "zig build release-provenance",
+    "zig fmt --check build.zig packages/",
 };
 
-const release_only_gate_markers = [_][]const u8{
-    "zig build smoke-getting-started",
-    "zig build smoke-demo",
-    "zig build smoke-studio",
-    "zig build release-check",
-    "contents: write",
-};
+const release_permission_marker = "contents: write";
 
 pub const ReleaseDoctorOptions = struct {
     json: bool = false,
@@ -307,6 +297,13 @@ pub fn parseReleaseDoctorOptions(argv: []const []const u8) !ReleaseDoctorOptions
 }
 
 pub fn collectReleasePassport(allocator: std.mem.Allocator) !ReleasePassport {
+    return collectReleasePassportWithProvenance(allocator, releaseProvenancePasses(allocator));
+}
+
+fn collectReleasePassportWithProvenance(
+    allocator: std.mem.Allocator,
+    provenance_ok: bool,
+) !ReleasePassport {
     const zon = readOptionalFile(allocator, "build.zig.zon", 256 * 1024);
     defer if (zon) |bytes| allocator.free(bytes);
     const version = if (zon) |bytes| extractZonVersion(bytes) orelse "unknown" else "unknown";
@@ -315,6 +312,7 @@ pub fn collectReleasePassport(allocator: std.mem.Allocator) !ReleasePassport {
 
     try addVersionCheck(allocator, &passport, zon);
     try addReleaseEvidenceCheck(allocator, &passport);
+    try addReleaseProvenanceCheck(allocator, &passport, provenance_ok);
     try addReleaseGateCheck(allocator, &passport);
     try addPublicClaimsCheck(allocator, &passport);
     try addCurrentDocsScopeCheck(allocator, &passport);
@@ -327,22 +325,29 @@ pub fn collectReleasePassport(allocator: std.mem.Allocator) !ReleasePassport {
 fn addVersionCheck(allocator: std.mem.Allocator, passport: *ReleasePassport, zon: ?[]const u8) !void {
     const root = readOptionalFile(allocator, "packages/zts/src/root.zig", 256 * 1024);
     defer if (root) |bytes| allocator.free(bytes);
+    const zts_zon = readOptionalFile(allocator, "packages/zts/build.zig.zon", 256 * 1024);
+    defer if (zts_zon) |bytes| allocator.free(bytes);
+    const runtime_zon = readOptionalFile(allocator, "packages/runtime/build.zig.zon", 256 * 1024);
+    defer if (runtime_zon) |bytes| allocator.free(bytes);
 
     const version = if (zon) |bytes| extractZonVersion(bytes) else null;
-    if (version == null or root == null) {
-        try passport.add(allocator, "version", "Version alignment", .fail, "build.zig.zon or packages/zts/src/root.zig is missing", "zig build test-zts");
+    if (version == null or root == null or zts_zon == null or runtime_zon == null) {
+        try passport.add(allocator, "version", "Version alignment", .fail, "a release package manifest or packages/zts/src/root.zig is missing", "zig build test-zts");
         return;
     }
 
     const root_bytes = root.?;
     const expected = try std.fmt.allocPrint(allocator, "string = \"{s}\"", .{version.?});
     defer allocator.free(expected);
-    if (std.mem.indexOf(u8, root_bytes, expected) == null) {
-        try passport.add(allocator, "version", "Version alignment", .fail, "build.zig.zon version does not match packages/zts/src/root.zig", "zig build test-zts");
+    if (std.mem.indexOf(u8, root_bytes, expected) == null or
+        !std.mem.eql(u8, extractZonVersion(zts_zon.?) orelse "", version.?) or
+        !std.mem.eql(u8, extractZonVersion(runtime_zon.?) orelse "", version.?))
+    {
+        try passport.add(allocator, "version", "Version alignment", .fail, "root, zts, runtime, and binary versions do not agree", "zig build test-zts");
         return;
     }
 
-    try passport.add(allocator, "version", "Version alignment", .ok, "build.zig.zon and zts version string agree", "zig build test-zts");
+    try passport.add(allocator, "version", "Version alignment", .ok, "root, zts, runtime, and binary versions agree", "zig build test-zts");
 }
 
 fn addReleaseEvidenceCheck(allocator: std.mem.Allocator, passport: *ReleasePassport) !void {
@@ -357,6 +362,39 @@ fn addReleaseEvidenceCheck(allocator: std.mem.Allocator, passport: *ReleasePassp
     } else {
         try passport.add(allocator, "release_evidence", "Documentation evidence", .fail, "missing maintained README, user guide, roadmap, or module index", "bash scripts/audit-docs.sh .");
     }
+}
+
+fn addReleaseProvenanceCheck(
+    allocator: std.mem.Allocator,
+    passport: *ReleasePassport,
+    provenance_ok: bool,
+) !void {
+    if (!provenance_ok) {
+        try passport.add(
+            allocator,
+            "release_provenance",
+            "Release evidence provenance",
+            .fail,
+            "the authoritative provenance validator rejected coverage or convergence evidence",
+            "zig build release-provenance",
+        );
+        return;
+    }
+
+    try passport.add(
+        allocator,
+        "release_provenance",
+        "Release evidence provenance",
+        .ok,
+        "the authoritative validator accepted clean, ancestral release evidence",
+        "zig build release-provenance",
+    );
+}
+
+fn releaseProvenancePasses(allocator: std.mem.Allocator) bool {
+    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    return release_provenance.passes(allocator, io_backend.io(), ".");
 }
 
 fn addReleaseGateCheck(allocator: std.mem.Allocator, passport: *ReleasePassport) !void {
@@ -379,7 +417,7 @@ fn addReleaseGateCheck(allocator: std.mem.Allocator, passport: *ReleasePassport)
         false;
 
     if (smoke_ok and examples_ok and installer_ok and semantics_ok and workflow_ok) {
-        try passport.add(allocator, "release_gates", "Release gates", .ok, "CI, release workflow, local verifier, installer, semantics, docs, smoke, and doctor gates are wired", "bash scripts/verify.sh && zig build release-check");
+        try passport.add(allocator, "release_gates", "Release gates", .ok, "CI, release workflow, local verifier, browser analyzer, installer, semantics, docs, smoke, and doctor gates are wired", "bash scripts/verify.sh && zig build release-check");
     } else {
         try passport.add(allocator, "release_gates", "Release gates", .fail, "one or more release gates are missing from build wiring, scripts, or workflows", "bash scripts/verify.sh && zig build release-check");
     }
@@ -576,7 +614,8 @@ fn releaseGateRequirementsPresent(build_zig: []const u8, ci_yml: []const u8, rel
     return containsAll(build_zig, &build_gate_markers) and
         containsAll(ci_yml, &ci_gate_markers) and
         containsAll(release_yml, &ci_gate_markers) and
-        containsAll(release_yml, &release_only_gate_markers) and
+        containsAll(release_yml, &release_verify_commands) and
+        std.mem.indexOf(u8, release_yml, release_permission_marker) != null and
         containsAll(verify_sh, &verify_script_markers);
 }
 
@@ -588,10 +627,10 @@ fn hasReleaseVerifyCommand(command: []const u8) bool {
 }
 
 test "release verify commands cover release gates" {
-    try std.testing.expect(hasReleaseVerifyCommand("zig fmt --check build.zig packages/"));
-    try std.testing.expect(hasReleaseVerifyCommand("zig build test-zruntime"));
-    try std.testing.expect(hasReleaseVerifyCommand("bash scripts/test-install-archive-safety.sh"));
-    try std.testing.expect(hasReleaseVerifyCommand("bash scripts/check-semantics-spec.sh"));
+    try std.testing.expect(hasReleaseVerifyCommand("bash scripts/verify.sh"));
+    try std.testing.expect(hasReleaseVerifyCommand("zig build smoke-getting-started"));
+    try std.testing.expect(hasReleaseVerifyCommand("zig build smoke-demo"));
+    try std.testing.expect(hasReleaseVerifyCommand("zig build smoke-studio"));
     try std.testing.expect(hasReleaseVerifyCommand("zig build bench-check"));
     try std.testing.expect(hasReleaseVerifyCommand("zig build release-check"));
 }
@@ -606,21 +645,23 @@ test "pending receipt-backed measurement note tolerates markdown wrapping" {
 test "release gate requirements require semantics and doctor wiring" {
     const build_zig =
         "smoke-v1 test-panic-isolation smoke-getting-started smoke-demo smoke-studio " ++
-        "test-module-governance test-capability-audit test-docs-drift";
-    const ci_yml =
-        "zig fmt --check build.zig packages/\nzig build test\nzig build test-zruntime\nzig build test-docs-drift test-doc-links\n" ++
-        "zig build -Doptimize=ReleaseFast\nzig build smoke-v1\nzig build test-panic-isolation\n" ++
-        "bash scripts/test-examples.sh\nbash scripts/test-install-archive-safety.sh\n" ++
-        "bash scripts/check-semantics-spec.sh\n";
+        "test-module-governance test-capability-audit test-docs-drift test-evidence-marker";
+    const ci_yml = "bash scripts/verify.sh\n";
     const release_yml =
         ci_yml ++
         "zig build smoke-getting-started\nzig build smoke-demo\nzig build smoke-studio\n" ++
-        "zig build release-check\ncontents: write\n";
+        "zig build bench-check\nzig build release-check\ncontents: write\n";
     const verify_sh =
-        "zig build test\nzig build test-zruntime\nzig build test-docs-drift test-doc-links\n" ++
-        "zig build -Doptimize=ReleaseFast\nzig build smoke-v1\nzig build test-panic-isolation\n" ++
+        "zig build test\nzig build test-zruntime\n" ++
+        "zig build -Doptimize=ReleaseFast\nzig build wasm\nzig build smoke-v1\nzig build test-panic-isolation\n" ++
+        "zig build test-cli -Dstudio\n" ++
         "bash scripts/test-examples.sh\nbash scripts/test-install-archive-safety.sh\n" ++
-        "bash scripts/check-semantics-spec.sh\nzts meta --json\n";
+        "bash scripts/check-normalize-idempotent.sh\nbash scripts/check-idiom-table.sh\n" ++
+        "bash scripts/check-canonical-style.sh\nbash scripts/check-grammar-drift.sh\n" ++
+        "bash scripts/check-decision-registry.sh\nbash scripts/check-meta-drift.sh\n" ++
+        "bash scripts/check-agent-determinism.sh\nbash scripts/check-semantics-spec.sh\n" ++
+        "zts module-spec-render --check\nzts meta --json\n" ++
+        "zig build release-provenance\nzig fmt --check build.zig packages/\n";
 
     try std.testing.expect(releaseGateRequirementsPresent(build_zig, ci_yml, release_yml, verify_sh));
     try std.testing.expect(!releaseGateRequirementsPresent(build_zig, ci_yml, "zig build test\n", verify_sh));
@@ -668,7 +709,7 @@ test "release passport reports known issue for pending public measurement receip
 
     try writeReleaseDoctorFixture(io, &tmp, .{});
 
-    var passport = try collectReleasePassport(testing.allocator);
+    var passport = try collectReleasePassportWithProvenance(testing.allocator, true);
     defer passport.deinit(testing.allocator);
     try testing.expectEqual(ReleaseVerdict.ready_with_known_issues, passport.verdict());
 
@@ -693,7 +734,27 @@ test "release passport blocks stale public claims" {
 
     try writeReleaseDoctorFixture(io, &tmp, .{ .stale_readme = true });
 
-    var passport = try collectReleasePassport(testing.allocator);
+    var passport = try collectReleasePassportWithProvenance(testing.allocator, true);
+    defer passport.deinit(testing.allocator);
+    try testing.expectEqual(ReleaseVerdict.blocked, passport.verdict());
+}
+
+test "release passport blocks a failed provenance validator" {
+    const testing = std.testing;
+
+    var io_backend = std.Io.Threaded.init(testing.allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    const io = io_backend.io();
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const old_cwd = try chdirTmpForTest(&tmp);
+    defer testing.allocator.free(old_cwd);
+    defer std.Io.Threaded.chdir(old_cwd) catch {};
+
+    try writeReleaseDoctorFixture(io, &tmp, .{});
+
+    var passport = try collectReleasePassportWithProvenance(testing.allocator, false);
     defer passport.deinit(testing.allocator);
     try testing.expectEqual(ReleaseVerdict.blocked, passport.verdict());
 }
@@ -713,7 +774,7 @@ test "release passport warns for documented reliability gap" {
 
     try writeReleaseDoctorFixture(io, &tmp, .{ .document_413_gap = true });
 
-    var passport = try collectReleasePassport(testing.allocator);
+    var passport = try collectReleasePassportWithProvenance(testing.allocator, true);
     defer passport.deinit(testing.allocator);
     try testing.expectEqual(ReleaseVerdict.ready_with_known_issues, passport.verdict());
 }
@@ -749,6 +810,14 @@ fn writeReleaseDoctorFixture(io: std.Io, tmp: *std.testing.TmpDir, opts: Release
         ,
     });
     try tmp.dir.writeFile(io, .{
+        .sub_path = "packages/zts/build.zig.zon",
+        .data = ".{ .name = .zts, .version = \"0.18.0\" }\n",
+    });
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "packages/runtime/build.zig.zon",
+        .data = ".{ .name = .runtime, .version = \"0.18.0\" }\n",
+    });
+    try tmp.dir.writeFile(io, .{
         .sub_path = "build.zig",
         .data =
         \\// smoke-v1
@@ -759,6 +828,7 @@ fn writeReleaseDoctorFixture(io: std.Io, tmp: *std.testing.TmpDir, opts: Release
         \\// test-module-governance
         \\// test-capability-audit
         \\// test-docs-drift
+        \\// test-evidence-marker
         ,
     });
     try tmp.dir.writeFile(io, .{ .sub_path = "scripts/smoke-v1.sh", .data = "#!/bin/sh\n" });
@@ -772,45 +842,38 @@ fn writeReleaseDoctorFixture(io: std.Io, tmp: *std.testing.TmpDir, opts: Release
         \\zig build test-zruntime
         \\zig build test-docs-drift test-doc-links
         \\zig build -Doptimize=ReleaseFast
+        \\zig build wasm
         \\zig build smoke-v1
         \\zig build test-panic-isolation
+        \\zig build test-cli -Dstudio
         \\bash scripts/test-examples.sh
+        \\bash scripts/check-normalize-idempotent.sh
+        \\bash scripts/check-idiom-table.sh
+        \\bash scripts/check-canonical-style.sh
+        \\bash scripts/check-grammar-drift.sh
+        \\bash scripts/check-decision-registry.sh
+        \\bash scripts/check-meta-drift.sh
+        \\bash scripts/check-agent-determinism.sh
         \\bash scripts/test-install-archive-safety.sh
         \\bash scripts/check-semantics-spec.sh
+        \\zts module-spec-render --check
         \\zts meta --json
+        \\zig build release-provenance
+        \\zig fmt --check build.zig packages/
         ,
     });
     try tmp.dir.writeFile(io, .{
         .sub_path = ".github/workflows/ci.yml",
-        .data =
-        \\zig fmt --check build.zig packages/
-        \\zig build test
-        \\zig build test-zruntime
-        \\zig build test-docs-drift test-doc-links
-        \\zig build -Doptimize=ReleaseFast
-        \\zig build smoke-v1
-        \\zig build test-panic-isolation
-        \\bash scripts/test-examples.sh
-        \\bash scripts/test-install-archive-safety.sh
-        \\bash scripts/check-semantics-spec.sh
-        ,
+        .data = "bash scripts/verify.sh\n",
     });
     try tmp.dir.writeFile(io, .{
         .sub_path = ".github/workflows/release.yml",
         .data =
-        \\zig fmt --check build.zig packages/
-        \\zig build test
-        \\zig build test-zruntime
-        \\zig build test-docs-drift test-doc-links
-        \\zig build -Doptimize=ReleaseFast
-        \\zig build smoke-v1
-        \\zig build test-panic-isolation
+        \\bash scripts/verify.sh
         \\zig build smoke-getting-started
         \\zig build smoke-demo
         \\zig build smoke-studio
-        \\bash scripts/test-examples.sh
-        \\bash scripts/test-install-archive-safety.sh
-        \\bash scripts/check-semantics-spec.sh
+        \\zig build bench-check
         \\zig build release-check
         \\contents: write
         ,
@@ -856,6 +919,10 @@ fn writeReleaseDoctorFixture(io: std.Io, tmp: *std.testing.TmpDir, opts: Release
         .sub_path = "docs/performance.md",
         .data = "Performance: 3.5 ms floor, 7-15 ms typical, 13 MB RSS, 112k req/s. These numbers are pending receipt-backed measurement.\n",
     });
+    const evidence_json =
+        "{\"complete\":true,\"publishable\":true,\"publicationMode\":true,\"sourceCommit\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"sourceDirty\":false}\n";
+    try tmp.dir.writeFile(io, .{ .sub_path = "docs/coverage.json", .data = evidence_json });
+    try tmp.dir.writeFile(io, .{ .sub_path = "docs/convergence.json", .data = evidence_json });
     try tmp.dir.writeFile(io, .{
         .sub_path = "docs/reliability.md",
         .data = if (opts.document_413_gap)

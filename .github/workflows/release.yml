@@ -25,6 +25,8 @@ jobs:
     steps:
       # actions/checkout@v4
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          fetch-depth: 0
       # mlugg/setup-zig@v2
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29
         with:
@@ -34,6 +36,8 @@ jobs:
         run: |
           TAG_VERSION="${GITHUB_REF_NAME#v}"
           PACKAGE_VERSION="$(awk -F'"' '/^[[:space:]]*\.version =/ { print $2; exit }' build.zig.zon)"
+          ZTS_PACKAGE_VERSION="$(awk -F'"' '/^[[:space:]]*\.version =/ { print $2; exit }' packages/zts/build.zig.zon)"
+          RUNTIME_PACKAGE_VERSION="$(awk -F'"' '/^[[:space:]]*\.version =/ { print $2; exit }' packages/runtime/build.zig.zon)"
           BINARY_VERSION="$(awk -F'"' '/^[[:space:]]*pub const string = "/ { print $2; exit }' packages/zts/src/root.zig)"
           if [ "$TAG_VERSION" != "$PACKAGE_VERSION" ]; then
             echo "::error::release tag v${TAG_VERSION} does not match build.zig.zon version ${PACKAGE_VERSION}"
@@ -41,6 +45,14 @@ jobs:
           fi
           if [ "$TAG_VERSION" != "$BINARY_VERSION" ]; then
             echo "::error::release tag v${TAG_VERSION} does not match binary version ${BINARY_VERSION}"
+            exit 1
+          fi
+          if [ "$TAG_VERSION" != "$ZTS_PACKAGE_VERSION" ]; then
+            echo "::error::release tag v${TAG_VERSION} does not match zts package version ${ZTS_PACKAGE_VERSION}"
+            exit 1
+          fi
+          if [ "$TAG_VERSION" != "$RUNTIME_PACKAGE_VERSION" ]; then
+            echo "::error::release tag v${TAG_VERSION} does not match runtime package version ${RUNTIME_PACKAGE_VERSION}"
             exit 1
           fi
 
@@ -53,28 +65,8 @@ jobs:
             sudo apt-get install -y z3
           fi
 
-      - name: Check formatting
-        run: zig fmt --check build.zig packages/
-
-      - name: Run aggregate tests
-        run: |
-          if [ "$RUNNER_OS" = "macOS" ]; then
-            zig build test -j1
-          else
-            zig build test
-          fi
-
-      - name: Run focused runtime tests
-        run: zig build test-zruntime
-
-      - name: Build release binaries
-        run: zig build -Doptimize=ReleaseFast
-
-      - name: Run v1 user-flow smoke
-        run: zig build smoke-v1
-
-      - name: Run panic isolation smoke
-        run: zig build test-panic-isolation
+      - name: Run authoritative verifier
+        run: bash scripts/verify.sh
 
       - name: Run Getting Started smoke
         if: ${{ matrix.os == 'macos-latest' }}
@@ -94,37 +86,9 @@ jobs:
           test -f "$PROOF_LEDGER_PATH"
           ./zig-out/bin/zttp ledger replay --input "$PROOF_LEDGER_PATH" --onto "$PROOF_LEDGER_ONTO"
 
-      - name: Run example handler tests
-        run: bash scripts/test-examples.sh
-
-      - name: Run installer archive safety tests
-        run: bash scripts/test-install-archive-safety.sh
-
-      - name: Assert policy hash unchanged
-        run: |
-          if [ ! -f policy-hash.txt ]; then
-            echo "::error::policy-hash.txt is missing - the policy hash baseline must be committed"
-            echo "Run: ./zig-out/bin/zts describe-rule --hash > policy-hash.txt"
-            exit 1
-          fi
-          EXPECTED=$(cat policy-hash.txt)
-          ACTUAL=$(./zig-out/bin/zts describe-rule --hash)
-          if [ "$ACTUAL" != "$EXPECTED" ]; then
-            echo "::error::Policy hash mismatch - rules changed without updating policy-hash.txt"
-            echo "Expected: $EXPECTED"
-            echo "Actual:   $ACTUAL"
-            echo "Run: ./zig-out/bin/zts describe-rule --hash > policy-hash.txt"
-            exit 1
-          fi
-
-      - name: Run semantics spec gate
-        run: bash scripts/check-semantics-spec.sh
-
-      - name: Verify expert subsystem
-        run: |
-          META=$(./zig-out/bin/zts meta --json)
-          echo "$META" | jq -e '.rule_count >= 25'
-          echo "$META" | jq -e '.policy_hash | length == 64'
+      - name: Check benchmark budget
+        if: ${{ matrix.os == 'macos-latest' }}
+        run: zig build bench-check
 
       - name: Run release check
         run: zig build release-check -- --json

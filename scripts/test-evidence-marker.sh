@@ -5,8 +5,10 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 test_tmp="$(mktemp -d "${TMPDIR:-/tmp}/zttp-evidence-marker.XXXXXX")"
+dirty_probe=".zttp-evidence-dirty-probe.$$"
 cleanup() {
   rm -rf "$test_tmp"
+  rm -f "$dirty_probe"
 }
 trap cleanup EXIT HUP INT TERM
 
@@ -310,5 +312,19 @@ for publisher in scripts/update-convergence.sh scripts/update-coverage.sh; do
     checks=$((checks + 1))
   done
 done
+
+printf 'probe\n' > "$dirty_probe"
+for publisher in scripts/update-convergence.sh scripts/update-coverage.sh; do
+  if bash "$publisher" >"$log" 2>&1; then
+    printf 'evidence marker test: %s accepted a dirty working tree\n' "$publisher" >&2
+    exit 1
+  fi
+  grep -q 'requires a clean working tree' "$log" || {
+    printf 'evidence marker test: %s did not explain why dirty source was refused\n' "$publisher" >&2
+    exit 1
+  }
+  checks=$((checks + 1))
+done
+rm -f "$dirty_probe"
 
 printf 'evidence marker tests OK: %s checks\n' "$checks"

@@ -39,11 +39,9 @@ PASSPORT_ABS="$TMP_DIR/$PASSPORT_DIR"
 [ -f "$PASSPORT_ABS/index.html" ] || fail "index.html missing"
 [ -f "$PASSPORT_ABS/verify.txt" ] || fail "verify.txt missing"
 
-grep -q '"kind":"zttp-proof-passport"' "$PASSPORT_ABS/passport.json" || fail "passport kind missing"
-grep -q '"step":"deployed"' "$PASSPORT_ABS/passport.json" || fail "passport final step is not deployed"
-grep -q '"contractHash":"' "$PASSPORT_ABS/passport.json" || fail "passport missing contract hash"
-grep -q '"policyHash":"' "$PASSPORT_ABS/passport.json" || fail "passport missing policy hash"
-grep -q '"kind":"verified_patch"' "$PASSPORT_ABS/events.jsonl" || fail "events missing verified patch"
+(cd "$REPO_ROOT" && "$ZIG" build demo-passport-check -- \
+    "$PASSPORT_ABS/passport.json" "$PASSPORT_ABS/events.jsonl") \
+    || fail "passport schema or event journal invalid"
 grep -q 'zttp proofs show HEAD' "$PASSPORT_ABS/verify.txt" || fail "verify commands missing proof ledger check"
 grep -q 'zttp Proof Passport' "$PASSPORT_ABS/index.html" || fail "html export missing title"
 
