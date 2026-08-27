@@ -73,11 +73,13 @@ with an explicit outbound host allow-list.
 
 - **durable/** - `run`, `step`, `waitSignal` from `zttp:durable`. Replay-safe execution. See [approval.ts](durable/approval.ts) (illustrative; the gated durable coverage lives in `workflow/`, run live by `scripts/test-examples.sh`).
 - **workflow/** - start with [dsl-orchestrator.ts](workflow/dsl-orchestrator.ts) for the embedded workflow DSL path, then use the primitive fixtures for `call`, `fanout`, `follow`, durable workflow queue, signal resume, timeout, and dead-letter replay. See [../docs/durable-workflows.md](../docs/durable-workflows.md).
-- **parallel/** - `parallel` and `race` from `zttp:io` (illustrative; not in the gated example suite).
+- **parallel/** - `parallel` from `zttp:io`; both handlers must pass strict
+  `check --types` in `scripts/test-examples.sh`.
 - **hypermedia/** - [order.ts](hypermedia/order.ts) declares one resource with `resource(data, affordances)` and serves HAL-JSON or an HTMX fragment from the same affordance set, chosen by `Accept` and `HX-Request`.
 - **patterns/** - the TypeScript canon mapped onto the zts subset, one file per pattern. These are the targets of the table in [../docs/typescript.md](../docs/typescript.md#typescript-patterns-in-the-zts-subset).
 - **sql/** - the `sql` tagged template from `zttp:sql`.
-- **system/** - the cross-handler linking story (`zts link`).
+- **system/** - the cross-handler linking story. The example suite links both
+  manifests and rejects handler compilation failures or unresolved links.
 - **autoloop/** - the agent autoloop demo (`zttp expert`); the handler deliberately fails a proof so the agent has something to repair (illustrative; not in the gated example suite).
 
 ## Running an example
@@ -95,12 +97,14 @@ default is to demand a *fully discharged* handler: when a handler declares no
 `Proof<T, P>` on its return type, the verifier must prove the entire default
 profile, which is all seventeen v1 spec names in
 `packages/zts/src/spec_discharge.zig`, and emits **ZTS500** if any member does
-not hold. Most examples here are intentionally minimal -
+not hold. Many examples here are intentionally minimal -
 they exist to show one feature (a route, a module import, a JSX component) and
 deliberately do *not* carry a `Proof<T, P>`, so they exit non-zero under `check`.
-That is expected, not a bug: the example test harness
+That is expected for those files: the example test harness
 (`scripts/test-examples.sh`) replays each `.test.jsonl` for observable
-behavior, which is a separate gate from the strict `check` discharge.
+behavior, which is a separate gate from the strict `check` discharge. The
+pattern, parallel, SQL, and system examples also run their advertised static
+checks because compiler output is part of what they demonstrate.
 Workflow fixtures in `examples/workflow/` run as live server checks because the
 JSONL replay runner intentionally stubs virtual-module I/O and creates a fresh
 runtime per test case.

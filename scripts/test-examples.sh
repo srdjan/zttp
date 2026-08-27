@@ -64,6 +64,24 @@ check_types() {
     fi
 }
 
+check_system() {
+    local manifest=$1
+    local name
+    name=$(echo "$manifest" | sed 's|examples/||')
+    local output_dir="$TMP_ROOT/system-link-$PASS-$FAIL"
+    local output="$output_dir/output.log"
+    mkdir -p "$output_dir"
+
+    if "$ZTTP" link "$manifest" --output-dir "$output_dir" >"$output" 2>&1; then
+        echo "  PASS  $name (link)"
+        PASS=$((PASS + 1))
+    else
+        echo "  FAIL  $name (link)"
+        grep -iE "error|failed|unresolved" "$output" | head -5 | sed 's/^/        /'
+        FAIL=$((FAIL + 1))
+    fi
+}
+
 start_live_server() {
     local handler=$1
     shift
@@ -254,6 +272,14 @@ run_tests_with_args "examples/jsx/jsx-ssr.tsx"       "examples/jsx/jsx-ssr.test.
 # modules/
 run_tests_with_args "examples/modules/modules.ts"      "examples/modules/modules.test.jsonl"
 run_tests_with_args "examples/modules/modules_all.ts"  "examples/modules/modules_all.test.jsonl"
+
+# parallel/
+check_types "examples/parallel/parallel-simple.ts"
+check_types "examples/parallel/parallel.ts"
+
+# system/
+check_system "examples/system/system.json"
+check_system "examples/system/system-static.json"
 
 # fetch/
 run_tests_with_args "examples/fetch/weather-forecasts.ts" "examples/fetch/weather-forecasts.test.jsonl"

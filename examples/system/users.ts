@@ -27,7 +27,7 @@ function getUserById(req: Request): Response {
 
   const user = { id: id, name: ["User ", String(id)].join(""), orders: orders.json() };
 
-  cacheSet("users", id, user);
+  cacheSet("users", id, JSON.stringify(user), 300);
   return Response.json({ user: user });
 }
 

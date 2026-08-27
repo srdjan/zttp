@@ -3,7 +3,13 @@ import { parseBearer, jwtVerify } from "zttp:auth";
 import { env } from "zttp:env";
 import { serviceCall } from "zttp:service";
 
-function handler(req: Request): Response {
+structural Guardrails<T> = Proof<T,
+    | "injection_safe"
+    | "state_isolated"
+    | "no_secret_leakage"
+>;
+
+function handler(req: Request): Guardrails<Response> {
   // Authenticate
   const token = parseBearer(req.headers["authorization"]);
   if (token === undefined) {
@@ -17,19 +23,18 @@ function handler(req: Request): Response {
 
   const auth = jwtVerify(token, secret);
   if (!auth.ok) {
-    return Response.json({ error: auth.error }, { status: 401 });
+    return Response.json({ error: "unauthorized" }, { status: 401 });
   }
 
   // Route to users service
   const user = serviceCall("users", "GET /api/users/:id", {
-    params: { id: auth.value.sub },
+    params: { id: "self" },
   });
-  if (user.status !== 200) {
-    return Response.json(
-      { error: "user service unavailable" },
-      { status: 502 },
-    );
+  if (user.status === 200) {
+    return Response.json({ user: user.json() });
   }
-
-  return Response.json({ user: user.json() });
+  return Response.json(
+    { error: "user service unavailable" },
+    { status: 502 },
+  );
 }

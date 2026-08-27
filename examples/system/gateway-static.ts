@@ -1,8 +1,15 @@
 // Gateway handler with static fetchSync URLs (for linking demo)
 import { env } from "zttp:env";
+import { fetch } from "zttp:fetch";
 import { serviceCall } from "zttp:service";
 
-function handler(req) {
+structural Guardrails<T> = Proof<T,
+    | "injection_safe"
+    | "state_isolated"
+    | "no_secret_leakage"
+>;
+
+function handler(req: Request): Guardrails<Response> {
   const appName = env("APP_NAME") ?? "demo";
 
   // Named internal call - linked directly to users service
@@ -18,7 +25,10 @@ function handler(req) {
   }
 
   // External URL - not part of the system
-  const external = fetchSync("https://api.stripe.com/v1/charges");
+  const external = fetch("https://api.stripe.com/v1/charges", {});
+  if (!external.ok) {
+    return Response.json({ error: "external service down" }, { status: 502 });
+  }
 
   return Response.json({
     app: appName,

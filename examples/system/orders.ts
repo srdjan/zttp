@@ -2,6 +2,12 @@
 import { cacheGet } from "zttp:cache";
 import { routerMatch } from "zttp:router";
 
+structural Guardrails<T> = Proof<T,
+    | "injection_safe"
+    | "state_isolated"
+    | "no_secret_leakage"
+>;
+
 function getOrderById(req: Request): Response {
   const cached = cacheGet("orders", req.params.id);
   if (cached !== undefined) {
@@ -19,7 +25,7 @@ const routes = {
   "GET /api/orders": listOrders,
 };
 
-function handler(req: Request): Response {
+function handler(req: Request): Guardrails<Response> {
   const found = routerMatch(routes, req);
   if (found !== undefined) {
     req.params = found.params;
