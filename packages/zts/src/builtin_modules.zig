@@ -486,3 +486,33 @@ test "CapabilityMatrix.has finds present and misses absent" {
     try std.testing.expect(matrix.has(.clock));
     try std.testing.expect(!matrix.has(.crypto));
 }
+
+test "the analyzer projection keeps every module's own metadata and drops its implementation" {
+    const projected = comptime analyzerModuleBindings(&runtime_builtins);
+    try std.testing.expectEqual(runtime_builtins.len, projected.len);
+
+    for (runtime_builtins, projected) |runtime, analyzer| {
+        try std.testing.expectEqualStrings(runtime.specifier, analyzer.specifier);
+        try std.testing.expectEqualStrings(runtime.name, analyzer.name);
+        try std.testing.expectEqual(runtime.exports.len, analyzer.exports.len);
+        try std.testing.expectEqualSlices(
+            module_authorization.ModuleCapability,
+            runtime.required_capabilities,
+            analyzer.required_capabilities,
+        );
+        try std.testing.expect(analyzer.state_init == null);
+        try std.testing.expect(analyzer.state_deinit == null);
+
+        // Each entry must carry its OWN exports. A projection that returned one
+        // shared array would still pass a length check while every module
+        // reported the last module's signatures to the browser analyzer.
+        for (runtime.exports, analyzer.exports) |runtime_export, analyzer_export| {
+            try std.testing.expectEqualStrings(runtime_export.name, analyzer_export.name);
+            try std.testing.expectEqual(runtime_export.arg_count, analyzer_export.arg_count);
+            try std.testing.expectEqual(runtime_export.effect, analyzer_export.effect);
+            try std.testing.expectEqual(runtime_export.returns, analyzer_export.returns);
+            try std.testing.expect(analyzer_export.module_func == null);
+            try std.testing.expect(analyzer_export.func == @as(object.NativeFn, analyzerOnlyStub));
+        }
+    }
+}
