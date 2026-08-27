@@ -1202,7 +1202,12 @@ fn backfillApiRouteCollections(
                 .schema = .none,
             };
             errdefer body.deinit(allocator);
-            body.schema = .{ .ref = try allocator.dupe(u8, schema_ref) };
+            // The dupe lands in a local first. Assigning the union expression
+            // straight into `body.schema` gives it the result location, so a
+            // failing dupe leaves the tag written and the payload undefined,
+            // and the errdefer above then frees a garbage slice.
+            const schema_ref_owned = try allocator.dupe(u8, schema_ref);
+            body.schema = .{ .ref = schema_ref_owned };
             try route.request_bodies.append(allocator, body);
         }
     }
@@ -1222,12 +1227,16 @@ fn backfillApiRouteCollections(
             .schema = .none,
         };
         errdefer response.deinit(allocator);
-        response.schema = try projectSchemaSpec(
+        // Landed in a local for the same reason as the request body above: a
+        // failing allocation inside `projectSchemaSpec` must not leave a written
+        // tag over an undefined payload for the errdefer to free.
+        const response_schema = try projectSchemaSpec(
             allocator,
             route.response_schema_ref,
             route.response_schema_json,
             route.response_schema_dynamic,
         );
+        response.schema = response_schema;
         try route.responses.append(allocator, response);
         route.responses_dynamic = route.responses_dynamic or route.response_schema_dynamic;
     }
