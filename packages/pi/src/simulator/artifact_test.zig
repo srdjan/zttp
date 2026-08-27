@@ -497,14 +497,20 @@ test "flow artifact loader rejects a symlink in the case root" {
     var io_backend = std.Io.Threaded.init(testing.allocator, .{ .environ = .empty });
     defer io_backend.deinit();
     const io = io_backend.io();
-    var private_tmp = try std.Io.Dir.openDirAbsolute(io, "/private/tmp", .{});
-    defer private_tmp.close(io);
+    // The link goes beside the case root rather than in a named system
+    // directory: `case_root_abs` is already resolved, so its parent has no
+    // symlink component of its own, and the only symlink on the path under test
+    // is the one this test creates. A hard-coded "/private/tmp" is macOS-only
+    // and does not exist on Linux.
+    const link_parent = std.fs.path.dirname(fixture.case_root_abs) orelse return error.TestFailed;
+    var parent_dir = try std.Io.Dir.openDirAbsolute(io, link_parent, .{});
+    defer parent_dir.close(io);
     const link_name = try std.fmt.allocPrint(testing.allocator, "{s}-link", .{fixture.tree.name});
     defer testing.allocator.free(link_name);
-    private_tmp.deleteFile(io, link_name) catch {};
-    defer private_tmp.deleteFile(io, link_name) catch {};
-    try private_tmp.symLink(io, fixture.case_root_abs, link_name, .{ .is_directory = true });
-    const link_path = try std.fs.path.join(testing.allocator, &.{ "/private/tmp", link_name });
+    parent_dir.deleteFile(io, link_name) catch {};
+    defer parent_dir.deleteFile(io, link_name) catch {};
+    try parent_dir.symLink(io, fixture.case_root_abs, link_name, .{ .is_directory = true });
+    const link_path = try std.fs.path.join(testing.allocator, &.{ link_parent, link_name });
     defer testing.allocator.free(link_path);
 
     try expectLoadFailure(link_path, .symlink_component);
