@@ -86,7 +86,7 @@ pub fn fromVerifierDiagnostic(
                 .template = "if (value === undefined) return Response.json({ error: \"missing value\" }, { status: 400 });",
             },
         },
-        .missing_return_path, .missing_return_else, .missing_return_default => .{
+        .missing_return_path => .{
             .kind = .add_fallback_response,
             .target = target,
             .behavioral_change = true,

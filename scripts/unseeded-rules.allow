@@ -15,79 +15,26 @@
 # reason slug says what would have to change first, and every one of them is a
 # defect somewhere other than the seed suite:
 #
-#   no-producer     the registry carries the code but no code path constructs a
-#                   diagnostic with it, so nothing can ever emit it
-#   shadowed        another checker refuses the construct first, so this rule's
-#                   diagnostic never reaches the stream
 #   non-default     emitted only under an opt-in mode the veto does not run
+#
+# This file once carried nineteen rows in three categories. Seventeen are gone
+# and none were closed by writing a seed:
+#
+#   - POL001/003/005/007 got a producer. The allow-list was enforced only at
+#     build time, through a path raising `error.PolicyViolation` and printing
+#     prose with no code, so `zts check` and the veto never saw it.
+#   - ZTS306 got a producer. Unused-import was advertised and never wired.
+#   - PROP01-06, ZTS300, ZTS301, ZTS307 and POL002/004/006/008 were deleted
+#     from the registry. They were duplicate namings of coded findings, dead
+#     enum variants, or diagnostics an earlier checker refuses first. A rule no
+#     execution order can surface is a false advertisement in a hashed policy
+#     surface, not defense in depth.
 #
 # Method, so a later reader can repeat it rather than trust it: each row was
 # established by probe against the built analyzer, not by reading the registry.
-# For `no-producer`, the producing enum variant was traced to its declaration
-# and found to have no construction site, then confirmed by writing the handler
-# the rule describes and observing the analyzer accept it. For `shadowed` and
-# `non-default`, the handler was written, `zts edit-simulate` was run against a
-# clean baseline, and the codes it did report are named in the finding.
-
-# POL001, POL003, POL005 and POL007 were in this file with a `no-producer`
-# reason and are seeded now. The reason was accurate when written and the fix
-# was in the product, not the suite: the allow-list was enforced only at build
-# time, through a path that raises `error.PolicyViolation` and prints prose
-# carrying no code, so `zts check` and the veto never saw it. `zttp.json` now
-# carries a `policy` key and the check path reports coded POL diagnostics.
-#
-# The four `dynamic_not_allowed` codes are a different case, and their earlier
-# `no-producer` reason was wrong. `validateContract` raises them from
-# `contract.env.dynamic` and its three siblings, which are set while the
-# contract is built - but the contract is never built for such a handler.
-# `strict_checker.zig:1532` reports any non-literal argument to a capability
-# export as ZTS602 at error severity, and `precompile.zig:1410` returns on
-# strict errors before the contract stage. Probe: a computed argument to
-# `env`, `cacheGet` and `fetch` each report ZTS602 and nothing else. Four
-# evasive shapes - an aliased import, a ternary argument, an argument from a
-# call, and an indirect callee held in a record field - are all caught too.
-# So the language refuses all dynamic capability access unconditionally, which
-# is strictly broader than any allow-list, and the policy knob is vacuous in
-# both directions.
-POL002 shadowed
-POL004 shadowed
-POL006 shadowed
-POL008 shadowed
-
-# PROP01-PROP06 are the same shape one layer over. `property_diagnostics.zig`
-# defines PropertyViolation with no code field at all, so the violations
-# precompile collects under -Dverify and writes to violations.jsonl carry no
-# code to print. `diagnostic_catalog.propertyCode` is reached only from the
-# catalog table.
-PROP01 no-producer
-PROP02 no-producer
-PROP03 no-producer
-PROP04 no-producer
-PROP05 no-producer
-PROP06 no-producer
-
-# ZTS300 and ZTS301 are declared in handler_verifier's DiagnosticKind and
-# constructed nowhere. Each appears exactly twice in that file: once in the
-# enum, once in the test that asserts the variants are distinct. Probe: an if
-# with a non-returning else is accepted, and the shape that does fail reports
-# ZTS302, which a seed already covers.
-#
-# ZTS306 was in this group and is not any more. It was the one row here whose
-# rule described a check worth having rather than a duplicate, so it got a
-# producer instead of a deletion: `collectImportBindings`, `markUsedImports`
-# and `reportUnusedImports` in handler_verifier.zig. It found two genuinely
-# dead imports in `packages/tools/tests/fixtures/contract/modules_all.ts` and
-# one in this suite's own `clean_literal_access` baseline on its first run.
-ZTS300 no-producer
-ZTS301 no-producer
-
-# ZTS307 has a construction site, but nothing reaches it through the veto. The
-# rule is a verifier warning about a match with no default arm; the strict
-# checker and the type checker both refuse that construct first. Probe: a match
-# over two number literals with no default reports ZTS205 and ZTS603, and no
-# ZTS307. Removing the shadowing would mean changing what the strict profile
-# refuses, which is a language decision, not a seed.
-ZTS307 shadowed
+# The handler the rule describes was written, `zts edit-simulate` was run
+# against a clean baseline, and the codes it did report are named in the
+# finding.
 
 # ZTS508 is emitted only under the opt-in docs mode. The veto runs the default
 # profile, so no seed measured through it can reach the rule. Reaching it needs

@@ -1037,7 +1037,7 @@ test "DiagnosticProjection maps type checker codes" {
 }
 
 test "DiagnosticProjection maps verifier codes" {
-    try std.testing.expectEqualStrings("ZTS300", diagnostic_projection.code(.verifier, .missing_return_else));
+    try std.testing.expectEqualStrings("ZTS302", diagnostic_projection.code(.verifier, .missing_return_path));
     try std.testing.expectEqualStrings("ZTS303", diagnostic_projection.code(.verifier, .unchecked_result_value));
     try std.testing.expectEqualStrings("ZTS305", diagnostic_projection.code(.verifier, .unused_variable));
     try std.testing.expectEqualStrings("ZTS310", diagnostic_projection.code(.verifier, .module_scope_mutation));

@@ -93,13 +93,9 @@ pub const VirtualImportKind = enum {
 
 pub const PolicyKind = enum {
     env_literal_not_allowed,
-    env_dynamic_not_allowed,
     egress_literal_not_allowed,
-    egress_dynamic_not_allowed,
     cache_literal_not_allowed,
-    cache_dynamic_not_allowed,
     sql_literal_not_allowed,
-    sql_dynamic_not_allowed,
 };
 
 /// Semantic conformance diagnostics retain the existing `.code()` call shape
@@ -246,14 +242,11 @@ pub fn virtualImportCode(kind: VirtualImportKind) []const u8 {
 
 pub fn verifierCode(kind: handler_verifier.DiagnosticKind) []const u8 {
     return switch (kind) {
-        .missing_return_else => "ZTS300",
-        .missing_return_default => "ZTS301",
         .missing_return_path => "ZTS302",
         .unchecked_result_value => "ZTS303",
         .unreachable_after_return => "ZTS304",
         .unused_variable => "ZTS305",
         .unused_import => "ZTS306",
-        .non_exhaustive_match => "ZTS307",
         .unchecked_optional_use => "ZTS308",
         .unchecked_optional_access => "ZTS309",
         .module_scope_mutation => "ZTS310",
@@ -328,13 +321,9 @@ pub fn specCode(kind: SpecKind) []const u8 {
 pub fn policyCode(kind: PolicyKind) []const u8 {
     return switch (kind) {
         .env_literal_not_allowed => "POL001",
-        .env_dynamic_not_allowed => "POL002",
         .egress_literal_not_allowed => "POL003",
-        .egress_dynamic_not_allowed => "POL004",
         .cache_literal_not_allowed => "POL005",
-        .cache_dynamic_not_allowed => "POL006",
         .sql_literal_not_allowed => "POL007",
-        .sql_dynamic_not_allowed => "POL008",
     };
 }
 
@@ -342,31 +331,16 @@ pub fn policyKind(category: PolicyCategory, kind: PolicyViolationKind) PolicyKin
     return switch (category) {
         .env => switch (kind) {
             .literal_not_allowed => .env_literal_not_allowed,
-            .dynamic_not_allowed => .env_dynamic_not_allowed,
         },
         .egress => switch (kind) {
             .literal_not_allowed => .egress_literal_not_allowed,
-            .dynamic_not_allowed => .egress_dynamic_not_allowed,
         },
         .cache => switch (kind) {
             .literal_not_allowed => .cache_literal_not_allowed,
-            .dynamic_not_allowed => .cache_dynamic_not_allowed,
         },
         .sql => switch (kind) {
             .literal_not_allowed => .sql_literal_not_allowed,
-            .dynamic_not_allowed => .sql_dynamic_not_allowed,
         },
-    };
-}
-
-pub fn propertyCode(kind: property_diagnostics.ViolationKind) []const u8 {
-    return switch (kind) {
-        .fault_uncovered => "PROP01",
-        .injection_unsafe => "PROP02",
-        .secret_leakage => "PROP03",
-        .credential_leakage => "PROP04",
-        .result_unsafe => "PROP05",
-        .optional_unchecked => "PROP06",
     };
 }
 
@@ -449,11 +423,8 @@ fn verifierMetadata(kind: handler_verifier.DiagnosticKind) Metadata {
     return .{
         .code = verifierCode(kind),
         .family = switch (kind) {
-            .missing_return_else,
-            .missing_return_default,
             .missing_return_path,
             .unreachable_after_return,
-            .non_exhaustive_match,
             => .control_flow,
             .unchecked_result_value,
             .unchecked_optional_use,
@@ -546,25 +517,6 @@ fn policyMetadata(kind: PolicyKind) Metadata {
     return .{ .code = policyCode(kind), .family = .capability_control, .risk = .security_critical };
 }
 
-fn propertyMetadata(kind: property_diagnostics.ViolationKind) Metadata {
-    return .{
-        .code = propertyCode(kind),
-        .family = switch (kind) {
-            .fault_uncovered => .fault_handling,
-            .injection_unsafe => .untrusted_input_flow,
-            .secret_leakage, .credential_leakage => .sensitive_data_flow,
-            .result_unsafe, .optional_unchecked => .runtime_safety,
-        },
-        .risk = switch (kind) {
-            .injection_unsafe,
-            .secret_leakage,
-            .credential_leakage,
-            => .security_critical,
-            else => .correctness,
-        },
-    };
-}
-
 fn semanticsMetadata(kind: SemanticsKind) Metadata {
     return .{ .code = semanticsCode(kind), .family = .semantics_conformance, .risk = .correctness };
 }
@@ -602,13 +554,12 @@ const flow_entries = enumEntries(flow_checker.DiagnosticKind, .flow_checker, flo
 const strict_entries = enumEntries(strict_checker.DiagnosticKind, .strict_checker, strictMetadata);
 const spec_entries = enumEntries(SpecKind, .spec_discharge, specMetadata);
 const policy_entries = enumEntries(PolicyKind, .capability_policy, policyMetadata);
-const property_entries = enumEntries(property_diagnostics.ViolationKind, .property_analysis, propertyMetadata);
 const semantics_entries = enumEntries(SemanticsKind, .semantics_conformance, semanticsMetadata);
 
 const total_count = driver_entries.len + parser_entries.len + prepare_source_entries.len +
     strip_entries.len + boolean_entries.len + type_entries.len + virtual_import_entries.len +
     verifier_entries.len + flow_entries.len + strict_entries.len + spec_entries.len +
-    policy_entries.len + property_entries.len + semantics_entries.len;
+    policy_entries.len + semantics_entries.len;
 
 pub const all_entries: [total_count]Entry = blk: {
     var result: [total_count]Entry = undefined;
@@ -626,7 +577,6 @@ pub const all_entries: [total_count]Entry = blk: {
         strict_entries,
         spec_entries,
         policy_entries,
-        property_entries,
         semantics_entries,
     }) |producer_entries| {
         for (producer_entries) |entry| {

@@ -1355,6 +1355,24 @@ const record_corpus = [_]RecordCase{
         //
         // Verified before recording: a handler whose steps return
         // { reservationId } and { chargeId } passes this spec 3/3.
+        //
+        // Third pass, 2026-08-27. The pin moves to false, and the reason is a
+        // new one rather than the old ambiguity returning. This draw wrote the
+        // shape the prompt asks for -
+        // `step("reserve", () => ({ reservationId: uuid() }))` - and then
+        // sourced the id from `zttp:id`.`uuid`. `zttp test` serves virtual
+        // module calls from the `io` lines a spec declares and returns an
+        // empty value for anything it does not, and this spec declares no stub
+        // for `uuid`, so both step results serialized without their keys.
+        // Measured, not inferred: the committed handler with `uuid()` replaced
+        // by two string literals and nothing else changed passes 3/3.
+        //
+        // So the draft is structurally right and depends on a call the harness
+        // does not answer. That is a model-behaviour outcome and belongs in the
+        // published rate. Closing it means either stubbing `uuid` in the spec
+        // or telling the prompt where the ids come from, and both edit the
+        // model-visible input, so both belong to a deliberate re-record.
+        .expect_committed_intent_pass = false,
         .prompt = "Create a durable handler in handler.ts using zttp:durable that runs a " ++
             "two-step order workflow via run() and step(): a `reserve` step returning " ++
             "{ reservationId }, then a `charge` step returning { chargeId }. Respond 201 " ++
@@ -1419,6 +1437,19 @@ const record_corpus = [_]RecordCase{
         // Same omission, same internal abort: the model wrote `notify.ts` and
         // the recorder refused the capture, so run 5 recorded no outcome for
         // this case at all.
+        //
+        // 2026-08-27: pinned false. The draft dispatches the child outside the
+        // step callback, which is the behaviour the case is named for and the
+        // thing it exists to measure. It fails on a name: the spec asserts a
+        // `step_start` for a step called `reserve`, and the draft called its
+        // step `reserve-inventory`. The prompt says "Reserve inventory with a
+        // durable step" and never states the step's name.
+        //
+        // That is the defect durable-order's comment above already names - a
+        // test asking for more than its prompt says measures guessing rather
+        // than convergence - and the fix is the same shape: state the step name
+        // in the prompt, which moves the request identity and so belongs to a
+        // deliberate re-record rather than to this one.
         .prompt = "Create a durable order workflow in handler.ts. Reserve inventory with a " ++
             "durable step that returns the reservation response, then dispatch the " ++
             "already-registered `notify` child handler with workflow.call after the step " ++
@@ -1463,11 +1494,18 @@ const record_corpus = [_]RecordCase{
         // draft was right and the compiler was wrong, and the round-trip the
         // model spent working around it is the cost of that.
         .expect_first_attempt_green = true,
-        // Measured, not chosen: the recording that produced the committed
-        // corpus applied no edit for this case, so there is no handler to run
-        // and the intent cannot pass. docs/convergence.md already pins this case
-        // as the precedent accepted failure. Flip this back when a recording
-        // measures it passing, and say what closed the gap.
+        // Measured, not chosen, and the measurement has changed twice.
+        //
+        // It was pinned false because the recording that produced the committed
+        // corpus applied no edit at all, leaving no handler to run. The
+        // 2026-08-27 recording did apply one, and it still fails - for the
+        // different reason set out with this case's prompt above: the draft
+        // dispatches outside the step, which is what the case measures, and
+        // then names its step `reserve-inventory` where the spec asserts
+        // `reserve`, a name the prompt never states.
+        //
+        // The pin does not move, but its reason did. Flip it back when a
+        // recording measures it passing, and say what closed the gap.
         .expect_committed_intent_pass = false,
     },
     .{

@@ -1,9 +1,15 @@
 //! Static registry of all diagnostic rules.
 //!
 //! Derived at comptime from the handler_verifier.DiagnosticKind,
-//! strict_checker.DiagnosticKind, handler_policy ViolationKind, and
-//! property_diagnostics.ViolationKind
-//! enums so the registry cannot drift from the actual checkers.
+//! strict_checker.DiagnosticKind and handler_policy ViolationKind enums so the
+//! registry cannot drift from the actual checkers.
+//!
+//! `property_diagnostics.ViolationKind` is deliberately NOT a source. Its
+//! violations are a second serialization of findings that already carry codes:
+//! `collectVerifierViolations` relabels ZTS303 as `result_unsafe` and
+//! ZTS308/ZTS309 as `optional_unchecked`, and the flow kinds beside them
+//! restate ZTS400, ZTS401 and ZTS407. Advertising those again as PROP01-PROP06
+//! let one finding be counted twice by anything measuring this registry.
 //!
 //! Used by `zts describe-rule`, `zts search`, and policy hash assertions.
 
@@ -12,7 +18,6 @@ const diagnostic_catalog = @import("diagnostic_catalog.zig");
 const handler_verifier = @import("handler_verifier.zig");
 const strict_checker = @import("strict_checker.zig");
 const handler_policy = @import("zts-engine").handler_policy;
-const property_diagnostics = @import("property_diagnostics.zig");
 const flow_checker = @import("flow_checker.zig");
 const repair_intent_mod = @import("repair_intent.zig");
 
@@ -21,14 +26,12 @@ pub const RepairIntent = repair_intent_mod.RepairIntent;
 pub const RuleCategory = enum {
     verifier,
     policy,
-    property,
     flow,
 
     pub fn label(self: RuleCategory) []const u8 {
         return switch (self) {
             .verifier => "verifier",
             .policy => "policy",
-            .property => "property",
             .flow => "flow",
         };
     }
@@ -59,22 +62,6 @@ const verifier_meta = [_]struct {
     help: []const u8,
     repair: ?RepairIntent,
 }{
-    .{
-        .kind = .missing_return_else,
-        .code = "ZTS300",
-        .description = "An if/else branch does not return a Response.",
-        .example = "if (cond) { return Response.json({ok: true}); } // else missing",
-        .help = "Add a return statement to the else branch.",
-        .repair = .add_trailing_return,
-    },
-    .{
-        .kind = .missing_return_default,
-        .code = "ZTS301",
-        .description = "A match expression lacks a default arm that returns a Response.",
-        .example = "match (x) { 'a' => Response.text('a') } // no default",
-        .help = "Add a default arm: _ => Response.text('not found', {status: 404})",
-        .repair = .add_trailing_return,
-    },
     .{
         .kind = .missing_return_path,
         .code = "ZTS302",
@@ -117,14 +104,6 @@ const verifier_meta = [_]struct {
         .example = "import { sha256 } from 'zttp:crypto'; // sha256 never used",
         .help = "Remove the unused import.",
         .repair = null,
-    },
-    .{
-        .kind = .non_exhaustive_match,
-        .code = "ZTS307",
-        .description = "A match expression does not cover all possible values.",
-        .example = "match (method) { 'GET' => ... } // missing POST, etc.",
-        .help = "Add a default arm or cover all cases.",
-        .repair = .add_trailing_return,
     },
     .{
         .kind = .unchecked_optional_use,
@@ -410,24 +389,10 @@ const policy_meta = [_]struct {
         .repair = null,
     },
     .{
-        .name = "env_dynamic_not_allowed",
-        .code = "POL002",
-        .description = "Handler uses dynamic (computed) env access when policy requires static-only.",
-        .help = "Use literal env var names instead of computed access.",
-        .repair = null,
-    },
-    .{
         .name = "egress_literal_not_allowed",
         .code = "POL003",
         .description = "Handler calls an outbound host not in the policy allow-list.",
         .help = "Add the host to the policy file or remove the fetch call.",
-        .repair = null,
-    },
-    .{
-        .name = "egress_dynamic_not_allowed",
-        .code = "POL004",
-        .description = "Handler uses dynamic (computed) outbound URLs when policy requires static-only.",
-        .help = "Use literal host names instead of computed URLs.",
         .repair = null,
     },
     .{
@@ -438,80 +403,11 @@ const policy_meta = [_]struct {
         .repair = null,
     },
     .{
-        .name = "cache_dynamic_not_allowed",
-        .code = "POL006",
-        .description = "Handler uses dynamic (computed) cache namespace when policy requires static-only.",
-        .help = "Use literal cache namespace names.",
-        .repair = null,
-    },
-    .{
         .name = "sql_literal_not_allowed",
         .code = "POL007",
         .description = "Handler executes a SQL query name not in the policy allow-list.",
         .help = "Add the query name to the policy file.",
         .repair = null,
-    },
-    .{
-        .name = "sql_dynamic_not_allowed",
-        .code = "POL008",
-        .description = "Handler uses dynamic (computed) SQL query names when policy requires static-only.",
-        .help = "Use literal query names.",
-        .repair = null,
-    },
-};
-
-// ---------------------------------------------------------------------------
-// Property rules (PROP0x) - derived from property_diagnostics.ViolationKind
-// ---------------------------------------------------------------------------
-
-const property_meta = [_]struct {
-    kind: property_diagnostics.ViolationKind,
-    code: []const u8,
-    description: []const u8,
-    help: []const u8,
-    repair: ?RepairIntent,
-}{
-    .{
-        .kind = .fault_uncovered,
-        .code = "PROP01",
-        .description = "A critical I/O call (auth/validation) has a failure path that returns 2xx.",
-        .help = "Handle the failure case and return an appropriate error status.",
-        .repair = .insert_guard_before_line,
-    },
-    .{
-        .kind = .injection_unsafe,
-        .code = "PROP02",
-        .description = "Unvalidated user input reaches a sensitive sink (fetchSync, Response.html).",
-        .help = "Validate or sanitize user input before passing to sinks.",
-        .repair = .insert_guard_before_line,
-    },
-    .{
-        .kind = .secret_leakage,
-        .code = "PROP03",
-        .description = "Secret env var data flows to a response body, log, or egress URL.",
-        .help = "Do not include secret values in responses or logs.",
-        .repair = .insert_guard_before_line,
-    },
-    .{
-        .kind = .credential_leakage,
-        .code = "PROP04",
-        .description = "Credential data (auth token, JWT) flows to a response body or log.",
-        .help = "Do not echo credentials back in responses.",
-        .repair = .insert_guard_before_line,
-    },
-    .{
-        .kind = .result_unsafe,
-        .code = "PROP05",
-        .description = "result.value accessed without checking result.ok first.",
-        .help = "Check result.ok before accessing result.value.",
-        .repair = .insert_guard_before_line,
-    },
-    .{
-        .kind = .optional_unchecked,
-        .code = "PROP06",
-        .description = "Optional value used without narrowing (undefined check).",
-        .help = "Check the value is defined before using it.",
-        .repair = .insert_guard_before_line,
     },
 };
 
@@ -729,10 +625,6 @@ fn verifierName(kind: handler_verifier.DiagnosticKind) []const u8 {
     return @tagName(kind);
 }
 
-fn propertyName(kind: property_diagnostics.ViolationKind) []const u8 {
-    return @tagName(kind);
-}
-
 fn strictName(kind: strict_checker.DiagnosticKind) []const u8 {
     return @tagName(kind);
 }
@@ -741,7 +633,7 @@ fn flowName(kind: flow_checker.DiagnosticKind) []const u8 {
     return @tagName(kind);
 }
 
-const total_count = verifier_meta.len + strict_meta.len + capsule_meta.len + policy_meta.len + property_meta.len + flow_meta.len;
+const total_count = verifier_meta.len + strict_meta.len + capsule_meta.len + policy_meta.len + flow_meta.len;
 
 pub const all_rules: [total_count]RuleEntry = blk: {
     var rules: [total_count]RuleEntry = undefined;
@@ -791,19 +683,6 @@ pub const all_rules: [total_count]RuleEntry = blk: {
             .name = p.name,
             .code = p.code,
             .category = .policy,
-            .description = p.description,
-            .example = null,
-            .help = p.help,
-            .repair = p.repair,
-        };
-        i += 1;
-    }
-
-    for (property_meta) |p| {
-        rules[i] = .{
-            .name = propertyName(p.kind),
-            .code = diagnostic_catalog.propertyCode(p.kind),
-            .category = .property,
             .description = p.description,
             .example = null,
             .help = p.help,
@@ -1149,14 +1028,6 @@ test "all policy rules have POL codes" {
     for (&all_rules) |*rule| {
         if (rule.category == .policy) {
             try std.testing.expect(std.mem.startsWith(u8, rule.code, "POL"));
-        }
-    }
-}
-
-test "all property rules have PROP codes" {
-    for (&all_rules) |*rule| {
-        if (rule.category == .property) {
-            try std.testing.expect(std.mem.startsWith(u8, rule.code, "PROP"));
         }
     }
 }

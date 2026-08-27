@@ -829,8 +829,14 @@ test "stand-in gate: every defect seed reproduces its declared veto class throug
 
         // Floors. Both checks below are set differences, and an empty input on
         // either side satisfies one of them while proving nothing.
-        try testing.expect(unseeded.rows.items.len >= 10);
-        try testing.expect(zts.PolicyCatalog.rules().len >= 60);
+        //
+        // Both numbers moved when the registry shrank from 72 rules to 59 and
+        // the list from nineteen rows to one. They are backstops against an
+        // emptied input, not targets: the list is meant to keep shrinking, and
+        // a floor set just under today's count would fail the next time it
+        // does. One row still proves the file parses and is read.
+        try testing.expect(unseeded.rows.items.len >= 1);
+        try testing.expect(zts.PolicyCatalog.rules().len >= 40);
 
         for (zts.PolicyCatalog.rules()) |rule| {
             var seeded = false;

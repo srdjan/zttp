@@ -56,8 +56,6 @@ pub const Severity = enum {
 
 pub const DiagnosticKind = enum {
     // Return analysis (Check 1)
-    missing_return_else,
-    missing_return_default,
     missing_return_path,
 
     // Result checking (Check 2)
@@ -71,7 +69,6 @@ pub const DiagnosticKind = enum {
     unused_import,
 
     // Match expression (Check 5)
-    non_exhaustive_match,
 
     // Optional checking (Check 6)
     unchecked_optional_use,
@@ -897,16 +894,6 @@ pub const HandlerVerifier = struct {
                     const arm = self.ir_view.getMatchArm(arm_idx) orelse continue;
                     self.walkExprForRefs(arm.body);
                 }
-                if (!self.isMatchExhaustive(match_e)) {
-                    self.addDiagnostic(.{
-                        .severity = .warning,
-                        .kind = .non_exhaustive_match,
-                        .node = node,
-                        .message = "match expression without default arm may not produce a value",
-                        .help = "add a 'default:' arm to handle all cases",
-                        .repair_intent = .add_trailing_return,
-                    });
-                }
             },
             .assignment => {
                 const assign = self.ir_view.getAssignment(node) orelse return;
@@ -1565,14 +1552,11 @@ test "Severity labels" {
 test "DiagnosticKind enum values" {
     // Ensure all variants are distinct
     const kinds = [_]DiagnosticKind{
-        .missing_return_else,
-        .missing_return_default,
         .missing_return_path,
         .unchecked_result_value,
         .unreachable_after_return,
         .unused_variable,
         .unused_import,
-        .non_exhaustive_match,
         .unchecked_optional_use,
         .unchecked_optional_access,
     };
@@ -1669,7 +1653,16 @@ test "HandlerVerifier fails closed when a diagnostic cannot allocate" {
     try std.testing.expectError(error.OutOfMemory, verifier.verify(handler_fn));
 }
 
-fn verifyTypedHandlerSource(source: []const u8, expect_errors: u32, expect_match_warnings: u32) !void {
+/// Drive the verifier over typed source and assert its error count.
+///
+/// This used to assert a match-exhaustiveness warning count as well. That
+/// warning's producer is gone: the type checker and the strict checker both
+/// refuse a non-exhaustive match, and the check pipeline returns on their
+/// errors before the verifier stage runs, so the diagnostic could never reach
+/// anyone. Calling the verifier directly, as this helper does, was the only
+/// place it was ever observed - which is how a rule stayed advertised and
+/// tested while being unreachable in the product.
+fn verifyTypedHandlerSource(source: []const u8, expect_errors: u32) !void {
     const allocator = std.testing.allocator;
 
     var strip_result = try @import("zts-engine").stripper.strip(allocator, source, .{});
@@ -1703,14 +1696,6 @@ fn verifyTypedHandlerSource(source: []const u8, expect_errors: u32, expect_match
 
     const errors = try verifier.verify(handler_fn);
     try std.testing.expectEqual(expect_errors, errors);
-
-    var warning_count: u32 = 0;
-    for (verifier.getDiagnostics()) |diag| {
-        if (diag.severity == .warning and diag.kind == .non_exhaustive_match) {
-            warning_count += 1;
-        }
-    }
-    try std.testing.expectEqual(expect_match_warnings, warning_count);
 }
 
 /// Count the `unused_variable` warnings `source` produces. Untyped: the rule
@@ -1761,20 +1746,13 @@ test "HandlerVerifier accepts exhaustive literal union match without default" {
         \\  };
         \\  return Response.json({ out: out });
         \\}
-    , 0, 0);
+    , 0);
 }
 
-test "HandlerVerifier still warns on non-exhaustive union match" {
-    try verifyTypedHandlerSource(
-        \\const value: "a" | "b" = "a";
-        \\function handler(req) {
-        \\  const out = match (value) {
-        \\    when "a": 1,
-        \\  };
-        \\  return Response.json({ out: out });
-        \\}
-    , 0, 1);
-}
+// The companion test here asserted that a non-exhaustive union match produced a
+// verifier warning. It is gone with the producer: ZTS603 and ZTS205 refuse that
+// match first, and both are seed-verified, so the behaviour is still covered -
+// by the checkers that actually reach a user.
 
 test "missing_return_path diagnostic carries repair_intent = add_trailing_return" {
     // Handler verifier diagnostics must populate the typed repair primitive

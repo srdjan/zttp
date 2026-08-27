@@ -757,8 +757,12 @@ test "code collection separates registry rules from codes the registry cannot se
     // ZTS042 is the stripper's; no `all_rules` entry carries it, which is the
     // blind spot the second list exists to name. ZTS000 is the "no violations"
     // marker and belongs to neither.
+    //
+    // The registry-side sample is ZTS302, a rule with a producer and a seed.
+    // It was ZTS300, which is not in the registry any more - the sample has to
+    // be a live rule or this test proves the opposite of its name.
     try tr.append(testing.allocator, .{ .diagnostic_box = .{
-        .llm_text = "ZTS300 unhandled path; ZTS042 unsupported cast; ZTS000 clean",
+        .llm_text = "ZTS302 unhandled path; ZTS042 unsupported cast; ZTS000 clean",
     } });
 
     var hits: CodeSet = .empty;
@@ -771,11 +775,11 @@ test "code collection separates registry rules from codes the registry cannot se
 
     try collectCodes(testing.allocator, &tr, &hits, &off);
 
-    try testing.expect(hits.contains("ZTS300"));
+    try testing.expect(hits.contains("ZTS302"));
     try testing.expect(!hits.contains("ZTS042"));
     try testing.expect(off.contains("ZTS042"));
     try testing.expect(!off.contains("ZTS000"));
-    try testing.expect(!off.contains("ZTS300"));
+    try testing.expect(!off.contains("ZTS302"));
 
     // A second turn reporting the same code must not double-count it: the
     // published figure is how many distinct rules the corpus reaches.

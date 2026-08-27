@@ -199,7 +199,11 @@ const all_codes: [code_count]CodeEntry = blk: {
 };
 
 test "checker diagnostic codes are globally unique" {
-    try std.testing.expectEqual(@as(usize, 69), allCodes().len);
+    // 66 after the three dead verifier variants went (ZTS300, ZTS301, ZTS307).
+    // The count is here so a projection that silently stops enumerating a
+    // checker cannot pass the uniqueness loop below over a shorter list; it
+    // moves whenever a checker's kind set does.
+    try std.testing.expectEqual(@as(usize, 66), allCodes().len);
 
     var seen: std.StringHashMapUnmanaged(CodeEntry) = .empty;
     defer seen.deinit(std.testing.allocator);

@@ -34,7 +34,6 @@ pub const category_counts: Categories = blk: {
         switch (rule.category) {
             .verifier => v += 1,
             .policy => p += 1,
-            .property => pr += 1,
             // The v1 `zts meta` envelope closes `categories` on three keys
             // (see docs/internals/zts-expert-contract.md line 102: "new
             // categories would be a v2 change"). FlowChecker rules carry the
@@ -42,6 +41,10 @@ pub const category_counts: Categories = blk: {
             // the v1 invariant `rule_count == verifier + policy + property`
             // holds. Surface `flow` as a distinct key only as part of a v2
             // contract bump, alongside the tripwire tests in expert.zig.
+            //
+            // The registry's own `.property` category is gone with PROP01-06,
+            // which renamed findings that already carried codes. The `property`
+            // key stays because the v1 envelope does, and is now flow-only.
             .flow => pr += 1,
         }
     }

@@ -2999,11 +2999,6 @@ fn appendPolicyDiagnostics(
                 "{s} '{s}' is not in the capability policy allow-list",
                 .{ handler_policy.categoryLiteralLabel(violation.category), violation.value orelse "" },
             ),
-            .dynamic_not_allowed => try std.fmt.allocPrint(
-                allocator,
-                "dynamic {s} access is not allowed by the capability policy",
-                .{handler_policy.categoryDynamicLabel(violation.category)},
-            ),
         };
         errdefer allocator.free(message);
 

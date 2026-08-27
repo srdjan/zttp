@@ -600,8 +600,8 @@ test "DiagnosticProjection exposes stable tagged checker codes" {
         DiagnosticProjection.code(.type, .type_mismatch),
     );
     try std.testing.expectEqualStrings(
-        "ZTS300",
-        DiagnosticProjection.code(.verifier, .missing_return_else),
+        "ZTS302",
+        DiagnosticProjection.code(.verifier, .missing_return_path),
     );
     try std.testing.expectEqualStrings(
         "ZTS400",

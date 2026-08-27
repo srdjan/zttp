@@ -43,6 +43,7 @@ corpus, not estimates.
 | 2026-08-17 | `20360613` | `0012ad8ca6d5` | 19 | deepseek | deepseek-v4-flash | `0f7250ffdb2b` | 57% (11/19) | 57% (11/19) | 5 | 94% (17/18) |
 | 2026-08-25 | `fbfac94c` | `0012ad8ca6d5` | 19 | deepseek | deepseek-v4-flash | `0f7250ffdb2b` | 63% (12/19) | 63% (12/19) | 6 | 83% (15/18) |
 | 2026-08-26 | `120f2d53-dirty` | `0012ad8ca6d5` | 19 | deepseek | deepseek-v4-flash | `0f7250ffdb2b` | 63% (12/19) | 63% (12/19) | 5 | 94% (17/18) |
+| 2026-08-27 | `de404d28-dirty` | `0012ad8ca6d5` | 19 | deepseek | deepseek-v4-flash | `97aec67e484a` | 57% (11/19) | 57% (11/19) | 5 | 88% (16/18) |
 
 Regenerate with `bash scripts/update-convergence.sh`, which appends a row and
 rewrites [convergence.json](convergence.json). History is git history on those

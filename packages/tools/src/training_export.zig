@@ -51,7 +51,17 @@ pub const soundness_epoch = "2026.08.1";
 /// a language with no rules. Measured on 2026-08-26: 72 rules, 21 syntax
 /// examples, 3 module examples. Raising a floor after adding entries is
 /// expected; lowering one needs a reason in the commit.
-const min_rule_count = 72;
+///
+/// Lowered on 2026-08-27 from 72, and the reason is that the registry lost
+/// thirteen rules that no code path could ever emit - six PROP codes that
+/// renamed findings already carrying codes, two dead verifier variants, one
+/// diagnostic an earlier checker always refuses first, and four policy codes
+/// for dynamic capability access the language forbids outright. The count is
+/// 59. The floor is set well below it rather than just under it, because it is
+/// a backstop against an unlinked registry and not a target: a floor pinned to
+/// today's count fails the next honest deletion and teaches the next reader to
+/// raise it reflexively.
+const min_rule_count = 40;
 const min_syntax_example_count = 21;
 const min_module_example_count = 3;
 

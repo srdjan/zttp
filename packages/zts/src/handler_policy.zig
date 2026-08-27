@@ -222,9 +222,15 @@ pub const PolicyCategory = enum {
     sql,
 };
 
+/// Only one shape survives. `dynamic_not_allowed` was removed with POL002,
+/// POL004, POL006 and POL008: the strict checker reports any non-literal
+/// argument to a capability export as ZTS602 at error severity, and both the
+/// check path and the build path return on strict errors before the contract
+/// is built, so `contract.<category>.dynamic` is never true by the time this
+/// runs. The language refuses all dynamic capability access unconditionally,
+/// which is strictly broader than any allow-list could express.
 pub const ViolationKind = enum {
     literal_not_allowed,
-    dynamic_not_allowed,
 };
 
 pub const PolicyViolation = struct {
@@ -291,12 +297,6 @@ pub fn validateContract(
                 });
             }
         }
-        if (contract.env.dynamic) {
-            try report.violations.append(allocator, .{
-                .category = .env,
-                .kind = .dynamic_not_allowed,
-            });
-        }
     }
 
     if (policy.egress) |section| {
@@ -308,12 +308,6 @@ pub fn validateContract(
                     .value = item,
                 });
             }
-        }
-        if (contract.egress.dynamic) {
-            try report.violations.append(allocator, .{
-                .category = .egress,
-                .kind = .dynamic_not_allowed,
-            });
         }
     }
 
@@ -327,12 +321,6 @@ pub fn validateContract(
                 });
             }
         }
-        if (contract.cache.dynamic) {
-            try report.violations.append(allocator, .{
-                .category = .cache,
-                .kind = .dynamic_not_allowed,
-            });
-        }
     }
 
     if (policy.sql) |section| {
@@ -344,12 +332,6 @@ pub fn validateContract(
                     .value = query.name,
                 });
             }
-        }
-        if (contract.sql.dynamic) {
-            try report.violations.append(allocator, .{
-                .category = .sql,
-                .kind = .dynamic_not_allowed,
-            });
         }
     }
 
@@ -363,12 +345,6 @@ pub fn formatViolations(report: *const ValidationReport, writer: anytype) !void 
                 try writer.print(
                     "policy violation: {s} '{s}' is not allowed\n",
                     .{ categoryLiteralLabel(violation.category), violation.value.? },
-                );
-            },
-            .dynamic_not_allowed => {
-                try writer.print(
-                    "policy violation: dynamic {s} access is not allowed\n",
-                    .{categoryDynamicLabel(violation.category)},
                 );
             },
         }
@@ -454,7 +430,7 @@ test "parse policy json rejects unknown sections" {
     try std.testing.expectError(error.InvalidPolicy, parsePolicyJson(allocator, source));
 }
 
-test "validate contract rejects disallowed literals and dynamic access" {
+test "validate contract rejects disallowed literals" {
     const allocator = std.testing.allocator;
 
     const path = try allocator.dupe(u8, "handler.ts");
@@ -504,11 +480,11 @@ test "validate contract rejects disallowed literals and dynamic access" {
     var report = try validateContract(allocator, &contract, &policy);
     defer report.deinit(allocator);
 
-    try std.testing.expectEqual(@as(usize, 3), report.violations.items.len);
+    try std.testing.expectEqual(@as(usize, 2), report.violations.items.len);
     try std.testing.expectEqual(PolicyCategory.env, report.violations.items[0].category);
     try std.testing.expectEqual(ViolationKind.literal_not_allowed, report.violations.items[0].kind);
-    try std.testing.expectEqual(ViolationKind.dynamic_not_allowed, report.violations.items[1].kind);
-    try std.testing.expectEqual(PolicyCategory.cache, report.violations.items[2].category);
+    try std.testing.expectEqual(PolicyCategory.cache, report.violations.items[1].category);
+    try std.testing.expectEqual(ViolationKind.literal_not_allowed, report.violations.items[1].kind);
 }
 
 test "runtime policy host matching is case insensitive" {

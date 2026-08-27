@@ -197,6 +197,78 @@ union_all = len(set(union_codes) | set(seed_codes))
 def codes(names):
     return ", ".join("`%s`" % n for n in names) if names else "none"
 
+REASON_MEANING = {
+    "no-producer": "The registry carries the code and no code path constructs a diagnostic with it, so nothing can emit it",
+    "shadowed": "Another checker refuses the construct first, so this rule's diagnostic never reaches the stream",
+    "non-default": "Emitted only under an opt-in mode the veto does not run",
+}
+
+
+def render_remainder(rows_by_reason, total, verified):
+    """The rules the seed suite does not verify, and why each is out.
+
+    Written to survive its own list shrinking. The first version of this
+    section hard-coded three table rows and a sentence about the `no-producer`
+    group being load-bearing, which was true when seventeen rules sat in it and
+    became nonsense at zero - printing "none" twice and claiming a reader was
+    "wrong about 0 of them".
+    """
+    present = [(r, c) for r, c in rows_by_reason.items() if c]
+    present.sort(key=lambda pair: (-len(pair[1]), pair[0]))
+    left = total - verified
+
+    if not present:
+        return (
+            "None. Every one of the %d advertised rules is verified firing by a\n"
+            "defect seed." % total
+        )
+
+    lines = []
+    if left == 1:
+        reason, codes_for = present[0]
+        lines.append(
+            "One advertised rule of %d is not verified by a seed: %s, because it is\n"
+            "`%s`. %s.\n" % (total, codes(codes_for), reason, REASON_MEANING[reason])
+        )
+    else:
+        lines.append(
+            "The %d advertised rules the section above leaves out, and why each is out.\n"
+            "This is not a backlog: a rule is listed here only when writing another\n"
+            "seed cannot reach it.\n" % left
+        )
+        lines.append("| Reason | Rules | What it means |")
+        lines.append("|---|---|---|")
+        for reason, codes_for in present:
+            lines.append("| `%s` | %s | %s |" % (reason, codes(codes_for), REASON_MEANING[reason]))
+        lines.append("")
+
+    no_producer = len(rows_by_reason.get("no-producer", []))
+    if no_producer:
+        lines.append(
+            "The `no-producer` group is the load-bearing one. Each of those %d codes is\n"
+            "advertised by `zts describe-rule` and counted in the %d denominator every\n"
+            "figure on this page divides by, and no seed and no recorded draft can ever\n"
+            "trip it. Reading %d of %d as \"%d still to write\" is wrong about them."
+            % (no_producer, total, verified, total, left)
+        )
+    else:
+        lines.append(
+            "Nothing here is waiting on a seed. The registry once advertised codes no\n"
+            "code path could construct; those were deleted rather than seeded, which is\n"
+            "why this section is now one line instead of a table of seventeen."
+        )
+
+    lines.append("")
+    lines.append(
+        "The rows live in `scripts/unseeded-rules.allow` with the probe behind each one.\n"
+        "The stand-in gate enforces the list in both directions: an advertised rule that\n"
+        "is neither seeded nor listed fails, and so does a row for a code a seed has\n"
+        "since covered. Neither list can drift from the registry without failing a build."
+    )
+    return "\n".join(lines)
+
+remainder_section = render_remainder(by_reason, total, seed_verified)
+
 out = f"""<!-- Generated file. Do not edit. Run `bash scripts/update-coverage.sh` to regenerate it. -->
 
 # Coverage
@@ -312,27 +384,7 @@ measurement.
 
 ## The rules no seed reaches
 
-The {len(seed_unseeded)} advertised rules the section above leaves out, and why each is
-out. This is not a backlog. Only a rule whose reason is a defect in the seed
-suite could be closed by writing another seed, and none of these are:
-
-| Reason | Rules | What it means |
-|---|---|---|
-| `no-producer` | {codes(by_reason.get("no-producer", []))} | The registry carries the code and no code path constructs a diagnostic with it, so nothing can emit it |
-| `shadowed` | {codes(by_reason.get("shadowed", []))} | Another checker refuses the construct first, so this rule's diagnostic never reaches the stream |
-| `non-default` | {codes(by_reason.get("non-default", []))} | Emitted only under an opt-in mode the veto does not run |
-
-The `no-producer` group is the load-bearing one, and it is the reason this
-section exists rather than a sentence saying the remainder is unwritten work.
-Each of those codes is advertised by `zts describe-rule`, counted in the {total}
-denominator every figure on this page divides by, and unreachable: no seed can
-trip it and no recorded draft ever will. A reader who takes {seed_verified} of {total} as
-"{total - seed_verified} still to write" is wrong about {len(by_reason.get("no-producer", []))} of them.
-
-The rows live in `scripts/unseeded-rules.allow` with the probe behind each one.
-The stand-in gate enforces the list in both directions: an advertised rule that
-is neither seeded nor listed fails, and so does a row for a code a seed has
-since covered. Neither list can drift from the registry without failing a build.
+{remainder_section}
 
 ## Codes the registry does not carry
 
