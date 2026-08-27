@@ -518,7 +518,10 @@ zttp proofs gate --base origin/main --head HEAD --format json
 ```
 
 Exit code: `0` safe (equivalent / additive), `1` breaking, `2` usage or git
-error. The Markdown form is a ready-to-paste PR comment; the JSON form
+error, or a changed `.ts`/`.tsx` file the analyzer could not read. A file that
+fails to analyze is never classified: calling it additive or skipping it would
+hide a route the branch removed, so the gate names the file and stops. The
+Markdown form is a ready-to-paste PR comment; the JSON form
 (`zttp.proof-gate.v1`) carries the per-handler verdict, behavior delta,
 surface delta, and counterexamples.
 
@@ -535,7 +538,8 @@ Flags:
 Files that are not handlers (a changed `.ts`/`.tsx` with no routes and no
 behavior paths, i.e. a config or library module) and files under `tests/`,
 `fixtures/`, or matching `*.test.*`/`*.spec.*` are skipped, and listed as such
-in the report.
+in the report. An added file is skipped for the same reason: it counts as
+`additive` only after the analyzer proves it is a handler.
 
 ### GitHub Actions
 

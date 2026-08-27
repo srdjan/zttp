@@ -185,6 +185,13 @@ re-hashes a local proof bundle.
 The old spelling `zttp proof replay` still works as a deprecated alias for one
 release and prints a migration note. It is no longer listed in `zttp help --all`.
 
+`zttp proofs verify` checks the bundle manifest before it hashes anything. The
+manifest must name a `contract` component and may add `binary` and `replay`.
+Each component needs its own relative path inside the bundle and a lowercase
+sha256. The verifier opens every path segment without following symlinks, so a
+component that points outside the bundle directory is refused rather than
+hashed.
+
 `zttp verify --json` includes durable workflow receipt fields when a build was
 attested with a workflow contract: `durableWorkflowProofLevel`,
 `durableWorkflowRetrySafe`, `durableWorkflowIdempotent`, and

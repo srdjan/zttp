@@ -47,6 +47,51 @@ For releases prior to v0.16 see git tags and [RELEASE_CHECKLIST.md](RELEASE_CHEC
   `scripts/update-convergence.sh` and `scripts/update-coverage.sh` measure the
   model a user actually gets. The Claude and OpenAI corpora stay measured but
   are no longer ratcheted.
+- **A configured capability policy binds every project-backed command.** Name
+  the policy file in `zttp.json` and `check`, `dev`, `studio`, `serve`, `test`,
+  `doctor`, `compile`, `build`, `deploy`, `zts check`, edit simulation, expert
+  verification, live-reload candidates, and recorded proof capsules all analyze
+  against it. A missing, unreadable, or malformed policy is an error at each of
+  those boundaries; no command substitutes an unrestricted policy and then
+  publishes a clean verdict or artifact. `zttp doctor` prints a `policy` row,
+  and live reload watches the policy file and keeps the previous handler when a
+  candidate violates it.
+- **The edge bounds its accepted connections.** Accepted connections run on a
+  fixed worker pool (`cpu_count * 2`, clamped 2 to 128) behind a 4,096-entry
+  queue instead of one detached thread each. A newly accepted connection is
+  closed when the queue is full, workers are joined before handler state is
+  released, and `timeoutMs: 0` is rejected at startup.
+- **`zttp proofs verify` refuses an ambiguous bundle.** The manifest must name
+  a `contract` component and may add `binary` and `replay`, each with its own
+  relative path and a lowercase sha256. Every path segment is opened without
+  following symlinks, so a component that resolves outside the bundle is
+  refused instead of hashed.
+- **`zttp proofs gate` classifies added and deleted TypeScript before it
+  judges.** An added file is `additive` only after the analyzer proves it is a
+  handler; a changed file the analyzer cannot read exits `2` instead of being
+  reported as additive or skipped.
+- **`scripts/verify.sh` is the one release gate.** CI and the release workflow
+  each run it as a single step rather than repeating a partial list, and it
+  adds the freestanding `wasm` build and a release-evidence provenance check
+  that requires coverage and convergence to come from a clean source commit
+  that the release tree still matches.
+
+### Fixed
+
+- **`zttp proofs verify` hashed a component past its first chunk.** The file
+  reader shared one buffer with its read destination, so any component larger
+  than 64 KiB panicked instead of producing a digest.
+- **Secondary analyzer passes could change a verdict.** Contract extraction and
+  the strict, boolean, and verifier passes now query the authoritative type
+  session without creating diagnostics, so a type asked for outside the
+  statement walk's live narrowing context no longer adds a compiler error.
+- **The freestanding analyzer retained runtime module implementations.** The
+  wasm build now projects every built-in binding to a stub, so no native
+  implementation, state callback, or libc string path reaches the browser
+  artifact.
+- **TSX handlers lost their declared proof signature.** Type annotations are
+  recorded before TSX lowering while IR locations come from the lowered
+  program, so a `.tsx` handler resolves its signature by name.
 
 ## [0.18.0] - 2026-07-16
 
