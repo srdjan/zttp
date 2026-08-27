@@ -70,11 +70,14 @@ For releases prior to v0.16 see git tags and [RELEASE_CHECKLIST.md](RELEASE_CHEC
   judges.** An added file is `additive` only after the analyzer proves it is a
   handler; a changed file the analyzer cannot read exits `2` instead of being
   reported as additive or skipped.
-- **`scripts/verify.sh` is the one release gate.** CI and the release workflow
-  each run it as a single step rather than repeating a partial list, and it
-  adds the freestanding `wasm` build and a release-evidence provenance check
-  that requires coverage and convergence to come from a clean source commit
-  that the release tree still matches.
+- **`scripts/verify.sh` is the one gate.** CI and the release workflow each run
+  it as a single step rather than repeating a partial list, and it now also
+  builds the freestanding `wasm` analyzer. `bash scripts/verify.sh --release`,
+  which the release workflow uses, adds a release-evidence provenance check
+  that requires coverage and convergence to come from a clean source commit the
+  release tree still matches. Per-commit CI does not run that check, because
+  every ordinary source commit would fail it until the corpus is replayed and
+  both pages republished.
 
 ### Fixed
 
@@ -92,6 +95,10 @@ For releases prior to v0.16 see git tags and [RELEASE_CHECKLIST.md](RELEASE_CHEC
 - **TSX handlers lost their declared proof signature.** Type annotations are
   recorded before TSX lowering while IR locations come from the lowered
   program, so a `.tsx` handler resolves its signature by name.
+- **The evidence publishers could not run from a clean checkout.** The build
+  runs `scripts/*.py` and nothing ignored `scripts/__pycache__/`, so every
+  replay stamped its coverage and convergence markers `sourceDirty: true` and
+  both publishers refused the run.
 
 ## [0.18.0] - 2026-07-16
 
