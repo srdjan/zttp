@@ -16,6 +16,7 @@ const handler_policy = zts.handler_policy;
 pub const MAGIC: u64 = 0x5A54_5042_4331_0000; // "ZTPBC1\0\0"
 pub const FORMAT_VERSION: u16 = 1;
 pub const TRAILER_SIZE: usize = 32;
+const base_copy_chunk_size: usize = 64 * 1024;
 
 // Section types in the payload
 pub const Section = enum(u8) {
@@ -156,12 +157,19 @@ fn createWithWriter(
     input: PayloadInput,
     writer: ArtifactWriteCapability,
 ) !void {
-    // Read base binary (100MB limit matches payload sanity check)
-    const base_data = try readFile(allocator, base_binary_path, 100 * 1024 * 1024);
-    defer allocator.free(base_data);
+    const base_binary_path_z = try allocator.dupeZ(u8, base_binary_path);
+    defer allocator.free(base_binary_path_z);
+    const base_fd = try std.posix.openatZ(
+        std.posix.AT.FDCWD,
+        base_binary_path_z,
+        .{ .ACCMODE = .RDONLY },
+        0,
+    );
+    defer std.Io.Threaded.closeFd(base_fd);
 
-    // Strip any existing trailer from the base binary (nested compile)
-    const clean_size = getCleanBinarySize(base_data);
+    // Strip any existing trailer from the base binary (nested compile) without
+    // loading the runtime template into memory.
+    const clean_size = try getCleanBinarySizeFromFd(base_fd);
 
     // Serialize payload
     const payload = try serializePayload(allocator, input);
@@ -207,7 +215,7 @@ fn createWithWriter(
 
     {
         defer std.Io.Threaded.closeFd(out_fd);
-        try writer.writeAll(out_fd, base_data[0..clean_size]);
+        try streamFilePrefix(base_fd, clean_size, out_fd, writer);
         try writer.writeAll(out_fd, payload);
         try writer.writeAll(out_fd, &trailer);
         if (std.c.fsync(out_fd) != 0) return error.WriteFailure;
@@ -223,19 +231,53 @@ fn createWithWriter(
 pub fn getCleanBinarySize(data: []const u8) usize {
     if (data.len < TRAILER_SIZE) return data.len;
     const trailer_start = data.len - TRAILER_SIZE;
-    const magic = std.mem.readInt(u64, data[trailer_start + 24 ..][0..8], .little);
-    if (magic != MAGIC) return data.len;
+    return @intCast(cleanBinarySizeFromTrailer(
+        @intCast(data.len),
+        data[trailer_start..][0..TRAILER_SIZE],
+    ));
+}
 
-    const payload_offset = std.mem.readInt(u64, data[trailer_start..][0..8], .little);
-    const payload_size = std.mem.readInt(u64, data[trailer_start + 8 ..][0..8], .little);
+fn getCleanBinarySizeFromFd(fd: std.c.fd_t) !u64 {
+    const file_size = (try zts.file_io.fstatFd(fd)).size;
+    if (file_size < TRAILER_SIZE) return file_size;
+
+    var trailer: [TRAILER_SIZE]u8 = undefined;
+    const trailer_offset: i64 = @intCast(file_size - TRAILER_SIZE);
+    const bytes_read = std.c.pread(fd, &trailer, trailer.len, trailer_offset);
+    if (bytes_read < 0 or @as(usize, @intCast(bytes_read)) != trailer.len) {
+        return error.ReadFailed;
+    }
+    return cleanBinarySizeFromTrailer(file_size, &trailer);
+}
+
+fn cleanBinarySizeFromTrailer(file_size: u64, trailer: []const u8) u64 {
+    const magic = std.mem.readInt(u64, trailer[24..32], .little);
+    if (magic != MAGIC) return file_size;
+
+    const payload_offset = std.mem.readInt(u64, trailer[0..8], .little);
+    const payload_size = std.mem.readInt(u64, trailer[8..16], .little);
 
     // Overflow-safe: payload_offset/payload_size are raw trailer bytes.
-    const body_end = std.math.add(u64, payload_offset, payload_size) catch return data.len;
-    const total = std.math.add(u64, body_end, @as(u64, TRAILER_SIZE)) catch return data.len;
-    if (total == @as(u64, data.len)) {
-        return @intCast(payload_offset);
+    const body_end = std.math.add(u64, payload_offset, payload_size) catch return file_size;
+    const total = std.math.add(u64, body_end, @as(u64, TRAILER_SIZE)) catch return file_size;
+    return if (total == file_size) payload_offset else file_size;
+}
+
+fn streamFilePrefix(
+    source_fd: std.c.fd_t,
+    byte_count: u64,
+    output_fd: std.c.fd_t,
+    writer: ArtifactWriteCapability,
+) !void {
+    var buffer: [base_copy_chunk_size]u8 = undefined;
+    var remaining = byte_count;
+    while (remaining > 0) {
+        const chunk_size: usize = @intCast(@min(remaining, buffer.len));
+        const bytes_read = try std.posix.read(source_fd, buffer[0..chunk_size]);
+        if (bytes_read == 0) return error.ReadFailed;
+        try writer.writeAll(output_fd, buffer[0..bytes_read]);
+        remaining -= bytes_read;
     }
-    return data.len;
 }
 
 // -- Payload serialization --
@@ -609,6 +651,18 @@ const FailingArtifactWriter = struct {
     }
 };
 
+const RejectingArtifactWriter = struct {
+    calls: usize = 0,
+    max_chunk_size: usize = 0,
+
+    fn write(context: ?*anyopaque, _: std.c.fd_t, data: []const u8) !void {
+        const self: *RejectingArtifactWriter = @ptrCast(@alignCast(context.?));
+        self.calls += 1;
+        self.max_chunk_size = @max(self.max_chunk_size, data.len);
+        return error.InjectedWriteFailure;
+    }
+};
+
 fn selfExtractTestPath(allocator: std.mem.Allocator, tmp: std.testing.TmpDir, name: []const u8) ![]u8 {
     const dir = try tmp.dir.realPathFileAlloc(std.testing.io, ".", allocator);
     defer allocator.free(dir);
@@ -654,6 +708,137 @@ test "create preserves the previous artifact when a payload write fails" {
     while (try iter.next(io)) |entry| {
         try std.testing.expect(!std.mem.startsWith(u8, entry.name, ".artifact.tmp."));
     }
+}
+
+test "create streams base runtimes larger than the payload limit" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const base_path = try selfExtractTestPath(allocator, tmp, "large-runtime");
+    defer allocator.free(base_path);
+    const output_path = try selfExtractTestPath(allocator, tmp, "artifact");
+    defer allocator.free(output_path);
+    const base_path_z = try allocator.dupeZ(u8, base_path);
+    defer allocator.free(base_path_z);
+
+    const base_fd = try std.posix.openatZ(
+        std.posix.AT.FDCWD,
+        base_path_z,
+        .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true },
+        0o755,
+    );
+    defer std.Io.Threaded.closeFd(base_fd);
+    const large_runtime_size = 100 * 1024 * 1024 + 1;
+    if (std.c.ftruncate(base_fd, large_runtime_size) != 0) return error.TestTruncateFailed;
+    const stat = try zts.file_io.fstatFd(base_fd);
+    try std.testing.expectEqual(@as(u64, large_runtime_size), stat.size);
+
+    const policy = zts.RuntimePolicy{};
+    var rejecting = RejectingArtifactWriter{};
+    try std.testing.expectError(error.InjectedWriteFailure, createWithWriter(
+        allocator,
+        base_path,
+        output_path,
+        .{ .bytecode = "payload", .policy = &policy },
+        .{ .context = &rejecting, .write_all = RejectingArtifactWriter.write },
+    ));
+
+    try std.testing.expectEqual(@as(usize, 1), rejecting.calls);
+    try std.testing.expect(rejecting.max_chunk_size <= base_copy_chunk_size);
+
+    const input: PayloadInput = .{ .bytecode = "payload", .policy = &policy };
+    const expected_payload = try serializePayload(allocator, input);
+    defer allocator.free(expected_payload);
+    try create(allocator, base_path, output_path, input);
+
+    const output_path_z = try allocator.dupeZ(u8, output_path);
+    defer allocator.free(output_path_z);
+    const output_fd = try std.posix.openatZ(
+        std.posix.AT.FDCWD,
+        output_path_z,
+        .{ .ACCMODE = .RDONLY },
+        0,
+    );
+    defer std.Io.Threaded.closeFd(output_fd);
+
+    const expected_size = large_runtime_size + expected_payload.len + TRAILER_SIZE;
+    const output_stat = try zts.file_io.fstatFd(output_fd);
+    try std.testing.expectEqual(@as(u64, expected_size), output_stat.size);
+
+    var trailer: [TRAILER_SIZE]u8 = undefined;
+    const trailer_read = std.c.pread(
+        output_fd,
+        &trailer,
+        trailer.len,
+        @intCast(expected_size - TRAILER_SIZE),
+    );
+    try std.testing.expectEqual(@as(isize, trailer.len), trailer_read);
+    try std.testing.expectEqual(
+        @as(u64, large_runtime_size),
+        std.mem.readInt(u64, trailer[0..8], .little),
+    );
+    try std.testing.expectEqual(
+        @as(u64, expected_payload.len),
+        std.mem.readInt(u64, trailer[8..16], .little),
+    );
+
+    const actual_payload = try allocator.alloc(u8, expected_payload.len);
+    defer allocator.free(actual_payload);
+    const payload_read = std.c.pread(
+        output_fd,
+        actual_payload.ptr,
+        actual_payload.len,
+        large_runtime_size,
+    );
+    try std.testing.expectEqual(@as(isize, @intCast(actual_payload.len)), payload_read);
+    try std.testing.expectEqualSlices(u8, expected_payload, actual_payload);
+    const parsed = (try parse(allocator, actual_payload)).?;
+    defer parsed.deinit(allocator);
+    try std.testing.expectEqualStrings("payload", parsed.bytecode);
+}
+
+test "create strips an existing payload while streaming" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const base_path = try selfExtractTestPath(allocator, tmp, "base.sh");
+    defer allocator.free(base_path);
+    const first_path = try selfExtractTestPath(allocator, tmp, "first-artifact");
+    defer allocator.free(first_path);
+    const second_path = try selfExtractTestPath(allocator, tmp, "second-artifact");
+    defer allocator.free(second_path);
+    const base = "#!/bin/sh\nexit 0\n";
+    try zts.file_io.writeFile(allocator, base_path, base);
+
+    const policy = zts.RuntimePolicy{};
+    try create(
+        allocator,
+        base_path,
+        first_path,
+        .{ .bytecode = "first payload", .policy = &policy },
+    );
+    try create(
+        allocator,
+        first_path,
+        second_path,
+        .{ .bytecode = "second payload", .policy = &policy },
+    );
+
+    const artifact = try readFile(allocator, second_path, 1024 * 1024);
+    defer allocator.free(artifact);
+    try std.testing.expectEqual(base.len, getCleanBinarySize(artifact));
+    try std.testing.expectEqualSlices(u8, base, artifact[0..base.len]);
+
+    const trailer = artifact[artifact.len - TRAILER_SIZE ..];
+    const payload_offset: usize = @intCast(std.mem.readInt(u64, trailer[0..8], .little));
+    const payload_size: usize = @intCast(std.mem.readInt(u64, trailer[8..16], .little));
+    const parsed = (try parse(allocator, artifact[payload_offset..][0..payload_size])).?;
+    defer parsed.deinit(allocator);
+    try std.testing.expectEqualStrings("second payload", parsed.bytecode);
 }
 
 test "create produces a runnable mode 0755 artifact" {

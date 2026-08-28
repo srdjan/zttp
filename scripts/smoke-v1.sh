@@ -39,6 +39,20 @@ trap cleanup EXIT
 step() { printf '\n[smoke-v1] %s\n' "$*"; }
 fail() { printf '\n[smoke-v1] FAIL: %s\n' "$*" >&2; exit 1; }
 
+# Keep successful smoke steps quiet, but preserve the command's diagnostic when
+# a normal user-flow build or deploy fails.
+run_captured() {
+    local failure_message="$1"
+    shift
+    local output_path="$TMP_DIR/captured-command-output.log"
+    local status=0
+    "$@" >"$output_path" 2>&1 || status=$?
+    if [ "$status" -ne 0 ]; then
+        [ ! -s "$output_path" ] || /bin/cat "$output_path" >&2
+        fail "$failure_message"
+    fi
+}
+
 # Poll URL until reachable (HTTP 2xx) or attempts exhausted, printing the
 # response body to stdout. Returns non-zero on exhaustion so callers can
 # chain `|| fail "..."` - bash command substitution does not propagate
@@ -68,6 +82,15 @@ stop_bg() {
 step "build $ZTTP and zttp-runtime"
 (cd "$REPO_ROOT" && $ZIG build) || fail "zig build"
 [ -x "$ZTTP" ] || fail "missing $ZTTP after build"
+
+step "diagnostics: successful captures stay quiet and failures explain"
+quiet_out=$(run_captured "quiet probe failed" /bin/sh -c 'printf noisy-success-output' 2>&1)
+[ -z "$quiet_out" ] || fail "successful captured command leaked output: $quiet_out"
+if captured_failure=$(run_captured "diagnostic probe failed" /bin/sh -c 'printf inner-command-diagnostic >&2; exit 23' 2>&1); then
+    fail "diagnostic capture probe unexpectedly succeeded"
+fi
+printf '%s' "$captured_failure" | grep -q "inner-command-diagnostic" || fail "captured failure lost command diagnostic: $captured_failure"
+printf '%s' "$captured_failure" | grep -q "diagnostic probe failed" || fail "captured failure lost smoke context: $captured_failure"
 
 step "negative: init rejects path-like project names"
 if invalid_out=$(cd "$TMP_DIR" && "$ZTTP" init "../bad-app" 2>&1); then
@@ -107,7 +130,7 @@ step "check"
 "$ZTTP" check >/dev/null || fail "check exited non-zero"
 
 step "build emits .zttp/build/$APP_NAME"
-"$ZTTP" build >/dev/null 2>&1 || fail "build exited non-zero"
+run_captured "build exited non-zero" "$ZTTP" build
 [ -x "$APP_DIR/.zttp/build/$APP_NAME" ] || fail "build artifact missing or not executable"
 
 step "run build artifact on :$BUILD_PORT and curl /"
@@ -127,7 +150,7 @@ printf '%s' "$missing_runtime_out" | grep -q "zttp-runtime template not found" |
 [ ! -e "$APP_DIR/.zttp/deploy/$APP_NAME" ] || fail "deploy artifact was created despite missing runtime"
 
 step "deploy emits .zttp/deploy/$APP_NAME and appends ledger row"
-"$ZTTP" deploy >/dev/null 2>&1 || fail "deploy exited non-zero"
+run_captured "deploy exited non-zero" "$ZTTP" deploy
 [ -x "$APP_DIR/.zttp/deploy/$APP_NAME" ] || fail "deploy artifact missing or not executable"
 [ -s "$APP_DIR/.zttp/proofs.jsonl" ] || fail "proofs.jsonl missing or empty after deploy"
 grep -q '"kind":"deploy"' "$APP_DIR/.zttp/proofs.jsonl" || fail "no kind=deploy row in proofs.jsonl"
