@@ -40,6 +40,8 @@ cd "$(dirname "$0")/.."
 
 allow_file="scripts/module-boundary.allow"
 root_file="packages/zts/src/root.zig"
+work_dir="$(mktemp -d)"
+trap 'rm -rf "$work_dir"' EXIT
 
 fail() {
   printf 'module boundary: %s\n' "$1" >&2
@@ -77,11 +79,16 @@ internal_count="$(printf '%s\n' "$internals" | grep -c . || true)"
 [[ "$internal_count" -ge 40 ]] ||
   fail "only $internal_count internal modules parsed from $root_file; the file layout changed"
 
-# Every name a file reaches through the `zts` module, whatever it aliased the
-# import to. Handles `const zts = @import("zts")`, `const zq = @import("zts")`,
-# and the destructured `const compat = @import("zts").compat`.
+# Every name the given files reach through the `zts` module, whatever they
+# alias the import to. Handles `const zts = @import("zts")`,
+# `const zq = @import("zts")`, and the destructured
+# `const compat = @import("zts").compat`. FNR resets for each input file, so
+# aliases cannot leak from one file into the next.
 names_used_in() {
   awk '
+    FNR == 1 {
+      for (name in aliases) delete aliases[name]
+    }
     match($0, /@import\("zts"\)\.[A-Za-z_][A-Za-z0-9_]*/) {
       field = substr($0, RSTART + 15, RLENGTH - 15)
       print field
@@ -104,7 +111,7 @@ names_used_in() {
         }
       }
     }
-  ' "$1"
+  ' "$@"
 }
 
 # Every tracked Zig file in the package, not only `src/`. Scanning `src/` alone
@@ -114,13 +121,25 @@ names_used_in() {
 used_pairs="$(
   for pkg in runtime tools pi modules proof-review zttp-sdk; do
     [[ -d "packages/$pkg" ]] || continue
+
+    package_list="$work_dir/$pkg.zig-files"
+    git ls-files -z "packages/$pkg/*.zig" > "$package_list" ||
+      fail "failed to enumerate tracked Zig files for $pkg"
+
+    package_files=()
     while IFS= read -r -d '' file; do
       # `git ls-files` still reports an unstaged deletion. Skip paths that are
       # absent from the working tree so a cleanup diff cannot make awk fail
       # noisily while the gate continues with a false-looking success log.
       [[ -f "$file" ]] || continue
-      names_used_in "$file"
-    done < <(git ls-files -z "packages/$pkg/*.zig") |
+      package_files+=("$file")
+    done < "$package_list"
+
+    [[ "${#package_files[@]}" -gt 0 ]] || continue
+    package_names="$(names_used_in "${package_files[@]}")" ||
+      fail "failed to scan tracked Zig files for $pkg"
+
+    printf '%s\n' "$package_names" |
       sort -u |
       while IFS= read -r name; do
         printf '%s\n' "$internals" | grep -qx -- "$name" || continue

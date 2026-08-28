@@ -547,9 +547,13 @@ pub fn build(b: *std.Build) void {
     );
     expert_qualification_step.dependOn(&expert_qualification_cmd.step);
 
-    const module_boundary = b.addSystemCommand(&.{ "/bin/bash", "scripts/check-module-boundary.sh" });
+    const module_boundary = b.addSystemCommand(&.{ "/bin/bash", "scripts/test-module-boundary.sh" });
     const module_boundary_step = b.step("test-module-boundary", "Check consumer reach into zts internals against the allowlist");
     module_boundary_step.dependOn(&module_boundary.step);
+
+    const release_workflow = b.addSystemCommand(&.{ "/bin/bash", "scripts/test-release-workflow.sh" });
+    const release_workflow_step = b.step("test-release-workflow", "Check release workflow invariants");
+    release_workflow_step.dependOn(&release_workflow.step);
 
     const proof_swallow = b.addSystemCommand(&.{ "/bin/bash", "scripts/check-proof-swallow.sh" });
     const proof_swallow_step = b.step("test-proof-swallow", "Check the proof pipeline for unreviewed swallowed errors");
@@ -1090,6 +1094,7 @@ pub fn build(b: *std.Build) void {
     for (host_test_runs) |run| test_step.dependOn(&run.step);
     test_step.dependOn(&capability_audit.step);
     test_step.dependOn(&module_boundary.step);
+    test_step.dependOn(&release_workflow.step);
     test_step.dependOn(&proof_swallow.step);
     test_step.dependOn(&zts_layering.step);
     test_step.dependOn(&run_release_check_tests.step);

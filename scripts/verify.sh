@@ -51,6 +51,11 @@ step() {
   printf '========================================\n'
 }
 
+if [ "$release_mode" = true ]; then
+  step "bash scripts/test-release-workflow.sh  (release workflow invariants)"
+  bash scripts/test-release-workflow.sh
+fi
+
 step "zig build test  (aggregate unit suite)"
 if [ "$(uname -s)" = "Darwin" ]; then
   zig build test -j1
