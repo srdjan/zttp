@@ -208,43 +208,6 @@ pub fn checkRequiredKinds(members: []const Member) Error!void {
     try hasher.checkRequiredKinds();
 }
 
-/// How two inventories differ. The consumer recomputes its own inventory from
-/// the artifact and compares it against the certificate's; the first difference
-/// is the diagnostic.
-pub const Difference = union(enum) {
-    same,
-    missing: Member,
-    extra: Member,
-    digest_mismatch: struct { member: Member, expected: [32]u8, actual: [32]u8 },
-};
-
-/// Compare a certificate inventory against a recomputed one. Both must already
-/// be in canonical order; `computeRoot` is what establishes that.
-pub fn compare(expected: []const Member, actual: []const Member) Difference {
-    var i: usize = 0;
-    var j: usize = 0;
-    while (i < expected.len and j < actual.len) {
-        switch (Member.order(expected[i], actual[j])) {
-            .eq => {
-                if (!std.mem.eql(u8, &expected[i].digest, &actual[j].digest)) {
-                    return .{ .digest_mismatch = .{
-                        .member = expected[i],
-                        .expected = expected[i].digest,
-                        .actual = actual[j].digest,
-                    } };
-                }
-                i += 1;
-                j += 1;
-            },
-            .lt => return .{ .missing = expected[i] },
-            .gt => return .{ .extra = actual[j] },
-        }
-    }
-    if (i < expected.len) return .{ .missing = expected[i] };
-    if (j < actual.len) return .{ .extra = actual[j] };
-    return .same;
-}
-
 const testing = std.testing;
 
 fn m(kind: MemberKind, ordinal: u32, seed: u8) Member {
@@ -330,29 +293,6 @@ test "required kinds must all be present" {
     const members = fullGraph(&buf);
     try checkRequiredKinds(members);
     try testing.expectError(error.MissingRequiredKind, checkRequiredKinds(members[0 .. members.len - 1]));
-}
-
-test "compare names the first difference" {
-    var buf: [8]Member = undefined;
-    const members = fullGraph(&buf);
-    try testing.expectEqual(Difference.same, compare(members, members));
-
-    var mutated: [8]Member = undefined;
-    @memcpy(&mutated, members);
-    mutated[3].digest[7] +%= 1;
-    switch (compare(members, &mutated)) {
-        .digest_mismatch => |d| try testing.expectEqual(members[3].kind, d.member.kind),
-        else => return error.TestUnexpectedResult,
-    }
-
-    switch (compare(members, members[0 .. members.len - 1])) {
-        .missing => |missing| try testing.expectEqual(members[members.len - 1].kind, missing.kind),
-        else => return error.TestUnexpectedResult,
-    }
-    switch (compare(members[0 .. members.len - 1], members)) {
-        .extra => |extra| try testing.expectEqual(members[members.len - 1].kind, extra.kind),
-        else => return error.TestUnexpectedResult,
-    }
 }
 
 test "member kind wire decoding is closed" {

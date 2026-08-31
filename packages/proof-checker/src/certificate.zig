@@ -119,8 +119,6 @@ pub const Identity = struct {
 
 pub const graph_record_size = 38;
 
-pub const graph_record_size_check = graph_mod.Member;
-
 pub const obligation_record_size = 8;
 
 pub const SubjectKind = enum(u8) {
