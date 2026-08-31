@@ -102,8 +102,8 @@ The package suites: `test-zts`, `test-sdk`, `test-modules`,
 `test-compile-bench`.
 
 The audits and gates: `test-capability-audit`, `test-module-boundary`,
-`test-proof-checker-purity`, `test-proof-swallow`, `test-zts-layering`,
-`test-module-governance`,
+`test-proof-checker-purity`, `test-proof-ratchet`, `test-proof-ratchet-drift`,
+`test-proof-swallow`, `test-zts-layering`, `test-module-governance`,
 `test-runtime-purity`, `test-contract-golden`, `test-expert-golden`,
 `test-docs-drift`, `test-doc-links`, `test-convergence-emitter`,
 `test-production-branch-metric`, `test-comptime-cli-matrix`,
@@ -237,6 +237,20 @@ the suite the first step reports on is not empty. The second gate exists because
 the first reports a pass over zero tests. It fails in both directions: a new
 forbidden import fails it, and so does a source file that `src/test_root.zig`
 does not reference or that carries no test.
+
+`zig build test-proof-ratchet` compiles a corpus of real handlers, builds real
+certificates, runs the real acceptance kernel over them, and asserts the exact
+edge each property was answered with. It is rooted at
+`packages/runtime/src/proof_ratchet.zig` because nothing in the product imports
+that file, and Zig collects tests only from files a root analyzes.
+`zig build test-proof-ratchet-drift` runs `scripts/check-proof-ratchet.sh`,
+which compares the published residual boundary in `docs/verification.md`
+against `Property.consumerChecked` in the kernel and fails in both directions.
+The doc carries a marked list rather than prose, because a promoted property
+stays mentioned in prose: a gate that only greps for the name would report a
+pass after exactly the promotion it exists to catch. Both directions were
+confirmed by hand - an undocumented promotion, a doc that drops a disclosure, a
+kernel that re-derives nothing, and an emptied corpus each fail.
 
 Discarding an error inside the analysis files that decide whether a program is
 proven needs a row in `scripts/proof-swallow.allow` giving the reason it cannot

@@ -454,6 +454,31 @@ artifact's grade is the weakest across the properties the policy required:
   re-derived by the consumer today. Reducing that list one family at a time is
   the ratchet's job.
 
+### The residual boundary, in full
+
+Which properties the consumer re-derives, and which it accepts on the producer's
+word. `scripts/check-proof-ratchet.sh` compares this list against
+`Property.consumerChecked` in the acceptance kernel and fails in both
+directions, so it cannot drift from what shipped.
+
+<!-- proof-ratchet: consumer-checked -->
+- `response_total`
+<!-- proof-ratchet: disclosed -->
+- `results_checked`
+- `no_secret_leakage`
+- `state_isolated`
+- `deterministic`
+- `read_only`
+- `retry_safe`
+- `capability_bounded`
+<!-- proof-ratchet: end -->
+
+Promoting one is the unit of work that shrinks this list: it means adding the
+property's members to the proof IR and its rule to the kernel, not relabelling
+the edge. `results_checked` is the next one - the result-binding dataflow is the
+smallest analysis the kernel does not yet model, and it is the property with the
+most direct security consequence after totality.
+
 ### What proof acceptance unlocks, and what it does not
 
 Only a proof-checked contract drives behavior that is unsound if a claim is

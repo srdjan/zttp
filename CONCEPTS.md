@@ -29,6 +29,61 @@ The same declaration applied to a helper rather than the Handler. A capsule is w
 ### Effects ceiling
 A declared upper bound on the Capabilities a function may reach. The inferred set must sit inside the ceiling; reaching past it is an error, and declaring a Capability never reached is a warning, so the ceiling stays honest in both directions.
 
+### Residual runtime obligation
+A closed, consumer-checked requirement to evaluate one locally observable capability resource at its authoritative runtime boundary because the compiler could not resolve that resource statically.
+
+An obligation proves guard coverage, not that a future value will pass and not that a Property holds. The configured capability policy supplies the allowed values, the runtime either permits or denies the operation before its effect, and unsupported or uncovered obligations remain compile-time or activation-time rejections.
+
+## Accepting an artifact
+
+### Executable graph
+The ordered inventory of every byte and identity that can affect what a
+deployment runs: the entry module's bytecode, each dependency in load order,
+every function, every constant pool, the module and native-module identities,
+the contract, the runtime policy, the source profiles, the grammar, the
+semantics registry, the capability matrix, and the proof IR. It folds to one
+root. Order is part of the commitment, and the producer and the consumer build
+their inventories independently from the same bytes - that independence is what
+makes comparing them worth anything.
+
+### Certificate
+What a producer attaches to an artifact so a consumer can check it: the
+canonical proof IR, the obligations it discharges, the evidence for each, the
+translation witnesses relating the IR to the final bytecode, and the executable
+graph the whole thing is about. It is data, not authority. A certificate is
+never believed; it is decoded, re-derived against, and either accepted or
+refused.
+
+### Acceptance kernel
+The consumer-owned checker that decides whether an artifact may serve. It
+reconstructs the obligations from the proof system's rules rather than reading
+the producer's list, folds totality itself rather than reading the producer's
+answer, and re-relates the translation witnesses. It is a leaf with no I/O, no
+allocator, and no dependency on the compiler or the server, so what an auditor
+has to read to trust an acceptance is one directory.
+
+### Assurance grade
+How strong the weakest link in a certificate's chain is: proved, translation
+validated, solver assumed, tested, or trusted. An obligation's grade is the
+weakest edge actually used to establish it, and an artifact's grade is the
+weakest across the properties the consumer required. A grade is never averaged
+and never rounded up.
+
+### Disclosed edge
+A step in the chain the consumer did not check and the certificate says so:
+a corpus that exercised something, a family the kernel does not model, an axiom
+from outside the artifact. Disclosing an edge is not a weakness in the design;
+failing to disclose one is. The published set of them is the residual trusted
+boundary, and shrinking it one family at a time is the ratchet.
+
+### Proof-checked contract
+A handler contract an acceptance has promoted. Only this drives behavior that is
+unsound if a compiler claim is wrong - the proof response cache, unbounded
+runtime reuse, the result and optional safety shortcuts, the durable-workflow
+guarantees. Its counterpart, the integrity-bound contract, says only that the
+contract describes the artifact that was loaded, which is what makes its claims
+readable and is not a check of any of them.
+
 ## Tracking data through a handler
 
 ### Data label

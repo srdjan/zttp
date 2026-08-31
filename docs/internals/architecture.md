@@ -20,6 +20,7 @@ share the same `zts` engine and contract logic.
 | `packages/modules/` | SDK-pure virtual modules and module spec JSON. |
 | `packages/zttp-sdk/` | Extension SDK types and helpers for native modules. |
 | `packages/proof-review/` | Proof-review verdict types and rendering helpers. |
+| `packages/proof-checker/` | The consumer acceptance kernel. A leaf: it imports `std` and its own siblings, allocates nothing, and reaches no filesystem, clock, process, network, or signer. It decides whether an artifact may serve. |
 | `packages/pi/` | Compiler-in-the-loop expert agent linked into `zttp` only. |
 
 `build.zig` wires the packages, build options, tests, smoke checks, and release
@@ -174,13 +175,42 @@ be read, both keep the previous handler serving.
 
 `zttp deploy` builds a self-contained local binary under
 `.zttp/deploy/<project-name>`. The output starts with the `zttp-runtime`
-template and appends a payload containing bytecode, contract JSON, runtime
-policy, and optional JWS attestation. `self_extract.zig` validates the trailer,
-loads the payload, and starts the runtime.
+template and appends a payload (format v2) containing bytecode, dependency
+bytecode, contract JSON, runtime policy, a proof certificate, and optional JWS
+attestation. `self_extract.zig` validates the trailer, loads the payload, and
+starts the runtime. The payload version is checked for equality and an unknown
+section is refused: a section this reader does not know is a malformed artifact,
+not a future one.
 
-Attestation signs bytecode, contract, and policy hashes. The running server
-emits proof headers and serves `/.well-known/zttp-attest`; `zttp verify
-<url>` validates the receipt.
+Attestation signs the contract, bytecode, policy, and capability hashes, plus
+the root of the artifact's executable graph. The running server emits proof
+headers and serves `/.well-known/zttp-attest`; `zttp verify <url>` validates the
+receipt, and reports provenance only, because the endpoint returns a claim
+rather than the artifact.
+
+## Activation
+
+Startup runs four stages before a handler pool exists, in this order:
+
+1. **Contract binding.** The embedded contract must bind to the artifact this
+   process loaded: bytecode hash, policy hash, capability matrix, source
+   identity, grammar, and semantics.
+2. **Runtime policy attestation.** When a JWS is present, the exact section-4
+   bytes and the executable-graph root must match the signed claims.
+3. **Proof acceptance.** `artifact_graph.zig` rebuilds the executable-graph
+   inventory from the sections just loaded; `proof_activation.zig` hands it and
+   the embedded certificate to the acceptance kernel; `contract_runtime.promote`
+   turns an acceptance into a `ProofCheckedContract`. A deployed artifact that
+   fails any of this does not serve.
+4. **Pool init and prewarm.** Only now, so a refused artifact never has a warm
+   runtime.
+
+Only a `ProofCheckedContract` drives the proof response cache, unbounded runtime
+reuse, the result and optional safety shortcuts, and the durable-workflow
+guarantees. `ValidatedRuntimeContract` - integrity without acceptance - drives
+env validation and route pre-filtering and nothing that is unsound if a compiler
+claim is wrong. A dev server, a live-reload swap, and a `-Dhandler` build have
+no artifact and no certificate, so they get no promotion at all.
 
 ## Testing And Governance
 

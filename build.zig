@@ -247,6 +247,33 @@ pub fn build(b: *std.Build) void {
     const proof_checker_purity_step = b.step("test-proof-checker-purity", "Check the acceptance kernel is a leaf with a non-empty suite");
     proof_checker_purity_step.dependOn(&proof_checker_purity.step);
 
+    // The published trusted boundary against the one the kernel implements.
+    const proof_ratchet_drift = b.addSystemCommand(&.{ "bash", "scripts/check-proof-ratchet.sh" });
+    proof_ratchet_drift.has_side_effects = true;
+    const proof_ratchet_drift_step = b.step("test-proof-ratchet-drift", "Check the published trusted boundary against the kernel");
+    proof_ratchet_drift_step.dependOn(&proof_ratchet_drift.step);
+
+    // The trusted-boundary ratchet. Rooted at its own file because nothing in
+    // the product imports it: it is a corpus plus assertions, and a file no
+    // analyzed root reaches contributes no tests.
+    const proof_ratchet_tests = b.addTest(.{
+        .filters = test_filters,
+        .root_module = b.createModule(.{
+            .root_source_file = runtime_dep.path("src/proof_ratchet.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{
+                .{ .name = "zts", .module = zts_dep.module("zts") },
+                .{ .name = "zts_cli", .module = zts_cli_mod },
+                .{ .name = "zttp_proof_checker", .module = proof_checker_dep.module("zttp_proof_checker") },
+            },
+        }),
+    });
+    const run_proof_ratchet_tests = b.addRunArtifact(proof_ratchet_tests);
+    const proof_ratchet_step = b.step("test-proof-ratchet", "Check the disclosed trusted boundary against what the kernel re-derives");
+    proof_ratchet_step.dependOn(&run_proof_ratchet_tests.step);
+
     // zttp proof-review package tests
     // Pass perf_histogram so the build-graph dedups this dep with the one
     // runtime threads through its own modules. Without it the option-set
@@ -1150,6 +1177,8 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_modules_tests.step);
     test_step.dependOn(&run_proof_review_pkg_tests.step);
     test_step.dependOn(&run_proof_checker_tests.step);
+    test_step.dependOn(&run_proof_ratchet_tests.step);
+    test_step.dependOn(&proof_ratchet_drift.step);
     test_step.dependOn(&proof_checker_purity.step);
     test_step.dependOn(expert_golden_step);
     test_step.dependOn(contract_golden_step);

@@ -128,6 +128,12 @@ if [ "$ACTUAL" != "$EXPECTED" ]; then
 fi
 echo "policy hash OK: $ACTUAL"
 
+step "bash scripts/check-proof-checker.sh  (acceptance kernel is a leaf with a non-empty suite)"
+bash scripts/check-proof-checker.sh
+
+step "bash scripts/check-proof-ratchet.sh  (published trusted boundary matches the kernel)"
+bash scripts/check-proof-ratchet.sh
+
 step "bash scripts/check-semantics-spec.sh  (strict semantics spec gate)"
 bash scripts/check-semantics-spec.sh
 

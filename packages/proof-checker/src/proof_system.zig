@@ -88,6 +88,44 @@ pub const Property = enum(u16) {
         };
     }
 
+    /// Whether the acceptance kernel re-derives this property itself, or takes
+    /// the producer's disclosure for it.
+    ///
+    /// This is the ratchet. Every `false` here is a property a consumer accepts
+    /// on somebody else's word, and moving one to `true` is the unit of work
+    /// that shrinks the disclosed trusted boundary. `scripts/check-proof-ratchet.sh`
+    /// pins the count in both directions: it fails when the count drops, and it
+    /// fails when the published residual list stops matching this switch.
+    pub fn consumerChecked(self: Property) bool {
+        return switch (self) {
+            // Totality is folded over the proof IR by the consumer and related
+            // to the final bytecode by the translation witnesses.
+            .response_total => true,
+            // Disclosed. Each needs an analysis the kernel does not model: the
+            // result-binding dataflow, the label propagation, and the effect
+            // inference respectively. Promoting one means adding its rule to
+            // the kernel and its members to the proof IR, not relabelling it.
+            .results_checked,
+            .no_secret_leakage,
+            .state_isolated,
+            .deterministic,
+            .read_only,
+            .retry_safe,
+            .capability_bounded,
+            => false,
+        };
+    }
+
+    /// How many properties the consumer re-derives. The ratchet floor.
+    pub fn consumerCheckedCount() usize {
+        var count: usize = 0;
+        inline for (@typeInfo(Property).@"enum".fields) |field| {
+            const property: Property = @enumFromInt(field.value);
+            if (property.consumerChecked()) count += 1;
+        }
+        return count;
+    }
+
     pub fn name(self: Property) []const u8 {
         return switch (self) {
             .response_total => "response_total",
@@ -255,6 +293,22 @@ test "every alphabet member round trips through its wire decoder" {
             try std.testing.expectEqual(@as(?T, member), T.fromWire(field.value));
         }
     }
+}
+
+test "the ratchet floor is met and the two halves partition the alphabet" {
+    var checked: usize = 0;
+    var disclosed: usize = 0;
+    inline for (@typeInfo(Property).@"enum".fields) |field| {
+        const p: Property = @enumFromInt(field.value);
+        if (p.consumerChecked()) checked += 1 else disclosed += 1;
+    }
+    try std.testing.expectEqual(checked + disclosed, @typeInfo(Property).@"enum".fields.len);
+    try std.testing.expectEqual(checked, Property.consumerCheckedCount());
+    // A kernel that re-derives nothing is a kernel that checks nothing. The
+    // floor is what stops the ratchet from being turned the wrong way by a
+    // change that only meant to simplify.
+    try std.testing.expect(checked >= 1);
+    try std.testing.expect(Property.response_total.consumerChecked());
 }
 
 test "every property states its subject and names itself" {
