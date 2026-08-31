@@ -9,6 +9,13 @@ const builtin = @import("builtin");
 const compat = @import("zts").compat;
 const ascii = std.ascii;
 
+/// The egress policy entry for a URL, since policy names endpoints and a test
+/// server's port is only known once it is listening. Writing `127.0.0.1` in a
+/// fixture would name a destination the handler never reaches.
+fn egressEndpoint(url: []const u8, out: []u8) []const u8 {
+    return @import("zts").endpoint.normalize(url, out) catch unreachable;
+}
+
 // Import zts module
 const zq = @import("zts");
 const durable_store_mod = @import("durable_store.zig");
@@ -2143,8 +2150,10 @@ test "durable fetch retries 5xx responses and succeeds within the retry budget" 
         .outbound_http_enabled = true,
     });
     defer rt.deinit();
+    var endpoint_buf: [512]u8 = undefined;
+    const allowed = [_][]const u8{egressEndpoint(url, &endpoint_buf)};
     rt.ctx.capability_policy = .{
-        .egress = .{ .enabled = true, .values = &[_][]const u8{"127.0.0.1"} },
+        .egress = .{ .enabled = true, .values = &allowed },
     };
 
     const handler_code = try std.fmt.allocPrint(allocator,
@@ -2189,8 +2198,10 @@ test "durable fetch stops retrying once the retry budget is exhausted" {
         .outbound_http_enabled = true,
     });
     defer rt.deinit();
+    var endpoint_buf: [512]u8 = undefined;
+    const allowed = [_][]const u8{egressEndpoint(url, &endpoint_buf)};
     rt.ctx.capability_policy = .{
-        .egress = .{ .enabled = true, .values = &[_][]const u8{"127.0.0.1"} },
+        .egress = .{ .enabled = true, .values = &allowed },
     };
 
     const handler_code = try std.fmt.allocPrint(allocator,
@@ -2236,7 +2247,7 @@ test "durable fetch retry loop stops once the step deadline passes instead of ex
     });
     defer rt.deinit();
     rt.ctx.capability_policy = .{
-        .egress = .{ .enabled = true, .values = &[_][]const u8{"127.0.0.1"} },
+        .egress = .{ .enabled = true, .values = &[_][]const u8{"http://127.0.0.1:18711"} },
     };
 
     const handler_code =
@@ -2826,7 +2837,7 @@ test "fetchSync respects embedded capability policy host allowlist" {
     rt.ctx.capability_policy = .{
         .egress = .{
             .enabled = true,
-            .values = &[_][]const u8{"localhost"},
+            .values = &[_][]const u8{"http://localhost:80"},
         },
     };
 
@@ -2869,7 +2880,7 @@ test "parallel fetch enforces egress allowlist - disallowed host never registers
     const rt = try HandlerInstance.init(allocator, .{ .outbound_http_enabled = true });
     defer rt.deinit();
     rt.ctx.capability_policy = .{
-        .egress = .{ .enabled = true, .values = &[_][]const u8{"localhost"} },
+        .egress = .{ .enabled = true, .values = &[_][]const u8{"http://localhost:80"} },
     };
 
     // Both thunks target a disallowed host: no descriptor registers, so
@@ -2920,8 +2931,10 @@ test "parallel fetch allows allowlisted host and drops disallowed one" {
 
     const rt = try HandlerInstance.init(allocator, .{ .outbound_http_enabled = true });
     defer rt.deinit();
+    var endpoint_buf: [512]u8 = undefined;
+    const allowed = [_][]const u8{egressEndpoint(allowed_url, &endpoint_buf)};
     rt.ctx.capability_policy = .{
-        .egress = .{ .enabled = true, .values = &[_][]const u8{"127.0.0.1"} },
+        .egress = .{ .enabled = true, .values = &allowed },
     };
 
     const handler_code = try std.fmt.allocPrint(allocator,
@@ -2970,7 +2983,7 @@ test "dev_capability_policy config enforces egress on sync fetch" {
 
     const rt = try HandlerInstance.init(allocator, .{
         .outbound_http_enabled = true,
-        .dev_capability_policy = .{ .egress = .{ .enabled = true, .values = &[_][]const u8{"localhost"} } },
+        .dev_capability_policy = .{ .egress = .{ .enabled = true, .values = &[_][]const u8{"http://localhost:80"} } },
     });
     defer rt.deinit();
 
@@ -3027,7 +3040,7 @@ test "dev_capability_policy config enforces egress on parallel fetch" {
 
     const rt = try HandlerInstance.init(allocator, .{
         .outbound_http_enabled = true,
-        .dev_capability_policy = .{ .egress = .{ .enabled = true, .values = &[_][]const u8{"localhost"} } },
+        .dev_capability_policy = .{ .egress = .{ .enabled = true, .values = &[_][]const u8{"http://localhost:80"} } },
     });
     defer rt.deinit();
 

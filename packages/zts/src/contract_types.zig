@@ -62,7 +62,11 @@ pub const EnvInfo = struct {
 };
 
 pub const EgressInfo = struct {
-    hosts: std.ArrayList([]const u8), // each entry owned
+    /// Normalized `scheme://host:port`, one per literal destination the
+    /// compiler saw. A host name names no destination: the same host under a
+    /// different scheme or port is a different server, so the contract records
+    /// what the runtime will compare - see `zts.endpoint`.
+    endpoints: std.ArrayList([]const u8), // each entry owned
     urls: std.ArrayList([]const u8) = .empty, // full fetchSync URLs, each entry owned
     dynamic: bool,
 };
@@ -84,9 +88,9 @@ pub const ExtensionCategoryBucket = struct {
 /// `extension_category` tags (e.g. "payment_gateway", "llm_egress").
 pub const ExtensionContract = struct {
     /// Per-extension copy of egress hosts. The same hosts also land in the
-    /// top-level `egress.hosts` list so runtime policy enforcement stays
+    /// top-level `egress.endpoints` list so runtime policy enforcement stays
     /// uniform; this duplicate preserves provenance.
-    egress_hosts: std.ArrayList([]const u8) = .empty, // each entry owned
+    egress_endpoints: std.ArrayList([]const u8) = .empty, // each entry owned
     egress_dynamic: bool = false,
     /// Partner-declared category tag -> bucket of extracted literals. Keys
     /// are owned; lookup is structural.
@@ -98,8 +102,8 @@ pub const ExtensionContract = struct {
     contract_section: ?[]u8 = null,
 
     pub fn deinit(self: *ExtensionContract, allocator: std.mem.Allocator) void {
-        for (self.egress_hosts.items) |s| allocator.free(s);
-        self.egress_hosts.deinit(allocator);
+        for (self.egress_endpoints.items) |s| allocator.free(s);
+        self.egress_endpoints.deinit(allocator);
         var it = self.categories.iterator();
         while (it.next()) |entry| {
             allocator.free(entry.key_ptr.*);
@@ -549,7 +553,7 @@ pub fn emptyContract(path: []const u8) HandlerContract {
         .modules = .empty,
         .functions = .empty,
         .env = .{ .literal = .empty, .dynamic = false },
-        .egress = .{ .hosts = .empty, .dynamic = false },
+        .egress = .{ .endpoints = .empty, .dynamic = false },
         .cache = .{ .namespaces = .empty, .dynamic = false },
         .sql = emptySqlInfo(),
         .durable = .{
@@ -1881,10 +1885,10 @@ pub const HandlerContract = struct {
             allocator.free(s);
         }
         self.env.literal.deinit(allocator);
-        for (self.egress.hosts.items) |s| {
+        for (self.egress.endpoints.items) |s| {
             allocator.free(s);
         }
-        self.egress.hosts.deinit(allocator);
+        self.egress.endpoints.deinit(allocator);
         for (self.egress.urls.items) |s| {
             allocator.free(s);
         }

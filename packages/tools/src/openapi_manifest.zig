@@ -468,7 +468,7 @@ test "writeOpenApiJson renders schema and route" {
         .modules = .empty,
         .functions = .empty,
         .env = .{ .literal = .empty, .dynamic = false },
-        .egress = .{ .hosts = .empty, .dynamic = false },
+        .egress = .{ .endpoints = .empty, .dynamic = false },
         .cache = .{ .namespaces = .empty, .dynamic = false },
         .sql = handler_contract.emptySqlInfo(),
         .durable = .{

@@ -547,7 +547,7 @@ pub fn buildFactsForTest(
             arr[0] = try allocator.dupe(u8, "PORT");
             break :blk arr;
         },
-        .egress_hosts = try allocator.alloc([]const u8, 0),
+        .egress_endpoints = try allocator.alloc([]const u8, 0),
         .cache_namespaces = try allocator.alloc([]const u8, 0),
         .routes = routes,
         .capabilities = try allocator.alloc([]const u8, 0),

@@ -923,15 +923,15 @@ test "appendedServerConfig wires the embedded capability policy for enforcement"
         .bytecode = &.{},
         .dep_bytecodes = &.{},
         .contract_json = null,
-        .policy = .{ .egress = .{ .enabled = true, .values = &[_][]const u8{"api.allowed.example"} } },
+        .policy = .{ .egress = .{ .enabled = true, .values = &[_][]const u8{"https://api.allowed.example:443"} } },
         .policy_strings = &.{},
         .policy_section_sha256 = [_]u8{0x5a} ** 32,
         .attestation_jws = null,
     };
     const config = appendedServerConfig(&payload);
     const policy = config.runtime_config.dev_capability_policy orelse return error.EmbeddedPolicyNotWired;
-    try std.testing.expect(policy.allowsEgressHost("api.allowed.example"));
-    try std.testing.expect(!policy.allowsEgressHost("evil.example"));
+    try std.testing.expect(policy.allowsEgressEndpoint("https://api.allowed.example:443"));
+    try std.testing.expect(!policy.allowsEgressEndpoint("https://evil.example:443"));
     try std.testing.expectEqualSlices(u8, &payload.policy_section_sha256, &config.policy_section_sha256.?);
 }
 

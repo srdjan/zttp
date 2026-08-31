@@ -738,7 +738,7 @@ test "buildFromSystemConfig applies each target's contract-derived egress policy
         .{
             .outbound_http_enabled = true,
             .dev_capability_policy = .{
-                .egress = .{ .enabled = true, .values = &[_][]const u8{"localhost"} },
+                .egress = .{ .enabled = true, .values = &[_][]const u8{"http://localhost:1"} },
             },
         },
         1,
@@ -816,8 +816,8 @@ test "buildFromSystemConfig includes imported capabilities in each target policy
     defer sys.deinit();
 
     const target = sys.find("entry") orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(@as(usize, 1), target.contract.egress.hosts.items.len);
-    try std.testing.expectEqualStrings("localhost", target.contract.egress.hosts.items[0]);
+    try std.testing.expectEqual(@as(usize, 1), target.contract.egress.endpoints.items.len);
+    try std.testing.expectEqualStrings("http://localhost:1", target.contract.egress.endpoints.items[0]);
 }
 
 test "buildFromSystemConfig rejects a target whose contract cannot compile" {

@@ -281,7 +281,7 @@ pub fn writeSuccessJson(
 
         // Outbound hosts
         try writer.writeAll(",\"outbound_hosts\":[");
-        for (c.egress.hosts.items, 0..) |h, i| {
+        for (c.egress.endpoints.items, 0..) |h, i| {
             if (i > 0) try writer.writeByte(',');
             try writeJsonString(writer, h);
         }
@@ -368,7 +368,7 @@ pub fn writeErrorJson(
             try writeJsonString(writer, v);
         }
         try writer.writeAll("],\"outbound_hosts\":[");
-        for (c.egress.hosts.items, 0..) |h, i| {
+        for (c.egress.endpoints.items, 0..) |h, i| {
             if (i > 0) try writer.writeByte(',');
             try writeJsonString(writer, h);
         }

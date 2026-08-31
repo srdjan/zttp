@@ -612,7 +612,7 @@ pub fn diffContracts(
     try diffStringList(allocator, old.env.literal.items, new.env.literal.items, &env_changes);
 
     // Egress comparison
-    try diffStringList(allocator, old.egress.hosts.items, new.egress.hosts.items, &egress_changes);
+    try diffStringList(allocator, old.egress.endpoints.items, new.egress.endpoints.items, &egress_changes);
 
     // Cache comparison
     try diffStringList(allocator, old.cache.namespaces.items, new.cache.namespaces.items, &cache_changes);
@@ -1940,7 +1940,7 @@ fn makeTestContract(allocator: std.mem.Allocator) !HandlerContract {
         .modules = .empty,
         .functions = .empty,
         .env = .{ .literal = .empty, .dynamic = false },
-        .egress = .{ .hosts = .empty, .dynamic = false },
+        .egress = .{ .endpoints = .empty, .dynamic = false },
         .cache = .{ .namespaces = .empty, .dynamic = false },
         .sql = handler_contract.emptySqlInfo(),
         .durable = .{

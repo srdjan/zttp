@@ -59,7 +59,7 @@ const DynamicWire = struct {
 };
 
 const EgressWire = struct {
-    hosts: []const WireString = &.{},
+    endpoints: []const WireString = &.{},
     urls: []const WireString = &.{},
     dynamic: bool = false,
 };
@@ -72,7 +72,7 @@ const ExtensionCategoryWire = struct {
 const ExtensionCategoryMap = json_wire.RawArrayHashMap(ExtensionCategoryWire);
 
 const ExtensionWire = struct {
-    egressHosts: []const WireString = &.{},
+    egressEndpoints: []const WireString = &.{},
     egressDynamic: bool = false,
     categories: ExtensionCategoryMap = .{},
     contractSection: ?WireString = null,
@@ -674,7 +674,7 @@ fn projectContract(
     try projectFunctions(allocator, &wire.functions, &contract);
     contract.env.literal = try projectStringList(allocator, wire.env.literal);
     contract.env.dynamic = wire.env.dynamic;
-    contract.egress.hosts = try projectStringList(allocator, wire.egress.hosts);
+    contract.egress.endpoints = try projectStringList(allocator, wire.egress.endpoints);
     contract.egress.urls = try projectStringList(allocator, wire.egress.urls);
     contract.egress.dynamic = wire.egress.dynamic;
     try projectServiceCalls(allocator, wire.serviceCalls, &contract);
@@ -1581,7 +1581,7 @@ fn projectExtensions(
         const key = try dupeWireString(allocator, entry.key);
         errdefer allocator.free(key);
         var extension = contract_types.ExtensionContract{
-            .egress_hosts = try projectStringList(allocator, entry.value.egressHosts),
+            .egress_endpoints = try projectStringList(allocator, entry.value.egressEndpoints),
             .egress_dynamic = entry.value.egressDynamic,
             .contract_section = null,
         };
@@ -1694,7 +1694,7 @@ test "parseFromJson reads version 2 snake_case fields" {
         \\  ],
         \\  "modules": ["zttp:service"],
         \\  "env": { "literal": ["TOKEN"], "dynamic": false },
-        \\  "egress": { "hosts": ["api.example.com"], "urls": [], "dynamic": false },
+        \\  "egress": { "endpoints": ["api.example.com"], "urls": [], "dynamic": false },
         \\  "service_calls": [{
         \\    "service": "orders", "route": "POST /orders", "dynamic": false,
         \\    "path_params": ["id"], "path_params_dynamic": false,

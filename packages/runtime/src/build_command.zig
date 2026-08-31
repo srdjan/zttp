@@ -202,6 +202,8 @@ const ProjectCompileContext = struct {
                     "Configured capability policy '{s}' is invalid: {s}\n",
                     .{ project.policy orelse "", @errorName(err) },
                 );
+                const help = zts.handler_policy.policyErrorHelp(err);
+                if (help.len > 0) std.debug.print("{s}\n", .{help});
                 return error.PolicyContextFailed;
             };
         }
@@ -2090,7 +2092,7 @@ fn emptyProbeContract(allocator: std.mem.Allocator) !zts.HandlerContract {
         .modules = .empty,
         .functions = .empty,
         .env = .{ .literal = .empty, .dynamic = false },
-        .egress = .{ .hosts = .empty, .urls = .empty, .dynamic = false },
+        .egress = .{ .endpoints = .empty, .urls = .empty, .dynamic = false },
         .cache = .{ .namespaces = .empty, .dynamic = false },
         .sql = .{ .backend = "sqlite", .queries = .empty, .dynamic = false },
         .durable = .{

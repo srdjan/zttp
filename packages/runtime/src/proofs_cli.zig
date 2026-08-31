@@ -363,7 +363,7 @@ fn writeListRow(
         review.classify(&delta).slug(),
         ev.facts.routes.len,
         ev.facts.env_keys.len,
-        ev.facts.egress_hosts.len,
+        ev.facts.egress_endpoints.len,
         ev.facts.cache_namespaces.len,
         ev.facts.capabilities.len,
     });
@@ -632,7 +632,7 @@ fn renderMarkdown(
     if (!any) try stdout.writeAll("_(none)_\n");
 
     const has_surface = ev.facts.routes.len > 0 or ev.facts.env_keys.len > 0 or
-        ev.facts.egress_hosts.len > 0 or ev.facts.cache_namespaces.len > 0 or
+        ev.facts.egress_endpoints.len > 0 or ev.facts.cache_namespaces.len > 0 or
         ev.facts.capabilities.len > 0;
     if (has_surface) {
         try stdout.writeAll("\n### Surface\n\n");
@@ -643,7 +643,7 @@ fn renderMarkdown(
             }
         }
         try writeMdStringList(stdout, "Env keys", ev.facts.env_keys);
-        try writeMdStringList(stdout, "Egress hosts", ev.facts.egress_hosts);
+        try writeMdStringList(stdout, "Egress hosts", ev.facts.egress_endpoints);
         try writeMdStringList(stdout, "Cache namespaces", ev.facts.cache_namespaces);
         try writeMdStringList(stdout, "Capabilities", ev.facts.capabilities);
     }
@@ -745,7 +745,7 @@ fn renderHtml(
 
     try writeHtmlSurfaceList(stdout, "Routes", ev.facts.routes);
     try writeHtmlStringList(stdout, "Env keys", ev.facts.env_keys);
-    try writeHtmlStringList(stdout, "Egress hosts", ev.facts.egress_hosts);
+    try writeHtmlStringList(stdout, "Egress hosts", ev.facts.egress_endpoints);
     try writeHtmlStringList(stdout, "Cache namespaces", ev.facts.cache_namespaces);
     try writeHtmlStringList(stdout, "Capabilities", ev.facts.capabilities);
 
@@ -1580,7 +1580,7 @@ test "export svg: zero proven properties omits trailer" {
         .contract_sha = try testing.allocator.dupe(u8, "sha-bare"),
         .proof_level = .none,
         .env_keys = try testing.allocator.alloc([]const u8, 0),
-        .egress_hosts = try testing.allocator.alloc([]const u8, 0),
+        .egress_endpoints = try testing.allocator.alloc([]const u8, 0),
         .cache_namespaces = try testing.allocator.alloc([]const u8, 0),
         .routes = try testing.allocator.alloc(review.Route, 0),
         .capabilities = try testing.allocator.alloc([]const u8, 0),

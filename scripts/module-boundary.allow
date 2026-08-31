@@ -36,6 +36,10 @@ runtime bytecode_cache
 runtime compat
 runtime contract_diff
 runtime counterexample
+# The one endpoint rule. The runtime compares what the compiler recorded, so
+# both must canonicalize `scheme://host:port` identically; a second copy in the
+# runtime is the drift this row exists to avoid.
+runtime endpoint
 runtime equivalence_receipt
 runtime file_io
 runtime handler_contract

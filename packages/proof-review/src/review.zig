@@ -214,7 +214,7 @@ pub const ReviewFacts = struct {
     contract_sha: []const u8,
     proof_level: ProofLevel,
     env_keys: []const []const u8,
-    egress_hosts: []const []const u8,
+    egress_endpoints: []const []const u8,
     cache_namespaces: []const []const u8,
     routes: []const Route,
     capabilities: []const []const u8,
@@ -249,8 +249,8 @@ pub const ReviewFacts = struct {
     ) !ReviewFacts {
         const env_keys = try dupeSortedDedupedStrings(allocator, facts.env_vars);
         errdefer freeStringList(allocator, env_keys);
-        const egress_hosts = try dupeSortedDedupedStrings(allocator, facts.egress_hosts);
-        errdefer freeStringList(allocator, egress_hosts);
+        const egress_endpoints = try dupeSortedDedupedStrings(allocator, facts.egress_endpoints);
+        errdefer freeStringList(allocator, egress_endpoints);
         const cache_namespaces = try dupeSortedDedupedStrings(allocator, facts.cache_namespaces);
         errdefer freeStringList(allocator, cache_namespaces);
         const caps = try dupeSortedDedupedStrings(allocator, capabilities);
@@ -269,7 +269,7 @@ pub const ReviewFacts = struct {
             .contract_sha = sha,
             .proof_level = ProofLevel.fromString(facts.proof_level.toString()),
             .env_keys = env_keys,
-            .egress_hosts = egress_hosts,
+            .egress_endpoints = egress_endpoints,
             .cache_namespaces = cache_namespaces,
             .routes = routes,
             .capabilities = caps,
@@ -294,7 +294,7 @@ pub const ReviewFacts = struct {
     pub fn deinit(self: *ReviewFacts, allocator: std.mem.Allocator) void {
         allocator.free(self.contract_sha);
         freeStringList(allocator, self.env_keys);
-        freeStringList(allocator, self.egress_hosts);
+        freeStringList(allocator, self.egress_endpoints);
         freeStringList(allocator, self.cache_namespaces);
         freeStringList(allocator, self.capabilities);
         freeRouteList(allocator, self.routes);
@@ -328,8 +328,8 @@ pub const ReviewFacts = struct {
         try json.write(self.proof_level.toString());
         try json.objectField("envKeys");
         try writeStringArray(json, self.env_keys);
-        try json.objectField("egressHosts");
-        try writeStringArray(json, self.egress_hosts);
+        try json.objectField("egressEndpoints");
+        try writeStringArray(json, self.egress_endpoints);
         try json.objectField("cacheNamespaces");
         try writeStringArray(json, self.cache_namespaces);
         try json.objectField("capabilities");
@@ -407,8 +407,8 @@ pub const ReviewFacts = struct {
 
         const env_keys = try parseStringArray(allocator, obj, "envKeys");
         errdefer freeStringList(allocator, env_keys);
-        const egress_hosts = try parseStringArray(allocator, obj, "egressHosts");
-        errdefer freeStringList(allocator, egress_hosts);
+        const egress_endpoints = try parseStringArray(allocator, obj, "egressEndpoints");
+        errdefer freeStringList(allocator, egress_endpoints);
         const cache_namespaces = try parseStringArray(allocator, obj, "cacheNamespaces");
         errdefer freeStringList(allocator, cache_namespaces);
         const capabilities = try parseStringArray(allocator, obj, "capabilities");
@@ -442,7 +442,7 @@ pub const ReviewFacts = struct {
             .contract_sha = sha,
             .proof_level = level,
             .env_keys = env_keys,
-            .egress_hosts = egress_hosts,
+            .egress_endpoints = egress_endpoints,
             .cache_namespaces = cache_namespaces,
             .routes = routes,
             .capabilities = capabilities,
@@ -549,9 +549,9 @@ pub fn deriveDelta(
     const removed_env = try setDiff(allocator, b.env_keys, current.env_keys);
     errdefer allocator.free(removed_env);
 
-    const added_egress = try setDiff(allocator, current.egress_hosts, b.egress_hosts);
+    const added_egress = try setDiff(allocator, current.egress_endpoints, b.egress_endpoints);
     errdefer allocator.free(added_egress);
-    const removed_egress = try setDiff(allocator, b.egress_hosts, current.egress_hosts);
+    const removed_egress = try setDiff(allocator, b.egress_endpoints, current.egress_endpoints);
     errdefer allocator.free(removed_egress);
 
     const added_cache = try setDiff(allocator, current.cache_namespaces, b.cache_namespaces);
@@ -831,7 +831,7 @@ pub fn writeProofCardPlaintext(card: *const ProofCard, writer: *std.Io.Writer) !
     try writer.print("  Surface:    {d} route(s), {d} env, {d} egress, {d} cache, {d} cap(s)\n", .{
         card.current.routes.len,
         card.current.env_keys.len,
-        card.current.egress_hosts.len,
+        card.current.egress_endpoints.len,
         card.current.cache_namespaces.len,
         card.current.capabilities.len,
     });
@@ -1278,7 +1278,7 @@ test "deriveDelta: no baseline yields empty delta" {
         .contract_sha = "sha-current",
         .proof_level = .complete,
         .env_keys = &[_][]const u8{"PORT"},
-        .egress_hosts = &.{},
+        .egress_endpoints = &.{},
         .cache_namespaces = &.{},
         .routes = &.{},
         .capabilities = &.{},
@@ -1296,7 +1296,7 @@ test "deriveDelta: detects added env, removed route, demoted property" {
         .contract_sha = "sha-old",
         .proof_level = .complete,
         .env_keys = try allocator.dupe([]const u8, &[_][]const u8{"PORT"}),
-        .egress_hosts = &.{},
+        .egress_endpoints = &.{},
         .cache_namespaces = &.{},
         .routes = blk: {
             var arr = try allocator.alloc(Route, 1);
@@ -1316,7 +1316,7 @@ test "deriveDelta: detects added env, removed route, demoted property" {
         .contract_sha = "sha-new",
         .proof_level = .complete,
         .env_keys = try allocator.dupe([]const u8, &[_][]const u8{ "PORT", "DB_URL" }),
-        .egress_hosts = &.{},
+        .egress_endpoints = &.{},
         .cache_namespaces = &.{},
         .routes = try allocator.alloc(Route, 0),
         .capabilities = &.{},
@@ -1356,7 +1356,7 @@ test "fromProvenFacts: projects every field from ProvenFacts" {
         .handler_path = "src/handler.ts",
         .env_vars = &env_in,
         .env_proven = true,
-        .egress_hosts = &egress_in,
+        .egress_endpoints = &egress_in,
         .egress_proven = true,
         .cache_namespaces = &cache_in,
         .cache_proven = true,
@@ -1387,8 +1387,8 @@ test "fromProvenFacts: projects every field from ProvenFacts" {
     try std.testing.expectEqualStrings("DB_URL", review.env_keys[0]);
     try std.testing.expectEqualStrings("PORT", review.env_keys[1]);
 
-    try std.testing.expectEqual(@as(usize, 1), review.egress_hosts.len);
-    try std.testing.expectEqualStrings("api.example.com", review.egress_hosts[0]);
+    try std.testing.expectEqual(@as(usize, 1), review.egress_endpoints.len);
+    try std.testing.expectEqualStrings("api.example.com", review.egress_endpoints[0]);
 
     try std.testing.expectEqual(@as(usize, 1), review.cache_namespaces.len);
     try std.testing.expectEqualStrings("sessions", review.cache_namespaces[0]);
@@ -1427,7 +1427,7 @@ test "fromProvenFacts: dedupes duplicate env keys" {
         .handler_path = "src/handler.ts",
         .env_vars = &env_in,
         .env_proven = true,
-        .egress_hosts = &.{},
+        .egress_endpoints = &.{},
         .egress_proven = true,
         .cache_namespaces = &.{},
         .cache_proven = true,
@@ -1455,7 +1455,7 @@ test "ReviewFacts: writeJson then parseJson round trips" {
             arr[1] = try allocator.dupe(u8, "PORT");
             break :blk arr;
         },
-        .egress_hosts = blk: {
+        .egress_endpoints = blk: {
             var arr = try allocator.alloc([]const u8, 1);
             arr[0] = try allocator.dupe(u8, "api.example.com");
             break :blk arr;
@@ -1493,8 +1493,8 @@ test "ReviewFacts: writeJson then parseJson round trips" {
     try std.testing.expectEqual(@as(usize, 2), round.env_keys.len);
     try std.testing.expectEqualStrings("DB_URL", round.env_keys[0]);
     try std.testing.expectEqualStrings("PORT", round.env_keys[1]);
-    try std.testing.expectEqual(@as(usize, 1), round.egress_hosts.len);
-    try std.testing.expectEqualStrings("api.example.com", round.egress_hosts[0]);
+    try std.testing.expectEqual(@as(usize, 1), round.egress_endpoints.len);
+    try std.testing.expectEqualStrings("api.example.com", round.egress_endpoints[0]);
     try std.testing.expectEqual(@as(usize, 1), round.routes.len);
     try std.testing.expectEqualStrings("/users", round.routes[0].pattern);
     try std.testing.expect(round.routes[0].is_prefix);
@@ -1511,7 +1511,7 @@ test "ReviewFacts.setIntentSummary surfaces intent fields in JSON" {
         .contract_sha = try allocator.dupe(u8, "sha-intent"),
         .proof_level = .complete,
         .env_keys = try allocator.alloc([]const u8, 0),
-        .egress_hosts = try allocator.alloc([]const u8, 0),
+        .egress_endpoints = try allocator.alloc([]const u8, 0),
         .cache_namespaces = try allocator.alloc([]const u8, 0),
         .routes = try allocator.alloc(Route, 0),
         .capabilities = try allocator.alloc([]const u8, 0),
@@ -1538,7 +1538,7 @@ test "ReviewFacts intent fields default to zero in JSON" {
         .contract_sha = try allocator.dupe(u8, "sha-default"),
         .proof_level = .none,
         .env_keys = try allocator.alloc([]const u8, 0),
-        .egress_hosts = try allocator.alloc([]const u8, 0),
+        .egress_endpoints = try allocator.alloc([]const u8, 0),
         .cache_namespaces = try allocator.alloc([]const u8, 0),
         .routes = try allocator.alloc(Route, 0),
         .capabilities = try allocator.alloc([]const u8, 0),
@@ -1581,7 +1581,7 @@ test "renderReviewCard: first deploy shows baseline none and no blockers" {
             arr[0] = try allocator.dupe(u8, "PORT");
             break :blk arr;
         },
-        .egress_hosts = try allocator.alloc([]const u8, 0),
+        .egress_endpoints = try allocator.alloc([]const u8, 0),
         .cache_namespaces = try allocator.alloc([]const u8, 0),
         .routes = try allocator.alloc(Route, 0),
         .capabilities = try allocator.alloc([]const u8, 0),
@@ -1620,7 +1620,7 @@ test "renderReviewCard: drift section is included when drift is set" {
         .contract_sha = try allocator.dupe(u8, "sha-2"),
         .proof_level = .complete,
         .env_keys = try allocator.alloc([]const u8, 0),
-        .egress_hosts = try allocator.alloc([]const u8, 0),
+        .egress_endpoints = try allocator.alloc([]const u8, 0),
         .cache_namespaces = try allocator.alloc([]const u8, 0),
         .routes = try allocator.alloc(Route, 0),
         .capabilities = try allocator.alloc([]const u8, 0),
@@ -1656,7 +1656,7 @@ test "renderReviewCard: additive deploy shows added route and env" {
             arr[0] = try allocator.dupe(u8, "PORT");
             break :blk arr;
         },
-        .egress_hosts = try allocator.alloc([]const u8, 0),
+        .egress_endpoints = try allocator.alloc([]const u8, 0),
         .cache_namespaces = try allocator.alloc([]const u8, 0),
         .routes = try allocator.alloc(Route, 0),
         .capabilities = try allocator.alloc([]const u8, 0),
@@ -1672,7 +1672,7 @@ test "renderReviewCard: additive deploy shows added route and env" {
             arr[1] = try allocator.dupe(u8, "PORT");
             break :blk arr;
         },
-        .egress_hosts = try allocator.alloc([]const u8, 0),
+        .egress_endpoints = try allocator.alloc([]const u8, 0),
         .cache_namespaces = try allocator.alloc([]const u8, 0),
         .routes = blk: {
             var arr = try allocator.alloc(Route, 1);
@@ -1709,7 +1709,7 @@ test "renderReviewCard: demoted property is breaking with bullet" {
         .contract_sha = try allocator.dupe(u8, "sha-old"),
         .proof_level = .complete,
         .env_keys = try allocator.alloc([]const u8, 0),
-        .egress_hosts = try allocator.alloc([]const u8, 0),
+        .egress_endpoints = try allocator.alloc([]const u8, 0),
         .cache_namespaces = try allocator.alloc([]const u8, 0),
         .routes = try allocator.alloc(Route, 0),
         .capabilities = try allocator.alloc([]const u8, 0),
@@ -1720,7 +1720,7 @@ test "renderReviewCard: demoted property is breaking with bullet" {
         .contract_sha = try allocator.dupe(u8, "sha-new"),
         .proof_level = .complete,
         .env_keys = try allocator.alloc([]const u8, 0),
-        .egress_hosts = try allocator.alloc([]const u8, 0),
+        .egress_endpoints = try allocator.alloc([]const u8, 0),
         .cache_namespaces = try allocator.alloc([]const u8, 0),
         .routes = try allocator.alloc(Route, 0),
         .capabilities = try allocator.alloc([]const u8, 0),
@@ -1750,7 +1750,7 @@ test "renderReviewCard: promoted property renders + bullet" {
         .contract_sha = try allocator.dupe(u8, "sha-old"),
         .proof_level = .complete,
         .env_keys = try allocator.alloc([]const u8, 0),
-        .egress_hosts = try allocator.alloc([]const u8, 0),
+        .egress_endpoints = try allocator.alloc([]const u8, 0),
         .cache_namespaces = try allocator.alloc([]const u8, 0),
         .routes = try allocator.alloc(Route, 0),
         .capabilities = try allocator.alloc([]const u8, 0),
@@ -1761,7 +1761,7 @@ test "renderReviewCard: promoted property renders + bullet" {
         .contract_sha = try allocator.dupe(u8, "sha-new"),
         .proof_level = .complete,
         .env_keys = try allocator.alloc([]const u8, 0),
-        .egress_hosts = try allocator.alloc([]const u8, 0),
+        .egress_endpoints = try allocator.alloc([]const u8, 0),
         .cache_namespaces = try allocator.alloc([]const u8, 0),
         .routes = try allocator.alloc(Route, 0),
         .capabilities = try allocator.alloc([]const u8, 0),
@@ -1791,7 +1791,7 @@ test "renderReviewCard: plan_required section lists reasons" {
         .contract_sha = try allocator.dupe(u8, "sha-3"),
         .proof_level = .complete,
         .env_keys = try allocator.alloc([]const u8, 0),
-        .egress_hosts = try allocator.alloc([]const u8, 0),
+        .egress_endpoints = try allocator.alloc([]const u8, 0),
         .cache_namespaces = try allocator.alloc([]const u8, 0),
         .routes = try allocator.alloc(Route, 0),
         .capabilities = try allocator.alloc([]const u8, 0),
@@ -1837,7 +1837,7 @@ test "writeProofCardPlaintext: renders a card built without a DeployReview" {
             arr[0] = try allocator.dupe(u8, "PORT");
             break :blk arr;
         },
-        .egress_hosts = try allocator.alloc([]const u8, 0),
+        .egress_endpoints = try allocator.alloc([]const u8, 0),
         .cache_namespaces = try allocator.alloc([]const u8, 0),
         .routes = try allocator.alloc(Route, 0),
         .capabilities = try allocator.alloc([]const u8, 0),

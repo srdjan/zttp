@@ -643,6 +643,8 @@ pub fn runCompileWithArgs(allocator: std.mem.Allocator, argv: []const []const u8
 
         policy = handler_policy.parsePolicyJson(allocator, policy_source) catch |err| {
             debugPrint("Error parsing policy file '{s}': {}\n", .{ path, err });
+            const help = handler_policy.policyErrorHelp(err);
+            if (help.len > 0) debugPrint("{s}\n", .{help});
             return err;
         };
     }
@@ -3127,7 +3129,7 @@ fn printSandboxReport(contract: *const HandlerContract) void {
     }
 
     printSandboxSection("env", contract.env.literal.items, env_restricted, "no dynamic access");
-    printSandboxSection("egress", contract.egress.hosts.items, egress_restricted, "no dynamic access");
+    printSandboxSection("egress", contract.egress.endpoints.items, egress_restricted, "no dynamic access");
     printSandboxSection("cache", contract.cache.namespaces.items, cache_restricted, "no dynamic access");
     printSqlSandboxSection(contract);
 }
@@ -3457,7 +3459,7 @@ fn writeCapabilityPolicy(writer: anytype, policy: ?HandlerPolicy, contract: ?*co
     } else if (contract) |c| {
         // Auto-derive from contract proven facts
         try writeContractDerivedSection(writer, "env", c.env.literal.items, c.env.dynamic);
-        try writeContractDerivedSection(writer, "egress", c.egress.hosts.items, c.egress.dynamic);
+        try writeContractDerivedSection(writer, "egress", c.egress.endpoints.items, c.egress.dynamic);
         try writeContractDerivedSection(writer, "cache", c.cache.namespaces.items, c.cache.dynamic);
         try writeSqlContractDerivedSection(writer, c);
     } else {
@@ -5876,7 +5878,7 @@ test "writeSdkArtifact writes client sibling file" {
         .modules = .empty,
         .functions = .empty,
         .env = .{ .literal = .empty, .dynamic = false },
-        .egress = .{ .hosts = .empty, .dynamic = false },
+        .egress = .{ .endpoints = .empty, .dynamic = false },
         .cache = .{ .namespaces = .empty, .dynamic = false },
         .sql = handler_contract.emptySqlInfo(),
         .durable = .{

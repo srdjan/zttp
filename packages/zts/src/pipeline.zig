@@ -1086,8 +1086,8 @@ test "extractContract merges capabilities from relative imports" {
     });
     defer contract.deinit(allocator);
 
-    try testing.expectEqual(@as(usize, 1), contract.egress.hosts.items.len);
-    try testing.expectEqualStrings("localhost", contract.egress.hosts.items[0]);
+    try testing.expectEqual(@as(usize, 1), contract.egress.endpoints.items.len);
+    try testing.expectEqualStrings("http://localhost:1", contract.egress.endpoints.items[0]);
 
     try file_io.writeFile(
         allocator,

@@ -11,9 +11,9 @@ const std = @import("std");
 /// which imports this file, dragged both serializers along. See
 /// docs/plans/2026-08-07-021-zts-three-module-split-plan.md.
 const contract_mod = @import("zts-contracts").contract_types;
+const endpoint = @import("zts-base").endpoint;
 
 const HandlerContract = contract_mod.HandlerContract;
-const ascii = std.ascii;
 
 /// Re-export so runtime-side serializers (self_extract) can name the per-query
 /// allowlist element type without reaching into the contract types directly.
@@ -30,17 +30,16 @@ pub const AllowList = struct {
     }
 
     fn appendUnique(self: *AllowList, allocator: std.mem.Allocator, item: []const u8) !void {
-        if (self.contains(item, false)) return;
+        if (self.contains(item)) return;
         try self.values.append(allocator, try allocator.dupe(u8, item));
     }
 
-    fn contains(self: *const AllowList, candidate: []const u8, case_insensitive: bool) bool {
+    /// Exact, for every category. Egress used to compare case-insensitively
+    /// because it held host names; it holds normalized endpoints now, and the
+    /// folding happens in `zts.endpoint` before a value reaches this list.
+    fn contains(self: *const AllowList, candidate: []const u8) bool {
         for (self.values.items) |item| {
-            const matches = if (case_insensitive)
-                ascii.eqlIgnoreCase(item, candidate)
-            else
-                std.mem.eql(u8, item, candidate);
-            if (matches) return true;
+            if (std.mem.eql(u8, item, candidate)) return true;
         }
         return false;
     }
@@ -48,7 +47,14 @@ pub const AllowList = struct {
 
 pub const HandlerPolicy = struct {
     env: ?AllowList = null,
+    /// Normalized `scheme://host:port` entries, from `egress.allow_endpoints`.
     egress: ?AllowList = null,
+    /// Which resolved-address scopes a connection may land in, from
+    /// `egress.allow_address_scopes`. Empty permits none: an endpoint says
+    /// which name and port may be reached, and this says which addresses that
+    /// name is allowed to answer with, so a policy that names endpoints and no
+    /// scopes has not yet said a connection may happen.
+    egress_scopes: endpoint.ScopeSet = .{},
     cache: ?AllowList = null,
     sql: ?AllowList = null,
 
@@ -84,14 +90,6 @@ pub const RuntimeAllowList = struct {
         if (!self.enabled) return true;
         for (self.values) |item| {
             if (std.mem.eql(u8, item, candidate)) return true;
-        }
-        return false;
-    }
-
-    pub fn allowsCaseInsensitive(self: RuntimeAllowList, candidate: []const u8) bool {
-        if (!self.enabled) return true;
-        for (self.values) |item| {
-            if (ascii.eqlIgnoreCase(item, candidate)) return true;
         }
         return false;
     }
@@ -136,7 +134,13 @@ pub const RuntimeSqlAllowList = struct {
 
 pub const RuntimePolicy = struct {
     env: RuntimeAllowList = .{},
+    /// Normalized `scheme://host:port` entries. Compared byte for byte,
+    /// because both sides normalized first: case folding and the default port
+    /// happened in `zts.endpoint`, not in the comparison.
     egress: RuntimeAllowList = .{},
+    /// Which resolved-address scopes a connection may land in. Supplied by the
+    /// configured policy; empty names none.
+    egress_scopes: endpoint.ScopeSet = .{},
     cache: RuntimeAllowList = .{},
     sql: RuntimeSqlAllowList = .{},
 
@@ -144,8 +148,18 @@ pub const RuntimePolicy = struct {
         return self.env.allows(key);
     }
 
-    pub fn allowsEgressHost(self: RuntimePolicy, host: []const u8) bool {
-        return self.egress.allowsCaseInsensitive(host);
+    /// Whether an already-normalized endpoint is allowed.
+    ///
+    /// The caller normalizes: a value that reaches here unnormalized is a value
+    /// no entry matches, which denies. That is the safe direction, and it is
+    /// why this takes the canonical form rather than a URL.
+    pub fn allowsEgressEndpoint(self: RuntimePolicy, normalized: []const u8) bool {
+        return self.egress.allows(normalized);
+    }
+
+    /// Whether a resolved address may be connected to.
+    pub fn allowsAddressScope(self: RuntimePolicy, scope: endpoint.AddressScope) bool {
+        return self.egress_scopes.contains(scope);
     }
 
     pub fn allowsCacheNamespace(self: RuntimePolicy, ns: []const u8) bool {
@@ -224,9 +238,13 @@ pub fn contractToRuntimePolicy(
         ),
         .egress = projectSection(
             contract.egress.dynamic,
-            contract.egress.hosts.items,
+            contract.egress.endpoints.items,
             if (configured) |policy| policy.egress else null,
         ),
+        // Scopes are the policy file's to grant. A contract proves which
+        // endpoint a handler names; it cannot prove what that name will resolve
+        // to at run time, so there is nothing here to derive them from.
+        .egress_scopes = if (configured) |policy| policy.egress_scopes else .{},
         .cache = projectSection(
             contract.cache.dynamic,
             contract.cache.namespaces.items,
@@ -450,6 +468,36 @@ pub const ValidationReport = struct {
     }
 };
 
+/// One line telling a developer what a refused policy file got wrong, for the
+/// errors where the error name alone does not say. Lives here, beside the
+/// reader that produces them, so every command reports the same thing.
+pub fn policyErrorHelp(err: anyerror) []const u8 {
+    return switch (err) {
+        error.EgressAllowHostsRetired =>
+        \\egress.allow_hosts was replaced by egress.allow_endpoints, which names
+        \\destinations as scheme://host:port, and egress.allow_address_scopes,
+        \\which names the resolved addresses those may answer with. A host list
+        \\could not say which scheme or port it meant.
+        ,
+        error.InvalidEgressEndpoint =>
+        \\an egress.allow_endpoints entry is not a destination this runtime can
+        \\canonicalize. Write scheme://host[:port] with http or https, and no
+        \\userinfo: a bare host names no destination.
+        ,
+        error.UnknownAddressScope =>
+        \\an egress.allow_address_scopes entry names no known scope. The set is
+        \\public, private, loopback, link_local, multicast, unspecified.
+        ,
+        else => "",
+    };
+}
+
+pub const scopes_field = "allow_address_scopes";
+pub const endpoints_field = "allow_endpoints";
+/// The key this file used to read. Named here so the parser can say what
+/// replaced it rather than reporting an unknown key.
+pub const retired_hosts_field = "allow_hosts";
+
 pub fn parsePolicyJson(allocator: std.mem.Allocator, source: []const u8) !HandlerPolicy {
     var parsed = try std.json.parseFromSlice(std.json.Value, allocator, source, .{});
     defer parsed.deinit();
@@ -469,12 +517,69 @@ pub fn parsePolicyJson(allocator: std.mem.Allocator, source: []const u8) !Handle
         }
     }
 
-    return .{
+    var policy = HandlerPolicy{
         .env = try parseSection(allocator, root, "env", "allow"),
-        .egress = try parseSection(allocator, root, "egress", "allow_hosts"),
         .cache = try parseSection(allocator, root, "cache", "allow_namespaces"),
         .sql = try parseSection(allocator, root, "sql", "allow_queries"),
     };
+    errdefer policy.deinit(allocator);
+    const egress = try parseEgressSection(allocator, root);
+    policy.egress = egress.allow;
+    policy.egress_scopes = egress.scopes;
+    return policy;
+}
+
+const EgressSection = struct {
+    allow: ?AllowList = null,
+    scopes: endpoint.ScopeSet = .{},
+};
+
+/// `egress` carries two fields, and both are load-bearing.
+///
+/// `allow_endpoints` replaced `allow_hosts` outright: a host list cannot say
+/// which scheme or port it meant, and the same host under another scheme or
+/// port is another server. Entries are normalized here, so the file may write
+/// `https://api.example.com` and the runtime compares
+/// `https://api.example.com:443`; a form the rule cannot canonicalize is a
+/// policy error rather than an entry nothing will ever match.
+fn parseEgressSection(allocator: std.mem.Allocator, root: std.json.ObjectMap) !EgressSection {
+    const raw_section = root.get("egress") orelse return .{};
+    if (raw_section != .object) return error.InvalidPolicy;
+    const section_obj = raw_section.object;
+
+    var iter = section_obj.iterator();
+    while (iter.next()) |entry| {
+        const key = entry.key_ptr.*;
+        if (std.mem.eql(u8, key, retired_hosts_field)) return error.EgressAllowHostsRetired;
+        if (!std.mem.eql(u8, key, endpoints_field) and !std.mem.eql(u8, key, scopes_field)) {
+            return error.InvalidPolicy;
+        }
+    }
+
+    const raw_allow = section_obj.get(endpoints_field) orelse return error.InvalidPolicy;
+    if (raw_allow != .array) return error.InvalidPolicy;
+
+    var allow = AllowList{};
+    errdefer allow.deinit(allocator);
+    for (raw_allow.array.items) |item| {
+        if (item != .string or item.string.len == 0) return error.InvalidPolicy;
+        var buf: [endpoint.max_endpoint_bytes]u8 = undefined;
+        const normalized = endpoint.normalize(item.string, &buf) catch return error.InvalidEgressEndpoint;
+        try allow.appendUnique(allocator, normalized);
+    }
+
+    var scopes = endpoint.ScopeSet{};
+    if (section_obj.get(scopes_field)) |raw_scopes| {
+        if (raw_scopes != .array) return error.InvalidPolicy;
+        for (raw_scopes.array.items) |item| {
+            if (item != .string) return error.InvalidPolicy;
+            const scope = endpoint.AddressScope.fromText(item.string) orelse
+                return error.UnknownAddressScope;
+            scopes = scopes.with(scope);
+        }
+    }
+
+    return .{ .allow = allow, .scopes = scopes };
 }
 
 pub fn validateContract(
@@ -487,7 +592,7 @@ pub fn validateContract(
 
     if (policy.env) |section| {
         for (contract.env.literal.items) |item| {
-            if (!section.contains(item, false)) {
+            if (!section.contains(item)) {
                 try report.violations.append(allocator, .{
                     .category = .env,
                     .kind = .literal_not_allowed,
@@ -498,8 +603,12 @@ pub fn validateContract(
     }
 
     if (policy.egress) |section| {
-        for (contract.egress.hosts.items) |item| {
-            if (!section.contains(item, true)) {
+        // Both sides hold normalized endpoints - the contract from the
+        // compiler, the section from the policy reader - so this compares
+        // exactly, like every other category. The case-insensitive match this
+        // used to do belonged to host names.
+        for (contract.egress.endpoints.items) |item| {
+            if (!section.contains(item)) {
                 try report.violations.append(allocator, .{
                     .category = .egress,
                     .kind = .literal_not_allowed,
@@ -511,7 +620,7 @@ pub fn validateContract(
 
     if (policy.cache) |section| {
         for (contract.cache.namespaces.items) |item| {
-            if (!section.contains(item, false)) {
+            if (!section.contains(item)) {
                 try report.violations.append(allocator, .{
                     .category = .cache,
                     .kind = .literal_not_allowed,
@@ -523,7 +632,7 @@ pub fn validateContract(
 
     if (policy.sql) |section| {
         for (contract.sql.queries.items) |query| {
-            if (!section.contains(query.name, false)) {
+            if (!section.contains(query.name)) {
                 try report.violations.append(allocator, .{
                     .category = .sql,
                     .kind = .literal_not_allowed,
@@ -601,7 +710,10 @@ test "parse policy json with all sections" {
     const source =
         \\{
         \\  "env": { "allow": ["JWT_SECRET", "API_KEY"] },
-        \\  "egress": { "allow_hosts": ["api.example.com"] },
+        \\  "egress": {
+        \\    "allow_endpoints": ["https://api.example.com"],
+        \\    "allow_address_scopes": ["public"]
+        \\  },
         \\  "cache": { "allow_namespaces": ["sessions"] }
         \\}
     ;
@@ -613,8 +725,77 @@ test "parse policy json with all sections" {
     try std.testing.expect(policy.egress != null);
     try std.testing.expect(policy.cache != null);
     try std.testing.expectEqual(@as(usize, 2), policy.env.?.values.items.len);
-    try std.testing.expectEqualStrings("api.example.com", policy.egress.?.values.items[0]);
+    // The file may write the endpoint any way the rule accepts; what is stored
+    // is the canonical form the runtime will compare.
+    try std.testing.expectEqualStrings("https://api.example.com:443", policy.egress.?.values.items[0]);
     try std.testing.expectEqualStrings("sessions", policy.cache.?.values.items[0]);
+    try std.testing.expect(policy.egress_scopes.contains(.public));
+    try std.testing.expect(!policy.egress_scopes.contains(.loopback));
+}
+
+test "the retired egress key names its replacement" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\{ "egress": { "allow_hosts": ["api.example.com"] } }
+    ;
+    // Not "unknown key": a host list read as an endpoint list would permit
+    // nothing it names, and the reader should say which key took its place.
+    try std.testing.expectError(
+        error.EgressAllowHostsRetired,
+        parsePolicyJson(allocator, source),
+    );
+
+    // The developer is told the replacement, not only that something failed.
+    const help = policyErrorHelp(error.EgressAllowHostsRetired);
+    try std.testing.expect(std.mem.indexOf(u8, help, endpoints_field) != null);
+    try std.testing.expect(std.mem.indexOf(u8, help, scopes_field) != null);
+    try std.testing.expect(policyErrorHelp(error.InvalidEgressEndpoint).len > 0);
+    try std.testing.expect(policyErrorHelp(error.UnknownAddressScope).len > 0);
+    // An error with nothing extra to say says nothing rather than something
+    // generic, which is how the caller decides whether to print a second line.
+    try std.testing.expectEqualStrings("", policyErrorHelp(error.InvalidPolicy));
+}
+
+test "an egress section the rule cannot read is a policy error" {
+    const allocator = std.testing.allocator;
+
+    // A bare host names no destination.
+    try std.testing.expectError(error.InvalidEgressEndpoint, parsePolicyJson(allocator,
+        \\{ "egress": { "allow_endpoints": ["api.example.com"] } }
+    ));
+    // A scheme outside the set, and userinfo, which reads as the allowed host.
+    try std.testing.expectError(error.InvalidEgressEndpoint, parsePolicyJson(allocator,
+        \\{ "egress": { "allow_endpoints": ["ftp://api.example.com"] } }
+    ));
+    try std.testing.expectError(error.InvalidEgressEndpoint, parsePolicyJson(allocator,
+        \\{ "egress": { "allow_endpoints": ["https://allowed.example@evil.example"] } }
+    ));
+    // A scope name outside the alphabet is not "some scope we do not model".
+    try std.testing.expectError(error.UnknownAddressScope, parsePolicyJson(allocator,
+        \\{ "egress": { "allow_endpoints": ["https://a.example"], "allow_address_scopes": ["everywhere"] } }
+    ));
+    // An endpoints list is required; a section with only scopes says where a
+    // connection may land without saying which one may be made.
+    try std.testing.expectError(error.InvalidPolicy, parsePolicyJson(allocator,
+        \\{ "egress": { "allow_address_scopes": ["public"] } }
+    ));
+}
+
+test "an egress section with no address scope permits no connection" {
+    const allocator = std.testing.allocator;
+    var policy = try parsePolicyJson(allocator,
+        \\{ "egress": { "allow_endpoints": ["https://api.example.com"] } }
+    );
+    defer policy.deinit(allocator);
+
+    // The endpoint is named, so the destination is allowed - and no resolved
+    // address may be connected to, because the section granted no scope.
+    try std.testing.expect(policy.egress.?.values.items.len == 1);
+    try std.testing.expect(policy.egress_scopes.isEmpty());
+    inline for (@typeInfo(endpoint.AddressScope).@"enum".fields) |field| {
+        const scope: endpoint.AddressScope = @enumFromInt(field.value);
+        try std.testing.expect(!policy.egress_scopes.contains(scope));
+    }
 }
 
 test "parse policy json rejects unknown sections" {
@@ -645,7 +826,7 @@ test "validate contract rejects disallowed literals" {
         .modules = .empty,
         .functions = .empty,
         .env = .{ .literal = env_literals, .dynamic = true },
-        .egress = .{ .hosts = hosts, .dynamic = false },
+        .egress = .{ .endpoints = hosts, .dynamic = false },
         .cache = .{ .namespaces = namespaces, .dynamic = false },
         .sql = contract_mod.emptySqlInfo(),
         .durable = .{
@@ -685,16 +866,32 @@ test "validate contract rejects disallowed literals" {
     try std.testing.expectEqual(ViolationKind.literal_not_allowed, report.violations.items[1].kind);
 }
 
-test "runtime policy host matching is case insensitive" {
+test "the egress comparison is exact, because both sides normalized first" {
+    // Case folding and the default port happen in `zts.endpoint`, before either
+    // side of this comparison. An entry that reaches the list unnormalized is
+    // an entry nothing matches, which denies - the safe direction.
     const policy = RuntimePolicy{
         .egress = .{
             .enabled = true,
-            .values = &[_][]const u8{"API.EXAMPLE.COM"},
+            .values = &[_][]const u8{"https://api.example.com:443"},
         },
     };
 
-    try std.testing.expect(policy.allowsEgressHost("api.example.com"));
-    try std.testing.expect(!policy.allowsEgressHost("other.example.com"));
+    try std.testing.expect(policy.allowsEgressEndpoint("https://api.example.com:443"));
+    try std.testing.expect(!policy.allowsEgressEndpoint("https://other.example.com:443"));
+    // The same host, another scheme or port, is another server.
+    try std.testing.expect(!policy.allowsEgressEndpoint("http://api.example.com:80"));
+    try std.testing.expect(!policy.allowsEgressEndpoint("https://api.example.com:8443"));
+    // A caller that skipped normalization gets no match rather than a lenient one.
+    try std.testing.expect(!policy.allowsEgressEndpoint("https://API.EXAMPLE.COM:443"));
+    try std.testing.expect(!policy.allowsEgressEndpoint("api.example.com"));
+
+    // Scopes are a separate grant, and an empty set names none.
+    try std.testing.expect(!policy.allowsAddressScope(.public));
+    try std.testing.expect(!policy.allowsAddressScope(.loopback));
+    const scoped = RuntimePolicy{ .egress_scopes = (endpoint.ScopeSet{}).with(.public) };
+    try std.testing.expect(scoped.allowsAddressScope(.public));
+    try std.testing.expect(!scoped.allowsAddressScope(.loopback));
 }
 
 test "contractToRuntimePolicy restricts static sections" {
@@ -705,7 +902,7 @@ test "contractToRuntimePolicy restricts static sections" {
     try env_literals.append(allocator, try allocator.dupe(u8, "API_KEY"));
     try env_literals.append(allocator, try allocator.dupe(u8, "DB_URL"));
     var hosts: std.ArrayList([]const u8) = .empty;
-    try hosts.append(allocator, try allocator.dupe(u8, "api.stripe.com"));
+    try hosts.append(allocator, try allocator.dupe(u8, "https://api.stripe.com:443"));
     var namespaces: std.ArrayList([]const u8) = .empty;
     try namespaces.append(allocator, try allocator.dupe(u8, "sessions"));
 
@@ -715,7 +912,7 @@ test "contractToRuntimePolicy restricts static sections" {
         .modules = .empty,
         .functions = .empty,
         .env = .{ .literal = env_literals, .dynamic = false },
-        .egress = .{ .hosts = hosts, .dynamic = false },
+        .egress = .{ .endpoints = hosts, .dynamic = false },
         .cache = .{ .namespaces = namespaces, .dynamic = false },
         .sql = contract_mod.emptySqlInfo(),
         .durable = .{
@@ -747,8 +944,8 @@ test "contractToRuntimePolicy restricts static sections" {
     try std.testing.expect(policy.allowsEnv("DB_URL"));
     try std.testing.expect(!policy.allowsEnv("SECRET"));
 
-    try std.testing.expect(policy.allowsEgressHost("api.stripe.com"));
-    try std.testing.expect(!policy.allowsEgressHost("evil.com"));
+    try std.testing.expect(policy.allowsEgressEndpoint("https://api.stripe.com:443"));
+    try std.testing.expect(!policy.allowsEgressEndpoint("https://evil.com:443"));
 
     try std.testing.expect(policy.allowsCacheNamespace("sessions"));
     try std.testing.expect(!policy.allowsCacheNamespace("other"));
@@ -792,7 +989,7 @@ test "a dynamic section denies everything unless a policy names it" {
         .modules = .empty,
         .functions = .empty,
         .env = .{ .literal = env_literals, .dynamic = true }, // dynamic
-        .egress = .{ .hosts = .empty, .dynamic = false }, // static, empty
+        .egress = .{ .endpoints = .empty, .dynamic = false }, // static, empty
         .cache = .{ .namespaces = .empty, .dynamic = true }, // dynamic
         .sql = contract_mod.emptySqlInfo(),
         .durable = .{
@@ -825,7 +1022,7 @@ test "a dynamic section denies everything unless a policy names it" {
 
     // Static but empty: restricted to nothing, as before.
     try std.testing.expect(denied.egress.enabled);
-    try std.testing.expect(!denied.allowsEgressHost("any.host"));
+    try std.testing.expect(!denied.allowsEgressEndpoint("https://any.host:443"));
 
     // A configured section, and only a configured section, supplies the
     // entries a dynamic category may reach.

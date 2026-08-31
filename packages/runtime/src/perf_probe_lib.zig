@@ -127,7 +127,7 @@ fn minimalFacts(allocator: std.mem.Allocator, sha: []const u8) !review.ReviewFac
         .contract_sha = contract_sha,
         .proof_level = .none,
         .env_keys = try allocator.alloc([]const u8, 0),
-        .egress_hosts = try allocator.alloc([]const u8, 0),
+        .egress_endpoints = try allocator.alloc([]const u8, 0),
         .cache_namespaces = try allocator.alloc([]const u8, 0),
         .routes = try allocator.alloc(review.Route, 0),
         .capabilities = try allocator.alloc([]const u8, 0),

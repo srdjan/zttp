@@ -637,7 +637,7 @@ const clean_no_imports =
 /// four, so a seed that trips its own category cannot be passing because the
 /// other three sections are absent.
 const pol_policy =
-    \\{ "env": { "allow": ["APP_NAME"] }, "egress": { "allow_hosts": ["allowed.example.com"] }, "cache": { "allow_namespaces": ["allowed_ns"] }, "sql": { "allow_queries": ["allowedQuery"] } }
+    \\{ "env": { "allow": ["APP_NAME"] }, "egress": { "allow_endpoints": ["https://allowed.example.com"], "allow_address_scopes": ["public"] }, "cache": { "allow_namespaces": ["allowed_ns"] }, "sql": { "allow_queries": ["allowedQuery"] } }
     \\
 ;
 

@@ -430,7 +430,18 @@ pub fn splitHeaderKV(headers: anytype, names: *[64][]const u8, values: *[64][]co
     return count;
 }
 
-fn outboundHostViolation(rt: *HandlerInstance, host: []const u8) ?[]const u8 {
+/// Authorize the destination this request would reach.
+///
+/// The policy names endpoints - `scheme://host:port` - so the URL is
+/// canonicalized by the same rule that produced those entries and the two are
+/// compared byte for byte. A host comparison could not tell
+/// `https://api.example.com` from `http://api.example.com:8080`, which are two
+/// servers, and a URL the rule refuses (userinfo, a scheme outside the set)
+/// is denied rather than connected to.
+///
+/// `--allow-host` stays a host comparison: it is a coarse operator switch over
+/// whatever the policy already permits, not the policy itself.
+fn outboundEndpointViolation(rt: *HandlerInstance, url: []const u8, host: []const u8) ?[]const u8 {
     if (rt.config.outbound_allow_host) |allowed_host| {
         if (!ascii.eqlIgnoreCase(host, allowed_host)) {
             zq.policy.emitDenied(.{
@@ -440,7 +451,16 @@ fn outboundHostViolation(rt: *HandlerInstance, host: []const u8) ?[]const u8 {
             return allowed_host;
         }
     }
-    if (!rt.ctx.capability_policy.allowsEgressHost(host)) {
+
+    var buf: [zq.endpoint.max_endpoint_bytes]u8 = undefined;
+    const normalized = zq.endpoint.normalize(url, &buf) catch {
+        zq.policy.emitDenied(.{
+            .action = .http_outbound,
+            .resource = .{ .kind = zq.policy.resource_kind_host, .id = host },
+        }, .not_in_allowlist);
+        return "url names no endpoint this policy can decide";
+    };
+    if (!rt.ctx.capability_policy.allowsEgressEndpoint(normalized)) {
         zq.policy.emitDenied(.{
             .action = .http_outbound,
             .resource = .{ .kind = zq.policy.resource_kind_host, .id = host },
@@ -576,7 +596,7 @@ pub fn parseFetchArgs(rt: *HandlerInstance, pool: *const zq.HiddenClassPool, arg
         rt.allocator.free(final_url);
         return .{ .err = try createFetchErrorResponse(rt, "InvalidUrl", "url host is required") };
     };
-    if (outboundHostViolation(rt, host.bytes)) |details| {
+    if (outboundEndpointViolation(rt, final_url, host.bytes)) |details| {
         rt.allocator.free(final_url);
         return .{ .err = try createFetchErrorResponse(rt, "HostNotAllowed", details) };
     }
@@ -2114,7 +2134,7 @@ fn httpRequestResultJsonAlloc(rt: *HandlerInstance, args: []const zq.JSValue) ![
     const host = resolveHostSafe(uri, &host_buf) catch {
         return try httpRequestErrorJsonAlloc(a, "InvalidUrl", "url host is required");
     };
-    if (outboundHostViolation(rt, host.bytes)) |details| {
+    if (outboundEndpointViolation(rt, url_v.string, host.bytes)) |details| {
         return try httpRequestErrorJsonAlloc(a, "HostNotAllowed", details);
     }
 
@@ -2402,7 +2422,7 @@ test "the egress allowlist rejects a host it does not name" {
 
     // Exact match passes the allowlist check. Whether the capability policy also
     // allows it is a separate gate, so only assert the allowlist verdict here.
-    const violation = outboundHostViolation(rt, "evil.example.com");
+    const violation = outboundEndpointViolation(rt, "https://evil.example.com/x", "evil.example.com");
     try testing.expect(violation != null);
     try testing.expectEqualStrings("api.example.com", violation.?);
 }
@@ -2420,7 +2440,34 @@ test "the egress allowlist is case-insensitive on the host" {
 
     // Not the allowlist's complaint: any violation here comes from the
     // capability policy, never from a case difference.
-    if (outboundHostViolation(rt, "API.Example.COM")) |reason| {
+    if (outboundEndpointViolation(rt, "https://API.Example.COM/x", "API.Example.COM")) |reason| {
         try testing.expectEqualStrings("capability policy", reason);
     }
+}
+
+test "the endpoint decides, not the host" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const rt = try HandlerInstance.init(allocator, .{});
+    defer rt.deinit();
+
+    const allowed = [_][]const u8{"https://api.example.com:443"};
+    rt.ctx.capability_policy = .{ .egress = .{ .enabled = true, .values = &allowed } };
+
+    // The endpoint the policy names, written three ways that canonicalize to it.
+    try testing.expect(outboundEndpointViolation(rt, "https://api.example.com/v1?x=1", "api.example.com") == null);
+    try testing.expect(outboundEndpointViolation(rt, "https://API.Example.COM.", "API.Example.COM.") == null);
+    try testing.expect(outboundEndpointViolation(rt, "https://api.example.com:443/", "api.example.com") == null);
+
+    // Same host, other scheme or port: another server, and denied.
+    try testing.expect(outboundEndpointViolation(rt, "http://api.example.com", "api.example.com") != null);
+    try testing.expect(outboundEndpointViolation(rt, "https://api.example.com:8443", "api.example.com") != null);
+
+    // A URL the rule cannot canonicalize is refused rather than connected to,
+    // and userinfo is the case a host-only check reads as the allowed host.
+    const refused = outboundEndpointViolation(rt, "https://api.example.com@evil.example", "evil.example") orelse
+        return error.TestUnexpectedResult;
+    try testing.expectEqualStrings("url names no endpoint this policy can decide", refused);
 }

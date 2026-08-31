@@ -176,8 +176,8 @@ fn writeContractJsonVersion(
 
     // egress
     try writer.writeAll("  \"egress\": {\n");
-    try writer.writeAll("    \"hosts\": [");
-    for (contract.egress.hosts.items, 0..) |host, i| {
+    try writer.writeAll("    \"endpoints\": [");
+    for (contract.egress.endpoints.items, 0..) |host, i| {
         if (i > 0) try writer.writeAll(", ");
         try writeJsonString(writer, host);
     }
@@ -907,8 +907,8 @@ fn writeExtensionsJson(
         if (i > 0) try writer.writeAll(",");
         try writer.writeAll("\n    ");
         try writeJsonString(writer, spec);
-        try writer.writeAll(": {\n      \"" ++ comptime contractKey(json_version, "egressHosts") ++ "\": [");
-        for (ext.egress_hosts.items, 0..) |host, j| {
+        try writer.writeAll(": {\n      \"" ++ comptime contractKey(json_version, "egressEndpoints") ++ "\": [");
+        for (ext.egress_endpoints.items, 0..) |host, j| {
             if (j > 0) try writer.writeAll(", ");
             try writeJsonString(writer, host);
         }
@@ -1268,7 +1268,7 @@ fn populateVersionTwoTestContract(
     try appendTestFunction(allocator, contract);
     try appendTestString(allocator, &contract.env.literal, "ORDERS_TOKEN");
     contract.env.dynamic = true;
-    try appendTestString(allocator, &contract.egress.hosts, "api.example.com");
+    try appendTestString(allocator, &contract.egress.endpoints, "api.example.com");
     try appendTestString(allocator, &contract.egress.urls, "https://api.example.com/orders");
     contract.egress.dynamic = true;
     try appendTestWorkflowCall(allocator, contract);

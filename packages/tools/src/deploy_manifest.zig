@@ -32,7 +32,7 @@ pub const ProvenFacts = struct {
     env_vars: []const []const u8,
     env_proven: bool,
 
-    egress_hosts: []const []const u8,
+    egress_endpoints: []const []const u8,
     egress_proven: bool,
 
     cache_namespaces: []const []const u8,
@@ -163,7 +163,7 @@ pub fn extractProvenFacts(
     // that want a narrower allow-list (e.g. Cloudflare egress) treat
     // fetch_hosts as the set to configure.
     const imports_fetch = containsString(contract.modules.items, "zttp:fetch");
-    const fetch_hosts: []const []const u8 = if (imports_fetch) contract.egress.hosts.items else &.{};
+    const fetch_hosts: []const []const u8 = if (imports_fetch) contract.egress.endpoints.items else &.{};
 
     const cost_total: ?handler_contract.Bound = if (contract.cost_envelope) |envelope| envelope.total else null;
 
@@ -173,7 +173,7 @@ pub fn extractProvenFacts(
             .handler_path = contract.handler.path,
             .env_vars = contract.env.literal.items,
             .env_proven = !contract.env.dynamic,
-            .egress_hosts = contract.egress.hosts.items,
+            .egress_endpoints = contract.egress.endpoints.items,
             .egress_proven = !contract.egress.dynamic,
             .cache_namespaces = contract.cache.namespaces.items,
             .cache_proven = !contract.cache.dynamic,
@@ -343,7 +343,7 @@ fn renderAws(allocator: std.mem.Allocator, facts: *const ProvenFacts) ![]const R
         try w.writeAll("    }");
     }
     // VPC parameters (when egress hosts are known)
-    const has_egress = facts.egress_hosts.len > 0;
+    const has_egress = facts.egress_endpoints.len > 0;
     if (has_egress) {
         if (facts.env_vars.len > 0) try w.writeAll(",");
         try w.writeAll("\n    \"VpcSubnetIds\": {\n");
@@ -521,14 +521,14 @@ fn renderAws(allocator: std.mem.Allocator, facts: *const ProvenFacts) ![]const R
     try w.writeAll(if (facts.fault_covered) "true" else "false");
     try w.writeAll("\"");
 
-    if (facts.egress_hosts.len > 0 or facts.egress_proven) {
+    if (facts.egress_endpoints.len > 0 or facts.egress_proven) {
         try w.writeAll(",\n          \"zttp:egressProven\": \"");
         try w.writeAll(if (facts.egress_proven) "true" else "false");
         try w.writeAll("\"");
 
-        if (facts.egress_hosts.len > 0) {
-            try w.writeAll(",\n          \"zttp:egressHosts\": \"");
-            for (facts.egress_hosts, 0..) |host, i| {
+        if (facts.egress_endpoints.len > 0) {
+            try w.writeAll(",\n          \"zttp:egressEndpoints\": \"");
+            for (facts.egress_endpoints, 0..) |host, i| {
                 if (i > 0) try w.writeAll(",");
                 try writeJsonStringContent(w, host);
             }
@@ -549,7 +549,7 @@ fn renderAws(allocator: std.mem.Allocator, facts: *const ProvenFacts) ![]const R
         try w.writeAll("        \"GroupDescription\": \"zttp proven egress - ");
         if (facts.egress_proven) {
             try w.writeAll("restricted to: ");
-            for (facts.egress_hosts, 0..) |host, i| {
+            for (facts.egress_endpoints, 0..) |host, i| {
                 if (i > 0) try w.writeAll(", ");
                 try writeJsonStringContent(w, host);
             }
@@ -567,7 +567,7 @@ fn renderAws(allocator: std.mem.Allocator, facts: *const ProvenFacts) ![]const R
         try w.writeAll("            \"Description\": \"HTTPS egress");
         if (facts.egress_proven) {
             try w.writeAll(" (proven hosts: ");
-            for (facts.egress_hosts, 0..) |host, i| {
+            for (facts.egress_endpoints, 0..) |host, i| {
                 if (i > 0) try w.writeAll(", ");
                 try writeJsonStringContent(w, host);
             }
@@ -831,9 +831,9 @@ pub fn writeDeployReport(w: anytype, facts: *const ProvenFacts, provider: []cons
         any_proven = true;
     }
 
-    if (facts.egress_hosts.len > 0 and facts.egress_proven) {
+    if (facts.egress_endpoints.len > 0 and facts.egress_proven) {
         try w.writeAll("  Outbound hosts: ");
-        try writeCommaList(w, facts.egress_hosts);
+        try writeCommaList(w, facts.egress_endpoints);
         try w.writeAll("\n");
         any_proven = true;
     }
@@ -870,7 +870,7 @@ pub fn writeDeployReport(w: anytype, facts: *const ProvenFacts, provider: []cons
     }
 
     if (!facts.egress_proven) {
-        try writeReviewLine(w, "Outbound hosts: handler uses dynamic URLs", facts.egress_hosts);
+        try writeReviewLine(w, "Outbound hosts: handler uses dynamic URLs", facts.egress_endpoints);
         any_review = true;
     }
 
@@ -1102,7 +1102,7 @@ test "extractProvenFacts with env and egress" {
     try contract.env.literal.append(allocator, env2);
 
     const host1 = try allocator.dupe(u8, "api.stripe.com");
-    try contract.egress.hosts.append(allocator, host1);
+    try contract.egress.endpoints.append(allocator, host1);
     contract.egress.dynamic = true;
 
     contract.verification = .{
@@ -1121,7 +1121,7 @@ test "extractProvenFacts with env and egress" {
     try std.testing.expectEqualStrings("JWT_SECRET", facts.env_vars[0]);
     try std.testing.expectEqualStrings("API_KEY", facts.env_vars[1]);
     try std.testing.expect(facts.env_proven);
-    try std.testing.expectEqual(@as(usize, 1), facts.egress_hosts.len);
+    try std.testing.expectEqual(@as(usize, 1), facts.egress_endpoints.len);
     try std.testing.expect(!facts.egress_proven);
     try std.testing.expectEqual(ProofLevel.partial, facts.proof_level);
     try std.testing.expectEqual(@as(usize, 3), facts.checks_passed.len);
@@ -1158,7 +1158,7 @@ test "renderAws minimal" {
         .handler_path = "handler.ts",
         .env_vars = &.{},
         .env_proven = true,
-        .egress_hosts = &.{},
+        .egress_endpoints = &.{},
         .egress_proven = true,
         .cache_namespaces = &.{},
         .cache_proven = true,
@@ -1195,7 +1195,7 @@ test "linear cost bound emits costClass/costBound tags and no maxIoDepth" {
         .handler_path = "handler.ts",
         .env_vars = &.{},
         .env_proven = true,
-        .egress_hosts = &.{},
+        .egress_endpoints = &.{},
         .egress_proven = true,
         .cache_namespaces = &.{},
         .cache_proven = true,
@@ -1231,7 +1231,7 @@ test "worst-case cost tags render at the body limit" {
         .handler_path = "handler.ts",
         .env_vars = &.{},
         .env_proven = true,
-        .egress_hosts = &.{},
+        .egress_endpoints = &.{},
         .egress_proven = true,
         .cache_namespaces = &.{},
         .cache_proven = true,
@@ -1276,7 +1276,7 @@ test "renderAws with env vars and routes" {
         .handler_path = "handler.ts",
         .env_vars = &env_vars,
         .env_proven = true,
-        .egress_hosts = &[_][]const u8{"api.stripe.com"},
+        .egress_endpoints = &[_][]const u8{"api.stripe.com"},
         .egress_proven = true,
         .cache_namespaces = &[_][]const u8{"sessions"},
         .cache_proven = true,
@@ -1330,7 +1330,7 @@ test "renderAws dynamic env produces review comment" {
         .handler_path = "handler.ts",
         .env_vars = &[_][]const u8{"KNOWN_VAR"},
         .env_proven = false,
-        .egress_hosts = &.{},
+        .egress_endpoints = &.{},
         .egress_proven = true,
         .cache_namespaces = &.{},
         .cache_proven = true,
@@ -1365,7 +1365,7 @@ test "writeDeployReport complete proof" {
         .handler_path = "handler.ts",
         .env_vars = &env_vars,
         .env_proven = true,
-        .egress_hosts = &[_][]const u8{"api.stripe.com"},
+        .egress_endpoints = &[_][]const u8{"api.stripe.com"},
         .egress_proven = true,
         .cache_namespaces = &[_][]const u8{"sessions"},
         .cache_proven = true,
@@ -1411,7 +1411,7 @@ test "writeDeployReport with review needed" {
         .handler_path = "handler.ts",
         .env_vars = &[_][]const u8{"KNOWN_VAR"},
         .env_proven = false,
-        .egress_hosts = &.{},
+        .egress_endpoints = &.{},
         .egress_proven = false,
         .cache_namespaces = &.{},
         .cache_proven = true,
@@ -1465,7 +1465,7 @@ test "renderAws exposes fetchHosts when the handler imports zttp:fetch" {
         .handler_path = "examples/fetch/webhook.ts",
         .env_vars = &.{},
         .env_proven = true,
-        .egress_hosts = &fetch_hosts,
+        .egress_endpoints = &fetch_hosts,
         .egress_proven = true,
         .cache_namespaces = &.{},
         .cache_proven = true,
@@ -1509,7 +1509,7 @@ test "renderCloudflareWorkers omits path-only routes and keeps host-qualified ro
         .handler_path = "src/checkout.ts",
         .env_vars = &env_vars,
         .env_proven = true,
-        .egress_hosts = &fetch_hosts,
+        .egress_endpoints = &fetch_hosts,
         .egress_proven = true,
         .cache_namespaces = &.{},
         .cache_proven = true,
@@ -1555,7 +1555,7 @@ test "renderCloudflareWorkers omits routes and vars blocks when neither is prese
         .handler_path = "minimal.ts",
         .env_vars = &.{},
         .env_proven = true,
-        .egress_hosts = &.{},
+        .egress_endpoints = &.{},
         .egress_proven = true,
         .cache_namespaces = &.{},
         .cache_proven = true,
@@ -1584,7 +1584,7 @@ test "renderAws omits the fetch block when absent" {
         .handler_path = "handler.ts",
         .env_vars = &.{},
         .env_proven = true,
-        .egress_hosts = &.{},
+        .egress_endpoints = &.{},
         .egress_proven = true,
         .cache_namespaces = &.{},
         .cache_proven = true,

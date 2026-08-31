@@ -1753,14 +1753,14 @@ test "linkSystem: linked and external" {
     const url_str = try allocator.dupe(u8, "https://users.internal/api/v1/42");
     try egress_urls_0.append(allocator, url_str);
 
-    var egress_hosts_0: std.ArrayList([]const u8) = .empty;
+    var egress_endpoints_0: std.ArrayList([]const u8) = .empty;
     const host_str = try allocator.dupe(u8, "users.internal");
-    try egress_hosts_0.append(allocator, host_str);
+    try egress_endpoints_0.append(allocator, host_str);
 
     const path0 = try allocator.dupe(u8, "gateway.ts");
     contracts[0] = handler_contract.emptyContract(path0);
     contracts[0].egress.urls = egress_urls_0;
-    contracts[0].egress.hosts = egress_hosts_0;
+    contracts[0].egress.endpoints = egress_endpoints_0;
 
     // Contract 1 (users): serves route /api/v1/:id
     const path1 = try allocator.dupe(u8, "users.ts");
@@ -2562,12 +2562,12 @@ test "linkSystem: unlinked route" {
     var egress_urls: std.ArrayList([]const u8) = .empty;
     try egress_urls.append(allocator, try allocator.dupe(u8, "https://users.internal/wrong/path"));
 
-    var egress_hosts: std.ArrayList([]const u8) = .empty;
-    try egress_hosts.append(allocator, try allocator.dupe(u8, "users.internal"));
+    var egress_endpoints: std.ArrayList([]const u8) = .empty;
+    try egress_endpoints.append(allocator, try allocator.dupe(u8, "users.internal"));
 
     contracts[0] = handler_contract.emptyContract(try allocator.dupe(u8, "gateway.ts"));
     contracts[0].egress.urls = egress_urls;
-    contracts[0].egress.hosts = egress_hosts;
+    contracts[0].egress.endpoints = egress_endpoints;
 
     // Users serves /api/v1/:id only
     contracts[1] = handler_contract.emptyContract(try allocator.dupe(u8, "users.ts"));
@@ -2617,12 +2617,12 @@ test "linkSystem: mixed literal and dynamic fetches keep proof partial" {
     var egress_urls: std.ArrayList([]const u8) = .empty;
     try egress_urls.append(allocator, try allocator.dupe(u8, "https://users.internal/api/v1/42"));
 
-    var egress_hosts: std.ArrayList([]const u8) = .empty;
-    try egress_hosts.append(allocator, try allocator.dupe(u8, "users.internal"));
+    var egress_endpoints: std.ArrayList([]const u8) = .empty;
+    try egress_endpoints.append(allocator, try allocator.dupe(u8, "users.internal"));
 
     contracts[0] = handler_contract.emptyContract(try allocator.dupe(u8, "gateway.ts"));
     contracts[0].egress.urls = egress_urls;
-    contracts[0].egress.hosts = egress_hosts;
+    contracts[0].egress.endpoints = egress_endpoints;
     contracts[0].egress.dynamic = true;
     contracts[0].verification = .{
         .exhaustive_returns = true,
@@ -2680,12 +2680,12 @@ test "linkSystem: longest baseUrl prefix wins on shared host" {
     var egress_urls: std.ArrayList([]const u8) = .empty;
     try egress_urls.append(allocator, try allocator.dupe(u8, "https://api.internal/users/123"));
 
-    var egress_hosts: std.ArrayList([]const u8) = .empty;
-    try egress_hosts.append(allocator, try allocator.dupe(u8, "api.internal"));
+    var egress_endpoints: std.ArrayList([]const u8) = .empty;
+    try egress_endpoints.append(allocator, try allocator.dupe(u8, "api.internal"));
 
     contracts[0] = handler_contract.emptyContract(try allocator.dupe(u8, "gateway.ts"));
     contracts[0].egress.urls = egress_urls;
-    contracts[0].egress.hosts = egress_hosts;
+    contracts[0].egress.endpoints = egress_endpoints;
 
     contracts[1] = handler_contract.emptyContract(try allocator.dupe(u8, "users.ts"));
     var user_behaviors: std.ArrayList(BehaviorPath) = .empty;

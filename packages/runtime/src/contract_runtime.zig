@@ -667,7 +667,7 @@ test "parseContractJson minimal" {
         \\  "modules": [],
         \\  "functions": {},
         \\  "env": {"literal": ["JWT_SECRET", "DB_URL"], "dynamic": false},
-        \\  "egress": {"hosts": [], "dynamic": false},
+        \\  "egress": {"endpoints": [], "dynamic": false},
         \\  "serviceCalls": [],
         \\  "cache": {"namespaces": [], "dynamic": false},
         \\  "sql": {"backend": "sqlite", "queries": [], "dynamic": false},
@@ -732,7 +732,7 @@ test "parseContractJson with properties and routes" {
         \\  "modules": [],
         \\  "functions": {},
         \\  "env": {"literal": ["API_KEY"], "dynamic": true},
-        \\  "egress": {"hosts": ["api.stripe.com"], "dynamic": false},
+        \\  "egress": {"endpoints": ["api.stripe.com"], "dynamic": false},
         \\  "serviceCalls": [],
         \\  "cache": {"namespaces": [], "dynamic": false},
         \\  "sql": {"backend": "sqlite", "queries": [], "dynamic": false},
@@ -826,7 +826,7 @@ fn parseContractFailingAlloc(allocator: std.mem.Allocator) !void {
         \\  "modules": ["zttp:env", "zttp:crypto"],
         \\  "functions": {},
         \\  "env": {"literal": ["JWT_SECRET", "DB_URL", "API_KEY"], "dynamic": false},
-        \\  "egress": {"hosts": [], "dynamic": false},
+        \\  "egress": {"endpoints": [], "dynamic": false},
         \\  "serviceCalls": [],
         \\  "cache": {"namespaces": [], "dynamic": false},
         \\  "sql": {"backend": "sqlite", "queries": [], "dynamic": false},
@@ -944,7 +944,7 @@ test "fromHandlerContract converts properties and env vars" {
             .dynamic = false,
         },
         .egress = .{
-            .hosts = .empty,
+            .endpoints = .empty,
             .urls = .empty,
             .dynamic = false,
         },
@@ -1035,7 +1035,7 @@ test "contract wire format round-trips between writer and runtime parser" {
         .modules = .empty,
         .functions = .empty,
         .env = .{ .literal = .empty, .dynamic = false },
-        .egress = .{ .hosts = .empty, .urls = .empty, .dynamic = false },
+        .egress = .{ .endpoints = .empty, .urls = .empty, .dynamic = false },
         .cache = .{ .namespaces = .empty, .dynamic = false },
         .sql = .{ .backend = "sqlite", .queries = .empty, .dynamic = false },
         .durable = .{
@@ -1120,7 +1120,7 @@ test "parseContractJson reads sandbox block" {
         \\    "capabilityHash": "0000000000000000000000000000000000000000000000000000000000000000"
         \\  },
         \\  "env": {"literal": [], "dynamic": false},
-        \\  "egress": {"hosts": [], "dynamic": false},
+        \\  "egress": {"endpoints": [], "dynamic": false},
         \\  "api": {"routes": [], "routesDynamic": false}
         \\}
     ;
@@ -1144,7 +1144,7 @@ test "validate promotes Raw to Validated when integrity checks pass" {
         \\  "handler": {"path": "handler.ts", "line": 1, "column": 0},
         \\  "modules": [],
         \\  "env": {"literal": [], "dynamic": false},
-        \\  "egress": {"hosts": [], "dynamic": false},
+        \\  "egress": {"endpoints": [], "dynamic": false},
         \\  "api": {"routes": [], "routesDynamic": false}
         \\}
     ;
@@ -1164,7 +1164,7 @@ test "validate rejects artifact-hash drift" {
         \\  "handler": {"path": "handler.ts", "line": 1, "column": 0},
         \\  "modules": [],
         \\  "env": {"literal": [], "dynamic": false},
-        \\  "egress": {"hosts": [], "dynamic": false},
+        \\  "egress": {"endpoints": [], "dynamic": false},
         \\  "api": {"routes": [], "routesDynamic": false}
         \\}
     ;
@@ -1185,7 +1185,7 @@ test "parseContractJson returns null capabilities when sandbox block is absent" 
         \\  "handler": {"path": "handler.ts", "line": 1, "column": 0},
         \\  "modules": [],
         \\  "env": {"literal": [], "dynamic": false},
-        \\  "egress": {"hosts": [], "dynamic": false},
+        \\  "egress": {"endpoints": [], "dynamic": false},
         \\  "api": {"routes": [], "routesDynamic": false}
         \\}
     ;
@@ -1543,7 +1543,7 @@ test "parseContractJson: errdefer ladders close every failure path" {
         \\  "modules": [],
         \\  "functions": {},
         \\  "env": {"literal": ["JWT_SECRET", "DB_URL"], "dynamic": false},
-        \\  "egress": {"hosts": [], "dynamic": false},
+        \\  "egress": {"endpoints": [], "dynamic": false},
         \\  "serviceCalls": [],
         \\  "cache": {"namespaces": [], "dynamic": false},
         \\  "sql": {"backend": "sqlite", "queries": [], "dynamic": false},
@@ -1599,7 +1599,7 @@ test "a stamped contract with no sandbox block still validates" {
         \\  "handler": {"path": "handler.ts", "line": 1, "column": 0},
         \\  "modules": [],
         \\  "env": {"literal": [], "dynamic": false},
-        \\  "egress": {"hosts": [], "dynamic": false},
+        \\  "egress": {"endpoints": [], "dynamic": false},
         \\  "api": {"routes": [], "routesDynamic": false}
         \\}
     ;
@@ -1620,7 +1620,7 @@ test "runtime validation refuses missing or stale source identity" {
         \\  "handler": {"path": "handler.ts", "line": 1, "column": 0},
         \\  "modules": [],
         \\  "env": {"literal": [], "dynamic": false},
-        \\  "egress": {"hosts": [], "dynamic": false},
+        \\  "egress": {"endpoints": [], "dynamic": false},
         \\  "api": {"routes": [], "routesDynamic": false}
         \\}
     ;
@@ -1647,7 +1647,7 @@ test "runtime validation binds the TSX frontend identity" {
         \\  "handler": {"path": "handler.tsx", "line": 1, "column": 0},
         \\  "modules": [],
         \\  "env": {"literal": [], "dynamic": false},
-        \\  "egress": {"hosts": [], "dynamic": false},
+        \\  "egress": {"endpoints": [], "dynamic": false},
         \\  "api": {"routes": [], "routesDynamic": false}
         \\}
     ;
@@ -1680,7 +1680,7 @@ test "the module list survives the read" {
         \\  "handler": {"path": "handler.ts", "line": 1, "column": 0},
         \\  "modules": ["zttp:crypto", "zttp:auth"],
         \\  "env": {"literal": [], "dynamic": false},
-        \\  "egress": {"hosts": [], "dynamic": false},
+        \\  "egress": {"endpoints": [], "dynamic": false},
         \\  "api": {"routes": [], "routesDynamic": false}
         \\}
     ;
@@ -1706,7 +1706,7 @@ test "a contract with no properties block proves nothing" {
         \\  "handler": {"path": "handler.ts", "line": 1, "column": 0},
         \\  "modules": [],
         \\  "env": {"literal": [], "dynamic": false},
-        \\  "egress": {"hosts": [], "dynamic": false},
+        \\  "egress": {"endpoints": [], "dynamic": false},
         \\  "api": {"routes": [], "routesDynamic": false}
         \\}
     ;

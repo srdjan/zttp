@@ -53,7 +53,7 @@ Every precompilation extracts a contract from the handler's IR. Add
     "zttp:scope": ["scope", "ensure"]
   },
   "env": { "literal": ["JWT_SECRET"], "dynamic": false },
-  "egress": { "hosts": ["api.example.com"], "dynamic": false },
+  "egress": { "endpoints": ["api.example.com"], "dynamic": false },
   "cache": { "namespaces": ["sessions"], "dynamic": false },
   "scope": {
     "used": true, "names": ["request", "enrich-user"],
@@ -262,7 +262,10 @@ graph before validation.
 ```json
 {
   "env":    { "allow": ["JWT_SECRET"] },
-  "egress": { "allow_hosts": ["api.example.com"] },
+  "egress": {
+    "allow_endpoints": ["https://api.example.com"],
+    "allow_address_scopes": ["public"]
+  },
   "cache":  { "allow_namespaces": ["sessions"] },
   "sql":    { "allow_queries": ["listTodos"] }
 }
@@ -271,6 +274,29 @@ graph before validation.
 Omit a section to leave that capability unrestricted. If a section is
 present, dynamic access in that category is rejected because zttp
 cannot fully enumerate it.
+
+### Egress names endpoints, not hosts
+
+An egress entry is a destination: `scheme://host:port`. A missing port is the
+scheme's default, so `https://api.example.com` and
+`https://api.example.com:443` are the same entry, and case and one trailing dot
+on the host are folded. `https://api.example.com` and
+`http://api.example.com:8080` are two different servers and need two entries.
+A value the rule cannot canonicalize - a bare host, a scheme outside `http` and
+`https`, or one carrying userinfo such as
+`https://allowed.example@evil.example` - is a policy error rather than an entry
+that would match nothing.
+
+`allow_address_scopes` says which addresses those names may resolve to:
+`public`, `private`, `loopback`, `link_local`, `multicast`, `unspecified`. A
+section that names endpoints and no scopes permits no connection. The list
+exists because a name is not an address: a permitted host that resolves to
+`169.254.169.254` reaches the cloud metadata service, and only the scope says
+whether that is allowed.
+
+`egress.allow_hosts` was the previous key. It is refused with a message naming
+its replacement rather than read, because a host list cannot say which scheme
+or port it meant.
 
 Projects can apply the same policy during local analysis by naming the file in
 `zttp.json`. The path is resolved relative to the manifest:

@@ -140,7 +140,7 @@ pub fn initMergedContract(allocator: std.mem.Allocator, handler_path: []const u8
         .modules = .empty,
         .functions = .empty,
         .env = .{ .literal = .empty, .dynamic = false },
-        .egress = .{ .hosts = .empty, .dynamic = false },
+        .egress = .{ .endpoints = .empty, .dynamic = false },
         .cache = .{ .namespaces = .empty, .dynamic = false },
         .sql = .{ .backend = "sqlite", .queries = .empty, .dynamic = false },
         .durable = .{
@@ -208,8 +208,8 @@ pub fn mergeModuleContract(
     }
     target.env.dynamic = target.env.dynamic or source.env.dynamic;
 
-    for (source.egress.hosts.items) |host| {
-        try appendUniqueString(allocator, &target.egress.hosts, host, true);
+    for (source.egress.endpoints.items) |host| {
+        try appendUniqueString(allocator, &target.egress.endpoints, host, true);
     }
     target.egress.dynamic = target.egress.dynamic or source.egress.dynamic;
 
@@ -413,7 +413,7 @@ test "parseFromJson minimal" {
         \\  "modules": [],
         \\  "functions": {},
         \\  "env": { "literal": [], "dynamic": false },
-        \\  "egress": { "hosts": [], "dynamic": false },
+        \\  "egress": { "endpoints": [], "dynamic": false },
         \\  "cache": { "namespaces": [], "dynamic": false },
         \\  "api": {},
         \\  "verification": null,
@@ -445,7 +445,7 @@ test "parseFromJson with data" {
         \\  "modules": ["zttp:env"],
         \\  "functions": {},
         \\  "env": { "literal": ["JWT_SECRET", "API_KEY"], "dynamic": false },
-        \\  "egress": { "hosts": ["api.stripe.com"], "dynamic": true },
+        \\  "egress": { "endpoints": ["api.stripe.com"], "dynamic": true },
         \\  "cache": { "namespaces": ["sessions"], "dynamic": false },
         \\  "api": {},
         \\  "verification": {
@@ -472,7 +472,7 @@ test "parseFromJson with data" {
     try std.testing.expectEqualStrings("JWT_SECRET", contract.env.literal.items[0]);
     try std.testing.expectEqualStrings("API_KEY", contract.env.literal.items[1]);
     try std.testing.expect(!contract.env.dynamic);
-    try std.testing.expectEqual(@as(usize, 1), contract.egress.hosts.items.len);
+    try std.testing.expectEqual(@as(usize, 1), contract.egress.endpoints.items.len);
     try std.testing.expect(contract.egress.dynamic);
     try std.testing.expectEqual(@as(usize, 1), contract.cache.namespaces.items.len);
     try std.testing.expect(!contract.durable.used);
@@ -521,7 +521,7 @@ test "parseFromJson roundtrip" {
         .modules = .empty,
         .functions = .empty,
         .env = .{ .literal = env_lit, .dynamic = true },
-        .egress = .{ .hosts = .empty, .dynamic = false },
+        .egress = .{ .endpoints = .empty, .dynamic = false },
         .service_calls = service_calls,
         .workflow_calls = workflow_calls,
         .cache = .{ .namespaces = .empty, .dynamic = false },
@@ -618,7 +618,7 @@ test "parseFromJson roundtrip preserves declared specs and diagnostics" {
         .modules = .empty,
         .functions = .empty,
         .env = .{ .literal = .empty, .dynamic = false },
-        .egress = .{ .hosts = .empty, .dynamic = false },
+        .egress = .{ .endpoints = .empty, .dynamic = false },
         .cache = .{ .namespaces = .empty, .dynamic = false },
         .sql = emptySqlInfo(),
         .durable = .{
@@ -693,7 +693,7 @@ test "parseFromJson roundtrip preserves sagas" {
         .modules = .empty,
         .functions = .empty,
         .env = .{ .literal = .empty, .dynamic = false },
-        .egress = .{ .hosts = .empty, .dynamic = false },
+        .egress = .{ .endpoints = .empty, .dynamic = false },
         .cache = .{ .namespaces = .empty, .dynamic = false },
         .sql = emptySqlInfo(),
         .durable = .{
@@ -751,7 +751,7 @@ test "parseFromJson roundtrip preserves partner extensions section" {
     // partner-declared `payment_gateway` literal.
     var stripe_ext = contract_types.ExtensionContract{};
 
-    try stripe_ext.egress_hosts.append(allocator, try allocator.dupe(u8, "api.stripe.com"));
+    try stripe_ext.egress_endpoints.append(allocator, try allocator.dupe(u8, "api.stripe.com"));
 
     var payment_bucket = contract_types.ExtensionCategoryBucket{};
     try payment_bucket.literals.append(allocator, try allocator.dupe(u8, "card_charge"));
@@ -770,7 +770,7 @@ test "parseFromJson roundtrip preserves partner extensions section" {
         .modules = .empty,
         .functions = .empty,
         .env = .{ .literal = .empty, .dynamic = false },
-        .egress = .{ .hosts = .empty, .dynamic = false },
+        .egress = .{ .endpoints = .empty, .dynamic = false },
         .cache = .{ .namespaces = .empty, .dynamic = false },
         .sql = emptySqlInfo(),
         .durable = .{
@@ -802,8 +802,8 @@ test "parseFromJson roundtrip preserves partner extensions section" {
 
     try std.testing.expectEqual(@as(usize, 1), parsed.extensions.count());
     const parsed_stripe = parsed.extensions.getPtr("zttp-ext:stripe") orelse return error.MissingExtension;
-    try std.testing.expectEqual(@as(usize, 1), parsed_stripe.egress_hosts.items.len);
-    try std.testing.expectEqualStrings("api.stripe.com", parsed_stripe.egress_hosts.items[0]);
+    try std.testing.expectEqual(@as(usize, 1), parsed_stripe.egress_endpoints.items.len);
+    try std.testing.expectEqualStrings("api.stripe.com", parsed_stripe.egress_endpoints.items[0]);
 
     const parsed_bucket = parsed_stripe.categories.getPtr("payment_gateway") orelse return error.MissingCategory;
     try std.testing.expectEqual(@as(usize, 2), parsed_bucket.literals.items.len);
@@ -817,7 +817,7 @@ test "parseFromJson roundtrip preserves partner contract_section field" {
     var stripe_ext = contract_types.ExtensionContract{
         .contract_section = try allocator.dupe(u8, "stripe"),
     };
-    try stripe_ext.egress_hosts.append(allocator, try allocator.dupe(u8, "api.stripe.com"));
+    try stripe_ext.egress_endpoints.append(allocator, try allocator.dupe(u8, "api.stripe.com"));
 
     var payment_bucket = contract_types.ExtensionCategoryBucket{};
     try payment_bucket.literals.append(allocator, try allocator.dupe(u8, "card_charge"));
@@ -835,7 +835,7 @@ test "parseFromJson roundtrip preserves partner contract_section field" {
         .modules = .empty,
         .functions = .empty,
         .env = .{ .literal = .empty, .dynamic = false },
-        .egress = .{ .hosts = .empty, .dynamic = false },
+        .egress = .{ .endpoints = .empty, .dynamic = false },
         .cache = .{ .namespaces = .empty, .dynamic = false },
         .sql = emptySqlInfo(),
         .durable = .{
@@ -897,7 +897,7 @@ test "parseFromJson roundtrip preserves dynamic service call keys" {
         .modules = .empty,
         .functions = .empty,
         .env = .{ .literal = .empty, .dynamic = false },
-        .egress = .{ .hosts = .empty, .dynamic = false },
+        .egress = .{ .endpoints = .empty, .dynamic = false },
         .service_calls = service_calls,
         .cache = .{ .namespaces = .empty, .dynamic = false },
         .sql = emptySqlInfo(),
@@ -976,7 +976,7 @@ test "parseFromJson roundtrip preserves durable workflow" {
         .modules = .empty,
         .functions = .empty,
         .env = .{ .literal = .empty, .dynamic = false },
-        .egress = .{ .hosts = .empty, .dynamic = false },
+        .egress = .{ .endpoints = .empty, .dynamic = false },
         .service_calls = .empty,
         .cache = .{ .namespaces = .empty, .dynamic = false },
         .sql = emptySqlInfo(),
@@ -1042,7 +1042,7 @@ test "parseFromJson defaults missing durable workflow properties to false" {
         \\  "modules": [],
         \\  "functions": [],
         \\  "env": {"literal": [], "dynamic": false},
-        \\  "egress": {"hosts": [], "dynamic": false},
+        \\  "egress": {"endpoints": [], "dynamic": false},
         \\  "cache": {"namespaces": [], "dynamic": false},
         \\  "sql": {"backend": "sqlite", "queries": [], "dynamic": false},
         \\  "durable": {
@@ -1132,7 +1132,7 @@ test "parseFromJson roundtrip preserves api route response schema" {
         .modules = .empty,
         .functions = .empty,
         .env = .{ .literal = .empty, .dynamic = false },
-        .egress = .{ .hosts = .empty, .dynamic = false },
+        .egress = .{ .endpoints = .empty, .dynamic = false },
         .cache = .{ .namespaces = .empty, .dynamic = false },
         .sql = emptySqlInfo(),
         .durable = .{
@@ -1215,7 +1215,7 @@ test "writeContractJson minimal" {
         .modules = .empty,
         .functions = .empty,
         .env = .{ .literal = .empty, .dynamic = false },
-        .egress = .{ .hosts = .empty, .dynamic = false },
+        .egress = .{ .endpoints = .empty, .dynamic = false },
         .cache = .{ .namespaces = .empty, .dynamic = false },
         .sql = emptySqlInfo(),
         .durable = .{
@@ -1309,7 +1309,7 @@ test "writeContractJson with data" {
         .modules = modules,
         .functions = functions,
         .env = .{ .literal = env_lit, .dynamic = false },
-        .egress = .{ .hosts = hosts, .dynamic = true },
+        .egress = .{ .endpoints = hosts, .dynamic = true },
         .cache = .{ .namespaces = namespaces, .dynamic = false },
         .sql = emptySqlInfo(),
         .durable = .{
@@ -1372,7 +1372,7 @@ test "behaviors serialization roundtrip" {
         \\  "modules": [],
         \\  "functions": {},
         \\  "env": { "literal": [], "dynamic": false },
-        \\  "egress": { "hosts": [], "dynamic": false },
+        \\  "egress": { "endpoints": [], "dynamic": false },
         \\  "cache": { "namespaces": [], "dynamic": false },
         \\  "api": {},
         \\  "verification": null,
@@ -1513,7 +1513,7 @@ test "contract without costEnvelope parses with null envelope (back-compat)" {
         \\  "modules": [],
         \\  "functions": {},
         \\  "env": { "literal": [], "dynamic": false },
-        \\  "egress": { "hosts": [], "dynamic": false },
+        \\  "egress": { "endpoints": [], "dynamic": false },
         \\  "cache": { "namespaces": [], "dynamic": false },
         \\  "api": {},
         \\  "verification": null,
@@ -1538,7 +1538,7 @@ test "unknown sibling keys around costEnvelope are skipped" {
         \\  "modules": [],
         \\  "functions": {},
         \\  "env": { "literal": [], "dynamic": false },
-        \\  "egress": { "hosts": [], "dynamic": false },
+        \\  "egress": { "endpoints": [], "dynamic": false },
         \\  "cache": { "namespaces": [], "dynamic": false },
         \\  "api": {},
         \\  "verification": null,
@@ -1606,7 +1606,7 @@ test "intent assertions roundtrip through writer and parser" {
         .modules = .empty,
         .functions = .empty,
         .env = .{ .literal = .empty, .dynamic = false },
-        .egress = .{ .hosts = .empty, .dynamic = false },
+        .egress = .{ .endpoints = .empty, .dynamic = false },
         .cache = .{ .namespaces = .empty, .dynamic = false },
         .sql = emptySqlInfo(),
         .durable = .{
@@ -1682,7 +1682,7 @@ test "intent dynamic flag roundtrips and assertions empty" {
         \\  "modules": [],
         \\  "functions": {},
         \\  "env": { "literal": [], "dynamic": false },
-        \\  "egress": { "hosts": [], "dynamic": false },
+        \\  "egress": { "endpoints": [], "dynamic": false },
         \\  "cache": { "namespaces": [], "dynamic": false },
         \\  "api": {},
         \\  "verification": null,
@@ -1709,7 +1709,7 @@ test "intent absent roundtrips as null" {
         .modules = .empty,
         .functions = .empty,
         .env = .{ .literal = .empty, .dynamic = false },
-        .egress = .{ .hosts = .empty, .dynamic = false },
+        .egress = .{ .endpoints = .empty, .dynamic = false },
         .cache = .{ .namespaces = .empty, .dynamic = false },
         .sql = emptySqlInfo(),
         .durable = .{
@@ -1756,7 +1756,7 @@ test "sandbox block roundtrips through writeContractJson and parseFromJson" {
         .modules = modules,
         .functions = .empty,
         .env = .{ .literal = .empty, .dynamic = false },
-        .egress = .{ .hosts = .empty, .dynamic = false },
+        .egress = .{ .endpoints = .empty, .dynamic = false },
         .cache = .{ .namespaces = .empty, .dynamic = false },
         .sql = emptySqlInfo(),
         .durable = .{

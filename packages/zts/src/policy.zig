@@ -111,7 +111,10 @@ pub const LocalPolicyChecker = struct {
             .cache_read, .cache_write => self.runtime_policy.allowsCacheNamespace(id),
             .db_read => self.runtime_policy.allowsSqlQuery(id),
             .db_write => self.runtime_policy.allowsSqlWrite(id),
-            .http_outbound => self.runtime_policy.allowsEgressHost(id),
+            // The resource for an outbound request is the endpoint, normalized
+            // by the caller. This checker compares; it does not canonicalize,
+            // so a value that arrives unnormalized matches nothing and denies.
+            .http_outbound => self.runtime_policy.allowsEgressEndpoint(id),
         };
 
         return if (allowed) .allow else .{ .deny = .not_in_allowlist };
@@ -336,20 +339,27 @@ test "golden fixtures match expected results" {
     }
 }
 
-test "http.outbound host allowlist is case-insensitive" {
+test "http.outbound is decided on the endpoint, not the host" {
     const policy = RuntimePolicy{
-        .egress = .{ .enabled = true, .values = &[_][]const u8{"API.STRIPE.COM"} },
+        .egress = .{ .enabled = true, .values = &[_][]const u8{"https://api.stripe.com:443"} },
     };
     const checker = LocalPolicyChecker.init(&policy);
-    const lower = checker.check(.{
+    const allowed = checker.check(.{
         .action = .http_outbound,
-        .resource = .{ .kind = "host", .id = "api.stripe.com" },
+        .resource = .{ .kind = resource_kind_host, .id = "https://api.stripe.com:443" },
     });
-    try std.testing.expectEqual(PolicyResult.allow, lower);
+    try std.testing.expectEqual(PolicyResult.allow, allowed);
+
+    // The same host under another scheme or port is another server.
+    const other_scheme = checker.check(.{
+        .action = .http_outbound,
+        .resource = .{ .kind = resource_kind_host, .id = "http://api.stripe.com:80" },
+    });
+    try std.testing.expectEqual(DenyReason.not_in_allowlist, other_scheme.deny);
 
     const other = checker.check(.{
         .action = .http_outbound,
-        .resource = .{ .kind = "host", .id = "evil.example.com" },
+        .resource = .{ .kind = resource_kind_host, .id = "https://evil.example.com:443" },
     });
     try std.testing.expectEqual(DenyReason.not_in_allowlist, other.deny);
 }

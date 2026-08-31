@@ -527,11 +527,6 @@ fn parseDeps(allocator: std.mem.Allocator, data: []const u8) ![]const []const u8
 // Canonicalizing here also makes the same policy serialize to the same bytes,
 // which is what the certificate identity commits to.
 
-/// No resolved-address scope is permitted. The egress guard reads scopes from
-/// the policy file once egress entries become endpoints; until then an empty
-/// set is the honest value, and an empty set denies.
-const policy_scopes_none: u8 = 0;
-
 pub const PolicyFormatError = error{
     PolicyTooManyEntries,
     PolicyEntryTooLong,
@@ -554,7 +549,9 @@ pub fn serializePolicy(allocator: std.mem.Allocator, policy: *const zts.RuntimeP
     // db.read/db.write split the contract proved (not a flat, operation-agnostic
     // name list).
     try serializeSqlAllowList(&buf, allocator, policy.sql);
-    try buf.append(allocator, policy_scopes_none);
+    // Which resolved-address scopes a connection may land in. Empty denies all
+    // of them, which is what a policy that named endpoints and no scopes said.
+    try buf.append(allocator, policy.egress_scopes.bits);
 
     return buf.toOwnedSlice(allocator);
 }
@@ -660,13 +657,14 @@ fn deserializePolicy(
     // bytes for used to come back disabled, and a disabled section admits every
     // value, so a truncated policy read as a permissive one.
     if (pos >= data.len) return error.InvalidPayload;
-    if (data[pos] != policy_scopes_none) return error.InvalidPayload;
+    const scopes = zts.endpoint.ScopeSet.fromWire(data[pos]) orelse return error.InvalidPayload;
     pos += 1;
     if (pos != data.len) return error.InvalidPayload;
 
     return .{
         .env = env,
         .egress = egress,
+        .egress_scopes = scopes,
         .cache = cache,
         .sql = sql,
     };
@@ -1185,7 +1183,7 @@ test "roundtrip: payload policy with populated allow lists" {
     };
     const policy = zts.RuntimePolicy{
         .env = .{ .enabled = true, .values = &[_][]const u8{ "API_KEY", "DB_URL" } },
-        .egress = .{ .enabled = true, .values = &[_][]const u8{"api.stripe.com"} },
+        .egress = .{ .enabled = true, .values = &[_][]const u8{"https://api.stripe.com:443"} },
         .cache = .{ .enabled = true, .values = &[_][]const u8{"sessions"} },
         .sql = .{ .enabled = true, .queries = &sql_queries },
     };
@@ -1213,8 +1211,8 @@ test "roundtrip: payload policy with populated allow lists" {
     try std.testing.expect(parsed.policy.allowsEnv("API_KEY"));
     try std.testing.expect(parsed.policy.allowsEnv("DB_URL"));
     try std.testing.expect(!parsed.policy.allowsEnv("OTHER"));
-    try std.testing.expect(parsed.policy.allowsEgressHost("api.stripe.com"));
-    try std.testing.expect(!parsed.policy.allowsEgressHost("evil.example"));
+    try std.testing.expect(parsed.policy.allowsEgressEndpoint("https://api.stripe.com:443"));
+    try std.testing.expect(!parsed.policy.allowsEgressEndpoint("https://evil.example:443"));
     try std.testing.expect(parsed.policy.allowsCacheNamespace("sessions"));
     try std.testing.expect(!parsed.policy.allowsCacheNamespace("other"));
     // The read/write split must survive serialization: a read-only query is

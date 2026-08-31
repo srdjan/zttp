@@ -805,7 +805,7 @@ fn buildSurfacePane(
     }
 
     try appendStringSection(allocator, &lines, "env", card.current.env_keys);
-    try appendStringSection(allocator, &lines, "egress", card.current.egress_hosts);
+    try appendStringSection(allocator, &lines, "egress", card.current.egress_endpoints);
     try appendStringSection(allocator, &lines, "caches", card.current.cache_namespaces);
     try appendStringSection(allocator, &lines, "capabilities", card.current.capabilities);
 
@@ -926,7 +926,7 @@ fn buildTestFacts(allocator: std.mem.Allocator) !ReviewFacts {
             arr[1] = try allocator.dupe(u8, "PORT");
             break :blk arr;
         },
-        .egress_hosts = blk: {
+        .egress_endpoints = blk: {
             var arr = try allocator.alloc([]const u8, 1);
             arr[0] = try allocator.dupe(u8, "api.example.com");
             break :blk arr;

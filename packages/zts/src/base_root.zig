@@ -41,6 +41,10 @@ pub const module_slots = @import("module_slots.zig");
 /// for a namespaced export.
 pub const module_specifier = @import("module_specifier.zig");
 
+/// The canonical egress endpoint - `scheme://host:port` - and the resolved
+/// address scopes a connection may land in.
+pub const endpoint = @import("endpoint.zig");
+
 /// Whether a request path matches a route pattern, parameter segments included.
 pub const route_match = @import("route_match.zig");
 

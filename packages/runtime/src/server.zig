@@ -1397,6 +1397,7 @@ fn denyAllDevPolicy() engine.RuntimePolicy {
     return .{
         .env = .{ .enabled = true, .values = &.{} },
         .egress = .{ .enabled = true, .values = &.{} },
+        .egress_scopes = .{},
         .cache = .{ .enabled = true, .values = &.{} },
         .sql = .{ .enabled = true, .values = &.{}, .queries = &.{} },
     };

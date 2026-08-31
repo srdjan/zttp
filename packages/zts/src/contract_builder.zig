@@ -12,6 +12,7 @@ const std = @import("std");
 const handler_contract = @import("zts-contracts").handler_contract;
 const contract_types = @import("zts-contracts").contract_types;
 const api_schema = @import("api_schema.zig");
+const endpoint = @import("zts-base").endpoint;
 const known_globals = @import("zts-base").known_globals;
 
 /// Display form for a varying read, derived from the shared list so a new
@@ -83,7 +84,19 @@ const computeCapabilityMatrix = @import("zts-engine").builtin_modules.computeCap
 
 const containsString = json_utils.containsString;
 const writeJsonString = json_utils.writeJsonString;
-const extractHost = handler_contract.extractHost;
+/// Rewrite one extracted literal before it is recorded. The output buffer is
+/// the caller's, because a canonical form is built rather than found: an
+/// endpoint's default port is not a substring of the URL it came from.
+/// An empty result means the rule refused the literal.
+const Transform = *const fn (raw: []const u8, out: []u8) []const u8;
+
+/// The `extract_host` transform, which now yields an endpoint. A partner
+/// manifest that declares it is naming a destination, and a destination is
+/// `scheme://host:port` - the same host under another scheme or port is
+/// another server. A literal the rule cannot canonicalize yields nothing.
+fn normalizeEndpoint(raw: []const u8, out: []u8) []const u8 {
+    return endpoint.normalize(raw, out) catch "";
+}
 
 /// Type annotations are recorded before TSX lowering, while IR source
 /// locations come from the lowered program. Resolve the named top-level
@@ -131,7 +144,7 @@ pub const ContractBuilder = struct {
     // Collected data (all strings are duped/owned)
     env_literals: std.ArrayList([]const u8),
     env_dynamic: bool,
-    egress_hosts: std.ArrayList([]const u8),
+    egress_endpoints: std.ArrayList([]const u8),
     egress_urls: std.ArrayList([]const u8),
     egress_dynamic: bool,
     service_calls: std.ArrayList(ServiceCallInfo),
@@ -236,7 +249,7 @@ pub const ContractBuilder = struct {
             .owned_facts = .{ .allocator = allocator },
             .env_literals = .empty,
             .env_dynamic = false,
-            .egress_hosts = .empty,
+            .egress_endpoints = .empty,
             .egress_urls = .empty,
             .egress_dynamic = false,
             .service_calls = .empty,
@@ -301,8 +314,8 @@ pub const ContractBuilder = struct {
         self.extensions.deinit(self.allocator);
         for (self.env_literals.items) |s| self.allocator.free(s);
         self.env_literals.deinit(self.allocator);
-        for (self.egress_hosts.items) |s| self.allocator.free(s);
-        self.egress_hosts.deinit(self.allocator);
+        for (self.egress_endpoints.items) |s| self.allocator.free(s);
+        self.egress_endpoints.deinit(self.allocator);
         for (self.egress_urls.items) |s| self.allocator.free(s);
         self.egress_urls.deinit(self.allocator);
         for (self.service_calls.items) |*call| call.deinit(self.allocator);
@@ -519,7 +532,7 @@ pub const ContractBuilder = struct {
                 .dynamic = self.env_dynamic,
             },
             .egress = .{
-                .hosts = self.egress_hosts,
+                .endpoints = self.egress_endpoints,
                 .urls = self.egress_urls,
                 .dynamic = self.egress_dynamic,
             },
@@ -602,7 +615,7 @@ pub const ContractBuilder = struct {
         modules_copy = .empty;
         functions_copy = .empty;
         self.env_literals = .empty;
-        self.egress_hosts = .empty;
+        self.egress_endpoints = .empty;
         self.egress_urls = .empty;
         self.service_calls = .empty;
         self.workflow_calls = .empty;
@@ -1454,7 +1467,7 @@ pub const ContractBuilder = struct {
                 if (binding.kind == .undeclared_global) {
                     const name = self.resolveAtomName(binding.name_atom) orelse continue;
                     if (std.mem.eql(u8, name, "fetchSync")) {
-                        try self.extractLiteralArg(call, .{ .list = &self.egress_hosts, .dynamic = &self.egress_dynamic }, &extractHost);
+                        try self.extractLiteralArg(call, .{ .list = &self.egress_endpoints, .dynamic = &self.egress_dynamic }, &normalizeEndpoint);
                         try self.extractLiteralArg(call, .{ .list = &self.egress_urls, .dynamic = &self.egress_dynamic }, null);
                         continue;
                     }
@@ -1497,9 +1510,9 @@ pub const ContractBuilder = struct {
                             // Generic: extract literal from arg N into category bucket
                             else => {
                                 if (self.getCategoryTarget(ext.category)) |target| {
-                                    const transform: ?*const fn ([]const u8) []const u8 =
+                                    const transform: ?Transform =
                                         if (ext.transform) |t| switch (t) {
-                                            .extract_host => &extractHost,
+                                            .extract_host => &normalizeEndpoint,
                                             .identity => null,
                                         } else null;
                                     try self.extractLiteralArgAt(call, ext.arg_position, target, transform);
@@ -1512,7 +1525,7 @@ pub const ContractBuilder = struct {
 
                 // Partner extractions route literals into the per-specifier
                 // extensions map. `fetch_host` rules also mirror into the
-                // top-level egress.hosts so runtime egress policy enforcement
+                // top-level egress.endpoints so runtime egress policy enforcement
                 // sees one uniform list.
                 for (self.factsRef().extension_bindings.items) |eb| {
                     if (eb.slot != binding.slot) continue;
@@ -1707,7 +1720,7 @@ pub const ContractBuilder = struct {
         self: *ContractBuilder,
         call: Node.CallExpr,
         target: CategoryTarget,
-        transform: ?*const fn ([]const u8) []const u8,
+        transform: ?Transform,
     ) !void {
         try self.extractLiteralArgAt(call, 0, target, transform);
     }
@@ -1715,7 +1728,7 @@ pub const ContractBuilder = struct {
     /// Apply one partner-declared extraction rule to a partner-module call
     /// site. Routes a literal argument into the per-specifier extensions
     /// store. `fetch_host` rules additionally mirror the host into the
-    /// top-level `egress_hosts` so runtime egress policy sees one uniform
+    /// top-level `egress_endpoints` so runtime egress policy sees one uniform
     /// list of allowed hosts.
     fn applyExtensionExtraction(
         self: *ContractBuilder,
@@ -1723,9 +1736,9 @@ pub const ContractBuilder = struct {
         specifier: []const u8,
         rule: module_manifest.ContractExtractionRule,
     ) !void {
-        const transform: ?*const fn ([]const u8) []const u8 =
+        const transform: ?Transform =
             if (rule.transform) |t| switch (t) {
-                .extract_host => &extractHost,
+                .extract_host => &normalizeEndpoint,
                 .identity => null,
             } else null;
 
@@ -1734,8 +1747,8 @@ pub const ContractBuilder = struct {
         switch (rule.category) {
             .fetch_host => {
                 // Per-extension copy AND top-level mirror.
-                try self.extractLiteralArgAt(call, rule.arg_position, .{ .list = &bucket.egress_hosts, .dynamic = &bucket.egress_dynamic }, transform);
-                try self.extractLiteralArgAt(call, rule.arg_position, .{ .list = &self.egress_hosts, .dynamic = &self.egress_dynamic }, transform);
+                try self.extractLiteralArgAt(call, rule.arg_position, .{ .list = &bucket.egress_endpoints, .dynamic = &bucket.egress_dynamic }, transform);
+                try self.extractLiteralArgAt(call, rule.arg_position, .{ .list = &self.egress_endpoints, .dynamic = &self.egress_dynamic }, transform);
                 // Mirror the full URL into egress_urls as well (matching the bare
                 // fetchSync path), so system_linker can resolve cross-handler
                 // internal calls made through the `zttp:fetch` module import -
@@ -1815,7 +1828,7 @@ pub const ContractBuilder = struct {
         call: Node.CallExpr,
         arg_pos: u8,
         target: CategoryTarget,
-        transform: ?*const fn ([]const u8) []const u8,
+        transform: ?Transform,
     ) !void {
         if (call.args_count <= arg_pos) return;
 
@@ -1831,10 +1844,16 @@ pub const ContractBuilder = struct {
 
         const str_idx = self.ir_view.getStringIdx(arg_idx) orelse return;
         const raw = self.ir_view.getString(str_idx) orelse return;
-        const value = if (transform) |t| t(raw) else raw;
+        var transformed: [endpoint.max_endpoint_bytes]u8 = undefined;
+        const value = if (transform) |t| t(raw, &transformed) else raw;
 
-        // Empty post-transform (e.g. extractHost on a URL with no host)
-        // is also a dynamic signal.
+        // Empty after the transform is a literal the rule could not
+        // canonicalize - a URL with no host, a scheme outside the set, one
+        // carrying userinfo. The category becomes dynamic, which under the
+        // fail-closed projection means the runtime reaches only what the
+        // configured policy names. Recording the raw literal instead would put
+        // a string in the allowlist that the sink, which normalizes, can never
+        // match.
         if (value.len == 0) {
             target.dynamic.* = true;
             return;
@@ -1878,7 +1897,7 @@ pub const ContractBuilder = struct {
             .durable_signal => .{ .list = &self.durable_signal_names, .dynamic = &self.durable_signal_dynamic },
             .durable_producer_key => .{ .list = &self.durable_producer_key_literals, .dynamic = &self.durable_producer_key_dynamic },
             .request_schema => .{ .list = &self.api_request_schema_refs, .dynamic = &self.api_request_schema_dynamic },
-            .fetch_host => .{ .list = &self.egress_hosts, .dynamic = &self.egress_dynamic },
+            .fetch_host => .{ .list = &self.egress_endpoints, .dynamic = &self.egress_dynamic },
             // Custom categories are dispatched directly, not via generic target
             .rate_limit_key => .{ .list = &self.rate_limit_keys, .dynamic = &self.rate_limit_key_dynamic },
             .sql_registration, .schema_compile, .route_pattern, .service_call, .workflow_call, .cookie_name, .cors_origin => null,
@@ -4188,7 +4207,7 @@ pub const ContractBuilder = struct {
             }
         }
 
-        if (self.egress_hosts.items.len > 0 or self.egress_dynamic) summary.includeEgress();
+        if (self.egress_endpoints.items.len > 0 or self.egress_dynamic) summary.includeEgress();
 
         return summary;
     }
@@ -5260,15 +5279,47 @@ test "partner manifest contractExtractions populate extensions section" {
 
     // Top-level egress mirrors the partner-declared fetch_host (shared-section
     // product decision: write to both).
-    try std.testing.expect(containsString(builder.egress_hosts.items, "api.stripe.com"));
+    try std.testing.expect(containsString(builder.egress_endpoints.items, "api.stripe.com"));
 
     // Per-extension copy lives under extensions["zttp-ext:stripe"].
     const ext = builder.extensions.get("zttp-ext:stripe") orelse return error.TestExpectedExtension;
-    try std.testing.expect(containsString(ext.egress_hosts.items, "api.stripe.com"));
+    try std.testing.expect(containsString(ext.egress_endpoints.items, "api.stripe.com"));
 
     // The payment_gateway category bucket holds the second arg's literal.
     const bucket = ext.categories.get("payment_gateway") orelse return error.TestExpectedCategory;
     try std.testing.expect(containsString(bucket.literals.items, "card_charge"));
+}
+
+test "a literal url the endpoint rule refuses proves no destination" {
+    const allocator = std.testing.allocator;
+
+    // Userinfo is the case a host-only reader gets wrong: this URL's host is
+    // `evil.example`, and `allowed.example` is a username. The rule refuses the
+    // whole form rather than picking one of them, so nothing is recorded and
+    // the category goes dynamic - which, under the fail-closed projection,
+    // means the runtime reaches only what a configured policy names.
+    const source =
+        \\import { fetch } from "zttp:fetch";
+        \\const r = fetch("https://allowed.example@evil.example/v1", { headers: {} });
+    ;
+
+    var parser = try @import("zts-engine").parser.JsParser.init(allocator, source);
+    var atoms = atom_table.AtomTable.init(allocator);
+    defer atoms.deinit();
+    parser.setAtomTable(&atoms);
+    defer parser.deinit();
+
+    _ = try parser.parse();
+    const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+
+    var builder = ContractBuilder.init(allocator, ir_view, &atoms, null, null);
+    defer builder.deinit();
+
+    try builder.buildFacts();
+    try builder.scanCallSites();
+
+    try std.testing.expectEqual(@as(usize, 0), builder.egress_endpoints.items.len);
+    try std.testing.expect(builder.egress_dynamic);
 }
 
 test "builtin zttp:fetch extracts the Open-Meteo egress host from a literal url" {
@@ -5276,7 +5327,7 @@ test "builtin zttp:fetch extracts the Open-Meteo egress host from a literal url"
 
     // Mirrors examples/fetch/weather-forecasts.ts: a single keyless fetch to
     // Open-Meteo. The built-in fetch binding declares a fetch_host/extract_host
-    // contract extraction on arg 0, so the host must land in egress_hosts as the
+    // contract extraction on arg 0, so the host must land in egress_endpoints as the
     // sole proven host with dynamic=false. This locks the demo's headline proof.
     const source =
         \\import { fetch } from "zttp:fetch";
@@ -5298,9 +5349,11 @@ test "builtin zttp:fetch extracts the Open-Meteo egress host from a literal url"
     try builder.buildFacts();
     try builder.scanCallSites();
 
-    try std.testing.expect(containsString(builder.egress_hosts.items, "api.open-meteo.com"));
-    // Exactly one proven host, statically known (not dynamic).
-    try std.testing.expectEqual(@as(usize, 1), builder.egress_hosts.items.len);
+    // The contract records the destination, not the name: scheme and effective
+    // port are part of what the runtime will compare.
+    try std.testing.expect(containsString(builder.egress_endpoints.items, "https://api.open-meteo.com:443"));
+    // Exactly one proven endpoint, statically known (not dynamic).
+    try std.testing.expectEqual(@as(usize, 1), builder.egress_endpoints.items.len);
     try std.testing.expect(!builder.egress_dynamic);
 }
 

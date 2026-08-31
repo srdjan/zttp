@@ -1183,7 +1183,7 @@ test "writeTypeScriptClient renders typed route and skipped operation" {
         .modules = .empty,
         .functions = .empty,
         .env = .{ .literal = .empty, .dynamic = false },
-        .egress = .{ .hosts = .empty, .dynamic = false },
+        .egress = .{ .endpoints = .empty, .dynamic = false },
         .cache = .{ .namespaces = .empty, .dynamic = false },
         .sql = handler_contract.emptySqlInfo(),
         .durable = .{
@@ -1252,7 +1252,7 @@ test "writeTypeScriptClient emits inline response alias" {
         .modules = .empty,
         .functions = .empty,
         .env = .{ .literal = .empty, .dynamic = false },
-        .egress = .{ .hosts = .empty, .dynamic = false },
+        .egress = .{ .endpoints = .empty, .dynamic = false },
         .cache = .{ .namespaces = .empty, .dynamic = false },
         .sql = handler_contract.emptySqlInfo(),
         .durable = .{
@@ -1331,7 +1331,7 @@ test "writeTypeScriptClient emits discriminated union for multi-response route" 
         .modules = .empty,
         .functions = .empty,
         .env = .{ .literal = .empty, .dynamic = false },
-        .egress = .{ .hosts = .empty, .dynamic = false },
+        .egress = .{ .endpoints = .empty, .dynamic = false },
         .cache = .{ .namespaces = .empty, .dynamic = false },
         .sql = handler_contract.emptySqlInfo(),
         .durable = .{

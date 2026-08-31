@@ -179,7 +179,7 @@ fn minimalFacts(allocator: std.mem.Allocator, sha: []const u8) !review.ReviewFac
         .contract_sha = contract_sha,
         .proof_level = .none,
         .env_keys = try allocator.alloc([]const u8, 0),
-        .egress_hosts = try allocator.alloc([]const u8, 0),
+        .egress_endpoints = try allocator.alloc([]const u8, 0),
         .cache_namespaces = try allocator.alloc([]const u8, 0),
         .routes = try allocator.alloc(review.Route, 0),
         .capabilities = try allocator.alloc([]const u8, 0),
@@ -214,7 +214,7 @@ test "contractHashHex hashes the serialized contract JSON" {
         .modules = .empty,
         .functions = .empty,
         .env = .{ .literal = .empty, .dynamic = false },
-        .egress = .{ .hosts = .empty, .dynamic = false },
+        .egress = .{ .endpoints = .empty, .dynamic = false },
         .cache = .{ .namespaces = .empty, .dynamic = false },
         .sql = .{ .queries = .empty, .dynamic = false },
         .durable = .{

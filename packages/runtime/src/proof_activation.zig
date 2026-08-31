@@ -228,3 +228,78 @@ test "the producer and the consumer cap policy resources at the same numbers" {
         producer.max_lookup_comparisons,
     );
 }
+
+test "the kernel's endpoint rule and the base-tier one agree" {
+    // Two implementations of one rule, in packages that cannot import each
+    // other. This file imports both. A corpus of the forms the rule is meant to
+    // settle - scheme, case, trailing dot, explicit and implicit ports, paths,
+    // userinfo, brackets - run through each, and every answer must match,
+    // including which inputs are refused.
+    const corpus = [_][]const u8{
+        "https://api.example.com",
+        "https://api.example.com/",
+        "https://api.example.com/v1/orders?page=2#top",
+        "HTTPS://API.Example.COM.",
+        "https://api.example.com:443",
+        "https://api.example.com:8443",
+        "http://api.example.com",
+        "http://api.example.com:80",
+        "http://localhost:3000",
+        "https://[::1]",
+        "http://[::1]:8080",
+        "https://[::1",
+        "https://allowed.example@evil.example",
+        "api.example.com",
+        "ftp://api.example.com",
+        "file:///etc/passwd",
+        "https://",
+        "https:///path",
+        "https://api.example.com:0",
+        "https://api.example.com:70000",
+        "https://api.example.com:80x",
+        "https://api.example.com..",
+        "https://api example.com",
+        "",
+    };
+
+    for (corpus) |value| {
+        var producer_buf: [zts.endpoint.max_endpoint_bytes]u8 = undefined;
+        var kernel_buf: [pcc.residual.max_endpoint_bytes]u8 = undefined;
+        const producer = zts.endpoint.normalize(value, &producer_buf);
+        const kernel = pcc.residual.normalize(.endpoint_v1, value, &kernel_buf);
+
+        if (producer) |produced| {
+            const checked = kernel catch |err| {
+                std.debug.print(
+                    "base tier normalized '{s}' to '{s}'; the kernel refused it with {s}\n",
+                    .{ value, produced, @errorName(err) },
+                );
+                return error.TestUnexpectedResult;
+            };
+            try testing.expectEqualStrings(produced, checked);
+        } else |producer_error| {
+            if (kernel) |checked| {
+                std.debug.print(
+                    "base tier refused '{s}' with {s}; the kernel normalized it to '{s}'\n",
+                    .{ value, @errorName(producer_error), checked },
+                );
+                return error.TestUnexpectedResult;
+            } else |kernel_error| {
+                try testing.expectEqual(producer_error, kernel_error);
+            }
+        }
+    }
+}
+
+test "the producer and the consumer name address scopes with the same bits" {
+    inline for (@typeInfo(zts.endpoint.AddressScope).@"enum".fields) |field| {
+        const producer: zts.endpoint.AddressScope = @enumFromInt(field.value);
+        const consumer = pcc.residual.AddressScope.fromWire(field.value) orelse
+            return error.TestUnexpectedResult;
+        try testing.expectEqualStrings(producer.name(), consumer.name());
+        try testing.expectEqual(producer.bit(), consumer.bit());
+    }
+    // Neither side admits a bit the other does not model.
+    try testing.expect(zts.endpoint.ScopeSet.fromWire(0b1000_0000) == null);
+    try testing.expect(pcc.residual.ScopeSet.fromWire(0b1000_0000) == null);
+}

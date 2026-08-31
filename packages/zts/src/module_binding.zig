@@ -662,17 +662,22 @@ test "allowsSqlQueryForActiveModule denies queries outside the allowlist" {
 // Egress is unlike the other four policy categories: there is no
 // `allowsEgressHostForActiveModule` wrapper. Outbound `fetch` is a
 // runtime-initiated check (see zruntime.zig calling
-// `ctx.capability_policy.allowsEgressHost(host)`), not an SDK module
+// `ctx.capability_policy.allowsEgressEndpoint(endpoint)`), not an SDK module
 // call routed through the active Context scope, so it does not require
-// `.policy_check`. This test pins the raw `RuntimePolicy.allowsEgressHost`
-// semantics (case-insensitive host match). If a future change moves
-// outbound checks into an SDK module, the parity (a `*ForActiveModule`
-// wrapper, gated by `.policy_check`) must be added at the same time.
-test "allowsEgressHost is case-insensitive against the runtime policy" {
+// `.policy_check`. This test pins the raw `RuntimePolicy.allowsEgressEndpoint`
+// semantics (an exact match against an already-normalized endpoint). If a
+// future change moves outbound checks into an SDK module, the parity (a
+// `*ForActiveModule` wrapper, gated by `.policy_check`) must be added at the
+// same time.
+test "allowsEgressEndpoint compares the destination, not the name" {
     const policy: handler_policy.RuntimePolicy = .{
-        .egress = .{ .enabled = true, .values = &[_][]const u8{"api.example.com"} },
+        .egress = .{ .enabled = true, .values = &[_][]const u8{"https://api.example.com:443"} },
     };
-    try std.testing.expect(policy.allowsEgressHost("api.example.com"));
-    try std.testing.expect(policy.allowsEgressHost("API.EXAMPLE.COM"));
-    try std.testing.expect(!policy.allowsEgressHost("evil.example.com"));
+    try std.testing.expect(policy.allowsEgressEndpoint("https://api.example.com:443"));
+    // Case folding happened in `zts.endpoint`, before this comparison. A value
+    // that arrives unnormalized matches nothing, which denies.
+    try std.testing.expect(!policy.allowsEgressEndpoint("HTTPS://API.EXAMPLE.COM:443"));
+    // The same host under another scheme or port is another server.
+    try std.testing.expect(!policy.allowsEgressEndpoint("http://api.example.com:80"));
+    try std.testing.expect(!policy.allowsEgressEndpoint("https://evil.example.com:443"));
 }
