@@ -220,18 +220,24 @@ pub const max_endpoint_bytes: usize = 512;
 pub const max_policy_entries: u16 = 256;
 /// The serialized runtime policy the checker will read at all.
 pub const max_policy_bytes: usize = 256 * 1024;
-/// Key comparisons a category lookup may cost at `max_policy_entries`. Binary
-/// search over 256 sorted entries settles in eight.
-pub const max_lookup_comparisons: usize = 8;
+/// Key comparisons a category lookup may cost at `max_policy_entries`.
+///
+/// Nine, measured rather than taken from log2. A three-way binary search over
+/// 256 sorted entries probes nine times in the worst case, because the last
+/// probe lands on a range of one. Eight is the cost at 255 entries; reading
+/// log2 of the cap and writing it down here described a search over a smaller
+/// list than the cap admits.
+pub const max_lookup_comparisons: usize = 9;
 
 comptime {
-    // The bound is the property, not a hope about it. If the entry cap moves,
-    // this fails until the comparison cap moves with it.
-    var reach: usize = 1;
+    // The cost of the search, not the width of the cap. Halving the range
+    // until it is empty counts the probes a lookup pays when the answer sits
+    // at the last one or is not there at all.
+    var range: usize = max_policy_entries;
     var comparisons: usize = 0;
-    while (reach < max_policy_entries) : (comparisons += 1) reach *= 2;
-    if (comparisons > max_lookup_comparisons) {
-        @compileError("binary search over max_policy_entries exceeds max_lookup_comparisons");
+    while (range > 0) : (comparisons += 1) range /= 2;
+    if (comparisons != max_lookup_comparisons) {
+        @compileError("the comparison cap does not describe the search over max_policy_entries");
     }
 }
 
@@ -629,6 +635,8 @@ test "the catalog is non-empty and covers every guard kind" {
 }
 
 test "the lookup bound is a compile-time property, not a hope" {
-    try testing.expectEqual(@as(usize, 8), max_lookup_comparisons);
+    // Nine, not log2(256). `capability_policy` counts the probes a full
+    // category actually costs and compares them against this number.
+    try testing.expectEqual(@as(usize, 9), max_lookup_comparisons);
     try testing.expectEqual(@as(u16, 256), max_policy_entries);
 }

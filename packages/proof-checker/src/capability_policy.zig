@@ -93,6 +93,13 @@ pub const Section = struct {
     }
 
     pub fn find(self: Section, normalized: []const u8) DecodeError!?Entry {
+        var ignored: usize = 0;
+        return self.findCounting(normalized, &ignored);
+    }
+
+    /// `find`, reporting what it cost. The counter is how the comparison bound
+    /// is checked against the search rather than against a formula about it.
+    fn findCounting(self: Section, normalized: []const u8, comparisons: *usize) DecodeError!?Entry {
         if (!self.enabled) return null;
         if (self.count == 0) return null;
         var low: u16 = 0;
@@ -100,6 +107,7 @@ pub const Section = struct {
         while (low < high) {
             const mid = low + (high - low) / 2;
             const entry = try self.get(mid);
+            comparisons.* += 1;
             switch (std.mem.order(u8, entry.value, normalized)) {
                 .lt => low = mid + 1,
                 .gt => high = mid,
@@ -496,4 +504,23 @@ test "a full category still resolves inside the comparison bound" {
     try testing.expect(try policy.env.allows("k00000"));
     try testing.expect(try policy.env.allows("k00255"));
     try testing.expect(!try policy.env.allows("k00256"));
+
+    // What the search actually costs at the cap, over every entry and over a
+    // miss below, inside, and above the range. The worst case is the bound, so
+    // the test names the value rather than a difference from it.
+    var worst: usize = 0;
+    index = 0;
+    while (index < residual.max_policy_entries) : (index += 1) {
+        var name: [8]u8 = undefined;
+        const text = std.fmt.bufPrint(&name, "k{d:0>5}", .{index}) catch unreachable;
+        var comparisons: usize = 0;
+        _ = try policy.env.findCounting(text, &comparisons);
+        worst = @max(worst, comparisons);
+    }
+    for ([_][]const u8{ "a00000", "k00000x", "z00000" }) |absent| {
+        var comparisons: usize = 0;
+        _ = try policy.env.findCounting(absent, &comparisons);
+        worst = @max(worst, comparisons);
+    }
+    try testing.expectEqual(residual.max_lookup_comparisons, worst);
 }
