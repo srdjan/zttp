@@ -42,6 +42,13 @@ pub fn build(b: *std.Build) void {
     });
     const proof_review_mod = proof_review_dep.module("zttp_proof_review");
 
+    // The acceptance kernel. It takes no options, so it dedups on its own.
+    const proof_checker_dep = b.dependency("zttp_proof_checker", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    const proof_checker_mod = proof_checker_dep.module("zttp_proof_checker");
+
     const runtime_features = runtimeFeatureOptions(b, .{
         .enable_live_reload = false,
         .enable_studio = false,
@@ -60,6 +67,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     runtime_main.addImport("zts", zts_mod);
+    runtime_main.addImport("zttp_proof_checker", proof_checker_mod);
     runtime_main.addImport("project_config", project_config_mod);
     runtime_main.addOptions("runtime_feature_options", runtime_features);
 
@@ -69,6 +77,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     runtime_main_tests.addImport("zts", zts_mod);
+    runtime_main_tests.addImport("zttp_proof_checker", proof_checker_mod);
     runtime_main_tests.addImport("project_config", project_config_mod);
     runtime_main_tests.addImport("zttp_proof_review", proof_review_mod);
     runtime_main_tests.addOptions("runtime_feature_options", runtime_features);
@@ -80,6 +89,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     cli_main.addImport("zts", zts_mod);
+    cli_main.addImport("zttp_proof_checker", proof_checker_mod);
     cli_main.addImport("zts_cli", zts_cli_mod);
     cli_main.addImport("pi_app", pi_app_mod);
     cli_main.addImport("project_config", project_config_mod);
@@ -92,6 +102,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     cli_main_tests.addImport("zts", zts_mod);
+    cli_main_tests.addImport("zttp_proof_checker", proof_checker_mod);
     cli_main_tests.addImport("zts_cli", zts_cli_mod);
     cli_main_tests.addImport("pi_app", pi_app_mod);
     cli_main_tests.addImport("project_config", project_config_mod);
@@ -107,6 +118,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     zruntime.addImport("zts", zts_mod);
+    zruntime.addImport("zttp_proof_checker", proof_checker_mod);
     zruntime.addImport("project_config", project_config_mod);
     zruntime.addImport("zttp_proof_review", proof_review_mod);
     zruntime.addOptions("runtime_feature_options", runtime_features);
@@ -123,6 +135,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     server_tests.addImport("zts", zts_mod);
+    server_tests.addImport("zttp_proof_checker", proof_checker_mod);
     server_tests.addOptions("runtime_feature_options", runtime_features);
 
     // The benchmark harness lives in bench/, outside the product source tree,
@@ -137,6 +150,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     runtime_instance.addImport("zts", zts_mod);
+    runtime_instance.addImport("zttp_proof_checker", proof_checker_mod);
     runtime_instance.addOptions("runtime_feature_options", runtime_features);
     runtime_instance.addAnonymousImport("embedded_handler", .{
         .root_source_file = b.path("src/embedded_handler_stub.zig"),

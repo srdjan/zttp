@@ -21,6 +21,7 @@ pub fn buildJws(
     bytecode: []const u8,
     contract: *const zts.HandlerContract,
     runtime_policy_sha256: []const u8,
+    executable_root_sha256: []const u8,
 ) ![]u8 {
     const loaded = identity.loadOrCreate(allocator) catch |err| {
         std.log.err(
@@ -38,6 +39,7 @@ pub fn buildJws(
         bytecode,
         contract,
         runtime_policy_sha256,
+        executable_root_sha256,
         loaded.key_pair,
     );
 }
@@ -57,6 +59,9 @@ pub fn buildDevJws(
         bytecode,
         contract,
         envelope.unpinned_runtime_policy_sha256,
+        // A dev receipt has no self-extracting artifact behind it, so there is
+        // no executable graph to commit to and it says so.
+        envelope.unpinned_executable_root,
         loadPersistentOrEphemeralKey(allocator),
     );
 }
@@ -67,6 +72,7 @@ fn buildJwsWithKey(
     bytecode: []const u8,
     contract: *const zts.HandlerContract,
     runtime_policy_sha256: []const u8,
+    executable_root_sha256: []const u8,
     key_pair: Ed25519.KeyPair,
 ) ![]u8 {
     if (!contract.source_identity.isStamped()) return error.SourceIdentityMissing;
@@ -136,6 +142,7 @@ fn buildJwsWithKey(
         .policy_sha256 = &policy_sha_hex,
         .capability_hash = &capability_hash_hex,
         .runtime_policy_sha256 = runtime_policy_sha256,
+        .executable_root_sha256 = executable_root_sha256,
         .core_profile_id = contract.source_identity.core_profile.id(),
         .core_grammar_sha256 = &core_grammar_hex,
         .semantics_sha256 = &semantics_hex,
@@ -233,6 +240,7 @@ test "build receipt refuses unstamped contracts and signs exact source identity"
         "bytecode",
         &contract,
         envelope.unpinned_runtime_policy_sha256,
+        "9" ** 64,
         key_pair,
     ));
 
@@ -243,6 +251,7 @@ test "build receipt refuses unstamped contracts and signs exact source identity"
         "bytecode",
         &contract,
         envelope.unpinned_runtime_policy_sha256,
+        "9" ** 64,
         key_pair,
     );
     defer allocator.free(jws);
@@ -257,4 +266,35 @@ test "build receipt refuses unstamped contracts and signs exact source identity"
     try std.testing.expectEqualStrings(&semantics_hex, verified.claims.semantics_sha256);
     try std.testing.expectEqualStrings(contract.source_identity.frontend.?.profile.id(), verified.claims.frontend_profile_id.?);
     try std.testing.expectEqualStrings(&frontend_grammar_hex, verified.claims.frontend_grammar_sha256.?);
+    // The receipt carries the executable-graph root it was handed, not a
+    // recomputation of its own: the signer commits, the consumer checks.
+    try std.testing.expectEqualStrings("9" ** 64, verified.claims.executable_root_sha256);
+}
+
+test "a dev receipt states that it commits to no executable graph" {
+    const allocator = std.testing.allocator;
+    var contract = zts.handler_contract.emptyContract(try allocator.dupe(u8, "handler.ts"));
+    defer contract.deinit(allocator);
+    contract.source_identity = zts.sourceIdentityForPath(contract.handler.path);
+    const key_pair = try envelope.keyPairFromSeed([_]u8{0x42} ** Ed25519.KeyPair.seed_length);
+
+    const jws = try buildJwsWithKey(
+        allocator,
+        "{}",
+        "bytecode",
+        &contract,
+        envelope.unpinned_runtime_policy_sha256,
+        envelope.unpinned_executable_root,
+        key_pair,
+    );
+    defer allocator.free(jws);
+
+    var verified = try envelope.verify(allocator, jws);
+    defer verified.deinit();
+    // The sentinel is a statement, not an omission: a verifier can tell "this
+    // receipt commits to no graph" from "this receipt's graph is missing".
+    try std.testing.expectEqualStrings(
+        envelope.unpinned_executable_root,
+        verified.claims.executable_root_sha256,
+    );
 }

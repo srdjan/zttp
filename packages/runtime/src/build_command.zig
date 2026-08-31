@@ -12,6 +12,7 @@ const zts_cli = @import("zts_cli");
 const precompile = zts_cli.precompile;
 const deploy_manifest = zts_cli.deploy_manifest;
 const shared = @import("cli_shared.zig");
+const artifact_graph = @import("artifact_graph.zig");
 const self_extract = @import("self_extract.zig");
 const attest_build_receipt = @import("attest/build_receipt.zig");
 const live_reload = @import("live_reload.zig");
@@ -509,6 +510,7 @@ fn buildAttestationJws(
     bytecode: []const u8,
     contract: *const zts.HandlerContract,
     runtime_policy_sha256: []const u8,
+    executable_root_sha256: []const u8,
 ) !?[]u8 {
     return try attest_build_receipt.buildJws(
         allocator,
@@ -516,6 +518,7 @@ fn buildAttestationJws(
         bytecode,
         contract,
         runtime_policy_sha256,
+        executable_root_sha256,
     );
 }
 
@@ -557,6 +560,7 @@ const ArtifactTailCapabilities = struct {
         bytecode: []const u8,
         contract: *const zts.HandlerContract,
         runtime_policy_sha256: []const u8,
+        executable_root_sha256: []const u8,
     ) anyerror!?[]u8,
     create_artifact: *const fn (
         context: ?*anyopaque,
@@ -582,6 +586,7 @@ fn signContractCapability(
     bytecode: []const u8,
     contract: *const zts.HandlerContract,
     runtime_policy_sha256: []const u8,
+    executable_root_sha256: []const u8,
 ) !?[]u8 {
     return buildAttestationJws(
         allocator,
@@ -589,6 +594,7 @@ fn signContractCapability(
         bytecode,
         contract,
         runtime_policy_sha256,
+        executable_root_sha256,
     );
 }
 
@@ -644,6 +650,37 @@ fn writeArtifactTail(
     const policy_section = try self_extract.serializePolicy(allocator, &policy);
     defer allocator.free(policy_section);
 
+    // Serialize once, hash once. The runtime policy digest below is the value
+    // that goes into the graph, into the signed claim, and into the section the
+    // artifact carries, so no two of them can describe different bytes.
+    var runtime_policy_digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(policy_section, &runtime_policy_digest, .{});
+
+    // Commit to the whole executable graph, not only the entry module. The
+    // inventory is built from the exact section bytes about to be embedded, so
+    // the consumer that rebuilds it at startup is hashing the same buffers.
+    const members = try allocator.alloc(artifact_graph.Member, artifact_graph.max_members);
+    defer allocator.free(members);
+    const built = artifact_graph.buildRoot(allocator, artifact_graph.fromArtifact(.{
+        .bytecode = input.bytecode,
+        .dep_bytecodes = input.dep_bytecodes,
+        .contract_section = contract_json,
+        .policy_section_digest = runtime_policy_digest,
+        .identity = if (input.contract) |contract|
+            artifact_graph.identityFromContract(contract)
+        else
+            .{},
+    }), members) catch |err| {
+        if (!builtin.is_test) {
+            std.log.err(
+                "failed to commit to the executable graph ({s}); refusing to write an artifact whose contents are not fully covered",
+                .{@errorName(err)},
+            );
+        }
+        return err;
+    };
+    const executable_root_sha256 = std.fmt.bytesToHex(built.root, .lower);
+
     const attestation_jws: ?[]u8 = blk: {
         if (!input.attest_requested) break :blk null;
         const json = contract_json orelse {
@@ -651,8 +688,6 @@ fn writeArtifactTail(
             break :blk null;
         };
         const contract = input.contract orelse break :blk null;
-        var runtime_policy_digest: [32]u8 = undefined;
-        std.crypto.hash.sha2.Sha256.hash(policy_section, &runtime_policy_digest, .{});
         const runtime_policy_sha256 = std.fmt.bytesToHex(runtime_policy_digest, .lower);
         break :blk try capabilities.sign_contract(
             capabilities.context,
@@ -661,6 +696,7 @@ fn writeArtifactTail(
             input.bytecode,
             contract,
             &runtime_policy_sha256,
+            &executable_root_sha256,
         );
     };
     defer if (attestation_jws) |attestation| allocator.free(attestation);
@@ -1025,6 +1061,7 @@ const ArtifactTailProbe = struct {
     created_with_contract: bool = false,
     created_with_attestation: bool = false,
     signed_runtime_policy_sha256: ?[64]u8 = null,
+    signed_executable_root_sha256: ?[64]u8 = null,
     created_runtime_policy_sha256: ?[64]u8 = null,
 
     fn fromContext(context: ?*anyopaque) *ArtifactTailProbe {
@@ -1048,13 +1085,18 @@ const ArtifactTailProbe = struct {
         _: []const u8,
         _: *const zts.HandlerContract,
         runtime_policy_sha256: []const u8,
+        executable_root_sha256: []const u8,
     ) !?[]u8 {
         const self = fromContext(context);
         self.sign_calls += 1;
         if (runtime_policy_sha256.len != 64) return error.InvalidRuntimePolicyHash;
+        if (executable_root_sha256.len != 64) return error.InvalidExecutableRoot;
         var copied: [64]u8 = undefined;
         @memcpy(&copied, runtime_policy_sha256);
         self.signed_runtime_policy_sha256 = copied;
+        var root_copy: [64]u8 = undefined;
+        @memcpy(&root_copy, executable_root_sha256);
+        self.signed_executable_root_sha256 = root_copy;
         return try allocator.dupe(u8, "test-attestation");
     }
 
@@ -1138,6 +1180,9 @@ test "artifact tail stops before signing or creation when serialization fails" {
     const output_path = try std.fs.path.join(allocator, &.{ root, "artifact.bin" });
     defer allocator.free(output_path);
 
+    var blob_buf: [4096]u8 = undefined;
+    const bytecode = try artifact_graph.test_support.moduleBlob(allocator, 0x10, &blob_buf);
+
     for ([_]bool{ true, false }) |attest_requested| {
         var probe = ArtifactTailProbe{};
         var failing = std.testing.FailingAllocator.init(
@@ -1150,7 +1195,7 @@ test "artifact tail stops before signing or creation when serialization fails" {
                 .runtime_binary = "runtime",
                 .output_path = output_path,
                 .attest_requested = attest_requested,
-                .bytecode = "bytecode",
+                .bytecode = bytecode,
                 .dep_bytecodes = &.{},
                 .contract = &contract,
             }, probe.capabilities()),
@@ -1167,12 +1212,16 @@ test "artifact tail stops before signing or creation when serialization fails" {
 }
 
 test "artifact tail preserves absent-contract creation behavior" {
+    const allocator = std.testing.allocator;
+    var blob_buf: [4096]u8 = undefined;
+    const bytecode = try artifact_graph.test_support.moduleBlob(allocator, 0x10, &blob_buf);
+
     var probe = ArtifactTailProbe{};
-    try writeArtifactTail(std.testing.allocator, .{
+    try writeArtifactTail(allocator, .{
         .runtime_binary = "runtime",
         .output_path = "artifact.bin",
         .attest_requested = true,
-        .bytecode = "bytecode",
+        .bytecode = bytecode,
         .dep_bytecodes = &.{},
         .contract = null,
     }, probe.capabilities());
@@ -1190,13 +1239,16 @@ test "artifact tail embeds complete contracts and signs only when requested" {
     var contract = zts.handler_contract.emptyContract(path);
     defer contract.deinit(allocator);
 
+    var blob_buf: [4096]u8 = undefined;
+    const bytecode = try artifact_graph.test_support.moduleBlob(allocator, 0x10, &blob_buf);
+
     for ([_]bool{ true, false }) |attest_requested| {
         var probe = ArtifactTailProbe{};
         try writeArtifactTail(allocator, .{
             .runtime_binary = "runtime",
             .output_path = "artifact.bin",
             .attest_requested = attest_requested,
-            .bytecode = "bytecode",
+            .bytecode = bytecode,
             .dep_bytecodes = &.{},
             .contract = &contract,
         }, probe.capabilities());
@@ -1215,6 +1267,83 @@ test "artifact tail embeds complete contracts and signs only when requested" {
             );
         }
     }
+}
+
+test "the signed executable root is the one a consumer recomputes from the same sections" {
+    const allocator = std.testing.allocator;
+    const path = try allocator.dupe(u8, "handler.ts");
+    var contract = zts.handler_contract.emptyContract(path);
+    defer contract.deinit(allocator);
+    contract.source_identity = zts.sourceIdentityForPath(contract.handler.path);
+
+    var main_buf: [4096]u8 = undefined;
+    var dep_buf: [4096]u8 = undefined;
+    const bytecode = try artifact_graph.test_support.moduleBlob(allocator, 0x10, &main_buf);
+    const dep = try artifact_graph.test_support.moduleBlob(allocator, 0x20, &dep_buf);
+    const deps = [_][]const u8{dep};
+
+    var probe = ArtifactTailProbe{};
+    try writeArtifactTail(allocator, .{
+        .runtime_binary = "runtime",
+        .output_path = "artifact.bin",
+        .attest_requested = true,
+        .bytecode = bytecode,
+        .dep_bytecodes = &deps,
+        .contract = &contract,
+    }, probe.capabilities());
+
+    const signed = probe.signed_executable_root_sha256 orelse return error.TestUnexpectedResult;
+
+    // Rebuild the inventory the way the runtime does at startup, from the same
+    // sections, and confirm the two derivations agree.
+    const contract_json = try serializeContractJson(allocator, &contract);
+    defer allocator.free(contract_json);
+    const policy = zts.handler_policy.contractToRuntimePolicy(&contract);
+    const policy_section = try self_extract.serializePolicy(allocator, &policy);
+    defer allocator.free(policy_section);
+    var policy_digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(policy_section, &policy_digest, .{});
+
+    const members = try allocator.alloc(artifact_graph.Member, artifact_graph.max_members);
+    defer allocator.free(members);
+    const rebuilt = try artifact_graph.buildRoot(allocator, artifact_graph.fromArtifact(.{
+        .bytecode = bytecode,
+        .dep_bytecodes = &deps,
+        .contract_section = contract_json,
+        .policy_section_digest = policy_digest,
+        .identity = artifact_graph.identityFromContract(&contract),
+    }), members);
+
+    const rebuilt_hex = std.fmt.bytesToHex(rebuilt.root, .lower);
+    try std.testing.expectEqualSlices(u8, &rebuilt_hex, &signed);
+
+    // A dependency the producer embedded but the consumer did not load changes
+    // the root, so the two derivations stop agreeing.
+    const without_dep = try artifact_graph.buildRoot(allocator, artifact_graph.fromArtifact(.{
+        .bytecode = bytecode,
+        .contract_section = contract_json,
+        .policy_section_digest = policy_digest,
+        .identity = artifact_graph.identityFromContract(&contract),
+    }), members);
+    try std.testing.expect(!std.mem.eql(u8, &rebuilt.root, &without_dep.root));
+}
+
+test "an artifact whose bytecode cannot be walked is refused rather than half-committed" {
+    const allocator = std.testing.allocator;
+    const path = try allocator.dupe(u8, "handler.ts");
+    var contract = zts.handler_contract.emptyContract(path);
+    defer contract.deinit(allocator);
+
+    var probe = ArtifactTailProbe{};
+    try std.testing.expectError(error.MalformedBytecodeStream, writeArtifactTail(allocator, .{
+        .runtime_binary = "runtime",
+        .output_path = "artifact.bin",
+        .attest_requested = false,
+        .bytecode = "not a serialized module",
+        .dep_bytecodes = &.{},
+        .contract = &contract,
+    }, probe.capabilities()));
+    try std.testing.expectEqual(@as(usize, 0), probe.create_calls);
 }
 
 test "prepareProjectArtifact default path: <root>/.zttp/<subdir>/<basename>" {

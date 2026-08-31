@@ -28,8 +28,18 @@ pub fn main(init: std.process.Init.Minimal) !void {
     };
     const allocator = if (builtin.mode == .Debug) debug_alloc.allocator() else std.heap.smp_allocator;
 
-    // Check for self-extracting binary payload before anything else
-    const self_payload = self_extract.detect(allocator) catch null;
+    // Check for self-extracting binary payload before anything else. A payload
+    // this runtime cannot read is not the same as no payload: swallowing it
+    // would start the plain CLI on a binary somebody deployed as a service.
+    const self_payload = self_extract.detect(allocator) catch |err| switch (err) {
+        error.UnsupportedArtifactFormat => {
+            shared.writeStderrLine(
+                "This binary carries a handler payload in a format this runtime cannot read. Rebuild the artifact with the current toolchain.",
+            );
+            std.process.exit(1);
+        },
+        else => null,
+    };
 
     const args = try shared.collectArgs(allocator, init.args);
     defer {

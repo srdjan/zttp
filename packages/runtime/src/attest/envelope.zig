@@ -16,8 +16,13 @@ const Ed25519 = std.crypto.sign.Ed25519;
 const Sha256 = std.crypto.hash.sha2.Sha256;
 const b64 = std.base64.url_safe_no_pad;
 
-pub const version_tag: []const u8 = "zttp-attest-v2";
+pub const version_tag: []const u8 = "zttp-attest-v3";
 pub const unpinned_runtime_policy_sha256: []const u8 = "0" ** 64;
+/// A receipt for something that is not a self-extracting artifact - a dev
+/// server, a live-reload swap - has no executable graph to commit to. It says
+/// so with this sentinel rather than by omitting the field, so a verifier can
+/// tell "no graph" from "a graph whose root happens to be missing".
+pub const unpinned_executable_root: []const u8 = "0" ** 64;
 
 /// Forty-byte payload caller assembles; sign() embeds it into the JWS.
 /// Hex fields are 64-character lowercase strings (the form `bytesToHex`
@@ -28,6 +33,11 @@ pub const Claims = struct {
     policy_sha256: []const u8,
     capability_hash: []const u8,
     runtime_policy_sha256: []const u8 = unpinned_runtime_policy_sha256,
+    /// Root over the canonical executable graph: every byte and identity that
+    /// can affect what this deployment runs. The bytecode hash above commits to
+    /// the entry module alone, which leaves dependency bytecode, nested
+    /// functions, and constant pools outside the claim.
+    executable_root_sha256: []const u8 = unpinned_executable_root,
     core_profile_id: []const u8,
     core_grammar_sha256: []const u8,
     semantics_sha256: []const u8,
@@ -202,6 +212,7 @@ fn validateClaims(claims: Claims) SignError!void {
     try validateHexField(claims.policy_sha256);
     try validateHexField(claims.capability_hash);
     try validateHexField(claims.runtime_policy_sha256);
+    try validateHexField(claims.executable_root_sha256);
     try validateHexField(claims.core_grammar_sha256);
     try validateHexField(claims.semantics_sha256);
     if (claims.core_profile_id.len == 0) return error.InvalidProfileIdentity;
@@ -273,6 +284,7 @@ const wire_key = struct {
     const policy_sha256 = "policySha256";
     const capability_hash = "capabilityHash";
     const runtime_policy_sha256 = "runtimePolicySha256";
+    const executable_root_sha256 = "executableRootSha256";
     const core_profile_id = "coreProfileId";
     const core_grammar_sha256 = "coreGrammarSha256";
     const semantics_sha256 = "semanticsSha256";
@@ -301,6 +313,7 @@ fn buildPayloadJson(allocator: std.mem.Allocator, claims: Claims) ![]u8 {
         .{ wire_key.policy_sha256, claims.policy_sha256 },
         .{ wire_key.capability_hash, claims.capability_hash },
         .{ wire_key.runtime_policy_sha256, claims.runtime_policy_sha256 },
+        .{ wire_key.executable_root_sha256, claims.executable_root_sha256 },
         .{ wire_key.core_profile_id, claims.core_profile_id },
         .{ wire_key.core_grammar_sha256, claims.core_grammar_sha256 },
         .{ wire_key.semantics_sha256, claims.semantics_sha256 },
@@ -382,6 +395,7 @@ fn parseClaims(allocator: std.mem.Allocator, payload_bytes: []const u8) !Claims 
         .policy_sha256 = try dupString(allocator, obj, wire_key.policy_sha256),
         .capability_hash = try dupString(allocator, obj, wire_key.capability_hash),
         .runtime_policy_sha256 = try dupString(allocator, obj, wire_key.runtime_policy_sha256),
+        .executable_root_sha256 = try dupString(allocator, obj, wire_key.executable_root_sha256),
         .core_profile_id = try dupString(allocator, obj, wire_key.core_profile_id),
         .core_grammar_sha256 = try dupString(allocator, obj, wire_key.core_grammar_sha256),
         .semantics_sha256 = try dupString(allocator, obj, wire_key.semantics_sha256),
@@ -457,6 +471,7 @@ fn testClaims() Claims {
         .policy_sha256 = "c" ** 64,
         .capability_hash = "d" ** 64,
         .runtime_policy_sha256 = "e" ** 64,
+        .executable_root_sha256 = "f" ** 64,
         .core_profile_id = "zts-model-1",
         .core_grammar_sha256 = "1" ** 64,
         .semantics_sha256 = "2" ** 64,
@@ -549,8 +564,11 @@ test "verify refuses a legacy receipt without source identity" {
     try std.testing.expectError(error.InvalidJson, verify(allocator, jws));
 }
 
-test "parseClaims defaults missing durable workflow fields" {
+test "a receipt from the previous attestation version is refused, not reinterpreted" {
     const allocator = std.testing.allocator;
+    // The v2 payload is well formed and correctly signed. It simply commits to
+    // the entry module rather than the executable graph, so reading it under
+    // the current rules would report a coverage it never had.
     const payload =
         "{\"v\":\"zttp-attest-v2\"," ++
         "\"contractSha256\":\"" ++ "a" ** 64 ++ "\"," ++
@@ -568,6 +586,81 @@ test "parseClaims defaults missing durable workflow fields" {
         "\"propertySummary\":\"pure\"," ++
         "\"routesCount\":1}";
 
+    const key_pair = try keyPairFromSeed(test_seed);
+    const jws = try signPayloadJsonForTest(allocator, payload, key_pair);
+    defer allocator.free(jws);
+
+    try std.testing.expectError(error.InvalidJson, verify(allocator, jws));
+}
+
+test "a current receipt without the executable root is refused" {
+    const allocator = std.testing.allocator;
+    const payload =
+        "{\"v\":\"" ++ version_tag ++ "\"," ++
+        "\"contractSha256\":\"" ++ "a" ** 64 ++ "\"," ++
+        "\"bytecodeSha256\":\"" ++ "b" ** 64 ++ "\"," ++
+        "\"policySha256\":\"" ++ "c" ** 64 ++ "\"," ++
+        "\"capabilityHash\":\"" ++ "d" ** 64 ++ "\"," ++
+        "\"runtimePolicySha256\":\"" ++ "e" ** 64 ++ "\"," ++
+        "\"coreProfileId\":\"zts-model-1\"," ++
+        "\"coreGrammarSha256\":\"" ++ "1" ** 64 ++ "\"," ++
+        "\"semanticsSha256\":\"" ++ "2" ** 64 ++ "\"," ++
+        "\"frontendProfileId\":null," ++
+        "\"frontendGrammarSha256\":null," ++
+        "\"compilerVersion\":\"0.0.0-test\"," ++
+        "\"signedAt\":1700000000," ++
+        "\"propertySummary\":\"pure\"," ++
+        "\"routesCount\":1}";
+
+    const key_pair = try keyPairFromSeed(test_seed);
+    const jws = try signPayloadJsonForTest(allocator, payload, key_pair);
+    defer allocator.free(jws);
+
+    try std.testing.expectError(error.InvalidJson, verify(allocator, jws));
+}
+
+test "the executable root claim survives a sign and verify round trip" {
+    const allocator = std.testing.allocator;
+    const key_pair = try keyPairFromSeed(test_seed);
+    var claims = testClaims();
+    claims.executable_root_sha256 = "9" ** 64;
+
+    var env = try sign(allocator, claims, key_pair);
+    defer env.deinit(allocator);
+
+    var result = try verify(allocator, env.jws_compact);
+    defer result.deinit();
+    try std.testing.expectEqualStrings("9" ** 64, result.claims.executable_root_sha256);
+}
+
+test "an executable root that is not a hex digest is refused at signing" {
+    const allocator = std.testing.allocator;
+    const key_pair = try keyPairFromSeed(test_seed);
+    var claims = testClaims();
+    claims.executable_root_sha256 = "not-a-digest";
+    try std.testing.expectError(error.InvalidHexLength, sign(allocator, claims, key_pair));
+}
+
+test "parseClaims defaults missing durable workflow fields" {
+    const allocator = std.testing.allocator;
+    const payload =
+        "{\"v\":\"" ++ version_tag ++ "\"," ++
+        "\"contractSha256\":\"" ++ "a" ** 64 ++ "\"," ++
+        "\"bytecodeSha256\":\"" ++ "b" ** 64 ++ "\"," ++
+        "\"policySha256\":\"" ++ "c" ** 64 ++ "\"," ++
+        "\"capabilityHash\":\"" ++ "d" ** 64 ++ "\"," ++
+        "\"runtimePolicySha256\":\"" ++ "e" ** 64 ++ "\"," ++
+        "\"executableRootSha256\":\"" ++ "f" ** 64 ++ "\"," ++
+        "\"coreProfileId\":\"zts-model-1\"," ++
+        "\"coreGrammarSha256\":\"" ++ "1" ** 64 ++ "\"," ++
+        "\"semanticsSha256\":\"" ++ "2" ** 64 ++ "\"," ++
+        "\"frontendProfileId\":null," ++
+        "\"frontendGrammarSha256\":null," ++
+        "\"compilerVersion\":\"0.0.0-test\"," ++
+        "\"signedAt\":1700000000," ++
+        "\"propertySummary\":\"pure\"," ++
+        "\"routesCount\":1}";
+
     const claims = try parseClaims(allocator, payload);
     defer {
         allocator.free(claims.contract_sha256);
@@ -575,6 +668,7 @@ test "parseClaims defaults missing durable workflow fields" {
         allocator.free(claims.policy_sha256);
         allocator.free(claims.capability_hash);
         allocator.free(claims.runtime_policy_sha256);
+        allocator.free(claims.executable_root_sha256);
         allocator.free(claims.core_profile_id);
         allocator.free(claims.core_grammar_sha256);
         allocator.free(claims.semantics_sha256);

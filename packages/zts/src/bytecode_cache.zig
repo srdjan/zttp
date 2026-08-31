@@ -1921,6 +1921,183 @@ pub fn serializeBytecodeWithAtomsAndShapes(
     try serializeShapes(shapes, writer);
 }
 
+// ============================================================================
+// Executable spans
+// ============================================================================
+//
+// The artifact commitment needs a member per executable unit, not one digest
+// over a whole module blob. A blob digest does detect any change, but it cannot
+// say which nested function moved, and it leaves the member kinds the
+// commitment advertises with nothing producing them.
+//
+// This walker reads the same stream `serializeBytecodeWithAtomsAndShapes`
+// writes and yields byte spans into it. It lives beside the serializer on
+// purpose: it duplicates the layout, so a format change has to be made twice in
+// one file rather than once here and once in a package that finds out later.
+// Nothing is decoded into values; the spans are the exact embedded bytes, so a
+// producer and a consumer hashing them are hashing the same thing.
+
+/// One executable unit inside a serialized module: its code and its constant
+/// pool, as byte ranges into the blob they were read from.
+pub const ExecutableSpan = struct {
+    /// Pre-order position of the function within the module. Zero is the
+    /// module's top-level function; nested functions follow in the order the
+    /// constant stream carries them.
+    index: u32,
+    code_start: u32,
+    code_len: u32,
+    constants_start: u32,
+    constants_len: u32,
+};
+
+pub const SpanWalkError = error{
+    MalformedBytecodeStream,
+    TooManyFunctions,
+};
+
+const SpanWalker = struct {
+    bytes: []const u8,
+    at: usize = 0,
+    out: []ExecutableSpan,
+    count: usize = 0,
+    depth: u16 = 0,
+
+    const max_depth: u16 = 256;
+
+    fn take(self: *SpanWalker, n: usize) SpanWalkError![]const u8 {
+        if (self.at + n > self.bytes.len) return error.MalformedBytecodeStream;
+        const slice = self.bytes[self.at..][0..n];
+        self.at += n;
+        return slice;
+    }
+
+    fn u8At(self: *SpanWalker) SpanWalkError!u8 {
+        return (try self.take(1))[0];
+    }
+
+    fn u16At(self: *SpanWalker) SpanWalkError!u16 {
+        return std.mem.readInt(u16, (try self.take(2))[0..2], .little);
+    }
+
+    fn u32At(self: *SpanWalker) SpanWalkError!u32 {
+        return std.mem.readInt(u32, (try self.take(4))[0..4], .little);
+    }
+
+    fn skipAtoms(self: *SpanWalker) SpanWalkError!void {
+        const count = try self.u16At();
+        var i: u16 = 0;
+        while (i < count) : (i += 1) {
+            const tag = try self.u8At();
+            _ = try self.u32At();
+            if (tag == 1) {
+                const len = try self.u16At();
+                _ = try self.take(len);
+            } else if (tag != 0) {
+                return error.MalformedBytecodeStream;
+            }
+        }
+    }
+
+    fn skipShapes(self: *SpanWalker) SpanWalkError!void {
+        const count = try self.u16At();
+        var i: u16 = 0;
+        while (i < count) : (i += 1) {
+            const len = try self.u16At();
+            _ = try self.take(@as(usize, len) * 4);
+        }
+    }
+
+    fn skipPatternDispatch(self: *SpanWalker) SpanWalkError!void {
+        const count = try self.u16At();
+        var i: u16 = 0;
+        while (i < count) : (i += 1) {
+            _ = try self.u8At(); // pattern type
+            _ = try self.u16At(); // route source atom
+            const url_len = try self.u16At();
+            _ = try self.take(url_len);
+            const body_len = try self.u32At();
+            _ = try self.take(body_len);
+            _ = try self.u16At(); // status
+            _ = try self.u8At(); // content type index
+        }
+    }
+
+    fn walkConstants(self: *SpanWalker) SpanWalkError!void {
+        const count = try self.u16At();
+        var i: u16 = 0;
+        while (i < count) : (i += 1) {
+            const tag = try self.u8At();
+            switch (tag) {
+                @intFromEnum(ConstantTag.int) => _ = try self.take(4),
+                @intFromEnum(ConstantTag.float) => _ = try self.take(8),
+                @intFromEnum(ConstantTag.string) => {
+                    const len = try self.u16At();
+                    _ = try self.take(len);
+                },
+                @intFromEnum(ConstantTag.special) => _ = try self.take(1),
+                @intFromEnum(ConstantTag.nested_function) => try self.walkFunction(),
+                else => return error.MalformedBytecodeStream,
+            }
+        }
+    }
+
+    fn walkFunction(self: *SpanWalker) SpanWalkError!void {
+        if (self.depth >= max_depth) return error.MalformedBytecodeStream;
+        self.depth += 1;
+        defer self.depth -= 1;
+
+        if (self.count >= self.out.len) return error.TooManyFunctions;
+        const slot = self.count;
+        self.count += 1;
+
+        _ = try self.u32At(); // name atom
+        _ = try self.u16At(); // arg count
+        _ = try self.u16At(); // local count
+        _ = try self.u16At(); // stack size
+        _ = try self.u8At(); // flags
+        const upvalue_count = try self.u8At();
+
+        const code_len = try self.u32At();
+        const code_start = self.at;
+        _ = try self.take(code_len);
+
+        _ = try self.take(@as(usize, upvalue_count) * 2);
+
+        const line_count = try self.u32At();
+        _ = try self.take(@as(usize, line_count) * 12);
+
+        const constants_start = self.at;
+        try self.walkConstants();
+        const constants_end = self.at;
+
+        _ = try self.u8At(); // handler flags
+        try self.skipPatternDispatch();
+
+        self.out[slot] = .{
+            .index = @intCast(slot),
+            .code_start = @intCast(code_start),
+            .code_len = code_len,
+            .constants_start = @intCast(constants_start),
+            .constants_len = @intCast(constants_end - constants_start),
+        };
+    }
+};
+
+/// Walk one serialized module blob and record a span for every function in it.
+///
+/// Returns the number of spans written. The walk is total: a stream that ends
+/// early, carries an unknown constant tag, or nests past the depth bound is
+/// refused rather than partially reported, because a partial inventory would
+/// commit to less than the artifact executes.
+pub fn walkExecutableSpans(bytes: []const u8, out: []ExecutableSpan) SpanWalkError!usize {
+    var walker = SpanWalker{ .bytes = bytes, .out = out };
+    try walker.skipAtoms();
+    try walker.walkFunction();
+    try walker.skipShapes();
+    if (walker.at != bytes.len) return error.MalformedBytecodeStream;
+    return walker.count;
+}
+
 /// Result of deserializing bytecode with shapes
 pub const DeserializedBytecode = struct {
     func: *bytecode.FunctionBytecode,
@@ -2223,4 +2400,168 @@ test "full bytecode with atoms roundtrip" {
     try std.testing.expectEqual(@as(u16, @truncate(tgt_global_id)), restored_atom);
     try std.testing.expect(restored.line_table != null);
     try std.testing.expectEqualSlices(bytecode.LineEntry, &line_table, restored.line_table.?);
+}
+
+test "executable span walk covers every function in a module blob" {
+    const allocator = std.testing.allocator;
+
+    var atoms = AtomTable.init(allocator);
+    defer atoms.deinit();
+
+    // A nested function, carried as a constant of the top-level function.
+    const nested_code = try allocator.dupe(u8, &[_]u8{
+        @intFromEnum(bytecode.Opcode.push_undefined),
+        @intFromEnum(bytecode.Opcode.ret),
+    });
+    const nested_constants = try allocator.alloc(value.JSValue, 0);
+    const nested_upvalues = try allocator.alloc(bytecode.UpvalueInfo, 0);
+    const nested = try allocator.create(bytecode.FunctionBytecode);
+    nested.* = .{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 1,
+        .flags = .{},
+        .upvalue_count = 0,
+        .upvalue_info = nested_upvalues,
+        .code = nested_code,
+        .constants = nested_constants,
+        .source_map = null,
+        .line_table = null,
+    };
+    defer {
+        allocator.free(nested.code);
+        allocator.free(nested.constants);
+        allocator.free(nested.upvalue_info);
+        allocator.destroy(nested);
+    }
+
+    const top_code = try allocator.dupe(u8, &[_]u8{
+        @intFromEnum(bytecode.Opcode.push_const),
+        0,
+        0,
+        @intFromEnum(bytecode.Opcode.ret),
+    });
+    const top_constants = try allocator.alloc(value.JSValue, 1);
+    top_constants[0] = value.JSValue.fromExternPtr(nested);
+    const top_upvalues = try allocator.alloc(bytecode.UpvalueInfo, 0);
+    const line_table = [_]bytecode.LineEntry{.{ .offset = 0, .line = 1, .column = 1 }};
+    const top = try allocator.create(bytecode.FunctionBytecode);
+    top.* = .{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 2,
+        .flags = .{},
+        .upvalue_count = 0,
+        .upvalue_info = top_upvalues,
+        .code = top_code,
+        .constants = top_constants,
+        .source_map = null,
+        .line_table = &line_table,
+    };
+    defer {
+        allocator.free(top.code);
+        allocator.free(top.constants);
+        allocator.free(top.upvalue_info);
+        allocator.destroy(top);
+    }
+
+    var buffer: [4096]u8 = undefined;
+    var writer = SliceWriter{ .buffer = &buffer };
+    try serializeBytecodeWithAtomsAndShapes(top, &atoms, &.{}, &writer, allocator);
+    const blob = writer.getWritten();
+
+    var spans: [8]ExecutableSpan = undefined;
+    const count = try walkExecutableSpans(blob, &spans);
+    try std.testing.expectEqual(@as(usize, 2), count);
+
+    // The spans are the exact embedded bytes, not a re-encoding of them.
+    try std.testing.expectEqualSlices(
+        u8,
+        top.code,
+        blob[spans[0].code_start..][0..spans[0].code_len],
+    );
+    try std.testing.expectEqualSlices(
+        u8,
+        nested.code,
+        blob[spans[1].code_start..][0..spans[1].code_len],
+    );
+    // The nested function lives inside the top-level constant pool, so the
+    // outer pool span must contain the inner code span.
+    try std.testing.expect(spans[0].constants_start <= spans[1].code_start);
+    try std.testing.expect(
+        spans[1].code_start + spans[1].code_len <=
+            spans[0].constants_start + spans[0].constants_len,
+    );
+
+    // Mutating any covered byte changes the digest of the span that covers it.
+    var mutated: [4096]u8 = undefined;
+    @memcpy(mutated[0..blob.len], blob);
+    mutated[spans[1].code_start] +%= 1;
+    var original_digest: [32]u8 = undefined;
+    var mutated_digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(blob[spans[1].code_start..][0..spans[1].code_len], &original_digest, .{});
+    std.crypto.hash.sha2.Sha256.hash(mutated[spans[1].code_start..][0..spans[1].code_len], &mutated_digest, .{});
+    try std.testing.expect(!std.mem.eql(u8, &original_digest, &mutated_digest));
+}
+
+test "executable span walk refuses a truncated or overlong blob" {
+    const allocator = std.testing.allocator;
+    var atoms = AtomTable.init(allocator);
+    defer atoms.deinit();
+
+    const code = try allocator.dupe(u8, &[_]u8{@intFromEnum(bytecode.Opcode.ret)});
+    const constants = try allocator.alloc(value.JSValue, 0);
+    const upvalues = try allocator.alloc(bytecode.UpvalueInfo, 0);
+    const func = try allocator.create(bytecode.FunctionBytecode);
+    func.* = .{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 1,
+        .flags = .{},
+        .upvalue_count = 0,
+        .upvalue_info = upvalues,
+        .code = code,
+        .constants = constants,
+        .source_map = null,
+        .line_table = null,
+    };
+    defer {
+        allocator.free(func.code);
+        allocator.free(func.constants);
+        allocator.free(func.upvalue_info);
+        allocator.destroy(func);
+    }
+
+    var buffer: [1024]u8 = undefined;
+    var writer = SliceWriter{ .buffer = &buffer };
+    try serializeBytecodeWithAtomsAndShapes(func, &atoms, &.{}, &writer, allocator);
+    const blob = writer.getWritten();
+
+    var spans: [4]ExecutableSpan = undefined;
+    _ = try walkExecutableSpans(blob, &spans);
+
+    var cut: usize = 1;
+    while (cut < blob.len) : (cut += 1) {
+        try std.testing.expectError(
+            error.MalformedBytecodeStream,
+            walkExecutableSpans(blob[0..cut], &spans),
+        );
+    }
+
+    var extended: [1024]u8 = undefined;
+    @memcpy(extended[0..blob.len], blob);
+    extended[blob.len] = 0xAB;
+    try std.testing.expectError(
+        error.MalformedBytecodeStream,
+        walkExecutableSpans(extended[0 .. blob.len + 1], &spans),
+    );
+
+    var no_room: [0]ExecutableSpan = undefined;
+    try std.testing.expectError(error.TooManyFunctions, walkExecutableSpans(blob, &no_room));
 }

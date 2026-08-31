@@ -16,6 +16,9 @@
         .zttp_proof_review = .{
             .path = "../proof-review",
         },
+        .zttp_proof_checker = .{
+            .path = "../proof-checker",
+        },
     },
     .paths = .{
         "build.zig",

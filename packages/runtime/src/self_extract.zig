@@ -14,7 +14,11 @@ const handler_policy = zts.handler_policy;
 // 24      8     magic
 
 pub const MAGIC: u64 = 0x5A54_5042_4331_0000; // "ZTPBC1\0\0"
-pub const FORMAT_VERSION: u16 = 1;
+/// Bumped to 2 for the executable-graph cutover. The reader checks equality,
+/// not an upper bound: a version-1 payload committed to the entry module alone,
+/// so reinterpreting one under the current rules would report a coverage the
+/// artifact never had.
+pub const FORMAT_VERSION: u16 = 2;
 pub const TRAILER_SIZE: usize = 32;
 const base_copy_chunk_size: usize = 64 * 1024;
 
@@ -84,22 +88,19 @@ pub fn detect(allocator: std.mem.Allocator) !?Payload {
     if (bytes_read != TRAILER_SIZE) return null;
 
     // Parse trailer
-    const magic = std.mem.readInt(u64, trailer_buf[24..32], .little);
-    if (magic != MAGIC) return null;
-
-    const payload_offset = std.mem.readInt(u64, trailer_buf[0..8], .little);
-    const payload_size = std.mem.readInt(u64, trailer_buf[8..16], .little);
-    const version = std.mem.readInt(u16, trailer_buf[16..18], .little);
-    const checksum_expected = std.mem.readInt(u32, trailer_buf[20..24], .little);
-
-    if (version > FORMAT_VERSION) return null;
-    // payload_offset/payload_size come straight from the (pre-CRC) trailer, so a
-    // tampered trailer can drive this addition past maxInt(u64): overflow-safe
-    // add avoids a safe-build panic / a wrap that spuriously equals file_size.
-    const body_end = std.math.add(u64, payload_offset, payload_size) catch return null;
-    const total = std.math.add(u64, body_end, @as(u64, TRAILER_SIZE)) catch return null;
-    if (total != file_size) return null;
-    if (payload_size > 100 * 1024 * 1024) return null; // 100MB sanity limit
+    const trailer = readTrailer(file_size, &trailer_buf) catch |err| switch (err) {
+        error.NoPayload => return null,
+        error.UnsupportedArtifactFormat => {
+            std.log.err(
+                "self-extract: this binary carries a handler payload in a format this runtime cannot read. Rebuild the artifact with the current toolchain.",
+                .{},
+            );
+            return error.UnsupportedArtifactFormat;
+        },
+    };
+    const payload_offset = trailer.payload_offset;
+    const payload_size = trailer.payload_size;
+    const checksum_expected = trailer.checksum;
 
     // Read payload
     const payload_data = try allocator.alloc(u8, @intCast(payload_size));
@@ -114,6 +115,57 @@ pub fn detect(allocator: std.mem.Allocator) !?Payload {
 
     // Parse sections
     return parse(allocator, payload_data);
+}
+
+pub const TrailerReadError = error{
+    /// The bytes at the end of this file are not a zttp payload trailer. A
+    /// plain binary lands here, and so does a stray magic that does not frame a
+    /// payload of the right size.
+    NoPayload,
+    /// A payload is framed correctly, and this runtime does not read its
+    /// format. Distinct from `NoPayload` on purpose: a deployment artifact this
+    /// runtime cannot read must say "rebuild", not "no handler here".
+    UnsupportedArtifactFormat,
+};
+
+pub const Trailer = struct {
+    payload_offset: u64,
+    payload_size: u64,
+    flags: u16,
+    checksum: u32,
+};
+
+/// Read and validate the 32-byte trailer.
+///
+/// The framing checks run before the version check so a base binary that
+/// happens to end in the magic is reported as having no payload rather than as
+/// an artifact somebody must rebuild.
+pub fn readTrailer(file_size: u64, trailer: *const [TRAILER_SIZE]u8) TrailerReadError!Trailer {
+    const magic = std.mem.readInt(u64, trailer[24..32], .little);
+    if (magic != MAGIC) return error.NoPayload;
+
+    const payload_offset = std.mem.readInt(u64, trailer[0..8], .little);
+    const payload_size = std.mem.readInt(u64, trailer[8..16], .little);
+    const version = std.mem.readInt(u16, trailer[16..18], .little);
+    const flags = std.mem.readInt(u16, trailer[18..20], .little);
+    const checksum = std.mem.readInt(u32, trailer[20..24], .little);
+
+    // payload_offset/payload_size come straight from the (pre-CRC) trailer, so
+    // this addition can be driven past maxInt(u64): overflow-safe add avoids a
+    // safe-build panic and a wrap that spuriously equals file_size.
+    const body_end = std.math.add(u64, payload_offset, payload_size) catch return error.NoPayload;
+    const total = std.math.add(u64, body_end, @as(u64, TRAILER_SIZE)) catch return error.NoPayload;
+    if (total != file_size) return error.NoPayload;
+    if (payload_size > 100 * 1024 * 1024) return error.NoPayload; // 100MB sanity limit
+
+    if (version != FORMAT_VERSION) return error.UnsupportedArtifactFormat;
+
+    return .{
+        .payload_offset = payload_offset,
+        .payload_size = payload_size,
+        .flags = flags,
+        .checksum = checksum,
+    };
 }
 
 // -- Creation: copy base binary, append payload + trailer --
@@ -1062,4 +1114,53 @@ test "getCleanBinarySize: with trailer returns clean offset" {
 
     const total = trailer_start + TRAILER_SIZE;
     try std.testing.expectEqual(base.len, getCleanBinarySize(file_buf[0..total]));
+}
+
+fn buildTrailer(payload_offset: u64, payload_size: u64, version: u16) [TRAILER_SIZE]u8 {
+    var trailer: [TRAILER_SIZE]u8 = undefined;
+    std.mem.writeInt(u64, trailer[0..8], payload_offset, .little);
+    std.mem.writeInt(u64, trailer[8..16], payload_size, .little);
+    std.mem.writeInt(u16, trailer[16..18], version, .little);
+    std.mem.writeInt(u16, trailer[18..20], 0, .little);
+    std.mem.writeInt(u32, trailer[20..24], 0x1234_5678, .little);
+    std.mem.writeInt(u64, trailer[24..32], MAGIC, .little);
+    return trailer;
+}
+
+test "a trailer from the previous payload format is refused with a rebuild diagnostic" {
+    const trailer = buildTrailer(100, 50, 1);
+    try std.testing.expectError(
+        error.UnsupportedArtifactFormat,
+        readTrailer(100 + 50 + TRAILER_SIZE, &trailer),
+    );
+}
+
+test "a current trailer reads its framing" {
+    const trailer = buildTrailer(100, 50, FORMAT_VERSION);
+    const read = try readTrailer(100 + 50 + TRAILER_SIZE, &trailer);
+    try std.testing.expectEqual(@as(u64, 100), read.payload_offset);
+    try std.testing.expectEqual(@as(u64, 50), read.payload_size);
+    try std.testing.expectEqual(@as(u32, 0x1234_5678), read.checksum);
+}
+
+test "a binary that only looks like an artifact reports no payload, not a rebuild" {
+    // Right magic, wrong framing: this is a base binary, not something a user
+    // should be told to rebuild.
+    const trailer = buildTrailer(100, 50, 1);
+    try std.testing.expectError(error.NoPayload, readTrailer(999, &trailer));
+
+    var no_magic = buildTrailer(100, 50, FORMAT_VERSION);
+    std.mem.writeInt(u64, no_magic[24..32], 0, .little);
+    try std.testing.expectError(error.NoPayload, readTrailer(100 + 50 + TRAILER_SIZE, &no_magic));
+}
+
+test "an overflowing trailer reports no payload rather than panicking" {
+    const trailer = buildTrailer(std.math.maxInt(u64), 8, FORMAT_VERSION);
+    try std.testing.expectError(error.NoPayload, readTrailer(64, &trailer));
+}
+
+test "an oversized payload is refused before it is allocated" {
+    const size: u64 = 200 * 1024 * 1024;
+    const trailer = buildTrailer(0, size, FORMAT_VERSION);
+    try std.testing.expectError(error.NoPayload, readTrailer(size + TRAILER_SIZE, &trailer));
 }

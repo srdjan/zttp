@@ -34,6 +34,7 @@ const durable_store_mod = @import("durable_store.zig");
 const proof_adapter = @import("proof_adapter.zig");
 const proof_audit_ring = @import("proof_audit_ring.zig");
 const attest_header_strings = @import("attest/header_strings.zig");
+const artifact_graph = @import("artifact_graph.zig");
 const attest_envelope = @import("attest/envelope.zig");
 const attest_well_known = @import("attest/well_known.zig");
 const attest_build_receipt = @import("attest/build_receipt.zig");
@@ -1804,6 +1805,86 @@ pub const Server = struct {
             }
             return err;
         };
+
+        try self.validateExecutableGraphClaim(
+            section_sha256,
+            verify_result.claims.executable_root_sha256,
+        );
+    }
+
+    /// Rebuild the executable graph from the sections this process actually
+    /// loaded and compare it against the signed root.
+    ///
+    /// The bytecode hash the contract carries covers the entry module. This
+    /// covers the dependency modules, every nested function, every constant
+    /// pool, the module and native-module identities, the contract, the runtime
+    /// policy, and the source profile - all of which run, and none of which the
+    /// older claim reached.
+    fn validateExecutableGraphClaim(
+        self: *Self,
+        policy_section_sha256: [32]u8,
+        claimed_root_hex: []const u8,
+    ) !void {
+        if (std.mem.eql(u8, claimed_root_hex, attest_envelope.unpinned_executable_root)) {
+            if (!builtin.is_test) {
+                std.log.err(
+                    "attestation: artifact predates executable-graph binding and must be rebuilt; refusing to serve",
+                    .{},
+                );
+            }
+            return error.ExecutableGraphClaimUnpinned;
+        }
+
+        const bytecode = self.embedded_bytecode orelse return error.ExecutableGraphMissingBytecode;
+
+        const members = try self.allocator.alloc(artifact_graph.Member, artifact_graph.max_members);
+        defer self.allocator.free(members);
+
+        const built = artifact_graph.buildRoot(self.allocator, artifact_graph.fromArtifact(.{
+            .bytecode = bytecode,
+            .dep_bytecodes = self.runtime_dep_bytecodes orelse &.{},
+            .contract_section = self.config.contract_json,
+            .policy_section_digest = policy_section_sha256,
+            .identity = self.observedArtifactIdentity(),
+        }), members) catch |err| {
+            if (!builtin.is_test) {
+                std.log.err(
+                    "attestation: could not rebuild the executable graph ({s}); refusing to serve",
+                    .{@errorName(err)},
+                );
+            }
+            return error.ExecutableGraphUnreadable;
+        };
+
+        const observed_hex = std.fmt.bytesToHex(built.root, .lower);
+        if (!std.mem.eql(u8, &observed_hex, claimed_root_hex)) {
+            if (!builtin.is_test) {
+                std.log.err(
+                    "attestation: the loaded executable graph does not match the signed root; refusing to serve",
+                    .{},
+                );
+            }
+            return error.ExecutableGraphMismatch;
+        }
+    }
+
+    /// The identity half of the graph, read from the contract this process
+    /// validated rather than from the one the producer signed.
+    fn observedArtifactIdentity(self: *Self) artifact_graph.Identity {
+        const validated = self.contract orelse return .{};
+        const runtime_contract = validated.view().*;
+        var identity = artifact_graph.Identity{
+            .module_specifiers = runtime_contract.modules,
+            .core_profile_id = runtime_contract.source_identity.core_profile.id(),
+            .core_grammar_hash = runtime_contract.source_identity.core_grammar_hash,
+            .semantics_hash = runtime_contract.source_identity.semantics_hash,
+        };
+        if (runtime_contract.capabilities) |caps| identity.capability_hash = caps.hash;
+        if (runtime_contract.source_identity.frontend) |frontend| {
+            identity.frontend_profile_id = frontend.profile.id();
+            identity.frontend_grammar_hash = frontend.grammar_hash;
+        }
+        return identity;
     }
 
     pub fn installDevAttestation(

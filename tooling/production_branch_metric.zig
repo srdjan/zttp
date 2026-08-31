@@ -16,6 +16,7 @@ const std = @import("std");
 const Package = enum {
     modules,
     pi,
+    proof_checker,
     proof_review,
     runtime,
     tools,
@@ -27,6 +28,7 @@ const Package = enum {
         return switch (self) {
             .modules => "modules",
             .pi => "pi",
+            .proof_checker => "proof-checker",
             .proof_review => "proof-review",
             .runtime => "runtime",
             .tools => "tools",
@@ -41,6 +43,7 @@ const package_count = @typeInfo(Package).@"enum".fields.len;
 const required_packages = [_]Package{
     .modules,
     .pi,
+    .proof_checker,
     .proof_review,
     .runtime,
     .tools,

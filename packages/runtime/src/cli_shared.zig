@@ -118,6 +118,11 @@ pub fn writeStdoutLine(s: []const u8) void {
     _ = std.c.write(std.c.STDOUT_FILENO, "\n", 1);
 }
 
+pub fn writeStderrLine(s: []const u8) void {
+    _ = std.c.write(std.c.STDERR_FILENO, s.ptr, s.len);
+    _ = std.c.write(std.c.STDERR_FILENO, "\n", 1);
+}
+
 /// Report that an opt-in feature was compiled out of this build and exit
 /// non-zero. `name` is the command (e.g. "studio"), `flag` the build option
 /// to rebuild with (e.g. "studio" for `zig build -Dstudio`).
