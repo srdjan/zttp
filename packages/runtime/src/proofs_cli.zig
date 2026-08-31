@@ -194,15 +194,41 @@ fn verifyCommand(
     stdout: *std.Io.Writer,
     stderr: *std.Io.Writer,
 ) !void {
-    if (argv.len != 1) {
-        try stderr.writeAll("zttp proofs verify: usage is `verify <bundle-dir>`\n");
-        return error.MissingArgValue;
+    var bundle_dir: ?[]const u8 = null;
+    var require_proof = false;
+    for (argv) |arg| {
+        if (std.mem.eql(u8, arg, "--require-proof")) {
+            require_proof = true;
+            continue;
+        }
+        if (bundle_dir != null) {
+            try stderr.writeAll("zttp proofs verify: usage is `verify <bundle-dir> [--require-proof]`\n");
+            return error.MissingArgValue;
+        }
+        bundle_dir = arg;
     }
-    bundle_mod.verify(allocator, argv[0], stdout, stderr) catch |err| {
+    const dir = bundle_dir orelse {
+        try stderr.writeAll("zttp proofs verify: usage is `verify <bundle-dir> [--require-proof]`\n");
+        return error.MissingArgValue;
+    };
+    bundle_mod.verify(allocator, dir, require_proof, stdout, stderr) catch |err| {
         // Mismatch and missing-component are diagnostic failures that
         // already wrote a per-component line; exit non-zero so CI fails.
         switch (err) {
-            error.Sha256Mismatch, error.MissingComponent, error.NoComponentsVerified => {
+            error.Sha256Mismatch,
+            error.MissingComponent,
+            error.NoComponentsVerified,
+            // A certificate that is present and refused, and a bundle asked for
+            // proof that carries none, are both non-zero. They print different
+            // lines because they are different answers.
+            error.ProofRejected,
+            error.NoProofToCheck,
+            => {
+                stdout.flush() catch {};
+                stderr.flush() catch {};
+                std.process.exit(1);
+            },
+            error.UnsupportedBundleVersion => {
                 stdout.flush() catch {};
                 stderr.flush() catch {};
                 std.process.exit(1);

@@ -188,16 +188,23 @@ fn writeClaimsHuman(url: []const u8, result: *const envelope.VerifyResult) void 
     var buf: [4096]u8 = undefined;
     const out = std.fmt.bufPrint(
         &buf,
-        \\Verified: {s}
+        \\Signature verified: {s}
+        \\  This checks provenance, not proof. The endpoint returns a signed
+        \\  claim about an artifact; it does not return the artifact. Nothing
+        \\  here reconstructed an obligation or checked a derivation, so no
+        \\  proof or policy acceptance is reported. For that, check the
+        \\  artifact itself: `zttp proofs verify <bundle-dir> --require-proof`.
+        \\
         \\  key fingerprint:  {s}
         \\  compiler version: {s}
         \\  signed at:        {d} (unix)
         \\  contract sha256:  {s}
         \\  bytecode sha256:  {s}
+        \\  executable root:  {s}
         \\  policy sha256:    {s}
         \\  capability hash:  {s}
         \\  routes count:     {d}
-        \\  proven chips:     {s}
+        \\  claimed chips:    {s}
         \\  durable workflow: proof={s}, retrySafe={s}, idempotent={s}, faultCovered={s}
         \\
     ,
@@ -208,6 +215,7 @@ fn writeClaimsHuman(url: []const u8, result: *const envelope.VerifyResult) void 
             result.claims.signed_at_unix,
             result.claims.contract_sha256,
             result.claims.bytecode_sha256,
+            result.claims.executable_root_sha256,
             result.claims.policy_sha256,
             result.claims.capability_hash,
             result.claims.routes_count,
@@ -243,6 +251,13 @@ fn renderClaimsJson(allocator: std.mem.Allocator, url: []const u8, result: *cons
     try json.write(result.claims.contract_sha256);
     try json.objectField("bytecodeSha256");
     try json.write(result.claims.bytecode_sha256);
+    try json.objectField("executableRootSha256");
+    try json.write(result.claims.executable_root_sha256);
+    // What this command established, named so a consumer of the JSON cannot
+    // read a signature check as an acceptance. The endpoint returns a claim,
+    // not the bytes, so the semantic states stay out of reach here.
+    try json.objectField("assurance");
+    try json.write("provenance_only");
     try json.objectField("policySha256");
     try json.write(result.claims.policy_sha256);
     try json.objectField("capabilityHash");

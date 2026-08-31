@@ -482,6 +482,38 @@ The running server emits `Zttp-Proofs` and `Zttp-Attest` headers and serves
 attestation from another machine. Use `zttp proofs` to inspect local ledger
 entries and `zttp proofs gate` for pull-request checks.
 
+A deployed artifact carries a proof certificate, and the server checks it with
+an independent kernel before it accepts a request. If the certificate is
+missing, does not describe the bytes that were loaded, or does not meet the
+production policy, the process refuses to serve and says at which stage and for
+what reason. That check happens before any runtime is warmed, so a refused
+artifact never has a handler ready.
+
+Two commands answer two different questions:
+
+```bash
+# Provenance: who signed a claim about this deployment.
+zttp verify http://127.0.0.1:8080
+
+# Proof: does this exact artifact satisfy the required properties.
+zttp proofs bundle --contract .zttp/deploy/handler.contract.json \
+  --binary .zttp/deploy/my-app --out bundle
+zttp proofs verify bundle --require-proof
+```
+
+`zttp verify` reads a signed claim from a live endpoint. The endpoint returns
+the claim, not the artifact, so that command reports provenance only. Proof and
+policy acceptance are established against the artifact itself, which is what
+`zttp proofs verify` does. Integrity and proof are printed as separate lines
+because they are separate answers: matching hashes say the bundle holds the
+bytes the manifest names, and nothing more.
+
+Proof acceptance is also what unlocks the proof response cache, unbounded
+runtime reuse, and the durable-workflow guarantees. A dev server has no
+artifact and no certificate, so it runs without them; that is deliberate, not a
+gap. See [docs/verification.md](verification.md) for what each assurance grade
+means and for the list of edges the consumer discloses rather than checks.
+
 ## Expert Mode
 
 `zttp expert` is the compiler-in-the-loop coding agent. It proposes edits and

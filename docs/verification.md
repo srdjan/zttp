@@ -380,6 +380,120 @@ Results appear in:
   records a `cost_bounded` soundness incident (log-only, with the arena
   high-water as evidence; it never alters the response)
 
+## Artifact-Level Proof-Carrying Code
+
+Everything above is what the compiler establishes about a handler. This section
+is about what a consumer establishes about the artifact that ships.
+
+The difference matters because the compiler is the producer. It can be wrong,
+it can be an older build than the one that ran, and it can be replaced. A
+runtime that reads its verdict and believes it has checked nothing. So a
+deployed artifact now carries a certificate, and the runtime checks it with an
+independent kernel before it serves a request.
+
+### Five separate answers
+
+These are reported as distinct states, never collapsed into one word:
+
+| State | What it means |
+|---|---|
+| `parsed` | The certificate decoded within its resource bounds. Nothing about the artifact is established. |
+| `integrity_verified` | Every member of the executable graph the consumer recomputed matches the certificate, and the root over them matches too. |
+| `proof_checked` | The reconstructed obligations equal the supplied ones, and every obligation carries evidence the consumer checked or explicitly graded. |
+| `policy_accepted` | The checked result meets this consumer's required properties, epochs, and minimum grades. |
+| Provenance | Orthogonal: `absent`, `unchecked`, `signature_verified`, or `trusted_origin`. It never raises or lowers a semantic state. |
+
+A signature says who signed. It does not say what was signed is safe. An
+unsigned artifact whose certificate this consumer accepts is accepted; a signed
+artifact whose certificate fails is not.
+
+### The executable graph
+
+The artifact commitment covers every byte and identity that can affect what runs:
+the entry module's bytecode, each dependency module in load order, every
+function in every module, every constant pool, the module specifiers in declared
+order, the native-module binding identities, the contract, the runtime policy,
+the source profiles, the grammar, the semantics registry, the capability matrix,
+and the proof IR itself. Order is part of the commitment.
+
+The producer builds this inventory from the section bytes it is about to embed.
+The consumer rebuilds it from the section bytes it just loaded. Neither reads
+the other's list; the comparison is only worth anything because the two
+derivations are independent.
+
+### Assurance grades
+
+A certificate is a chain, and a chain is as strong as its weakest link. Every
+obligation is graded by the weakest edge that was actually used, and the
+artifact's grade is the weakest across the properties the policy required:
+
+| Grade | Meaning |
+|---|---|
+| `proved` | A small-kernel rule the consumer re-ran itself over the proof IR. |
+| `translation_validated` | The consumer also re-related the proof IR to the final bytecode: emissions nest without partially overlapping, and every jump lands on the start of the member it names. |
+| `solver_assumed` | An isolated solver, run outside the kernel, discharged a reconstructed query. No answer means inconclusive, and inconclusive is a rejection. |
+| `tested` | A finite corpus exercised it. Disclosed by the producer, not checked by the consumer. |
+| `trusted` | Declared, with a reason. Disclosed, not checked. |
+
+### What is not checked, said out loud
+
+- **The bytes at the witness offsets.** The consumer checks that the translation
+  witnesses hold together - ranges nest, jumps land on member starts, rewrite
+  spans add up - not that the bytes at those offsets decode to the instructions
+  the witnesses describe. That edge is disclosed as `trusted` in every
+  certificate's own inventory.
+- **Closed-union `match` coverage.** A `match` with no default arm is lowered as
+  open. Whether a closed union is covered member by member is the type checker's
+  answer, and re-deciding it inside the acceptance kernel would mean
+  re-implementing the type checker there. A certificate that needs such a node
+  total declares that edge, and the declaration caps its grade.
+- **Three of the four production-floor properties.** `results_checked`,
+  `no_secret_leakage`, and `capability_bounded` are disclosed as `tested`: the
+  compiler discharged them and the repository's corpus exercises the analyses
+  that do so, but this consumer did not re-run them. Only `response_total` is
+  re-derived by the consumer today. Reducing that list one family at a time is
+  the ratchet's job.
+
+### What proof acceptance unlocks, and what it does not
+
+Only a proof-checked contract drives behavior that is unsound if a claim is
+wrong: the proof response cache, unbounded runtime reuse, the result and
+optional safety shortcuts, and the durable-workflow guarantees. An artifact
+whose certificate is missing or refused does not serve at all.
+
+A development server, a live-reload swap, and a `-Dhandler` build carry no
+artifact and no certificate, so they get none of those. That is the same rule
+seen from the other side, not an exemption: there is no consumer, so there is
+nothing checked, so nothing is promoted.
+
+Nothing about acceptance relaxes a runtime control. Bytecode structural
+verification, capability enforcement, request isolation, authorization, limits,
+leases, and live policy checks are mandatory before and after. A certificate is
+a reason to run a handler, not a reason to stop checking it.
+
+### Checking an artifact yourself
+
+```bash
+zttp proofs bundle --contract handler.contract.json --binary ./my-service --out bundle
+zttp proofs verify bundle --require-proof
+```
+
+The bundle carries the certificate as its own component. `verify` reports
+integrity and proof as separate lines, and `--require-proof` turns "nothing to
+check" into a non-zero exit for a caller that needs the stronger state.
+
+`zttp verify <url>` is a different command with a different answer: it checks a
+signature over a claim an endpoint returns. The endpoint does not return the
+artifact, so that command reports provenance and says so.
+
+### Format cutover
+
+The self-extract payload is v2, the attestation envelope is `zttp-attest-v3`,
+and the proof bundle is `zttp-bundle-2`. All three are checked for equality
+rather than a lower bound, and a predecessor is refused with a rebuild
+diagnostic. A v1 payload committed to the entry module alone; reinterpreting one
+under the current rules would report a coverage it never had.
+
 ## Running Tests
 
 ```bash

@@ -186,11 +186,24 @@ The old spelling `zttp proof replay` still works as a deprecated alias for one
 release and prints a migration note. It is no longer listed in `zttp help --all`.
 
 `zttp proofs verify` checks the bundle manifest before it hashes anything. The
-manifest must name a `contract` component and may add `binary` and `replay`.
-Each component needs its own relative path inside the bundle and a lowercase
-sha256. The verifier opens every path segment without following symlinks, so a
-component that points outside the bundle directory is refused rather than
-hashed.
+manifest must declare the current `toolVersion` and name a `contract`
+component; it may add `binary`, `certificate`, and `replay`. Each component
+needs its own relative path inside the bundle and a lowercase sha256. The
+verifier opens every path segment without following symlinks, so a component
+that points outside the bundle directory is refused rather than hashed. A bundle
+in an older format is refused with a rebuild diagnostic rather than read.
+
+Integrity and proof are separate answers and are printed on separate lines.
+Matching hashes say the bundle holds the bytes the manifest names, and nothing
+more; when the bundle carries an artifact and a certificate, the verifier
+rebuilds the executable graph from the artifact and runs consumer acceptance
+over the certificate. `--require-proof` makes "nothing to check" a non-zero exit
+for a caller that needs the stronger state.
+
+`zttp verify <url>` checks a signature over a claim an endpoint returns. The
+endpoint does not return the artifact, so the command reports provenance only
+and says so; its JSON carries `"assurance": "provenance_only"`. Proof and policy
+acceptance are established against the artifact, with `zttp proofs verify`.
 
 `zttp verify --json` includes durable workflow receipt fields when a build was
 attested with a workflow contract: `durableWorkflowProofLevel`,

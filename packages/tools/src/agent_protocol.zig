@@ -1829,7 +1829,7 @@ fn runVerify(
             .system_path = null,
         })) catch |err| switch (err) {
         // Every property is undecided rather than false: the analysis never
-        // ran, and reporting `not_proven` would claim a verdict nothing
+        // ran, and reporting `analyzer_not_proved` would claim a verdict nothing
         // produced.
         error.MissingSqlSchema => {
             try writeVerifyPayload(allocator, json, file_rel, digest, null, input);
@@ -1938,7 +1938,12 @@ fn writeVerifyResult(
     const obj = entry.?.object;
     const holds = if (obj.get("holds")) |h| h == .bool and h.bool else false;
     try json.objectField("grade");
-    try json.write(if (holds) "proven" else "not_proven");
+    // The analyzer's own verdict about a source file. Deliberately not
+    // "proven": nothing here checked an artifact, and no consumer accepted
+    // anything. Artifact-level acceptance is `zttp proofs verify`, and it
+    // reports a separate set of states. Reporting the weaker result under the
+    // stronger word is the confusion the proof-carrying work exists to remove.
+    try json.write(if (holds) "analyzer_proved" else "analyzer_not_proved");
 
     try json.objectField("evidence");
     try json.beginObject();
@@ -4146,7 +4151,7 @@ test "an external client completes propose, simulate, verify over the wire" {
 
     const results = verified.value.object.get("payload").?.object.get("results").?.array;
     for (results.items) |r| {
-        try testing.expectEqualStrings("proven", r.object.get("grade").?.string);
+        try testing.expectEqualStrings("analyzer_proved", r.object.get("grade").?.string);
     }
 
     // The file on disk never changed: the whole cycle is read-only.
@@ -4221,13 +4226,13 @@ test "verify answers only the properties it was asked about" {
 
     const leak = results.items[0].object;
     try testing.expectEqualStrings("no_secret_leakage", leak.get("property").?.string);
-    try testing.expectEqualStrings("not_proven", leak.get("grade").?.string);
+    try testing.expectEqualStrings("analyzer_not_proved", leak.get("grade").?.string);
     const evidence = leak.get("evidence").?.object;
     try testing.expectEqualStrings("flow-trace", evidence.get("kind").?.string);
     // A failed verify with a counterexample is a reproduction, not a verdict.
     try testing.expect(evidence.get("counterexample").? == .object);
 
-    try testing.expectEqualStrings("proven", results.items[1].object.get("grade").?.string);
+    try testing.expectEqualStrings("analyzer_proved", results.items[1].object.get("grade").?.string);
 
     // Named, and not a property this compiler decides. Reported per property:
     // a client discovering the registry by asking is a normal use.

@@ -18,6 +18,13 @@
 //! Content-addressed: the ETag is SHA-256 of the body. Identical builds
 //! produce identical bodies, identical ETags. Verifiers and CDNs may cache
 //! aggressively.
+//!
+//! What this document is: provenance. It carries a signed claim about an
+//! artifact, including the root of that artifact's executable graph. It does
+//! not carry the artifact, so a reader cannot reconstruct an obligation or
+//! check a derivation from it, and nothing here reports proof or policy
+//! acceptance. Those are established against the artifact itself - see
+//! `zttp proofs verify <bundle-dir> --require-proof`.
 
 const std = @import("std");
 const envelope = @import("envelope.zig");
