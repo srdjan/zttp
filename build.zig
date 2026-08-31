@@ -428,6 +428,13 @@ pub fn build(b: *std.Build) void {
             }),
         });
         tests.root_module.addImport("zts", zts_host_mod);
+        // The acceptance kernel is a leaf and takes no options, so wiring it
+        // into every host root costs nothing and keeps the table free of a flag
+        // that would need updating each time a file starts naming it.
+        tests.root_module.addImport(
+            "zttp_proof_checker",
+            proof_checker_dep.module("zttp_proof_checker"),
+        );
         if (root.project_config) tests.root_module.addImport("project_config", project_config_mod);
         if (root.pi_modules) {
             tests.root_module.addImport("zts_cli", pi_zts_cli_host_mod);

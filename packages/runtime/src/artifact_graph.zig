@@ -61,6 +61,10 @@ pub const Inputs = struct {
     proof_ir_digest: ?[32]u8 = null,
     /// Cycle-safe digest of every certificate byte. Absent with no certificate.
     proof_certificate_digest: ?[32]u8 = null,
+    /// Digest of the canonical residual guard plan. Absent when the handler has
+    /// no guarded operation, which is a different statement from an empty plan
+    /// and is why the member is absent rather than zero.
+    residual_plan_digest: ?[32]u8 = null,
 };
 
 /// The identity half of the commitment: which modules the handler imports, and
@@ -111,6 +115,7 @@ pub const ArtifactInputs = struct {
     identity: Identity = .{},
     proof_ir_digest: ?[32]u8 = null,
     proof_certificate_digest: ?[32]u8 = null,
+    residual_plan_digest: ?[32]u8 = null,
 };
 
 /// Project the artifact onto the graph inputs.
@@ -129,6 +134,7 @@ pub fn fromArtifact(inputs: ArtifactInputs) Inputs {
         .frontend_grammar_hash = inputs.identity.frontend_grammar_hash,
         .proof_ir_digest = inputs.proof_ir_digest,
         .proof_certificate_digest = inputs.proof_certificate_digest,
+        .residual_plan_digest = inputs.residual_plan_digest,
     };
 }
 
@@ -232,6 +238,9 @@ pub fn build(
     }
     if (inputs.proof_certificate_digest) |digest| {
         try collector.add(.proof_certificate, 0, digest);
+    }
+    if (inputs.residual_plan_digest) |digest| {
+        try collector.add(.residual_plan, 0, digest);
     }
 
     const members = out[0..collector.count];

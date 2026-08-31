@@ -27,6 +27,11 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     });
+    const proof_checker_dep = b.dependency("zttp_proof_checker", .{
+        .target = target,
+        .optimize = optimize,
+    });
     zts_cli_mod.addImport("zts", zts_mod);
+    zts_cli_mod.addImport("zttp_proof_checker", proof_checker_dep.module("zttp_proof_checker"));
     zts_cli_mod.addImport("project_config", project_config_mod);
 }

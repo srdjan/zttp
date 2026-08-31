@@ -8,6 +8,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const pcc = @import("zttp_proof_checker");
 const zts = @import("zts");
 const diagnostic_catalog = zts.DiagnosticCatalog;
 const ir = zts.parser;
@@ -1705,6 +1706,34 @@ pub fn runGenTests(
     return @intCast(gen.getTests().len);
 }
 
+/// Resolves a call site to a row of the acceptance kernel's guard catalog.
+///
+/// The row index is what the proof IR carries. The consumer looks the row up in
+/// its own table, so nothing the producer writes about the module, the export,
+/// or the argument position is taken as an answer.
+const GuardResolver = struct {
+    checker: ?*const zts.StrictChecker,
+    view: zts.parser.IrView,
+
+    fn resolve(context: *const anyopaque, node: zts.parser.ir.NodeIndex) ?u32 {
+        const self: *const GuardResolver = @ptrCast(@alignCast(context));
+        const checker = self.checker orelse return null;
+        const call = self.view.getCall(node) orelse return null;
+        const imported = checker.importedFunctionForCallee(call.callee) orelse return null;
+        const index = pcc.residual.lookupIndex(imported.module, imported.name, 0) orelse return null;
+        if (call.args_count == 0) return null;
+        const argument = self.view.getListIndex(call.args_start, 0);
+        // A compiler-visible argument keeps the static path and pays no residual
+        // lookup. Only what the compiler could not resolve becomes an obligation.
+        if (checker.isLiteralOrStaticTemplate(argument)) return null;
+        return index;
+    }
+
+    fn resolver(self: *const GuardResolver) zts.ProofResolver {
+        return .{ .context = self, .resolve = resolve };
+    }
+};
+
 pub const CompileOptions = struct {
     emit_aot: bool = false,
     emit_verify: bool = false,
@@ -2105,12 +2134,22 @@ pub fn compileHandler(
         const proof_view = zts.parser.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
         const handler_source = zts.findHandlerFunction(proof_view, root) orelse
             return error.HandlerNotFound;
+        // A guarded call is one the strict checker would refuse today: a
+        // capability export in the consumer's catalog whose resource argument
+        // is not compiler-visible. Both halves of that question are answered by
+        // the same code that answers `ZTS602`, so the plan and the diagnostic
+        // cannot disagree about what a handler does.
+        var guard_resolver = GuardResolver{
+            .checker = if (resolved.strict_checker) |*checker| checker else null,
+            .view = proof_view,
+        };
         proof_evidence = try zts.buildProofEvidence(
             allocator,
             proof_view,
             root,
             handler_source,
             recorder,
+            guard_resolver.resolver(),
         );
     }
 

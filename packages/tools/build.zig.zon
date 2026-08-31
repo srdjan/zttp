@@ -4,6 +4,9 @@
     .fingerprint = 0xbadc33f7a58d22c8,
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
+        .zttp_proof_checker = .{
+            .path = "../proof-checker",
+        },
         .zts = .{
             .path = "../zts",
         },

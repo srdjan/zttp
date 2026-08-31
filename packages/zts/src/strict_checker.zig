@@ -146,7 +146,7 @@ pub const Diagnostic = struct {
     repair_intent: ?RepairIntent = null,
 };
 
-const ImportedFunction = struct {
+pub const ImportedFunction = struct {
     slot: u16,
     module: []const u8,
     name: []const u8,
@@ -1871,7 +1871,13 @@ pub const StrictChecker = struct {
         return self.call_counts.get(bindingKey(binding)) orelse 0;
     }
 
-    fn importedFunctionForCallee(self: *const StrictChecker, callee: NodeIndex) ?ImportedFunction {
+    /// Which imported export a call names, if any.
+    ///
+    /// Public because the residual guard plan has to answer the same question
+    /// the `ZTS602` check answers - is this call a capability export, and which
+    /// argument is the resource - and answering it twice in two files is how
+    /// the classifier and the plan end up disagreeing about what a handler does.
+    pub fn importedFunctionForCallee(self: *const StrictChecker, callee: NodeIndex) ?ImportedFunction {
         if (self.ir_view.getTag(callee) != .identifier) return null;
         const binding = self.ir_view.getBinding(callee) orelse return null;
         return self.importedFunctionForSlot(binding.slot);
@@ -1925,7 +1931,13 @@ pub const StrictChecker = struct {
         };
     }
 
-    fn isLiteralOrStaticTemplate(self: *const StrictChecker, node: NodeIndex) bool {
+    /// Whether an argument is compiler-visible.
+    ///
+    /// Public for the same reason `importedFunctionForCallee` is: the residual
+    /// guard plan must classify a capability argument exactly as the `ZTS602`
+    /// check does, and two answers to one question is how a guarded call ends
+    /// up in one list and not the other.
+    pub fn isLiteralOrStaticTemplate(self: *const StrictChecker, node: NodeIndex) bool {
         const tag = self.ir_view.getTag(node) orelse return false;
         if (tag == .lit_string) return true;
         if (tag == .lit_int) return true;

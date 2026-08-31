@@ -23,6 +23,10 @@ const ps = pcc.proof_system;
 
 pub const Error = error{
     OutOfMemory,
+    /// The handler has guarded operations and the caller asked for a
+    /// certificate that cannot carry them. Refusing beats emitting a
+    /// certificate that describes a program without its guarded calls.
+    GuardedOperationsNotRepresentable,
     BufferTooSmall,
     /// The proof IR carries no function, so there is no entry function for the
     /// totality obligation to be about.
@@ -74,6 +78,16 @@ pub const Inputs = struct {
     /// The artifact was built with an ephemeral identity or an unpinned runtime
     /// policy.
     development: bool = false,
+    /// Digest of the exact serialized runtime capability policy. The consumer
+    /// recomputes it from the bytes it is handed, so this is what ties a guard
+    /// plan to one policy rather than to any policy.
+    runtime_policy_digest: [32]u8 = [_]u8{0} ** 32,
+    /// Emit the successor schema and proof system, which can carry residual
+    /// guard obligations. Off by default: until the cutover, the strict default
+    /// is the predecessor pair, and a producer that emitted successor evidence
+    /// while consumers still read the predecessor would be writing certificates
+    /// nothing accepts.
+    emit_successor: bool = false,
 };
 
 pub const Built = struct {
@@ -90,6 +104,43 @@ pub const Built = struct {
     }
 };
 
+/// One residual obligation per guarded call in the proof IR.
+///
+/// Every field but the operation comes from the consumer's own catalog, read
+/// through the row the IR node names. The producer is restating what the
+/// consumer will derive; it is not choosing any of it.
+fn residualPlan(
+    allocator: std.mem.Allocator,
+    nodes: []const cert.IrNode,
+) Error![]cert.ResidualObligation {
+    var count: usize = 0;
+    for (nodes) |node| {
+        if (node.tag == .capability_call) count += 1;
+    }
+    const out = try allocator.alloc(cert.ResidualObligation, count);
+    errdefer allocator.free(out);
+
+    var index: usize = 0;
+    for (nodes) |node| {
+        if (node.tag != .capability_call) continue;
+        if (node.aux >= pcc.residual.catalog.len) return error.GuardedOperationsNotRepresentable;
+        const entry = pcc.residual.catalog[node.aux];
+        out[index] = .{
+            .kind = entry.kind,
+            .normalization = entry.kind.normalization(),
+            .sink = entry.kind.sink(),
+            .section = entry.kind.section(),
+            .impl_id = entry.impl_id,
+            .operation_id = node.id,
+        };
+        index += 1;
+    }
+    // Node ids ascend, so the plan is already in the canonical order the
+    // consumer walks. Sorting here would hide a lowering that stopped
+    // producing them in order.
+    return out;
+}
+
 fn irNodes(allocator: std.mem.Allocator, evidence: *const zts.ProofEvidence) Error![]cert.IrNode {
     const nodes = try allocator.alloc(cert.IrNode, evidence.proof.nodes.len);
     errdefer allocator.free(nodes);
@@ -102,6 +153,7 @@ fn irNodes(allocator: std.mem.Allocator, evidence: *const zts.ProofEvidence) Err
             .first_child = node.first_child,
             .child_count = node.child_count,
             .digest = node.digest,
+            .aux = node.aux,
         };
     }
     return nodes;
@@ -118,6 +170,7 @@ fn tagFor(tag: zts.ProofIrTag) ps.NodeTag {
         .loop_node => .loop_node,
         .return_node => .return_node,
         .plain => .plain,
+        .capability_call => .capability_call,
     };
 }
 
@@ -175,7 +228,21 @@ pub fn build(allocator: std.mem.Allocator, inputs: Inputs) Error!Built {
     if (entry >= nodes.len or nodes[entry].tag != .function) return error.NoEntryFunction;
     const ir_root = cert.irRootFromNodes(nodes);
 
+    const residual_plan = try residualPlan(allocator, nodes);
+    defer allocator.free(residual_plan);
+    // A certificate that cannot carry residual obligations must not be built
+    // for a handler that has them. Emitting one would describe a program
+    // without its guarded calls, which is the omission the consumer's exact-set
+    // comparison exists to catch and would have nothing to catch it with.
+    if (residual_plan.len > 0 and !inputs.emit_successor) {
+        return error.GuardedOperationsNotRepresentable;
+    }
+
     var artifact = inputs.artifact;
+    artifact.residual_plan_digest = if (residual_plan.len > 0)
+        cert.residualPlanDigest(residual_plan)
+    else
+        null;
     artifact.proof_ir_digest = ir_root;
     artifact.proof_certificate_digest = [_]u8{0} ** 32;
     const members = try allocator.alloc(graph.Member, artifact_graph.max_members);
@@ -233,6 +300,8 @@ pub fn build(allocator: std.mem.Allocator, inputs: Inputs) Error!Built {
             .executable_root = [_]u8{0} ** 32,
             .ir_root = ir_root,
             .contract_digest = inputs.contract_digest,
+            .residual_plan_digest = cert.residualPlanDigest(residual_plan),
+            .runtime_policy_digest = inputs.runtime_policy_digest,
             .development = inputs.development,
         },
         .graph = built_members,
@@ -455,16 +524,10 @@ test "the compiler and the kernel agree on the proof-IR alphabet" {
     // The kernel's alphabet may run ahead of the compiler's while a producer
     // side is being built, but only by members named here. A tag the kernel
     // gained that nobody wrote down is the drift this test exists to catch.
-    const kernel_only = [_]ps.NodeTag{.capability_call};
     try testing.expectEqual(
-        @typeInfo(zts.ProofIrTag).@"enum".fields.len + kernel_only.len,
+        @typeInfo(zts.ProofIrTag).@"enum".fields.len,
         @typeInfo(ps.NodeTag).@"enum".fields.len,
     );
-    for (kernel_only) |tag| {
-        // Each one must be outside the compiler's numbering, so no compiler tag
-        // can silently map onto it.
-        try testing.expect(@intFromEnum(tag) > @typeInfo(zts.ProofIrTag).@"enum".fields.len);
-    }
 
     inline for (@typeInfo(zts.ProofRule).@"enum".fields) |field| {
         const rule: zts.ProofRule = @enumFromInt(field.value);

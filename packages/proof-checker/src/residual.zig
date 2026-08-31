@@ -414,11 +414,19 @@ pub const catalog = [_]CatalogEntry{
 
 /// The catalog entry for one export argument, if the consumer guards it.
 pub fn lookup(module: []const u8, export_name: []const u8, arg_index: u8) ?CatalogEntry {
-    for (catalog) |entry| {
+    const index = lookupIndex(module, export_name, arg_index) orelse return null;
+    return catalog[index];
+}
+
+/// The catalog row's index. This is what the proof IR carries, so the consumer
+/// resolves the row from its own table rather than from anything the producer
+/// wrote down about it.
+pub fn lookupIndex(module: []const u8, export_name: []const u8, arg_index: u8) ?u32 {
+    for (catalog, 0..) |entry, index| {
         if (entry.arg_index != arg_index) continue;
         if (!std.mem.eql(u8, entry.module, module)) continue;
         if (!std.mem.eql(u8, entry.export_name, export_name)) continue;
-        return entry;
+        return @intCast(index);
     }
     return null;
 }
@@ -587,6 +595,13 @@ test "the catalog names only exports a sink actually observes" {
     // An export nobody wrote down cannot fall into a generic bucket.
     try testing.expectEqual(@as(?CatalogEntry, null), lookup("zttp:cache", "cacheFlush", 0));
     try testing.expectEqual(@as(?CatalogEntry, null), lookup("zttp:unknown", "anything", 0));
+}
+
+test "a row's index and its entry name the same row" {
+    const index = lookupIndex("zttp:sql", "sqlExec", 0).?;
+    try testing.expectEqual(GuardKind.sql_write, catalog[index].kind);
+    try testing.expectEqual(catalog[index].impl_id, lookup("zttp:sql", "sqlExec", 0).?.impl_id);
+    try testing.expectEqual(@as(?u32, null), lookupIndex("zttp:sql", "sql", 0));
 }
 
 test "the catalog is non-empty and covers every guard kind" {

@@ -203,6 +203,7 @@ pub const ProofEvidence = compiler.proof_ir.Evidence;
 pub const ProofEmission = compiler.proof_ir.Emission;
 pub const ProofJump = compiler.proof_ir.Jump;
 pub const lowerProofIr = compiler.proof_ir.lower;
+pub const ProofResolver = compiler.proof_ir.Resolver;
 pub const buildProofEvidence = compiler.proof_ir.buildEvidence;
 pub const compilerProofRuleAt = compiler.proof_ir.ruleAt;
 pub const proofIrNodeDomain = compiler.proof_ir.node_domain;

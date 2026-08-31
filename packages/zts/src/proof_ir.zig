@@ -42,6 +42,10 @@ pub const Tag = enum(u16) {
     loop_node = 4,
     return_node = 5,
     plain = 6,
+    /// A call to a capability export whose resource the compiler could not
+    /// resolve. It contributes nothing to totality and exists so the consumer
+    /// can count the guarded operations itself.
+    capability_call = 7,
 };
 
 /// Mirrors `proof_system.Rule` in the acceptance kernel, totality half.
@@ -50,6 +54,21 @@ pub const Rule = enum(u16) {
     branch_both_arms_total = 2,
     sequence_member_total = 3,
     loop_never_total = 4,
+};
+
+/// How the lowering learns that a call reaches a guarded capability export.
+///
+/// The compiler resolves the callee to a module and export; the caller turns
+/// that into the consumer catalog's row index. The index, not the names, is
+/// what the proof IR carries, so the consumer resolves the row from its own
+/// table rather than from anything the producer wrote about it.
+pub const Resolver = struct {
+    context: *const anyopaque,
+    resolve: *const fn (*const anyopaque, NodeIndex) ?u32,
+
+    fn call(self: Resolver, node: NodeIndex) ?u32 {
+        return self.resolve(self.context, node);
+    }
 };
 
 pub const Node = struct {
@@ -62,6 +81,9 @@ pub const Node = struct {
     /// The parser IR node this came from. Translation witnesses are recorded
     /// against parser indices, so this is how they attach.
     source: NodeIndex,
+    /// The consumer catalog row for a `capability_call`. Zero for every other
+    /// tag.
+    aux: u32 = 0,
 };
 
 pub const ProofIr = struct {
@@ -102,6 +124,7 @@ const Tree = struct {
     /// Discriminator folded into a leaf's digest, so two different parser forms
     /// that both collapse to `plain` are still different members.
     leaf_kind: u16,
+    aux: u32 = 0,
     children: std.ArrayList(Tree) = .empty,
     digest: [32]u8 = undefined,
 
@@ -114,7 +137,156 @@ const Tree = struct {
 const Lowerer = struct {
     allocator: std.mem.Allocator,
     view: IrView,
+    resolver: ?Resolver = null,
     depth: u16 = 0,
+
+    /// Whether a subtree contains a guarded call.
+    ///
+    /// A guarded call can sit anywhere an expression can - inside a `return`,
+    /// inside an initializer, inside a match arm - and the lowering must reach
+    /// it wherever it is. It must also leave a handler with none exactly as it
+    /// was, or every literal-only artifact's proof identity would move. So the
+    /// descent below expression forms happens only along paths that lead to
+    /// one.
+    fn containsGuarded(self: *Lowerer, index: NodeIndex) bool {
+        if (index == null_node) return false;
+        if (self.resolver == null) return false;
+        if (self.guardedIndex(index) != null) return true;
+        var found = false;
+        self.forEachSubNode(index, &found, struct {
+            fn visit(ctx: *bool, lowerer: *Lowerer, child: NodeIndex) void {
+                if (ctx.*) return;
+                if (lowerer.containsGuarded(child)) ctx.* = true;
+            }
+        }.visit);
+        return found;
+    }
+
+    fn guardedIndex(self: *Lowerer, index: NodeIndex) ?u32 {
+        const resolver = self.resolver orelse return null;
+        const tag = self.view.getTag(index) orelse return null;
+        return switch (tag) {
+            .call, .method_call => resolver.call(index),
+            else => null,
+        };
+    }
+
+    /// Every node one node can hold, expressions included.
+    ///
+    /// `IrView.forEachChild` walks statements only, which is right for the
+    /// totality fold and not enough to find a call inside a return. This covers
+    /// the expression forms the subset admits; anything it misses is a guarded
+    /// call the lowering cannot see, which is why the classifier in U5 refuses
+    /// a form this walk does not reach.
+    fn forEachSubNode(
+        self: *Lowerer,
+        index: NodeIndex,
+        ctx: anytype,
+        comptime visit: fn (@TypeOf(ctx), *Lowerer, NodeIndex) void,
+    ) void {
+        const tag = self.view.getTag(index) orelse return;
+        switch (tag) {
+            .program, .block => {
+                const block = self.view.getBlock(index) orelse return;
+                for (0..block.stmts_count) |i| {
+                    visit(ctx, self, self.view.getListIndex(block.stmts_start, @intCast(i)));
+                }
+            },
+            .export_decl => {
+                if (self.view.getExportDecl(index)) |decl| visit(ctx, self, decl.declaration);
+            },
+            .var_decl, .function_decl => {
+                if (self.view.getVarDecl(index)) |decl| visit(ctx, self, decl.init);
+            },
+            .function_expr, .arrow_function => {
+                if (self.view.getFunction(index)) |func| visit(ctx, self, func.body);
+            },
+            .if_stmt => {
+                const stmt = self.view.getIfStmt(index) orelse return;
+                visit(ctx, self, stmt.condition);
+                visit(ctx, self, stmt.then_branch);
+                visit(ctx, self, stmt.else_branch);
+            },
+            .for_of_stmt, .for_in_stmt => {
+                const loop = self.view.getForIter(index) orelse return;
+                visit(ctx, self, loop.body);
+            },
+            .for_stmt, .while_stmt, .do_while_stmt => {
+                const loop = self.view.getLoop(index) orelse return;
+                visit(ctx, self, loop.body);
+            },
+            .return_stmt, .expr_stmt => {
+                if (self.view.getOptValue(index)) |value| visit(ctx, self, value);
+            },
+            .assert_stmt => {
+                const stmt = self.view.getAssertStmt(index) orelse return;
+                visit(ctx, self, stmt.condition);
+                visit(ctx, self, stmt.error_expr);
+            },
+            .binary_op => {
+                const binary = self.view.getBinary(index) orelse return;
+                visit(ctx, self, binary.left);
+                visit(ctx, self, binary.right);
+            },
+            .unary_op => {
+                if (self.view.getUnary(index)) |unary| visit(ctx, self, unary.operand);
+            },
+            .ternary => {
+                const ternary = self.view.getTernary(index) orelse return;
+                visit(ctx, self, ternary.condition);
+                visit(ctx, self, ternary.then_branch);
+                visit(ctx, self, ternary.else_branch);
+            },
+            .call, .method_call => {
+                const call = self.view.getCall(index) orelse return;
+                visit(ctx, self, call.callee);
+                for (0..call.args_count) |i| {
+                    visit(ctx, self, self.view.getListIndex(call.args_start, @intCast(i)));
+                }
+            },
+            .member_access, .optional_chain, .computed_access => {
+                const member = self.view.getMember(index) orelse return;
+                visit(ctx, self, member.object);
+                visit(ctx, self, member.computed);
+            },
+            .assignment => {
+                const assign = self.view.getAssignment(index) orelse return;
+                visit(ctx, self, assign.target);
+                visit(ctx, self, assign.value);
+            },
+            .array_literal => {
+                const array = self.view.getArray(index) orelse return;
+                for (0..array.elements_count) |i| {
+                    visit(ctx, self, self.view.getListIndex(array.elements_start, @intCast(i)));
+                }
+            },
+            .object_literal => {
+                const object = self.view.getObject(index) orelse return;
+                for (0..object.properties_count) |i| {
+                    visit(ctx, self, self.view.getListIndex(object.properties_start, @intCast(i)));
+                }
+            },
+            .object_property => {
+                const property = self.view.getProperty(index) orelse return;
+                visit(ctx, self, property.key);
+                visit(ctx, self, property.value);
+            },
+            .match_expr => {
+                const match = self.view.getMatchExpr(index) orelse return;
+                visit(ctx, self, match.discriminant);
+                for (0..match.arms_count) |i| {
+                    visit(ctx, self, self.view.getListIndex(match.arms_start, @intCast(i)));
+                }
+            },
+            .match_arm => {
+                if (self.view.getMatchArm(index)) |arm| visit(ctx, self, arm.body);
+            },
+            .spread, .object_spread => {
+                if (self.view.getOptValue(index)) |value| visit(ctx, self, value);
+            },
+            else => {},
+        }
+    }
 
     fn build(self: *Lowerer, index: NodeIndex) Error!Tree {
         if (self.depth >= max_depth) return error.ProgramTooDeep;
@@ -185,9 +357,48 @@ const Lowerer = struct {
         return node;
     }
 
+    /// A node with no structural children of its own.
+    ///
+    /// When its subtree holds a guarded call, the node keeps children after all:
+    /// just the paths that lead to one. A handler with no guarded call gets the
+    /// leaf it got before, so its proof identity does not move.
     fn leaf(self: *Lowerer, tag: Tag, index: NodeIndex, kind: u16) Error!Tree {
-        _ = self;
-        return .{ .tag = tag, .source = index, .leaf_kind = kind };
+        if (self.guardedIndex(index)) |catalog_index| {
+            return .{
+                .tag = .capability_call,
+                .source = index,
+                .leaf_kind = kind,
+                .aux = catalog_index,
+            };
+        }
+        if (!self.containsGuarded(index)) {
+            return .{ .tag = tag, .source = index, .leaf_kind = kind };
+        }
+
+        var node = Tree{ .tag = tag, .source = index, .leaf_kind = kind };
+        errdefer node.deinit(self.allocator);
+        const Collector = struct {
+            lowerer: *Lowerer,
+            parent: *Tree,
+            failed: ?Error = null,
+
+            fn visit(ctx: *@This(), lowerer: *Lowerer, child: NodeIndex) void {
+                if (ctx.failed != null) return;
+                if (child == null_node) return;
+                if (!lowerer.containsGuarded(child)) return;
+                const built = lowerer.build(child) catch |err| {
+                    ctx.failed = err;
+                    return;
+                };
+                ctx.parent.children.append(lowerer.allocator, built) catch |err| {
+                    ctx.failed = err;
+                };
+            }
+        };
+        var collector = Collector{ .lowerer = self, .parent = &node };
+        self.forEachSubNode(index, &collector, Collector.visit);
+        if (collector.failed) |err| return err;
+        return node;
     }
 };
 
@@ -202,6 +413,9 @@ fn digestTree(node: *Tree) void {
     var kind_le: [2]u8 = undefined;
     std.mem.writeInt(u16, &kind_le, node.leaf_kind, .little);
     hasher.update(&kind_le);
+    var aux_le: [4]u8 = undefined;
+    std.mem.writeInt(u32, &aux_le, node.aux, .little);
+    hasher.update(&aux_le);
     var count_le: [4]u8 = undefined;
     std.mem.writeInt(u32, &count_le, @intCast(node.children.items.len), .little);
     hasher.update(&count_le);
@@ -221,8 +435,9 @@ pub fn lower(
     view: IrView,
     root: NodeIndex,
     handler_source: ?NodeIndex,
+    resolver: ?Resolver,
 ) Error!ProofIr {
-    var lowerer = Lowerer{ .allocator = allocator, .view = view };
+    var lowerer = Lowerer{ .allocator = allocator, .view = view, .resolver = resolver };
     var tree = try lowerer.build(root);
     defer tree.deinit(allocator);
     digestTree(&tree);
@@ -242,6 +457,7 @@ pub fn lower(
         .child_count = @intCast(tree.children.items.len),
         .digest = tree.digest,
         .source = tree.source,
+        .aux = tree.aux,
     });
     try queue.append(allocator, .{ .tree = &tree, .id = 0, .parent = 0 });
 
@@ -260,6 +476,7 @@ pub fn lower(
                 .child_count = @intCast(child.children.items.len),
                 .digest = child.digest,
                 .source = child.source,
+                .aux = child.aux,
             });
             try queue.append(allocator, .{ .tree = child, .id = id, .parent = frame.id });
         }
@@ -307,7 +524,7 @@ pub fn deriveTotality(
             .function => firstChildTotal(total, node),
             .sequence => anyChildTotal(total, node),
             .branch => node.child_count == 2 and allChildrenTotal(total, node),
-            .loop_node, .plain => false,
+            .loop_node, .plain, .capability_call => false,
         };
         for (declared) |declared_id| {
             if (declared_id == node.id) total[index] = true;
@@ -349,7 +566,7 @@ pub fn ruleAt(proof: ProofIr, total: []const bool, id: u32) ?Rule {
         else
             null,
         .loop_node => .loop_never_total,
-        .function, .plain => null,
+        .function, .plain, .capability_call => null,
     };
 }
 
@@ -424,8 +641,9 @@ pub fn buildEvidence(
     root: NodeIndex,
     handler_source: NodeIndex,
     recorder: ?*const translation_witness.Recorder,
+    resolver: ?Resolver,
 ) Error!Evidence {
-    var proof = try lower(allocator, view, root, handler_source);
+    var proof = try lower(allocator, view, root, handler_source, resolver);
     errdefer proof.deinit();
 
     // No node in this alphabet needs a declared edge: the fold decides every
@@ -530,7 +748,32 @@ const Lowered = struct {
     }
 };
 
+/// A stand-in for the compiler's import resolution: every call site is the
+/// guarded export named by `row`. The real resolver in `precompile` resolves the
+/// callee to a module and export first; this one exists so the lowering itself
+/// can be tested without the import machinery.
+const EveryCallResolver = struct {
+    row: u32,
+
+    fn resolve(context: *const anyopaque, _: NodeIndex) ?u32 {
+        const self: *const EveryCallResolver = @ptrCast(@alignCast(context));
+        return self.row;
+    }
+
+    fn resolver(self: *const EveryCallResolver) Resolver {
+        return .{ .context = self, .resolve = resolve };
+    }
+};
+
 fn parseAndLower(allocator: std.mem.Allocator, source: []const u8) !Lowered {
+    return parseAndLowerWith(allocator, source, null);
+}
+
+fn parseAndLowerWith(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    resolver: ?Resolver,
+) !Lowered {
     const parser = try allocator.create(JsParser);
     errdefer allocator.destroy(parser);
     parser.* = try JsParser.init(allocator, source);
@@ -538,7 +781,7 @@ fn parseAndLower(allocator: std.mem.Allocator, source: []const u8) !Lowered {
     const root = try parser.parse();
     const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
     const handler_source = handler_verifier.findHandlerFunction(view, root);
-    const proof = try lower(allocator, view, root, handler_source);
+    const proof = try lower(allocator, view, root, handler_source, resolver);
     return .{ .allocator = allocator, .parser = parser, .proof = proof };
 }
 
@@ -736,6 +979,121 @@ test "a match is an expression, so it never carries totality" {
     try testing.expectEqual(@as(usize, 1), returns);
 }
 
+test "a guarded call is reachable wherever an expression is" {
+    const allocator = testing.allocator;
+    var resolver_state = EveryCallResolver{ .row = 3 };
+    const resolver = resolver_state.resolver();
+
+    // Inside a return, which the fold treats as a leaf. Before this lowering
+    // learned to descend, a guarded call here was invisible.
+    var in_return = try parseAndLowerWith(allocator,
+        \\function handler(req) {
+        \\  return env("API_KEY");
+        \\}
+    , resolver);
+    defer in_return.deinit();
+    try testing.expectEqual(@as(usize, 1), countTag(in_return.proof, .capability_call));
+    try testing.expectEqual(@as(u32, 3), guardedAux(in_return.proof).?);
+
+    // Inside an initializer.
+    var in_init = try parseAndLowerWith(allocator,
+        \\function handler(req) {
+        \\  const value = env("API_KEY");
+        \\  return Response.text(value);
+        \\}
+    , resolver);
+    defer in_init.deinit();
+    try testing.expect(countTag(in_init.proof, .capability_call) >= 1);
+
+    // The handler is still total: a guarded call establishes nothing about
+    // returning, and it must not take that away either.
+    const function_id = in_return.proof.handler_function orelse return error.TestUnexpectedResult;
+    const total = try deriveTotality(allocator, in_return.proof, &.{});
+    defer allocator.free(total);
+    try testing.expect(total[function_id]);
+}
+
+test "a handler with no guarded call lowers exactly as it did before" {
+    const allocator = testing.allocator;
+    var resolver_state = EveryCallResolver{ .row = 0 };
+    const source =
+        \\function handler(req) {
+        \\  if (req.method === "GET") {
+        \\    return Response.text("a");
+        \\  } else {
+        \\    return Response.text("b");
+        \\  }
+        \\}
+    ;
+
+    var without = try parseAndLower(allocator, source);
+    defer without.deinit();
+
+    // With a resolver that guards nothing, the shape and the identity are the
+    // same. A literal-only artifact's proof identity must not move because the
+    // lowering gained the ability to see guarded calls.
+    var never = NeverResolver{};
+    var with_none = try parseAndLowerWith(allocator, source, never.resolver());
+    defer with_none.deinit();
+
+    try testing.expectEqual(without.proof.nodes.len, with_none.proof.nodes.len);
+    try testing.expectEqualSlices(
+        u8,
+        &without.proof.nodes[0].digest,
+        &with_none.proof.nodes[0].digest,
+    );
+    _ = &resolver_state;
+}
+
+test "a guarded call at a different catalog row is a different member" {
+    const allocator = testing.allocator;
+    const source =
+        \\function handler(req) {
+        \\  return env("API_KEY");
+        \\}
+    ;
+    var row_one = EveryCallResolver{ .row = 1 };
+    var row_two = EveryCallResolver{ .row = 2 };
+
+    var first = try parseAndLowerWith(allocator, source, row_one.resolver());
+    defer first.deinit();
+    var second = try parseAndLowerWith(allocator, source, row_two.resolver());
+    defer second.deinit();
+
+    // The catalog row is folded into the digest, so pointing an operation at a
+    // different guard changes the proof identity rather than passing silently.
+    try testing.expect(!std.mem.eql(
+        u8,
+        &first.proof.nodes[0].digest,
+        &second.proof.nodes[0].digest,
+    ));
+}
+
+fn countTag(proof: ProofIr, tag: Tag) usize {
+    var count: usize = 0;
+    for (proof.nodes) |node| {
+        if (node.tag == tag) count += 1;
+    }
+    return count;
+}
+
+fn guardedAux(proof: ProofIr) ?u32 {
+    for (proof.nodes) |node| {
+        if (node.tag == .capability_call) return node.aux;
+    }
+    return null;
+}
+
+const NeverResolver = struct {
+    fn never(_: *const anyopaque, _: NodeIndex) ?u32 {
+        return null;
+    }
+
+    fn resolver(self: *const NeverResolver) Resolver {
+        return .{ .context = self, .resolve = never };
+    }
+};
+
 test "every tag in the alphabet is reachable from real source" {
     const allocator = testing.allocator;
     var seen = std.EnumSet(Tag).initEmpty();
@@ -771,6 +1129,18 @@ test "every tag in the alphabet is reachable from real source" {
         defer lowered.deinit();
         for (lowered.proof.nodes) |node| seen.insert(node.tag);
     }
+
+    // The guarded tag needs a resolver to appear at all, which is the point:
+    // without one the lowering cannot know a call is guarded, and it must not
+    // guess.
+    var guarded_resolver = EveryCallResolver{ .row = 0 };
+    var guarded = try parseAndLowerWith(allocator,
+        \\function handler(req) {
+        \\  return env("API_KEY");
+        \\}
+    , guarded_resolver.resolver());
+    defer guarded.deinit();
+    for (guarded.proof.nodes) |node| seen.insert(node.tag);
 
     // An alphabet member no source reaches is a rule that never runs. If a tag
     // is added here, a source that produces it belongs above.
@@ -827,5 +1197,5 @@ test "a program deeper than the walk bound is refused, not truncated" {
     defer parser.deinit();
     const root = parser.parse() catch return;
     const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
-    try testing.expectError(error.ProgramTooDeep, lower(allocator, view, root, null));
+    try testing.expectError(error.ProgramTooDeep, lower(allocator, view, root, null, null));
 }
