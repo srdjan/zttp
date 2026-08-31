@@ -16,6 +16,8 @@ const pcc = @import("zttp_proof_checker");
 
 const artifact_graph = @import("artifact_graph.zig");
 
+const graph = pcc.executable_graph;
+
 pub const Assessment = pcc.Assessment;
 
 pub const Inputs = struct {
@@ -64,6 +66,41 @@ fn refusal(
     };
 }
 
+/// Rebuild the inventory this process's sections produce, and fold it.
+///
+/// One definition, used by the attestation check and by acceptance, so the two
+/// cannot disagree about which members the artifact has. They disagreed once:
+/// acceptance folded the proof-IR member and the attestation check did not, and
+/// every artifact carrying a certificate then refused to serve because its own
+/// two rebuilds produced different roots.
+pub fn observedRoot(allocator: std.mem.Allocator, inputs: Inputs) Error!?[32]u8 {
+    const members = try allocator.alloc(artifact_graph.Member, artifact_graph.max_members);
+    defer allocator.free(members);
+    const observed = artifact_graph.build(allocator, graphInputs(inputs), members) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return null,
+    };
+    return graph.computeRoot(observed) catch null;
+}
+
+fn graphInputs(inputs: Inputs) artifact_graph.Inputs {
+    return artifact_graph.fromArtifact(.{
+        .bytecode = inputs.bytecode,
+        .dep_bytecodes = inputs.dep_bytecodes,
+        .contract_section = inputs.contract_section,
+        .policy_section_digest = inputs.policy_section_digest,
+        .identity = inputs.identity,
+        // The proof IR is a member of the graph, and its digest is the IR root
+        // the certificate states. Reading it from the certificate is safe
+        // precisely because the kernel then folds the IR section itself and
+        // refuses a root that does not match what it folded.
+        .proof_ir_digest = if (inputs.certificate) |certificate|
+            proofIrDigest(certificate)
+        else
+            null,
+    });
+}
+
 /// Rebuild the inventory, check the certificate against it, and report what the
 /// consumer established.
 pub fn accept(
@@ -77,18 +114,7 @@ pub fn accept(
     const members = try allocator.alloc(artifact_graph.Member, artifact_graph.max_members);
     defer allocator.free(members);
 
-    const observed = artifact_graph.build(allocator, artifact_graph.fromArtifact(.{
-        .bytecode = inputs.bytecode,
-        .dep_bytecodes = inputs.dep_bytecodes,
-        .contract_section = inputs.contract_section,
-        .policy_section_digest = inputs.policy_section_digest,
-        .identity = inputs.identity,
-        // The proof IR is a member of the graph, and its digest is the IR root
-        // the certificate states. Reading it from the certificate is safe
-        // precisely because the kernel then folds the IR section itself and
-        // refuses a root that does not match what it folded.
-        .proof_ir_digest = proofIrDigest(certificate),
-    }), members) catch |err| switch (err) {
+    const observed = artifact_graph.build(allocator, graphInputs(inputs), members) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return refusal(.artifact_binding, .graph_member_missing, inputs.provenance, true),
     };

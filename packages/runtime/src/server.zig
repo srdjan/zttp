@@ -1932,16 +1932,14 @@ pub const Server = struct {
 
         const bytecode = self.embedded_bytecode orelse return error.ExecutableGraphMissingBytecode;
 
-        const members = try self.allocator.alloc(artifact_graph.Member, artifact_graph.max_members);
-        defer self.allocator.free(members);
-
-        const built = artifact_graph.buildRoot(self.allocator, artifact_graph.fromArtifact(.{
+        const observed = proof_activation.observedRoot(self.allocator, .{
+            .certificate = self.config.certificate,
             .bytecode = bytecode,
             .dep_bytecodes = self.runtime_dep_bytecodes orelse &.{},
             .contract_section = self.config.contract_json,
             .policy_section_digest = policy_section_sha256,
             .identity = self.observedArtifactIdentity(),
-        }), members) catch |err| {
+        }) catch |err| {
             if (!builtin.is_test) {
                 std.log.err(
                     "attestation: could not rebuild the executable graph ({s}); refusing to serve",
@@ -1949,9 +1947,17 @@ pub const Server = struct {
                 );
             }
             return error.ExecutableGraphUnreadable;
+        } orelse {
+            if (!builtin.is_test) {
+                std.log.err(
+                    "attestation: could not rebuild the executable graph; refusing to serve",
+                    .{},
+                );
+            }
+            return error.ExecutableGraphUnreadable;
         };
 
-        const observed_hex = std.fmt.bytesToHex(built.root, .lower);
+        const observed_hex = std.fmt.bytesToHex(observed, .lower);
         if (!std.mem.eql(u8, &observed_hex, claimed_root_hex)) {
             if (!builtin.is_test) {
                 std.log.err(

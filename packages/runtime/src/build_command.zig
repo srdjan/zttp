@@ -14,6 +14,7 @@ const deploy_manifest = zts_cli.deploy_manifest;
 const shared = @import("cli_shared.zig");
 const artifact_graph = @import("artifact_graph.zig");
 const pcc = @import("zttp_proof_checker");
+const proof_activation = @import("proof_activation.zig");
 const proof_certificate = @import("proof_certificate.zig");
 const self_extract = @import("self_extract.zig");
 const attest_build_receipt = @import("attest/build_receipt.zig");
@@ -1592,6 +1593,74 @@ test "a real compile reaches policy acceptance, and one changed byte does not" {
     }, pcc.policy.production);
     try std.testing.expect(!rejected.accepted());
     try std.testing.expectEqual(pcc.verdict.Stage.artifact_binding, rejected.rejection.?.stage);
+}
+
+test "the signed root and the startup rebuild are the same fold" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\export function handler(req: Request): Proof<Response, "deterministic" | "read_only" | "state_isolated" | "no_secret_leakage" | "result_safe"> {
+        \\  return Response.text("ok");
+        \\}
+    ;
+
+    var compiled = try precompile.compileHandler(allocator, source, "handler.ts", .{
+        .emit_verify = true,
+        .emit_contract = true,
+        .emit_proof_evidence = true,
+    });
+    defer compiled.deinit(allocator);
+
+    const evidence = compiled.proof_evidence orelse return error.TestUnexpectedResult;
+    const contract = compiled.contract orelse return error.TestUnexpectedResult;
+    const contract_json = try serializeContractJson(allocator, &contract);
+    defer allocator.free(contract_json);
+    const policy = zts.handler_policy.contractToRuntimePolicy(&contract);
+    const policy_section = try self_extract.serializePolicy(allocator, &policy);
+    defer allocator.free(policy_section);
+    const policy_digest = artifact_graph.digestOf(policy_section);
+
+    var built = try proof_certificate.build(allocator, .{
+        .evidence = &evidence,
+        .properties = dischargedProperties(&contract),
+        .artifact = .{
+            .bytecode = compiled.bytecode,
+            .dep_bytecodes = compiled.dep_bytecodes orelse &.{},
+            .contract_section = contract_json,
+            .policy_section_digest = policy_digest,
+            .identity = artifact_graph.identityFromContract(&contract),
+        },
+        .contract_digest = artifact_graph.digestOf(contract_json),
+    });
+    defer built.deinit();
+
+    // What the server folds at startup, from the sections it loaded, using the
+    // certificate for the one member it cannot derive.
+    const observed = (try proof_activation.observedRoot(allocator, .{
+        .certificate = built.bytes,
+        .bytecode = compiled.bytecode,
+        .dep_bytecodes = compiled.dep_bytecodes orelse &.{},
+        .contract_section = contract_json,
+        .policy_section_digest = policy_digest,
+        .identity = artifact_graph.identityFromContract(&contract),
+    })).?;
+
+    // These two folds are what the signed claim is compared against. When they
+    // disagreed - acceptance folded the proof-IR member, the attestation check
+    // did not - every artifact carrying a certificate refused to serve, and
+    // only the end-to-end smoke test noticed.
+    try std.testing.expectEqualSlices(u8, &built.executable_root, &observed);
+
+    // And a rebuild that forgets the proof IR is a different artifact, which is
+    // what makes the equality above load-bearing rather than incidental.
+    const without_ir = (try proof_activation.observedRoot(allocator, .{
+        .certificate = null,
+        .bytecode = compiled.bytecode,
+        .dep_bytecodes = compiled.dep_bytecodes orelse &.{},
+        .contract_section = contract_json,
+        .policy_section_digest = policy_digest,
+        .identity = artifact_graph.identityFromContract(&contract),
+    })).?;
+    try std.testing.expect(!std.mem.eql(u8, &built.executable_root, &without_ir));
 }
 
 test "a handler that does not always return is not accepted" {
