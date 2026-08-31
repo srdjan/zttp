@@ -6,10 +6,16 @@
 //! source positions, and every expression form in it is a member the consumer
 //! would have to model.
 //!
-//! This lowering keeps the ten node kinds totality depends on and collapses
+//! This lowering keeps the six node kinds totality depends on and collapses
 //! everything else to a leaf. What survives is small enough that the consumer
 //! re-runs the derivation itself rather than checking a producer's word for it,
 //! and stable enough that moving a line does not move the proof identity.
+//!
+//! Six, not more, because six is what this subset's totality depends on. A
+//! `match` is an expression here, so it can never be the construct that
+//! returns; the same is true of a call. Modelling either would have added node
+//! kinds and a rule that no real source could reach, and an alphabet member
+//! nothing constructs is a check that never runs.
 //!
 //! The tag and rule numbering here mirrors the acceptance kernel's alphabet.
 //! It is duplicated rather than imported because the kernel is a leaf and the
@@ -32,17 +38,9 @@ pub const Tag = enum(u16) {
     function = 1,
     sequence = 2,
     branch = 3,
-    /// A `match` carrying a default arm.
-    match_default = 4,
-    /// A `match` with no default arm. Closed-union coverage is the type
-    /// checker's answer, not this lowering's, so the node is recorded as open
-    /// and a certificate that needs it total has to declare that edge.
-    match_open = 5,
-    match_arm = 6,
-    loop_node = 7,
-    return_node = 8,
-    call = 9,
-    plain = 10,
+    loop_node = 4,
+    return_node = 5,
+    plain = 6,
 };
 
 /// Mirrors `proof_system.Rule` in the acceptance kernel, totality half.
@@ -50,8 +48,7 @@ pub const Rule = enum(u16) {
     return_total = 1,
     branch_both_arms_total = 2,
     sequence_member_total = 3,
-    match_exhaustive_total = 4,
-    loop_never_total = 5,
+    loop_never_total = 4,
 };
 
 pub const Node = struct {
@@ -157,33 +154,6 @@ const Lowerer = struct {
                 }
                 break :blk node;
             },
-            .match_expr => blk: {
-                const match = self.view.getMatchExpr(index) orelse break :blk try self.leaf(.plain, index, @intFromEnum(tag));
-                var has_default = false;
-                for (0..match.arms_count) |i| {
-                    const arm_index = self.view.getListIndex(match.arms_start, @intCast(i));
-                    const arm = self.view.getMatchArm(arm_index) orelse continue;
-                    if (arm.pattern == null_node) has_default = true;
-                }
-                var node = Tree{
-                    .tag = if (has_default) .match_default else .match_open,
-                    .source = index,
-                    .leaf_kind = 0,
-                };
-                errdefer node.deinit(self.allocator);
-                for (0..match.arms_count) |i| {
-                    const arm_index = self.view.getListIndex(match.arms_start, @intCast(i));
-                    try node.children.append(self.allocator, try self.build(arm_index));
-                }
-                break :blk node;
-            },
-            .match_arm => blk: {
-                const arm = self.view.getMatchArm(index) orelse break :blk try self.leaf(.plain, index, @intFromEnum(tag));
-                var node = Tree{ .tag = .match_arm, .source = index, .leaf_kind = 0 };
-                errdefer node.deinit(self.allocator);
-                try node.children.append(self.allocator, try self.build(arm.body));
-                break :blk node;
-            },
             .for_of_stmt, .for_in_stmt => blk: {
                 const loop = self.view.getForIter(index) orelse break :blk try self.leaf(.loop_node, index, @intFromEnum(tag));
                 var node = Tree{ .tag = .loop_node, .source = index, .leaf_kind = 0 };
@@ -199,7 +169,6 @@ const Lowerer = struct {
                 break :blk node;
             },
             .return_stmt => try self.leaf(.return_node, index, @intFromEnum(tag)),
-            .call, .method_call => try self.leaf(.call, index, @intFromEnum(tag)),
             else => try self.leaf(.plain, index, @intFromEnum(tag)),
         };
     }
@@ -327,11 +296,10 @@ pub fn deriveTotality(
         const node = proof.nodes[index];
         total[index] = switch (node.tag) {
             .return_node => true,
-            .function, .match_arm => firstChildTotal(total, node),
+            .function => firstChildTotal(total, node),
             .sequence => anyChildTotal(total, node),
             .branch => node.child_count == 2 and allChildrenTotal(total, node),
-            .match_default => node.child_count > 0 and allChildrenTotal(total, node),
-            .match_open, .loop_node, .call, .plain => false,
+            .loop_node, .plain => false,
         };
         for (declared) |declared_id| {
             if (declared_id == node.id) total[index] = true;
@@ -372,24 +340,9 @@ pub fn ruleAt(proof: ProofIr, total: []const bool, id: u32) ?Rule {
             .branch_both_arms_total
         else
             null,
-        .match_default => if (node.child_count > 0 and allChildrenTotal(total, node))
-            .match_exhaustive_total
-        else
-            null,
         .loop_node => .loop_never_total,
-        .function, .match_arm, .match_open, .call, .plain => null,
+        .function, .plain => null,
     };
-}
-
-/// Every `match` the lowering could not close. A certificate that needs one of
-/// these total has to declare that edge, and the declaration caps its grade.
-pub fn openMatches(allocator: std.mem.Allocator, proof: ProofIr) Error![]u32 {
-    var out: std.ArrayList(u32) = .empty;
-    errdefer out.deinit(allocator);
-    for (proof.nodes) |node| {
-        if (node.tag == .match_open) try out.append(allocator, node.id);
-    }
-    return out.toOwnedSlice(allocator);
 }
 
 // ---------------------------------------------------------------------------
@@ -466,32 +419,14 @@ pub fn buildEvidence(
     var proof = try lower(allocator, view, root);
     errdefer proof.deinit();
 
-    // Declare open matches only when the handler needs them. Over-declaring
-    // would cap the grade for a handler that never depended on one.
-    var declared: []u32 = try allocator.alloc(u32, 0);
+    // No node in this alphabet needs a declared edge: the fold decides every
+    // one of the six tags. The field stays because the certificate format has
+    // the concept and the kernel checks it; the producer has nothing to put in
+    // it today, and saying so beats emitting an empty mechanism that looks used.
+    const declared: []u32 = try allocator.alloc(u32, 0);
     errdefer allocator.free(declared);
-    var total = try deriveTotality(allocator, proof, declared);
+    const total = try deriveTotality(allocator, proof, declared);
     errdefer allocator.free(total);
-
-    const handler = proof.handler_function;
-    const needs_declaration = if (handler) |id| !total[id] else false;
-    if (needs_declaration) {
-        const open = try openMatches(allocator, proof);
-        if (open.len == 0) {
-            allocator.free(open);
-        } else {
-            const with_open = try deriveTotality(allocator, proof, open);
-            if (handler != null and with_open[handler.?]) {
-                allocator.free(total);
-                allocator.free(declared);
-                total = with_open;
-                declared = open;
-            } else {
-                allocator.free(with_open);
-                allocator.free(open);
-            }
-        }
-    }
 
     var emissions: std.ArrayList(Emission) = .empty;
     errdefer emissions.deinit(allocator);
@@ -762,28 +697,80 @@ test "proof identity ignores source position and follows structure" {
     ));
 }
 
-test "a match without a default arm is recorded open and can be declared total" {
+test "a match is an expression, so it never carries totality" {
     const allocator = testing.allocator;
     var lowered = try parseAndLower(allocator,
         \\function handler(req) {
         \\  return match (req.method) {
         \\    when "GET": Response.text("get"),
-        \\    when "POST": Response.text("post")
+        \\    default: Response.text("other")
         \\  };
         \\}
     );
     defer lowered.deinit();
 
     const proof = lowered.proof;
-    const open = try openMatches(allocator, proof);
-    defer allocator.free(open);
-    // The match is an expression inside a return, so the return already carries
-    // totality; what matters is that the lowering did not silently call the
-    // match closed.
+    const function_id = proof.handler_function orelse return error.TestUnexpectedResult;
+    const total = try deriveTotality(allocator, proof, &.{});
+    defer allocator.free(total);
+
+    // The `return` is what makes the handler total. The match under it is an
+    // expression and contributes nothing, which is why the alphabet has no tag
+    // for it: a tag here would be a member no rule could ever be checked
+    // against.
+    try testing.expect(total[function_id]);
+    var returns: usize = 0;
     for (proof.nodes) |node| {
-        try testing.expect(node.tag != .match_default);
+        if (node.tag == .return_node) returns += 1;
     }
-    try testing.expect(open.len <= proof.nodes.len);
+    try testing.expectEqual(@as(usize, 1), returns);
+}
+
+test "every tag in the alphabet is reachable from real source" {
+    const allocator = testing.allocator;
+    var seen = std.EnumSet(Tag).initEmpty();
+
+    const sources = [_][]const u8{
+        // function, sequence, return
+        \\function handler(req) {
+        \\  return Response.text("ok");
+        \\}
+        ,
+        // branch
+        \\function handler(req) {
+        \\  if (req.method === "GET") {
+        \\    return Response.text("a");
+        \\  } else {
+        \\    return Response.text("b");
+        \\  }
+        \\}
+        ,
+        // loop, plain
+        \\function handler(req) {
+        \\  const items = [1, 2];
+        \\  for (const item of items) {
+        \\    const x = item;
+        \\  }
+        \\  return Response.text("ok");
+        \\}
+        ,
+    };
+
+    for (sources) |source| {
+        var lowered = try parseAndLower(allocator, source);
+        defer lowered.deinit();
+        for (lowered.proof.nodes) |node| seen.insert(node.tag);
+    }
+
+    // An alphabet member no source reaches is a rule that never runs. If a tag
+    // is added here, a source that produces it belongs above.
+    inline for (@typeInfo(Tag).@"enum".fields) |field| {
+        const tag: Tag = @enumFromInt(field.value);
+        testing.expect(seen.contains(tag)) catch |err| {
+            std.debug.print("proof IR tag '{s}' is unreachable from the corpus above\n", .{@tagName(tag)});
+            return err;
+        };
+    }
 }
 
 test "a declared node is total even when no rule closes it" {

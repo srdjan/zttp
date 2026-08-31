@@ -350,10 +350,11 @@ fn verifySemantics(
     }
 
     try stdout.print(
-        "Proof:     {s} (weakest edge: {s}{s})\n",
+        "Proof:     {s} (weakest edge: {s}; {d} disclosed edge(s) the consumer did not check{s})\n",
         .{
             assessment.semantic.name(),
             if (assessment.grade) |grade| grade.name() else "none",
+            assessment.disclosed_edges,
             if (assessment.development_only) ", development artifact" else "",
         },
     );

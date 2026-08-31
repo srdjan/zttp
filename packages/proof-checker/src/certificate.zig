@@ -283,18 +283,16 @@ pub const Rewrite = struct {
 pub const trusted_record_size = 8;
 
 pub const TrustedFamily = enum(u8) {
-    /// A semantics registry node rule.
+    /// A proof-IR node whose totality is declared rather than derived.
     node = 1,
-    /// A semantics registry opcode rule.
+    /// A bytecode-level edge the kernel does not model, such as the decode of
+    /// the bytes the translation witnesses point at.
     opcode = 2,
-    /// A whole property.
-    property = 3,
 
     pub fn fromWire(value: u8) ?TrustedFamily {
         return switch (value) {
             1 => .node,
             2 => .opcode,
-            3 => .property,
             else => null,
         };
     }
@@ -310,15 +308,14 @@ pub const TrustedEdge = struct {
 pub const solver_record_size = 8;
 
 pub const SolverQueryKind = enum(u16) {
-    /// The lowering of one opcode agrees with its denotation.
+    /// The lowering of one opcode agrees with its denotation. One kind, because
+    /// one is what a producer can construct today; a second would advertise a
+    /// query shape nothing emits.
     opcode_equivalence = 1,
-    /// A fused opcode agrees with the sequence it replaced.
-    refinement_equivalence = 2,
 
     pub fn fromWire(value: u16) ?SolverQueryKind {
         return switch (value) {
             1 => .opcode_equivalence,
-            2 => .refinement_equivalence,
             else => null,
         };
     }

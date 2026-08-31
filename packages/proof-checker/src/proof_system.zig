@@ -143,10 +143,12 @@ pub const Property = enum(u16) {
 /// Small-kernel rules. Each one is a check the consumer performs itself over
 /// data it holds; none of them reads a producer verdict.
 ///
-/// The set is closed and every member is constructible: a rule the compiler
-/// cannot produce and no certificate can cite would advertise a check that
-/// never runs, which is the shape of gate this repository has been burned by
-/// before.
+/// The set is closed and every member is constructible from real source. A rule
+/// the compiler cannot produce and no certificate can cite would advertise a
+/// check that never runs, which is the shape of gate this repository has been
+/// burned by before. `match` is deliberately absent: it is an expression in this
+/// subset, so it can never be the construct that returns, and modelling it would
+/// have added three node kinds and a rule that nothing could reach.
 pub const Rule = enum(u16) {
     /// A `return` node discharges totality for itself.
     return_total = 1,
@@ -155,34 +157,30 @@ pub const Rule = enum(u16) {
     /// A statement sequence is total when one of its statements is total.
     /// Everything after that statement is unreachable.
     sequence_member_total = 3,
-    /// A `match` node with a default arm is total when every arm is total. A
-    /// match without one is not covered by this rule; see `TrustReason`.
-    match_exhaustive_total = 4,
     /// A loop body never establishes totality: the iterable can be empty.
-    loop_never_total = 5,
+    loop_never_total = 4,
     /// Each IR member occupies one contiguous range of final bytecode, and no
     /// two sibling ranges overlap.
-    emission_contiguous = 6,
+    emission_contiguous = 5,
     /// Every jump a branch emitted resolves to the emitted start of the IR
     /// member it names as its target.
-    jump_target_resolved = 7,
+    jump_target_resolved = 6,
     /// A recorded peephole fusion replaced a known instruction pair with a
     /// known fused instruction.
-    rewrite_peephole_fusion = 8,
+    rewrite_peephole_fusion = 7,
     /// A recorded compaction shifted later offsets by one consistent delta.
-    rewrite_compaction = 9,
+    rewrite_compaction = 8,
 
     pub fn fromWire(value: u16) ?Rule {
         return switch (value) {
             1 => .return_total,
             2 => .branch_both_arms_total,
             3 => .sequence_member_total,
-            4 => .match_exhaustive_total,
-            5 => .loop_never_total,
-            6 => .emission_contiguous,
-            7 => .jump_target_resolved,
-            8 => .rewrite_peephole_fusion,
-            9 => .rewrite_compaction,
+            4 => .loop_never_total,
+            5 => .emission_contiguous,
+            6 => .jump_target_resolved,
+            7 => .rewrite_peephole_fusion,
+            8 => .rewrite_compaction,
             else => null,
         };
     }
@@ -195,7 +193,6 @@ pub const Rule = enum(u16) {
             .return_total,
             .branch_both_arms_total,
             .sequence_member_total,
-            .match_exhaustive_total,
             .loop_never_total,
             => .totality,
             .emission_contiguous,
@@ -209,41 +206,31 @@ pub const Rule = enum(u16) {
 
 pub const RuleFamily = enum { totality, translation };
 
-/// Proof-IR node tags the kernel can walk. The producer lowers its own richer
-/// IR into this alphabet; anything it cannot lower must be declared a trusted
-/// edge rather than smuggled through as an unknown tag.
+/// Proof-IR node tags the kernel can walk.
+///
+/// Six, which is what this subset's totality actually depends on: a function,
+/// a statement sequence, a branch, a loop, a return, and a leaf for everything
+/// else. `match` is an expression here and can never be the construct that
+/// returns; a call is one too. Both collapse to `plain`, because a tag nothing
+/// can produce is a tag no rule can be checked against.
 pub const NodeTag = enum(u16) {
     function = 1,
     sequence = 2,
     branch = 3,
-    /// A `match` carrying a default arm. Totality follows from its arms.
-    match_default = 4,
-    /// A `match` with no default arm. The kernel models no rule that closes it:
-    /// whether a closed union is covered member by member is decided by the
-    /// type checker, and re-deciding it here would mean re-implementing the
-    /// type checker inside the acceptance kernel. A certificate that needs such
-    /// a node to be total says so with a declared edge, and the grade drops.
-    match_open = 5,
-    match_arm = 6,
-    loop_node = 7,
-    return_node = 8,
-    call = 9,
-    /// A statement with no bearing on totality (declaration, expression
-    /// statement). Present so a sequence's shape is complete.
-    plain = 10,
+    loop_node = 4,
+    return_node = 5,
+    /// A statement or expression with no bearing on totality. Present so a
+    /// sequence's shape is complete.
+    plain = 6,
 
     pub fn fromWire(value: u16) ?NodeTag {
         return switch (value) {
             1 => .function,
             2 => .sequence,
             3 => .branch,
-            4 => .match_default,
-            5 => .match_open,
-            6 => .match_arm,
-            7 => .loop_node,
-            8 => .return_node,
-            9 => .call,
-            10 => .plain,
+            4 => .loop_node,
+            5 => .return_node,
+            6 => .plain,
             else => null,
         };
     }
@@ -281,8 +268,8 @@ test "wire decoders refuse values outside the alphabet" {
     try std.testing.expectEqual(@as(?ProofSystem, null), ProofSystem.fromWire(2));
     try std.testing.expectEqual(@as(?Property, null), Property.fromWire(0));
     try std.testing.expectEqual(@as(?Property, null), Property.fromWire(9));
-    try std.testing.expectEqual(@as(?Rule, null), Rule.fromWire(10));
-    try std.testing.expectEqual(@as(?NodeTag, null), NodeTag.fromWire(11));
+    try std.testing.expectEqual(@as(?Rule, null), Rule.fromWire(9));
+    try std.testing.expectEqual(@as(?NodeTag, null), NodeTag.fromWire(7));
     try std.testing.expectEqual(@as(?TrustReason, null), TrustReason.fromWire(6));
 }
 

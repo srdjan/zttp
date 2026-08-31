@@ -140,6 +140,11 @@ pub const Stage = enum(u8) {
 
 /// Stable rejection codes. The numeric value is the contract; the spelling is
 /// the diagnostic. Never renumber a member, and never reuse a retired one.
+///
+/// Every member here is a code some path in this package constructs. A code the
+/// kernel advertises and never produces reads, to anyone auditing the rejection
+/// surface, as a check that exists; three such were removed rather than left in
+/// as placeholders, and their numbers are retired.
 pub const ReasonCode = enum(u16) {
     // decode
     certificate_too_large = 1001,
@@ -159,7 +164,6 @@ pub const ReasonCode = enum(u16) {
 
     // limits
     work_budget_exhausted = 1101,
-    depth_limit_exceeded = 1102,
 
     // proof-system identity
     unsupported_proof_system = 1201,
@@ -184,7 +188,6 @@ pub const ReasonCode = enum(u16) {
 
     // evidence
     obligation_without_evidence = 1501,
-    unknown_rule = 1502,
     rule_family_mismatch = 1503,
     rule_premise_unmet = 1504,
     proof_node_cycle = 1505,
@@ -202,7 +205,6 @@ pub const ReasonCode = enum(u16) {
 
     // solver
     solver_edge_not_permitted = 1701,
-    solver_unavailable = 1702,
     solver_inconclusive = 1703,
     solver_query_too_large = 1704,
 
@@ -268,6 +270,11 @@ pub const Assessment = struct {
     /// Work units spent. Reported so a caller can see how close a certificate
     /// came to its budget.
     work_spent: u64,
+    /// How many edges the certificate disclosed rather than the consumer
+    /// checked. Reported next to the grade because a grade alone hides them:
+    /// "translation_validated" describes the check that ran, and this describes
+    /// what the whole chain still rests on.
+    disclosed_edges: u32 = 0,
 
     pub fn accepted(self: Assessment) bool {
         return self.rejection == null and self.semantic == .policy_accepted;

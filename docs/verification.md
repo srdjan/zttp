@@ -435,18 +435,20 @@ artifact's grade is the weakest across the properties the policy required:
 | `tested` | A finite corpus exercised it. Disclosed by the producer, not checked by the consumer. |
 | `trusted` | Declared, with a reason. Disclosed, not checked. |
 
+A grade describes the check that ran. It does not describe what the chain still
+rests on, so every result also reports how many edges the certificate disclosed
+rather than the consumer checked. The runtime's acceptance line and
+`zttp proofs verify` both print the count next to the grade.
+
 ### What is not checked, said out loud
 
 - **The bytes at the witness offsets.** The consumer checks that the translation
   witnesses hold together - ranges nest, jumps land on member starts, rewrite
   spans add up - not that the bytes at those offsets decode to the instructions
   the witnesses describe. That edge is disclosed as `trusted` in every
-  certificate's own inventory.
-- **Closed-union `match` coverage.** A `match` with no default arm is lowered as
-  open. Whether a closed union is covered member by member is the type checker's
-  answer, and re-deciding it inside the acceptance kernel would mean
-  re-implementing the type checker there. A certificate that needs such a node
-  total declares that edge, and the declaration caps its grade.
+  certificate's own inventory and is counted in every result. Closing it means
+  giving the kernel the opcode encoding, which is a data coupling to the engine
+  that can drift silently; disclosing it is the honest interim.
 - **Three of the four production-floor properties.** `results_checked`,
   `no_secret_leakage`, and `capability_bounded` are disclosed as `tested`: the
   compiler discharged them and the repository's corpus exercises the analyses

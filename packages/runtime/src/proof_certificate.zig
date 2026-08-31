@@ -123,12 +123,8 @@ fn tagFor(tag: zts.ProofIrTag) ps.NodeTag {
         .function => .function,
         .sequence => .sequence,
         .branch => .branch,
-        .match_default => .match_default,
-        .match_open => .match_open,
-        .match_arm => .match_arm,
         .loop_node => .loop_node,
         .return_node => .return_node,
-        .call => .call,
         .plain => .plain,
     };
 }
@@ -138,7 +134,6 @@ fn ruleFor(rule: zts.ProofRule) ps.Rule {
         .return_total => .return_total,
         .branch_both_arms_total => .branch_both_arms_total,
         .sequence_member_total => .sequence_member_total,
-        .match_exhaustive_total => .match_exhaustive_total,
         .loop_never_total => .loop_never_total,
     };
 }

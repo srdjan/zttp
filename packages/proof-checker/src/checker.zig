@@ -191,6 +191,7 @@ pub fn check(inputs: Inputs, policy: Policy) Assessment {
         .development_only = certificate.identity.development,
         .rejection = null,
         .work_spent = budget.spent(limits),
+        .disclosed_edges = certificate.trusted.len(),
     };
 }
 
@@ -381,11 +382,10 @@ const Session = struct {
             const node = try self.certificate.ir.get(index);
             const value = switch (node.tag) {
                 .return_node => true,
-                .function, .match_arm => node.child_count > 0 and self.total.get(node.first_child),
+                .function => node.child_count > 0 and self.total.get(node.first_child),
                 .sequence => self.anyChildTotal(node),
                 .branch => node.child_count == 2 and self.allChildrenTotal(node),
-                .match_default => node.child_count > 0 and self.allChildrenTotal(node),
-                .match_open, .loop_node, .call, .plain => false,
+                .loop_node, .plain => false,
             };
             self.total.set(index, value or self.declared.get(index));
         }
@@ -417,12 +417,8 @@ const Session = struct {
                 .branch_both_arms_total
             else
                 null,
-            .match_default => if (node.child_count > 0 and self.allChildrenTotal(node))
-                .match_exhaustive_total
-            else
-                null,
             .loop_node => .loop_never_total,
-            .function, .match_arm, .match_open, .call, .plain => null,
+            .function, .plain => null,
         };
     }
 
@@ -985,6 +981,16 @@ pub const test_support = struct {
         return fixture;
     }
 };
+
+test "the disclosed edge count is reported next to the grade" {
+    var fixture = try test_support.build();
+    const result = check(fixture.inputs(), policy_mod.production);
+    try testing.expect(result.accepted());
+    // The certificate declares one edge it did not check: the decode of the
+    // bytes its translation witnesses point at. A grade that hid that would be
+    // reporting the check without the assumption under it.
+    try testing.expectEqual(@as(u32, 1), result.disclosed_edges);
+}
 
 test "a matching certificate and inventory reach policy acceptance" {
     var fixture = try test_support.build();

@@ -1898,9 +1898,10 @@ pub const Server = struct {
 
         if (!builtin.is_test) {
             std.log.info(
-                "Proof accepted: weakest edge {s}{s}",
+                "Proof accepted: weakest edge {s}, {d} disclosed edge(s){s}",
                 .{
                     self.proof_checked.?.grade.name(),
+                    assessment.disclosed_edges,
                     if (self.proof_checked.?.development_only) " (development artifact)" else "",
                 },
             );
