@@ -366,7 +366,11 @@ test "the inventory covers every executable and authority-bearing member" {
     // exercises. The frontend profile is genuinely absent here.
     inline for (@typeInfo(MemberKind).@"enum".fields) |field| {
         const kind: MemberKind = @enumFromInt(field.value);
-        if (kind == .source_profile_frontend) continue;
+        // The frontend profile is genuinely absent for a `.ts` handler, and the
+        // residual plan is absent until a handler has a guarded operation. Both
+        // are named rather than skipped by a wildcard, so a member kind that
+        // stops being produced for any other reason fails here.
+        if (kind == .source_profile_frontend or kind == .residual_plan) continue;
         try testing.expect(seen.contains(kind));
     }
 

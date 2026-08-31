@@ -32,6 +32,9 @@ pub const Limits = struct {
     max_trusted_edges: u32 = 4096,
     /// Reconstructed solver queries.
     max_solver_queries: u16 = 64,
+    /// Residual guard obligations. One per guarded call site; a handler with
+    /// more than this is refused rather than partly checked.
+    max_residual_obligations: u32 = 4096,
     /// Deepest proof-IR walk. The subset has no back edges, so a real handler
     /// is far below this; the bound exists for a producer that lies.
     max_depth: u16 = 256,

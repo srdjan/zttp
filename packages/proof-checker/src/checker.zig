@@ -7,11 +7,13 @@
 
 const std = @import("std");
 
+const capability_policy = @import("capability_policy.zig");
 const cert_mod = @import("certificate.zig");
 const graph = @import("executable_graph.zig");
 const limits_mod = @import("limits.zig");
 const policy_mod = @import("policy.zig");
 const ps = @import("proof_system.zig");
+const residual = @import("residual.zig");
 const verdict = @import("verdict.zig");
 
 const Assessment = verdict.Assessment;
@@ -132,6 +134,21 @@ pub const Inputs = struct {
     /// refuses those edges rather than assuming them, which is what makes a
     /// missing adapter fail closed instead of silently permissive.
     solver_results: []const bool = &.{},
+    /// The exact serialized runtime capability policy this artifact was built
+    /// against, when the caller has it.
+    ///
+    /// Separate from `Policy` on purpose. `Policy` is the consumer's question -
+    /// which properties, at which grades. This is the resource authority: which
+    /// environment key, endpoint, namespace, or query name a guarded operation
+    /// may reach. Conflating them would let a permissive acceptance policy
+    /// widen a resource allowlist. The kernel recomputes the digest from these
+    /// bytes and decodes them itself; bytes are required, and a digest without
+    /// bytes proves only that two sides hashed the same blob.
+    runtime_policy: ?RuntimeCapabilityPolicyInput = null,
+};
+
+pub const RuntimeCapabilityPolicyInput = struct {
+    bytes: []const u8,
 };
 
 fn rejectAt(
@@ -154,14 +171,22 @@ pub fn check(inputs: Inputs, policy: Policy) Assessment {
             .stage = .policy,
             .code = switch (err) {
                 error.EmptyRequirementSet => .policy_requires_nothing,
-                error.EmptyProofSystemSet, error.DuplicateRequirement => .proof_system_not_selected,
+                error.EmptyProofSystemSet,
+                error.EmptySchemaVersionSet,
+                error.DuplicateRequirement,
+                => .proof_system_not_selected,
                 error.EmptyEpochSet => .semantics_epoch_not_selected,
             },
             .recertifiable = false,
         });
     };
 
-    const certificate = cert_mod.decode(inputs.certificate, limits, &budget) catch |err| {
+    const certificate = cert_mod.decodeAccepting(
+        inputs.certificate,
+        policy.schema_versions,
+        limits,
+        &budget,
+    ) catch |err| {
         return rejectAt(.parsed, inputs.provenance, budget, limits, .{
             .stage = if (err == error.WorkBudgetExhausted) .limits else .decode,
             .code = cert_mod.reasonFor(err),
@@ -173,6 +198,17 @@ pub fn check(inputs: Inputs, policy: Policy) Assessment {
         return rejectAt(.parsed, inputs.provenance, budget, limits, .{
             .stage = .proof_system_identity,
             .code = .unsupported_proof_system,
+            .actual = .{ .scalar = @intFromEnum(certificate.proof_system) },
+            .recertifiable = true,
+        });
+    }
+    // A residual section under a proof system that does not carry residual
+    // guards is not a section to ignore. Ignoring it would let a producer ship
+    // guarded operations to a consumer that never checks their coverage.
+    if (certificate.residual.len() > 0 and !certificate.proof_system.carriesResidualGuards()) {
+        return rejectAt(.parsed, inputs.provenance, budget, limits, .{
+            .stage = .proof_system_identity,
+            .code = .residual_section_not_permitted,
             .actual = .{ .scalar = @intFromEnum(certificate.proof_system) },
             .recertifiable = true,
         });
@@ -213,6 +249,7 @@ pub fn check(inputs: Inputs, policy: Policy) Assessment {
     const range_start = depth_start + depthBytes(limits);
     var session = Session{
         .certificate = certificate,
+        .runtime_policy = inputs.runtime_policy,
         .policy = policy,
         .solver_results = inputs.solver_results,
         .budget = &budget,
@@ -245,6 +282,7 @@ pub fn check(inputs: Inputs, policy: Policy) Assessment {
             .development_only = certificate.identity.development,
             .rejection = rejection,
             .work_spent = budget.spent(limits),
+            .guards = outcome.guards,
             .properties = outcome.properties,
             .disclosed_edges = outcome.disclosed_edges,
         };
@@ -259,6 +297,7 @@ pub fn check(inputs: Inputs, policy: Policy) Assessment {
         .work_spent = budget.spent(limits),
         .disclosed_edges = outcome.disclosed_edges,
         .properties = outcome.properties,
+        .guards = outcome.guards,
     };
 }
 
@@ -268,6 +307,7 @@ const Outcome = struct {
     rejection: ?Rejection = null,
     properties: verdict.PropertyVerdicts = .{},
     disclosed_edges: u32 = 0,
+    guards: verdict.GuardVerdicts = .{},
 };
 
 /// One acceptance run's working state.
@@ -279,6 +319,7 @@ const Outcome = struct {
 /// enough.
 const Session = struct {
     certificate: cert_mod.Certificate,
+    runtime_policy: ?RuntimeCapabilityPolicyInput,
     policy: Policy,
     solver_results: []const bool,
     budget: *Budget,
@@ -318,7 +359,151 @@ const Session = struct {
 
         if (try self.checkTranslation()) |rejection| return rejection;
 
-        return self.checkEvidence();
+        const guards = switch (try self.checkGuardCoverage()) {
+            .rejected => |outcome| return outcome,
+            .covered => |verdicts| verdicts,
+        };
+
+        var outcome = try self.checkEvidence();
+        outcome.guards = guards;
+        return outcome;
+    }
+
+    const GuardOutcome = union(enum) {
+        covered: verdict.GuardVerdicts,
+        rejected: Outcome,
+    };
+
+    /// Reconstruct the residual guard set from the proof IR and the consumer's
+    /// own catalog, then check the certificate's list against it.
+    ///
+    /// The IR says where the guarded calls are and which catalog row each
+    /// matches; the catalog says what a row implies. The certificate's records
+    /// restate both, and a restatement that disagrees is refused. Nothing here
+    /// reads a guard kind, a rule, a sink, or a policy section from the
+    /// producer as an answer - only as a claim to compare.
+    fn checkGuardCoverage(self: *Session) SessionError!GuardOutcome {
+        var verdicts = verdict.GuardVerdicts{};
+
+        // The plan the certificate carries must be the plan its identity names,
+        // and the graph member for it - when present - must be that same digest.
+        const plan_digest = try cert_mod.residualPlanDigestFromTable(self.certificate.residual);
+        if (!std.mem.eql(u8, &plan_digest, &self.certificate.identity.residual_plan_digest)) {
+            return .{ .rejected = reject(.guard_coverage, .residual_plan_digest_mismatch, .none) };
+        }
+        var member_index: u32 = 0;
+        while (member_index < self.certificate.graph.len()) : (member_index += 1) {
+            const member = try self.certificate.graph.get(member_index);
+            if (member.kind != .residual_plan) continue;
+            if (!std.mem.eql(u8, &member.digest, &plan_digest)) {
+                return .{ .rejected = reject(.guard_coverage, .residual_plan_digest_mismatch, .{
+                    .graph_member = .{ .kind = @intFromEnum(member.kind), .ordinal = member.ordinal },
+                }) };
+            }
+        }
+
+        // Decode the resource authority once, from bytes, against the digest
+        // the certificate committed to.
+        var decoded: ?capability_policy.Policy = null;
+        if (self.runtime_policy) |input| {
+            decoded = capability_policy.decode(
+                input.bytes,
+                self.certificate.identity.runtime_policy_digest,
+            ) catch {
+                return .{ .rejected = reject(.guard_coverage, .runtime_policy_undecodable, .none) };
+            };
+        }
+
+        var supplied_index: u32 = 0;
+        var previous: ?cert_mod.ResidualObligation = null;
+        var node_index: u32 = 0;
+        while (node_index < self.certificate.ir.len()) : (node_index += 1) {
+            try self.budget.spend(1);
+            const node = try self.certificate.ir.get(node_index);
+            if (node.tag != .capability_call) continue;
+
+            // The IR names a catalog row. A row outside the consumer's catalog
+            // is not a guarded operation the consumer knows how to cover.
+            if (node.aux >= residual.catalog.len) {
+                return .{ .rejected = reject(.guard_coverage, .guard_operation_unknown, .{ .ir_node = node.id }) };
+            }
+            const entry = residual.catalog[node.aux];
+            const expected = cert_mod.ResidualObligation{
+                .kind = entry.kind,
+                .normalization = entry.kind.normalization(),
+                .sink = entry.kind.sink(),
+                .section = entry.kind.section(),
+                .impl_id = entry.impl_id,
+                .operation_id = node.id,
+            };
+            verdicts.required += 1;
+            verdicts.kinds |= @as(u8, 1) << @intCast(@intFromEnum(entry.kind) - 1);
+
+            if (supplied_index >= self.certificate.residual.len()) {
+                return .{ .rejected = reject(.guard_coverage, .guard_member_missing, .{ .ir_node = node.id }) };
+            }
+            const supplied = try self.certificate.residual.get(supplied_index);
+            supplied_index += 1;
+
+            if (previous) |prev| {
+                switch (cert_mod.ResidualObligation.order(prev, supplied)) {
+                    .lt => {},
+                    .eq => return .{ .rejected = reject(.guard_coverage, .guard_member_duplicate, .{ .ir_node = supplied.operation_id }) },
+                    .gt => return .{ .rejected = reject(.guard_coverage, .guard_member_out_of_order, .{ .ir_node = supplied.operation_id }) },
+                }
+            }
+            previous = supplied;
+
+            if (supplied.operation_id != expected.operation_id) {
+                return .{ .rejected = reject(.guard_coverage, .guard_member_missing, .{ .ir_node = node.id }) };
+            }
+            if (supplied.kind != expected.kind) {
+                return .{ .rejected = reject(.guard_coverage, .guard_kind_mismatch, .{ .ir_node = node.id }) };
+            }
+            if (supplied.normalization != expected.normalization) {
+                return .{ .rejected = reject(.guard_coverage, .guard_normalization_mismatch, .{ .ir_node = node.id }) };
+            }
+            if (supplied.sink != expected.sink) {
+                return .{ .rejected = reject(.guard_coverage, .guard_sink_mismatch, .{ .ir_node = node.id }) };
+            }
+            if (supplied.section != expected.section) {
+                return .{ .rejected = reject(.guard_coverage, .guard_section_mismatch, .{ .ir_node = node.id }) };
+            }
+            if (supplied.impl_id != expected.impl_id) {
+                return .{ .rejected = .{
+                    .state = .integrity_verified,
+                    .rejection = .{
+                        .stage = .guard_coverage,
+                        .code = .guard_impl_identity_mismatch,
+                        .subject = .{ .ir_node = node.id },
+                        .expected = .{ .scalar = expected.impl_id },
+                        .actual = .{ .scalar = supplied.impl_id },
+                        .recertifiable = true,
+                    },
+                } };
+            }
+
+            // A guarded operation with no configured category is not guarded.
+            // An absent policy is not an empty allowlist and is not a licence.
+            const policy_bytes = decoded orelse {
+                return .{ .rejected = reject(.guard_coverage, .runtime_policy_missing, .{ .ir_node = node.id }) };
+            };
+            if (!policy_bytes.categoryEnabled(entry.kind)) {
+                return .{ .rejected = reject(.guard_coverage, .guard_category_not_configured, .{ .ir_node = node.id }) };
+            }
+
+            verdicts.covered += 1;
+        }
+
+        // A record the IR never asked for is an operation the consumer did not
+        // reconstruct, which means the producer is describing a program the
+        // consumer cannot see.
+        if (supplied_index < self.certificate.residual.len()) {
+            const extra = try self.certificate.residual.get(supplied_index);
+            return .{ .rejected = reject(.guard_coverage, .guard_member_extra, .{ .ir_node = extra.operation_id }) };
+        }
+
+        return .{ .covered = verdicts };
     }
 
     /// The IR has to be a forest of the shape the wire form promises before any
@@ -487,7 +672,9 @@ const Session = struct {
                 .function => node.child_count > 0 and self.total.get(node.first_child),
                 .sequence => self.anyChildTotal(node),
                 .branch => node.child_count == 2 and self.allChildrenTotal(node),
-                .loop_node, .plain => false,
+                // A guarded call returns a value; it never returns a Response
+                // from the handler, so it establishes no totality.
+                .loop_node, .plain, .capability_call => false,
             };
             self.total.set(index, value or self.declared.get(index));
         }
@@ -520,7 +707,7 @@ const Session = struct {
             else
                 null,
             .loop_node => .loop_never_total,
-            .function, .plain => null,
+            .function, .plain, .capability_call => null,
         };
     }
 
@@ -1142,6 +1329,197 @@ pub const test_support = struct {
         }
     };
 
+    /// The consumer policy a guarded artifact is checked under: the production
+    /// requirements, plus the successor schema and proof system this build can
+    /// read but does not yet read by default.
+    pub fn guardedPolicy() Policy {
+        var value = policy_mod.production;
+        value.schema_versions = &policy_mod.successor_schema_versions;
+        value.proof_systems = &policy_mod.successor_proof_systems;
+        return value;
+    }
+
+    /// A handler with one guarded environment read.
+    ///
+    /// The proof IR carries the guarded call, the certificate carries one
+    /// residual obligation for it, and the serialized policy configures the env
+    /// category. Every adversarial test below starts here and changes one thing.
+    pub const GuardedFixture = struct {
+        members: [10]graph.Member,
+        ir: [4]cert_mod.IrNode,
+        obligations: [8]cert_mod.Obligation,
+        evidence: [10]cert_mod.Evidence,
+        residual_plan: [1]cert_mod.ResidualObligation,
+        buffer: [8192]u8 = undefined,
+        len: usize = 0,
+        policy_bytes: [256]u8 = undefined,
+        policy_len: usize = 0,
+        scratch: [Fixture.scratch_len]u8 = undefined,
+
+        pub fn bytes(self: *const GuardedFixture) []const u8 {
+            return self.buffer[0..self.len];
+        }
+
+        pub fn policySlice(self: *const GuardedFixture) []const u8 {
+            return self.policy_bytes[0..self.policy_len];
+        }
+
+        pub fn policyDigest(self: *const GuardedFixture) [32]u8 {
+            var out: [32]u8 = undefined;
+            std.crypto.hash.sha2.Sha256.hash(self.policySlice(), &out, .{});
+            return out;
+        }
+
+        /// Serialize an env-only capability policy with one allowed key.
+        pub fn writePolicy(self: *GuardedFixture, entries: []const []const u8) void {
+            var at: usize = 0;
+            self.policy_bytes[at] = 1;
+            at += 1;
+            std.mem.writeInt(u16, self.policy_bytes[at..][0..2], @intCast(entries.len), .little);
+            at += 2;
+            for (entries) |entry| {
+                std.mem.writeInt(u16, self.policy_bytes[at..][0..2], @intCast(entry.len), .little);
+                at += 2;
+                @memcpy(self.policy_bytes[at..][0..entry.len], entry);
+                at += entry.len;
+            }
+            // Three unconfigured categories and no permitted address scope.
+            for (0..3) |section| {
+                self.policy_bytes[at] = 0;
+                at += 1;
+                std.mem.writeInt(u16, self.policy_bytes[at..][0..2], 0, .little);
+                at += 2;
+                _ = section;
+            }
+            self.policy_bytes[at] = 0;
+            at += 1;
+            self.policy_len = at;
+        }
+
+        pub fn parts(self: *GuardedFixture) cert_mod.Parts {
+            return .{
+                .proof_system = .zttp_pcc_v2,
+                .schema_version = ps.schema_version_next,
+                .identity = .{
+                    .executable_root = [_]u8{0} ** 32,
+                    .ir_root = cert_mod.irRootFromNodes(&self.ir),
+                    .contract_digest = digest(2),
+                    .residual_plan_digest = cert_mod.residualPlanDigest(&self.residual_plan),
+                    .runtime_policy_digest = self.policyDigest(),
+                    .development = false,
+                },
+                .graph = &self.members,
+                .obligations = &self.obligations,
+                .ir = &self.ir,
+                .evidence = &self.evidence,
+                .residual = &self.residual_plan,
+            };
+        }
+
+        pub fn encode(self: *GuardedFixture) !void {
+            std.mem.sort(graph.Member, &self.members, {}, struct {
+                fn lt(_: void, a: graph.Member, b: graph.Member) bool {
+                    return graph.Member.order(a, b) == .lt;
+                }
+            }.lt);
+            var built = self.parts();
+            for (&self.members) |*member| {
+                switch (member.kind) {
+                    .proof_ir => member.digest = built.identity.ir_root,
+                    .residual_plan => member.digest = built.identity.residual_plan_digest,
+                    .runtime_policy_bytes => member.digest = built.identity.runtime_policy_digest,
+                    .proof_certificate => member.digest = [_]u8{0} ** 32,
+                    else => {},
+                }
+            }
+            built.identity.executable_root = [_]u8{0} ** 32;
+            built.graph = &self.members;
+            const provisional = try cert_mod.encode(built, &self.buffer);
+            var budget = Budget.init(.{});
+            const decoded = try cert_mod.decodeAccepting(
+                provisional,
+                &policy_mod.successor_schema_versions,
+                .{},
+                &budget,
+            );
+            const certificate_digest = try cert_mod.commitmentDigest(provisional, decoded);
+            for (&self.members) |*member| {
+                if (member.kind == .proof_certificate) member.digest = certificate_digest;
+            }
+            built.identity.executable_root = try graph.computeRoot(&self.members);
+            const encoded = try cert_mod.encode(built, &self.buffer);
+            self.len = encoded.len;
+        }
+
+        pub fn inputs(self: *GuardedFixture) Inputs {
+            return .{
+                .certificate = self.bytes(),
+                .observed_graph = &self.members,
+                .scratch = &self.scratch,
+                .runtime_policy = .{ .bytes = self.policySlice() },
+            };
+        }
+    };
+
+    pub fn buildGuarded() !GuardedFixture {
+        var fixture = GuardedFixture{
+            .members = .{
+                .{ .kind = .main_bytecode, .ordinal = 0, .digest = digest(1) },
+                .{ .kind = .contract_bytes, .ordinal = 0, .digest = digest(2) },
+                .{ .kind = .runtime_policy_bytes, .ordinal = 0, .digest = digest(3) },
+                .{ .kind = .source_profile_core, .ordinal = 0, .digest = digest(4) },
+                .{ .kind = .core_grammar, .ordinal = 0, .digest = digest(5) },
+                .{ .kind = .semantics, .ordinal = 0, .digest = digest(6) },
+                .{ .kind = .capability_matrix, .ordinal = 0, .digest = digest(7) },
+                .{ .kind = .proof_ir, .ordinal = 0, .digest = digest(8) },
+                .{ .kind = .proof_certificate, .ordinal = 0, .digest = digest(9) },
+                .{ .kind = .residual_plan, .ordinal = 0, .digest = digest(10) },
+            },
+            // function -> sequence -> { guarded call, return }
+            .ir = .{
+                .{ .id = 0, .tag = .function, .is_handler = true, .parent = 0, .first_child = 1, .child_count = 1, .digest = digest(20) },
+                .{ .id = 1, .tag = .sequence, .parent = 0, .first_child = 2, .child_count = 2, .digest = digest(21) },
+                .{ .id = 2, .tag = .capability_call, .parent = 1, .first_child = 0, .child_count = 0, .digest = digest(22), .aux = 0 },
+                .{ .id = 3, .tag = .return_node, .parent = 1, .first_child = 0, .child_count = 0, .digest = digest(23) },
+            },
+            .obligations = .{
+                .{ .property = .response_total, .subject_kind = .function, .subject_id = 0 },
+                .{ .property = .results_checked, .subject_kind = .handler, .subject_id = 0 },
+                .{ .property = .no_secret_leakage, .subject_kind = .handler, .subject_id = 0 },
+                .{ .property = .state_isolated, .subject_kind = .handler, .subject_id = 0 },
+                .{ .property = .deterministic, .subject_kind = .handler, .subject_id = 0 },
+                .{ .property = .read_only, .subject_kind = .handler, .subject_id = 0 },
+                .{ .property = .retry_safe, .subject_kind = .handler, .subject_id = 0 },
+                .{ .property = .capability_bounded, .subject_kind = .handler, .subject_id = 0 },
+            },
+            .evidence = .{
+                .{ .obligation_index = 0, .edge = .proved, .rule = .sequence_member_total, .node_id = 1, .aux = 0 },
+                testedFor(0),
+                testedFor(1),
+                testedFor(2),
+                testedFor(3),
+                testedFor(4),
+                testedFor(5),
+                testedFor(6),
+                testedFor(7),
+                testedFor(7),
+            },
+            .residual_plan = .{
+                .{
+                    .kind = .env_key,
+                    .normalization = .identifier_exact_v1,
+                    .sink = .env_read,
+                    .section = .env,
+                    .impl_id = residual.guard_impl.env_read_v1,
+                    .operation_id = 2,
+                },
+            },
+        };
+        fixture.writePolicy(&.{"API_KEY"});
+        try fixture.encode();
+        return fixture;
+    }
+
     fn testedFor(index: u32) cert_mod.Evidence {
         return .{
             .obligation_index = index,
@@ -1209,6 +1587,255 @@ pub const test_support = struct {
         return fixture;
     }
 };
+
+test "a guarded artifact is accepted, and its guards are counted apart from its properties" {
+    var fixture = try test_support.buildGuarded();
+    const result = check(fixture.inputs(), test_support.guardedPolicy());
+
+    if (result.rejection) |rejection| {
+        std.debug.print(
+            "unexpected rejection: {s} / {s}\n",
+            .{ rejection.stage.name(), rejection.code.text() },
+        );
+        return error.TestUnexpectedResult;
+    }
+    try testing.expectEqual(SemanticState.policy_accepted, result.semantic);
+    try testing.expectEqual(@as(u32, 1), result.guards.required);
+    try testing.expectEqual(@as(u32, 1), result.guards.covered);
+    try testing.expect(result.guards.ready());
+    try testing.expect(result.guards.kinds & (@as(u8, 1) << 0) != 0);
+
+    // A covered guard is not a discharged property. Nothing about the guard
+    // appears in the property verdicts, and the grade is still the weakest
+    // static edge.
+    try testing.expectEqual(@as(?verdict.AssuranceGrade, .tested), result.grade);
+    inline for (@typeInfo(ps.Property).@"enum".fields) |field| {
+        const property: ps.Property = @enumFromInt(field.value);
+        _ = result.properties.gradeFor(property);
+    }
+}
+
+test "a certificate with no guarded call is ready with nothing to guard" {
+    var fixture = try test_support.build();
+    const result = check(fixture.inputs(), policy_mod.production);
+    try testing.expect(result.accepted());
+    try testing.expectEqual(@as(u32, 0), result.guards.required);
+    // Vacuously ready is the honest answer for a handler that guards nothing.
+    try testing.expect(result.guards.ready());
+    try testing.expectEqual(@as(u8, 0), result.guards.kinds);
+}
+
+test "a residual section is refused under a proof system that does not carry one" {
+    var fixture = try test_support.buildGuarded();
+    var parts = fixture.parts();
+    parts.proof_system = .zttp_pcc_v1;
+    const encoded = try cert_mod.encode(parts, &fixture.buffer);
+    fixture.len = encoded.len;
+
+    var permissive = test_support.guardedPolicy();
+    permissive.proof_systems = &[_]ps.ProofSystem{ .zttp_pcc_v1, .zttp_pcc_v2 };
+    const result = check(fixture.inputs(), permissive);
+    try testing.expectEqual(
+        verdict.ReasonCode.residual_section_not_permitted,
+        result.rejection.?.code,
+    );
+}
+
+test "an omitted, extra, duplicated, or reordered guard rejects" {
+    var missing = try test_support.buildGuarded();
+    var parts = missing.parts();
+    parts.residual = &.{};
+    parts.identity.residual_plan_digest = cert_mod.residualPlanDigest(&.{});
+    for (&missing.members) |*member| {
+        if (member.kind == .residual_plan) member.digest = parts.identity.residual_plan_digest;
+    }
+    parts.graph = &missing.members;
+    try encodeGuardedParts(&missing, parts);
+    var result = check(missing.inputs(), test_support.guardedPolicy());
+    try testing.expectEqual(verdict.Stage.guard_coverage, result.rejection.?.stage);
+    try testing.expectEqual(verdict.ReasonCode.guard_member_missing, result.rejection.?.code);
+
+    var extra = try test_support.buildGuarded();
+    const two = [_]cert_mod.ResidualObligation{
+        extra.residual_plan[0],
+        .{
+            .kind = .env_key,
+            .normalization = .identifier_exact_v1,
+            .sink = .env_read,
+            .section = .env,
+            .impl_id = residual.guard_impl.env_read_v1,
+            .operation_id = 3,
+        },
+    };
+    var extra_parts = extra.parts();
+    extra_parts.residual = &two;
+    extra_parts.identity.residual_plan_digest = cert_mod.residualPlanDigest(&two);
+    for (&extra.members) |*member| {
+        if (member.kind == .residual_plan) member.digest = extra_parts.identity.residual_plan_digest;
+    }
+    extra_parts.graph = &extra.members;
+    try encodeGuardedParts(&extra, extra_parts);
+    result = check(extra.inputs(), test_support.guardedPolicy());
+    try testing.expectEqual(verdict.ReasonCode.guard_member_extra, result.rejection.?.code);
+}
+
+test "a guard that disagrees with the consumer's catalog rejects on every field" {
+    const Case = struct {
+        name: []const u8,
+        code: verdict.ReasonCode,
+        apply: *const fn (*cert_mod.ResidualObligation) void,
+    };
+    const cases = [_]Case{
+        .{ .name = "kind", .code = .guard_kind_mismatch, .apply = struct {
+            fn f(o: *cert_mod.ResidualObligation) void {
+                o.kind = .cache_namespace;
+            }
+        }.f },
+        .{ .name = "normalization", .code = .guard_normalization_mismatch, .apply = struct {
+            fn f(o: *cert_mod.ResidualObligation) void {
+                o.normalization = .endpoint_v1;
+            }
+        }.f },
+        .{ .name = "sink", .code = .guard_sink_mismatch, .apply = struct {
+            fn f(o: *cert_mod.ResidualObligation) void {
+                o.sink = .cache_operation;
+            }
+        }.f },
+        .{ .name = "section", .code = .guard_section_mismatch, .apply = struct {
+            fn f(o: *cert_mod.ResidualObligation) void {
+                o.section = .cache;
+            }
+        }.f },
+        .{ .name = "implementation", .code = .guard_impl_identity_mismatch, .apply = struct {
+            fn f(o: *cert_mod.ResidualObligation) void {
+                o.impl_id = 99;
+            }
+        }.f },
+        .{ .name = "operation", .code = .guard_member_missing, .apply = struct {
+            fn f(o: *cert_mod.ResidualObligation) void {
+                o.operation_id = 3;
+            }
+        }.f },
+    };
+
+    for (cases) |case| {
+        var fixture = try test_support.buildGuarded();
+        case.apply(&fixture.residual_plan[0]);
+        try fixture.encode();
+        const result = check(fixture.inputs(), test_support.guardedPolicy());
+        testing.expectEqual(case.code, result.rejection.?.code) catch |err| {
+            std.debug.print("guard '{s}' mismatch was not refused as expected\n", .{case.name});
+            return err;
+        };
+    }
+}
+
+test "a guarded call naming a catalog row that does not exist rejects" {
+    var fixture = try test_support.buildGuarded();
+    fixture.ir[2].aux = @intCast(residual.catalog.len);
+    try fixture.encode();
+    const result = check(fixture.inputs(), test_support.guardedPolicy());
+    try testing.expectEqual(verdict.ReasonCode.guard_operation_unknown, result.rejection.?.code);
+}
+
+test "a guarded operation with no configured category rejects" {
+    var fixture = try test_support.buildGuarded();
+    // Every category unconfigured. An absent allowlist is not an empty one.
+    fixture.policy_len = 0;
+    var at: usize = 0;
+    for (0..4) |_| {
+        fixture.policy_bytes[at] = 0;
+        at += 1;
+        std.mem.writeInt(u16, fixture.policy_bytes[at..][0..2], 0, .little);
+        at += 2;
+    }
+    fixture.policy_bytes[at] = 0;
+    at += 1;
+    fixture.policy_len = at;
+    try fixture.encode();
+
+    const result = check(fixture.inputs(), test_support.guardedPolicy());
+    try testing.expectEqual(
+        verdict.ReasonCode.guard_category_not_configured,
+        result.rejection.?.code,
+    );
+}
+
+test "a guarded artifact with no policy bytes rejects rather than assuming any" {
+    var fixture = try test_support.buildGuarded();
+    var inputs = fixture.inputs();
+    inputs.runtime_policy = null;
+    const result = check(inputs, test_support.guardedPolicy());
+    try testing.expectEqual(verdict.ReasonCode.runtime_policy_missing, result.rejection.?.code);
+}
+
+test "policy bytes that do not hash to the committed digest reject" {
+    var fixture = try test_support.buildGuarded();
+    // Same shape, different entry: the certificate committed to the other bytes.
+    var other = try test_support.buildGuarded();
+    other.writePolicy(&.{"OTHER_KEY"});
+    var inputs = fixture.inputs();
+    inputs.runtime_policy = .{ .bytes = other.policySlice() };
+    const result = check(inputs, test_support.guardedPolicy());
+    try testing.expectEqual(
+        verdict.ReasonCode.runtime_policy_undecodable,
+        result.rejection.?.code,
+    );
+}
+
+test "a residual plan that is not the one the identity names rejects" {
+    var fixture = try test_support.buildGuarded();
+    var parts = fixture.parts();
+    parts.identity.residual_plan_digest = test_support.digest(0x7C);
+    for (&fixture.members) |*member| {
+        if (member.kind == .residual_plan) member.digest = test_support.digest(0x7C);
+    }
+    parts.graph = &fixture.members;
+    try encodeGuardedParts(&fixture, parts);
+    const result = check(fixture.inputs(), test_support.guardedPolicy());
+    try testing.expectEqual(
+        verdict.ReasonCode.residual_plan_digest_mismatch,
+        result.rejection.?.code,
+    );
+}
+
+test "the successor schema is unreachable from the shipped production policy" {
+    var fixture = try test_support.buildGuarded();
+    const result = check(fixture.inputs(), policy_mod.production);
+    try testing.expectEqual(
+        verdict.ReasonCode.unsupported_schema_version,
+        result.rejection.?.code,
+    );
+}
+
+/// Re-encode a guarded fixture from parts a test built by hand, keeping the
+/// certificate's self-commitment and executable root consistent.
+fn encodeGuardedParts(
+    fixture: *test_support.GuardedFixture,
+    certificate_parts: cert_mod.Parts,
+) !void {
+    var built = certificate_parts;
+    for (&fixture.members) |*member| {
+        if (member.kind == .proof_certificate) member.digest = [_]u8{0} ** 32;
+    }
+    built.graph = &fixture.members;
+    built.identity.executable_root = [_]u8{0} ** 32;
+    const provisional = try cert_mod.encode(built, &fixture.buffer);
+    var budget = Budget.init(.{});
+    const decoded = try cert_mod.decodeAccepting(
+        provisional,
+        &policy_mod.successor_schema_versions,
+        .{},
+        &budget,
+    );
+    const certificate_digest = try cert_mod.commitmentDigest(provisional, decoded);
+    for (&fixture.members) |*member| {
+        if (member.kind == .proof_certificate) member.digest = certificate_digest;
+    }
+    built.identity.executable_root = try graph.computeRoot(&fixture.members);
+    const encoded = try cert_mod.encode(built, &fixture.buffer);
+    fixture.len = encoded.len;
+}
 
 test "the disclosed edge count is reported next to the grade" {
     var fixture = try test_support.build();

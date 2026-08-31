@@ -5,12 +5,14 @@
 //! outside the suite that is later cited as evidence for it.
 
 comptime {
+    _ = @import("capability_policy.zig");
     _ = @import("certificate.zig");
     _ = @import("checker.zig");
     _ = @import("executable_graph.zig");
     _ = @import("limits.zig");
     _ = @import("policy.zig");
     _ = @import("proof_system.zig");
+    _ = @import("residual.zig");
     _ = @import("root.zig");
     _ = @import("verdict.zig");
 }

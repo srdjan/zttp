@@ -122,6 +122,8 @@ pub const Stage = enum(u8) {
     translation_check = 7,
     solver = 8,
     policy = 9,
+    /// Residual guard reconstruction and coverage.
+    guard_coverage = 10,
 
     pub fn name(self: Stage) []const u8 {
         return switch (self) {
@@ -134,6 +136,7 @@ pub const Stage = enum(u8) {
             .translation_check => "translation_check",
             .solver => "solver",
             .policy => "policy",
+            .guard_coverage => "guard_coverage",
         };
     }
 };
@@ -219,6 +222,23 @@ pub const ReasonCode = enum(u16) {
     development_artifact_refused = 1803,
     proof_system_not_selected = 1804,
     policy_requires_nothing = 1805,
+
+    // residual guards
+    guard_member_missing = 1901,
+    guard_member_extra = 1902,
+    guard_member_duplicate = 1903,
+    guard_member_out_of_order = 1904,
+    guard_kind_mismatch = 1905,
+    guard_normalization_mismatch = 1906,
+    guard_sink_mismatch = 1907,
+    guard_section_mismatch = 1908,
+    guard_impl_identity_mismatch = 1909,
+    guard_operation_unknown = 1910,
+    guard_category_not_configured = 1911,
+    residual_plan_digest_mismatch = 1912,
+    residual_section_not_permitted = 1913,
+    runtime_policy_missing = 1914,
+    runtime_policy_undecodable = 1915,
     semantics_epoch_not_selected = 1806,
 
     pub fn text(self: ReasonCode) []const u8 {
@@ -246,6 +266,24 @@ pub const Subject = union(enum) {
 pub const Identity = union(enum) {
     digest: [32]u8,
     scalar: u64,
+};
+
+/// What the consumer established about guarded operations.
+pub const GuardVerdicts = struct {
+    /// Guarded call sites the consumer reconstructed from the proof IR.
+    required: u32 = 0,
+    /// Of those, how many the certificate covered with a matching obligation
+    /// whose policy category is configured.
+    covered: u32 = 0,
+    /// Which guard kinds appear, as one bit per kind.
+    kinds: u8 = 0,
+
+    /// Every reconstructed guard has a matching covered obligation. Vacuously
+    /// true for a handler with none, which is the honest answer: it has nothing
+    /// to guard.
+    pub fn ready(self: GuardVerdicts) bool {
+        return self.required == self.covered;
+    }
 };
 
 pub const Rejection = struct {
@@ -310,6 +348,10 @@ pub const Assessment = struct {
     /// Per-property grades and the subset that cleared this policy. Runtime
     /// behavior may consume only the accepted subset.
     properties: PropertyVerdicts = .{},
+    /// Residual guard coverage. A third axis beside proof stages and property
+    /// verdicts, never folded into either: a covered guard is a promise to
+    /// check at run time, and a passing check is not a theorem.
+    guards: GuardVerdicts = .{},
 
     pub fn accepted(self: Assessment) bool {
         return self.rejection == null and self.semantic == .policy_accepted;

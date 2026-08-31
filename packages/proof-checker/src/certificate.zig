@@ -14,6 +14,7 @@ const std = @import("std");
 const limits_mod = @import("limits.zig");
 const ps = @import("proof_system.zig");
 const graph_mod = @import("executable_graph.zig");
+const residual = @import("residual.zig");
 const verdict = @import("verdict.zig");
 
 const Limits = limits_mod.Limits;
@@ -75,6 +76,9 @@ pub const SectionTag = enum(u16) {
     rewrites = 7,
     trusted = 8,
     solver = 9,
+    /// Residual guard obligations. Present only under a proof system that
+    /// carries them.
+    residual = 10,
 
     pub fn fromWire(value: u16) ?SectionTag {
         return switch (value) {
@@ -87,6 +91,7 @@ pub const SectionTag = enum(u16) {
             7 => .rewrites,
             8 => .trusted,
             9 => .solver,
+            10 => .residual,
             else => null,
         };
     }
@@ -94,7 +99,7 @@ pub const SectionTag = enum(u16) {
     pub fn required(self: SectionTag) bool {
         return switch (self) {
             .identity, .graph, .obligations, .proof_ir, .evidence => true,
-            .translation, .rewrites, .trusted, .solver => false,
+            .translation, .rewrites, .trusted, .solver, .residual => false,
         };
     }
 };
@@ -103,7 +108,7 @@ pub const SectionTag = enum(u16) {
 // Records
 // ---------------------------------------------------------------------------
 
-pub const identity_size = 97;
+pub const identity_size = 161;
 
 pub const Identity = struct {
     /// Root over the canonical executable graph.
@@ -112,6 +117,13 @@ pub const Identity = struct {
     ir_root: [32]u8,
     /// Digest of the serialized handler contract.
     contract_digest: [32]u8,
+    /// Digest of the canonical residual guard plan. All zero when the handler
+    /// has no guarded operations, which is a statement and not an omission.
+    residual_plan_digest: [32]u8 = [_]u8{0} ** 32,
+    /// Digest of the exact serialized runtime capability policy this artifact
+    /// was built against. The checker recomputes it from the bytes it is given,
+    /// so this is what ties a guard plan to one policy rather than to any.
+    runtime_policy_digest: [32]u8 = [_]u8{0} ** 32,
     /// The artifact was built with an ephemeral identity or an unpinned runtime
     /// policy. It can be checked; it can never satisfy production acceptance.
     development: bool,
@@ -153,7 +165,7 @@ pub const Obligation = struct {
     }
 };
 
-pub const ir_record_size = 52;
+pub const ir_record_size = 56;
 
 pub const IrNode = struct {
     id: u32,
@@ -167,6 +179,11 @@ pub const IrNode = struct {
     child_count: u32,
     /// Stable identity of this IR member, independent of source lines.
     digest: [32]u8,
+    /// Tag-specific operand. Only `capability_call` uses it, where it names the
+    /// row of the consumer's guard catalog this call matches. Every other tag
+    /// must leave it zero, so the field cannot become a place to carry meaning
+    /// the decoder does not check.
+    aux: u32 = 0,
 };
 
 pub const evidence_record_size = 16;
@@ -320,6 +337,34 @@ pub const TrustedEdge = struct {
     grade: verdict.AssuranceGrade,
 };
 
+pub const residual_record_size = 16;
+
+/// One guarded operation.
+///
+/// Every field except `operation_id` restates something the consumer's own
+/// catalog already decides. That redundancy is the point: a producer that
+/// disagrees with the catalog about the kind, the rule, the sink, the section,
+/// or the guard implementation is refused, and a producer that agrees has told
+/// the consumer nothing it did not already know.
+pub const ResidualObligation = struct {
+    kind: residual.GuardKind,
+    normalization: residual.Normalization,
+    sink: residual.SinkId,
+    section: residual.PolicySection,
+    /// Identity of the guard implementation at that sink.
+    impl_id: u32,
+    /// The proof-IR node of the guarded call. This is the only field the
+    /// catalog cannot supply, and it is what makes two guarded calls in one
+    /// category two obligations.
+    operation_id: u32,
+
+    /// Canonical order: by the operation this is about. Kind follows from the
+    /// catalog, so ordering by kind first would order by a derived value.
+    pub fn order(a: ResidualObligation, b: ResidualObligation) std.math.Order {
+        return std.math.order(a.operation_id, b.operation_id);
+    }
+};
+
 pub const solver_record_size = 8;
 
 pub const SolverQueryKind = enum(u16) {
@@ -373,6 +418,7 @@ pub const WitnessTable = Table(Witness, witness_record_size);
 pub const RewriteTable = Table(Rewrite, rewrite_record_size);
 pub const TrustedTable = Table(TrustedEdge, trusted_record_size);
 pub const SolverTable = Table(SolverQuery, solver_record_size);
+pub const ResidualTable = Table(ResidualObligation, residual_record_size);
 
 fn u16At(bytes: []const u8, offset: usize) u16 {
     return std.mem.readInt(u16, bytes[offset..][0..2], .little);
@@ -417,6 +463,8 @@ fn decodeRecord(comptime Record: type, bytes: []const u8) DecodeError!Record {
             try requireZero(bytes[7..8]);
             var digest: [32]u8 = undefined;
             @memcpy(&digest, bytes[20..52]);
+            const aux = u32At(bytes, 52);
+            if (!tag.usesAux() and aux != 0) return error.ReservedFieldNonZero;
             break :blk IrNode{
                 .id = u32At(bytes, 0),
                 .tag = tag,
@@ -425,6 +473,7 @@ fn decodeRecord(comptime Record: type, bytes: []const u8) DecodeError!Record {
                 .first_child = u32At(bytes, 12),
                 .child_count = u32At(bytes, 16),
                 .digest = digest,
+                .aux = aux,
             };
         },
         Evidence => blk: {
@@ -480,6 +529,21 @@ fn decodeRecord(comptime Record: type, bytes: []const u8) DecodeError!Record {
                 .grade = grade,
             };
         },
+        ResidualObligation => blk: {
+            const kind = residual.GuardKind.fromWire(bytes[0]) orelse return error.UnknownEnumMember;
+            const normalization = residual.Normalization.fromWire(bytes[1]) orelse return error.UnknownEnumMember;
+            const sink = residual.SinkId.fromWire(bytes[2]) orelse return error.UnknownEnumMember;
+            const section = residual.PolicySection.fromWire(bytes[3]) orelse return error.UnknownEnumMember;
+            try requireZero(bytes[12..16]);
+            break :blk ResidualObligation{
+                .kind = kind,
+                .normalization = normalization,
+                .sink = sink,
+                .section = section,
+                .impl_id = u32At(bytes, 4),
+                .operation_id = u32At(bytes, 8),
+            };
+        },
         SolverQuery => blk: {
             const kind = SolverQueryKind.fromWire(u16At(bytes, 4)) orelse return error.UnknownEnumMember;
             try requireZero(bytes[6..8]);
@@ -509,6 +573,7 @@ pub const Certificate = struct {
     rewrites: RewriteTable = .{},
     trusted: TrustedTable = .{},
     solver: SolverTable = .{},
+    residual: ResidualTable = .{},
 };
 
 fn countLimitFor(tag: SectionTag, limits: Limits) u32 {
@@ -522,6 +587,7 @@ fn countLimitFor(tag: SectionTag, limits: Limits) u32 {
         .rewrites => limits.max_rewrites,
         .trusted => limits.max_trusted_edges,
         .solver => limits.max_solver_queries,
+        .residual => limits.max_residual_obligations,
     };
 }
 
@@ -536,19 +602,39 @@ fn recordSizeFor(tag: SectionTag) usize {
         .rewrites => rewrite_record_size,
         .trusted => trusted_record_size,
         .solver => solver_record_size,
+        .residual => residual_record_size,
     };
 }
 
 /// Bounded decode. Validates the container, the section table, every record's
 /// fixed shape, and every enum-bearing field, then returns cursors into `bytes`.
 pub fn decode(bytes: []const u8, limits: Limits, budget: *Budget) DecodeError!Certificate {
+    return decodeAccepting(bytes, &[_]u16{ps.schema_version}, limits, budget);
+}
+
+/// Bounded decode against an explicit set of accepted schema versions.
+///
+/// The set comes from the consumer's policy, so which schemas a build reads is
+/// a policy decision rather than a constant compiled into the decoder. Equality
+/// against the set, never a range.
+pub fn decodeAccepting(
+    bytes: []const u8,
+    accepted_schemas: []const u16,
+    limits: Limits,
+    budget: *Budget,
+) DecodeError!Certificate {
     if (bytes.len > limits.max_certificate_bytes) return error.CertificateTooLarge;
     if (bytes.len < header_size) return error.Truncated;
     try budget.spend(bytes.len / 64 + 1);
 
     if (std.mem.readInt(u64, bytes[0..8], .little) != magic) return error.BadMagic;
     const schema = u16At(bytes, 8);
-    if (schema != ps.schema_version) return error.UnsupportedSchemaVersion;
+    accepted: {
+        for (accepted_schemas) |candidate| {
+            if (candidate == schema) break :accepted;
+        }
+        return error.UnsupportedSchemaVersion;
+    }
     const proof_system = ps.ProofSystem.fromWire(u16At(bytes, 10)) orelse return error.UnknownEnumMember;
     const epoch = u32At(bytes, 12);
     const section_count = u16At(bytes, 16);
@@ -619,7 +705,9 @@ fn decodeSection(
         @memcpy(&identity.executable_root, payload[0..32]);
         @memcpy(&identity.ir_root, payload[32..64]);
         @memcpy(&identity.contract_digest, payload[64..96]);
-        const flags = payload[96];
+        @memcpy(&identity.residual_plan_digest, payload[96..128]);
+        @memcpy(&identity.runtime_policy_digest, payload[128..160]);
+        const flags = payload[160];
         if (flags & ~@as(u8, 0x01) != 0) return error.ReservedFieldNonZero;
         identity.development = (flags & 0x01) != 0;
         cert.identity = identity;
@@ -645,6 +733,7 @@ fn decodeSection(
         .rewrites => cert.rewrites = .{ .bytes = records, .count = count },
         .trusted => cert.trusted = .{ .bytes = records, .count = count },
         .solver => cert.solver = .{ .bytes = records, .count = count },
+        .residual => cert.residual = .{ .bytes = records, .count = count },
     }
 
     // Validate every enum-bearing field now, so a caller walking the table
@@ -662,8 +751,57 @@ fn decodeSection(
             .rewrites => _ = try cert.rewrites.get(i),
             .trusted => _ = try cert.trusted.get(i),
             .solver => _ = try cert.solver.get(i),
+            .residual => _ = try cert.residual.get(i),
         }
     }
+}
+
+/// Domain separator for the residual guard plan.
+pub const residual_plan_domain = "zttp-residual-plan-v1";
+
+fn foldResidual(hasher: *std.crypto.hash.sha2.Sha256, obligation: ResidualObligation) void {
+    hasher.update(&[_]u8{
+        @intFromEnum(obligation.kind),
+        @intFromEnum(obligation.normalization),
+        @intFromEnum(obligation.sink),
+        @intFromEnum(obligation.section),
+    });
+    var scratch: [4]u8 = undefined;
+    std.mem.writeInt(u32, &scratch, obligation.impl_id, .little);
+    hasher.update(&scratch);
+    std.mem.writeInt(u32, &scratch, obligation.operation_id, .little);
+    hasher.update(&scratch);
+}
+
+/// Fold a residual plan into one digest.
+///
+/// An empty plan folds to all zero rather than to the digest of an empty list,
+/// so "this handler guards nothing" is one value a reader can recognize instead
+/// of a hash they would have to know to compare against.
+pub fn residualPlanDigest(obligations: []const ResidualObligation) [32]u8 {
+    if (obligations.len == 0) return [_]u8{0} ** 32;
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    hasher.update(residual_plan_domain);
+    var count_le: [4]u8 = undefined;
+    std.mem.writeInt(u32, &count_le, @intCast(obligations.len), .little);
+    hasher.update(&count_le);
+    for (obligations) |obligation| foldResidual(&hasher, obligation);
+    return hasher.finalResult();
+}
+
+/// The same fold over a decoded table.
+pub fn residualPlanDigestFromTable(table: ResidualTable) DecodeError![32]u8 {
+    if (table.len() == 0) return [_]u8{0} ** 32;
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    hasher.update(residual_plan_domain);
+    var count_le: [4]u8 = undefined;
+    std.mem.writeInt(u32, &count_le, table.len(), .little);
+    hasher.update(&count_le);
+    var index: u32 = 0;
+    while (index < table.len()) : (index += 1) {
+        foldResidual(&hasher, try table.get(index));
+    }
+    return hasher.finalResult();
 }
 
 /// Domain separator for the proof-IR root.
@@ -684,6 +822,8 @@ fn foldIrNode(hasher: *std.crypto.hash.sha2.Sha256, node: IrNode) void {
     std.mem.writeInt(u32, &scratch, node.child_count, .little);
     hasher.update(&scratch);
     hasher.update(&node.digest);
+    std.mem.writeInt(u32, &scratch, node.aux, .little);
+    hasher.update(&scratch);
 }
 
 /// Fold a proof-IR node list into one root.
@@ -758,6 +898,9 @@ pub fn commitmentDigest(bytes: []const u8, certificate: Certificate) DecodeError
 /// canonical bytes. The encoder lives beside the decoder so the two cannot
 /// drift; it is not part of the acceptance kernel and takes no authority.
 pub const Parts = struct {
+    /// The schema this certificate is written in. Defaults to the shipped one;
+    /// a producer of successor evidence names the successor explicitly.
+    schema_version: u16 = ps.schema_version,
     proof_system: ps.ProofSystem = .zttp_pcc_v1,
     semantics_epoch: u32 = ps.semantics_epoch,
     identity: Identity,
@@ -769,6 +912,7 @@ pub const Parts = struct {
     rewrites: []const Rewrite = &.{},
     trusted: []const TrustedEdge = &.{},
     solver: []const SolverQuery = &.{},
+    residual: []const ResidualObligation = &.{},
 };
 
 pub const EncodeError = error{BufferTooSmall};
@@ -785,6 +929,7 @@ pub fn encodedSize(parts: Parts) usize {
     if (parts.rewrites.len > 0) total += section_header_size + 4 + parts.rewrites.len * rewrite_record_size;
     if (parts.trusted.len > 0) total += section_header_size + 4 + parts.trusted.len * trusted_record_size;
     if (parts.solver.len > 0) total += section_header_size + 4 + parts.solver.len * solver_record_size;
+    if (parts.residual.len > 0) total += section_header_size + 4 + parts.residual.len * residual_record_size;
     return total;
 }
 
@@ -834,6 +979,7 @@ fn sectionCount(parts: Parts) u16 {
     if (parts.rewrites.len > 0) count += 1;
     if (parts.trusted.len > 0) count += 1;
     if (parts.solver.len > 0) count += 1;
+    if (parts.residual.len > 0) count += 1;
     return count;
 }
 
@@ -843,7 +989,7 @@ fn sectionCount(parts: Parts) u16 {
 pub fn encode(parts: Parts, out: []u8) EncodeError![]u8 {
     var cursor = Cursor{ .buf = out };
     try cursor.u64At(magic);
-    try cursor.u16At(ps.schema_version);
+    try cursor.u16At(parts.schema_version);
     try cursor.u16At(@intFromEnum(parts.proof_system));
     try cursor.u32At(parts.semantics_epoch);
     try cursor.u16At(sectionCount(parts));
@@ -853,6 +999,8 @@ pub fn encode(parts: Parts, out: []u8) EncodeError![]u8 {
     try cursor.raw(&parts.identity.executable_root);
     try cursor.raw(&parts.identity.ir_root);
     try cursor.raw(&parts.identity.contract_digest);
+    try cursor.raw(&parts.identity.residual_plan_digest);
+    try cursor.raw(&parts.identity.runtime_policy_digest);
     try cursor.u8At(if (parts.identity.development) 0x01 else 0x00);
 
     try writeTable(&cursor, .graph, parts.graph.len, graph_record_size);
@@ -880,6 +1028,7 @@ pub fn encode(parts: Parts, out: []u8) EncodeError![]u8 {
         try cursor.u32At(node.first_child);
         try cursor.u32At(node.child_count);
         try cursor.raw(&node.digest);
+        try cursor.u32At(node.aux);
     }
 
     try writeTable(&cursor, .evidence, parts.evidence.len, evidence_record_size);
@@ -936,6 +1085,19 @@ pub fn encode(parts: Parts, out: []u8) EncodeError![]u8 {
             try cursor.u32At(query.obligation_index);
             try cursor.u16At(@intFromEnum(query.query_kind));
             try cursor.zeros(2);
+        }
+    }
+
+    if (parts.residual.len > 0) {
+        try writeTable(&cursor, .residual, parts.residual.len, residual_record_size);
+        for (parts.residual) |obligation| {
+            try cursor.u8At(@intFromEnum(obligation.kind));
+            try cursor.u8At(@intFromEnum(obligation.normalization));
+            try cursor.u8At(@intFromEnum(obligation.sink));
+            try cursor.u8At(@intFromEnum(obligation.section));
+            try cursor.u32At(obligation.impl_id);
+            try cursor.u32At(obligation.operation_id);
+            try cursor.zeros(4);
         }
     }
 
@@ -1152,6 +1314,7 @@ test "a missing required section rejects" {
         try cursor.u32At(node.first_child);
         try cursor.u32At(node.child_count);
         try cursor.raw(&node.digest);
+        try cursor.u32At(node.aux);
     }
     var budget = Budget.init(.{});
     try testing.expectError(error.MissingRequiredSection, decode(buf[0..cursor.at], .{}, &budget));

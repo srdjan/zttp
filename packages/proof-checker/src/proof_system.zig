@@ -17,14 +17,33 @@ pub const schema_version: u16 = 2;
 /// translation witnesses down to the final optimized bytecode.
 pub const ProofSystem = enum(u16) {
     zttp_pcc_v1 = 1,
+    /// Adds residual guard obligations: operations whose resource the compiler
+    /// could not resolve, checked at an authoritative runtime sink against a
+    /// bound capability policy. Not the strict default until the cutover.
+    zttp_pcc_v2 = 2,
 
     pub fn fromWire(value: u16) ?ProofSystem {
         return switch (value) {
             1 => .zttp_pcc_v1,
+            2 => .zttp_pcc_v2,
             else => null,
         };
     }
+
+    /// Whether this system carries residual guard obligations at all. A
+    /// certificate that names a residual section under a system without them is
+    /// refused rather than read with the section ignored.
+    pub fn carriesResidualGuards(self: ProofSystem) bool {
+        return switch (self) {
+            .zttp_pcc_v1 => false,
+            .zttp_pcc_v2 => true,
+        };
+    }
 };
+
+/// The successor schema. Reachable only through a consumer policy that lists
+/// it; the shipped production policy does not, until the cutover.
+pub const schema_version_next: u16 = 3;
 
 /// The semantics registry generation the producer compiled against. The
 /// consumer pins the epochs it accepts; a certificate from a different epoch
@@ -222,6 +241,11 @@ pub const NodeTag = enum(u16) {
     /// A statement or expression with no bearing on totality. Present so a
     /// sequence's shape is complete.
     plain = 6,
+    /// A call to a capability export whose resource the compiler could not
+    /// resolve. It contributes nothing to totality; it exists so the consumer
+    /// can count the guarded operations for itself instead of reading the
+    /// producer's list of them.
+    capability_call = 7,
 
     pub fn fromWire(value: u16) ?NodeTag {
         return switch (value) {
@@ -231,8 +255,16 @@ pub const NodeTag = enum(u16) {
             4 => .loop_node,
             5 => .return_node,
             6 => .plain,
+            7 => .capability_call,
             else => null,
         };
+    }
+
+    /// Whether a node of this tag carries a catalog index in its `aux` field.
+    /// Every other tag must leave it zero, so the field cannot become a place
+    /// to smuggle data past the decoder.
+    pub fn usesAux(self: NodeTag) bool {
+        return self == .capability_call;
     }
 };
 
@@ -265,11 +297,11 @@ pub const TrustReason = enum(u16) {
 
 test "wire decoders refuse values outside the alphabet" {
     try std.testing.expectEqual(@as(?ProofSystem, null), ProofSystem.fromWire(0));
-    try std.testing.expectEqual(@as(?ProofSystem, null), ProofSystem.fromWire(2));
+    try std.testing.expectEqual(@as(?ProofSystem, null), ProofSystem.fromWire(3));
     try std.testing.expectEqual(@as(?Property, null), Property.fromWire(0));
     try std.testing.expectEqual(@as(?Property, null), Property.fromWire(9));
     try std.testing.expectEqual(@as(?Rule, null), Rule.fromWire(9));
-    try std.testing.expectEqual(@as(?NodeTag, null), NodeTag.fromWire(7));
+    try std.testing.expectEqual(@as(?NodeTag, null), NodeTag.fromWire(8));
     try std.testing.expectEqual(@as(?TrustReason, null), TrustReason.fromWire(6));
 }
 

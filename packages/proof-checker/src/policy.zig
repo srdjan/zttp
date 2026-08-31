@@ -22,12 +22,17 @@ pub const Requirement = struct {
 
 pub const Error = error{
     EmptyRequirementSet,
+    EmptySchemaVersionSet,
     EmptyProofSystemSet,
     EmptyEpochSet,
     DuplicateRequirement,
 };
 
 pub const Policy = struct {
+    /// Certificate schema versions this consumer reads. Equality against a set,
+    /// never a range: an older schema said less and a newer one says something
+    /// this build has not been taught to check.
+    schema_versions: []const u16 = &default_schema_versions,
     /// Proof systems this consumer reads. A certificate outside the set is
     /// refused without being interpreted.
     proof_systems: []const ps.ProofSystem,
@@ -49,6 +54,7 @@ pub const Policy = struct {
     /// cannot skip it.
     pub fn validate(self: Policy) Error!void {
         if (self.required.len == 0) return error.EmptyRequirementSet;
+        if (self.schema_versions.len == 0) return error.EmptySchemaVersionSet;
         if (self.proof_systems.len == 0) return error.EmptyProofSystemSet;
         if (self.semantics_epochs.len == 0) return error.EmptyEpochSet;
         for (self.required, 0..) |a, i| {
@@ -56,6 +62,13 @@ pub const Policy = struct {
                 if (a.property == b.property) return error.DuplicateRequirement;
             }
         }
+    }
+
+    pub fn acceptsSchema(self: Policy, schema: u16) bool {
+        for (self.schema_versions) |candidate| {
+            if (candidate == schema) return true;
+        }
+        return false;
     }
 
     pub fn acceptsProofSystem(self: Policy, system: ps.ProofSystem) bool {
@@ -88,7 +101,13 @@ pub const Policy = struct {
     }
 };
 
+const default_schema_versions = [_]u16{ps.schema_version};
 const default_proof_systems = [_]ps.ProofSystem{.zttp_pcc_v1};
+
+/// The successor pair, reachable only from a policy that names it. Nothing
+/// shipped selects this until the cutover.
+pub const successor_schema_versions = [_]u16{ps.schema_version_next};
+pub const successor_proof_systems = [_]ps.ProofSystem{.zttp_pcc_v2};
 const default_epochs = [_]u32{ps.semantics_epoch};
 
 const production_requirements = [_]Requirement{

@@ -49,6 +49,10 @@ pub const MemberKind = enum(u16) {
     proof_ir = 14,
     /// The complete certificate with recursive root fields normalized.
     proof_certificate = 15,
+    /// The canonical residual guard plan. Committed separately from the
+    /// certificate that contains it so a mutated plan names itself rather than
+    /// surfacing as a whole-certificate mismatch.
+    residual_plan = 16,
 
     pub fn fromWire(value: u16) ?MemberKind {
         return switch (value) {
@@ -67,6 +71,7 @@ pub const MemberKind = enum(u16) {
             13 => .capability_matrix,
             14 => .proof_ir,
             15 => .proof_certificate,
+            16 => .residual_plan,
             else => null,
         };
     }
@@ -95,6 +100,11 @@ pub const MemberKind = enum(u16) {
             .module_identity,
             .native_module_identity,
             .source_profile_frontend,
+            // Present only when the handler has guarded operations. An artifact
+            // with none must not be forced to commit an empty plan, because an
+            // empty plan and no plan are the same statement and one of them
+            // would then be required.
+            .residual_plan,
             => false,
         };
     }
@@ -302,7 +312,7 @@ test "required kinds must all be present" {
 
 test "member kind wire decoding is closed" {
     try testing.expectEqual(@as(?MemberKind, null), MemberKind.fromWire(0));
-    try testing.expectEqual(@as(?MemberKind, null), MemberKind.fromWire(16));
+    try testing.expectEqual(@as(?MemberKind, null), MemberKind.fromWire(17));
     inline for (@typeInfo(MemberKind).@"enum".fields) |field| {
         const kind: MemberKind = @enumFromInt(field.value);
         try testing.expectEqual(@as(?MemberKind, kind), MemberKind.fromWire(field.value));

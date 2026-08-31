@@ -452,10 +452,19 @@ test "the compiler and the kernel agree on the proof-IR alphabet" {
             @as(u16, field.value),
         );
     }
+    // The kernel's alphabet may run ahead of the compiler's while a producer
+    // side is being built, but only by members named here. A tag the kernel
+    // gained that nobody wrote down is the drift this test exists to catch.
+    const kernel_only = [_]ps.NodeTag{.capability_call};
     try testing.expectEqual(
-        @typeInfo(zts.ProofIrTag).@"enum".fields.len,
+        @typeInfo(zts.ProofIrTag).@"enum".fields.len + kernel_only.len,
         @typeInfo(ps.NodeTag).@"enum".fields.len,
     );
+    for (kernel_only) |tag| {
+        // Each one must be outside the compiler's numbering, so no compiler tag
+        // can silently map onto it.
+        try testing.expect(@intFromEnum(tag) > @typeInfo(zts.ProofIrTag).@"enum".fields.len);
+    }
 
     inline for (@typeInfo(zts.ProofRule).@"enum".fields) |field| {
         const rule: zts.ProofRule = @enumFromInt(field.value);

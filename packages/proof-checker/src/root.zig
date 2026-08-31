@@ -10,12 +10,14 @@
 //! accepts still has to pass structural bytecode verification, capability
 //! enforcement, isolation, and every request-time check.
 
+pub const capability_policy = @import("capability_policy.zig");
 pub const certificate = @import("certificate.zig");
 pub const checker = @import("checker.zig");
 pub const executable_graph = @import("executable_graph.zig");
 pub const limits = @import("limits.zig");
 pub const policy = @import("policy.zig");
 pub const proof_system = @import("proof_system.zig");
+pub const residual = @import("residual.zig");
 pub const verdict = @import("verdict.zig");
 
 pub const Assessment = verdict.Assessment;
@@ -23,5 +25,6 @@ pub const AssuranceGrade = verdict.AssuranceGrade;
 pub const Policy = policy.Policy;
 pub const ProvenanceState = verdict.ProvenanceState;
 pub const ReasonCode = verdict.ReasonCode;
+pub const GuardVerdicts = verdict.GuardVerdicts;
 pub const SemanticState = verdict.SemanticState;
 pub const check = checker.check;
