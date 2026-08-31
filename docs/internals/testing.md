@@ -98,10 +98,12 @@ never received. Compaction flow tests assert that retry does not duplicate user
 input, tools, edits, or turn completion.
 
 The package suites: `test-zts`, `test-sdk`, `test-modules`,
-`test-proof-review`, `test-release-check`, `test-server`, `test-compile-bench`.
+`test-proof-review`, `test-proof-checker`, `test-release-check`, `test-server`,
+`test-compile-bench`.
 
 The audits and gates: `test-capability-audit`, `test-module-boundary`,
-`test-proof-swallow`, `test-zts-layering`, `test-module-governance`,
+`test-proof-checker-purity`, `test-proof-swallow`, `test-zts-layering`,
+`test-module-governance`,
 `test-runtime-purity`, `test-contract-golden`, `test-expert-golden`,
 `test-docs-drift`, `test-doc-links`, `test-convergence-emitter`,
 `test-production-branch-metric`, `test-comptime-cli-matrix`,
@@ -224,6 +226,17 @@ when it consumes the shared tool cores through the `zts_cli` named module.
 Reaching a new `zts` internal module from `runtime`, `tools`, `pi`, or
 `proof-review` also needs a row in `scripts/module-boundary.allow`, and a row
 that nothing uses fails the same gate. Run `zig build test-module-boundary`.
+
+`packages/proof-checker` is the consumer acceptance kernel and the only thing
+in the repository whose word decides whether an artifact may serve production
+traffic. `zig build test-proof-checker` runs its suite;
+`zig build test-proof-checker-purity` runs `scripts/check-proof-checker.sh`,
+which asserts the package still imports nothing but `std` and its own siblings,
+reaches no filesystem, clock, process, network, signing, or allocator, and that
+the suite the first step reports on is not empty. The second gate exists because
+the first reports a pass over zero tests. It fails in both directions: a new
+forbidden import fails it, and so does a source file that `src/test_root.zig`
+does not reference or that carries no test.
 
 Discarding an error inside the analysis files that decide whether a program is
 proven needs a row in `scripts/proof-swallow.allow` giving the reason it cannot

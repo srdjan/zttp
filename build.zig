@@ -219,6 +219,34 @@ pub fn build(b: *std.Build) void {
     const modules_test_step = b.step("test-modules", "Run zttp-modules tests");
     modules_test_step.dependOn(&run_modules_tests.step);
 
+    // Consumer acceptance kernel. Declared before proof-review so the module is
+    // available to every consumer below it, and wired with no imports of its
+    // own: the package is a leaf, and `scripts/check-proof-checker.sh` fails
+    // when that stops being true.
+    const proof_checker_dep = b.dependency("zttp_proof_checker", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    const proof_checker_tests = b.addTest(.{
+        .filters = test_filters,
+        .root_module = b.createModule(.{
+            .root_source_file = proof_checker_dep.path("src/test_root.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_proof_checker_tests = b.addRunArtifact(proof_checker_tests);
+    const proof_checker_test_step = b.step("test-proof-checker", "Run the consumer acceptance kernel tests");
+    proof_checker_test_step.dependOn(&run_proof_checker_tests.step);
+
+    // The kernel's own floor: the suite above reports a pass whether it
+    // collected two hundred tests or none, so a separate gate asserts the
+    // corpus is non-empty and the package still imports nothing.
+    const proof_checker_purity = b.addSystemCommand(&.{ "bash", "scripts/check-proof-checker.sh" });
+    proof_checker_purity.has_side_effects = true;
+    const proof_checker_purity_step = b.step("test-proof-checker-purity", "Check the acceptance kernel is a leaf with a non-empty suite");
+    proof_checker_purity_step.dependOn(&proof_checker_purity.step);
+
     // zttp proof-review package tests
     // Pass perf_histogram so the build-graph dedups this dep with the one
     // runtime threads through its own modules. Without it the option-set
@@ -1121,6 +1149,8 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_sdk_tests.step);
     test_step.dependOn(&run_modules_tests.step);
     test_step.dependOn(&run_proof_review_pkg_tests.step);
+    test_step.dependOn(&run_proof_checker_tests.step);
+    test_step.dependOn(&proof_checker_purity.step);
     test_step.dependOn(expert_golden_step);
     test_step.dependOn(contract_golden_step);
     test_step.dependOn(&runtime_purity_cmd.step);

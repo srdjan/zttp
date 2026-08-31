@@ -25,6 +25,9 @@
         .zttp_proof_review = .{
             .path = "packages/proof-review",
         },
+        .zttp_proof_checker = .{
+            .path = "packages/proof-checker",
+        },
     },
     .paths = .{
         "README.md",
