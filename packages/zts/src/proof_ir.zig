@@ -529,12 +529,14 @@ pub fn buildEvidence(
             }
             for (scope.jumps.items) |jump| {
                 const id = proof.nodeFor(jump.node) orelse continue;
-                // A jump's target is an offset, not a node. Attach it to the
-                // member whose emission starts exactly there, inside the same
-                // buffer; a jump into the middle of a member is not a relation
-                // the consumer can check, and is left pointing at its own node
-                // rather than guessed at.
-                var target_node: u32 = id;
+                // A jump's target is an offset, not a node. It is only a
+                // relation the consumer can check when some member's code
+                // starts exactly there - a jump past the end of a branch, or
+                // into the middle of one, lands where nothing begins. Those are
+                // dropped rather than pointed at a node they do not name: a
+                // witness the consumer cannot check is worse than one absent,
+                // because the absent one does not claim anything.
+                var target_node: ?u32 = null;
                 for (scope.emissions.items) |candidate| {
                     if (candidate.code_start != jump.target_offset) continue;
                     target_node = proof.nodeFor(candidate.node) orelse continue;
@@ -544,7 +546,7 @@ pub fn buildEvidence(
                     .scope = scope_id,
                     .node = id,
                     .instruction_offset = jump.instruction_offset,
-                    .target_node = target_node,
+                    .target_node = target_node orelse continue,
                     .target_offset = jump.target_offset,
                 });
             }

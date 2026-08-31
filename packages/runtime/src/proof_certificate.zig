@@ -370,6 +370,17 @@ fn translationWitnesses(
         };
         index += 1;
     }
+    // Sorted by scope, then by start, then widest first. The consumer checks
+    // containment in one pass over this order instead of comparing every pair,
+    // which is what keeps the check linear in the number of witnesses.
+    std.mem.sort(cert.Witness, out, {}, struct {
+        fn lt(_: void, a: cert.Witness, b: cert.Witness) bool {
+            if (a.scope_ir_node != b.scope_ir_node) return a.scope_ir_node < b.scope_ir_node;
+            if (a.kind != b.kind) return @intFromEnum(a.kind) < @intFromEnum(b.kind);
+            if (a.code_start != b.code_start) return a.code_start < b.code_start;
+            return a.code_len > b.code_len;
+        }
+    }.lt);
     return out;
 }
 

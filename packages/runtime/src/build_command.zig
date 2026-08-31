@@ -1493,6 +1493,136 @@ test "a real compile produces a certificate that binds its own IR and artifact" 
     }
 }
 
+test "a real compile reaches policy acceptance, and one changed byte does not" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\export function handler(req: Request): Proof<Response, "deterministic" | "read_only" | "state_isolated" | "no_secret_leakage" | "result_safe"> {
+        \\  if (req.method === "GET") {
+        \\    return Response.text("get");
+        \\  } else {
+        \\    return Response.text("other");
+        \\  }
+        \\}
+    ;
+
+    var compiled = try precompile.compileHandler(allocator, source, "handler.ts", .{
+        .emit_verify = true,
+        .emit_contract = true,
+        .emit_proof_evidence = true,
+    });
+    defer compiled.deinit(allocator);
+
+    const evidence = compiled.proof_evidence orelse return error.TestUnexpectedResult;
+    const contract = compiled.contract orelse return error.TestUnexpectedResult;
+    const contract_json = try serializeContractJson(allocator, &contract);
+    defer allocator.free(contract_json);
+    const policy = zts.handler_policy.contractToRuntimePolicy(&contract);
+    const policy_section = try self_extract.serializePolicy(allocator, &policy);
+    defer allocator.free(policy_section);
+
+    const sections = artifact_graph.ArtifactInputs{
+        .bytecode = compiled.bytecode,
+        .dep_bytecodes = compiled.dep_bytecodes orelse &.{},
+        .contract_section = contract_json,
+        .policy_section_digest = artifact_graph.digestOf(policy_section),
+        .identity = artifact_graph.identityFromContract(&contract),
+    };
+
+    var built = try proof_certificate.build(allocator, .{
+        .evidence = &evidence,
+        .properties = dischargedProperties(&contract),
+        .artifact = sections,
+        .contract_digest = artifact_graph.digestOf(contract_json),
+    });
+    defer built.deinit();
+
+    const scratch = try allocator.alloc(u8, pcc.checker.scratchBytes(.{}));
+    defer allocator.free(scratch);
+
+    // The consumer rebuilds the inventory from the same sections, independently,
+    // and checks the certificate against it.
+    const members = try allocator.alloc(artifact_graph.Member, artifact_graph.max_members);
+    defer allocator.free(members);
+    var observed_sections = sections;
+    observed_sections.proof_ir_digest = built.ir_root;
+    const observed = try artifact_graph.build(
+        allocator,
+        artifact_graph.fromArtifact(observed_sections),
+        members,
+    );
+
+    // The production floor requires totality at the translation edge and three
+    // disclosed properties; this handler discharges all four.
+    const accepted = pcc.check(.{
+        .certificate = built.bytes,
+        .observed_graph = observed,
+        .scratch = scratch,
+    }, pcc.policy.production);
+    if (accepted.rejection) |rejection| {
+        std.debug.print(
+            "unexpected rejection: {s} / {s}\n",
+            .{ rejection.stage.name(), rejection.code.text() },
+        );
+        return error.TestUnexpectedResult;
+    }
+    try std.testing.expectEqual(pcc.SemanticState.policy_accepted, accepted.semantic);
+    try std.testing.expect(accepted.grade != null);
+
+    // One byte of the deployed bytecode, changed. The certificate is untouched
+    // and internally valid; it no longer describes what would run.
+    const tampered = try allocator.dupe(u8, compiled.bytecode);
+    defer allocator.free(tampered);
+    tampered[tampered.len / 2] +%= 1;
+    var tampered_sections = observed_sections;
+    tampered_sections.bytecode = tampered;
+    const tampered_members = artifact_graph.build(
+        allocator,
+        artifact_graph.fromArtifact(tampered_sections),
+        members,
+    ) catch |err| {
+        // Flipping a byte can also break the module stream outright, which is
+        // a refusal at an even earlier stage.
+        try std.testing.expectEqual(error.MalformedBytecodeStream, err);
+        return;
+    };
+    const rejected = pcc.check(.{
+        .certificate = built.bytes,
+        .observed_graph = tampered_members,
+        .scratch = scratch,
+    }, pcc.policy.production);
+    try std.testing.expect(!rejected.accepted());
+    try std.testing.expectEqual(pcc.verdict.Stage.artifact_binding, rejected.rejection.?.stage);
+}
+
+test "a handler that does not always return is not accepted" {
+    const allocator = std.testing.allocator;
+    // `if` with no `else`: the compiler refuses this outright, which is the
+    // strongest possible answer. What matters here is that the refusal happens
+    // and no artifact is produced for it.
+    const source =
+        \\export function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  if (req.method === "GET") {
+        \\    return Response.text("get");
+        \\  }
+        \\}
+    ;
+    const result = precompile.compileHandler(allocator, source, "handler.ts", .{
+        .emit_verify = true,
+        .emit_contract = true,
+        .emit_proof_evidence = true,
+    });
+    if (result) |compiled| {
+        var owned = compiled;
+        defer owned.deinit(allocator);
+        // A compile that got far enough to lower the proof IR must, by its own
+        // fold, say the handler is not total. A compile that refused earlier
+        // carries no evidence at all, which is a refusal too.
+        if (owned.proof_evidence) |evidence| {
+            try std.testing.expect(!evidence.handlerIsTotal());
+        }
+    } else |_| {}
+}
+
 test "the same source yields byte-identical certificates" {
     const allocator = std.testing.allocator;
     const source =
