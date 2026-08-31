@@ -686,6 +686,11 @@ fn writeArtifactTail(
                 artifact_graph.digestOf(json)
             else
                 [_]u8{0} ** 32,
+            // The same digest the graph member carries, over the same bytes.
+            // A guard plan is only ever checked against one policy, so the
+            // certificate names which one rather than leaving the consumer to
+            // accept whichever policy it happens to be handed.
+            .runtime_policy_digest = runtime_policy_digest,
         }) catch |err| {
             if (!builtin.is_test) {
                 std.log.err(
@@ -1125,6 +1130,7 @@ const ArtifactTailProbe = struct {
     signed_runtime_policy_sha256: ?[64]u8 = null,
     signed_executable_root_sha256: ?[64]u8 = null,
     created_runtime_policy_sha256: ?[64]u8 = null,
+    created_certificate_policy_digest: ?[32]u8 = null,
 
     fn fromContext(context: ?*anyopaque) *ArtifactTailProbe {
         return @ptrCast(@alignCast(context.?));
@@ -1177,6 +1183,15 @@ const ArtifactTailProbe = struct {
         var digest: [32]u8 = undefined;
         std.crypto.hash.sha2.Sha256.hash(policy_section, &digest, .{});
         self.created_runtime_policy_sha256 = std.fmt.bytesToHex(digest, .lower);
+
+        // Read the policy digest back out of the certificate the way a
+        // consumer does, so the test compares the identity the artifact
+        // carries against bytes the probe hashed itself.
+        if (payload.certificate) |bytes| {
+            var budget = pcc.limits.Budget.init(.{});
+            const decoded = try pcc.certificate.decode(bytes, .{}, &budget);
+            self.created_certificate_policy_digest = decoded.identity.runtime_policy_digest;
+        }
     }
 
     fn capabilities(self: *ArtifactTailProbe) ArtifactTailCapabilities {
@@ -1406,6 +1421,67 @@ test "an artifact whose bytecode cannot be walked is refused rather than half-co
         .contract = &contract,
     }, probe.capabilities()));
     try std.testing.expectEqual(@as(usize, 0), probe.create_calls);
+}
+
+test "the certificate names the exact policy the artifact carries" {
+    const allocator = std.testing.allocator;
+
+    // Two handlers whose runtime policies differ in one entry. The binding is
+    // worth nothing if the certificate names a policy rather than this policy.
+    const sources = [_][]const u8{
+        \\import { env } from "zttp:env";
+        \\
+        \\export function handler(req: Request): Response {
+        \\  const value = env("APP_NAME") ?? "fallback";
+        \\  return Response.text(value);
+        \\}
+        ,
+        \\import { env } from "zttp:env";
+        \\
+        \\export function handler(req: Request): Response {
+        \\  const value = env("OTHER_NAME") ?? "fallback";
+        \\  return Response.text(value);
+        \\}
+        ,
+    };
+
+    var bound: [sources.len][32]u8 = undefined;
+    for (sources, 0..) |source, index| {
+        var compiled = try precompile.compileHandler(allocator, source, "handler.ts", .{
+            .emit_verify = true,
+            .emit_contract = true,
+            .emit_proof_evidence = true,
+        });
+        defer compiled.deinit(allocator);
+
+        const evidence = compiled.proof_evidence orelse return error.TestUnexpectedResult;
+        const contract = compiled.contract orelse return error.TestUnexpectedResult;
+
+        var probe = ArtifactTailProbe{};
+        try writeArtifactTail(allocator, .{
+            .runtime_binary = "runtime",
+            .output_path = "artifact.bin",
+            .attest_requested = false,
+            .bytecode = compiled.bytecode,
+            .dep_bytecodes = compiled.dep_bytecodes orelse &.{},
+            .contract = &contract,
+            .proof_evidence = &evidence,
+        }, probe.capabilities());
+
+        const digest = probe.created_certificate_policy_digest orelse
+            return error.TestUnexpectedResult;
+        // The probe hashed the embedded policy section itself. The identity the
+        // artifact carries is over those bytes, not over some other policy the
+        // producer had in hand.
+        const hex = std.fmt.bytesToHex(digest, .lower);
+        try std.testing.expectEqualSlices(u8, &hex, &probe.created_runtime_policy_sha256.?);
+        try std.testing.expect(!std.mem.eql(u8, &digest, &[_]u8{0} ** 32));
+        bound[index] = digest;
+    }
+
+    // One changed environment key is one changed policy, and the certificate
+    // identity moves with it.
+    try std.testing.expect(!std.mem.eql(u8, &bound[0], &bound[1]));
 }
 
 test "a real compile produces a certificate that binds its own IR and artifact" {
