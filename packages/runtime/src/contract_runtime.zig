@@ -8,6 +8,7 @@
 
 const std = @import("std");
 const zq = @import("zts");
+const pcc = @import("zttp_proof_checker");
 const runtime_config = @import("runtime_config.zig");
 const HandlerContract = zq.HandlerContract;
 const HandlerProperties = zq.HandlerProperties;
@@ -71,12 +72,91 @@ pub const PoolingThresholds = struct {
 
 /// Map proven contract properties to a lifecycle policy. Null falls back to
 /// `.reuse_bounded_by_count`.
-pub fn derivePoolingPolicy(contract: ?*const ValidatedRuntimeContract) PoolingPolicy {
+///
+/// The argument is a proof-checked contract, not a validated one. Recycling a
+/// runtime without resetting it is a decision about whether the handler leaves
+/// state behind, and the compiler's word for that is a claim until a consumer
+/// checks it. An artifact with no accepted certificate lands on the
+/// conservative policy, which is what null means here.
+pub fn derivePoolingPolicy(contract: ?*const ProofCheckedContract) PoolingPolicy {
     const rc = contract orelse return .reuse_bounded_by_count;
-    const p = rc.properties();
+    const p = rc.properties;
     if (p.pure and p.deterministic and p.state_isolated) return .reuse_unbounded;
     if (p.read_only and p.state_isolated) return .reuse_bounded_by_ttl;
     return .reuse_bounded_by_count;
+}
+
+// ---------------------------------------------------------------------------
+// Proof-checked promotion.
+//
+// `ValidatedRuntimeContract` says the embedded contract binds to the artifact
+// this process loaded: same bytecode hash, same policy hash, same capability
+// matrix, same source identity. That is integrity, and it is what makes the
+// contract's *claims* readable. It is not a check of any claim.
+//
+// `ProofCheckedContract` says an independent consumer checker reconstructed the
+// obligations, checked the evidence, and accepted under a pinned policy. Only
+// this type may drive behavior that is unsound if a claim is wrong: the proof
+// response cache, unbounded runtime reuse, result and optional safety, and the
+// durable-workflow guarantees.
+//
+// The split is enforced by construction. The only way to make one is to hand
+// `promote` an assessment the acceptance kernel itself produced and marked
+// accepted; there is no literal, no default, and no field to set.
+// ---------------------------------------------------------------------------
+
+pub const ProofCheckedContract = struct {
+    /// The properties the consumer accepted. A snapshot, not a borrow: the
+    /// promotion outlives no allocation of the contract it came from.
+    properties: Properties,
+    durable_workflow: DurableWorkflowProperties,
+    /// Whether any route reads request headers or body. Not a proof result, but
+    /// the proof cache's key is method and URL only, so it is carried alongside.
+    reads_request_state: bool,
+    /// The weakest edge the accepted certificate leaned on.
+    grade: pcc.AssuranceGrade,
+    /// The artifact declared an ephemeral identity or an unpinned runtime
+    /// policy. A consumer that accepted one asked for it.
+    development_only: bool,
+    /// Construction gate, the same one `ValidatedRuntimeContract` uses: the
+    /// field's type names a file-private opaque, so no struct literal outside
+    /// this file can produce one. `promote` is the only way in.
+    _proof: ValidationProof,
+};
+
+/// Promote a validated contract using an acceptance the kernel produced.
+///
+/// Returns null for anything short of acceptance, including an assessment that
+/// reached `proof_checked` but failed the policy. There is no partial
+/// promotion: a property that did not clear the consumer's bar does not get to
+/// drive the runtime a little.
+pub fn promote(
+    validated: *const ValidatedRuntimeContract,
+    assessment: pcc.Assessment,
+) ?ProofCheckedContract {
+    if (!assessment.accepted()) return null;
+    const grade = assessment.grade orelse return null;
+    return .{
+        .properties = validated.properties(),
+        .durable_workflow = validated.durableWorkflowProperties(),
+        .reads_request_state = validated.view().reads_request_state,
+        .grade = grade,
+        .development_only = assessment.development_only,
+        ._proof = validation_proof,
+    };
+}
+
+/// Test-only promotion. Named so a reader can see at a glance that a call site
+/// is a test, and file-private so no consumer can reach it.
+fn promotedForTest(validated: *const ValidatedRuntimeContract) ProofCheckedContract {
+    return .{
+        .properties = validated.properties(),
+        .durable_workflow = validated.durableWorkflowProperties(),
+        .reads_request_state = validated.view().reads_request_state,
+        .grade = .translation_validated,
+        .development_only = false,
+        ._proof = validation_proof,
+    };
 }
 
 /// Runtime view of the proven contract.
@@ -1159,7 +1239,7 @@ test "derivePoolingPolicy: pure+deterministic+isolated = unbounded" {
         .allocator = std.testing.allocator,
     };
     var validated = validatedFromInner(contract);
-    try std.testing.expectEqual(PoolingPolicy.reuse_unbounded, derivePoolingPolicy(&validated));
+    try std.testing.expectEqual(PoolingPolicy.reuse_unbounded, derivePoolingPolicy(&promotedForTest(&validated)));
 }
 
 test "derivePoolingPolicy: read_only+isolated = ttl" {
@@ -1175,7 +1255,7 @@ test "derivePoolingPolicy: read_only+isolated = ttl" {
         .allocator = std.testing.allocator,
     };
     var validated = validatedFromInner(contract);
-    try std.testing.expectEqual(PoolingPolicy.reuse_bounded_by_ttl, derivePoolingPolicy(&validated));
+    try std.testing.expectEqual(PoolingPolicy.reuse_bounded_by_ttl, derivePoolingPolicy(&promotedForTest(&validated)));
 }
 
 test "derivePoolingPolicy: has_egress = bounded count" {
@@ -1191,7 +1271,7 @@ test "derivePoolingPolicy: has_egress = bounded count" {
         .allocator = std.testing.allocator,
     };
     var validated = validatedFromInner(contract);
-    try std.testing.expectEqual(PoolingPolicy.reuse_bounded_by_count, derivePoolingPolicy(&validated));
+    try std.testing.expectEqual(PoolingPolicy.reuse_bounded_by_count, derivePoolingPolicy(&promotedForTest(&validated)));
 }
 
 test "verifyPolicyHash passes when hash matches live registry" {
@@ -1288,7 +1368,7 @@ test "derivePoolingPolicy: !state_isolated = bounded count" {
         .allocator = std.testing.allocator,
     };
     var validated = validatedFromInner(contract);
-    try std.testing.expectEqual(PoolingPolicy.reuse_bounded_by_count, derivePoolingPolicy(&validated));
+    try std.testing.expectEqual(PoolingPolicy.reuse_bounded_by_count, derivePoolingPolicy(&promotedForTest(&validated)));
 }
 
 // ---------------------------------------------------------------------------

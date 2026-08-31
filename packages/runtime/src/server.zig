@@ -35,6 +35,8 @@ const proof_adapter = @import("proof_adapter.zig");
 const proof_audit_ring = @import("proof_audit_ring.zig");
 const attest_header_strings = @import("attest/header_strings.zig");
 const artifact_graph = @import("artifact_graph.zig");
+const pcc = @import("zttp_proof_checker");
+const proof_activation = @import("proof_activation.zig");
 const attest_envelope = @import("attest/envelope.zig");
 const attest_well_known = @import("attest/well_known.zig");
 const attest_build_receipt = @import("attest/build_receipt.zig");
@@ -1264,6 +1266,11 @@ pub const ServerConfig = struct {
     /// self-extract payload. Null for dev/live reload, which has no section 4.
     policy_section_sha256: ?[32]u8 = null,
 
+    /// The proof certificate, exactly as embedded. Null for dev, live reload,
+    /// and any artifact built before certificates existed. A production
+    /// artifact without one does not serve.
+    certificate: ?[]const u8 = null,
+
     /// Skip startup env validation (for testing/development)
     skip_env_check: bool = false,
 
@@ -1446,6 +1453,10 @@ pub const Server = struct {
     conn_pool: ?*ConnectionPool,
     contract: ?ValidatedRuntimeContract,
     proof_cache: ?proof_adapter.ProofCache,
+    /// The promotion an accepted certificate earned. Null until the acceptance
+    /// kernel says otherwise, and null again after any live swap: the swapped
+    /// handler is not the artifact the certificate described.
+    proof_checked: ?contract_runtime.ProofCheckedContract = null,
     /// Guards `contract`/`proof_cache` against the live-reload watcher thread
     /// freeing+rebuilding them (`updateContract`) while worker threads read
     /// them mid-request. Only engaged when `reload_active` is set, so the
@@ -1604,8 +1615,13 @@ pub const Server = struct {
 
         if (self.contract) |*c| c.deinit();
         self.contract = new_contract;
+        // The certificate described the artifact that was replaced. A live swap
+        // therefore drops the promotion rather than carrying it across: the new
+        // handler has not been checked by anything, and the proof cache,
+        // unbounded reuse, and the durable-workflow guarantees all go with it.
+        self.proof_checked = null;
         if (self.pool) |*pool| {
-            pool.setDurableWorkflowProperties(enforcedDurableWorkflowProperties(&self.contract.?));
+            pool.setDurableWorkflowProperties(.{});
         }
 
         // Always rebuild: even if eligibility is unchanged, cached responses
@@ -1621,17 +1637,6 @@ pub const Server = struct {
         // misleading signature. A future slice will re-mint attestation on
         // each live swap.
         self.clearAttestation();
-
-        const p = self.contract.?.properties();
-        if ((p.pure or (p.deterministic and p.read_only)) and
-            !self.contract.?.view().reads_request_state)
-        {
-            self.proof_cache = proof_adapter.ProofCache.init(
-                self.allocator,
-                p,
-                .{},
-            );
-        }
 
         _ = self.applyPoolingPolicy();
     }
@@ -1651,6 +1656,7 @@ pub const Server = struct {
             c.deinit();
             self.contract = null;
         }
+        self.proof_checked = null;
         if (self.pool) |*pool| {
             pool.setDurableWorkflowProperties(.{});
         }
@@ -1667,7 +1673,8 @@ pub const Server = struct {
     /// properties. Returns the applied policy, or null when there is no pool.
     fn applyPoolingPolicy(self: *Self) ?contract_runtime.PoolingPolicy {
         const pool = if (self.pool) |*p| p else return null;
-        const contract_ptr: ?*const ValidatedRuntimeContract = if (self.contract) |*c| c else null;
+        const contract_ptr: ?*const contract_runtime.ProofCheckedContract =
+            if (self.proof_checked) |*c| c else null;
         const effective = self.config.lifecycle_override orelse
             contract_runtime.derivePoolingPolicy(contract_ptr);
         pool.setPoolingPolicy(effective);
@@ -1810,6 +1817,94 @@ pub const Server = struct {
             section_sha256,
             verify_result.claims.executable_root_sha256,
         );
+    }
+
+    /// Run consumer acceptance over the embedded certificate, and promote the
+    /// contract only if it passes.
+    ///
+    /// A production artifact - one serving from an appended payload - must
+    /// carry a certificate this consumer accepts. Anything else refuses to
+    /// serve. Dev, live reload, and `-Dhandler` builds carry no artifact and no
+    /// certificate; they run with no promotion at all, which means no proof
+    /// response cache, no unbounded runtime reuse, no result-safety shortcut,
+    /// and no durable-workflow guarantees. That is the same rule stated from
+    /// the other side, not an exemption.
+    fn acceptEmbeddedCertificate(self: *Self) !void {
+        const validated = if (self.contract) |*contract| contract else null;
+        const is_production_artifact = switch (self.config.handler) {
+            .appended_payload => true,
+            else => false,
+        };
+
+        if (!is_production_artifact) {
+            if (self.config.certificate != null and !builtin.is_test) {
+                std.log.info("Proof certificate present but this is not a deployed artifact; running unpromoted", .{});
+            }
+            return;
+        }
+
+        const contract = validated orelse {
+            if (!builtin.is_test) {
+                std.log.err(
+                    "activation: deployed artifact carries no contract, so nothing can be checked; refusing to serve",
+                    .{},
+                );
+            }
+            return error.ProofContractMissing;
+        };
+
+        const bytecode = self.embedded_bytecode orelse return error.ProofBytecodeMissing;
+        const policy_digest = self.config.policy_section_sha256 orelse {
+            if (!builtin.is_test) {
+                std.log.err(
+                    "activation: deployed artifact carries no runtime policy section; refusing to serve",
+                    .{},
+                );
+            }
+            return error.RuntimePolicySectionHashMissing;
+        };
+
+        const assessment = try proof_activation.accept(self.allocator, .{
+            .certificate = self.config.certificate,
+            .bytecode = bytecode,
+            .dep_bytecodes = self.runtime_dep_bytecodes orelse &.{},
+            .contract_section = self.config.contract_json,
+            .policy_section_digest = policy_digest,
+            .identity = self.observedArtifactIdentity(),
+            .provenance = if (self.config.attestation_jws != null)
+                .signature_verified
+            else
+                .absent,
+        }, pcc.policy.production);
+
+        self.proof_checked = contract_runtime.promote(contract, assessment);
+        if (self.proof_checked == null) {
+            if (!builtin.is_test) {
+                if (assessment.rejection) |rejection| {
+                    std.log.err(
+                        "activation: proof acceptance failed at {s} ({s}); refusing to serve. Rebuild {s}resolve this.",
+                        .{
+                            rejection.stage.name(),
+                            rejection.code.text(),
+                            if (rejection.recertifiable) "can " else "cannot ",
+                        },
+                    );
+                } else {
+                    std.log.err("activation: proof acceptance did not complete; refusing to serve", .{});
+                }
+            }
+            return error.ProofAcceptanceFailed;
+        }
+
+        if (!builtin.is_test) {
+            std.log.info(
+                "Proof accepted: weakest edge {s}{s}",
+                .{
+                    self.proof_checked.?.grade.name(),
+                    if (self.proof_checked.?.development_only) " (development artifact)" else "",
+                },
+            );
+        }
     }
 
     /// Rebuild the executable graph from the sections this process actually
@@ -2072,17 +2167,26 @@ pub const Server = struct {
         // reload leaves policy_section_sha256 null and is intentionally exempt.
         try self.validateEmbeddedRuntimePolicyAttestation();
 
+        // Semantic acceptance. Everything above is integrity: the same bytes,
+        // the same identities, a signature that validates. None of it says the
+        // handler does anything in particular. This does, and it runs before
+        // the pool exists, so a refusal is a refusal to serve rather than a
+        // handler that is already warm when somebody reads the log line.
+        try self.acceptEmbeddedCertificate();
+
         // Initialize runtime pool with embedded bytecode (must be set before prewarm)
         // Wire the server-level request timeout into the runtime config so the
         // interpreter's cooperative deadline check is enforced per handler call.
         var pool_rt_config = self.config.runtime_config;
         pool_rt_config.request_timeout_ms = self.config.timeout_ms;
-        if (self.contract) |*contract| {
+        // Result and optional safety let the interpreter skip checks a handler
+        // is proven not to need. That is only sound on a proof-checked
+        // contract; an integrity-bound one has made a claim nobody checked.
+        if (self.proof_checked) |*contract| {
             pool_rt_config.durable_workflow_properties = enforcedDurableWorkflowProperties(contract);
-            const props = contract.properties();
             pool_rt_config.handler_proof = .{
-                .optional_safe = props.optional_safe,
-                .result_safe = props.result_safe,
+                .optional_safe = contract.properties.optional_safe,
+                .result_safe = contract.properties.result_safe,
             };
         }
 
@@ -2170,10 +2274,10 @@ pub const Server = struct {
         // The cache keys on method+URL only, so a handler that reads request
         // headers (auth, content-negotiation) is excluded - otherwise one
         // caller's response would be replayed to every other caller of the URL.
-        if (self.contract) |*contract| {
-            const p = contract.properties();
+        if (self.proof_checked) |*contract| {
+            const p = contract.properties;
             if (p.pure or (p.deterministic and p.read_only)) {
-                if (contract.view().reads_request_state) {
+                if (contract.reads_request_state) {
                     std.log.info("   Proof cache: disabled (handler reads request headers/body; method+URL key would be unsound)", .{});
                 } else {
                     self.proof_cache = proof_adapter.ProofCache.init(
@@ -2796,8 +2900,10 @@ const StaticFileCache = struct {
 /// contract's own `enforced` bit says. Shared by the initial pool-init path
 /// and the live-swap path (`updateContract`) so the derivation can't drift
 /// between the two.
-fn enforcedDurableWorkflowProperties(contract: *const ValidatedRuntimeContract) contract_runtime.DurableWorkflowProperties {
-    var workflow_properties = contract.durableWorkflowProperties();
+fn enforcedDurableWorkflowProperties(
+    contract: *const contract_runtime.ProofCheckedContract,
+) contract_runtime.DurableWorkflowProperties {
+    var workflow_properties = contract.durable_workflow;
     workflow_properties.enforced = true;
     return workflow_properties;
 }
@@ -4010,6 +4116,147 @@ fn serverForRuntimePolicyPayloadTest(
         .pool_size = 1,
         .log_requests = false,
     });
+}
+
+test "a deployed artifact that cannot be checked refuses to serve before any pool exists" {
+    const allocator = std.testing.allocator;
+    const policy = engine.RuntimePolicy{};
+    const serialized = try self_extract.serializePayload(allocator, .{
+        .bytecode = "bytecode",
+        .policy = &policy,
+    });
+    defer allocator.free(serialized);
+    const payload = (try self_extract.parse(allocator, serialized)).?;
+    defer payload.deinit(allocator);
+
+    var server = try serverForRuntimePolicyPayloadTest(allocator, &payload);
+    defer server.deinit();
+
+    // No contract, so nothing can be checked. The refusal is unconditional.
+    try std.testing.expectError(error.ProofContractMissing, server.start());
+    // And it happened before the handler pool was built: a refused artifact
+    // never gets a warm runtime, so there is no window in which it could serve.
+    try std.testing.expect(server.pool == null);
+    try std.testing.expect(server.proof_checked == null);
+}
+
+test "an unchecked server drives no proof-authoritative behavior" {
+    const allocator = std.testing.allocator;
+    var server = try Server.init(allocator, .{
+        .handler = .{ .inline_code = "" },
+        .pool_size = 1,
+        .log_requests = false,
+    });
+    defer server.deinit();
+
+    // No certificate, so no promotion, so the conservative pooling policy and
+    // no proof response cache. This is the same rule as the deployed path seen
+    // from the other side, not an exemption for development.
+    try std.testing.expect(server.proof_checked == null);
+    try std.testing.expect(server.proof_cache == null);
+    try std.testing.expectEqual(
+        contract_runtime.PoolingPolicy.reuse_bounded_by_count,
+        contract_runtime.derivePoolingPolicy(null),
+    );
+}
+
+/// A contract JSON carrying the current source identity, so `validate` has the
+/// stamps it insists on. Everything else is left at its default: these tests
+/// are about promotion, not about contract parsing.
+fn stampedContractJsonForTest(allocator: std.mem.Allocator, properties: []const u8) ![]u8 {
+    const identity = engine.sourceIdentityForPath("handler.ts");
+    const grammar = std.fmt.bytesToHex(identity.core_grammar_hash, .lower);
+    const semantics = std.fmt.bytesToHex(identity.semantics_hash, .lower);
+    return std.fmt.allocPrint(
+        allocator,
+        "{{\"version\":18,\"sourceIdentity\":{{\"coreProfileId\":\"{s}\",\"coreGrammarHash\":\"{s}\",\"semanticsHash\":\"{s}\"}}{s}}}",
+        .{ identity.core_profile.id(), grammar, semantics, properties },
+    );
+}
+
+test "a live swap drops the promotion the replaced artifact earned" {
+    const allocator = std.testing.allocator;
+    var server = try Server.init(allocator, .{
+        .handler = .{ .inline_code = "" },
+        .pool_size = 1,
+        .log_requests = false,
+    });
+    defer server.deinit();
+
+    const contract_json = try stampedContractJsonForTest(
+        allocator,
+        ",\"properties\":{\"pure\":true,\"deterministic\":true,\"stateIsolated\":true}",
+    );
+    defer allocator.free(contract_json);
+    const raw = try contract_runtime.parseContractJson(allocator, contract_json);
+    server.contract = try contract_runtime.validate(raw, .{});
+
+    // Stand in for what an accepted certificate earns.
+    server.proof_checked = contract_runtime.promote(&server.contract.?, .{
+        .semantic = .policy_accepted,
+        .provenance = .absent,
+        .grade = .translation_validated,
+        .development_only = false,
+        .rejection = null,
+        .work_spent = 1,
+    });
+    try std.testing.expect(server.proof_checked != null);
+
+    // The certificate described the artifact that is being replaced, so the
+    // swap takes the promotion with it.
+    const swapped_raw = try contract_runtime.parseContractJson(allocator, contract_json);
+    server.updateContract(try contract_runtime.validate(swapped_raw, .{}));
+    try std.testing.expect(server.contract != null);
+    try std.testing.expect(server.proof_checked == null);
+    try std.testing.expect(server.proof_cache == null);
+
+    // And dropping the contract entirely leaves nothing promoted either.
+    server.invalidateContractCaches();
+    try std.testing.expect(server.proof_checked == null);
+}
+
+test "promotion refuses anything short of acceptance" {
+    const allocator = std.testing.allocator;
+    const contract_json = try stampedContractJsonForTest(allocator, "");
+    defer allocator.free(contract_json);
+    const raw = try contract_runtime.parseContractJson(allocator, contract_json);
+    var validated = try contract_runtime.validate(raw, .{});
+    defer validated.deinit();
+
+    // Checked but refused by policy.
+    try std.testing.expect(contract_runtime.promote(&validated, .{
+        .semantic = .proof_checked,
+        .provenance = .absent,
+        .grade = .trusted,
+        .development_only = false,
+        .rejection = .{
+            .stage = .policy,
+            .code = .grade_below_floor,
+            .recertifiable = true,
+        },
+        .work_spent = 1,
+    }) == null);
+
+    // Accepted, but with no grade to report. An acceptance that cannot say how
+    // strong it is does not get to drive anything.
+    try std.testing.expect(contract_runtime.promote(&validated, .{
+        .semantic = .policy_accepted,
+        .provenance = .absent,
+        .grade = null,
+        .development_only = false,
+        .rejection = null,
+        .work_spent = 1,
+    }) == null);
+
+    // Integrity alone is not acceptance.
+    try std.testing.expect(contract_runtime.promote(&validated, .{
+        .semantic = .integrity_verified,
+        .provenance = .trusted_origin,
+        .grade = null,
+        .development_only = false,
+        .rejection = null,
+        .work_spent = 1,
+    }) == null);
 }
 
 test "self-extract runtime policy binding rejects a widened policy" {
