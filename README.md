@@ -7,15 +7,14 @@
 
 **The agent writes only what the compiler can prove.**
 
-zttp is an agent-compiler: a restricted TypeScript profile whose
-safety properties are decidable, a proof engine that is total over it, and an AI
-coding agent that can only author inside that proof boundary. Describe the handler
-you want in plain English. The agent drafts it, and the compiler simulates every
-draft before it reaches disk - every path returns a Response, no secret leaks,
-declared egress only. A draft that fails is not shipped with a warning; the compiler
-canonicalizes it, and if that is not enough it writes the repair itself. The runtime
-carries what the compiler proves: it replays the compiler's counterexamples, runs the
-proven handler, and ships it as one binary with no npm and no Node.
+zttp is an agent-compiler: a restricted TypeScript profile with bounded static
+analyses, a compiler-in-the-loop coding agent, and a local runtime. Describe the
+handler you want in plain English. The agent drafts it, and the compiler simulates
+every draft before it reaches disk. A draft that adds a violation is vetoed; supported
+repairs are normalized or applied before the edit can land. A deployed binary carries
+the resulting certificate, and an independent consumer checker decides which claims
+meet the runtime's policy before the handler can serve. The binary needs no npm or
+Node.
 
 ```bash
 zttp init my-app --expert
@@ -92,13 +91,15 @@ workflows, and proof examples.
   `class`, or `try/catch`; unsupported constructs fail at compile time.
 - Proofs: response-path verification, Result/optional checks, state-isolation
   checks, active `Proof<T, P>` obligations, flow checks, proof traces, witnesses,
-  and proof receipts. A runtime fault that slips through names the proof chip
-  that guards it and the faulting source line, instead of a bare 500.
+  proof receipts, and artifact-level proof certificates. Production startup
+  reconstructs the required obligations and executable graph with an independent
+  checker instead of trusting the compiler's serialized verdict.
 - Virtual modules: native modules under `zttp:*` for env, crypto, auth,
   validation, cache, SQL, fetch, service calls, routing, durable and
   multi-handler workflows, structured I/O, logging, IDs, time, text, and more.
 - Local deploy: self-contained binary output under
-  `.zttp/deploy/<project-name>` with default-on attestation.
+  `.zttp/deploy/<project-name>` with mandatory certificate acceptance and
+  default-on provenance attestation.
 
 ## Security model
 
@@ -113,6 +114,12 @@ exposing a binary publicly. Two boundaries are easy to miss:
   project-backed command checks the handler against it, and a policy that
   cannot be read is an error rather than an unrestricted verdict. See
   [Contracts and Sandboxing](docs/contracts-and-sandboxing.md).
+- A contract that matches the loaded bytes is still a set of compiler claims.
+  Deployed artifacts must also pass certificate acceptance before startup. Only
+  properties that clear the production policy can enable proof-authoritative
+  caching, pooling, check elision, or durable-workflow guarantees. `-Dhandler`
+  builds enforce their capability policy but carry no certificate and receive no
+  proof promotion.
 - No TLS. The runtime serves plain HTTP and binds `127.0.0.1` by default.
   Terminate TLS at a reverse proxy and set the host explicitly before exposing a
   deployed binary to public traffic.

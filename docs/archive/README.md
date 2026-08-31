@@ -48,6 +48,9 @@ Still live, and deliberately not archived:
   is closed, but `docs/roadmap.md` links its row to the plan that recorded what
   the phase actually found, so archiving them would break the roadmap's
   evidence trail.
+- The completed artifact-level proof-carrying-code plan. Its residual runtime
+  guard companion uses the original path as a stable prerequisite reference,
+  and the roadmap records that the prerequisite is complete.
 - `docs/solutions/`, which agents are pointed at and which is not planning
   residue.
 

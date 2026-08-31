@@ -300,10 +300,11 @@ from real function bodies, never an assumed claim. The opt-in
 
 ### Runtime Optimizations from Verification
 
-Verified properties also control runtime behavior:
+Some verified facts control runtime behavior, but they cross different trust
+boundaries:
 
-- **Route pre-filtering**: proven routes reject non-matching requests at the HTTP layer before entering JS (`contract_runtime.zig`).
-- **Response memoization**: when a handler is proven `deterministic` (no Date.now or Math.random) and `read_only` (no write-classified virtual module calls), and its contract shows it reads no request headers or body, GET/HEAD responses are cached in memory and served without JS execution. The header/body condition is required because the cache key is method+URL only: a handler whose response varies on a request header (auth, content negotiation) is excluded so one caller's response is never replayed to another. Cached responses include an `X-Zttp-Proof-Cache: hit` header (`proof_adapter.zig`).
+- **Route pre-filtering**: integrity-validated, statically enumerated routes reject non-matching requests at the HTTP layer before entering JS (`contract_runtime.zig`).
+- **Response memoization**: only an accepted deployed certificate can promote `deterministic` and `read_only` for this purpose. The shipped production policy accepts neither property, so this cache remains off today. A future policy must also require a contract showing that the handler reads no request headers or body. The cache key is method plus URL, so header/body-dependent handlers are excluded. Cached responses include an `X-Zttp-Proof-Cache: hit` header (`proof_adapter.zig`). Development, live reload, and `-Dhandler` execution carry no accepted artifact certificate and do not activate this cache.
 
 Both rely on the same property that makes verification tractable: the IR tree is the control flow graph, with no back-edges and no exceptions.
 
@@ -398,7 +399,7 @@ These are reported as distinct states, never collapsed into one word:
 | State | What it means |
 |---|---|
 | `parsed` | The certificate decoded within its resource bounds. Nothing about the artifact is established. |
-| `integrity_verified` | Every member of the executable graph the consumer recomputed matches the certificate, and the root over them matches too. |
+| `integrity_verified` | Every member of the executable graph the consumer recomputed matches the certificate, the complete certificate commitment matches its graph member, and the root over them matches too. |
 | `proof_checked` | The reconstructed obligations equal the supplied ones, and every obligation carries evidence the consumer checked or explicitly graded. |
 | `policy_accepted` | The checked result meets this consumer's required properties, epochs, and minimum grades. |
 | Provenance | Orthogonal: `absent`, `unchecked`, `signature_verified`, or `trusted_origin`. It never raises or lowers a semantic state. |
@@ -414,7 +415,15 @@ the entry module's bytecode, each dependency module in load order, every
 function in every module, every constant pool, the module specifiers in declared
 order, the native-module binding identities, the contract, the runtime policy,
 the source profiles, the grammar, the semantics registry, the capability matrix,
-and the proof IR itself. Order is part of the commitment.
+the proof IR, and every authority-bearing certificate section. Order is part of
+the commitment. The certificate fold normalizes only its executable-root slot
+and its own graph-member digest, which makes the cycle finite without excluding
+evidence, translation witnesses, trusted edges, or solver queries.
+
+A native-module identity uses a canonical serialization of the complete binding
+surface. Module and per-export capabilities, declared signatures,
+trace and replay flags, return labels, contract extraction rules, state model,
+and algebraic laws all move the executable root when they change.
 
 The producer builds this inventory from the section bytes it is about to embed.
 The consumer rebuilds it from the section bytes it just loaded. Neither reads

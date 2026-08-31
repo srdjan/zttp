@@ -66,11 +66,11 @@ When a guarding chip was not proven, that chip is the predicted cause:
 This response path was not proven optional_safe. A value was used without narrowing its type. at 12:9
 ```
 
-When every guarding chip was proven and the handler still faulted, the fault
-contradicts the proof, and the body says so:
+When every guarding chip was accepted by the artifact checker and the handler
+still faulted, the fault contradicts the accepted proof, and the body says so:
 
 ```text
-Possible soundness incident: the handler faulted on a path proven optional_safe/result_safe. This should be impossible — please report it.
+Possible soundness incident: the handler faulted on a path proven optional_safe/result_safe. This should be impossible; please report it.
 ```
 
 An unmapped fault returns the plain `Internal Server Error` body. The trailing
@@ -89,7 +89,8 @@ is unaffected.
 
 ## Durable Replay And Workflow Queue
 
-Durable replay is conservative when a validated contract is present:
+Durable replay is conservative unless an accepted artifact certificate
+promotes the relevant contract property:
 
 - incomplete replay requires a proven `durable.workflow.properties.retrySafe`
   claim or a matching `Idempotency-Key`;
@@ -97,6 +98,9 @@ Durable replay is conservative when a validated contract is present:
   `durable.workflow.properties.idempotent` or a matching `Idempotency-Key`;
 - unproven replay returns a `599` JSON response with
   `DurableRetryUnproven` or `DurableIdempotencyUnproven`.
+
+The current production policy promotes none of the durable properties, so
+those paths still require their runtime fallback or remain unavailable.
 
 `--workflow-queue` persists durable workflow child dispatch under
 `<durable>/workflow-queue`. Dead letters are visible operator state, not hidden

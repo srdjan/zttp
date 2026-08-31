@@ -140,6 +140,7 @@ fn certify(allocator: std.mem.Allocator, source: []const u8) !Certified {
     defer allocator.free(scratch_members);
     var observed_sections = sections;
     observed_sections.proof_ir_digest = built.ir_root;
+    observed_sections.proof_certificate_digest = built.certificate_digest;
     const observed = try artifact_graph.build(
         allocator,
         artifact_graph.fromArtifact(observed_sections),

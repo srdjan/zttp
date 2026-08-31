@@ -80,7 +80,7 @@ Common `dev` and `serve` flags:
 | `--outbound-timeout-ms <ms>` | Outbound connect timeout (default 10000). Implies `--outbound-http`. |
 | `--outbound-max-response <size>` | Outbound response body cap (default 1m). Implies `--outbound-http`. |
 | `--security-log <file>` | Append security events as JSONL: policy denials, arena audit failures, persistent-string escapes. |
-| `--lifecycle <mode>` | Override the contract-derived runtime lifecycle: `ephemeral`, `bounded`, `ttl`, or `reuse`. |
+| `--lifecycle <mode>` | Override the proof-gated runtime lifecycle: `ephemeral`, `bounded`, `ttl`, or `reuse`. |
 | `--static <dir>` | Serve static files. |
 | `--no-env-check` | Skip startup env validation. |
 
@@ -91,12 +91,14 @@ which captures the session's requests into a replayable proof capsule at
 (apply a breaking swap anyway) instead. Both take `--studio` when the binary was
 built with `-Dstudio`.
 
-Without `--lifecycle`, the runtime derives the pool's recycling policy from the
-proven contract: `reuse` when the handler is pure, deterministic, and
-state-isolated; `ttl` when it is read-only and state-isolated; `bounded`
-otherwise. `bounded` recycles a runtime after 64 requests, `ttl` after 30
-seconds, and `ephemeral` gives each request a fresh runtime. A hot swap
-re-derives the policy unless the override is set.
+Without `--lifecycle`, only properties promoted from an accepted deployed
+certificate can relax the pool's recycling policy: `reuse` requires pure,
+deterministic, and state-isolated; `ttl` requires read-only and state-isolated;
+otherwise the pool is `bounded`. The shipped production policy does not accept
+those lifecycle properties, so deployed, development, and hot-swap execution
+all stay bounded unless the operator supplies an override. `bounded` recycles
+a runtime after 64 requests, `ttl` after 30 seconds, and `ephemeral` gives each
+request a fresh runtime.
 
 `--security-log` writes one JSON object per line. A capability denial from a new
 gate site is `{"event":"policy_denied","ts":...,"service":...,"action":...,"resource":{"kind":...,"id":...},"reason":...}`;
@@ -180,7 +182,8 @@ zttp proofs replay <capsule>
 fails closed when the capsule's pinned handler, contract, or policy hash no
 longer matches (`--allow-version-mismatch` overrides). `zttp verify <url>`
 verifies a live endpoint's attestation. `zttp proofs verify <bundle-dir>`
-re-hashes a local proof bundle.
+checks a local bundle's integrity and, when it contains a binary and
+certificate, runs independent semantic acceptance.
 
 The old spelling `zttp proof replay` still works as a deprecated alias for one
 release and prints a migration note. It is no longer listed in `zttp help --all`.

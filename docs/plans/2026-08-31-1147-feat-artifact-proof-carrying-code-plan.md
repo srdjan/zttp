@@ -7,9 +7,15 @@ artifact_contract: ce-unified-plan/v1
 artifact_readiness: implementation-ready
 product_contract_source: ce-plan-bootstrap
 execution: code
+status: complete
+completed: 2026-08-31
 ---
 
 # Artifact-Level Proof-Carrying Code - Plan
+
+Status: complete. The implementation and adversarial review fixes satisfy the
+U1 through U7 acceptance gates. `docs/roadmap.md` owns further ratchet work and
+the residual runtime guard addendum.
 
 ## Goal Capsule
 

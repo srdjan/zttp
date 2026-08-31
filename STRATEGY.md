@@ -1,6 +1,6 @@
 ---
 name: zttp
-last_updated: 2026-08-16
+last_updated: 2026-08-31
 ---
 
 # zttp Strategy
@@ -12,16 +12,14 @@ built, what is planned, and what is refused as a feature decision live in
 
 ## The category
 
-zttp is an agent-compiler. That is one system with three parts engineered against
-each other: a restricted language whose safety and correctness properties are
-decidable, a proof engine that is total over that language, and an AI coding agent
-whose goal, feedback, repair, and reward are all expressed in the proof system's
-vocabulary. The defining property is convergence: the set of programs the agent can
-write approaches the set of programs the compiler can prove. The agent does not write
-code and then check it. It authors inside a fence, and the fence is load-bearing for
-everything else. The runtime exists to carry what the compiler proves: it replays the
-compiler's counterexamples, runs the proven handler, and ships it as one attested
-binary.
+zttp is an agent-compiler. That is one system with four parts engineered against
+each other: a restricted language with bounded static analyses, an AI coding agent
+whose goal and feedback use the proof vocabulary, a consumer-owned artifact checker,
+and a runtime that activates only accepted artifacts. The defining property is
+convergence: the set of programs the agent can write approaches the set of programs
+the compiler can prove. The agent authors inside a compiler fence. Deployment adds a
+second boundary: an independent checker decides which compiler claims meet consumer
+policy before the runtime may use them.
 
 The term never travels without that definition. On its own, "agent-compiler" misreads
 as "a compiler for agents", which is the opposite of the claim.
@@ -45,9 +43,9 @@ checker. It is in the boundary between them.
 
 ## Our approach
 
-We do not bolt an agent onto a compiler. We engineer three artifacts against each
-other: a restricted language, a proof engine that is total over it, and an agent that
-can only author inside the proof boundary.
+We do not bolt an agent onto a compiler. We engineer the language, compiler, agent,
+artifact checker, and runtime against the same closed identities and property
+vocabulary.
 
 The language is restricted on purpose. zts removes the constructs that make analysis
 undecidable: classes, async, try/catch, regex, `==`, `while`, `this`, `new`. Each
@@ -100,7 +98,10 @@ A strategy that sells verdicts must grade itself the same way.
 What holds today, by construction: the single fenced write path; the veto with
 canonicalize-and-salvage; the model-free repair lane; the autoloop with rollback on
 regression; replayable counterexamples; and registry hashes that bind every agent
-response to the exact rule, idiom, and restriction set in force. The wire protocol's
+response to the exact rule, idiom, and restriction set in force. Deployed artifacts
+carry a closed certificate over the complete executable graph. A leaf checker
+reconstructs obligations, validates bounded evidence, and promotes only properties
+that meet consumer policy before pool initialization. The wire protocol's
 proof operations (`verify` and `simulate_edit`) ship, so an outside client completes a
 propose, simulate, verify cycle with no in-process access. PI's aggregate change-set
 transaction is the only source-write authority: it proves the simultaneous overlay,
@@ -115,8 +116,9 @@ What is thin: six of the validator registry's fifteen repair intents grade as me
 repairs, so most rewrites still ship as proposed refactors an outside client must judge
 for itself. The canonical formatter refuses JSX and TSX, five of the 58 corpus files, and
 a refused file keeps the layout its author wrote. The convergence corpus is 19 cases and
-trips 5 of the compiler's 71 advertised rules, so most of the fence stands under no
-published number at all.
+the latest recording trips 3 of the compiler's 59 advertised rules. Across recordings
+of the same corpus it has ever tripped 6. The deterministic defect-seed suite verifies
+58 of 59 rules independently of model behavior, so those figures must remain separate.
 
 What is unmeasured: provable-set reach, the convergence metric itself. Given a reference
 suite of programs the compiler certifies green, the fraction the agent reproduces to
@@ -214,14 +216,16 @@ the compiler and pulls a rejected program into the provable set with no model to
 
 ### 5. Proof carrier (supporting)
 
-Runtime and deploy footprint: witness replay fidelity, attestation on by default, small
-self-contained artifacts, the cold-start floor.
+Runtime and deploy footprint: witness replay fidelity, independent certificate
+acceptance, attestation on by default, small self-contained artifacts, and the
+cold-start floor.
 
 _Why it serves the approach:_ a proof needs a place to be true and a way to travel. The
-runtime is the only part of the system that can falsify the compiler, because witnesses
-replay against the real engine in the format the compiler wrote them. It is also how a
-proven handler ships. Work lands in this track when it serves replay, attestation, or
-carrying proven handlers. Feature parity with general-purpose runtimes is refused.
+consumer checker keeps producer verdicts from becoming runtime authority by
+serialization alone. The runtime can still falsify the compiler, because witnesses
+replay against the real engine in the format the compiler wrote them. Work lands in
+this track when it serves replay, artifact acceptance, attestation, or carrying proven
+handlers. Feature parity with general-purpose runtimes is refused.
 
 ## Not working on
 

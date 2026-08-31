@@ -50,8 +50,10 @@ for investigation.
 - `--actor-queue` allocates in-memory mailbox rings only when enabled. The
   default serving path pays no queue-worker or mailbox cost, and queued payloads
   are stored as compact JSON byte slices outside the JS heap.
-- Handlers proven deterministic and read-only can serve cached GET/HEAD
-  responses from Zig memory.
+- The response cache is gated by certificate-accepted `deterministic` and
+  `read_only` properties plus a contract with no request-header or body
+  dependency. The shipped production policy accepts neither property, so this
+  cache remains off today. A contract claim by itself never enables it.
 
 ## Engine Optimizations
 

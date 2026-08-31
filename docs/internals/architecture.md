@@ -200,8 +200,9 @@ Startup runs four stages before a handler pool exists, in this order:
 3. **Proof acceptance.** `artifact_graph.zig` rebuilds the executable-graph
    inventory from the sections just loaded; `proof_activation.zig` hands it and
    the embedded certificate to the acceptance kernel; `contract_runtime.promote`
-   turns an acceptance into a `ProofCheckedContract`. A deployed artifact that
-   fails any of this does not serve.
+   turns only the properties that cleared the active policy floor into a
+   `ProofCheckedContract`. Unrequired or below-floor claims remain false. A
+   deployed artifact that fails any of this does not serve.
 4. **Pool init and prewarm.** Only now, so a refused artifact never has a warm
    runtime.
 

@@ -1,13 +1,15 @@
 //! `zttp proofs bundle` packages a handler's contract, optional binary,
-//! and optional replay artifacts into a directory layout a third party
-//! can verify deterministically. `zttp proofs verify <dir>` re-checks
-//! every SHA-256 in the manifest against the actual file bytes.
+//! extracted artifact certificate, and optional replay artifacts into a
+//! directory layout a third party can verify deterministically. `zttp proofs
+//! verify <dir>` checks every SHA-256, then runs independent artifact proof
+//! acceptance when the binary and certificate are present.
 //!
 //! Layout under `--out <dir>`:
 //!   - bundle.json            manifest (tool version, sha256s of all parts)
 //!   - handler.contract.json  byte-for-byte copy of the input contract
 //!   - binary                 copy of `--binary <path>` (when supplied)
 //!   - binary.sha256          hex digest as a text file (when supplied)
+//!   - certificate            copy extracted from the binary (when supplied)
 //!   - replay/<filename>      copy of `--replay <path>` (when supplied)
 //!
 //! Hard redaction guardrail: the bundle is built from explicit file

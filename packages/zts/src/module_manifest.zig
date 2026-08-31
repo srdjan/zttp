@@ -206,17 +206,163 @@ pub fn parse(allocator: std.mem.Allocator, bytes: []const u8) ManifestError!Mani
     return manifest;
 }
 
+const BindingHasher = struct {
+    hasher: std.crypto.hash.sha2.Sha256,
+
+    fn init(domain: []const u8) BindingHasher {
+        var result = BindingHasher{ .hasher = std.crypto.hash.sha2.Sha256.init(.{}) };
+        result.bytes(domain);
+        return result;
+    }
+
+    fn byte(self: *BindingHasher, value: u8) void {
+        self.hasher.update(&.{value});
+    }
+
+    fn boolean(self: *BindingHasher, value: bool) void {
+        self.byte(@intFromBool(value));
+    }
+
+    fn count(self: *BindingHasher, value: usize) void {
+        var encoded: [8]u8 = undefined;
+        std.mem.writeInt(u64, &encoded, @intCast(value), .little);
+        self.hasher.update(&encoded);
+    }
+
+    fn bytes(self: *BindingHasher, value: []const u8) void {
+        self.count(value.len);
+        self.hasher.update(value);
+    }
+
+    fn optionalBytes(self: *BindingHasher, value: ?[]const u8) void {
+        self.boolean(value != null);
+        if (value) |present| self.bytes(present);
+    }
+
+    fn tag(self: *BindingHasher, value: anytype) void {
+        self.bytes(@tagName(value));
+    }
+
+    fn optionalByte(self: *BindingHasher, value: ?u8) void {
+        self.boolean(value != null);
+        if (value) |present| self.byte(present);
+    }
+
+    fn stringList(self: *BindingHasher, values: []const []const u8) void {
+        self.count(values.len);
+        for (values) |value| self.bytes(value);
+    }
+
+    fn tagList(self: *BindingHasher, values: anytype) void {
+        self.count(values.len);
+        for (values) |value| self.tag(value);
+    }
+
+    fn foldExtraction(self: *BindingHasher, extraction: mb.ContractExtraction) void {
+        self.byte(extraction.arg_position);
+        self.tag(extraction.category);
+        self.boolean(extraction.transform != null);
+        if (extraction.transform) |transform| self.tag(transform);
+        self.boolean(extraction.flag_only);
+        self.optionalBytes(extraction.extension_category);
+    }
+
+    fn foldLaw(self: *BindingHasher, law: mb.Law) void {
+        const kind = std.meta.activeTag(law);
+        self.tag(kind);
+        switch (law) {
+            .pure, .idempotent_call => {},
+            .inverse_of => |name| self.bytes(name),
+            .absorbing => |pattern| {
+                self.byte(pattern.arg_position);
+                self.tag(pattern.argument_shape);
+                self.tag(pattern.residue);
+            },
+        }
+    }
+
+    fn foldExport(self: *BindingHasher, exp: mb.FunctionBinding) void {
+        self.bytes(exp.name);
+        self.boolean(exp.func != null);
+        self.boolean(exp.module_func != null);
+        self.byte(exp.arg_count);
+        self.optionalByte(exp.required_arg_count);
+        self.tag(exp.effect);
+        self.stringList(exp.param_names);
+
+        self.boolean(exp.required_capabilities != null);
+        if (exp.required_capabilities) |capabilities| self.tagList(capabilities);
+        self.tag(exp.returns);
+        self.boolean(exp.returns_from_param != null);
+        if (exp.returns_from_param) |source| {
+            self.byte(source.param_index);
+            self.tag(source.kind);
+        }
+        self.tagList(exp.param_types);
+        self.count(exp.json_encodable_args.len);
+        self.hasher.update(exp.json_encodable_args);
+
+        self.boolean(exp.signature != null);
+        if (exp.signature) |signature| {
+            self.stringList(signature.params);
+            self.bytes(signature.returns);
+        }
+        self.boolean(exp.traceable);
+        self.boolean(exp.replay_pure);
+
+        self.count(exp.contract_extractions.len);
+        for (exp.contract_extractions) |extraction| self.foldExtraction(extraction);
+        self.boolean(exp.contract_flags.sets_scope_used);
+        self.boolean(exp.contract_flags.sets_durable_used);
+        self.boolean(exp.contract_flags.sets_durable_timers);
+        self.boolean(exp.contract_flags.sets_bearer_auth);
+        self.boolean(exp.contract_flags.sets_jwt_auth);
+
+        var labels: [2]u8 = undefined;
+        std.mem.writeInt(u16, &labels, @bitCast(exp.return_labels), .little);
+        self.hasher.update(&labels);
+        self.boolean(exp.derives_from_args);
+        self.tag(exp.failure_severity);
+        self.count(exp.laws.len);
+        for (exp.laws) |law| self.foldLaw(law);
+    }
+
+    fn foldBinding(self: *BindingHasher, binding: mb.ModuleBinding) void {
+        self.bytes(binding.specifier);
+        self.bytes(binding.name);
+        self.count(binding.exports.len);
+        for (binding.exports) |exp| self.foldExport(exp);
+        self.bytes(binding.summary);
+        self.tagList(binding.required_capabilities);
+        self.boolean(binding.stateful);
+        self.boolean(binding.state_init != null);
+        self.boolean(binding.state_deinit != null);
+        self.optionalBytes(binding.contract_section);
+        self.boolean(binding.sandboxable);
+        self.boolean(binding.comptime_only);
+        self.boolean(binding.self_managed_io);
+    }
+};
+
+/// Canonical identity of every declared, authority-bearing native module field.
+/// Function addresses are intentionally excluded because they are build-layout
+/// details; whether an export uses the native or sandboxed implementation path
+/// is part of the identity.
+pub fn bindingDigest(binding: mb.ModuleBinding) [32]u8 {
+    var hasher = BindingHasher.init("zttp-native-module-surface-v2");
+    hasher.foldBinding(binding);
+    return hasher.hasher.finalResult();
+}
+
 pub fn registryHashFromBindings(comptime bindings: []const mb.ModuleBinding) [64]u8 {
+    // This is the published discovery-protocol identity. Keep its preimage
+    // stable independently of the stronger per-artifact binding digest above.
     var hasher = std.crypto.hash.sha2.Sha256.init(.{});
     inline for (bindings) |binding| {
         hasher.update(binding.specifier);
         hasher.update("\x00");
         hasher.update(binding.name);
         hasher.update("\x00");
-        // The hash answers "which module surface", and a client that cached
-        // work under it is entitled to reuse that work. The use protocol and
-        // the parameter names are part of what a caller was told, so an edit
-        // to either has to move the identity or the cache is a silent lie.
         hasher.update(binding.summary);
         hasher.update("\x00");
         inline for (binding.required_capabilities) |cap| {
@@ -240,13 +386,6 @@ pub fn registryHashFromBindings(comptime bindings: []const mb.ModuleBinding) [64
                 hasher.update(",");
             }
             hasher.update(":");
-            // A declared signature overrides the coarse kind at every position
-            // and is what discovery now publishes, so it is squarely "what a
-            // caller is told" - the thing this hash exists to identify. It was
-            // outside the hash while it was also outside the payload, which was
-            // at least consistent; publishing it without hashing it would let
-            // `zttp:workflow.call` change from `object` to a Response shape
-            // under a client's cached identity.
             if (exp.signature) |declared| {
                 inline for (declared.params) |param| {
                     hasher.update(param);
@@ -261,6 +400,59 @@ pub fn registryHashFromBindings(comptime bindings: []const mb.ModuleBinding) [64
     var digest: [32]u8 = undefined;
     hasher.final(&digest);
     return std.fmt.bytesToHex(digest, .lower);
+}
+
+test "binding digest covers the complete authority surface" {
+    const exports = [_]mb.FunctionBinding{
+        .{ .name = "read", .arg_count = 1, .param_types = &.{.string} },
+    };
+    const baseline_binding = mb.ModuleBinding{
+        .specifier = "zttp:test",
+        .name = "test",
+        .exports = &exports,
+    };
+    const baseline = bindingDigest(baseline_binding);
+
+    {
+        const capabilities = [_]mb.ModuleCapability{.network};
+        var changed_exports = exports;
+        changed_exports[0].required_capabilities = &capabilities;
+        var changed = baseline_binding;
+        changed.exports = &changed_exports;
+        try std.testing.expect(!std.mem.eql(u8, &baseline, &bindingDigest(changed)));
+    }
+    {
+        const signature_params = [_][]const u8{"URL"};
+        var changed_exports = exports;
+        changed_exports[0].signature = .{ .params = &signature_params, .returns = "Response" };
+        var changed = baseline_binding;
+        changed.exports = &changed_exports;
+        try std.testing.expect(!std.mem.eql(u8, &baseline, &bindingDigest(changed)));
+    }
+    {
+        var changed_exports = exports;
+        changed_exports[0].traceable = false;
+        var changed = baseline_binding;
+        changed.exports = &changed_exports;
+        try std.testing.expect(!std.mem.eql(u8, &baseline, &bindingDigest(changed)));
+    }
+    {
+        var changed_exports = exports;
+        changed_exports[0].return_labels = .{ .secret = true };
+        var changed = baseline_binding;
+        changed.exports = &changed_exports;
+        try std.testing.expect(!std.mem.eql(u8, &baseline, &bindingDigest(changed)));
+    }
+    {
+        var changed = baseline_binding;
+        changed.stateful = true;
+        try std.testing.expect(!std.mem.eql(u8, &baseline, &bindingDigest(changed)));
+    }
+    {
+        var changed = baseline_binding;
+        changed.sandboxable = true;
+        try std.testing.expect(!std.mem.eql(u8, &baseline, &bindingDigest(changed)));
+    }
 }
 
 fn parseExport(allocator: std.mem.Allocator, value: std.json.Value) ManifestError!Export {

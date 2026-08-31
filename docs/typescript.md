@@ -779,12 +779,13 @@ prose rather than a snippet. A passing type check proves shape, not behavior at
 the boundary. zts answers that on two fronts. At the boundary, runtime
 validation through `zttp:validate` and `zttp:decode` (tip 10) checks the
 data that types alone cannot. Above the type system, the
-restrictions-to-proofs story turns each language cut into a discharged property
-(exhaustive returns, state isolation, no secret leakage, and the rest), and
-every build can sign those properties into a proof receipt that a third party
-verifies. See [Restrictions to Proofs](restrictions-to-proofs.md) for the
-cut-to-proof table and the proof-receipt section of
-[User Guide](user-guide.md) for the signed receipts.
+restrictions-to-proofs story turns each language cut into a compiler claim
+(exhaustive returns, state isolation, no secret leakage, and the rest). A
+signed receipt lets a third party verify the claim's provenance. It does not
+establish the claim. Deployed artifact certificates cross the separate
+semantic boundary through the independent proof checker. See
+[Restrictions to Proofs](restrictions-to-proofs.md) for the cut-to-proof table
+and [Verification](verification.md) for the certificate boundary.
 
 ### Deliberately Absent
 

@@ -59,6 +59,8 @@ pub const Inputs = struct {
     /// artifact built without one; the acceptance kernel refuses such an
     /// artifact for production, and says which member was missing.
     proof_ir_digest: ?[32]u8 = null,
+    /// Cycle-safe digest of every certificate byte. Absent with no certificate.
+    proof_certificate_digest: ?[32]u8 = null,
 };
 
 /// The identity half of the commitment: which modules the handler imports, and
@@ -108,6 +110,7 @@ pub const ArtifactInputs = struct {
     /// an artifact by naming the member kinds it is missing.
     identity: Identity = .{},
     proof_ir_digest: ?[32]u8 = null,
+    proof_certificate_digest: ?[32]u8 = null,
 };
 
 /// Project the artifact onto the graph inputs.
@@ -125,6 +128,7 @@ pub fn fromArtifact(inputs: ArtifactInputs) Inputs {
         .frontend_profile_id = inputs.identity.frontend_profile_id,
         .frontend_grammar_hash = inputs.identity.frontend_grammar_hash,
         .proof_ir_digest = inputs.proof_ir_digest,
+        .proof_certificate_digest = inputs.proof_certificate_digest,
     };
 }
 
@@ -141,35 +145,6 @@ const Collector = struct {
 
 pub fn digestOf(bytes: []const u8) [32]u8 {
     return graph.digestBytes(bytes);
-}
-
-/// Identity of one native module binding: the surface a handler is entitled to
-/// call. Mirrors the fields `module_manifest.registryHashFromBindings` folds,
-/// one binding at a time, so a change to a module's capabilities or exports
-/// moves the artifact's root.
-fn bindingIdentity(binding: anytype) [32]u8 {
-    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
-    hasher.update("zttp-native-module-v1");
-    hasher.update(binding.specifier);
-    hasher.update("\x00");
-    hasher.update(binding.name);
-    hasher.update("\x00");
-    for (binding.required_capabilities) |cap| {
-        hasher.update(@tagName(cap));
-        hasher.update(",");
-    }
-    hasher.update("\x00");
-    for (binding.exports) |exp| {
-        hasher.update(exp.name);
-        hasher.update(":");
-        hasher.update(@tagName(exp.effect));
-        hasher.update(":");
-        hasher.update(@tagName(exp.returns));
-        hasher.update(":");
-        hasher.update(@tagName(exp.failure_severity));
-        hasher.update(";");
-    }
-    return hasher.finalResult();
 }
 
 fn addModuleSpans(
@@ -230,7 +205,7 @@ pub fn build(
     for (inputs.module_specifiers) |specifier| {
         for (zts.builtinModules) |binding| {
             if (!std.mem.eql(u8, binding.specifier, specifier)) continue;
-            try collector.add(.native_module_identity, native_ordinal, bindingIdentity(binding));
+            try collector.add(.native_module_identity, native_ordinal, zts.ModuleMetadata.nativeBindingDigest(binding));
             native_ordinal += 1;
             break;
         }
@@ -254,6 +229,9 @@ pub fn build(
     try collector.add(.capability_matrix, 0, inputs.capability_hash);
     if (inputs.proof_ir_digest) |digest| {
         try collector.add(.proof_ir, 0, digest);
+    }
+    if (inputs.proof_certificate_digest) |digest| {
+        try collector.add(.proof_certificate, 0, digest);
     }
 
     const members = out[0..collector.count];
@@ -365,6 +343,7 @@ fn sampleInputs(main: []const u8, deps: []const []const u8) Inputs {
         .semantics_hash = [_]u8{0xB2} ** 32,
         .capability_hash = [_]u8{0xC3} ** 32,
         .proof_ir_digest = [_]u8{0xD4} ** 32,
+        .proof_certificate_digest = [_]u8{0xE5} ** 32,
     };
 }
 
@@ -479,6 +458,11 @@ test "mutating any member class moves the root" {
         .{ .name = "proof ir", .apply = struct {
             fn f(i: *Inputs) void {
                 i.proof_ir_digest = [_]u8{0xD5} ** 32;
+            }
+        }.f },
+        .{ .name = "proof certificate", .apply = struct {
+            fn f(i: *Inputs) void {
+                i.proof_certificate_digest = [_]u8{0xE6} ** 32;
             }
         }.f },
     };

@@ -4,7 +4,10 @@
 
 ## What This Repo Is
 
-Serverless JavaScript runtime for FaaS, powered by zts (pure Zig JS engine). Targets AWS Lambda, Azure Functions, Cloudflare Workers, edge. Design goals: instant cold starts, small binary, request isolation, zero dependencies.
+Agent-compiler and local serverless runtime powered by zts, a pure Zig engine
+for the restricted `zts-model-1` TypeScript profile. The supported deployment
+surface is a self-contained macOS or Linux binary. Hosted cloud deployment is
+deferred from this beta.
 
 ## Build & Run
 
@@ -23,7 +26,12 @@ Release builds, handler precompilation (`-Dhandler` with `-Dverify`, `-Dcontract
 
 `zttp --help` advertises five core commands: `init`, `dev`, `test`, `expert`, `deploy`. Everything else is listed by `zttp help --all`, in seven categories: Analyze, Run and inspect, Package, Proof ledger, Credentials, Machine tools, and Advanced. Every analyzer command is reachable both as `zts <command>` and as `zttp <command>` with identical output; `expert` and `ledger` live only in `zttp`.
 
-`zttp verify <url>` is the proof-receipt verifier and is distinct from `zttp proofs verify <bundle-dir>`, which checks bundle integrity. `studio` and `edge` are compiled out by default. Hosted cloud deploy and the account verbs are deferred from this beta; hosted control-plane, provider, registry, and OCI image orchestration are intentionally out of core.
+`zttp verify <url>` verifies provenance for a signed live-endpoint claim. It is
+distinct from `zttp proofs verify <bundle-dir>`, which checks bundle integrity
+and, when the artifact carries a certificate, runs semantic acceptance against
+the artifact itself. `studio` and `edge` are compiled out by default. Hosted
+cloud deploy and the account verbs are deferred from this beta; hosted
+control-plane, registry, and OCI image orchestration are out of core.
 
 Full reference: [docs/cli.md](docs/cli.md). Semantics registry checking (`spec-check`, `spec-hash`, `spec-render`, `module-spec-render`, the SMT layer and exclusion audit): [docs/internals/semantics-verification.md](docs/internals/semantics-verification.md). Generated artifacts under `packages/modules/module-specs/` and the Module Catalog table in `docs/virtual-modules/README.md` are rendered from the Zig bindings; edit the binding and regenerate, never the output.
 
@@ -37,7 +45,14 @@ Monorepo with packages under `packages/`. Runtime (`packages/runtime/`): HTTP, C
 
 HTTP in `server.zig`, runtime management in `handler_instance.zig` (`zruntime_tests.zig` is its end-to-end test root), live reload in `live_reload.zig`. Engine (`packages/zts/`): two-pass compilation (parse to IR, then bytecode), parser in `packages/zts/src/parser/`, VM dispatch loop in `interpreter.zig`. The interpreter is the single execution path; the tiered JIT was removed after measurement. Values use NaN-boxing (`value.zig`, `object.zig`), memory management in `gc.zig`/`heap.zig`/`arena.zig`/`pool.zig`, TypeScript stripping in `stripper.zig`. Tools (`packages/tools/`): build-time precompilation, CLI, analysis.
 
-Request flow: accept connection, check proven route table, check proof cache for deterministic and read-only handlers (`proof_adapter.zig`), acquire an isolated runtime from HandlerPool, convert to a JS Request, invoke the handler, extract the Response, release the runtime. Self-extracting binaries parse the embedded contract at startup for env var validation, route pre-filtering, proof cache activation, and property logging (`contract_runtime.zig`).
+Request flow: accept connection, check the integrity-validated route table,
+check the proof cache only when an accepted certificate promoted the required
+properties, acquire an isolated runtime from `HandlerPool`, convert to a JS
+Request, invoke the handler, extract the Response, and release the runtime.
+Self-extracting binaries validate the contract and serialized policy, rebuild
+the executable graph, and run `packages/proof-checker` before pool creation.
+Contract parsing alone enables env validation and route pre-filtering, not
+proof-authoritative caching or reuse.
 
 Key patterns: native Zig error unions (`!T`) throughout the implementation (the `Result<T>` seen in handlers is a user-facing JS and verification construct, not a Zig engine pattern), hidden classes for inline caching, request-scoped arena allocation.
 
@@ -78,6 +93,10 @@ File identity selects the frontend: `.ts` enters the `zts-model-1` core and `.ts
 - **Replay and durable**: `packages/zts/src/trace.zig`, `packages/runtime/src/durable_recovery.zig`.
 - **Deploy manifests**: `packages/tools/src/deploy_manifest.zig`.
 - **System linking**: `packages/zts/src/system_linker.zig`.
+- **Artifact acceptance**: `packages/proof-checker/` owns bounded certificate
+  decoding, obligation reconstruction, evidence checks, consumer policy, and
+  exhaustive verdicts. `packages/runtime/src/proof_activation.zig` supplies the
+  independently reconstructed artifact graph.
 
 ## Models
 

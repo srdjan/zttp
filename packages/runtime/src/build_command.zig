@@ -705,7 +705,10 @@ fn writeArtifactTail(
     const members = try allocator.alloc(artifact_graph.Member, artifact_graph.max_members);
     defer allocator.free(members);
     var graph_inputs = artifact_sections;
-    if (certificate) |value| graph_inputs.proof_ir_digest = value.ir_root;
+    if (certificate) |value| {
+        graph_inputs.proof_ir_digest = value.ir_root;
+        graph_inputs.proof_certificate_digest = value.certificate_digest;
+    }
     const built = artifact_graph.buildRoot(
         allocator,
         artifact_graph.fromArtifact(graph_inputs),
@@ -1497,6 +1500,9 @@ test "a real compile produces a certificate that binds its own IR and artifact" 
 test "a real compile reaches policy acceptance, and one changed byte does not" {
     const allocator = std.testing.allocator;
     const source =
+        \\function helper(): undefined {
+        \\}
+        \\
         \\export function handler(req: Request): Proof<Response, "deterministic" | "read_only" | "state_isolated" | "no_secret_leakage" | "result_safe"> {
         \\  if (req.method === "GET") {
         \\    return Response.text("get");
@@ -1546,6 +1552,7 @@ test "a real compile reaches policy acceptance, and one changed byte does not" {
     defer allocator.free(members);
     var observed_sections = sections;
     observed_sections.proof_ir_digest = built.ir_root;
+    observed_sections.proof_certificate_digest = built.certificate_digest;
     const observed = try artifact_graph.build(
         allocator,
         artifact_graph.fromArtifact(observed_sections),
@@ -1649,6 +1656,37 @@ test "the signed root and the startup rebuild are the same fold" {
     // did not - every artifact carrying a certificate refused to serve, and
     // only the end-to-end smoke test noticed.
     try std.testing.expectEqualSlices(u8, &built.executable_root, &observed);
+
+    // Evidence is authority-bearing even when the proof IR is unchanged. A
+    // policy claim that moves from tested to not-established must therefore
+    // move the root compared with the one an attestation signed.
+    const mutated_certificate = try allocator.dupe(u8, built.bytes);
+    defer allocator.free(mutated_certificate);
+    var decode_budget = pcc.limits.Budget.init(.{});
+    const decoded = try pcc.certificate.decode(mutated_certificate, .{}, &decode_budget);
+    const evidence_offset = @intFromPtr(decoded.evidence.bytes.ptr) - @intFromPtr(mutated_certificate.ptr);
+    var evidence_index: u32 = 0;
+    while (evidence_index < decoded.evidence.len()) : (evidence_index += 1) {
+        const entry = try decoded.evidence.get(evidence_index);
+        const obligation = try decoded.obligations.get(entry.obligation_index);
+        if (obligation.property == .no_secret_leakage) break;
+    }
+    try std.testing.expect(evidence_index < decoded.evidence.len());
+    // The edge byte of the disclosed no-secret-leakage record.
+    mutated_certificate[
+        evidence_offset +
+            @as(usize, evidence_index) * pcc.certificate.evidence_record_size + 4
+    ] =
+        @intFromEnum(pcc.certificate.EdgeKind.not_established);
+    const mutated_root = (try proof_activation.observedRoot(allocator, .{
+        .certificate = mutated_certificate,
+        .bytecode = compiled.bytecode,
+        .dep_bytecodes = compiled.dep_bytecodes orelse &.{},
+        .contract_section = contract_json,
+        .policy_section_digest = policy_digest,
+        .identity = artifact_graph.identityFromContract(&contract),
+    })).?;
+    try std.testing.expect(!std.mem.eql(u8, &built.executable_root, &mutated_root));
 
     // And a rebuild that forgets the proof IR is a different artifact, which is
     // what makes the equality above load-bearing rather than incidental.

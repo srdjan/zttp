@@ -1,12 +1,12 @@
 # ZTS advanced formal-spec northstar
 
-**Status:** implemented language profile; advanced assurance certificate proposed
+**Status:** implemented language profile; staged artifact assurance implemented
 
 **Profile name:** `zts-model-1`
 
-**Grounded against:** ZTS 0.19.0, policy 2026.04.2, 2026-08-27
+**Grounded against:** ZTS 0.19.0, policy 2026.04.2, 2026-08-31
 
-**Revision:** 5, 2026-08-16. Revision 2 applied the multi-lens design review:
+**Revision:** 6, 2026-08-31. Revision 2 applied the multi-lens design review:
 stronger `match`, effect-aware `Result` combinators, a completed pure
 standard surface, decidable canonical-choice rules, and a closed
 agent-protocol contract. Revision 3 pushed the canonical-form law to "each
@@ -18,7 +18,9 @@ because an agent-first language cannot inherit idiom from a community
 (Section 4.2). Revision 5 records the direct `zts-model-1` cutover: the
 model-minimal core grammar, the separate `zts-tsx-1` frontend, complete
 reachable-node and opcode classification, and artifact-bound source-profile
-identity. The independent assurance certificate remains a proposal.
+identity. Revision 6 records the shipped artifact certificate and independent
+consumer, including the current `trusted` weakest edge and the properties
+disclosed at `tested`.
 
 **Relationship to the earlier northstar:** this document replaces its design
 claims, not its historical record. The earlier artifact remains useful context,
@@ -179,10 +181,19 @@ this revision:
 Complete classification is not the same claim as complete mechanized
 semantics. Twelve IR nodes and seven opcodes are specified directly, one
 opcode path is translation-validated, and the remaining reachable items are
-explicitly trusted with narrow reasons. The independent assurance certificate,
-authenticated extension trust, proof-obligation reconstruction, and solver
-isolation remain proposed work. No producer-only receipt may be presented as
-that future certificate.
+explicitly trusted with narrow reasons.
+
+The deployed artifact now carries a schema-v2 certificate for
+`zttp_pcc_v1`. The leaf consumer reconstructs the required obligations, binds
+the complete executable graph and authority-bearing certificate sections, and
+checks policy before the process serves. Assurance is deliberately staged:
+`response_total` is re-derived, the bytecode opcode relation remains trusted,
+and `results_checked`, `no_secret_leakage`, and `capability_bounded` enter the
+production floor at `tested`. Production solver edges are disabled.
+Authenticated extension trust, consumer-modeled opcode semantics, broader
+consumer-checked properties, and isolated solver execution remain target
+capabilities. No producer-only receipt may be presented as the artifact
+certificate.
 
 ## 4. Design laws
 
@@ -1349,7 +1360,7 @@ effect row carries them (Section 6.1).
 One rule separates ambient names from imports, so the split is derivable, not
 memorized:
 
-- Ambient type names: the closed profile-level type names — the primitives,
+- Ambient type names: the closed profile-level type names, including the primitives,
   `Result`, `Dict`, `Bytes`, `HtmlNode`, `Request`, `Response`, `Proof`, and
   `Effects`. These are never imported. A module-defined type (for example
   `FetchError` from `zttp:fetch`) is named through an ordinary `import type`
@@ -2239,23 +2250,25 @@ The toolchain may emit:
 2. **Checked report** - every required audit ran, but some theorem obligations
    may rely on trusted automation or may be inconclusive. It is not a proof
    certificate.
-3. **Proof certificate** - every obligation for named properties is present
-   and independently accepted under a closed certified profile.
+3. **Proof certificate** - every policy-required obligation for named
+   properties is reconstructed and independently accepted under a closed,
+   versioned consumer profile. Each result carries its actual assurance grade.
 
-Only the third artifact may use `certified`, `proved`, or
-`proof-carrying`.
+Only the third artifact may use `certified` or `proof-carrying`. A property may
+be called `proved` only when its weakest accepted edge is itself `proved`.
 
 For a proof certificate:
 
-- the solver or proof checker is available,
-- every required obligation is present,
-- `proved_obligation_count == required_obligation_count`,
-- there are zero unknown, timeout, disabled, malformed, or solver-error
-  outcomes,
-- every admitted reachable node, opcode, intrinsic, and module boundary is
-  covered,
-- every declared exclusion and trusted assumption is bound into the artifact,
-- and an independent verifier accepts the bundle.
+- the independent proof checker is available,
+- every policy-required obligation is reconstructed and present exactly once,
+- every accepted obligation has a permitted evidence form and an explicit
+  grade,
+- malformed, unsupported, unknown, timed-out, or solver-error outcomes cannot
+  satisfy a requirement,
+- every dependency, exclusion, and trusted assumption is bound into the
+  executable graph and certificate,
+- no result is labelled more strongly than its weakest required edge,
+- and the independent verifier accepts the artifact under consumer policy.
 
 An `unknown` result is not evidence of falsehood, but it is verification
 failure for the requested certificate.
@@ -2281,14 +2294,13 @@ For each edge, the certificate states one of:
 - tested but not proved,
 - or trusted as part of the TCB.
 
-No end-to-end label may be stronger than the weakest required edge.
-`tested but not proved` may appear as non-required metadata. If a named
-property depends on such an edge, the artifact is a checked report at most and
-MUST NOT be a proof certificate.
+No end-to-end label may be stronger than the weakest required edge. A consumer
+policy may accept a named property at `tested` or `trusted`, but the verdict and
+certificate MUST disclose that grade and MUST NOT call the property `proved`.
 
 ### 13.3 Certificate bundle
 
-The canonical bundle binds:
+The target canonical bundle binds:
 
 - profile identifier and complete member registry
 - source and resolved module-graph digests
@@ -2308,9 +2320,17 @@ The canonical bundle binds:
 
 Hashes without authenticated retrieval and reconstruction are insufficient.
 
+The shipped `zttp-bundle-2` is a staged subset of that target. Its manifest
+binds the contract and optional binary, certificate, and replay components. If
+the binary and certificate are present, `zttp proofs verify` reconstructs the
+artifact's executable graph and invokes the independent consumer. The graph
+commits the complete native-module surface, runtime and capability policies,
+source identities, proof IR, and every authority-bearing certificate section.
+It does not yet implement every target member listed above.
+
 ### 13.4 Independent verification
 
-The verifier:
+The target verifier:
 
 1. selects the deployment artifact and trust root independently,
 2. parses a closed, versioned bundle schema,
@@ -2325,6 +2345,14 @@ The verifier:
 10. verifies provenance only after semantic and bundle checks are complete.
 
 Producer-supplied unrestricted SMT-LIB is never executed directly.
+
+The shipped consumer in `packages/proof-checker` already performs closed
+decoding, hostile-input limits, executable-graph checks, obligation
+reconstruction, evidence validation, and translation-witness validation.
+Production solver edges are disabled. Artifact provenance remains orthogonal:
+the local artifact can reach semantic acceptance without a signature, while
+`zttp verify <url>` checks provenance only because the endpoint does not return
+the artifact.
 
 A signature proves provenance, not correctness. The trust policy therefore
 defines trusted issuers, pinned or transparent keys, authorization, rotation,
@@ -2498,6 +2526,13 @@ The corpus MUST include:
 
 ### 14.6 Certificate gate
 
+Current status: the independent consumer and exact artifact binding are
+shipped. Inconclusive required evidence fails acceptance, the native-module
+surface is bound, and production solver edges are disabled. Authenticated
+signer trust, consumer-modeled opcode semantics, and isolated solver execution
+remain target capabilities. [Roadmap](roadmap.md) is the authority for delivery
+status and priorities.
+
 - A real independent consumer exists before certificate production is called
   shipped.
 - The consumer reconstructs obligations and binds the exact deployment
@@ -2508,7 +2543,8 @@ The corpus MUST include:
 
 ## 15. Feature ledger
 
-> Reconciled against the engine on 2026-08-16 after the `zts-model-1` cutover.
+> Reconciled against the engine on 2026-08-31 after the `zts-model-1` cutover
+> and artifact-certificate implementation.
 > The earlier 29-item implementation backlog has landed and is represented by
 > the registries and gates named in this document. This ledger now lists only
 > work whose acceptance condition is not implemented. Reconcile it against
@@ -2554,22 +2590,13 @@ The corpus MUST include:
 - targeted diagnostics for rejected TypeScript forms, each carrying an exact
   alternative, with stable `restriction.<slug>` identifiers
 
-### Remaining assurance and policy work
+### Target gaps
 
-- an independent certificate verifier: proof grades ship, but the current
-  verify path shares producer code, reconstructs no proof obligation, and runs
-  no isolated solver;
-- authenticated extension manifests with an issuer, key-rotation, revocation,
-  and runtime-implementation trust policy;
-- a rule-severity projection, if emission-site severity is first replaced by a
-  registry-owned policy that can answer it without guessing;
-- a default repair and tool-call budget, once a client loop enforces the number
-  it publishes;
-- live-model convergence at the phase-7 exit threshold. The corpus and bounded
-  recorder exist, but the measured result remains the authority until every
-  supported model reaches green and preserves declared intent;
-- rejection or typed recovery for any remaining trapping operation at an
-  untrusted boundary.
+The target design still includes authenticated extension and signer trust,
+consumer-modeled opcode semantics, isolated solver execution, and broader
+consumer-checked properties. The current implementation and ordered work live
+in [Roadmap](roadmap.md); this specification defines the intended assurance
+shape rather than a second delivery backlog.
 
 ### Settled tightening decisions
 
@@ -2701,8 +2728,10 @@ function depth(value: JsonValue): number {
 The `null` literal pattern and the five type-test patterns cover the six
 value kinds of `JsonValue` exactly, so the `match` is exhaustive without
 `default` and each arm narrows `value`.
-This function is accepted. Its totality certificate depends on the checker
-proving that recursive calls receive strict subvalues of a finite input.
+This function is accepted as source. The shipped artifact checker does not
+prove decreasing recursion. A target totality certificate for this example
+depends on proving that recursive calls receive strict subvalues of a finite
+input.
 
 ### 16.4 Explicit effects
 

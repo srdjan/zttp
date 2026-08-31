@@ -1,6 +1,6 @@
 # Concepts
 
-Shared domain vocabulary for this project — entities, named processes, and status concepts with project-specific meaning. Seeded with core domain vocabulary, then accretes as ce-compound and ce-compound-refresh process learnings; direct edits are fine. Glossary only, not a spec or catch-all.
+Shared domain vocabulary for this project: entities, named processes, and status concepts with project-specific meaning. Seeded with core domain vocabulary, then accretes as ce-compound and ce-compound-refresh process learnings; direct edits are fine. Glossary only, not a spec or catch-all.
 
 ## Proving a handler
 
@@ -13,7 +13,7 @@ The compiler-produced record of a Handler's discovered routes, effects, Capabili
 A decoded Handler Contract is input claimed by its serialized source, not a fresh proof created by decoding. Consumers must preserve that distinction when using its fields for verification or authority.
 
 ### Property
-A fact the compiler either proves about a Handler or declines to prove — that it leaks no secret, that it answers the same way on every run, that it is safe to retry. A Property is never partially held: it is proven, or it is not, and an unproven Property is reported rather than assumed false-and-forgotten.
+A fact the compiler either proves about a Handler or declines to prove, such as whether it leaks a secret, answers the same way on every run, or is safe to retry. A Property is never partially held: it is proven, or it is not, and an unproven Property is reported rather than assumed false-and-forgotten.
 
 Some Properties are derived from others rather than observed directly, so a change to what decides one silently changes the derived one. Anything deriving a Property must be recomputed after the deciding answer lands, not before.
 
@@ -29,11 +29,6 @@ The same declaration applied to a helper rather than the Handler. A capsule is w
 ### Effects ceiling
 A declared upper bound on the Capabilities a function may reach. The inferred set must sit inside the ceiling; reaching past it is an error, and declaring a Capability never reached is a warning, so the ceiling stays honest in both directions.
 
-### Residual runtime obligation
-A closed, consumer-checked requirement to evaluate one locally observable capability resource at its authoritative runtime boundary because the compiler could not resolve that resource statically.
-
-An obligation proves guard coverage, not that a future value will pass and not that a Property holds. The configured capability policy supplies the allowed values, the runtime either permits or denies the operation before its effect, and unsupported or uncovered obligations remain compile-time or activation-time rejections.
-
 ## Accepting an artifact
 
 ### Executable graph
@@ -41,10 +36,11 @@ The ordered inventory of every byte and identity that can affect what a
 deployment runs: the entry module's bytecode, each dependency in load order,
 every function, every constant pool, the module and native-module identities,
 the contract, the runtime policy, the source profiles, the grammar, the
-semantics registry, the capability matrix, and the proof IR. It folds to one
-root. Order is part of the commitment, and the producer and the consumer build
-their inventories independently from the same bytes - that independence is what
-makes comparing them worth anything.
+semantics registry, the capability matrix, the proof IR, and a digest over every
+authority-bearing certificate section. It folds to one root. Order is part of
+the commitment, and the producer and the consumer build their inventories
+independently from the same bytes. That independence is what makes comparing
+them worth anything.
 
 ### Certificate
 What a producer attaches to an artifact so a consumer can check it: the
@@ -52,7 +48,8 @@ canonical proof IR, the obligations it discharges, the evidence for each, the
 translation witnesses relating the IR to the final bytecode, and the executable
 graph the whole thing is about. It is data, not authority. A certificate is
 never believed; it is decoded, re-derived against, and either accepted or
-refused.
+refused. Its cycle-safe digest normalizes only the executable-root slot and its
+own graph-member slot; every other certificate byte changes the signed root.
 
 ### Acceptance kernel
 The consumer-owned checker that decides whether an artifact may serve. It
@@ -80,24 +77,25 @@ boundary, and shrinking it one family at a time is the ratchet.
 A handler contract an acceptance has promoted. Only this drives behavior that is
 unsound if a compiler claim is wrong - the proof response cache, unbounded
 runtime reuse, the result and optional safety shortcuts, the durable-workflow
-guarantees. Its counterpart, the integrity-bound contract, says only that the
-contract describes the artifact that was loaded, which is what makes its claims
-readable and is not a check of any of them.
+guarantees. Promotion copies only properties that cleared the active consumer
+policy; unrelated or below-floor compiler claims remain false. Its counterpart,
+the integrity-bound contract, says only that the contract describes the artifact
+that was loaded, which makes its claims readable but checks none of them.
 
 ## Tracking data through a handler
 
 ### Data label
-A mark on a value recording where it came from — an environment secret, a caller's credential, request input, a clock or randomness read, or an explicit record that the analysis could not tell. Labels propagate through the operations a value passes through, so a value assembled from a labelled one carries the label.
+A mark on a value recording where it came from: an environment secret, a caller's credential, request input, a clock or randomness read, or an explicit record that the analysis could not tell. Labels propagate through the operations a value passes through, so a value assembled from a labelled one carries the label.
 
 The empty set of labels is a positive claim that a value carries nothing, not an absence of information. Code that cannot determine a value's provenance must say so with the label that means "could not follow", because returning the empty set instead asserts cleanliness the analysis never established. This bites hardest at a module call, where propagation is not automatic: an export is a propagator only when it declares that its result can hold what it was handed, and one that declares nothing is read as claiming its result holds nothing.
 
 ### Declassifier
-An operation entitled to clear one named Data label, because performing it is what that label's discharge means — validating clears the "came from the request" mark, and a Replay boundary clears the "differs per run" mark.
+An operation entitled to clear one named Data label, because performing it is what that label's discharge means. Validation clears the "came from the request" mark, and a Replay boundary clears the "differs per run" mark.
 
 The entitlement is per-label and never general. A Declassifier still carries every other label its input held: a validated secret is a secret, an escaped secret is a secret, and a recorded secret is a secret. Conflating "this operation clears a label" with "this operation clears the labels" is the recurring way a disclosure Property comes to be proven over a value that discloses.
 
 ### Sink
-A position where a value leaves the program — a response body, a log, or an outbound request. Sinks are where Data labels are judged: a label arriving at a Sink is what costs a Property, and each Sink decides a different set of Properties, since a value reaching a log is not the same disclosure as one reaching a client.
+A position where a value leaves the program, such as a response body, a log, or an outbound request. Sinks are where Data labels are judged: a label arriving at a Sink is what costs a Property, and each Sink decides a different set of Properties, since a value reaching a log is not the same disclosure as one reaching a client.
 
 ### Capability
 A kind of authority a function reaches for: reading the clock, drawing randomness, reading configuration, writing to storage, talking to the network. Capabilities are declared per module export and enforced where the call happens, so authority is visible in the contract rather than discovered at runtime.
@@ -114,7 +112,7 @@ Each Execution Context owns at most one active scope at a time. Nested calls rep
 An opaque token given to a native module that identifies the Execution Context whose authorization and module-state bridge operations must use.
 
 ### Replay boundary
-A point where a value is recorded on the first run and reproduced on later ones. Values crossing it stop varying between runs, so the marks that mean "differs per run" are cleared there — but marks about disclosure are not, because a secret that was recorded is still a secret when it is replayed.
+A point where a value is recorded on the first run and reproduced on later ones. Values crossing it stop varying between runs, so the marks that mean "differs per run" are cleared there. Marks about disclosure remain, because a recorded secret is still a secret when replayed.
 
 ## Typing a handler
 
@@ -164,7 +162,7 @@ The compiler's refusal of a Handler that does not discharge its Proof profile. T
 At edit time the Veto answers a narrower question than its name suggests. It counts the violations a draft introduces *relative to a baseline* - the prior content of the file - and passes when that count is zero. It is not a compare-and-swap against what is on disk, and it has no opinion on what the draft removes: deleting correct code introduces no violation. A caller that supplies an empty or absent baseline therefore gets a clean verdict from a working Veto, which is how a destructive edit once proved clean.
 
 ### First-draft veto-pass rate
-The share of prompts whose first generated attempt clears the Veto with no retries, counted over a frozen corpus. Retries are excluded deliberately — a rate counting them would measure a retry loop's persistence rather than the agent's aim.
+The share of prompts whose first generated attempt clears the Veto with no retries, counted over a frozen corpus. Retries are excluded deliberately because a rate counting them would measure a retry loop's persistence rather than the agent's aim.
 
 ### Policy hash
 A fingerprint of the compiler's rule set, recorded beside every published rate so two measurements taken under different rules are never compared as though they were the same. It covers the rules and not the analysis behind them, so a change to what a rule concludes can leave it identical; the build a measurement came from is what distinguishes those.

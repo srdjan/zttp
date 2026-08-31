@@ -27,7 +27,19 @@ const SemanticState = verdict.SemanticState;
 /// stack keeps the acceptance path off a large frame in whatever thread the
 /// server happens to run startup on.
 pub fn scratchBytes(limits: limits_mod.Limits) usize {
-    return ((limits.max_ir_nodes + 7) / 8) * 2;
+    return irBitBytes(limits) * 2 + depthBytes(limits) + rangeStackBytes(limits);
+}
+
+fn irBitBytes(limits: limits_mod.Limits) usize {
+    return (@as(usize, limits.max_ir_nodes) + 7) / 8;
+}
+
+fn depthBytes(limits: limits_mod.Limits) usize {
+    return @as(usize, limits.max_ir_nodes) * @sizeOf(u16);
+}
+
+fn rangeStackBytes(limits: limits_mod.Limits) usize {
+    return @as(usize, limits.max_witnesses) * @sizeOf(u64);
 }
 
 const BitSet = struct {
@@ -53,6 +65,46 @@ const BitSet = struct {
         } else {
             self.bytes[byte] &= ~mask;
         }
+    }
+};
+
+const DepthTable = struct {
+    bytes: []u8,
+
+    fn get(self: DepthTable, index: u32) u16 {
+        const start = @as(usize, index) * @sizeOf(u16);
+        return std.mem.readInt(u16, self.bytes[start..][0..2], .little);
+    }
+
+    fn set(self: DepthTable, index: u32, value: u16) void {
+        const start = @as(usize, index) * @sizeOf(u16);
+        std.mem.writeInt(u16, self.bytes[start..][0..2], value, .little);
+    }
+};
+
+const RangeStack = struct {
+    bytes: []u8,
+    len: u32 = 0,
+
+    fn reset(self: *RangeStack) void {
+        self.len = 0;
+    }
+
+    fn last(self: RangeStack) ?u64 {
+        if (self.len == 0) return null;
+        const start = @as(usize, self.len - 1) * @sizeOf(u64);
+        return std.mem.readInt(u64, self.bytes[start..][0..8], .little);
+    }
+
+    fn pop(self: *RangeStack) void {
+        std.debug.assert(self.len > 0);
+        self.len -= 1;
+    }
+
+    fn push(self: *RangeStack, value: u64) void {
+        const start = @as(usize, self.len) * @sizeOf(u64);
+        std.mem.writeInt(u64, self.bytes[start..][0..8], value, .little);
+        self.len += 1;
     }
 };
 
@@ -134,7 +186,14 @@ pub fn check(inputs: Inputs, policy: Policy) Assessment {
         });
     }
 
-    if (bindExecutableGraph(certificate, inputs.observed_graph, &budget)) |rejection| {
+    const certificate_digest = cert_mod.commitmentDigest(inputs.certificate, certificate) catch |err| {
+        return rejectAt(.parsed, inputs.provenance, budget, limits, .{
+            .stage = .decode,
+            .code = cert_mod.reasonFor(err),
+            .recertifiable = true,
+        });
+    };
+    if (bindExecutableGraph(certificate, certificate_digest, inputs.observed_graph, &budget)) |rejection| {
         return rejectAt(.parsed, inputs.provenance, budget, limits, rejection);
     }
 
@@ -149,13 +208,18 @@ pub fn check(inputs: Inputs, policy: Policy) Assessment {
         });
     }
 
+    const bit_bytes = irBitBytes(limits);
+    const depth_start = bit_bytes * 2;
+    const range_start = depth_start + depthBytes(limits);
     var session = Session{
         .certificate = certificate,
         .policy = policy,
         .solver_results = inputs.solver_results,
         .budget = &budget,
-        .total = BitSet.init(inputs.scratch[0 .. inputs.scratch.len / 2]),
-        .declared = BitSet.init(inputs.scratch[inputs.scratch.len / 2 ..]),
+        .total = BitSet.init(inputs.scratch[0..bit_bytes]),
+        .declared = BitSet.init(inputs.scratch[bit_bytes..depth_start]),
+        .depths = .{ .bytes = inputs.scratch[depth_start..range_start] },
+        .active_ranges = .{ .bytes = inputs.scratch[range_start..] },
     };
 
     const outcome = session.run() catch |err| {
@@ -181,6 +245,8 @@ pub fn check(inputs: Inputs, policy: Policy) Assessment {
             .development_only = certificate.identity.development,
             .rejection = rejection,
             .work_spent = budget.spent(limits),
+            .properties = outcome.properties,
+            .disclosed_edges = outcome.disclosed_edges,
         };
     }
 
@@ -191,7 +257,8 @@ pub fn check(inputs: Inputs, policy: Policy) Assessment {
         .development_only = certificate.identity.development,
         .rejection = null,
         .work_spent = budget.spent(limits),
-        .disclosed_edges = certificate.trusted.len(),
+        .disclosed_edges = outcome.disclosed_edges,
+        .properties = outcome.properties,
     };
 }
 
@@ -199,6 +266,8 @@ const Outcome = struct {
     state: SemanticState,
     grade: ?verdict.AssuranceGrade = null,
     rejection: ?Rejection = null,
+    properties: verdict.PropertyVerdicts = .{},
+    disclosed_edges: u32 = 0,
 };
 
 /// One acceptance run's working state.
@@ -215,6 +284,8 @@ const Session = struct {
     budget: *Budget,
     total: BitSet,
     declared: BitSet,
+    depths: DepthTable,
+    active_ranges: RangeStack,
 
     const SessionError = cert_mod.DecodeError;
 
@@ -239,7 +310,7 @@ const Session = struct {
             return reject(.artifact_binding, .proof_ir_digest_mismatch, .none);
         }
 
-        if (self.checkIrShape()) |rejection| return rejection;
+        if (try self.checkIrShape()) |rejection| return rejection;
         if (try self.checkObligationSet()) |rejection| return rejection;
 
         try self.markDeclared();
@@ -253,24 +324,46 @@ const Session = struct {
     /// The IR has to be a forest of the shape the wire form promises before any
     /// fold over it means anything: ids in order, children contiguous and after
     /// their parent, parents before their children.
-    fn checkIrShape(self: *Session) ?Outcome {
+    fn checkIrShape(self: *Session) SessionError!?Outcome {
         const count = self.certificate.ir.len();
         if (count == 0) return reject(.evidence_check, .proof_node_unknown, .none);
 
+        var handler_count: u32 = 0;
         var index: u32 = 0;
         while (index < count) : (index += 1) {
-            self.budget.spend(1) catch return reject(.evidence_check, .proof_node_unknown, .{ .ir_node = index });
-            const node = self.certificate.ir.get(index) catch
-                return reject(.evidence_check, .proof_node_unknown, .{ .ir_node = index });
+            try self.budget.spend(1);
+            const node = try self.certificate.ir.get(index);
 
             if (node.id != index) return reject(.evidence_check, .proof_node_unknown, .{ .ir_node = index });
+            if (node.is_handler) {
+                if (node.tag != .function) {
+                    return reject(.evidence_check, .proof_node_unknown, .{ .ir_node = index });
+                }
+                handler_count += 1;
+            }
             if (index == 0) {
                 if (node.parent != 0) return reject(.evidence_check, .proof_node_cycle, .{ .ir_node = index });
+                self.depths.set(index, 1);
             } else if (node.parent >= index) {
                 // A parent at or after its child is a cycle in a tree that is
                 // supposed to be ordered. Refusing here is what makes the fold
                 // below a single reverse sweep instead of a search.
                 return reject(.evidence_check, .proof_node_cycle, .{ .ir_node = index });
+            } else {
+                const parent = try self.certificate.ir.get(node.parent);
+                const parent_end = @as(u64, parent.first_child) + parent.child_count;
+                if (index < parent.first_child or index >= parent_end) {
+                    return reject(.evidence_check, .proof_node_parent_mismatch, .{ .ir_node = index });
+                }
+                const parent_depth = self.depths.get(node.parent);
+                if (parent_depth >= self.policy.limits.max_depth) {
+                    return reject(.limits, .proof_depth_exceeded, .{ .ir_node = index });
+                }
+                self.depths.set(index, parent_depth + 1);
+            }
+
+            if (index == 0 and self.policy.limits.max_depth < 1) {
+                return reject(.limits, .proof_depth_exceeded, .{ .ir_node = index });
             }
 
             if (node.child_count == 0) continue;
@@ -279,17 +372,26 @@ const Session = struct {
             }
             const end = @as(u64, node.first_child) + node.child_count;
             if (end > count) return reject(.evidence_check, .proof_node_unknown, .{ .ir_node = index });
+            var child_id = node.first_child;
+            while (@as(u64, child_id) < end) : (child_id += 1) {
+                try self.budget.spend(1);
+                const child = try self.certificate.ir.get(child_id);
+                if (child.parent != index) {
+                    return reject(.evidence_check, .proof_node_parent_mismatch, .{ .ir_node = child_id });
+                }
+            }
         }
+        if (handler_count != 1) return reject(.evidence_check, .proof_node_unknown, .none);
         return null;
     }
 
-    /// The entry function: the first `function` node in id order. Both sides
-    /// resolve it this way, from the IR, so neither reads the other's answer.
+    /// The entry function is the unique compiler-selected handler marker that
+    /// participates in the proof-IR root.
     fn entryFunction(self: *Session) SessionError!?u32 {
         var index: u32 = 0;
         while (index < self.certificate.ir.len()) : (index += 1) {
             const node = try self.certificate.ir.get(index);
-            if (node.tag == .function) return node.id;
+            if (node.is_handler) return node.id;
         }
         return null;
     }
@@ -435,34 +537,49 @@ const Session = struct {
         if (witnesses.len() == 0) return null;
 
         var previous: ?cert_mod.Witness = null;
+        var active_scope: ?u32 = null;
         var index: u32 = 0;
         while (index < witnesses.len()) : (index += 1) {
             try self.budget.spend(2);
             const witness = try witnesses.get(index);
+            if (previous) |prev| {
+                if (cert_mod.Witness.order(prev, witness) != .lt) {
+                    return reject(.translation_check, .witness_range_overlaps, .{ .code_offset = witness.code_start });
+                }
+            }
+            previous = witness;
             if (witness.ir_node >= self.certificate.ir.len() or
                 witness.target_ir >= self.certificate.ir.len() or
                 witness.scope_ir_node >= self.certificate.ir.len())
             {
                 return reject(.translation_check, .witness_range_out_of_bounds, .{ .ir_node = witness.ir_node });
             }
+            const scope = try self.certificate.ir.get(witness.scope_ir_node);
+            if (scope.tag != .function) {
+                return reject(.translation_check, .witness_range_out_of_bounds, .{ .ir_node = witness.scope_ir_node });
+            }
 
             if (witness.kind == .emission) {
-                if (previous) |prev| {
-                    if (prev.kind == .emission and prev.scope_ir_node == witness.scope_ir_node) {
-                        const prev_end = @as(u64, prev.code_start) + prev.code_len;
-                        const end = @as(u64, witness.code_start) + witness.code_len;
-                        const nested = witness.code_start >= prev.code_start and end <= prev_end;
-                        const disjoint = witness.code_start >= prev_end;
-                        if (!nested and !disjoint) {
-                            return reject(
-                                .translation_check,
-                                .witness_range_overlaps,
-                                .{ .code_offset = witness.code_start },
-                            );
-                        }
+                if (active_scope == null or active_scope.? != witness.scope_ir_node) {
+                    self.active_ranges.reset();
+                    active_scope = witness.scope_ir_node;
+                }
+                const start: u64 = witness.code_start;
+                const end = start + witness.code_len;
+                while (self.active_ranges.last()) |active_end| {
+                    if (active_end > start) break;
+                    self.active_ranges.pop();
+                }
+                if (self.active_ranges.last()) |active_end| {
+                    if (end > active_end) {
+                        return reject(
+                            .translation_check,
+                            .witness_range_overlaps,
+                            .{ .code_offset = witness.code_start },
+                        );
                     }
                 }
-                previous = witness;
+                if (witness.code_len > 0) self.active_ranges.push(end);
                 continue;
             }
 
@@ -539,6 +656,10 @@ const Session = struct {
             const slot = @intFromEnum(obligation.property) - 1;
             answered[slot] = true;
 
+            if (!validEvidenceShape(entry, obligation.property)) {
+                return reject(.evidence_check, .evidence_edge_invalid, .{ .property = obligation.property });
+            }
+
             if (entry.edge == .not_established) {
                 refused[slot] = true;
                 continue;
@@ -551,6 +672,12 @@ const Session = struct {
                 // `aux` names the query in the certificate's solver section.
                 if (entry.aux >= self.certificate.solver.len()) {
                     return reject(.solver, .solver_query_too_large, .{ .property = obligation.property });
+                }
+                const query = try self.certificate.solver.get(entry.aux);
+                if (query.obligation_index != entry.obligation_index or
+                    !solverKindApplies(query.query_kind, obligation.property))
+                {
+                    return reject(.solver, .solver_query_mismatch, .{ .property = obligation.property });
                 }
                 if (entry.aux >= self.solver_results.len or !self.solver_results[entry.aux]) {
                     // No answer, or an answer that was not "discharged". Both
@@ -606,12 +733,33 @@ const Session = struct {
             }
         }
 
+        // The trusted inventory names theorem-chain dependencies, not inert
+        // annotations. Every current trusted family supports totality, so its
+        // declared grade caps that property before policy evaluation.
+        const totality_slot = @intFromEnum(ps.Property.response_total) - 1;
+        var has_opcode_dependency = false;
+        var trusted_index: u32 = 0;
+        while (trusted_index < self.certificate.trusted.len()) : (trusted_index += 1) {
+            try self.budget.spend(1);
+            const edge = try self.certificate.trusted.get(trusted_index);
+            if (edge.grade != .trusted) {
+                return reject(.evidence_check, .evidence_edge_invalid, .{ .property = .response_total });
+            }
+            if (edge.family == .opcode) has_opcode_dependency = true;
+            grades[totality_slot] = if (grades[totality_slot]) |existing|
+                verdict.AssuranceGrade.weakest(existing, edge.grade)
+            else
+                edge.grade;
+        }
+        if (self.certificate.translation.len() > 0 and !has_opcode_dependency) {
+            return reject(.evidence_check, .trusted_edge_undeclared, .{ .property = .response_total });
+        }
+
         // Totality is the one obligation the consumer settles for itself. A
         // certificate claiming it for a handler whose fold says otherwise is a
         // fabricated property, and no amount of evidence changes that.
         const entry_function = (try self.entryFunction()) orelse
             return reject(.obligation_reconstruction, .obligation_subject_unknown, .none);
-        const totality_slot = @intFromEnum(ps.Property.response_total) - 1;
         if (!refused[totality_slot] and grades[totality_slot] != null and !self.total.get(entry_function)) {
             return .{
                 .state = .integrity_verified,
@@ -634,6 +782,12 @@ const Session = struct {
 
         // Everything above is what the consumer established. What follows is
         // whether the consumer wanted it.
+        var property_verdicts: verdict.PropertyVerdicts = .{};
+        inline for (@typeInfo(ps.Property).@"enum".fields) |field| {
+            const property: ps.Property = @enumFromInt(field.value);
+            const slot = @intFromEnum(property) - 1;
+            if (grades[slot]) |grade| property_verdicts.recordGrade(property, grade);
+        }
         var weakest: ?verdict.AssuranceGrade = null;
         for (self.policy.required) |requirement| {
             const slot = @intFromEnum(requirement.property) - 1;
@@ -666,6 +820,7 @@ const Session = struct {
                 verdict.AssuranceGrade.weakest(current, grade)
             else
                 grade;
+            property_verdicts.accept(requirement.property);
         }
 
         if (self.certificate.identity.development and !self.policy.allow_development) {
@@ -680,7 +835,26 @@ const Session = struct {
             };
         }
 
-        return .{ .state = .policy_accepted, .grade = weakest };
+        return .{
+            .state = .policy_accepted,
+            .grade = weakest,
+            .properties = property_verdicts,
+            .disclosed_edges = try self.countDisclosedEdges(),
+        };
+    }
+
+    fn countDisclosedEdges(self: *Session) SessionError!u32 {
+        var count: u32 = 0;
+        var index: u32 = 0;
+        while (index < self.certificate.evidence.len()) : (index += 1) {
+            try self.budget.spend(1);
+            const entry = try self.certificate.evidence.get(index);
+            if (entry.edge == .not_established or entry.edge.checked()) continue;
+            const obligation = try self.certificate.obligations.get(entry.obligation_index);
+            if (self.policy.requires(obligation.property)) count += 1;
+        }
+        if (self.policy.requires(.response_total)) count += self.certificate.trusted.len();
+        return count;
     }
 
     fn trustedEdgeDeclared(self: *Session, node_id: u32) SessionError!bool {
@@ -693,6 +867,25 @@ const Session = struct {
         return false;
     }
 };
+
+fn validEvidenceShape(entry: cert_mod.Evidence, property: ps.Property) bool {
+    return switch (entry.edge) {
+        .proved => entry.rule != null and
+            entry.rule.?.family() == .totality and
+            property == .response_total,
+        .translation_validated => entry.rule != null and
+            entry.rule.?.family() == .translation and
+            property == .response_total,
+        .solver, .trusted => entry.rule == null and property == .response_total,
+        .tested, .not_established => entry.rule == null,
+    };
+}
+
+fn solverKindApplies(kind: cert_mod.SolverQueryKind, property: ps.Property) bool {
+    return switch (kind) {
+        .opcode_equivalence => property == .response_total,
+    };
+}
 
 fn reconstructed(property: ps.Property, entry: u32) cert_mod.Obligation {
     return if (property.subjectIsEntryFunction())
@@ -728,6 +921,7 @@ fn memberSubject(member: graph.Member) verdict.Subject {
 /// Returns null when the binding holds.
 fn bindExecutableGraph(
     certificate: cert_mod.Certificate,
+    certificate_digest: [32]u8,
     observed: []const graph.Member,
     budget: *Budget,
 ) ?Rejection {
@@ -828,6 +1022,23 @@ fn bindExecutableGraph(
         break;
     }
 
+    var certificate_index: u32 = 0;
+    while (certificate_index < certificate.graph.len()) : (certificate_index += 1) {
+        const member = certificate.graph.get(certificate_index) catch break;
+        if (member.kind != .proof_certificate) continue;
+        if (!std.mem.eql(u8, &member.digest, &certificate_digest)) {
+            return .{
+                .stage = .artifact_binding,
+                .code = .proof_certificate_digest_mismatch,
+                .subject = memberSubject(member),
+                .expected = .{ .digest = member.digest },
+                .actual = .{ .digest = certificate_digest },
+                .recertifiable = true,
+            };
+        }
+        break;
+    }
+
     return null;
 }
 
@@ -848,7 +1059,7 @@ pub const test_support = struct {
     /// executable-graph inventory, and a certificate that reaches acceptance
     /// under the production policy.
     pub const Fixture = struct {
-        members: [8]graph.Member,
+        members: [9]graph.Member,
         ir: [3]cert_mod.IrNode,
         obligations: [8]cert_mod.Obligation,
         evidence: [10]cert_mod.Evidence,
@@ -859,7 +1070,7 @@ pub const test_support = struct {
         len: usize = 0,
         scratch: [scratch_len]u8 = undefined,
 
-        const scratch_len = 16 * 1024;
+        const scratch_len = scratchBytes(.{});
 
         pub fn bytes(self: *const Fixture) []const u8 {
             return self.buffer[0..self.len];
@@ -901,6 +1112,22 @@ pub const test_support = struct {
             for (&self.members) |*member| {
                 if (member.kind == .proof_ir) member.digest = built.identity.ir_root;
             }
+            try self.encodeParts(built);
+        }
+
+        pub fn encodeParts(self: *Fixture, certificate_parts: cert_mod.Parts) !void {
+            var built = certificate_parts;
+            for (&self.members) |*member| {
+                if (member.kind == .proof_certificate) member.digest = [_]u8{0} ** 32;
+            }
+            built.identity.executable_root = [_]u8{0} ** 32;
+            const provisional = try cert_mod.encode(built, &self.buffer);
+            var budget = Budget.init(.{});
+            const decoded = try cert_mod.decode(provisional, .{}, &budget);
+            const certificate_digest = try cert_mod.commitmentDigest(provisional, decoded);
+            for (&self.members) |*member| {
+                if (member.kind == .proof_certificate) member.digest = certificate_digest;
+            }
             built.identity.executable_root = try graph.computeRoot(&self.members);
             const encoded = try cert_mod.encode(built, &self.buffer);
             self.len = encoded.len;
@@ -936,10 +1163,11 @@ pub const test_support = struct {
                 .{ .kind = .semantics, .ordinal = 0, .digest = digest(6) },
                 .{ .kind = .capability_matrix, .ordinal = 0, .digest = digest(7) },
                 .{ .kind = .proof_ir, .ordinal = 0, .digest = digest(8) },
+                .{ .kind = .proof_certificate, .ordinal = 0, .digest = digest(9) },
             },
             // function -> sequence -> return
             .ir = .{
-                .{ .id = 0, .tag = .function, .parent = 0, .first_child = 1, .child_count = 1, .digest = digest(20) },
+                .{ .id = 0, .tag = .function, .is_handler = true, .parent = 0, .first_child = 1, .child_count = 1, .digest = digest(20) },
                 .{ .id = 1, .tag = .sequence, .parent = 0, .first_child = 2, .child_count = 1, .digest = digest(21) },
                 .{ .id = 2, .tag = .return_node, .parent = 1, .first_child = 0, .child_count = 0, .digest = digest(22) },
             },
@@ -986,10 +1214,42 @@ test "the disclosed edge count is reported next to the grade" {
     var fixture = try test_support.build();
     const result = check(fixture.inputs(), policy_mod.production);
     try testing.expect(result.accepted());
-    // The certificate declares one edge it did not check: the decode of the
-    // bytes its translation witnesses point at. A grade that hid that would be
-    // reporting the check without the assumption under it.
-    try testing.expectEqual(@as(u32, 1), result.disclosed_edges);
+    // Production relies on three tested property edges and the trusted opcode
+    // relation under translation. A grade that hid those would report the
+    // checks without the assumptions beneath them.
+    try testing.expectEqual(@as(u32, 4), result.disclosed_edges);
+}
+
+test "unchecked evidence and its trusted inventory are both disclosed" {
+    var fixture = try test_support.build();
+    fixture.evidence[0] = .{
+        .obligation_index = 0,
+        .edge = .trusted,
+        .rule = null,
+        .node_id = 0,
+        .aux = 0,
+    };
+    const trusted = [_]cert_mod.TrustedEdge{
+        .{ .family = .node, .member_id = 0, .reason = .not_modeled, .grade = .trusted },
+        .{ .family = .opcode, .member_id = 0, .reason = .not_modeled, .grade = .trusted },
+    };
+    var parts = fixture.parts();
+    parts.trusted = &trusted;
+    try fixture.encodeParts(parts);
+
+    const result = check(fixture.inputs(), policy_mod.production);
+    try testing.expect(result.accepted());
+    try testing.expectEqual(@as(u32, 6), result.disclosed_edges);
+}
+
+test "translation cannot omit its trusted opcode dependency" {
+    var fixture = try test_support.build();
+    fixture.trusted[0].family = .node;
+    try fixture.encode();
+
+    const result = check(fixture.inputs(), policy_mod.production);
+    try testing.expect(!result.accepted());
+    try testing.expectEqual(verdict.ReasonCode.trusted_edge_undeclared, result.rejection.?.code);
 }
 
 test "a matching certificate and inventory reach policy acceptance" {
@@ -1002,9 +1262,12 @@ test "a matching certificate and inventory reach policy acceptance" {
     }
     try testing.expectEqual(SemanticState.policy_accepted, result.semantic);
     try testing.expect(result.accepted());
-    // The weakest edge actually used: the three disclosed properties are tested,
-    // and nothing stronger can raise them.
-    try testing.expectEqual(@as(?verdict.AssuranceGrade, .tested), result.grade);
+    // The opcode relation under the translation witnesses is still trusted, so
+    // it is the honest weakest edge for the accepted theorem chain.
+    try testing.expectEqual(@as(?verdict.AssuranceGrade, .trusted), result.grade);
+    try testing.expect(result.properties.accepted(.no_secret_leakage));
+    try testing.expect(!result.properties.accepted(.read_only));
+    try testing.expectEqual(@as(?verdict.AssuranceGrade, .tested), result.properties.gradeFor(.read_only));
     try testing.expect(result.work_spent > 0);
 }
 
@@ -1053,9 +1316,9 @@ test "a valid certificate attached to another artifact rejects" {
 
 test "an artifact carrying a member the certificate omits rejects" {
     var fixture = try test_support.build();
-    var observed: [9]graph.Member = undefined;
-    @memcpy(observed[0..8], &fixture.members);
-    observed[8] = .{ .kind = .dep_bytecode, .ordinal = 0, .digest = test_support.digest(99) };
+    var observed: [10]graph.Member = undefined;
+    @memcpy(observed[0..9], &fixture.members);
+    observed[9] = .{ .kind = .dep_bytecode, .ordinal = 0, .digest = test_support.digest(99) };
     std.mem.sort(graph.Member, &observed, {}, struct {
         fn lt(_: void, a: graph.Member, b: graph.Member) bool {
             return graph.Member.order(a, b) == .lt;
@@ -1146,12 +1409,23 @@ test "citing a rule that does not apply at the named node rejects" {
     try testing.expectEqual(verdict.ReasonCode.rule_premise_unmet, result.rejection.?.code);
 }
 
+test "proved evidence without a kernel rule rejects" {
+    var fixture = try test_support.build();
+    fixture.evidence[4].edge = .proved;
+    fixture.evidence[4].rule = null;
+    try fixture.encode();
+
+    const result = check(fixture.inputs(), policy_mod.production);
+    try testing.expect(!result.accepted());
+    try testing.expectEqual(verdict.Stage.evidence_check, result.rejection.?.stage);
+}
+
 test "a translation rule cited as a source-level proof is a category error" {
     var fixture = try test_support.build();
     fixture.evidence[0].rule = .jump_target_resolved;
     try fixture.encode();
     const result = check(fixture.inputs(), policy_mod.production);
-    try testing.expectEqual(verdict.ReasonCode.rule_family_mismatch, result.rejection.?.code);
+    try testing.expectEqual(verdict.ReasonCode.evidence_edge_invalid, result.rejection.?.code);
 }
 
 test "an omitted obligation rejects" {
@@ -1159,8 +1433,7 @@ test "an omitted obligation rejects" {
     var parts = fixture.parts();
     parts.obligations = fixture.obligations[0..7];
     parts.evidence = fixture.evidence[0..9];
-    const encoded = try cert_mod.encode(parts, &fixture.buffer);
-    fixture.len = encoded.len;
+    try fixture.encodeParts(parts);
 
     const result = check(fixture.inputs(), policy_mod.production);
     try testing.expectEqual(verdict.Stage.obligation_reconstruction, result.rejection.?.stage);
@@ -1198,9 +1471,7 @@ test "a proof IR that does not fold into its stated root rejects" {
         if (member.kind == .proof_ir) member.digest = test_support.digest(0x77);
     }
     parts.graph = &fixture.members;
-    parts.identity.executable_root = try graph.computeRoot(&fixture.members);
-    const encoded = try cert_mod.encode(parts, &fixture.buffer);
-    fixture.len = encoded.len;
+    try fixture.encodeParts(parts);
 
     const result = check(fixture.inputs(), policy_mod.production);
     try testing.expectEqual(verdict.ReasonCode.proof_ir_digest_mismatch, result.rejection.?.code);
@@ -1211,13 +1482,34 @@ test "a cyclic or out-of-order proof IR rejects" {
     fixture.ir[1].parent = 2;
     try fixture.encode();
     var result = check(fixture.inputs(), policy_mod.production);
-    try testing.expectEqual(verdict.ReasonCode.proof_node_cycle, result.rejection.?.code);
+    try testing.expect(result.rejection.?.code == .proof_node_cycle or
+        result.rejection.?.code == .proof_node_parent_mismatch);
 
     var backwards = try test_support.build();
     backwards.ir[0].first_child = 0;
     try backwards.encode();
     result = check(backwards.inputs(), policy_mod.production);
     try testing.expectEqual(verdict.ReasonCode.proof_node_cycle, result.rejection.?.code);
+}
+
+test "a child whose parent disagrees with its owner rejects" {
+    var fixture = try test_support.build();
+    fixture.ir[2].parent = 0;
+    try fixture.encode();
+
+    const result = check(fixture.inputs(), policy_mod.production);
+    try testing.expect(!result.accepted());
+    try testing.expectEqual(verdict.Stage.evidence_check, result.rejection.?.stage);
+}
+
+test "proof IR depth is bounded by policy" {
+    var fixture = try test_support.build();
+    var shallow = policy_mod.production;
+    shallow.limits.max_depth = 1;
+
+    const result = check(fixture.inputs(), shallow);
+    try testing.expect(!result.accepted());
+    try testing.expectEqual(verdict.Stage.limits, result.rejection.?.stage);
 }
 
 test "a jump witness naming the wrong target offset rejects" {
@@ -1237,6 +1529,22 @@ test "emission ranges that partially overlap reject" {
     fixture.witnesses[1].code_len = 8;
     fixture.witnesses[2].target_offset = 6;
     try fixture.encode();
+    const result = check(fixture.inputs(), policy_mod.production);
+    try testing.expectEqual(verdict.ReasonCode.witness_range_overlaps, result.rejection.?.code);
+}
+
+test "emission ranges reject overlap with any active ancestor" {
+    var fixture = try test_support.build();
+    const emissions = [_]cert_mod.Witness{
+        .{ .ir_node = 0, .code_start = 0, .code_len = 100, .target_ir = 0, .target_offset = 0, .scope_ir_node = 0, .kind = .emission },
+        .{ .ir_node = 1, .code_start = 10, .code_len = 80, .target_ir = 1, .target_offset = 10, .scope_ir_node = 0, .kind = .emission },
+        .{ .ir_node = 2, .code_start = 20, .code_len = 10, .target_ir = 2, .target_offset = 20, .scope_ir_node = 0, .kind = .emission },
+        .{ .ir_node = 2, .code_start = 40, .code_len = 55, .target_ir = 2, .target_offset = 40, .scope_ir_node = 0, .kind = .emission },
+    };
+    var parts = fixture.parts();
+    parts.translation = &emissions;
+    try fixture.encodeParts(parts);
+
     const result = check(fixture.inputs(), policy_mod.production);
     try testing.expectEqual(verdict.ReasonCode.witness_range_overlaps, result.rejection.?.code);
 }
@@ -1290,20 +1598,43 @@ test "a property a policy does not require may go unestablished" {
 
 test "a grade below the policy floor rejects and says both sides" {
     var fixture = try test_support.build();
-    // Drop the proved edge to trusted; the totality obligation is then graded
-    // trusted, below the production floor of translation_validated.
-    fixture.evidence[0].edge = .trusted;
-    fixture.evidence[0].rule = null;
-    fixture.evidence[0].node_id = 1;
-    fixture.trusted[0] = .{ .family = .node, .member_id = 1, .reason = .not_modeled, .grade = .trusted };
-    try fixture.encode();
+    // The checked translation still depends on trusted opcode meaning, so a
+    // policy that demands translation-validated totality must reject it.
 
-    const result = check(fixture.inputs(), policy_mod.production);
+    const requirements = [_]policy_mod.Requirement{
+        .{ .property = .response_total, .min_grade = .translation_validated },
+    };
+    const strict = Policy{
+        .proof_systems = policy_mod.production.proof_systems,
+        .semantics_epochs = policy_mod.production.semantics_epochs,
+        .required = &requirements,
+    };
+    const result = check(fixture.inputs(), strict);
     try testing.expectEqual(verdict.ReasonCode.grade_below_floor, result.rejection.?.code);
     try testing.expectEqual(
         @as(u64, verdict.AssuranceGrade.translation_validated.toWire()),
         result.rejection.?.expected.?.scalar,
     );
+    try testing.expectEqual(
+        @as(u64, verdict.AssuranceGrade.trusted.toWire()),
+        result.rejection.?.actual.?.scalar,
+    );
+}
+
+test "declared trusted opcode dependencies cap translation assurance" {
+    var fixture = try test_support.build();
+    const requirements = [_]policy_mod.Requirement{
+        .{ .property = .response_total, .min_grade = .translation_validated },
+    };
+    const translation_only = Policy{
+        .proof_systems = policy_mod.production.proof_systems,
+        .semantics_epochs = policy_mod.production.semantics_epochs,
+        .required = &requirements,
+    };
+
+    const result = check(fixture.inputs(), translation_only);
+    try testing.expect(!result.accepted());
+    try testing.expectEqual(verdict.ReasonCode.grade_below_floor, result.rejection.?.code);
     try testing.expectEqual(
         @as(u64, verdict.AssuranceGrade.trusted.toWire()),
         result.rejection.?.actual.?.scalar,
@@ -1323,14 +1654,14 @@ test "a declared edge that is not disclosed in the trusted inventory rejects" {
 
 test "a solver edge is refused unless the consumer asked for one" {
     var fixture = try test_support.build();
-    fixture.evidence[3].edge = .solver;
+    fixture.evidence[1].edge = .solver;
+    fixture.evidence[1].rule = null;
     var parts = fixture.parts();
     const queries = [_]cert_mod.SolverQuery{
-        .{ .obligation_index = 1, .query_kind = .opcode_equivalence },
+        .{ .obligation_index = 0, .query_kind = .opcode_equivalence },
     };
     parts.solver = &queries;
-    var encoded = try cert_mod.encode(parts, &fixture.buffer);
-    fixture.len = encoded.len;
+    try fixture.encodeParts(parts);
 
     var result = check(fixture.inputs(), policy_mod.production);
     try testing.expectEqual(verdict.Stage.solver, result.rejection.?.stage);
@@ -1354,27 +1685,59 @@ test "a solver edge is refused unless the consumer asked for one" {
     inputs.solver_results = &discharged;
     result = check(inputs, permissive);
     try testing.expect(result.accepted());
-    try testing.expectEqual(@as(?verdict.AssuranceGrade, .tested), result.grade);
+    try testing.expectEqual(@as(?verdict.AssuranceGrade, .trusted), result.grade);
 
     // A query index outside the certificate's own solver section is refused
     // before any result is consulted.
-    fixture.evidence[3].aux = 7;
+    fixture.evidence[1].aux = 7;
     parts = fixture.parts();
     parts.solver = &queries;
-    encoded = try cert_mod.encode(parts, &fixture.buffer);
-    fixture.len = encoded.len;
+    try fixture.encodeParts(parts);
     var wide = fixture.inputs();
     wide.solver_results = &discharged;
     result = check(wide, permissive);
     try testing.expectEqual(verdict.ReasonCode.solver_query_too_large, result.rejection.?.code);
 }
 
+test "a solver answer cannot discharge a different obligation" {
+    var fixture = try test_support.build();
+    fixture.evidence[1] = .{
+        .obligation_index = 0,
+        .edge = .solver,
+        .rule = null,
+        .node_id = 0,
+        .aux = 0,
+    };
+    var parts = fixture.parts();
+    const queries = [_]cert_mod.SolverQuery{
+        .{ .obligation_index = 1, .query_kind = .opcode_equivalence },
+    };
+    parts.solver = &queries;
+    try fixture.encodeParts(parts);
+
+    const requirements = [_]policy_mod.Requirement{
+        .{ .property = .response_total, .min_grade = .trusted },
+    };
+    const solver_policy = Policy{
+        .proof_systems = policy_mod.production.proof_systems,
+        .semantics_epochs = policy_mod.production.semantics_epochs,
+        .required = &requirements,
+        .allow_solver_edges = true,
+    };
+    const discharged = [_]bool{true};
+    var inputs = fixture.inputs();
+    inputs.solver_results = &discharged;
+
+    const result = check(inputs, solver_policy);
+    try testing.expect(!result.accepted());
+    try testing.expectEqual(verdict.Stage.solver, result.rejection.?.stage);
+}
+
 test "a development artifact is checked and never accepted for production" {
     var fixture = try test_support.build();
     var parts = fixture.parts();
     parts.identity.development = true;
-    const encoded = try cert_mod.encode(parts, &fixture.buffer);
-    fixture.len = encoded.len;
+    try fixture.encodeParts(parts);
 
     const strict = check(fixture.inputs(), policy_mod.production);
     try testing.expectEqual(verdict.ReasonCode.development_artifact_refused, strict.rejection.?.code);
@@ -1399,7 +1762,7 @@ test "scratch smaller than the kernel needs is refused rather than truncated" {
 }
 
 test "scratchBytes covers two bits per node at the configured bound" {
-    const needed = scratchBytes(.{ .max_ir_nodes = 64 });
-    try testing.expectEqual(@as(usize, 16), needed);
+    const needed = scratchBytes(.{ .max_ir_nodes = 64, .max_witnesses = 4 });
+    try testing.expectEqual(@as(usize, 176), needed);
     try testing.expect(scratchBytes(.{}) > 0);
 }

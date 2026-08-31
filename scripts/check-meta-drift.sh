@@ -32,7 +32,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-ZTS="./zig-out/bin/zts"
+ZTS="${1:-./zig-out/bin/zts}"
 if [ ! -x "$ZTS" ]; then
   echo "error: $ZTS not built. Run: zig build" >&2
   exit 1

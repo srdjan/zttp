@@ -25,6 +25,7 @@
 const std = @import("std");
 const ir = @import("zts-engine").parser.ir;
 const translation_witness = @import("zts-engine").translation_witness;
+const handler_verifier = @import("handler_verifier.zig");
 
 const IrView = ir.IrView;
 const NodeIndex = ir.NodeIndex;
@@ -215,7 +216,12 @@ fn digestTree(node: *Tree) void {
 /// count. Digests are computed bottom up over shape alone, so a source-line
 /// change leaves the proof identity where it was and a structural change moves
 /// it.
-pub fn lower(allocator: std.mem.Allocator, view: IrView, root: NodeIndex) Error!ProofIr {
+pub fn lower(
+    allocator: std.mem.Allocator,
+    view: IrView,
+    root: NodeIndex,
+    handler_source: ?NodeIndex,
+) Error!ProofIr {
     var lowerer = Lowerer{ .allocator = allocator, .view = view };
     var tree = try lowerer.build(root);
     defer tree.deinit(allocator);
@@ -261,10 +267,12 @@ pub fn lower(allocator: std.mem.Allocator, view: IrView, root: NodeIndex) Error!
 
     const owned = try nodes.toOwnedSlice(allocator);
     var handler_function: ?u32 = null;
-    for (owned) |node| {
-        if (node.tag == .function) {
-            handler_function = node.id;
-            break;
+    if (handler_source) |source| {
+        for (owned) |node| {
+            if (node.source == source and node.tag == .function) {
+                handler_function = node.id;
+                break;
+            }
         }
     }
     return .{ .allocator = allocator, .nodes = owned, .handler_function = handler_function };
@@ -414,9 +422,10 @@ pub fn buildEvidence(
     allocator: std.mem.Allocator,
     view: IrView,
     root: NodeIndex,
+    handler_source: NodeIndex,
     recorder: ?*const translation_witness.Recorder,
 ) Error!Evidence {
-    var proof = try lower(allocator, view, root);
+    var proof = try lower(allocator, view, root, handler_source);
     errdefer proof.deinit();
 
     // No node in this alphabet needs a declared edge: the fold decides every
@@ -528,7 +537,8 @@ fn parseAndLower(allocator: std.mem.Allocator, source: []const u8) !Lowered {
     errdefer parser.deinit();
     const root = try parser.parse();
     const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
-    const proof = try lower(allocator, view, root);
+    const handler_source = handler_verifier.findHandlerFunction(view, root);
+    const proof = try lower(allocator, view, root, handler_source);
     return .{ .allocator = allocator, .parser = parser, .proof = proof };
 }
 
@@ -817,5 +827,5 @@ test "a program deeper than the walk bound is refused, not truncated" {
     defer parser.deinit();
     const root = parser.parse() catch return;
     const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
-    try testing.expectError(error.ProgramTooDeep, lower(allocator, view, root));
+    try testing.expectError(error.ProgramTooDeep, lower(allocator, view, root, null));
 }

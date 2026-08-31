@@ -14,6 +14,10 @@ behavior lives in [User Guide](user-guide.md).
 - Restricted TypeScript and TSX handler execution through `zts`.
 - The five core `zttp` commands: `init`, `dev`, `test`, `expert`, `deploy`.
 - Local self-contained deploy artifacts with default-on attestation.
+- Mandatory artifact-level proof certificates for deploy builds. Production
+  startup reconstructs the executable graph and required obligations with the
+  independent checker before pool initialization. `--no-attest` removes
+  provenance, not semantic acceptance.
 - Compile-time checks for response paths, Result and optional handling,
   state isolation, active specs, flow properties, contracts, and module policy.
 - Built-in `zttp:*` virtual modules listed in
@@ -34,6 +38,14 @@ behavior lives in [User Guide](user-guide.md).
 - There is no scrape-able `/metrics` endpoint. `/_health` and `/_readiness`
   return bare status codes.
 - Windows is not supported.
+- The production certificate honestly reaches a `trusted` weakest edge today.
+  The consumer re-derives `response_total`, but bytecode opcode meaning remains
+  declared trusted, while `results_checked`, `no_secret_leakage`, and
+  `capability_bounded` enter at `tested`. See
+  [Verification](verification.md#what-is-not-checked-said-out-loud).
+- Computed capability resources still fail static analysis. The residual guard
+  design that would admit selected dynamic env, egress, cache, and SQL resources
+  under consumer-checked coverage is not implemented.
 
 ## Runtime And Product Work
 
@@ -59,6 +71,15 @@ behavior lives in [User Guide](user-guide.md).
   `zttp:ratelimit`.
 - Promote hosted deploy only after the control-plane path has CI smoke coverage
   and user-facing commands appear in default docs.
+- Implement the [residual runtime guard addendum](plans/2026-08-31-1242-feat-residual-runtime-guard-addendum-plan.md)
+  on top of the completed artifact-level checker. Keep static Properties and
+  guarded runtime operations separate, bind exact guard coverage to policy and
+  the executable graph, and retain fail-closed live decisions at the effect
+  boundary.
+- Ratchet the certificate's disclosed boundary one property or opcode family at
+  a time. Each promotion needs a real producer case, an independent checker
+  rule or witness, and a mutation the checker rejects. The shipped boundary is
+  pinned by `zig build test-proof-ratchet test-proof-ratchet-drift`.
 
 ## Agent-Compiler Agenda
 
@@ -203,8 +224,10 @@ Implement the advanced language incrementally on the existing engine, keeping
 identities are `zts-model-1` for core `.ts` and `zts-tsx-1` for the lowering
 frontend. The source
 spec is [zts-formal-spec-northstar-advanced.md](zts-formal-spec-northstar-advanced.md)
-revision 5. The certificate and verifier stack (spec 13.3-13.4) and the
-two-client conformance lab (14.2) are outside this program.
+revision 6. The artifact certificate and independent acceptance kernel now
+ship as a staged implementation of sections 13.3-13.4. Eliminating its
+disclosed trusted edges and the two-client conformance lab (14.2) remain
+outside this language program.
 
 Three ground rules survive from phase to phase: the engine stays
 interpreter-only with no kernel growth except where the spec names it; each

@@ -8,6 +8,7 @@ artifact_readiness: implementation-ready
 product_contract_source: ce-plan-bootstrap
 execution: code
 related_plan: docs/plans/2026-08-31-1147-feat-artifact-proof-carrying-code-plan.md
+status: planned
 ---
 
 # Residual Runtime Guard Addendum - Plan
@@ -17,7 +18,7 @@ related_plan: docs/plans/2026-08-31-1147-feat-artifact-proof-carrying-code-plan.
 - **Objective:** Zttp developers can safely ship useful handlers with runtime-selected capability resources, while consumers retain exact proof claims and fail-closed control over every live resource decision.
 - **Means:** Add a closed residual-guard contract to the proof-carrying artifact, bind it to the existing capability policy and guard implementation, remove permissive dynamic policy projection, and then reclassify supported `ZTS602` cases. (KTD1, KTD2, KTD3, KTD5)
 - **Authority:** Static proof owns Property claims. The proof checker owns residual-guard coverage. The configured capability policy owns finite resource allowlists. The runtime sink owns each live guard decision. A guarded operation is never a proven Property.
-- **Execution profile:** Implement seven dependency-ordered units only after the related artifact-level PCC plan completes U1 through U7 and all required gates pass.
+- **Execution profile:** The artifact-level PCC prerequisite is complete. Implement the seven dependency-ordered units without reopening its accepted checker and runtime boundaries.
 - **Stop conditions:** Stop if the runtime cannot observe the actual resource before the effect, if a producer can omit a guard obligation, if an absent policy becomes allow-all, or if guarded evidence can unlock a proof-only optimization.
 - **Tail ownership:** Complete local implementation, verification, review, and local commits. Remote push, release, and deployment remain user-owned.
 
@@ -29,7 +30,10 @@ related_plan: docs/plans/2026-08-31-1147-feat-artifact-proof-carrying-code-plan.
 
 This addendum introduces a CCured-style hybrid acceptance path for a narrow class of Zttp operations. The compiler continues to prove every Property it claims. When it cannot resolve the resource selected by a supported capability operation, it may emit a residual runtime obligation instead of rejecting the handler, but only when the consumer proves complete guard coverage and the runtime enforces the bound policy before the operation crosses its effect boundary.
 
-This is a separate companion to `docs/plans/2026-08-31-1147-feat-artifact-proof-carrying-code-plan.md`. It does not amend, renumber, or delay that in-flight plan. It starts from the checker, executable-graph binding, and proof-checked runtime contract that plan delivers.
+This is a separate companion to the completed
+`docs/plans/2026-08-31-1147-feat-artifact-proof-carrying-code-plan.md`. It does
+not amend or renumber that plan. It starts from the checker, executable-graph
+binding, and proof-checked runtime contract that plan delivered.
 
 ### Problem Frame
 
@@ -64,7 +68,7 @@ The runtime already observes several actual resource values near their effects. 
 
 - R10. Dynamic route paths, service names, durable keys, schemas, reflection, arbitrary predicates, and non-local semantic properties must remain rejected until a separate plan proves a complete enforcement boundary.
 - R11. Compiler-visible literals must retain the existing static path and must not pay an additional residual-obligation lookup; existing mandatory runtime capability checks remain in force.
-- R12. Implementation must begin only after U1 through U7 of the related artifact-level PCC plan are complete and all of that plan's required gates pass; the addendum must preserve that plan's stable IDs and acceptance semantics.
+- R12. U1 through U7 of the related artifact-level PCC plan and its required gates are complete; the addendum must preserve that plan's stable IDs and acceptance semantics.
 - R13. Startup and live reload must reject a missing, stale, mismatched, unknown, or uncovered guard plan before pool prewarm or handler swap. Live reload must atomically install one generation containing the executable root, proof-checked contract, residual plan, and policy; a failed candidate leaves the prior generation intact, and each in-flight request remains pinned to one generation.
 - R14. Guard coverage and failure telemetry must use non-empty tested registries, stable guard IDs, bounded counters, and redacted resource data.
 - R15. At the R12 drift checkpoint, the implementation must assign the next incompatible certificate-schema and proof-system versions after the versions delivered by the related plan, cut all strict production artifacts to those successor versions, and reject predecessor evidence after cutover instead of maintaining mixed strict formats.
@@ -184,7 +188,7 @@ The runtime already observes several actual resource values near their effects. 
 - KTD3. **Enforce at the authoritative operation boundary.** Env reads, normalized egress endpoints and resolved address scopes, cache operations, and named SQL execution evaluate the actual resource immediately before the protected operation. Redirects and retries repeat the network check. Optional pre-check helpers do not count as coverage. Implements R5, R7, R9, R17.
 - KTD4. **Keep assurance two-dimensional.** (session-settled: user-approved - chosen over promoting a passing guard to proof: static theorems and live authorization decisions answer different questions.) Preserve the related plan's acceptance stages while reporting proven Properties and guarded operations independently. Implements R2, R3, R4, R11.
 - KTD5. **Relax `ZTS602` only after fail-closed guard infrastructure exists.** (session-settled: user-approved - chosen over a broad dynamic mode: the language may admit only the closed export and argument positions covered by R5.) Unsupported dynamic capability uses remain compile errors. Implements R1, R5, R10, R13.
-- KTD6. **Layer the addendum after the in-flight PCC plan.** (session-settled: user-directed - chosen over editing its stable units: implementation is already in progress.) Reuse its checker, certificate, artifact root, policy hash, and proof-checked runtime types. Do not create a parallel certificate or activation path. Implements R12.
+- KTD6. **Layer the addendum after the completed PCC plan.** (session-settled: user-directed - chosen over editing its stable units.) Reuse its checker, certificate, artifact root, policy hash, and proof-checked runtime types. Do not create a parallel certificate or activation path. Implements R12.
 
 ### High-Level Technical Design
 

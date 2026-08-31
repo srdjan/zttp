@@ -2103,7 +2103,15 @@ pub fn compileHandler(
             return error.TranslationWitnessIncomplete;
         };
         const proof_view = zts.parser.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
-        proof_evidence = try zts.buildProofEvidence(allocator, proof_view, root, recorder);
+        const handler_source = zts.findHandlerFunction(proof_view, root) orelse
+            return error.HandlerNotFound;
+        proof_evidence = try zts.buildProofEvidence(
+            allocator,
+            proof_view,
+            root,
+            handler_source,
+            recorder,
+        );
     }
 
     // Get object literal shapes from parser

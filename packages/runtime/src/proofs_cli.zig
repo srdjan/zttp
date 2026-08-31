@@ -282,13 +282,13 @@ fn writeHelp(w: *std.Io.Writer) !void {
         \\                   Flags: [--out PATH] [--inline] [--public-url URL]
         \\                          [--ref REF].
         \\                   Defaults: --out ./zttp-proof.svg, --ref HEAD.
-        \\  bundle           Package a contract (and optionally binary and
-        \\                   replay artifacts) into a verifiable audit bundle.
+        \\  bundle           Package a contract and optional binary or replay.
+        \\                   A binary's proof certificate is extracted too.
         \\                   Flags: --contract PATH --out DIR [--binary PATH]
         \\                          [--replay PATH]
-        \\  verify <dir>     Re-check every component sha256 in <dir>/bundle.json
-        \\                   against the actual file bytes. Exits non-zero on
-        \\                   any mismatch.
+        \\  verify <dir>     Check component integrity, then run artifact proof
+        \\                   acceptance when binary and certificate are present.
+        \\                   Flags: [--require-proof].
         \\  gate             Compile before/after for every handler changed in a
         \\                   git range, aggregate a repo-level behavioral verdict,
         \\                   and emit a PR-ready report. Exit 1 on `breaking`.
@@ -618,7 +618,7 @@ fn renderMarkdown(
     if (baseline) |b| {
         try stdout.print("- **Baseline**: `{s}`\n", .{b.contract_sha});
     } else {
-        try stdout.writeAll("- **Baseline**: _(none — first entry)_\n");
+        try stdout.writeAll("- **Baseline**: _(none - first entry)_\n");
     }
 
     try stdout.writeAll("\n### Proven properties\n\n");
@@ -1521,7 +1521,7 @@ test "export: --ref selects a past entry" {
 
     const text = out.writer.buffered();
     try testing.expect(std.mem.indexOf(u8, text, "**Contract**: `sha-old`") != null);
-    try testing.expect(std.mem.indexOf(u8, text, "**Baseline**: _(none — first entry)_") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "**Baseline**: _(none - first entry)_") != null);
 }
 
 test "export svg: safe verdict renders green" {

@@ -1,9 +1,11 @@
 # Contracts, Auto-Sandboxing, and Evolution
 
-The compiler extracts a contract from every handler. The contract
-describes what the handler does before it runs and is used to derive
-the runtime sandbox, compare versions across deployments, and emit
-public artifacts (OpenAPI, TypeScript SDK).
+The compiler extracts a contract claim from every handler. The claim
+describes what the compiler inferred before the handler runs. It is
+used to derive capability restrictions, compare versions across
+deployments, and emit public artifacts such as OpenAPI and TypeScript
+SDKs. In a deployed artifact, only properties accepted by the
+independent proof checker may authorize runtime optimizations.
 
 ## Contract Manifest (`-Dcontract`)
 
@@ -43,7 +45,7 @@ Every precompilation extracts a contract from the handler's IR. Add
 
 ```json
 {
-  "version": 12,
+  "version": 18,
   "modules": ["zttp:auth", "zttp:cache", "zttp:scope"],
   "functions": {
     "zttp:auth": ["jwtVerify", "parseBearer"],
@@ -121,18 +123,22 @@ Handler Properties:
   PROVEN deterministic   no Date.now(), Math.random(), or performance.now()
 ```
 
-Self-extracting binaries parse the embedded contract at startup:
-proven env vars are validated (missing vars fail fast instead of
-causing a 500 on first request), proven routes reject non-matching
-requests at the HTTP layer before entering JS, and proven handler
-properties are logged for operator visibility.
+Self-extracting binaries parse and integrity-check the embedded
+contract at startup. Proven env vars are validated so missing values
+fail before the first request. Statically enumerated routes reject
+non-matching requests at the HTTP layer before entering JS.
 
-Handlers proven `deterministic` and `read_only` that also read no
-request headers or body have their GET/HEAD responses cached at
-runtime and served from Zig memory without entering JS. The cache key
-is method+URL only, so a handler whose response depends on a request
-header (auth, content negotiation) is excluded. The
-`X-Zttp-Proof-Cache: hit` response header confirms a cache hit.
+The contract alone does not activate response caching or permissive
+handler reuse. A deployed artifact must also carry a certificate that
+the independent checker accepts. The checker promotes only the
+individual properties that meet the production policy floor. Source,
+development, live-reload, and `-Dhandler` execution have no accepted
+artifact certificate, so they retain conservative lifecycle behavior
+and do not activate the proof cache. The shipped production policy
+does not currently accept `read_only` or `deterministic`, so deployed
+artifacts do not activate this cache today. When a future policy does
+authorize caching, the cache key is method plus URL and the
+`X-Zttp-Proof-Cache: hit` response header confirms a hit.
 
 ### When each contract assertion is enforced
 
@@ -153,22 +159,22 @@ won't boot" and "individual requests get rejected".
   runtime invocation).
 
 **Process startup** (once, when the self-extracting binary boots):
-- `embedded_handler.capability_policy` is in scope. The precompile
-  pipeline generates this as a comptime `pub const RuntimePolicy` in
-  the embedded handler module; the runtime applies it to each
-  context via `runtime_config.zig:applyEmbeddedCapabilityPolicy`.
-  Because the value is comptime-baked at build time, **the
-  RuntimePolicy is fixed for the lifetime of the binary** — there is
-  no contract-file parse at boot that could change it.
+- A `-Dhandler` build uses the comptime
+  `embedded_handler.capability_policy`. A deployed self-extracting
+  artifact instead parses the serialized runtime policy in payload
+  section 4. In both cases, the runtime applies the selected policy to
+  each context through
+  `runtime_config.zig:applyEmbeddedCapabilityPolicy`.
 - `proven_env` literals are validated against the process environment
   (`proof_adapter.zig`). A missing required var fails the process
   rather than 500-ing the first request.
-- Pooling policy is derived from contract properties
-  (`contract_runtime.zig:derivePoolingPolicy`) and applied to the
-  HandlerPool exactly once via `pool.setPoolingPolicy(...)` from
-  `server.zig:start`. In `zttp dev --watch --prove`, each accepted
-  swap re-derives the pooling policy from the new contract before the
-  handler pool is reused.
+- A deployed artifact's certificate is checked before the handler
+  pool starts. `contract_runtime.zig:derivePoolingPolicy` sees only
+  accepted properties. Without an accepted certificate, pooling stays
+  bounded by request count. Live reload deliberately returns to this
+  conservative policy because source contracts are not artifact
+  certificates. The current production policy does not accept the
+  lifecycle properties, so deployed artifacts also stay bounded.
 - Attestation envelope (`Zttp-Attest`) is materialized for
   `GET /.well-known/zttp-attest`.
 
@@ -177,19 +183,20 @@ won't boot" and "individual requests get rejected".
   table in `contract_runtime.zig` rejects non-matching method/path
   combinations at the HTTP layer with a 404, never acquiring a
   runtime. When `routes_dynamic = true`, every request falls through
-  to the handler and route matching is the handler's responsibility
-  — the contract surface stops being a runtime gate for routing.
-- Proof cache lookup: handlers proven `deterministic` + `read_only`
-  that read no request headers or body serve `GET`/`HEAD` from the
-  Zig-side cache without entering JS (`X-Zttp-Proof-Cache: hit`).
-  Header/body-dependent handlers are excluded because the cache key is
-  method+URL only.
+  to the handler and route matching is the handler's responsibility.
+  The contract surface then stops being a runtime routing gate.
+- Proof cache lookup: only properties promoted from an accepted
+  deployed certificate can authorize the Zig-side cache. The current
+  production policy promotes neither `read_only` nor `deterministic`,
+  so no production artifact is cache-eligible today. A future policy
+  must also exclude header/body-dependent handlers because the cache
+  key is method plus URL.
 - Per-name policy checks for SDK-facing categories (env, cache, sql,
   sql-write): the runtime exposes `allows{Env,CacheNamespace,SqlQuery,
   SqlWrite}ForActiveModule` in `module_binding.zig`. Each consults
   `ctx.capability_policy.allows*(name)` and rejects the call when the
   name is outside the allowlist. The corresponding SDK module bindings
-  must declare `.policy_check` in `required_capabilities` — otherwise
+  must declare `.policy_check` in `required_capabilities`; otherwise
   the call panics with an undeclared-capability error. These two
   layers are independent: `required_capabilities` is the module's
   binding-level declaration of which gates it consults;
@@ -216,8 +223,9 @@ won't boot" and "individual requests get rejected".
   acquire. In-flight requests finish on the old bytecode and are
   recycled into the new code on their next cycle.
 - `server.zig:updateContract` (called by `live_reload`) replaces the
-  proven-routes table and the proof cache so per-request route
-  gating and the read-only cache reflect the new contract.
+  integrity-validated route table. It clears proof-checked properties,
+  the proof cache, and durable properties because the new source has
+  no accepted artifact certificate.
 - In the interpreted `dev`/`serve` path the embedded `RuntimePolicy`
   is the empty stub, so `live_reload` derives the full runtime policy
   from each accepted contract and applies it via
@@ -226,20 +234,20 @@ won't boot" and "individual requests get rejected".
   `RuntimeConfig.dev_capability_policy`). That invalidates idle
   runtimes so env, egress, cache, and sql gates re-create from the new
   contract. If policy allocation fails, the staged policy fails closed.
-- `server.zig:updateContract` also refreshes `pool.pooling_policy`
-  from the new contract unless an explicit lifecycle override was
-  configured. In-flight requests finish on the old runtime generation;
-  later acquisitions use the re-derived lifecycle policy.
-- In a precompiled or deployed binary the policy is the comptime
-  constant baked at build time and is never swapped; tightening or
+- `server.zig:updateContract` also restores conservative bounded
+  pooling unless an explicit lifecycle override was configured.
+  In-flight requests finish on the old runtime generation; later
+  acquisitions use the conservative lifecycle policy.
+- In a `-Dhandler` binary the capability policy is a comptime
+  constant. In a deployed self-extracting binary it comes from signed
+  payload section 4. Neither policy is hot-swapped; tightening or
   widening it requires a rebuild.
 - Durable handlers refuse hot swap entirely because replay state
   depends on handler identity.
 
-A narrow gap to be aware of: a handler that flips `routes_dynamic`
-from `false` to `true` across a hot swap loses the route pre-filter
-on the next request. This is intentional — the new contract honestly
-says routing is no longer statically enumerated — but operators
+A handler that flips `routes_dynamic` from `false` to `true` across a
+hot swap loses the route pre-filter on the next request. The new
+contract says routing is no longer statically enumerated. Operators
 monitoring route-shape changes should treat that transition as a
 deliberate widening of the request surface.
 
@@ -388,7 +396,7 @@ The upgrade verdict combines these signals:
 - **needs_review**: structurally OK but warning-level regressions or
   significant coverage gaps
 
-Output: `proof.json` (machine-readable certificate),
+Output: `proof.json` (machine-readable upgrade report),
 `proof-report.txt` (human-readable), and `upgrade-manifest.json`
 (verdict with full breakdown).
 
@@ -449,13 +457,14 @@ alongside the existing `properties` object, plus a `declaredSpecs`
 array containing the effective active spec set. If the handler has no
 `Proof<...>` capsule, this array contains every supported v1 spec; an explicit
 `Proof<T, P>` narrows it to the named specs. Both ride inside the signed
-JWS payload, so a third party can diff two builds and see exactly which
-property moved.
+JWS payload, so a third party can verify their provenance and diff two
+builds. The JWS does not independently establish those properties. A
+deployed artifact's proof certificate and checker verdict provide the
+separate semantic acceptance boundary.
 
 ```bash
-zttp ratchet show <handler.ts>      # current proven set
-zttp ratchet show <handler.ts>      # print declared vs proven specs, and the differences
-zttp check <handler.ts>              # the gate: exit 1 on an undischarged proof (ZTS500)
+zttp ratchet show <handler.ts>  # print declared and proven specs, and their differences
+zttp check <handler.ts>         # exit 1 on an undischarged proof (ZTS500)
 ```
 
 Handlers that declare no `Proof<T, P>` ratchet against the default full

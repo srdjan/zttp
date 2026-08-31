@@ -164,6 +164,7 @@ pub const ReasonCode = enum(u16) {
 
     // limits
     work_budget_exhausted = 1101,
+    proof_depth_exceeded = 1102,
 
     // proof-system identity
     unsupported_proof_system = 1201,
@@ -178,6 +179,7 @@ pub const ReasonCode = enum(u16) {
     graph_member_duplicate = 1306,
     zero_commitment = 1307,
     proof_ir_digest_mismatch = 1308,
+    proof_certificate_digest_mismatch = 1309,
 
     // obligation reconstruction
     obligation_missing = 1401,
@@ -194,6 +196,8 @@ pub const ReasonCode = enum(u16) {
     proof_node_unknown = 1506,
     fabricated_property = 1507,
     trusted_edge_undeclared = 1508,
+    evidence_edge_invalid = 1509,
+    proof_node_parent_mismatch = 1510,
 
     // translation
     witness_missing = 1601,
@@ -207,6 +211,7 @@ pub const ReasonCode = enum(u16) {
     solver_edge_not_permitted = 1701,
     solver_inconclusive = 1703,
     solver_query_too_large = 1704,
+    solver_query_mismatch = 1705,
 
     // policy
     required_property_not_established = 1801,
@@ -254,6 +259,33 @@ pub const Rejection = struct {
     recertifiable: bool,
 };
 
+pub const PropertyVerdicts = struct {
+    const count = @typeInfo(proof_system.Property).@"enum".fields.len;
+
+    grades: [count]?AssuranceGrade = [_]?AssuranceGrade{null} ** count,
+    accepted_bits: u16 = 0,
+
+    fn slot(property: proof_system.Property) usize {
+        return @intFromEnum(property) - 1;
+    }
+
+    pub fn gradeFor(self: PropertyVerdicts, property: proof_system.Property) ?AssuranceGrade {
+        return self.grades[slot(property)];
+    }
+
+    pub fn accepted(self: PropertyVerdicts, property: proof_system.Property) bool {
+        return self.accepted_bits & (@as(u16, 1) << @intCast(slot(property))) != 0;
+    }
+
+    pub fn recordGrade(self: *PropertyVerdicts, property: proof_system.Property, grade: AssuranceGrade) void {
+        self.grades[slot(property)] = grade;
+    }
+
+    pub fn accept(self: *PropertyVerdicts, property: proof_system.Property) void {
+        self.accepted_bits |= @as(u16, 1) << @intCast(slot(property));
+    }
+};
+
 /// The full result of one acceptance run. Every field states work the consumer
 /// actually did.
 pub const Assessment = struct {
@@ -275,6 +307,9 @@ pub const Assessment = struct {
     /// "translation_validated" describes the check that ran, and this describes
     /// what the whole chain still rests on.
     disclosed_edges: u32 = 0,
+    /// Per-property grades and the subset that cleared this policy. Runtime
+    /// behavior may consume only the accepted subset.
+    properties: PropertyVerdicts = .{},
 
     pub fn accepted(self: Assessment) bool {
         return self.rejection == null and self.semantic == .policy_accepted;

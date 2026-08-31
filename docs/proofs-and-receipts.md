@@ -166,8 +166,9 @@ three lenses:
 - `Properties` - the default `[+]`/`[-]` pills.
 - `Trade` - each proof paired with the substrate restriction that earned it:
   which rejected JavaScript feature bought which guarantee.
-- `Handover` - a copy-pasteable proof certificate for an AI agent or a
-  reviewer.
+- `Handover` - a copy-pasteable producer proof summary for an AI agent or a
+  reviewer. It is not the deployed artifact certificate checked by
+  `packages/proof-checker`.
 
 Studio mirrors the same three views with a tab bar. The rotation is described
 in the [User Guide](user-guide.md); the restriction-to-proof map it draws on

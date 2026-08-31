@@ -10,7 +10,7 @@ const std = @import("std");
 /// The certificate wire schema. Bumped for any layout change; the kernel checks
 /// equality, never a range, so an older or newer certificate is refused with a
 /// rebuild diagnostic instead of being reinterpreted.
-pub const schema_version: u16 = 1;
+pub const schema_version: u16 = 2;
 
 /// The proof system a certificate claims to be written in. `zttp_pcc_v1` is the
 /// initial small-kernel system: closed rules over the canonical proof IR, plus

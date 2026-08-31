@@ -137,12 +137,38 @@ pub fn promote(
     if (!assessment.accepted()) return null;
     const grade = assessment.grade orelse return null;
     return .{
-        .properties = validated.properties(),
-        .durable_workflow = validated.durableWorkflowProperties(),
+        .properties = acceptedProperties(validated.properties(), assessment.properties),
+        .durable_workflow = acceptedWorkflowProperties(
+            validated.durableWorkflowProperties(),
+            assessment.properties,
+        ),
         .reads_request_state = validated.view().reads_request_state,
         .grade = grade,
         .development_only = assessment.development_only,
         ._proof = validation_proof,
+    };
+}
+
+fn acceptedProperties(
+    claimed: Properties,
+    verdicts: pcc.verdict.PropertyVerdicts,
+) Properties {
+    return .{
+        .read_only = claimed.read_only and verdicts.accepted(.read_only),
+        .retry_safe = claimed.retry_safe and verdicts.accepted(.retry_safe),
+        .deterministic = claimed.deterministic and verdicts.accepted(.deterministic),
+        .no_secret_leakage = claimed.no_secret_leakage and verdicts.accepted(.no_secret_leakage),
+        .state_isolated = claimed.state_isolated and verdicts.accepted(.state_isolated),
+        .result_safe = claimed.result_safe and verdicts.accepted(.results_checked),
+    };
+}
+
+fn acceptedWorkflowProperties(
+    claimed: DurableWorkflowProperties,
+    verdicts: pcc.verdict.PropertyVerdicts,
+) DurableWorkflowProperties {
+    return .{
+        .retry_safe = claimed.retry_safe and verdicts.accepted(.retry_safe),
     };
 }
 
@@ -1392,6 +1418,55 @@ test "validatedFromInner installs the canonical validation_proof" {
     };
     const direct = validatedFromInner(contract);
     try std.testing.expect(direct._proof.marker == validation_proof.marker);
+}
+
+test "promotion exposes only properties that cleared the policy" {
+    const contract = RuntimeContract{
+        .env_vars = &.{},
+        .env_dynamic = false,
+        .routes = &.{},
+        .routes_dynamic = false,
+        .properties = .{
+            .read_only = true,
+            .state_isolated = true,
+            .no_secret_leakage = true,
+            .result_safe = true,
+        },
+        .durable_workflow_properties = .{
+            .retry_safe = true,
+            .idempotent = true,
+            .fault_covered = true,
+        },
+        .allocator = std.testing.allocator,
+    };
+    var validated = validatedFromInner(contract);
+    var property_verdicts: pcc.verdict.PropertyVerdicts = .{};
+    property_verdicts.recordGrade(.response_total, .trusted);
+    property_verdicts.recordGrade(.results_checked, .tested);
+    property_verdicts.recordGrade(.no_secret_leakage, .tested);
+    property_verdicts.recordGrade(.capability_bounded, .tested);
+    property_verdicts.accept(.response_total);
+    property_verdicts.accept(.results_checked);
+    property_verdicts.accept(.no_secret_leakage);
+    property_verdicts.accept(.capability_bounded);
+    const assessment = pcc.Assessment{
+        .semantic = .policy_accepted,
+        .provenance = .absent,
+        .grade = .trusted,
+        .development_only = false,
+        .rejection = null,
+        .work_spent = 1,
+        .properties = property_verdicts,
+    };
+
+    const promoted = promote(&validated, assessment) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(promoted.properties.no_secret_leakage);
+    try std.testing.expect(promoted.properties.result_safe);
+    try std.testing.expect(!promoted.properties.read_only);
+    try std.testing.expect(!promoted.properties.state_isolated);
+    try std.testing.expect(!promoted.durable_workflow.retry_safe);
+    try std.testing.expect(!promoted.durable_workflow.idempotent);
+    try std.testing.expect(!promoted.durable_workflow.fault_covered);
 }
 
 test "ValidationProof argument type is a file-private opaque" {

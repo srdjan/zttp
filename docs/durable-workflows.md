@@ -133,8 +133,11 @@ The analyzer emits `durable.workflow.properties` in `contract.json`:
 }
 ```
 
-At runtime, validated contracts copy those properties into the durable executor.
-When enforcement is active:
+At runtime, only a proof-checked contract can copy a durable property into the
+executor. The independent checker promotes each property separately. The
+current production policy does not accept `retrySafe`, `idempotent`, or
+`faultCovered`, so all three remain unavailable to runtime enforcement.
+Without an accepted property, enforcement stays conservative:
 
 - Incomplete replay requires `retrySafe` or a matching `Idempotency-Key`.
 - Completed response reuse requires `idempotent` or a matching
@@ -142,7 +145,9 @@ When enforcement is active:
 - Unproven replay returns a normal `599` JSON response with
   `DurableRetryUnproven` or `DurableIdempotencyUnproven`.
 
-Proof receipts and deploy manifests expose the same status:
+Proof receipts and deploy manifests expose the producer's reported status.
+Those fields are useful evidence, but they are not the runtime acceptance
+verdict:
 
 - `zttp verify --json` includes `durableWorkflowProofLevel`,
   `durableWorkflowRetrySafe`, `durableWorkflowIdempotent`, and

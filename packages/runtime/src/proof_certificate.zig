@@ -82,22 +82,13 @@ pub const Built = struct {
     members: []graph.Member,
     executable_root: [32]u8,
     ir_root: [32]u8,
+    certificate_digest: [32]u8,
 
     pub fn deinit(self: *Built) void {
         self.allocator.free(self.bytes);
         self.allocator.free(self.members);
     }
 };
-
-/// The entry function: the first `function` node in id order. The consumer
-/// resolves it the same way, from the same IR, so neither side reads the
-/// other's answer for which node the totality obligation is about.
-pub fn entryFunction(nodes: []const cert.IrNode) ?u32 {
-    for (nodes) |node| {
-        if (node.tag == .function) return node.id;
-    }
-    return null;
-}
 
 fn irNodes(allocator: std.mem.Allocator, evidence: *const zts.ProofEvidence) Error![]cert.IrNode {
     const nodes = try allocator.alloc(cert.IrNode, evidence.proof.nodes.len);
@@ -106,6 +97,7 @@ fn irNodes(allocator: std.mem.Allocator, evidence: *const zts.ProofEvidence) Err
         nodes[index] = .{
             .id = node.id,
             .tag = tagFor(node.tag),
+            .is_handler = if (evidence.proof.handler_function) |handler| handler == node.id else false,
             .parent = node.parent,
             .first_child = node.first_child,
             .child_count = node.child_count,
@@ -179,15 +171,16 @@ pub fn build(allocator: std.mem.Allocator, inputs: Inputs) Error!Built {
     const nodes = try irNodes(allocator, inputs.evidence);
     defer allocator.free(nodes);
 
-    const entry = entryFunction(nodes) orelse return error.NoEntryFunction;
+    const entry = inputs.evidence.proof.handler_function orelse return error.NoEntryFunction;
+    if (entry >= nodes.len or nodes[entry].tag != .function) return error.NoEntryFunction;
     const ir_root = cert.irRootFromNodes(nodes);
 
     var artifact = inputs.artifact;
     artifact.proof_ir_digest = ir_root;
+    artifact.proof_certificate_digest = [_]u8{0} ** 32;
     const members = try allocator.alloc(graph.Member, artifact_graph.max_members);
     errdefer allocator.free(members);
     const built_members = try artifact_graph.build(allocator, artifact_graph.fromArtifact(artifact), members);
-    const executable_root = try graph.computeRoot(built_members);
 
     var builder = ObligationBuilder{ .allocator = allocator };
     defer builder.deinit();
@@ -235,9 +228,9 @@ pub fn build(allocator: std.mem.Allocator, inputs: Inputs) Error!Built {
     const trusted = try trustedEdges(allocator, inputs.evidence);
     defer allocator.free(trusted);
 
-    const parts = cert.Parts{
+    var parts = cert.Parts{
         .identity = .{
-            .executable_root = executable_root,
+            .executable_root = [_]u8{0} ** 32,
             .ir_root = ir_root,
             .contract_digest = inputs.contract_digest,
             .development = inputs.development,
@@ -253,6 +246,25 @@ pub fn build(allocator: std.mem.Allocator, inputs: Inputs) Error!Built {
 
     const bytes = try allocator.alloc(u8, cert.encodedSize(parts));
     errdefer allocator.free(bytes);
+
+    // Encode once with both self-references zeroed. The resulting commitment
+    // covers every certificate section, then becomes an executable-graph
+    // member. A second canonical encoding writes that graph root into identity.
+    const provisional = try cert.encode(parts, bytes);
+    var budget = pcc.limits.Budget.init(.{});
+    const decoded = cert.decode(provisional, .{}, &budget) catch unreachable;
+    const certificate_digest = cert.commitmentDigest(provisional, decoded) catch unreachable;
+
+    var found_certificate_member = false;
+    for (built_members) |*member| {
+        if (member.kind != .proof_certificate) continue;
+        member.digest = certificate_digest;
+        found_certificate_member = true;
+    }
+    if (!found_certificate_member) return error.MissingRequiredKind;
+
+    const executable_root = try graph.computeRoot(built_members);
+    parts.identity.executable_root = executable_root;
     const encoded = try cert.encode(parts, bytes);
 
     const owned_members = try allocator.alloc(graph.Member, built_members.len);
@@ -265,6 +277,7 @@ pub fn build(allocator: std.mem.Allocator, inputs: Inputs) Error!Built {
         .members = owned_members,
         .executable_root = executable_root,
         .ir_root = ir_root,
+        .certificate_digest = certificate_digest,
     };
 }
 
@@ -370,10 +383,7 @@ fn translationWitnesses(
     // which is what keeps the check linear in the number of witnesses.
     std.mem.sort(cert.Witness, out, {}, struct {
         fn lt(_: void, a: cert.Witness, b: cert.Witness) bool {
-            if (a.scope_ir_node != b.scope_ir_node) return a.scope_ir_node < b.scope_ir_node;
-            if (a.kind != b.kind) return @intFromEnum(a.kind) < @intFromEnum(b.kind);
-            if (a.code_start != b.code_start) return a.code_start < b.code_start;
-            return a.code_len > b.code_len;
+            return cert.Witness.order(a, b) == .lt;
         }
     }.lt);
     return out;

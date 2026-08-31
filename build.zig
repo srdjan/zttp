@@ -835,6 +835,10 @@ pub fn build(b: *std.Build) void {
     zts_exe.root_module.addImport("zts_cli", zts_cli_mod);
     b.installArtifact(zts_exe);
 
+    // The drift gate must inspect this build's executable, not a possibly
+    // stale installation left in zig-out by an earlier invocation.
+    meta_drift.addFileArg(zts_exe.getEmittedBin());
+
     const zts_overview_drift = b.addSystemCommand(&.{ "/bin/bash", "scripts/check-zts-language-overview.sh" });
     zts_overview_drift.addFileArg(zts_exe.getEmittedBin());
     docs_drift_step.dependOn(&zts_overview_drift.step);

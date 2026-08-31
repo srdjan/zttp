@@ -1,6 +1,10 @@
 # Diagnostic teaching gaps: ZTS500 and the tool the model never calls
 
-Status: proposed, not started. Written 2026-08-17.
+Status: superseded. Written 2026-08-17. The first routing change landed in
+`4894b39a2`, then `24e73c779` established that `pi_specs_status` was not
+model-visible and removed the unreachable instruction. The current path puts
+the failing spec and suggestion directly in the ZTS500 diagnostic. Keep this
+file as the measurement record, not as an execution plan.
 
 ## The premise was wrong, and correcting it is the first result
 

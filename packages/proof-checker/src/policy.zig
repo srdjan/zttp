@@ -92,10 +92,9 @@ const default_proof_systems = [_]ps.ProofSystem{.zttp_pcc_v1};
 const default_epochs = [_]u32{ps.semantics_epoch};
 
 const production_requirements = [_]Requirement{
-    // The kernel proves totality over the proof IR and re-checks the
-    // translation down to the final bytecode, so the honest floor is the
-    // translation edge, not the source-level proof alone.
-    .{ .property = .response_total, .min_grade = .translation_validated },
+    // Translation witnesses still depend on the declared opcode relation. The
+    // overall theorem is therefore trusted until the kernel models that edge.
+    .{ .property = .response_total, .min_grade = .trusted },
     // These three are disclosed rather than kernel-checked today. The floor
     // says so out loud instead of implying a proof that does not exist.
     .{ .property = .results_checked, .min_grade = .tested },
@@ -186,5 +185,5 @@ test "requirement lookup drives what the consumer asks about" {
     try testing.expect(production.requires(.response_total));
     try testing.expect(!production.requires(.retry_safe));
     const requirement = production.requirementFor(.response_total).?;
-    try testing.expectEqual(AssuranceGrade.translation_validated, requirement.min_grade);
+    try testing.expectEqual(AssuranceGrade.trusted, requirement.min_grade);
 }

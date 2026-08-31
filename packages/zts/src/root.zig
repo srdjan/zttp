@@ -746,6 +746,11 @@ pub const ModuleMetadata = struct {
     pub fn builtinRegistryHash() [64]u8 {
         return module_manifest.registryHashFromBindings(&builtin_modules.all);
     }
+
+    /// Canonical identity of one native binding's declared authority surface.
+    pub fn nativeBindingDigest(binding: anytype) [32]u8 {
+        return module_manifest.bindingDigest(binding);
+    }
 };
 
 test "stable ModuleMetadata exposes manifest types and builtin registry identity" {

@@ -158,6 +158,9 @@ pub const ir_record_size = 52;
 pub const IrNode = struct {
     id: u32,
     tag: ps.NodeTag,
+    /// The compiler-selected handler entry. Exactly one function carries this
+    /// marker, and the marker participates in the proof-IR root.
+    is_handler: bool = false,
     /// Parent node id. The root function is its own parent.
     parent: u32,
     first_child: u32,
@@ -264,6 +267,20 @@ pub const Witness = struct {
     /// against an emission in another would be comparing two number lines.
     scope_ir_node: u32,
     kind: WitnessKind,
+
+    /// Canonical witness order. Emissions precede jumps within a scope so the
+    /// checker can validate the interval structure in one bounded pass.
+    pub fn order(a: Witness, b: Witness) std.math.Order {
+        if (a.scope_ir_node != b.scope_ir_node) return std.math.order(a.scope_ir_node, b.scope_ir_node);
+        const a_kind = @intFromEnum(a.kind);
+        const b_kind = @intFromEnum(b.kind);
+        if (a_kind != b_kind) return std.math.order(a_kind, b_kind);
+        if (a.code_start != b.code_start) return std.math.order(a.code_start, b.code_start);
+        if (a.code_len != b.code_len) return std.math.order(b.code_len, a.code_len);
+        if (a.ir_node != b.ir_node) return std.math.order(a.ir_node, b.ir_node);
+        if (a.target_ir != b.target_ir) return std.math.order(a.target_ir, b.target_ir);
+        return std.math.order(a.target_offset, b.target_offset);
+    }
 };
 
 pub const rewrite_record_size = 24;
@@ -395,12 +412,15 @@ fn decodeRecord(comptime Record: type, bytes: []const u8) DecodeError!Record {
         },
         IrNode => blk: {
             const tag = ps.NodeTag.fromWire(u16At(bytes, 4)) orelse return error.UnknownEnumMember;
-            try requireZero(bytes[6..8]);
+            const flags = bytes[6];
+            if (flags & ~@as(u8, 0x01) != 0) return error.ReservedFieldNonZero;
+            try requireZero(bytes[7..8]);
             var digest: [32]u8 = undefined;
             @memcpy(&digest, bytes[20..52]);
             break :blk IrNode{
                 .id = u32At(bytes, 0),
                 .tag = tag,
+                .is_handler = flags & 0x01 != 0,
                 .parent = u32At(bytes, 8),
                 .first_child = u32At(bytes, 12),
                 .child_count = u32At(bytes, 16),
@@ -647,7 +667,7 @@ fn decodeSection(
 }
 
 /// Domain separator for the proof-IR root.
-pub const ir_root_domain = "zttp-proof-ir-root-v1";
+pub const ir_root_domain = "zttp-proof-ir-root-v2";
 
 fn foldIrNode(hasher: *std.crypto.hash.sha2.Sha256, node: IrNode) void {
     var scratch: [4]u8 = undefined;
@@ -656,6 +676,7 @@ fn foldIrNode(hasher: *std.crypto.hash.sha2.Sha256, node: IrNode) void {
     var tag_le: [2]u8 = undefined;
     std.mem.writeInt(u16, &tag_le, @intFromEnum(node.tag), .little);
     hasher.update(&tag_le);
+    hasher.update(&[_]u8{@intFromBool(node.is_handler)});
     std.mem.writeInt(u32, &scratch, node.parent, .little);
     hasher.update(&scratch);
     std.mem.writeInt(u32, &scratch, node.first_child, .little);
@@ -691,6 +712,41 @@ pub fn irRootFromTable(table: IrTable) DecodeError![32]u8 {
     while (index < table.len()) : (index += 1) {
         foldIrNode(&hasher, try table.get(index));
     }
+    return hasher.finalResult();
+}
+
+/// Domain separator for the complete certificate commitment.
+pub const commitment_domain = "zttp-proof-certificate-commitment-v1";
+
+/// Commit every canonical certificate byte without creating a hash cycle.
+///
+/// The executable root contains this commitment as a graph member, while the
+/// identity section contains that executable root. Both self-references are
+/// replaced with zeroes for this fold. No authority-bearing certificate field
+/// is excluded: evidence, translation witnesses, rewrites, trusted edges, and
+/// solver queries all move the commitment.
+pub fn commitmentDigest(bytes: []const u8, certificate: Certificate) DecodeError![32]u8 {
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    hasher.update(commitment_domain);
+
+    const identity_root_offset = header_size + section_header_size;
+    const zero_digest = [_]u8{0} ** 32;
+    hasher.update(bytes[0..identity_root_offset]);
+    hasher.update(&zero_digest);
+    var cursor = identity_root_offset + zero_digest.len;
+
+    const graph_offset = @intFromPtr(certificate.graph.bytes.ptr) - @intFromPtr(bytes.ptr);
+    var index: u32 = 0;
+    while (index < certificate.graph.len()) : (index += 1) {
+        const member = try certificate.graph.get(index);
+        if (member.kind != .proof_certificate) continue;
+
+        const digest_offset = graph_offset + @as(usize, index) * graph_record_size + 6;
+        hasher.update(bytes[cursor..digest_offset]);
+        hasher.update(&zero_digest);
+        cursor = digest_offset + zero_digest.len;
+    }
+    hasher.update(bytes[cursor..]);
     return hasher.finalResult();
 }
 
@@ -818,7 +874,8 @@ pub fn encode(parts: Parts, out: []u8) EncodeError![]u8 {
     for (parts.ir) |node| {
         try cursor.u32At(node.id);
         try cursor.u16At(@intFromEnum(node.tag));
-        try cursor.zeros(2);
+        try cursor.u8At(@intFromBool(node.is_handler));
+        try cursor.zeros(1);
         try cursor.u32At(node.parent);
         try cursor.u32At(node.first_child);
         try cursor.u32At(node.child_count);

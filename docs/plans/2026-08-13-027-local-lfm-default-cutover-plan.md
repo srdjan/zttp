@@ -1,14 +1,20 @@
 ---
-status: blocked
+status: superseded
 priority: P1
 effort: L
 risk: high
 planned_against: 9a664a47-dirty
 created: 2026-08-13
 blocker: durable-order returns EmptyResponse from the exact local model
+superseded_by: "docs/roadmap.md#5-the-small-local-model-qualification-evidence"
 ---
 
 # Plan 027: Complete the local LFM measurement and default cutover
+
+Status: superseded. DeepSeek became the default on 2026-08-14. The local LFM
+corpus remains historical evidence, while the roadmap requires a fresh
+three-run qualification for the selected Qwen candidate. Do not execute this
+plan's default-cutover instructions.
 
 > Executor instructions: Follow this plan in order. Preserve the existing dirty
 > implementation and empirical artifacts. Run every verification command and

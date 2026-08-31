@@ -47,6 +47,8 @@ pub const MemberKind = enum(u16) {
     capability_matrix = 13,
     /// The canonical proof IR the certificate carries.
     proof_ir = 14,
+    /// The complete certificate with recursive root fields normalized.
+    proof_certificate = 15,
 
     pub fn fromWire(value: u16) ?MemberKind {
         return switch (value) {
@@ -64,6 +66,7 @@ pub const MemberKind = enum(u16) {
             12 => .semantics,
             13 => .capability_matrix,
             14 => .proof_ir,
+            15 => .proof_certificate,
             else => null,
         };
     }
@@ -84,6 +87,7 @@ pub const MemberKind = enum(u16) {
             .semantics,
             .capability_matrix,
             .proof_ir,
+            .proof_certificate,
             => true,
             .dep_bytecode,
             .nested_function,
@@ -216,7 +220,7 @@ fn m(kind: MemberKind, ordinal: u32, seed: u8) Member {
     return .{ .kind = kind, .ordinal = ordinal, .digest = digest };
 }
 
-fn fullGraph(buf: *[8]Member) []Member {
+fn fullGraph(buf: *[9]Member) []Member {
     buf.* = .{
         m(.main_bytecode, 0, 1),
         m(.contract_bytes, 0, 2),
@@ -226,6 +230,7 @@ fn fullGraph(buf: *[8]Member) []Member {
         m(.semantics, 0, 6),
         m(.capability_matrix, 0, 7),
         m(.proof_ir, 0, 8),
+        m(.proof_certificate, 0, 9),
     };
     std.mem.sort(Member, buf, {}, struct {
         fn lt(_: void, a: Member, b: Member) bool {
@@ -240,13 +245,13 @@ test "an empty graph is not a commitment" {
 }
 
 test "root is stable and order-sensitive" {
-    var buf: [8]Member = undefined;
+    var buf: [9]Member = undefined;
     const members = fullGraph(&buf);
     const root_a = try computeRoot(members);
     const root_b = try computeRoot(members);
     try testing.expectEqualSlices(u8, &root_a, &root_b);
 
-    var swapped: [8]Member = undefined;
+    var swapped: [9]Member = undefined;
     @memcpy(&swapped, members);
     std.mem.swap(Member, &swapped[0], &swapped[1]);
     try testing.expectError(error.NotOrdered, computeRoot(&swapped));
@@ -258,12 +263,12 @@ test "a duplicate member is refused" {
 }
 
 test "mutating any member class changes the root" {
-    var buf: [8]Member = undefined;
+    var buf: [9]Member = undefined;
     const members = fullGraph(&buf);
     const base = try computeRoot(members);
 
     for (members, 0..) |_, idx| {
-        var mutated: [8]Member = undefined;
+        var mutated: [9]Member = undefined;
         @memcpy(&mutated, members);
         mutated[idx].digest[0] +%= 1;
         const changed = try computeRoot(&mutated);
@@ -272,13 +277,13 @@ test "mutating any member class changes the root" {
 }
 
 test "adding a dependency member changes the root" {
-    var buf: [8]Member = undefined;
+    var buf: [9]Member = undefined;
     const members = fullGraph(&buf);
     const base = try computeRoot(members);
 
-    var extended: [9]Member = undefined;
-    @memcpy(extended[0..8], members);
-    extended[8] = m(.dep_bytecode, 0, 42);
+    var extended: [10]Member = undefined;
+    @memcpy(extended[0..9], members);
+    extended[9] = m(.dep_bytecode, 0, 42);
     std.mem.sort(Member, &extended, {}, struct {
         fn lt(_: void, a: Member, b: Member) bool {
             return Member.order(a, b) == .lt;
@@ -289,7 +294,7 @@ test "adding a dependency member changes the root" {
 }
 
 test "required kinds must all be present" {
-    var buf: [8]Member = undefined;
+    var buf: [9]Member = undefined;
     const members = fullGraph(&buf);
     try checkRequiredKinds(members);
     try testing.expectError(error.MissingRequiredKind, checkRequiredKinds(members[0 .. members.len - 1]));
@@ -297,7 +302,7 @@ test "required kinds must all be present" {
 
 test "member kind wire decoding is closed" {
     try testing.expectEqual(@as(?MemberKind, null), MemberKind.fromWire(0));
-    try testing.expectEqual(@as(?MemberKind, null), MemberKind.fromWire(15));
+    try testing.expectEqual(@as(?MemberKind, null), MemberKind.fromWire(16));
     inline for (@typeInfo(MemberKind).@"enum".fields) |field| {
         const kind: MemberKind = @enumFromInt(field.value);
         try testing.expectEqual(@as(?MemberKind, kind), MemberKind.fromWire(field.value));

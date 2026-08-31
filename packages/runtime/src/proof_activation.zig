@@ -84,20 +84,21 @@ pub fn observedRoot(allocator: std.mem.Allocator, inputs: Inputs) Error!?[32]u8 
 }
 
 fn graphInputs(inputs: Inputs) artifact_graph.Inputs {
+    const commitments = if (inputs.certificate) |certificate|
+        certificateCommitments(certificate)
+    else
+        null;
     return artifact_graph.fromArtifact(.{
         .bytecode = inputs.bytecode,
         .dep_bytecodes = inputs.dep_bytecodes,
         .contract_section = inputs.contract_section,
         .policy_section_digest = inputs.policy_section_digest,
         .identity = inputs.identity,
-        // The proof IR is a member of the graph, and its digest is the IR root
-        // the certificate states. Reading it from the certificate is safe
-        // precisely because the kernel then folds the IR section itself and
-        // refuses a root that does not match what it folded.
-        .proof_ir_digest = if (inputs.certificate) |certificate|
-            proofIrDigest(certificate)
-        else
-            null,
+        // The kernel refolds the IR and the complete certificate. The latter
+        // normalizes only the two self-referential digest slots, so every
+        // authority-bearing section participates in the executable root.
+        .proof_ir_digest = if (commitments) |value| value.ir else null,
+        .proof_certificate_digest = if (commitments) |value| value.certificate else null,
     });
 }
 
@@ -131,17 +132,24 @@ pub fn accept(
     }, policy);
 }
 
-/// Peek at the certificate's stated IR root without trusting it.
+const CertificateCommitments = struct {
+    ir: [32]u8,
+    certificate: [32]u8,
+};
+
+/// Derive the certificate-owned graph members without trusting either one.
 ///
-/// The consumer cannot rebuild the proof IR - it has no compiler - so the one
-/// member it cannot derive is read from the certificate. That is not a hole:
-/// the kernel refolds the IR section it decoded and refuses a certificate whose
-/// stated root is not the fold of the IR it carries, so a producer that lies
-/// here fails there.
-fn proofIrDigest(certificate: []const u8) ?[32]u8 {
+/// The consumer cannot rebuild the proof IR because it has no compiler, so its
+/// stated root is returned beside a fold over every certificate byte. The
+/// checker independently refolds the IR section and compares it with the first
+/// value before accepting any evidence.
+fn certificateCommitments(certificate: []const u8) ?CertificateCommitments {
     var budget = pcc.limits.Budget.init(.{});
     const decoded = pcc.certificate.decode(certificate, .{}, &budget) catch return null;
-    return decoded.identity.ir_root;
+    return .{
+        .ir = decoded.identity.ir_root,
+        .certificate = pcc.certificate.commitmentDigest(certificate, decoded) catch return null,
+    };
 }
 
 // ---------------------------------------------------------------------------

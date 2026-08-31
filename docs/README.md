@@ -3,9 +3,11 @@
 These docs describe the current codebase. Release history lives in
 `CHANGELOG.md`, and [Roadmap](roadmap.md) is the only forward-looking list of
 work. [docs/plans/](plans/) holds design documents for named subsystems, each
-owning one area and stating what it unblocks; they are forward-looking too, but
-they are designs rather than a backlog. Finished plans live under
-[archive](archive/README.md).
+owning one area and stating what it unblocks. A plan can define a design, but
+only the roadmap states whether that design is current, complete, blocked, or
+scheduled. Finished records normally move under [archive](archive/README.md).
+The repository-level [advisor-plans](../advisor-plans/README.md) directory holds
+saved proposals, not approved or active work.
 
 ## Start Here
 
@@ -22,8 +24,8 @@ they are designs rather than a backlog. Finished plans live under
 - [Durable Workflows](durable-workflows.md) - durable run/step/signal,
   workflow queue, dead-letter handling, proof receipts, and replay boundaries.
 - [Roadmap](roadmap.md) - supported platforms, current limitations, planned
-  runtime work, the `zts-model-1` language program, and what remains of the
-  reset.
+  runtime work, artifact-assurance ratchets, local-model qualification, and
+  what remains of the reset.
 - [First Durable Workflow](tutorials/first-durable-workflow.md) - run the
   durable workflow examples from a clean checkout and inspect replay state.
 - [Convergence](convergence.md) - the measured first-draft veto-pass rate over
@@ -88,8 +90,9 @@ they are designs rather than a backlog. Finished plans live under
 - [zts-model-1 Formal Spec](zts-formal-spec-northstar-advanced.md) - the
   language-design and assurance northstar for `zts-model-1`. Compiler-owned
   registries define the implemented surface, and some target-level design text
-  remains unreconciled with the live compiler. The independent assurance
-  certificate remains proposed work.
+  remains beyond the live compiler. Artifact-level certificate acceptance now
+  ships with disclosed tested and trusted edges; the spec's stronger target is
+  not a claim that those residual edges have been eliminated.
 
 ## Solutions
 
