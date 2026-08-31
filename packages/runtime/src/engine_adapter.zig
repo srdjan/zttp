@@ -15,6 +15,9 @@ pub const ResponseHandle = HandlerPool.ResponseHandle;
 pub const HandlerContract = zq.HandlerContract;
 pub const HandlerProperties = zq.HandlerProperties;
 pub const RuntimePolicy = zq.RuntimePolicy;
+/// The configured capability policy file, parsed. It is the only source of
+/// entries for a contract category the compiler could not enumerate.
+pub const HandlerPolicy = zq.handler_policy.HandlerPolicy;
 pub const SourceIdentity = zq.SourceIdentity;
 pub const SqlQueryInfo = zq.handler_policy.SqlQueryInfo;
 pub const normalizedSqlQuery = zq.handler_policy.normalizedSqlQuery;
@@ -64,8 +67,11 @@ pub fn defaultHandlerProperties() HandlerProperties {
     };
 }
 
-pub fn contractRuntimePolicy(contract: *const HandlerContract) RuntimePolicy {
-    return zq.handler_policy.contractToRuntimePolicy(contract);
+pub fn contractRuntimePolicy(
+    contract: *const HandlerContract,
+    configured: ?*const HandlerPolicy,
+) RuntimePolicy {
+    return zq.handler_policy.contractToRuntimePolicy(contract, configured);
 }
 
 pub fn initHandlerPool(

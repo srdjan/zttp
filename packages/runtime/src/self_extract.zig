@@ -45,6 +45,10 @@ pub const Payload = struct {
     policy_strings: []const []const u8,
     /// SHA-256 of the exact serialized bytes read from section 4.
     policy_section_sha256: [32]u8 = [_]u8{0} ** 32,
+    /// Section 4 itself, exactly as read. The acceptance kernel decodes these
+    /// bytes with its own code; a digest alone would say only that two sides
+    /// hashed the same blob, not that either could read it.
+    policy_section: ?[]const u8 = null,
     /// Compact JWS (RFC 7515 Section 7.1) signing the contract, bytecode,
     /// analyzer policy, capability matrix, and serialized runtime policy
     /// commitments. Null when the binary was built without `--attest`.
@@ -59,6 +63,7 @@ pub const Payload = struct {
         for (self.dep_bytecodes) |dep| allocator.free(dep);
         allocator.free(self.dep_bytecodes);
         if (self.contract_json) |c| allocator.free(c);
+        if (self.policy_section) |section| allocator.free(section);
         if (self.attestation_jws) |a| allocator.free(a);
         if (self.certificate) |c| allocator.free(c);
         // Free the values arrays inside each policy allow list
@@ -416,6 +421,7 @@ pub fn parse(allocator: std.mem.Allocator, data: []const u8) !?Payload {
     var attestation_jws: ?[]const u8 = null;
     var certificate: ?[]const u8 = null;
     var policy: zts.RuntimePolicy = .{};
+    var policy_section: ?[]const u8 = null;
     var policy_section_sha256 = [_]u8{0} ** 32;
     var policy_strings: std.ArrayList([]const u8) = .empty;
     errdefer {
@@ -425,6 +431,7 @@ pub fn parse(allocator: std.mem.Allocator, data: []const u8) !?Payload {
             allocator.free(deps);
         }
         if (contract_json) |c| allocator.free(c);
+        if (policy_section) |section| allocator.free(section);
         if (attestation_jws) |a| allocator.free(a);
         if (certificate) |c| allocator.free(c);
         for (policy_strings.items) |s| allocator.free(s);
@@ -454,6 +461,7 @@ pub fn parse(allocator: std.mem.Allocator, data: []const u8) !?Payload {
             },
             @intFromEnum(Section.policy) => {
                 std.crypto.hash.sha2.Sha256.hash(section_data, &policy_section_sha256, .{});
+                policy_section = try allocator.dupe(u8, section_data);
                 policy = try deserializePolicy(allocator, section_data, &policy_strings);
             },
             @intFromEnum(Section.attestation) => {
@@ -479,6 +487,7 @@ pub fn parse(allocator: std.mem.Allocator, data: []const u8) !?Payload {
         .policy = policy,
         .policy_strings = try policy_strings.toOwnedSlice(allocator),
         .policy_section_sha256 = policy_section_sha256,
+        .policy_section = policy_section,
         .attestation_jws = attestation_jws,
         .certificate = certificate,
     };
@@ -509,40 +518,130 @@ fn parseDeps(allocator: std.mem.Allocator, data: []const u8) ![]const []const u8
 // -- Policy serialization --
 // Format: for each of env, egress, cache, sql:
 //   [1 byte: enabled] [2 bytes: count] [for each: 2 bytes len + bytes]
+// then one byte of permitted resolved-address scopes.
+//
+// Entries are strictly ascending. That is not a convenience: the consumer's own
+// decoder (`packages/proof-checker/src/capability_policy.zig`) binary-searches
+// these bytes and rejects an unsorted or duplicated list, so a policy the
+// producer wrote in contract order would be a policy no consumer can read.
+// Canonicalizing here also makes the same policy serialize to the same bytes,
+// which is what the certificate identity commits to.
+
+/// No resolved-address scope is permitted. The egress guard reads scopes from
+/// the policy file once egress entries become endpoints; until then an empty
+/// set is the honest value, and an empty set denies.
+const policy_scopes_none: u8 = 0;
+
+pub const PolicyFormatError = error{
+    PolicyTooManyEntries,
+    PolicyEntryTooLong,
+    PolicyEntryEmpty,
+    PolicyDuplicateEntry,
+    /// A SQL name with no operation. The wire format carries one read-only flag
+    /// per entry, so a name that is allowed for both reads and writes cannot be
+    /// written down. Refusing beats serializing half of it.
+    PolicySqlOperationUnknown,
+};
 
 pub fn serializePolicy(allocator: std.mem.Allocator, policy: *const zts.RuntimePolicy) ![]u8 {
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
 
-    try serializeAllowList(&buf, allocator, policy.env);
-    try serializeAllowList(&buf, allocator, policy.egress);
-    try serializeAllowList(&buf, allocator, policy.cache);
+    try serializeAllowList(&buf, allocator, policy.env, handler_policy.max_identifier_bytes);
+    try serializeAllowList(&buf, allocator, policy.egress, handler_policy.max_endpoint_bytes);
+    try serializeAllowList(&buf, allocator, policy.cache, handler_policy.max_identifier_bytes);
     // SQL carries a per-query read-only flag so the deployed binary enforces the
     // db.read/db.write split the contract proved (not a flat, operation-agnostic
     // name list).
     try serializeSqlAllowList(&buf, allocator, policy.sql);
+    try buf.append(allocator, policy_scopes_none);
 
     return buf.toOwnedSlice(allocator);
 }
 
-fn serializeAllowList(buf: *std.ArrayList(u8), allocator: std.mem.Allocator, list: handler_policy.RuntimeAllowList) !void {
+fn serializeAllowList(
+    buf: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    list: handler_policy.RuntimeAllowList,
+    max_entry_bytes: usize,
+) !void {
+    const ordered = try canonicalValues(allocator, list.values, max_entry_bytes);
+    defer allocator.free(ordered);
+
     try buf.append(allocator, if (list.enabled) 1 else 0);
-    try writeU16(buf, allocator, @intCast(list.values.len));
-    for (list.values) |v| {
+    try writeU16(buf, allocator, @intCast(ordered.len));
+    for (ordered) |v| {
         try writeU16(buf, allocator, @intCast(v.len));
         try buf.appendSlice(allocator, v);
     }
 }
 
+fn canonicalValues(
+    allocator: std.mem.Allocator,
+    values: []const []const u8,
+    max_entry_bytes: usize,
+) ![]const []const u8 {
+    if (values.len > handler_policy.max_policy_entries) return error.PolicyTooManyEntries;
+    for (values) |value| {
+        if (value.len == 0) return error.PolicyEntryEmpty;
+        if (value.len > max_entry_bytes) return error.PolicyEntryTooLong;
+    }
+
+    const ordered = try allocator.alloc([]const u8, values.len);
+    errdefer allocator.free(ordered);
+    @memcpy(ordered, values);
+    std.mem.sort([]const u8, ordered, {}, lessThanBytes);
+
+    var index: usize = 1;
+    while (index < ordered.len) : (index += 1) {
+        if (std.mem.eql(u8, ordered[index - 1], ordered[index])) return error.PolicyDuplicateEntry;
+    }
+    return ordered;
+}
+
+fn lessThanBytes(_: void, a: []const u8, b: []const u8) bool {
+    return std.mem.order(u8, a, b) == .lt;
+}
+
+const SqlEntry = struct {
+    name: []const u8,
+    read_only: bool,
+};
+
+fn lessThanSqlEntry(_: void, a: SqlEntry, b: SqlEntry) bool {
+    return std.mem.order(u8, a.name, b.name) == .lt;
+}
+
 // SQL section format: [1 byte enabled] [2 bytes count]
 //   [for each query: 1 byte read_only, 2 bytes name len, name bytes]
-fn serializeSqlAllowList(buf: *std.ArrayList(u8), allocator: std.mem.Allocator, list: handler_policy.RuntimeSqlAllowList) !void {
+fn serializeSqlAllowList(
+    buf: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    list: handler_policy.RuntimeSqlAllowList,
+) !void {
+    if (list.values.len > 0) return error.PolicySqlOperationUnknown;
+    if (list.queries.len > handler_policy.max_policy_entries) return error.PolicyTooManyEntries;
+
+    const ordered = try allocator.alloc(SqlEntry, list.queries.len);
+    defer allocator.free(ordered);
+    for (list.queries, 0..) |query, i| {
+        if (query.name.len == 0) return error.PolicyEntryEmpty;
+        if (query.name.len > handler_policy.max_identifier_bytes) return error.PolicyEntryTooLong;
+        ordered[i] = .{ .name = query.name, .read_only = handler_policy.sqlQueryIsReadOnly(query) };
+    }
+    std.mem.sort(SqlEntry, ordered, {}, lessThanSqlEntry);
+
+    var index: usize = 1;
+    while (index < ordered.len) : (index += 1) {
+        if (std.mem.eql(u8, ordered[index - 1].name, ordered[index].name)) return error.PolicyDuplicateEntry;
+    }
+
     try buf.append(allocator, if (list.enabled) 1 else 0);
-    try writeU16(buf, allocator, @intCast(list.queries.len));
-    for (list.queries) |query| {
-        try buf.append(allocator, if (handler_policy.sqlQueryIsReadOnly(query)) 1 else 0);
-        try writeU16(buf, allocator, @intCast(query.name.len));
-        try buf.appendSlice(allocator, query.name);
+    try writeU16(buf, allocator, @intCast(ordered.len));
+    for (ordered) |entry| {
+        try buf.append(allocator, if (entry.read_only) 1 else 0);
+        try writeU16(buf, allocator, @intCast(entry.name.len));
+        try buf.appendSlice(allocator, entry.name);
     }
 }
 
@@ -556,6 +655,14 @@ fn deserializePolicy(
     const egress = try deserializeAllowList(allocator, data, &pos, strings);
     const cache = try deserializeAllowList(allocator, data, &pos, strings);
     const sql = try deserializeSqlAllowList(allocator, data, &pos, strings);
+
+    // The scope byte, and nothing after it. A section this reader ran out of
+    // bytes for used to come back disabled, and a disabled section admits every
+    // value, so a truncated policy read as a permissive one.
+    if (pos >= data.len) return error.InvalidPayload;
+    if (data[pos] != policy_scopes_none) return error.InvalidPayload;
+    pos += 1;
+    if (pos != data.len) return error.InvalidPayload;
 
     return .{
         .env = env,
@@ -571,7 +678,7 @@ fn deserializeSqlAllowList(
     pos: *usize,
     strings: *std.ArrayList([]const u8),
 ) !handler_policy.RuntimeSqlAllowList {
-    if (pos.* >= data.len) return .{};
+    if (pos.* >= data.len) return error.InvalidPayload;
     const enabled = data[pos.*] != 0;
     pos.* += 1;
 
@@ -602,7 +709,7 @@ fn deserializeAllowList(
     pos: *usize,
     strings: *std.ArrayList([]const u8),
 ) !handler_policy.RuntimeAllowList {
-    if (pos.* >= data.len) return .{};
+    if (pos.* >= data.len) return error.InvalidPayload;
     const enabled = data[pos.*] != 0;
     pos.* += 1;
 

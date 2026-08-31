@@ -747,6 +747,7 @@ fn appendedServerConfig(payload: *const self_extract.Payload) ServerConfig {
         .contract_json = payload.contract_json,
         .attestation_jws = payload.attestation_jws,
         .policy_section_sha256 = payload.policy_section_sha256,
+        .policy_section = payload.policy_section,
         .certificate = payload.certificate,
         .port = 3000,
         // The deployed binary runs the interpreter against the appended bytecode,

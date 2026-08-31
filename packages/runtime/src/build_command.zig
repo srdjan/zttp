@@ -551,6 +551,10 @@ const ArtifactTailInput = struct {
     /// captured them. Absent means no certificate is embedded, which the strict
     /// activation path refuses rather than treats as permission.
     proof_evidence: ?*const zts.ProofEvidence = null,
+    /// The configured capability policy, when the project has one. It is the
+    /// only source of entries for a contract category the compiler could not
+    /// enumerate; without it such a category ships denying everything.
+    configured_policy: ?*const zts.HandlerPolicy = null,
 };
 
 const ArtifactTailCapabilities = struct {
@@ -651,7 +655,7 @@ fn writeArtifactTail(
     defer if (contract_json) |json| allocator.free(json);
 
     const policy = if (input.contract) |contract|
-        zts.handler_policy.contractToRuntimePolicy(contract)
+        zts.handler_policy.contractToRuntimePolicy(contract, input.configured_policy)
     else
         zts.RuntimePolicy{};
     const policy_section = try self_extract.serializePolicy(allocator, &policy);
@@ -994,6 +998,7 @@ fn runBuild(
         .dep_bytecodes = dep_bytecodes,
         .contract = if (compiled.contract) |*contract| contract else null,
         .proof_evidence = if (compiled.proof_evidence) |*evidence| evidence else null,
+        .configured_policy = request.policy,
     });
 
     caps.codesign(caps.context, allocator, output_path);
@@ -1375,7 +1380,7 @@ test "the signed executable root is the one a consumer recomputes from the same 
     // sections, and confirm the two derivations agree.
     const contract_json = try serializeContractJson(allocator, &contract);
     defer allocator.free(contract_json);
-    const policy = zts.handler_policy.contractToRuntimePolicy(&contract);
+    const policy = zts.handler_policy.contractToRuntimePolicy(&contract, null);
     const policy_section = try self_extract.serializePolicy(allocator, &policy);
     defer allocator.free(policy_section);
     var policy_digest: [32]u8 = undefined;
@@ -1514,7 +1519,7 @@ test "a real compile produces a certificate that binds its own IR and artifact" 
     const contract = compiled.contract orelse return error.TestUnexpectedResult;
     const contract_json = try serializeContractJson(allocator, &contract);
     defer allocator.free(contract_json);
-    const policy = zts.handler_policy.contractToRuntimePolicy(&contract);
+    const policy = zts.handler_policy.contractToRuntimePolicy(&contract, null);
     const policy_section = try self_extract.serializePolicy(allocator, &policy);
     defer allocator.free(policy_section);
 
@@ -1599,7 +1604,7 @@ test "a real compile reaches policy acceptance, and one changed byte does not" {
     const contract = compiled.contract orelse return error.TestUnexpectedResult;
     const contract_json = try serializeContractJson(allocator, &contract);
     defer allocator.free(contract_json);
-    const policy = zts.handler_policy.contractToRuntimePolicy(&contract);
+    const policy = zts.handler_policy.contractToRuntimePolicy(&contract, null);
     const policy_section = try self_extract.serializePolicy(allocator, &policy);
     defer allocator.free(policy_section);
 
@@ -1697,7 +1702,7 @@ test "the signed root and the startup rebuild are the same fold" {
     const contract = compiled.contract orelse return error.TestUnexpectedResult;
     const contract_json = try serializeContractJson(allocator, &contract);
     defer allocator.free(contract_json);
-    const policy = zts.handler_policy.contractToRuntimePolicy(&contract);
+    const policy = zts.handler_policy.contractToRuntimePolicy(&contract, null);
     const policy_section = try self_extract.serializePolicy(allocator, &policy);
     defer allocator.free(policy_section);
     const policy_digest = artifact_graph.digestOf(policy_section);
@@ -1844,7 +1849,7 @@ fn certificateForSource(allocator: std.mem.Allocator, source: []const u8) ![]u8 
     const contract = compiled.contract orelse return error.TestUnexpectedResult;
     const contract_json = try serializeContractJson(allocator, &contract);
     defer allocator.free(contract_json);
-    const policy = zts.handler_policy.contractToRuntimePolicy(&contract);
+    const policy = zts.handler_policy.contractToRuntimePolicy(&contract, null);
     const policy_section = try self_extract.serializePolicy(allocator, &policy);
     defer allocator.free(policy_section);
 

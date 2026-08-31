@@ -107,7 +107,9 @@ fn certify(allocator: std.mem.Allocator, source: []const u8) !Certified {
 
     const contract_json = try contractJson(allocator, &contract);
     defer allocator.free(contract_json);
-    const policy = zts.handler_policy.contractToRuntimePolicy(&contract);
+    // The ratchet corpus is literal-only, so there is no dynamic category for a
+    // configured policy to supply entries to.
+    const policy = zts.handler_policy.contractToRuntimePolicy(&contract, null);
     const policy_section = try self_extract.serializePolicy(allocator, &policy);
     defer allocator.free(policy_section);
 

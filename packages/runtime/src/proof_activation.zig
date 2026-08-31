@@ -13,6 +13,7 @@
 
 const std = @import("std");
 const pcc = @import("zttp_proof_checker");
+const zts = @import("zts");
 
 const artifact_graph = @import("artifact_graph.zig");
 
@@ -31,6 +32,12 @@ pub const Inputs = struct {
     contract_section: ?[]const u8 = null,
     /// SHA-256 of section 4, as this process hashed it on the way in.
     policy_section_digest: [32]u8,
+    /// Section 4 itself, when this process holds it. The kernel decodes these
+    /// bytes with its own decoder and recomputes their digest against the
+    /// certificate identity, which is what ties a guard plan to one policy
+    /// rather than to any policy. Null supplies no resource authority, and a
+    /// guarded artifact is then refused for want of one.
+    policy_section: ?[]const u8 = null,
     /// Module and source identity, read from the contract this process
     /// validated rather than from the one the producer signed.
     identity: artifact_graph.Identity = .{},
@@ -120,6 +127,18 @@ pub fn accept(
         else => return refusal(.artifact_binding, .graph_member_missing, inputs.provenance, true),
     };
 
+    // The bytes and the graph member must describe the same policy before the
+    // kernel is asked anything about them. The kernel checks these bytes
+    // against the certificate's identity; this checks them against the section
+    // this process actually loaded.
+    if (inputs.policy_section) |bytes| {
+        var digest: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
+        if (!std.mem.eql(u8, &digest, &inputs.policy_section_digest)) {
+            return refusal(.guard_coverage, .runtime_policy_undecodable, inputs.provenance, true);
+        }
+    }
+
     const scratch = try allocator.alloc(u8, pcc.checker.scratchBytes(policy.limits));
     defer allocator.free(scratch);
 
@@ -129,6 +148,7 @@ pub fn accept(
         .provenance = inputs.provenance,
         .scratch = scratch,
         .solver_results = inputs.solver_results,
+        .runtime_policy = if (inputs.policy_section) |bytes| .{ .bytes = bytes } else null,
     }, policy);
 }
 
@@ -181,4 +201,30 @@ test "a certificate that does not decode is refused at the decode stage" {
     try testing.expect(!result.accepted());
     // The graph rebuild runs first and refuses the empty module stream.
     try testing.expect(result.rejection != null);
+}
+
+test "the producer and the consumer cap policy resources at the same numbers" {
+    // `packages/zts` writes the policy and `packages/proof-checker` reads it,
+    // and neither can import the other: the kernel is a leaf and the compiler
+    // sits below it, so each carries its own copy of R18's numbers. This file
+    // sees both. A number that moves on one side without the other produces a
+    // policy the producer writes and the consumer refuses, which is a failure
+    // at every deployment rather than here.
+    const producer = zts.handler_policy;
+    try testing.expectEqual(
+        @as(usize, pcc.residual.max_policy_entries),
+        producer.max_policy_entries,
+    );
+    try testing.expectEqual(
+        pcc.residual.max_identifier_bytes,
+        producer.max_identifier_bytes,
+    );
+    try testing.expectEqual(
+        pcc.residual.max_endpoint_bytes,
+        producer.max_endpoint_bytes,
+    );
+    try testing.expectEqual(
+        pcc.residual.max_lookup_comparisons,
+        producer.max_lookup_comparisons,
+    );
 }

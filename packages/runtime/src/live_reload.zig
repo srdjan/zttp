@@ -65,6 +65,42 @@ fn shouldSkipContract(config: *const LiveReloadConfig) bool {
     return !config.prove and config.policy_path == null;
 }
 
+/// Why a swap may not proceed.
+///
+/// A live swap installs an executable that nothing checked: there is no
+/// certificate, no acceptance run, and no residual plan. That is tolerable for
+/// a handler whose capability resources the compiler enumerated, because the
+/// contract-derived allowlist is exact. It is not tolerable in either direction
+/// once a guard is involved - the running generation's coverage was established
+/// for a different executable, and a candidate that computes a resource has no
+/// coverage at all. Both answers are refusals, and a refusal keeps the whole
+/// previous generation, which is what every caller does with `false`.
+///
+/// Separate from `applySwap` so the decision can be read and tested without a
+/// pool, a server, and a file watcher.
+const SwapRefusal = enum {
+    none,
+    installed_generation_is_guarded,
+    candidate_computes_a_capability_resource,
+};
+
+fn swapRefusal(installed_generation_is_guarded: bool, candidate: ?*const HandlerContract) SwapRefusal {
+    if (installed_generation_is_guarded) return .installed_generation_is_guarded;
+    const contract = candidate orelse return .none;
+    // The plain-swap and missing-contract branches arrive here with no
+    // candidate contract. They are covered by the first check: a swap with
+    // nothing to inspect may proceed only when the running generation has no
+    // guard to preserve.
+    if (contract.env.dynamic or
+        contract.egress.dynamic or
+        contract.cache.dynamic or
+        contract.sql.dynamic)
+    {
+        return .candidate_computes_a_capability_resource;
+    }
+    return .none;
+}
+
 pub const LiveReloadState = struct {
     allocator: std.mem.Allocator,
     server: *Server,
@@ -782,6 +818,24 @@ pub const LiveReloadState = struct {
             return false;
         };
 
+        switch (swapRefusal(self.server.generationIsGuarded(), runtime_contract)) {
+            .none => {},
+            .installed_generation_is_guarded => {
+                printReload(
+                    "Running artifact guards capability resources at run time. Live swap refused; the old handler stays active.\n",
+                    .{},
+                );
+                return false;
+            },
+            .candidate_computes_a_capability_resource => {
+                printReload(
+                    "New handler computes a capability resource, which only a checked build can install. Live swap refused; the old handler stays active.\n",
+                    .{},
+                );
+                return false;
+            },
+        }
+
         var validated_contract: ?contract_runtime.ValidatedRuntimeContract = null;
         var dev_policy: ?RuntimePolicy = null;
         if (runtime_contract) |hc| {
@@ -1121,6 +1175,56 @@ test "LiveReloadConfig defaults" {
     try std.testing.expectEqual(@as(i64, 250), config.poll_interval_ms);
     try std.testing.expect(config.policy_path == null);
     try std.testing.expect(shouldSkipContract(&config));
+}
+
+test "a swap that would strand a guard is refused from either side" {
+    const allocator = std.testing.allocator;
+    const path = try allocator.dupe(u8, "handler.ts");
+    var contract = zts.handler_contract.emptyContract(path);
+    defer contract.deinit(allocator);
+
+    // Nothing guarded on either side: an ordinary dev swap.
+    try std.testing.expectEqual(SwapRefusal.none, swapRefusal(false, &contract));
+    // The plain-swap and missing-contract branches, which carry no candidate.
+    try std.testing.expectEqual(SwapRefusal.none, swapRefusal(false, null));
+
+    // The running generation guards resources. Its coverage was established
+    // for the executable that is about to be replaced, so no candidate - not
+    // even one with nothing dynamic, and not even none at all - may take over.
+    try std.testing.expectEqual(
+        SwapRefusal.installed_generation_is_guarded,
+        swapRefusal(true, &contract),
+    );
+    try std.testing.expectEqual(
+        SwapRefusal.installed_generation_is_guarded,
+        swapRefusal(true, null),
+    );
+
+    // A candidate that computes a capability resource has no coverage at all,
+    // because a live swap runs no acceptance. Each category answers for itself.
+    contract.env.dynamic = true;
+    try std.testing.expectEqual(
+        SwapRefusal.candidate_computes_a_capability_resource,
+        swapRefusal(false, &contract),
+    );
+    contract.env.dynamic = false;
+    contract.egress.dynamic = true;
+    try std.testing.expectEqual(
+        SwapRefusal.candidate_computes_a_capability_resource,
+        swapRefusal(false, &contract),
+    );
+    contract.egress.dynamic = false;
+    contract.cache.dynamic = true;
+    try std.testing.expectEqual(
+        SwapRefusal.candidate_computes_a_capability_resource,
+        swapRefusal(false, &contract),
+    );
+    contract.cache.dynamic = false;
+    contract.sql.dynamic = true;
+    try std.testing.expectEqual(
+        SwapRefusal.candidate_computes_a_capability_resource,
+        swapRefusal(false, &contract),
+    );
 }
 
 test "live reload builds a contract when a capability policy is configured" {

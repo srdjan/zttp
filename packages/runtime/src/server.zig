@@ -1265,6 +1265,8 @@ pub const ServerConfig = struct {
     /// SHA-256 of the exact serialized runtime-policy section read from a
     /// self-extract payload. Null for dev/live reload, which has no section 4.
     policy_section_sha256: ?[32]u8 = null,
+    /// Section 4 exactly as loaded, for the acceptance kernel's own decoder.
+    policy_section: ?[]const u8 = null,
 
     /// The proof certificate, exactly as embedded. Null for dev, live reload,
     /// and any artifact built before certificates existed. A production
@@ -1349,8 +1351,12 @@ const OwnedDevPolicy = struct {
     }
 };
 
-fn ownDevPolicy(allocator: std.mem.Allocator, contract: *const engine.HandlerContract) !OwnedDevPolicy {
-    const borrowed = engine.contractRuntimePolicy(contract);
+fn ownDevPolicy(
+    allocator: std.mem.Allocator,
+    contract: *const engine.HandlerContract,
+    configured: ?*const engine.HandlerPolicy,
+) !OwnedDevPolicy {
+    const borrowed = engine.contractRuntimePolicy(contract, configured);
     var owned = OwnedDevPolicy{ .policy = borrowed };
     errdefer owned.deinit(allocator);
 
@@ -1603,6 +1609,18 @@ pub const Server = struct {
         if (self.config.handler == .file_path) {
             self.allocator.free(self.handler_code);
         }
+    }
+
+    /// Whether the installed generation depends on a runtime guard decision.
+    ///
+    /// Such a generation is a tuple - executable root, contract, residual plan,
+    /// policy - that one acceptance run established together. A live swap
+    /// replaces the executable without re-running acceptance, so it cannot
+    /// produce that tuple, and the swap is refused rather than allowed to leave
+    /// a new handler standing on the old policy's coverage.
+    pub fn generationIsGuarded(self: *const Self) bool {
+        const promoted = self.proof_checked orelse return false;
+        return promoted.guards.required > 0;
     }
 
     /// Replace the runtime contract and reconfigure the proof cache.
@@ -1870,6 +1888,7 @@ pub const Server = struct {
             .dep_bytecodes = self.runtime_dep_bytecodes orelse &.{},
             .contract_section = self.config.contract_json,
             .policy_section_digest = policy_digest,
+            .policy_section = self.config.policy_section,
             .identity = self.observedArtifactIdentity(),
             .provenance = if (self.config.attestation_jws != null)
                 .signature_verified
@@ -1877,7 +1896,7 @@ pub const Server = struct {
                 .absent,
         }, pcc.policy.production);
 
-        self.proof_checked = contract_runtime.promote(contract, assessment);
+        self.proof_checked = contract_runtime.promote(contract, assessment, policy_digest);
         if (self.proof_checked == null) {
             if (!builtin.is_test) {
                 if (assessment.rejection) |rejection| {
@@ -2057,7 +2076,11 @@ pub const Server = struct {
         self.dev_policy_previous = self.dev_policy_current;
         self.dev_policy_current = null;
 
-        const owned = ownDevPolicy(self.allocator, contract) catch {
+        // No configured policy reaches the live dev path: `zttp dev` compiles
+        // with strict checking on, so every category the contract carries is
+        // one the compiler enumerated. A category it could not enumerate
+        // installs deny-all rather than the allow-all it used to.
+        const owned = ownDevPolicy(self.allocator, contract, null) catch {
             return denyAllDevPolicy();
         };
         const policy = owned.policy;
@@ -4206,7 +4229,7 @@ test "a live swap drops the promotion the replaced artifact earned" {
         .development_only = false,
         .rejection = null,
         .work_spent = 1,
-    });
+    }, [_]u8{0} ** 32);
     try std.testing.expect(server.proof_checked != null);
 
     // The certificate described the artifact that is being replaced, so the
@@ -4242,7 +4265,7 @@ test "promotion refuses anything short of acceptance" {
             .recertifiable = true,
         },
         .work_spent = 1,
-    }) == null);
+    }, [_]u8{0} ** 32) == null);
 
     // Accepted, but with no grade to report. An acceptance that cannot say how
     // strong it is does not get to drive anything.
@@ -4253,7 +4276,7 @@ test "promotion refuses anything short of acceptance" {
         .development_only = false,
         .rejection = null,
         .work_spent = 1,
-    }) == null);
+    }, [_]u8{0} ** 32) == null);
 
     // Integrity alone is not acceptance.
     try std.testing.expect(contract_runtime.promote(&validated, .{
@@ -4263,7 +4286,7 @@ test "promotion refuses anything short of acceptance" {
         .development_only = false,
         .rejection = null,
         .work_spent = 1,
-    }) == null);
+    }, [_]u8{0} ** 32) == null);
 }
 
 test "self-extract runtime policy binding rejects a widened policy" {

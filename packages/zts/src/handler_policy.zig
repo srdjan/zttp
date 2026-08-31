@@ -60,6 +60,22 @@ pub const HandlerPolicy = struct {
     }
 };
 
+/// R18 resource limits.
+///
+/// Mirrored from `packages/proof-checker/src/residual.zig`, which this package
+/// cannot import: the acceptance kernel is a leaf and `packages/zts` sits below
+/// it. A test in `packages/runtime`, which sees both, pins the two sets equal,
+/// so a change on either side fails there rather than at a deployed guard.
+pub const max_policy_entries: usize = 256;
+/// An environment key, cache namespace, or SQL query name.
+pub const max_identifier_bytes: usize = 255;
+/// A normalized `scheme://host:port`. Egress entries are bare host names until
+/// the endpoint move, and the larger cap already covers those.
+pub const max_endpoint_bytes: usize = 512;
+/// Probes one category lookup may cost at `max_policy_entries`. Nine, measured
+/// over the search rather than read off log2 of the cap.
+pub const max_lookup_comparisons: usize = 9;
+
 pub const RuntimeAllowList = struct {
     enabled: bool = false,
     values: []const []const u8 = &.{},
@@ -179,40 +195,222 @@ fn firstSqlToken(statement: []const u8) ?[]const u8 {
 }
 
 /// Convert a HandlerContract's proven sections into a RuntimePolicy.
-/// When `dynamic: false`, the compiler proved ALL access uses literal strings -
-/// restrict to exactly those. When `dynamic: true`, some access is computed -
-/// leave that section permissive.
 ///
-/// The returned policy borrows string data from the contract. The contract
-/// must outlive the policy. For precompilation this is fine because the data
-/// gets embedded as compile-time constants in the generated .zig file.
-pub fn contractToRuntimePolicy(contract: *const HandlerContract) RuntimePolicy {
+/// A static section restricts the runtime to exactly the literals the compiler
+/// saw. A dynamic section - some access is computed - takes its entries from
+/// `configured`, the capability policy file, and from nowhere else. With no
+/// configured section it is enabled and empty, which denies everything.
+///
+/// It used to be left disabled, and a disabled list admits every value. The
+/// only thing standing between that and an allow-all deployment was that
+/// strict checking rejects a computed capability argument (ZTS602) before a
+/// dynamic contract can be built. That is a compiler decision guarding a
+/// runtime default, and the guarded-call work removes it, so the default moves
+/// first: no section this function returns is ever disabled.
+///
+/// The returned policy borrows string data from the contract and from
+/// `configured`. Both must outlive the policy. For precompilation this is fine
+/// because the data gets embedded as compile-time constants in the generated
+/// .zig file.
+pub fn contractToRuntimePolicy(
+    contract: *const HandlerContract,
+    configured: ?*const HandlerPolicy,
+) RuntimePolicy {
     return .{
-        .env = if (!contract.env.dynamic and contract.env.literal.items.len > 0)
-            .{ .enabled = true, .values = contract.env.literal.items }
-        else if (!contract.env.dynamic)
-            .{ .enabled = true, .values = &.{} }
-        else
-            .{},
-        .egress = if (!contract.egress.dynamic and contract.egress.hosts.items.len > 0)
-            .{ .enabled = true, .values = contract.egress.hosts.items }
-        else if (!contract.egress.dynamic)
-            .{ .enabled = true, .values = &.{} }
-        else
-            .{},
-        .cache = if (!contract.cache.dynamic and contract.cache.namespaces.items.len > 0)
-            .{ .enabled = true, .values = contract.cache.namespaces.items }
-        else if (!contract.cache.dynamic)
-            .{ .enabled = true, .values = &.{} }
-        else
-            .{},
-        .sql = if (!contract.sql.dynamic and contract.sql.queries.items.len > 0)
-            .{ .enabled = true, .queries = contract.sql.queries.items }
-        else if (!contract.sql.dynamic)
-            .{ .enabled = true, .queries = &.{} }
-        else
-            .{},
+        .env = projectSection(
+            contract.env.dynamic,
+            contract.env.literal.items,
+            if (configured) |policy| policy.env else null,
+        ),
+        .egress = projectSection(
+            contract.egress.dynamic,
+            contract.egress.hosts.items,
+            if (configured) |policy| policy.egress else null,
+        ),
+        .cache = projectSection(
+            contract.cache.dynamic,
+            contract.cache.namespaces.items,
+            if (configured) |policy| policy.cache else null,
+        ),
+        .sql = projectSqlSection(
+            contract.sql.dynamic,
+            contract.sql.queries.items,
+            if (configured) |policy| policy.sql else null,
+        ),
     };
+}
+
+fn projectSection(
+    dynamic: bool,
+    literals: []const []const u8,
+    configured: ?AllowList,
+) RuntimeAllowList {
+    if (!dynamic) return .{ .enabled = true, .values = literals };
+    const section = configured orelse return .{ .enabled = true, .values = &.{} };
+    return .{ .enabled = true, .values = section.values.items };
+}
+
+/// The SQL projection loses the read/write split when it comes from the policy
+/// file, because a configured `allow_queries` entry is a name with no
+/// operation. A name the file lists is therefore allowed for both, which is
+/// what the file says today. The residual guard schema splits named reads from
+/// named writes, so the SQL families stay rejected until the file can express
+/// the difference.
+fn projectSqlSection(
+    dynamic: bool,
+    queries: []const contract_mod.SqlQueryInfo,
+    configured: ?AllowList,
+) RuntimeSqlAllowList {
+    if (!dynamic) return .{ .enabled = true, .queries = queries };
+    const section = configured orelse return .{ .enabled = true };
+    return .{ .enabled = true, .values = section.values.items };
+}
+
+// ---------------------------------------------------------------------------
+// Installed lookup index
+// ---------------------------------------------------------------------------
+
+pub const IndexError = error{
+    /// More entries than R18 admits in one category.
+    TooManyEntries,
+    /// An identifier longer than R18 admits.
+    EntryTooLong,
+    /// An empty identifier names no resource.
+    EntryEmpty,
+    /// Two entries normalize to the same key, so the list says one thing twice
+    /// and the sorted index cannot say which one a lookup found.
+    DuplicateEntry,
+    OutOfMemory,
+};
+
+/// One immutable sorted index over an installed generation's policy.
+///
+/// Built once when the generation is installed, never after. Lookups are a
+/// bounded binary search - `max_lookup_comparisons` probes at the entry cap -
+/// rather than the linear scan `RuntimeAllowList` does, and the limits R18
+/// names are checked here, before activation, rather than at the sink.
+///
+/// Entries are borrowed. The policy, and whatever the policy borrows from,
+/// must outlive the index. Only the pointer arrays are owned.
+///
+/// Egress is absent on purpose: an egress entry is compared case-insensitively
+/// today, and a byte-sorted list cannot answer a case-insensitive question.
+/// It joins when egress entries become normalized endpoints, which are already
+/// case-folded, and the comparison becomes exact.
+pub const RuntimePolicyIndex = struct {
+    env: []const []const u8,
+    cache: []const []const u8,
+    sql_read: []const []const u8,
+    sql_write: []const []const u8,
+
+    pub const Section = enum { env, cache, sql_read, sql_write };
+
+    pub fn deinit(self: *RuntimePolicyIndex, allocator: std.mem.Allocator) void {
+        allocator.free(self.env);
+        allocator.free(self.cache);
+        allocator.free(self.sql_read);
+        allocator.free(self.sql_write);
+        self.* = undefined;
+    }
+
+    pub fn entries(self: *const RuntimePolicyIndex, section: Section) []const []const u8 {
+        return switch (section) {
+            .env => self.env,
+            .cache => self.cache,
+            .sql_read => self.sql_read,
+            .sql_write => self.sql_write,
+        };
+    }
+
+    pub fn allows(self: *const RuntimePolicyIndex, section: Section, candidate: []const u8) bool {
+        var ignored: usize = 0;
+        return searchCounting(self.entries(section), candidate, &ignored);
+    }
+
+    /// `allows`, reporting what it cost. The comparison bound is checked
+    /// against the search, not against a formula about the entry cap.
+    pub fn allowsCounting(
+        self: *const RuntimePolicyIndex,
+        section: Section,
+        candidate: []const u8,
+        comparisons: *usize,
+    ) bool {
+        return searchCounting(self.entries(section), candidate, comparisons);
+    }
+};
+
+fn searchCounting(values: []const []const u8, candidate: []const u8, comparisons: *usize) bool {
+    var low: usize = 0;
+    var high: usize = values.len;
+    while (low < high) {
+        const mid = low + (high - low) / 2;
+        comparisons.* += 1;
+        switch (std.mem.order(u8, values[mid], candidate)) {
+            .lt => low = mid + 1,
+            .gt => high = mid,
+            .eq => return true,
+        }
+    }
+    return false;
+}
+
+/// Build the generation's index. Rejects before activation rather than at the
+/// sink: an oversized, empty, or duplicated entry is a policy that cannot be
+/// enforced as written, and installing it would enforce something else.
+pub fn buildIndex(allocator: std.mem.Allocator, policy: RuntimePolicy) IndexError!RuntimePolicyIndex {
+    const env = try sortedSection(allocator, policy.env.values);
+    errdefer allocator.free(env);
+    const cache = try sortedSection(allocator, policy.cache.values);
+    errdefer allocator.free(cache);
+
+    var read_names: std.ArrayList([]const u8) = .empty;
+    defer read_names.deinit(allocator);
+    var write_names: std.ArrayList([]const u8) = .empty;
+    defer write_names.deinit(allocator);
+    for (policy.sql.values) |name| {
+        try read_names.append(allocator, name);
+        try write_names.append(allocator, name);
+    }
+    for (policy.sql.queries) |query| {
+        if (sqlQueryIsReadOnly(query))
+            try read_names.append(allocator, query.name)
+        else
+            try write_names.append(allocator, query.name);
+    }
+
+    const sql_read = try sortedSection(allocator, read_names.items);
+    errdefer allocator.free(sql_read);
+    const sql_write = try sortedSection(allocator, write_names.items);
+
+    return .{
+        .env = env,
+        .cache = cache,
+        .sql_read = sql_read,
+        .sql_write = sql_write,
+    };
+}
+
+fn sortedSection(allocator: std.mem.Allocator, values: []const []const u8) IndexError![]const []const u8 {
+    if (values.len > max_policy_entries) return error.TooManyEntries;
+    for (values) |value| {
+        if (value.len == 0) return error.EntryEmpty;
+        if (value.len > max_identifier_bytes) return error.EntryTooLong;
+    }
+
+    const out = try allocator.alloc([]const u8, values.len);
+    errdefer allocator.free(out);
+    @memcpy(out, values);
+    std.mem.sort([]const u8, out, {}, struct {
+        fn lt(_: void, a: []const u8, b: []const u8) bool {
+            return std.mem.order(u8, a, b) == .lt;
+        }
+    }.lt);
+
+    var index: usize = 1;
+    while (index < out.len) : (index += 1) {
+        if (std.mem.eql(u8, out[index - 1], out[index])) return error.DuplicateEntry;
+    }
+    return out;
 }
 
 pub const PolicyCategory = enum {
@@ -537,7 +735,7 @@ test "contractToRuntimePolicy restricts static sections" {
     };
     defer contract.deinit(allocator);
 
-    const policy = contractToRuntimePolicy(&contract);
+    const policy = contractToRuntimePolicy(&contract, null);
 
     // All sections should be restricted
     try std.testing.expect(policy.env.enabled);
@@ -581,7 +779,7 @@ test "runtime SQL policy splits read and write queries by statement operation" {
     try std.testing.expect(policy.allowsSqlWrite("insertTodo"));
 }
 
-test "contractToRuntimePolicy leaves dynamic sections permissive" {
+test "a dynamic section denies everything unless a policy names it" {
     const allocator = std.testing.allocator;
 
     const path = try allocator.dupe(u8, "handler.ts");
@@ -614,17 +812,126 @@ test "contractToRuntimePolicy leaves dynamic sections permissive" {
     };
     defer contract.deinit(allocator);
 
-    const policy = contractToRuntimePolicy(&contract);
+    // No configured policy: a computed environment key or cache namespace
+    // reaches an enabled, empty allowlist. This is the security probe. Before
+    // it, both sections came back disabled, and a disabled section admits every
+    // value a handler asks for.
+    const denied = contractToRuntimePolicy(&contract, null);
+    try std.testing.expect(denied.env.enabled);
+    try std.testing.expect(!denied.allowsEnv("ANYTHING"));
+    try std.testing.expect(!denied.allowsEnv("API_KEY"));
+    try std.testing.expect(denied.cache.enabled);
+    try std.testing.expect(!denied.allowsCacheNamespace("anything"));
 
-    // Dynamic sections are permissive (not enabled)
-    try std.testing.expect(!policy.env.enabled);
-    try std.testing.expect(policy.allowsEnv("ANYTHING"));
+    // Static but empty: restricted to nothing, as before.
+    try std.testing.expect(denied.egress.enabled);
+    try std.testing.expect(!denied.allowsEgressHost("any.host"));
 
-    // Static but empty: restricted to nothing (enabled with empty list)
-    try std.testing.expect(policy.egress.enabled);
-    try std.testing.expect(!policy.allowsEgressHost("any.host"));
+    // A configured section, and only a configured section, supplies the
+    // entries a dynamic category may reach.
+    var configured = HandlerPolicy{};
+    defer configured.deinit(allocator);
+    var env_allowed = AllowList{};
+    try env_allowed.appendUnique(allocator, "RUNTIME_KEY");
+    configured.env = env_allowed;
 
-    // Dynamic cache is permissive
-    try std.testing.expect(!policy.cache.enabled);
-    try std.testing.expect(policy.allowsCacheNamespace("anything"));
+    const allowed = contractToRuntimePolicy(&contract, &configured);
+    try std.testing.expect(allowed.allowsEnv("RUNTIME_KEY"));
+    // The contract's own literal is not authority for a dynamic category: the
+    // compiler did not see every key this handler reads.
+    try std.testing.expect(!allowed.allowsEnv("API_KEY"));
+    // A category the policy leaves out is still deny-all, not inherited.
+    try std.testing.expect(!allowed.allowsCacheNamespace("anything"));
+}
+
+test "the installed index answers inside the measured comparison bound" {
+    const allocator = std.testing.allocator;
+
+    var names: [max_policy_entries][8]u8 = undefined;
+    var values: [max_policy_entries][]const u8 = undefined;
+    var index: usize = 0;
+    while (index < max_policy_entries) : (index += 1) {
+        // Reverse insertion order, so a lookup that happened to work on the
+        // caller's order rather than on the sort would answer wrongly.
+        values[index] = try std.fmt.bufPrint(
+            &names[index],
+            "k{d:0>5}",
+            .{max_policy_entries - 1 - index},
+        );
+    }
+
+    var built = try buildIndex(allocator, .{ .env = .{ .enabled = true, .values = &values } });
+    defer built.deinit(allocator);
+
+    var worst: usize = 0;
+    index = 0;
+    while (index < max_policy_entries) : (index += 1) {
+        var comparisons: usize = 0;
+        try std.testing.expect(built.allowsCounting(.env, values[index], &comparisons));
+        worst = @max(worst, comparisons);
+    }
+    for ([_][]const u8{ "a00000", "k00000x", "z00000" }) |absent| {
+        var comparisons: usize = 0;
+        try std.testing.expect(!built.allowsCounting(.env, absent, &comparisons));
+        worst = @max(worst, comparisons);
+    }
+    try std.testing.expectEqual(max_lookup_comparisons, worst);
+}
+
+test "the index refuses a policy it could not enforce as written" {
+    const allocator = std.testing.allocator;
+
+    const empty = [_][]const u8{""};
+    try std.testing.expectError(
+        error.EntryEmpty,
+        buildIndex(allocator, .{ .env = .{ .enabled = true, .values = &empty } }),
+    );
+
+    var long_buf: [max_identifier_bytes + 1]u8 = @splat('k');
+    const long = [_][]const u8{&long_buf};
+    try std.testing.expectError(
+        error.EntryTooLong,
+        buildIndex(allocator, .{ .env = .{ .enabled = true, .values = &long } }),
+    );
+
+    // The first byte over the cap rejects; the cap itself passes.
+    const at_cap = [_][]const u8{long_buf[0..max_identifier_bytes]};
+    var ok = try buildIndex(allocator, .{ .env = .{ .enabled = true, .values = &at_cap } });
+    ok.deinit(allocator);
+
+    const duplicated = [_][]const u8{ "API_KEY", "API_KEY" };
+    try std.testing.expectError(
+        error.DuplicateEntry,
+        buildIndex(allocator, .{ .env = .{ .enabled = true, .values = &duplicated } }),
+    );
+
+    var over: [max_policy_entries + 1][8]u8 = undefined;
+    var over_values: [max_policy_entries + 1][]const u8 = undefined;
+    var index: usize = 0;
+    while (index < over_values.len) : (index += 1) {
+        over_values[index] = try std.fmt.bufPrint(&over[index], "k{d:0>5}", .{index});
+    }
+    try std.testing.expectError(
+        error.TooManyEntries,
+        buildIndex(allocator, .{ .env = .{ .enabled = true, .values = &over_values } }),
+    );
+    var at_entry_cap = try buildIndex(allocator, .{
+        .env = .{ .enabled = true, .values = over_values[0..max_policy_entries] },
+    });
+    at_entry_cap.deinit(allocator);
+}
+
+test "the index keeps a named read out of the write section" {
+    const allocator = std.testing.allocator;
+    const queries = [_]contract_mod.SqlQueryInfo{
+        .{ .name = "listTodos", .statement = "SELECT id FROM todos", .operation = "", .tables = .empty },
+        .{ .name = "insertTodo", .statement = "INSERT INTO todos(title) VALUES (:title)", .operation = "", .tables = .empty },
+    };
+    var built = try buildIndex(allocator, .{ .sql = .{ .enabled = true, .queries = &queries } });
+    defer built.deinit(allocator);
+
+    try std.testing.expect(built.allows(.sql_read, "listTodos"));
+    try std.testing.expect(!built.allows(.sql_write, "listTodos"));
+    try std.testing.expect(built.allows(.sql_write, "insertTodo"));
+    try std.testing.expect(!built.allows(.sql_read, "insertTodo"));
 }

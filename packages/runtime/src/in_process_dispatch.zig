@@ -74,7 +74,11 @@ pub const SystemRuntime = struct {
         errdefer contract.deinit(self.allocator);
 
         var target_config = config;
-        target_config.dev_capability_policy = zq.handler_policy.contractToRuntimePolicy(&contract);
+        // No configured capability policy reaches a co-located sub-handler, so
+        // a category this contract could not enumerate installs deny-all here.
+        // It used to install allow-all, and this extraction runs with
+        // `strict = false`, so a computed capability argument reaches it.
+        target_config.dev_capability_policy = zq.handler_policy.contractToRuntimePolicy(&contract, null);
 
         const name_owned = try self.allocator.dupe(u8, name);
         errdefer self.allocator.free(name_owned);

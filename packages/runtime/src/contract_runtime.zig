@@ -118,6 +118,16 @@ pub const ProofCheckedContract = struct {
     /// The artifact declared an ephemeral identity or an unpinned runtime
     /// policy. A consumer that accepted one asked for it.
     development_only: bool,
+    /// The guarded operations the consumer reconstructed and covered. Beside
+    /// the properties, never inside them: a guard authorizes one live value and
+    /// discharges nothing. `required > 0` marks a generation whose behavior
+    /// depends on the installed policy, which is what makes a hot swap - it
+    /// replaces the executable without re-running acceptance - inadmissible.
+    guards: pcc.verdict.GuardVerdicts,
+    /// The policy this generation was accepted against. The executable root,
+    /// the contract, the residual plan, and this digest install and retire
+    /// together; a request reads one generation's tuple or none of it.
+    runtime_policy_digest: [32]u8,
     /// Construction gate, the same one `ValidatedRuntimeContract` uses: the
     /// field's type names a file-private opaque, so no struct literal outside
     /// this file can produce one. `promote` is the only way in.
@@ -133,9 +143,15 @@ pub const ProofCheckedContract = struct {
 pub fn promote(
     validated: *const ValidatedRuntimeContract,
     assessment: pcc.Assessment,
+    runtime_policy_digest: [32]u8,
 ) ?ProofCheckedContract {
     if (!assessment.accepted()) return null;
     const grade = assessment.grade orelse return null;
+    // Coverage is part of acceptance, not a note beside it. A certificate
+    // whose reconstructed guards are not all covered describes operations the
+    // consumer could not account for, and the kernel rejects it; this refuses
+    // to promote one that arrives uncovered by any other route.
+    if (!assessment.guards.ready()) return null;
     return .{
         .properties = acceptedProperties(validated.properties(), assessment.properties),
         .durable_workflow = acceptedWorkflowProperties(
@@ -145,6 +161,8 @@ pub fn promote(
         .reads_request_state = validated.view().reads_request_state,
         .grade = grade,
         .development_only = assessment.development_only,
+        .guards = assessment.guards,
+        .runtime_policy_digest = runtime_policy_digest,
         ._proof = validation_proof,
     };
 }
@@ -181,6 +199,8 @@ fn promotedForTest(validated: *const ValidatedRuntimeContract) ProofCheckedContr
         .reads_request_state = validated.view().reads_request_state,
         .grade = .translation_validated,
         .development_only = false,
+        .guards = .{},
+        .runtime_policy_digest = [_]u8{0} ** 32,
         ._proof = validation_proof,
     };
 }
@@ -1459,7 +1479,8 @@ test "promotion exposes only properties that cleared the policy" {
         .properties = property_verdicts,
     };
 
-    const promoted = promote(&validated, assessment) orelse return error.TestUnexpectedResult;
+    const digest = [_]u8{0xab} ** 32;
+    const promoted = promote(&validated, assessment, digest) orelse return error.TestUnexpectedResult;
     try std.testing.expect(promoted.properties.no_secret_leakage);
     try std.testing.expect(promoted.properties.result_safe);
     try std.testing.expect(!promoted.properties.read_only);
@@ -1467,6 +1488,26 @@ test "promotion exposes only properties that cleared the policy" {
     try std.testing.expect(!promoted.durable_workflow.retry_safe);
     try std.testing.expect(!promoted.durable_workflow.idempotent);
     try std.testing.expect(!promoted.durable_workflow.fault_covered);
+    // The policy this generation was accepted against travels with it, and a
+    // handler with nothing to guard says so with zeroes rather than by leaving
+    // the question open.
+    try std.testing.expectEqualSlices(u8, &digest, &promoted.runtime_policy_digest);
+    try std.testing.expectEqual(@as(u32, 0), promoted.guards.required);
+
+    // An accepted assessment whose guards are not all covered describes
+    // operations nothing accounted for. It does not become a weaker promotion;
+    // it becomes no promotion.
+    var uncovered = assessment;
+    uncovered.guards = .{ .required = 2, .covered = 1 };
+    try std.testing.expect(promote(&validated, uncovered, digest) == null);
+
+    var covered = assessment;
+    covered.guards = .{ .required = 2, .covered = 2, .kinds = 0x01 };
+    const guarded = promote(&validated, covered, digest) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u32, 2), guarded.guards.required);
+    // Guard coverage is beside the properties, never inside them: the same
+    // property set comes back.
+    try std.testing.expectEqual(promoted.properties, guarded.properties);
 }
 
 test "ValidationProof argument type is a file-private opaque" {
