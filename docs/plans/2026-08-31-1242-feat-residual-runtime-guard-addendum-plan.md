@@ -278,7 +278,8 @@ The runtime already observes three of the four resource values immediately befor
 - KTD4. **Keep assurance three-dimensional.** (session-settled: user-approved - chosen over promoting a passing guard to proof: static theorems, guard coverage, and live authorization decisions answer three different questions.) Preserve the related plan's acceptance stages and its `PropertyVerdicts`, and add guard coverage beside them rather than inside them. Implements R2, R3, R4, R11.
 - KTD5. **Relax `ZTS602` only after fail-closed guard infrastructure exists.** (session-settled: user-approved - chosen over a broad dynamic mode: the language may admit only the closed export and argument positions covered by R5.) Unsupported dynamic capability uses remain compile errors. Implements R1, R5, R10, R13.
 - KTD6. **Layer the addendum after the completed PCC plan.** (session-settled: user-directed - chosen over editing its stable units.) Reuse its checker, certificate, artifact root, policy digest, and proof-checked runtime types. Do not create a parallel certificate or activation path. Implements R12.
-- KTD7. **Extend the existing capability policy file rather than inventing a format.** `parsePolicyJson` already reads `env.allow`, `cache.allow_namespaces`, and `sql.allow_queries`; those keep their names. `egress.allow_hosts` is replaced outright by `egress.allow_endpoints` and `egress.allow_address_scopes`, because a host list cannot express the scheme, port, and scope that R17 requires. The parser already rejects unknown keys, so the old key becomes a clear error rather than a silent weakening. Implements R5, R8, R17.
+- KTD7. **Move the egress format, the contract's egress facts, and the runtime egress check in one step.** (measured during U2: the policy file, the runtime comparison, and the contract all name hostnames, and changing any one alone leaves a policy that reads as configured and permits nothing it names.) `parsePolicyJson` already reads `env.allow`, `cache.allow_namespaces`, and `sql.allow_queries`; those keep their names and move independently. `egress.allow_hosts` is replaced by `egress.allow_endpoints` and `egress.allow_address_scopes` **together with** `EgressInfo` recording normalized endpoints and `outboundHostViolation` becoming an endpoint check - and the normalizer must be reachable from `packages/zts`, which cannot import the acceptance kernel. That is U4a below, not a part of U2. Implements R5, R8, R17.
+- KTD8. **Extend the existing capability policy file rather than inventing a format.** `parsePolicyJson` already reads `env.allow`, `cache.allow_namespaces`, and `sql.allow_queries`; those keep their names. `egress.allow_hosts` is replaced outright by `egress.allow_endpoints` and `egress.allow_address_scopes`, because a host list cannot express the scheme, port, and scope that R17 requires. The parser already rejects unknown keys, so the old key becomes a clear error rather than a silent weakening. Implements R5, R8, R17.
 
 ### High-Level Technical Design
 
@@ -379,7 +380,8 @@ flowchart TB
   P1[Related plan U1 through U7 plus hardening 99bb0289] --> U1[U1 Closed residual guard contract]
   U1 --> U2[U2 Producer plan and exact binding]
   U2 --> U3[U3 Policy projection and atomic generations]
-  U3 --> U4[U4 Authoritative sink enforcement]
+  U3 --> U4A[U4a Endpoint policy, contract facts, and egress check]
+  U4A --> U4[U4 Authoritative sink enforcement]
   U4 --> U5[U5 Selective ZTS602 reclassification]
   U5 --> U6[U6 Honest assurance surfaces]
   U6 --> U7[U7 Atomic format cutover and release gates]
@@ -465,11 +467,28 @@ flowchart TB
   - Literal-only handlers preserve current mandatory enforcement and perform no residual lookup.
 - **Verification:** `zig build test-zts`, `test-server`, `test-cli`, and `test-zruntime` prove fail-closed atomic installation.
 
+### U4a. Move egress from host names to endpoints in one step
+
+- **Goal:** Make the policy file, the contract's egress facts, and the runtime egress check all name `scheme://host:port` and an address scope, in a single change, so no layer is left describing a destination a neighbouring layer cannot.
+- **Requirements:** R5, R8, R9, R17, R18. Implements KTD7.
+- **Dependencies:** U3.
+- **Files:** `packages/zts/src/handler_policy.zig`, `packages/zts/src/contract_types.zig`, `packages/zts/src/contract_builder.zig`, `packages/zts/src/contract_json_writer.zig`, `packages/zts/src/contract_json_parser.zig`, `packages/zts/src/policy.zig`, `packages/zts/src/endpoint.zig` (new), `packages/runtime/src/runtime_http.zig`, `packages/runtime/src/self_extract.zig`, `packages/pi/src/standin/defect_seeds.zig`, `docs/contracts-and-sandboxing.md`.
+- **Approach:** The acceptance kernel owns the canonical endpoint rule and `packages/zts` cannot import it, so the rule moves to a base-tier `endpoint.zig` that both sides call, pinned by a test in `packages/runtime`, which sees both. `EgressInfo` records normalized endpoints rather than bare hosts. `contractToRuntimePolicy` projects those. `outboundHostViolation` becomes `outboundEndpointViolation` and normalizes the request URL with the same rule. Every fixture that names a host moves with it, including the ones that build a dynamic port at run time.
+- **Execution note:** Measured in U2: nineteen fixtures name egress hosts, several of them derived from a test server's dynamic port. Splitting this across commits leaves the tree with a policy format one layer understands.
+- **Test scenarios:**
+  - The same host under a different scheme or port is a different endpoint and is denied.
+  - A trailing dot and mixed case are the same endpoint.
+  - A URL the rule cannot canonicalize - userinfo, a scheme outside the set - is refused rather than connected to.
+  - The old `egress.allow_hosts` key is a policy error naming its replacement.
+  - An egress section with no address scope permits no connection.
+  - The kernel's rule and the base-tier rule agree on a shared corpus.
+- **Verification:** `zig build test-zts`, `test-modules`, `test-server`, `test-zruntime`, and `test-standin` pass with every egress fixture on endpoints.
+
 ### U4. Enforce guards at authoritative capability sinks
 
 - **Goal:** Check the actual normalized env, endpoint, cache, or SQL resource immediately before its protected operation, and close the egress gap.
 - **Requirements:** R5, R7, R8, R9, R11, R13, R14, R17, R18. Implements KTD2 and KTD3.
-- **Dependencies:** U3.
+- **Dependencies:** U4a.
 - **Files:** `packages/runtime/src/runtime_http.zig`, `packages/zts/src/module_binding/capabilities.zig`, `packages/modules/src/data/cache.zig`, `packages/modules/src/data/sql.zig`, `packages/modules/src/net/fetch.zig`, `packages/zts/src/security_events.zig`, `packages/runtime/src/security_logger.zig`, `packages/runtime/src/zruntime_tests.zig`.
 - **Approach:** The env, cache, and SQL sinks already check before their effects; this unit pins that placement with bypass probes and moves them onto the shared normalization from U1. The egress sink gains real work: normalize scheme, canonical host, and effective port into one endpoint string, authorize it before resolution, resolve the name in the runtime, validate the resolved address scope before connecting, and repeat both on every retry attempt. Emit only guard kind, obligation ID, outcome, and generation.
 - **Execution note:** Land one sink family at a time with a bypass probe, and keep `ZTS602` fatal and successor activation non-production until every family passes.
