@@ -182,6 +182,12 @@ pub const EdgeKind = enum(u8) {
     tested = 4,
     /// Declared trusted. Disclosed, not checked here.
     trusted = 5,
+    /// The producer states that this obligation is not discharged. A handler
+    /// that writes is not read-only, and saying so is an answer. It is not an
+    /// omission, and it is not a weak form of yes: an obligation carrying only
+    /// this edge is answered and not established, and a policy that requires
+    /// the property rejects.
+    not_established = 6,
 
     pub fn fromWire(value: u8) ?EdgeKind {
         return switch (value) {
@@ -190,18 +196,21 @@ pub const EdgeKind = enum(u8) {
             3 => .solver,
             4 => .tested,
             5 => .trusted,
+            6 => .not_established,
             else => null,
         };
     }
 
-    /// The grade an edge of this kind contributes when it holds.
-    pub fn grade(self: EdgeKind) verdict.AssuranceGrade {
+    /// The grade an edge of this kind contributes when it holds. An edge that
+    /// establishes nothing contributes no grade.
+    pub fn grade(self: EdgeKind) ?verdict.AssuranceGrade {
         return switch (self) {
             .proved => .proved,
             .translation_validated => .translation_validated,
             .solver => .solver_assumed,
             .tested => .tested,
             .trusted => .trusted,
+            .not_established => null,
         };
     }
 
@@ -209,7 +218,7 @@ pub const EdgeKind = enum(u8) {
     pub fn checked(self: EdgeKind) bool {
         return switch (self) {
             .proved, .translation_validated, .solver => true,
-            .tested, .trusted => false,
+            .tested, .trusted, .not_established => false,
         };
     }
 };
@@ -226,7 +235,7 @@ pub const Evidence = struct {
     aux: u32,
 };
 
-pub const witness_record_size = 24;
+pub const witness_record_size = 28;
 
 pub const WitnessKind = enum(u8) {
     /// This IR member occupies [code_start, code_start + code_len) in the final
@@ -251,6 +260,11 @@ pub const Witness = struct {
     code_len: u32,
     target_ir: u32,
     target_offset: u32,
+    /// The function whose code buffer these offsets are measured in, as a
+    /// proof-IR node id. Every function generates into its own buffer, so an
+    /// offset only means something inside one; comparing a jump in one function
+    /// against an emission in another would be comparing two number lines.
+    scope_ir_node: u32,
     kind: WitnessKind,
 };
 
@@ -415,14 +429,15 @@ fn decodeRecord(comptime Record: type, bytes: []const u8) DecodeError!Record {
             };
         },
         Witness => blk: {
-            const kind = WitnessKind.fromWire(bytes[20]) orelse return error.UnknownEnumMember;
-            try requireZero(bytes[21..24]);
+            const kind = WitnessKind.fromWire(bytes[24]) orelse return error.UnknownEnumMember;
+            try requireZero(bytes[25..28]);
             break :blk Witness{
                 .ir_node = u32At(bytes, 0),
                 .code_start = u32At(bytes, 4),
                 .code_len = u32At(bytes, 8),
                 .target_ir = u32At(bytes, 12),
                 .target_offset = u32At(bytes, 16),
+                .scope_ir_node = u32At(bytes, 20),
                 .kind = kind,
             };
         },
@@ -636,6 +651,54 @@ fn decodeSection(
     }
 }
 
+/// Domain separator for the proof-IR root.
+pub const ir_root_domain = "zttp-proof-ir-root-v1";
+
+fn foldIrNode(hasher: *std.crypto.hash.sha2.Sha256, node: IrNode) void {
+    var scratch: [4]u8 = undefined;
+    std.mem.writeInt(u32, &scratch, node.id, .little);
+    hasher.update(&scratch);
+    var tag_le: [2]u8 = undefined;
+    std.mem.writeInt(u16, &tag_le, @intFromEnum(node.tag), .little);
+    hasher.update(&tag_le);
+    std.mem.writeInt(u32, &scratch, node.parent, .little);
+    hasher.update(&scratch);
+    std.mem.writeInt(u32, &scratch, node.first_child, .little);
+    hasher.update(&scratch);
+    std.mem.writeInt(u32, &scratch, node.child_count, .little);
+    hasher.update(&scratch);
+    hasher.update(&node.digest);
+}
+
+/// Fold a proof-IR node list into one root.
+///
+/// This is the only definition of that fold. The producer calls it too, through
+/// the same package, so a certificate's `ir_root` and the value the consumer
+/// recomputes cannot come from two formulas that drifted apart.
+pub fn irRootFromNodes(nodes: []const IrNode) [32]u8 {
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    hasher.update(ir_root_domain);
+    var count_le: [4]u8 = undefined;
+    std.mem.writeInt(u32, &count_le, @intCast(nodes.len), .little);
+    hasher.update(&count_le);
+    for (nodes) |node| foldIrNode(&hasher, node);
+    return hasher.finalResult();
+}
+
+/// The same fold over a decoded table.
+pub fn irRootFromTable(table: IrTable) DecodeError![32]u8 {
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    hasher.update(ir_root_domain);
+    var count_le: [4]u8 = undefined;
+    std.mem.writeInt(u32, &count_le, table.len(), .little);
+    hasher.update(&count_le);
+    var index: u32 = 0;
+    while (index < table.len()) : (index += 1) {
+        foldIrNode(&hasher, try table.get(index));
+    }
+    return hasher.finalResult();
+}
+
 // ---------------------------------------------------------------------------
 // Canonical encoder
 // ---------------------------------------------------------------------------
@@ -785,6 +848,7 @@ pub fn encode(parts: Parts, out: []u8) EncodeError![]u8 {
             try cursor.u32At(witness.code_len);
             try cursor.u32At(witness.target_ir);
             try cursor.u32At(witness.target_offset);
+            try cursor.u32At(witness.scope_ir_node);
             try cursor.u8At(@intFromEnum(witness.kind));
             try cursor.zeros(3);
         }
@@ -1109,10 +1173,39 @@ test "every decode error maps to a distinct stable reason code" {
 }
 
 test "edge kinds grade and check consistently" {
-    try testing.expectEqual(verdict.AssuranceGrade.proved, EdgeKind.proved.grade());
-    try testing.expectEqual(verdict.AssuranceGrade.trusted, EdgeKind.trusted.grade());
+    try testing.expectEqual(@as(?verdict.AssuranceGrade, .proved), EdgeKind.proved.grade());
+    try testing.expectEqual(@as(?verdict.AssuranceGrade, .trusted), EdgeKind.trusted.grade());
     try testing.expect(EdgeKind.solver.checked());
     try testing.expect(!EdgeKind.tested.checked());
+    // An answer of "not established" is an answer, and it grades nothing.
+    try testing.expectEqual(@as(?verdict.AssuranceGrade, null), EdgeKind.not_established.grade());
+    try testing.expect(!EdgeKind.not_established.checked());
+}
+
+test "the IR root folds the same way from a slice and from a decoded table" {
+    var buf: [4096]u8 = undefined;
+    const bytes = try buildMinimal(&buf);
+    var budget = Budget.init(.{});
+    const cert = try decode(bytes, .{}, &budget);
+
+    const ir = [_]IrNode{
+        .{ .id = 0, .tag = .function, .parent = 0, .first_child = 1, .child_count = 1, .digest = fixture.digest(20) },
+        .{ .id = 1, .tag = .return_node, .parent = 0, .first_child = 0, .child_count = 0, .digest = fixture.digest(21) },
+    };
+    const from_slice = irRootFromNodes(&ir);
+    const from_table = try irRootFromTable(cert.ir);
+    try testing.expectEqualSlices(u8, &from_slice, &from_table);
+
+    // Changing any field of any node moves the root.
+    var mutated = ir;
+    mutated[1].tag = .plain;
+    try testing.expect(!std.mem.eql(u8, &from_slice, &irRootFromNodes(&mutated)));
+    mutated = ir;
+    mutated[0].child_count = 0;
+    try testing.expect(!std.mem.eql(u8, &from_slice, &irRootFromNodes(&mutated)));
+    mutated = ir;
+    mutated[0].digest[3] +%= 1;
+    try testing.expect(!std.mem.eql(u8, &from_slice, &irRootFromNodes(&mutated)));
 }
 
 test "obligation order is total and canonical" {

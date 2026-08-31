@@ -139,7 +139,7 @@ const Collector = struct {
     }
 };
 
-fn digestOf(bytes: []const u8) [32]u8 {
+pub fn digestOf(bytes: []const u8) [32]u8 {
     return graph.digestBytes(bytes);
 }
 

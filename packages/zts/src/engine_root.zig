@@ -49,6 +49,7 @@ pub const node_types = @import("node_types.zig");
 pub const comptime_eval = @import("comptime.zig");
 pub const bytecode_cache = @import("bytecode_cache.zig");
 pub const bytecode_opt = @import("bytecode_opt.zig");
+pub const translation_witness = @import("translation_witness.zig");
 pub const bytecode_verifier = @import("bytecode_verifier.zig");
 pub const arena = @import("arena.zig");
 pub const handler_analyzer = @import("handler_analyzer.zig");

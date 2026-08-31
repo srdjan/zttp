@@ -13,6 +13,8 @@ const precompile = zts_cli.precompile;
 const deploy_manifest = zts_cli.deploy_manifest;
 const shared = @import("cli_shared.zig");
 const artifact_graph = @import("artifact_graph.zig");
+const pcc = @import("zttp_proof_checker");
+const proof_certificate = @import("proof_certificate.zig");
 const self_extract = @import("self_extract.zig");
 const attest_build_receipt = @import("attest/build_receipt.zig");
 const live_reload = @import("live_reload.zig");
@@ -544,6 +546,10 @@ const ArtifactTailInput = struct {
     bytecode: []const u8,
     dep_bytecodes: []const []const u8,
     contract: ?*const zts.HandlerContract,
+    /// The compiler's proof IR and translation witnesses, when the compile
+    /// captured them. Absent means no certificate is embedded, which the strict
+    /// activation path refuses rather than treats as permission.
+    proof_evidence: ?*const zts.ProofEvidence = null,
 };
 
 const ArtifactTailCapabilities = struct {
@@ -656,12 +662,7 @@ fn writeArtifactTail(
     var runtime_policy_digest: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(policy_section, &runtime_policy_digest, .{});
 
-    // Commit to the whole executable graph, not only the entry module. The
-    // inventory is built from the exact section bytes about to be embedded, so
-    // the consumer that rebuilds it at startup is hashing the same buffers.
-    const members = try allocator.alloc(artifact_graph.Member, artifact_graph.max_members);
-    defer allocator.free(members);
-    const built = artifact_graph.buildRoot(allocator, artifact_graph.fromArtifact(.{
+    const artifact_sections = artifact_graph.ArtifactInputs{
         .bytecode = input.bytecode,
         .dep_bytecodes = input.dep_bytecodes,
         .contract_section = contract_json,
@@ -670,7 +671,45 @@ fn writeArtifactTail(
             artifact_graph.identityFromContract(contract)
         else
             .{},
-    }), members) catch |err| {
+    };
+
+    // The certificate, when the compile captured the evidence for one. Building
+    // it first fixes the proof-IR digest, which is itself a graph member, so the
+    // root below covers the certificate's own IR.
+    var certificate: ?proof_certificate.Built = if (input.proof_evidence) |evidence|
+        proof_certificate.build(allocator, .{
+            .evidence = evidence,
+            .properties = dischargedProperties(input.contract),
+            .artifact = artifact_sections,
+            .contract_digest = if (contract_json) |json|
+                artifact_graph.digestOf(json)
+            else
+                [_]u8{0} ** 32,
+        }) catch |err| {
+            if (!builtin.is_test) {
+                std.log.err(
+                    "failed to build the proof certificate ({s}); refusing to write an artifact that claims more than it carries",
+                    .{@errorName(err)},
+                );
+            }
+            return err;
+        }
+    else
+        null;
+    defer if (certificate) |*value| value.deinit();
+
+    // Commit to the whole executable graph, not only the entry module. The
+    // inventory is built from the exact section bytes about to be embedded, so
+    // the consumer that rebuilds it at startup is hashing the same buffers.
+    const members = try allocator.alloc(artifact_graph.Member, artifact_graph.max_members);
+    defer allocator.free(members);
+    var graph_inputs = artifact_sections;
+    if (certificate) |value| graph_inputs.proof_ir_digest = value.ir_root;
+    const built = artifact_graph.buildRoot(
+        allocator,
+        artifact_graph.fromArtifact(graph_inputs),
+        members,
+    ) catch |err| {
         if (!builtin.is_test) {
             std.log.err(
                 "failed to commit to the executable graph ({s}); refusing to write an artifact whose contents are not fully covered",
@@ -713,8 +752,25 @@ fn writeArtifactTail(
             .policy = &policy,
             .policy_section = policy_section,
             .attestation = attestation_jws,
+            .certificate = if (certificate) |value| value.bytes else null,
         },
     );
+}
+
+/// Read the properties the compiler discharged out of the contract, once, here.
+/// The certificate builder never reaches into contract shapes itself.
+fn dischargedProperties(contract: ?*const zts.HandlerContract) proof_certificate.DischargedProperties {
+    const handler_contract = contract orelse return .{};
+    const properties = handler_contract.properties orelse return .{};
+    return .{
+        .results_checked = properties.result_safe,
+        .no_secret_leakage = properties.no_secret_leakage,
+        .state_isolated = properties.state_isolated,
+        .deterministic = properties.deterministic,
+        .read_only = properties.read_only,
+        .retry_safe = properties.retry_safe,
+        .capability_bounded = handler_contract.capabilities != null,
+    };
 }
 
 fn appendDeployLedgerEntry(
@@ -816,6 +872,7 @@ fn compileCapability(
     return precompile.compileHandler(allocator, input.source, input.handler_path, .{
         .emit_verify = true,
         .emit_contract = true,
+        .emit_proof_evidence = true,
         .sql_schema_path = input.sql_schema_path,
         .system_path = input.system_path,
         .policy = if (input.policy) |policy| policy.* else null,
@@ -927,6 +984,7 @@ fn runBuild(
         .bytecode = compiled.bytecode,
         .dep_bytecodes = dep_bytecodes,
         .contract = if (compiled.contract) |*contract| contract else null,
+        .proof_evidence = if (compiled.proof_evidence) |*evidence| evidence else null,
     });
 
     caps.codesign(caps.context, allocator, output_path);
@@ -1344,6 +1402,153 @@ test "an artifact whose bytecode cannot be walked is refused rather than half-co
         .contract = &contract,
     }, probe.capabilities()));
     try std.testing.expectEqual(@as(usize, 0), probe.create_calls);
+}
+
+test "a real compile produces a certificate that binds its own IR and artifact" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\export function handler(req: Request): Proof<Response, "deterministic" | "read_only" | "state_isolated" | "no_secret_leakage" | "result_safe"> {
+        \\  if (req.method === "GET") {
+        \\    return Response.text("get");
+        \\  } else {
+        \\    return Response.text("other");
+        \\  }
+        \\}
+    ;
+
+    var compiled = try precompile.compileHandler(allocator, source, "handler.ts", .{
+        .emit_verify = true,
+        .emit_contract = true,
+        .emit_proof_evidence = true,
+    });
+    defer compiled.deinit(allocator);
+
+    const evidence = compiled.proof_evidence orelse return error.TestUnexpectedResult;
+    // The handler always returns, so the producer's own fold says so before it
+    // writes anything down.
+    try std.testing.expect(evidence.handlerIsTotal());
+    // Code generation recorded where the proof-IR members went.
+    try std.testing.expect(evidence.emissions.len > 0);
+    try std.testing.expect(evidence.jumps.len > 0);
+
+    const contract = compiled.contract orelse return error.TestUnexpectedResult;
+    const contract_json = try serializeContractJson(allocator, &contract);
+    defer allocator.free(contract_json);
+    const policy = zts.handler_policy.contractToRuntimePolicy(&contract);
+    const policy_section = try self_extract.serializePolicy(allocator, &policy);
+    defer allocator.free(policy_section);
+
+    var built = try proof_certificate.build(allocator, .{
+        .evidence = &evidence,
+        .properties = dischargedProperties(&contract),
+        .artifact = .{
+            .bytecode = compiled.bytecode,
+            .dep_bytecodes = compiled.dep_bytecodes orelse &.{},
+            .contract_section = contract_json,
+            .policy_section_digest = artifact_graph.digestOf(policy_section),
+            .identity = artifact_graph.identityFromContract(&contract),
+        },
+        .contract_digest = artifact_graph.digestOf(contract_json),
+    });
+    defer built.deinit();
+
+    // The certificate decodes under the kernel's own bounded decoder.
+    var budget = pcc.limits.Budget.init(.{});
+    const decoded = try pcc.certificate.decode(built.bytes, .{}, &budget);
+    try std.testing.expectEqualSlices(u8, &built.executable_root, &decoded.identity.executable_root);
+    try std.testing.expectEqualSlices(u8, &built.ir_root, &decoded.identity.ir_root);
+
+    // The IR root the certificate states is the fold of the IR it carries.
+    const recomputed_ir = try pcc.certificate.irRootFromTable(decoded.ir);
+    try std.testing.expectEqualSlices(u8, &built.ir_root, &recomputed_ir);
+
+    // The proof-IR member of the executable graph is that same root, so the IR
+    // cannot be swapped without moving the artifact commitment.
+    var saw_proof_ir = false;
+    for (built.members) |member| {
+        if (member.kind != .proof_ir) continue;
+        saw_proof_ir = true;
+        try std.testing.expectEqualSlices(u8, &built.ir_root, &member.digest);
+    }
+    try std.testing.expect(saw_proof_ir);
+
+    // Every property in the alphabet is answered exactly once.
+    try std.testing.expectEqual(
+        @as(u32, @typeInfo(pcc.proof_system.Property).@"enum".fields.len),
+        decoded.obligations.len(),
+    );
+    var index: u32 = 0;
+    while (index < decoded.obligations.len()) : (index += 1) {
+        const obligation = try decoded.obligations.get(index);
+        var answers: usize = 0;
+        var evidence_index: u32 = 0;
+        while (evidence_index < decoded.evidence.len()) : (evidence_index += 1) {
+            const entry = try decoded.evidence.get(evidence_index);
+            if (entry.obligation_index == index) answers += 1;
+        }
+        std.testing.expect(answers > 0) catch |err| {
+            std.debug.print("obligation {s} has no evidence\n", .{obligation.property.name()});
+            return err;
+        };
+    }
+}
+
+test "the same source yields byte-identical certificates" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\export function handler(req: Request): Proof<Response, "deterministic" | "read_only" | "state_isolated" | "no_secret_leakage" | "result_safe"> {
+        \\  return Response.text("ok");
+        \\}
+    ;
+
+    const first = try certificateForSource(allocator, source);
+    defer allocator.free(first);
+    const second = try certificateForSource(allocator, source);
+    defer allocator.free(second);
+    try std.testing.expectEqualSlices(u8, first, second);
+
+    const other =
+        \\export function handler(req: Request): Proof<Response, "deterministic" | "read_only" | "state_isolated" | "no_secret_leakage" | "result_safe"> {
+        \\  return Response.text("different");
+        \\}
+    ;
+    const changed = try certificateForSource(allocator, other);
+    defer allocator.free(changed);
+    // A different program is a different artifact even when its proof shape is
+    // the same: the bytecode member moved.
+    try std.testing.expect(!std.mem.eql(u8, first, changed));
+}
+
+fn certificateForSource(allocator: std.mem.Allocator, source: []const u8) ![]u8 {
+    var compiled = try precompile.compileHandler(allocator, source, "handler.ts", .{
+        .emit_verify = true,
+        .emit_contract = true,
+        .emit_proof_evidence = true,
+    });
+    defer compiled.deinit(allocator);
+
+    const evidence = compiled.proof_evidence orelse return error.TestUnexpectedResult;
+    const contract = compiled.contract orelse return error.TestUnexpectedResult;
+    const contract_json = try serializeContractJson(allocator, &contract);
+    defer allocator.free(contract_json);
+    const policy = zts.handler_policy.contractToRuntimePolicy(&contract);
+    const policy_section = try self_extract.serializePolicy(allocator, &policy);
+    defer allocator.free(policy_section);
+
+    var built = try proof_certificate.build(allocator, .{
+        .evidence = &evidence,
+        .properties = dischargedProperties(&contract),
+        .artifact = .{
+            .bytecode = compiled.bytecode,
+            .dep_bytecodes = compiled.dep_bytecodes orelse &.{},
+            .contract_section = contract_json,
+            .policy_section_digest = artifact_graph.digestOf(policy_section),
+            .identity = artifact_graph.identityFromContract(&contract),
+        },
+        .contract_digest = artifact_graph.digestOf(contract_json),
+    });
+    defer built.deinit();
+    return allocator.dupe(u8, built.bytes);
 }
 
 test "prepareProjectArtifact default path: <root>/.zttp/<subdir>/<basename>" {

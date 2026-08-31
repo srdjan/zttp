@@ -13,6 +13,7 @@
 
 const std = @import("std");
 const bytecode = @import("bytecode.zig");
+const translation_witness = @import("translation_witness.zig");
 const Opcode = bytecode.Opcode;
 
 /// ENG-2: the get_field(_ic) + call_method -> get_field_call fusion is disabled.
@@ -78,6 +79,11 @@ pub const BytecodeOptimizer = struct {
     /// Jump targets - dense bool array indexed by bytecode position
     /// More efficient than hash map for typical function sizes
     jump_targets: ?[]bool,
+    /// Optional translation-evidence recorder. Every fusion this pass performs
+    /// and the compaction that follows it move offsets a certificate has
+    /// already committed to, so a certificate-producing compile records both
+    /// here rather than reconstructing them from the finished bytes.
+    witness: ?*translation_witness.Recorder = null,
 
     pub fn init(allocator: std.mem.Allocator) BytecodeOptimizer {
         return .{
@@ -156,6 +162,27 @@ pub const BytecodeOptimizer = struct {
         return if (pos < targets.len) targets[pos] else false;
     }
 
+    /// Disclose one fusion. `before` is the byte span consumed in the current
+    /// (pre-compaction) frame; `after` is what replaced it. The difference is
+    /// what later offsets will move by once the NOPs are removed.
+    fn noteRewrite(
+        self: *BytecodeOptimizer,
+        kind: translation_witness.RewriteKind,
+        pos: u32,
+        before_len: u32,
+        after_len: u32,
+    ) void {
+        const recorder = self.witness orelse return;
+        recorder.recordRewrite(.{
+            .kind = kind,
+            .before_offset = pos,
+            .before_len = before_len,
+            .after_offset = pos,
+            .after_len = after_len,
+            .delta = @as(i32, @intCast(after_len)) - @as(i32, @intCast(before_len)),
+        });
+    }
+
     /// Try to fuse instructions starting at pos
     /// Returns the size of the fused instruction if fusion happened, 0 otherwise
     fn tryFuseAt(self: *BytecodeOptimizer, code: []u8, pos: u32, stats: *OptStats) u32 {
@@ -199,6 +226,7 @@ pub const BytecodeOptimizer = struct {
                 stats.if_false_goto_count += 1;
                 stats.dispatches_saved += 1;
                 stats.bytes_saved += 3;
+                self.noteRewrite(.if_false_goto, pos, @intCast(info1.size + info2.size), 3);
                 return 3;
             }
         }
@@ -217,6 +245,7 @@ pub const BytecodeOptimizer = struct {
             code[pos + 2] = @intFromEnum(Opcode.nop);
             stats.get_loc_add_count += 1;
             stats.dispatches_saved += 1;
+            self.noteRewrite(.get_loc_add, pos, @intCast(info1.size + info2.size), 2);
             return 2; // Size of get_loc_add
         }
 
@@ -236,6 +265,7 @@ pub const BytecodeOptimizer = struct {
             code[pos + 1] = local_idx;
             stats.get_loc_add_count += 1;
             stats.dispatches_saved += 1;
+            self.noteRewrite(.get_loc_add, pos, @intCast(info1.size + info2.size), 2);
             return 2; // Size of get_loc_add
         }
 
@@ -258,6 +288,12 @@ pub const BytecodeOptimizer = struct {
                     stats.get_loc_get_loc_add_count += 1;
                     stats.dispatches_saved += 2;
                     stats.bytes_saved += 2;
+                    self.noteRewrite(
+                        .get_loc_get_loc_add,
+                        pos,
+                        @intCast(info1.size + info2.size + bytecode.getOpcodeInfo(.add).size),
+                        3,
+                    );
                     return 3; // Size of get_loc_get_loc_add
                 }
             }
@@ -277,6 +313,7 @@ pub const BytecodeOptimizer = struct {
             stats.push_const_call_count += 1;
             stats.dispatches_saved += 1;
             stats.bytes_saved += 1;
+            self.noteRewrite(.push_const_call, pos, @intCast(info1.size + info2.size), 4);
             return 4; // Size of push_const_call
         }
 
@@ -295,6 +332,7 @@ pub const BytecodeOptimizer = struct {
             stats.push_const_call_count += 1;
             stats.dispatches_saved += 1;
             stats.bytes_saved += 3;
+            self.noteRewrite(.push_const_call, pos, @intCast(info1.size + info2.size), 4);
             return 4;
         }
 
@@ -313,6 +351,7 @@ pub const BytecodeOptimizer = struct {
             stats.get_field_call_count += 1;
             stats.dispatches_saved += 1;
             stats.bytes_saved += 1;
+            self.noteRewrite(.get_field_call, pos, @intCast(info1.size + info2.size), 4);
             return 4; // Size of get_field_call
         }
 
@@ -333,6 +372,7 @@ pub const BytecodeOptimizer = struct {
             stats.get_field_call_count += 1;
             stats.dispatches_saved += 1;
             stats.bytes_saved += 3;
+            self.noteRewrite(.get_field_call, pos, @intCast(info1.size + info2.size), 4);
             return 4;
         }
 
@@ -355,6 +395,7 @@ pub const BytecodeOptimizer = struct {
             stats.drop_goto_count += 1;
             stats.dispatches_saved += 1;
             stats.bytes_saved += 1;
+            self.noteRewrite(.drop_goto, pos, @intCast(info1.size + info2.size), 3);
             return 3;
         }
 
@@ -451,6 +492,42 @@ pub const BytecodeOptimizer = struct {
             }
 
             read_pos += info.size;
+        }
+
+        // Move every recorded witness offset through the same table the jump
+        // operands and the line table just moved through. Doing it here, with
+        // the map in hand, is the only place the two can be guaranteed to agree.
+        if (self.witness) |recorder| {
+            const Remap = struct {
+                map: *const std.AutoHashMapUnmanaged(u32, u32),
+
+                fn lookup(self_remap: @This(), offset: u32) u32 {
+                    var probe = offset;
+                    while (true) {
+                        if (self_remap.map.get(probe)) |mapped| return mapped;
+                        if (probe == 0) return 0;
+                        probe -= 1;
+                    }
+                }
+            };
+            const remapper = Remap{ .map = &offset_map };
+            var final_len: u32 = 0;
+            var scan: u32 = 0;
+            while (scan < code.len) {
+                const scan_op: Opcode = @enumFromInt(code[scan]);
+                const scan_size = bytecode.getOpcodeInfo(scan_op).size;
+                if (scan_op != .nop) final_len += scan_size;
+                scan += scan_size;
+            }
+            recorder.applyCompaction(remapper, Remap.lookup, final_len);
+            recorder.recordRewrite(.{
+                .kind = .compaction,
+                .before_offset = 0,
+                .before_len = @intCast(code.len),
+                .after_offset = 0,
+                .after_len = final_len,
+                .delta = @as(i32, @intCast(final_len)) - @as(i32, @intCast(code.len)),
+            });
         }
 
         // Third pass: compact by removing NOPs

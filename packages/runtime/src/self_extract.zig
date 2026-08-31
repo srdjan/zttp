@@ -30,6 +30,10 @@ pub const Section = enum(u8) {
     policy = 4,
     metadata = 5,
     attestation = 6, // slice 1 of proof receipts: compact JWS bytes
+    /// The proof certificate: the canonical proof IR, the obligations it
+    /// discharges, the evidence for each, and the executable-graph inventory
+    /// the consumer compares against what it loaded.
+    certificate = 7,
 };
 
 pub const Payload = struct {
@@ -45,6 +49,10 @@ pub const Payload = struct {
     /// analyzer policy, capability matrix, and serialized runtime policy
     /// commitments. Null when the binary was built without `--attest`.
     attestation_jws: ?[]const u8 = null,
+    /// The proof certificate, exactly as embedded. Null when the artifact
+    /// carries none, which the strict activation path refuses separately: an
+    /// absent certificate is a missing proof, not a permissive default.
+    certificate: ?[]const u8 = null,
 
     pub fn deinit(self: *const Payload, allocator: std.mem.Allocator) void {
         allocator.free(self.bytecode);
@@ -52,6 +60,7 @@ pub const Payload = struct {
         allocator.free(self.dep_bytecodes);
         if (self.contract_json) |c| allocator.free(c);
         if (self.attestation_jws) |a| allocator.free(a);
+        if (self.certificate) |c| allocator.free(c);
         // Free the values arrays inside each policy allow list
         if (self.policy.env.values.len > 0) allocator.free(self.policy.env.values);
         if (self.policy.egress.values.len > 0) allocator.free(self.policy.egress.values);
@@ -182,6 +191,10 @@ pub const PayloadInput = struct {
     /// Exact serialized section-4 bytes. Build/deploy supplies this after
     /// hashing so payload assembly writes the same bytes the JWS commits to.
     policy_section: ?[]const u8 = null,
+    /// Exact certificate bytes. Serialized once by the producer and embedded
+    /// verbatim, so the bytes the consumer decodes are the bytes that were
+    /// bound into the executable graph.
+    certificate: ?[]const u8 = null,
 };
 
 const ArtifactWriteCapability = struct {
@@ -344,6 +357,7 @@ pub fn serializePayload(allocator: std.mem.Allocator, input: PayloadInput) ![]u8
     if (input.contract_json != null) section_count += 1;
     section_count += 1; // policy always present
     if (input.attestation != null) section_count += 1;
+    if (input.certificate != null) section_count += 1;
 
     try buf.ensureTotalCapacity(allocator, input.bytecode.len + 256);
     try writeU16(&buf, allocator, section_count);
@@ -382,6 +396,11 @@ pub fn serializePayload(allocator: std.mem.Allocator, input: PayloadInput) ![]u8
         try writeSection(&buf, allocator, .attestation, jws);
     }
 
+    // Section 7: proof certificate (if any)
+    if (input.certificate) |certificate| {
+        try writeSection(&buf, allocator, .certificate, certificate);
+    }
+
     return buf.toOwnedSlice(allocator);
 }
 
@@ -395,6 +414,7 @@ pub fn parse(allocator: std.mem.Allocator, data: []const u8) !?Payload {
     var dep_bytecodes: ?[]const []const u8 = null;
     var contract_json: ?[]const u8 = null;
     var attestation_jws: ?[]const u8 = null;
+    var certificate: ?[]const u8 = null;
     var policy: zts.RuntimePolicy = .{};
     var policy_section_sha256 = [_]u8{0} ** 32;
     var policy_strings: std.ArrayList([]const u8) = .empty;
@@ -406,6 +426,7 @@ pub fn parse(allocator: std.mem.Allocator, data: []const u8) !?Payload {
         }
         if (contract_json) |c| allocator.free(c);
         if (attestation_jws) |a| allocator.free(a);
+        if (certificate) |c| allocator.free(c);
         for (policy_strings.items) |s| allocator.free(s);
         policy_strings.deinit(allocator);
     }
@@ -438,7 +459,14 @@ pub fn parse(allocator: std.mem.Allocator, data: []const u8) !?Payload {
             @intFromEnum(Section.attestation) => {
                 attestation_jws = try allocator.dupe(u8, section_data);
             },
-            else => {}, // skip unknown sections for forward compatibility
+            @intFromEnum(Section.certificate) => {
+                certificate = try allocator.dupe(u8, section_data);
+            },
+            // No forward-compatibility skip. The payload version is checked for
+            // equality, so a section this reader does not know is not a future
+            // artifact - it is a malformed one, and reading the rest of it would
+            // mean serving a binary whose contents were only partly understood.
+            else => return error.UnknownPayloadSection,
         }
     }
 
@@ -452,6 +480,7 @@ pub fn parse(allocator: std.mem.Allocator, data: []const u8) !?Payload {
         .policy_strings = try policy_strings.toOwnedSlice(allocator),
         .policy_section_sha256 = policy_section_sha256,
         .attestation_jws = attestation_jws,
+        .certificate = certificate,
     };
 }
 

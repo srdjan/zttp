@@ -189,6 +189,26 @@ pub const Parser = parser.Parser;
 /// Read-only view over a parsed IR store, for walking a program without
 /// holding the parser.
 pub const IrView = parser.IrView;
+
+// Proof-carrying evidence. The lowering that turns a parsed program into the
+// small proof IR a consumer can re-derive over, and the translation witnesses
+// code generation and the optimizer record on the way to final bytecode. These
+// are producer surfaces: nothing here decides anything, and the acceptance
+// kernel in `packages/proof-checker` never imports them.
+pub const ProofIr = compiler.proof_ir.ProofIr;
+pub const ProofIrNode = compiler.proof_ir.Node;
+pub const ProofIrTag = compiler.proof_ir.Tag;
+pub const ProofRule = compiler.proof_ir.Rule;
+pub const ProofEvidence = compiler.proof_ir.Evidence;
+pub const ProofEmission = compiler.proof_ir.Emission;
+pub const ProofJump = compiler.proof_ir.Jump;
+pub const lowerProofIr = compiler.proof_ir.lower;
+pub const buildProofEvidence = compiler.proof_ir.buildEvidence;
+pub const compilerProofRuleAt = compiler.proof_ir.ruleAt;
+pub const proofIrNodeDomain = compiler.proof_ir.node_domain;
+pub const TranslationRecorder = engine.translation_witness.Recorder;
+pub const TranslationRewrite = engine.translation_witness.Rewrite;
+pub const TranslationRewriteKind = engine.translation_witness.RewriteKind;
 pub const StripResult = stripper.StripResult;
 pub const StripOptions = stripper.StripOptions;
 pub const StripDiagnostic = stripper.StripDiagnostic;

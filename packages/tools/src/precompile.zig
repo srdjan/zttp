@@ -116,8 +116,16 @@ pub const CompiledHandler = struct {
     violations_jsonl: ?[]const u8 = null,
     /// Pre-formatted violations summary for build output (when violations exist)
     violations_summary: ?[]const u8 = null,
+    /// Canonical proof IR plus the translation witnesses code generation and
+    /// the optimizer recorded. Present only when the caller asked for it: the
+    /// relation between an IR member and its final bytecode offsets exists only
+    /// during compilation, so it is captured here or not at all.
+    proof_evidence: ?zts.ProofEvidence = null,
 
     pub fn deinit(self: *CompiledHandler, allocator: std.mem.Allocator) void {
+        if (self.proof_evidence) |*evidence| {
+            evidence.deinit();
+        }
         if (self.aot) |*analysis| {
             analysis.deinit(allocator);
         }
@@ -1714,6 +1722,11 @@ pub const CompileOptions = struct {
     build_time: ?[]const u8 = null,
     /// Git commit hash for reproducibility. When null, defaults to "unknown".
     git_commit: ?[]const u8 = null,
+    /// Capture the canonical proof IR and the translation witnesses. Off by
+    /// default: recording costs a null check per emitted node and an owned copy
+    /// of the witness arrays, and only a caller producing a certificate needs
+    /// them.
+    emit_proof_evidence: bool = false,
 };
 
 test "formatIsoTimestamp produces ISO-8601 UTC" {
@@ -2047,6 +2060,16 @@ pub fn compileHandler(
     );
     defer code_gen.deinit();
 
+    // Translation evidence, captured while code generation still knows where
+    // each IR member went. After this function returns, the IR is gone and the
+    // offsets have already been moved by the optimizer.
+    var witness_recorder: ?zts.TranslationRecorder = if (opts.emit_proof_evidence)
+        zts.TranslationRecorder.init(allocator)
+    else
+        null;
+    defer if (witness_recorder) |*recorder| recorder.deinit();
+    if (witness_recorder) |*recorder| code_gen.witness = recorder;
+
     // Wire type annotations from BoolChecker for type-directed opcode specialization.
     // The map is owned by `resolved.bool_checker`; pass-through borrow is safe
     // because `resolved` outlives the codegen pass.
@@ -2067,6 +2090,20 @@ pub fn compileHandler(
             verify_bc.message,
         });
         return error.BytecodeVerificationFailed;
+    }
+
+    // The proof IR is lowered from the same parse code generation just walked,
+    // and the witnesses are attached to it here rather than later, because
+    // `js_parser` does not outlive this function.
+    var proof_evidence: ?zts.ProofEvidence = null;
+    errdefer if (proof_evidence) |*evidence| evidence.deinit();
+    if (witness_recorder) |*recorder| {
+        recorder.check() catch |err| {
+            debugPrint("Translation evidence is incomplete ({s}); refusing to emit a proof certificate\n", .{@errorName(err)});
+            return error.TranslationWitnessIncomplete;
+        };
+        const proof_view = zts.parser.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
+        proof_evidence = try zts.buildProofEvidence(allocator, proof_view, root, recorder);
     }
 
     // Get object literal shapes from parser
@@ -2131,6 +2168,7 @@ pub fn compileHandler(
                 .bytecode = bytecode_data,
                 .aot = aot,
                 .contract = contract,
+                .proof_evidence = proof_evidence,
             };
         };
 
@@ -2348,6 +2386,7 @@ pub fn compileHandler(
         .generated_tests = generated_tests_jsonl,
         .violations_jsonl = violations_jsonl,
         .violations_summary = violations_summary,
+        .proof_evidence = proof_evidence,
     };
 }
 

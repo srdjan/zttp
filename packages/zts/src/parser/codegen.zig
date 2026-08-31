@@ -9,6 +9,7 @@ const scope_mod = @import("scope.zig");
 // Import real types from parent module for integration
 const bytecode = @import("../bytecode.zig");
 const bytecode_opt = @import("../bytecode_opt.zig");
+const translation_witness = @import("../translation_witness.zig");
 const value = @import("../value.zig");
 const heap = @import("../heap.zig");
 const string = @import("../string.zig");
@@ -101,6 +102,13 @@ pub const CodeGen = struct {
 
     /// Optimization statistics (accumulated across all functions)
     opt_stats: bytecode_opt.OptStats,
+
+    /// Optional translation-evidence recorder. Null on the ordinary compile
+    /// path, so the cost is one predictable null check per emitted node. Set
+    /// only when a caller is producing a proof certificate, because the
+    /// relation between an IR member and its final bytecode offsets exists
+    /// nowhere else once this pass finishes.
+    witness: ?*translation_witness.Recorder = null,
 
     /// Per-node type annotations from BoolChecker for type-specialized opcode emission.
     node_types: ?*const node_types.NodeTypeMap,
@@ -309,6 +317,11 @@ pub const CodeGen = struct {
     fn applyPeepholeOpt(self: *CodeGen) !void {
         var optimizer = bytecode_opt.BytecodeOptimizer.init(self.allocator);
         defer optimizer.deinit();
+        optimizer.witness = self.witness;
+
+        if (self.witness) |recorder| {
+            recorder.notePreOptimizationLen(@intCast(self.code.items.len));
+        }
 
         // Run peephole optimization
         const stats = try optimizer.optimize(self.code.items);
@@ -354,6 +367,44 @@ pub const CodeGen = struct {
     }
 
     fn emitNode(self: *CodeGen, index: NodeIndex) anyerror!void {
+        const recorder = self.witness orelse return self.emitNodeInner(index);
+        if (index == null_node) return;
+        const tag = self.ir.getTag(index) orelse return;
+
+        const start: u32 = @intCast(self.code.items.len);
+        try recorder.beginNode(index, start);
+        errdefer recorder.incomplete = true;
+        try self.emitNodeInner(index);
+        try recorder.endNode(@intCast(self.code.items.len), proofRelevant(tag));
+    }
+
+    /// Which IR tags the proof IR carries. Only these get an emission witness:
+    /// a certificate that recorded every expression would be dominated by
+    /// members no rule ever mentions.
+    fn proofRelevant(tag: NodeTag) bool {
+        return switch (tag) {
+            // Function forms are deliberately absent: each one generates into
+            // its own code buffer, so a span measured in the parent's buffer
+            // would name bytes that are not there. A function's translation is
+            // its body's, recorded inside its own scope.
+            .block,
+            .if_stmt,
+            .match_expr,
+            .match_arm,
+            .for_stmt,
+            .for_of_stmt,
+            .for_in_stmt,
+            .while_stmt,
+            .do_while_stmt,
+            .return_stmt,
+            .call,
+            .method_call,
+            => true,
+            else => false,
+        };
+    }
+
+    fn emitNodeInner(self: *CodeGen, index: NodeIndex) anyerror!void {
         if (index == null_node) return;
 
         const tag = self.ir.getTag(index) orelse return;
@@ -1575,6 +1626,10 @@ pub const CodeGen = struct {
         self.max_stack_depth = 0;
         self.current_stack_depth = 0;
 
+        // Everything from here to the buffer restore belongs to this function's
+        // own code buffer, label table, and optimization pass.
+        if (self.witness) |recorder| try recorder.beginFunctionScope(node_idx);
+
         // Compile function body
         try self.emitNode(func.body);
         try self.emit(.ret_undefined);
@@ -1584,6 +1639,8 @@ pub const CodeGen = struct {
         if (comptime enable_peephole_opt) {
             try self.applyPeepholeOpt();
         }
+
+        if (self.witness) |recorder| try recorder.endFunctionScope();
 
         // Get upvalue info from scope
         const scope = self.scopes.getScope(func.scope_id);
@@ -2322,22 +2379,27 @@ pub const CodeGen = struct {
 
     fn emitJump(self: *CodeGen, opcode: Opcode, label_id: u32) !void {
         try self.emit(opcode);
-        try self.pending_jumps.append(self.allocator, .{
-            .instruction_offset = @intCast(self.code.items.len),
-            .target_label = label_id,
-        });
-        try self.emitI16(0); // Placeholder
+        try self.emitI16Placeholder(label_id);
     }
 
     fn emitI16Placeholder(self: *CodeGen, label_id: u32) !void {
+        const operand_offset: u32 = @intCast(self.code.items.len);
         try self.pending_jumps.append(self.allocator, .{
-            .instruction_offset = @intCast(self.code.items.len),
+            .instruction_offset = operand_offset,
             .target_label = label_id,
         });
-        try self.emitI16(0);
+        if (self.witness) |recorder| try recorder.recordJump(operand_offset, label_id);
+        try self.emitI16(0); // Placeholder
+    }
+
+    fn labelOffset(self: *const CodeGen, label_id: u32) ?u32 {
+        if (label_id >= self.labels.items.len) return null;
+        const label = self.labels.items[label_id];
+        return if (label.resolved) label.offset else null;
     }
 
     fn resolveJumps(self: *CodeGen) !void {
+        if (self.witness) |recorder| try recorder.resolveJumps(self, labelOffset);
         for (self.pending_jumps.items) |jump| {
             const label = self.labels.items[jump.target_label];
             if (!label.resolved) continue;

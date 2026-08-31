@@ -147,6 +147,7 @@ zts string.zig
 zts stripper.zig
 zts tests/asi_census.zig
 zts tests/opcode_parity.zig
+zts translation_witness.zig
 zts trace.zig
 zts tsx_lowerer.zig
 zts value.zig
@@ -186,6 +187,7 @@ zts-compiler module_spec_render.zig
 zts-compiler module_types.zig
 zts-compiler path_generator.zig
 zts-compiler pipeline.zig
+zts-compiler proof_ir.zig
 zts-compiler proof_trace.zig
 zts-compiler property_diagnostics.zig
 zts-compiler repair_intent.zig

@@ -68,19 +68,23 @@ pub const Property = enum(u16) {
         };
     }
 
-    /// Whether the property is stated about each function in the proof IR or
-    /// once about the whole handler. The consumer uses this, not the producer's
-    /// word, to decide how many obligations a requirement induces.
-    pub fn scope(self: Property) Scope {
+    /// Which proof-IR member an obligation for this property is about.
+    ///
+    /// Only `response_total` names a specific member: the entry function, which
+    /// the consumer resolves from the IR itself rather than reading the
+    /// producer's word for which node that is. Everything else is stated once
+    /// about the handler.
+    pub fn subjectIsEntryFunction(self: Property) bool {
         return switch (self) {
-            .response_total, .results_checked => .per_function,
+            .response_total => true,
+            .results_checked,
             .no_secret_leakage,
             .state_isolated,
             .deterministic,
             .read_only,
             .retry_safe,
             .capability_bounded,
-            => .handler,
+            => false,
         };
     }
 
@@ -98,46 +102,49 @@ pub const Property = enum(u16) {
     }
 };
 
-pub const Scope = enum { per_function, handler };
-
 /// Small-kernel rules. Each one is a check the consumer performs itself over
 /// data it holds; none of them reads a producer verdict.
+///
+/// The set is closed and every member is constructible: a rule the compiler
+/// cannot produce and no certificate can cite would advertise a check that
+/// never runs, which is the shape of gate this repository has been burned by
+/// before.
 pub const Rule = enum(u16) {
     /// A `return` node discharges totality for itself.
     return_total = 1,
-    /// A branch node is total when both arms are total.
+    /// A branch node is total when both arms are present and both are total.
     branch_both_arms_total = 2,
-    /// A statement sequence is total when its last statement is total.
-    sequence_tail_total = 3,
-    /// A `match` node is total when every arm is total and the scrutinee union
-    /// is covered member by member, so no default arm is required.
+    /// A statement sequence is total when one of its statements is total.
+    /// Everything after that statement is unreachable.
+    sequence_member_total = 3,
+    /// A `match` node with a default arm is total when every arm is total. A
+    /// match without one is not covered by this rule; see `TrustReason`.
     match_exhaustive_total = 4,
     /// A loop body never establishes totality: the iterable can be empty.
     loop_never_total = 5,
-    /// A call is total when the callee's proof capsule states it.
-    call_capsule_total = 6,
-    /// Each IR member occupies one contiguous range of final bytecode.
-    emission_contiguous = 7,
-    /// A branch node's emitted jump resolves to the emitted start of the IR
+    /// Each IR member occupies one contiguous range of final bytecode, and no
+    /// two sibling ranges overlap.
+    emission_contiguous = 6,
+    /// Every jump a branch emitted resolves to the emitted start of the IR
     /// member it names as its target.
-    jump_target_resolved = 8,
-    /// A recorded peephole fusion replaced a known instruction pair.
-    rewrite_peephole_fusion = 9,
+    jump_target_resolved = 7,
+    /// A recorded peephole fusion replaced a known instruction pair with a
+    /// known fused instruction.
+    rewrite_peephole_fusion = 8,
     /// A recorded compaction shifted later offsets by one consistent delta.
-    rewrite_compaction = 10,
+    rewrite_compaction = 9,
 
     pub fn fromWire(value: u16) ?Rule {
         return switch (value) {
             1 => .return_total,
             2 => .branch_both_arms_total,
-            3 => .sequence_tail_total,
+            3 => .sequence_member_total,
             4 => .match_exhaustive_total,
             5 => .loop_never_total,
-            6 => .call_capsule_total,
-            7 => .emission_contiguous,
-            8 => .jump_target_resolved,
-            9 => .rewrite_peephole_fusion,
-            10 => .rewrite_compaction,
+            6 => .emission_contiguous,
+            7 => .jump_target_resolved,
+            8 => .rewrite_peephole_fusion,
+            9 => .rewrite_compaction,
             else => null,
         };
     }
@@ -149,10 +156,9 @@ pub const Rule = enum(u16) {
         return switch (self) {
             .return_total,
             .branch_both_arms_total,
-            .sequence_tail_total,
+            .sequence_member_total,
             .match_exhaustive_total,
             .loop_never_total,
-            .call_capsule_total,
             => .totality,
             .emission_contiguous,
             .jump_target_resolved,
@@ -172,26 +178,34 @@ pub const NodeTag = enum(u16) {
     function = 1,
     sequence = 2,
     branch = 3,
-    match_node = 4,
-    match_arm = 5,
-    loop_node = 6,
-    return_node = 7,
-    call = 8,
+    /// A `match` carrying a default arm. Totality follows from its arms.
+    match_default = 4,
+    /// A `match` with no default arm. The kernel models no rule that closes it:
+    /// whether a closed union is covered member by member is decided by the
+    /// type checker, and re-deciding it here would mean re-implementing the
+    /// type checker inside the acceptance kernel. A certificate that needs such
+    /// a node to be total says so with a declared edge, and the grade drops.
+    match_open = 5,
+    match_arm = 6,
+    loop_node = 7,
+    return_node = 8,
+    call = 9,
     /// A statement with no bearing on totality (declaration, expression
     /// statement). Present so a sequence's shape is complete.
-    plain = 9,
+    plain = 10,
 
     pub fn fromWire(value: u16) ?NodeTag {
         return switch (value) {
             1 => .function,
             2 => .sequence,
             3 => .branch,
-            4 => .match_node,
-            5 => .match_arm,
-            6 => .loop_node,
-            7 => .return_node,
-            8 => .call,
-            9 => .plain,
+            4 => .match_default,
+            5 => .match_open,
+            6 => .match_arm,
+            7 => .loop_node,
+            8 => .return_node,
+            9 => .call,
+            10 => .plain,
             else => null,
         };
     }
@@ -229,8 +243,8 @@ test "wire decoders refuse values outside the alphabet" {
     try std.testing.expectEqual(@as(?ProofSystem, null), ProofSystem.fromWire(2));
     try std.testing.expectEqual(@as(?Property, null), Property.fromWire(0));
     try std.testing.expectEqual(@as(?Property, null), Property.fromWire(9));
-    try std.testing.expectEqual(@as(?Rule, null), Rule.fromWire(11));
-    try std.testing.expectEqual(@as(?NodeTag, null), NodeTag.fromWire(10));
+    try std.testing.expectEqual(@as(?Rule, null), Rule.fromWire(10));
+    try std.testing.expectEqual(@as(?NodeTag, null), NodeTag.fromWire(11));
     try std.testing.expectEqual(@as(?TrustReason, null), TrustReason.fromWire(6));
 }
 
@@ -243,12 +257,16 @@ test "every alphabet member round trips through its wire decoder" {
     }
 }
 
-test "property scope is stated for every property" {
+test "every property states its subject and names itself" {
+    var entry_function_subjects: usize = 0;
     inline for (@typeInfo(Property).@"enum".fields) |field| {
         const p: Property = @enumFromInt(field.value);
-        _ = p.scope();
+        if (p.subjectIsEntryFunction()) entry_function_subjects += 1;
         try std.testing.expect(p.name().len > 0);
     }
+    // Exactly one property is about a named IR member. If that stops being
+    // true, obligation reconstruction has to change with it.
+    try std.testing.expectEqual(@as(usize, 1), entry_function_subjects);
 }
 
 test "rule family is stated for every rule" {
