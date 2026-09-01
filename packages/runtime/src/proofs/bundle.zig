@@ -27,6 +27,7 @@ const artifact_graph = @import("../artifact_graph.zig");
 const contract_runtime = @import("../contract_runtime.zig");
 const self_extract = @import("../self_extract.zig");
 const static_mod = @import("../server_static.zig");
+const guard_report = @import("guard_report.zig");
 
 /// Bumped to 2 for the certificate component. The verifier checks this for
 /// equality: a version-1 bundle carried hashes and nothing that could be
@@ -360,6 +361,13 @@ fn verifySemantics(
             if (assessment.development_only) ", development artifact" else "",
         },
     );
+    // Coverage on its own line, never inside the proof line above. A covered
+    // guard is a promise to check a value at request time; the line above is
+    // about what was proved before the artifact shipped.
+    var guard_buf: [256]u8 = undefined;
+    var guard_writer = std.Io.Writer.fixed(&guard_buf);
+    guard_report.writeSummary(&guard_writer, assessment.guards) catch {};
+    try stdout.print("Guards:    {s}\n", .{guard_writer.buffered()});
     try stdout.print(
         "Signature: {s}\n",
         .{switch (assessment.provenance) {

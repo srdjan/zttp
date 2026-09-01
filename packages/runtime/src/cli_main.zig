@@ -32,6 +32,10 @@ test {
     _ = @import("perf_probe_lib.zig");
     _ = @import("equivalence_probe_lib.zig");
     _ = @import("proofs_cli.zig");
+    // `proofs_cli` imports the bundle path, which imports this, and neither
+    // hop is enough on its own: a deliberate break in its tests left `zig
+    // build test` green until this line existed.
+    _ = @import("proofs/guard_report.zig");
     _ = @import("proof_card_tui.zig");
     _ = @import("proof_audit_ring.zig");
     _ = @import("demo.zig");
