@@ -45,6 +45,10 @@ pub const module_specifier = @import("module_specifier.zig");
 /// address scopes a connection may land in.
 pub const endpoint = @import("endpoint.zig");
 
+/// The canonical guard identifier - an environment key, cache namespace, or
+/// SQL query name - as the policy holds it.
+pub const identifier = @import("identifier.zig");
+
 /// Whether a request path matches a route pattern, parameter segments included.
 pub const route_match = @import("route_match.zig");
 

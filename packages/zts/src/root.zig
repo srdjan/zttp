@@ -115,6 +115,9 @@ pub const property_diagnostics = compiler.property_diagnostics;
 pub const diagnostic_catalog = compiler.diagnostic_catalog;
 /// The canonical egress endpoint rule and the resolved-address scopes.
 pub const endpoint = base.endpoint;
+
+/// The canonical guard identifier rule.
+pub const identifier = base.identifier;
 pub const route_match = base.route_match;
 pub const type_map = base.type_map;
 pub const type_pool = compiler.type_pool;

@@ -45,16 +45,27 @@ runtime file_io
 runtime handler_contract
 runtime handler_policy
 runtime http
+# The one guard identifier rule, for the same reason as `endpoint` above: the
+# runtime's pin test runs it and the acceptance kernel's copy over one corpus,
+# and it can only do that if it can name both.
+runtime identifier
 # packages/runtime/bench/benchmark.zig reads interpreter.PerfStats to report
 # perf counters. Benchmark-only; the counter layout is not stable surface.
 runtime interpreter
 runtime module_binding
+# The module state slot numbers, so a runtime test can assert that a denied
+# cache namespace never created the store rather than assert on the guard's
+# own return value.
+runtime module_slots
 runtime modules
 runtime perf_receipt
 runtime pipeline
 runtime policy
 runtime security_events
 runtime spec_discharge
+# Opening the handler's database directly, so a runtime test can count the rows
+# a denied write did not add.
+runtime sqlite
 runtime string
 runtime trace
 runtime witness_corpus

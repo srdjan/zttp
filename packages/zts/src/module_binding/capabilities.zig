@@ -23,6 +23,7 @@ const gc = @import("../gc.zig");
 const handler_policy = @import("../handler_policy.zig");
 const module_slots = @import("zts-base").module_slots;
 const module_authorization = @import("zts-base").module_authorization;
+const identifier = @import("zts-base").identifier;
 
 // -------------------------------------------------------------------------
 // Opaque handle for third-party module sandbox
@@ -366,8 +367,13 @@ pub fn readEnvForActiveModule(ctx: *context.Context, name_z: [:0]const u8) Activ
     // readFileChecked / openSqliteDbChecked, which gate internally. `allows`
     // returns true when no allowlist is configured, so this matches the
     // built-in module's behavior exactly and only closes the bypass.
-    if (!ctx.capability_policy.allowsEnv(name_z)) {
-        emitPolicyDenial(ctx, .policy_denied_env, name_z);
+    var buf: [identifier.max_identifier_bytes]u8 = undefined;
+    const canonical = normalizedIdentifier(name_z, &buf) orelse {
+        emitPolicyDenial(ctx, .policy_denied_env, unrepresentable_identifier);
+        return null;
+    };
+    if (!ctx.capability_policy.allowsEnv(canonical)) {
+        emitPolicyDenial(ctx, .policy_denied_env, canonical);
         return null;
     }
     const result = std.c.getenv(name_z) orelse return null;
@@ -440,6 +446,22 @@ pub fn hmacSha256Checked(
     hmacSha256ForActiveModule(ctx, out, data, key) catch |err| return panicCapabilityError(ctx, err, .crypto);
 }
 
+/// The resource named in a denial whose identifier the rule refused. The raw
+/// bytes are not emitted: the reason it was refused is that it carries a
+/// control byte or runs past the cap, and neither belongs in an event stream.
+const unrepresentable_identifier = "<unrepresentable>";
+
+/// Canonicalize before deciding.
+///
+/// The policy holds identifiers under one rule, and the guard applies that same
+/// rule to the value the effect is about to use. A value the rule refuses is a
+/// value no policy entry can hold, so it is refused here rather than compared:
+/// a comparison would reach the same answer against a list that names entries,
+/// and the opposite answer against a list that is not enabled.
+fn normalizedIdentifier(value_bytes: []const u8, out: []u8) ?[]const u8 {
+    return identifier.normalize(value_bytes, out) catch null;
+}
+
 fn emitPolicyDenial(ctx: *const context.Context, kind: security_events.SecurityEventKind, name: []const u8) void {
     security_events.emitGlobal(security_events.SecurityEvent.init(
         kind,
@@ -453,8 +475,13 @@ pub fn allowsCacheNamespaceForActiveModule(
     ns: []const u8,
 ) ActiveCapabilityError!bool {
     try requireActiveCapability(ctx, .policy_check);
-    const allowed = ctx.capability_policy.allowsCacheNamespace(ns);
-    if (!allowed) emitPolicyDenial(ctx, .policy_denied_cache, ns);
+    var buf: [identifier.max_identifier_bytes]u8 = undefined;
+    const canonical = normalizedIdentifier(ns, &buf) orelse {
+        emitPolicyDenial(ctx, .policy_denied_cache, unrepresentable_identifier);
+        return false;
+    };
+    const allowed = ctx.capability_policy.allowsCacheNamespace(canonical);
+    if (!allowed) emitPolicyDenial(ctx, .policy_denied_cache, canonical);
     return allowed;
 }
 
@@ -467,8 +494,13 @@ pub fn allowsEnvForActiveModule(
     name: []const u8,
 ) ActiveCapabilityError!bool {
     try requireActiveCapability(ctx, .policy_check);
-    const allowed = ctx.capability_policy.allowsEnv(name);
-    if (!allowed) emitPolicyDenial(ctx, .policy_denied_env, name);
+    var buf: [identifier.max_identifier_bytes]u8 = undefined;
+    const canonical = normalizedIdentifier(name, &buf) orelse {
+        emitPolicyDenial(ctx, .policy_denied_env, unrepresentable_identifier);
+        return false;
+    };
+    const allowed = ctx.capability_policy.allowsEnv(canonical);
+    if (!allowed) emitPolicyDenial(ctx, .policy_denied_env, canonical);
     return allowed;
 }
 
@@ -481,8 +513,13 @@ pub fn allowsSqlQueryForActiveModule(
     name: []const u8,
 ) ActiveCapabilityError!bool {
     try requireActiveCapability(ctx, .policy_check);
-    const allowed = ctx.capability_policy.allowsSqlQuery(name);
-    if (!allowed) emitPolicyDenial(ctx, .policy_denied_sql, name);
+    var buf: [identifier.max_identifier_bytes]u8 = undefined;
+    const canonical = normalizedIdentifier(name, &buf) orelse {
+        emitPolicyDenial(ctx, .policy_denied_sql, unrepresentable_identifier);
+        return false;
+    };
+    const allowed = ctx.capability_policy.allowsSqlQuery(canonical);
+    if (!allowed) emitPolicyDenial(ctx, .policy_denied_sql, canonical);
     return allowed;
 }
 
@@ -495,16 +532,21 @@ pub fn allowsSqlWriteForActiveModule(
     name: []const u8,
 ) ActiveCapabilityError!bool {
     try requireActiveCapability(ctx, .policy_check);
-    const allowed = ctx.capability_policy.allowsSqlWrite(name);
+    var buf: [identifier.max_identifier_bytes]u8 = undefined;
+    const canonical = normalizedIdentifier(name, &buf) orelse {
+        emitPolicyDenial(ctx, .policy_denied_sql, unrepresentable_identifier);
+        return false;
+    };
+    const allowed = ctx.capability_policy.allowsSqlWrite(canonical);
     if (!allowed) {
         // Phase 1 dual-emit: legacy per-module event for existing JSONL
         // consumers, generic policy_denied for spec section 12 shape.
         // Phase 4 deprecates the legacy kinds once consumers migrate.
-        emitPolicyDenial(ctx, .policy_denied_sql, name);
+        emitPolicyDenial(ctx, .policy_denied_sql, canonical);
         const policy = @import("../policy.zig");
         policy.emitDenied(.{
             .action = .db_write,
-            .resource = .{ .kind = policy.resource_kind_sql_query, .id = name },
+            .resource = .{ .kind = policy.resource_kind_sql_query, .id = canonical },
         }, .not_in_allowlist);
     }
     return allowed;
@@ -612,6 +654,64 @@ test "wrapModuleFnWithCapabilities invocation activates Context authorization" {
     // The Context scope must be torn down after the wrapped call returns so a
     // later call outside a module cannot inherit residual capabilities.
     try std.testing.expect(ctx.active_module_scope == null);
+}
+
+test "the guard refuses an identifier no policy entry can hold" {
+    const allocator = std.testing.allocator;
+    var gc_state = try gc.GC.init(allocator, .{});
+    defer gc_state.deinit();
+    const ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const longest = [_]u8{'a'} ** identifier.max_identifier_bytes;
+
+    const Observed = struct {
+        var longest_allowed: bool = false;
+        var too_long_allowed: bool = true;
+        var control_byte_allowed: bool = true;
+        var empty_allowed: bool = true;
+    };
+
+    const module_fn: ModuleFn = struct {
+        fn f(handle: *ModuleHandle, _: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+            _ = args;
+            const active_ctx = handleToContext(handle);
+            const max = [_]u8{'a'} ** identifier.max_identifier_bytes;
+            const over = [_]u8{'a'} ** (identifier.max_identifier_bytes + 1);
+            Observed.longest_allowed = try allowsEnvChecked(active_ctx, &max);
+            Observed.too_long_allowed = try allowsEnvChecked(active_ctx, &over);
+            Observed.control_byte_allowed = try allowsEnvChecked(active_ctx, "API\nKEY");
+            Observed.empty_allowed = try allowsEnvChecked(active_ctx, "");
+            return value.JSValue.true_val;
+        }
+    }.f;
+
+    // The list names the longest identifier the rule admits, and nothing else.
+    // The over-long, control-byte, and empty names are refused by the rule
+    // rather than by the comparison, which is the difference that matters when
+    // the list is permissive.
+    ctx.capability_policy = .{ .env = .{ .enabled = true, .values = &[_][]const u8{&longest} } };
+
+    const wrapped = comptime wrapModuleFnWithCapabilities(
+        module_fn,
+        "zttp:env",
+        &.{.policy_check},
+    );
+    _ = try wrapped(ctx, value.JSValue.undefined_val, &.{});
+
+    try std.testing.expect(Observed.longest_allowed);
+    try std.testing.expect(!Observed.too_long_allowed);
+    try std.testing.expect(!Observed.control_byte_allowed);
+    try std.testing.expect(!Observed.empty_allowed);
+
+    // A list that is not enabled admits every name it is asked about, and still
+    // does not admit one the rule refuses.
+    ctx.capability_policy = .{};
+    _ = try wrapped(ctx, value.JSValue.undefined_val, &.{});
+    try std.testing.expect(Observed.longest_allowed);
+    try std.testing.expect(!Observed.too_long_allowed);
+    try std.testing.expect(!Observed.control_byte_allowed);
+    try std.testing.expect(!Observed.empty_allowed);
 }
 
 test "active module authorization is scoped to its Context" {

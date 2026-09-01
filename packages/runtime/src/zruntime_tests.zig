@@ -3149,6 +3149,229 @@ test "dev_capability_policy config applies env cache and sql sections" {
     try std.testing.expect(!rt.ctx.capability_policy.allowsSqlQuery("dropTodos"));
 }
 
+extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+extern "c" fn unsetenv(name: [*:0]const u8) c_int;
+const probeSetenv = setenv;
+const probeUnsetenv = unsetenv;
+
+// The three sinks below already check before their effects. These probe that
+// the check is what stops the effect - a guard that returned the right answer
+// and let the operation run would pass an assertion on its return value.
+test "a denied env key never reaches the handler" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    _ = probeSetenv("ZTTP_PROBE_ALLOWED", "visible", 1);
+    _ = probeSetenv("ZTTP_PROBE_DENIED", "secret", 1);
+    defer {
+        _ = probeUnsetenv("ZTTP_PROBE_ALLOWED");
+        _ = probeUnsetenv("ZTTP_PROBE_DENIED");
+    }
+
+    const rt = try HandlerInstance.init(allocator, .{
+        .dev_capability_policy = .{
+            .env = .{ .enabled = true, .values = &[_][]const u8{"ZTTP_PROBE_ALLOWED"} },
+        },
+    });
+    defer rt.deinit();
+
+    const handler_code =
+        \\import { env } from "zttp:env";
+        \\function handler(req) {
+        \\  return Response.json({ allowed: env("ZTTP_PROBE_ALLOWED") });
+        \\}
+    ;
+    try rt.loadHandler(handler_code, "<env-allowed>");
+
+    var request = HttpRequestOwned{
+        .method = try allocator.dupe(u8, "GET"),
+        .url = try allocator.dupe(u8, "/"),
+        .headers = .empty,
+        .body = null,
+    };
+    defer request.deinit(allocator);
+
+    {
+        var response = try rt.executeHandler(request.asView());
+        defer response.deinit();
+        var parsed = try std.json.parseFromSlice(std.json.Value, allocator, response.body, .{});
+        defer parsed.deinit();
+        try std.testing.expectEqualStrings("visible", parsed.value.object.get("allowed").?.string);
+    }
+
+    // The denied key throws at the guard, so its value has no path into the
+    // response at all.
+    const denied_code =
+        \\import { env } from "zttp:env";
+        \\function handler(req) {
+        \\  return Response.json({ denied: env("ZTTP_PROBE_DENIED") });
+        \\}
+    ;
+    try rt.loadHandler(denied_code, "<env-denied>");
+    const request_val = try rt.createRequestObject(request.asView());
+    try std.testing.expectError(
+        error.NativeFunctionError,
+        rt.callGlobalFunction("handler", &[_]zq.JSValue{request_val}),
+    );
+    rt.resetForNextRequest();
+}
+
+test "a denied cache namespace never creates the store" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const cache_slot = @intFromEnum(zq.module_slots.Slot.cache);
+    const policy = zq.RuntimePolicy{
+        .cache = .{ .enabled = true, .values = &[_][]const u8{"allowed"} },
+    };
+
+    var request = HttpRequestOwned{
+        .method = try allocator.dupe(u8, "GET"),
+        .url = try allocator.dupe(u8, "/"),
+        .headers = .empty,
+        .body = null,
+    };
+    defer request.deinit(allocator);
+
+    // An allowed namespace reaches the store, so the slot holds one.
+    {
+        const rt = try HandlerInstance.init(allocator, .{ .dev_capability_policy = policy });
+        defer rt.deinit();
+        try rt.loadHandler(
+            \\import { cacheSet } from "zttp:cache";
+            \\function handler(req) {
+            \\  cacheSet("allowed", "k", "v");
+            \\  return Response.json({ wrote: true });
+            \\}
+        , "<cache-allowed>");
+        var response = try rt.executeHandler(request.asView());
+        defer response.deinit();
+        try std.testing.expect(rt.ctx.module_state[cache_slot] != null);
+    }
+
+    // A denied one does not. The guard runs before getOrCreateStore, so there
+    // is no store to have read, mutated, or counted - which is a stronger
+    // statement than "the deny helper returned false".
+    {
+        const rt = try HandlerInstance.init(allocator, .{ .dev_capability_policy = policy });
+        defer rt.deinit();
+        try rt.loadHandler(
+            \\import { cacheSet } from "zttp:cache";
+            \\function handler(req) {
+            \\  cacheSet("blocked", "k", "v");
+            \\  return Response.json({ wrote: true });
+            \\}
+        , "<cache-denied>");
+        const request_val = try rt.createRequestObject(request.asView());
+        try std.testing.expectError(
+            error.NativeFunctionError,
+            rt.callGlobalFunction("handler", &[_]zq.JSValue{request_val}),
+        );
+        rt.resetForNextRequest();
+        try std.testing.expect(rt.ctx.module_state[cache_slot] == null);
+    }
+}
+
+test "a denied sql write never reaches the database" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try durableTestDirPath(allocator, &tmp);
+    const db_path = try std.fmt.allocPrint(allocator, "{s}/probe.db", .{dir});
+
+    // Writes are allowed by name. `insertDenied` is not one of them, and the
+    // row count in the file afterwards is what says whether the guard stopped
+    // the statement or merely reported on it.
+    const policy = zq.RuntimePolicy{
+        .sql = .{
+            .enabled = true,
+            .queries = &.{
+                zq.handler_policy.normalizedSqlQuery("makeTable", false),
+                zq.handler_policy.normalizedSqlQuery("insertAllowed", false),
+            },
+        },
+    };
+
+    var request = HttpRequestOwned{
+        .method = try allocator.dupe(u8, "GET"),
+        .url = try allocator.dupe(u8, "/"),
+        .headers = .empty,
+        .body = null,
+    };
+    defer request.deinit(allocator);
+
+    {
+        const rt = try HandlerInstance.init(allocator, .{
+            .sqlite_path = db_path,
+            .dev_capability_policy = policy,
+        });
+        defer rt.deinit();
+        try rt.loadHandler(
+            \\import { sql, sqlExec } from "zttp:sql";
+            \\function handler(req) {
+            \\  sql("makeTable", "CREATE TABLE t (n INTEGER)");
+            \\  sql("insertAllowed", "INSERT INTO t VALUES (1)");
+            \\  sqlExec("makeTable");
+            \\  sqlExec("insertAllowed");
+            \\  return Response.json({ wrote: true });
+            \\}
+        , "<sql-write-allowed>");
+        var response = try rt.executeHandler(request.asView());
+        defer response.deinit();
+    }
+    try std.testing.expectEqual(@as(usize, 1), countRows(allocator, db_path));
+
+    {
+        const rt = try HandlerInstance.init(allocator, .{
+            .sqlite_path = db_path,
+            .dev_capability_policy = policy,
+        });
+        defer rt.deinit();
+        try rt.loadHandler(
+            \\import { sql, sqlExec } from "zttp:sql";
+            \\function handler(req) {
+            \\  sql("insertDenied", "INSERT INTO t VALUES (2)");
+            \\  sqlExec("insertDenied");
+            \\  return Response.json({ wrote: true });
+            \\}
+        , "<sql-write-denied>");
+        const request_val = try rt.createRequestObject(request.asView());
+        try std.testing.expectError(
+            error.NativeFunctionError,
+            rt.callGlobalFunction("handler", &[_]zq.JSValue{request_val}),
+        );
+        rt.resetForNextRequest();
+    }
+    try std.testing.expectEqual(@as(usize, 1), countRows(allocator, db_path));
+
+    // The same name is not a read either: the split is by operation, so an
+    // allowed write name does not satisfy a read.
+    {
+        const rt = try HandlerInstance.init(allocator, .{
+            .sqlite_path = db_path,
+            .dev_capability_policy = policy,
+        });
+        defer rt.deinit();
+        try std.testing.expect(rt.ctx.capability_policy.allowsSqlWrite("insertAllowed"));
+        try std.testing.expect(!rt.ctx.capability_policy.allowsSqlQuery("insertAllowed"));
+    }
+}
+
+fn countRows(allocator: std.mem.Allocator, path: []const u8) usize {
+    var db = zq.sqlite.Db.openReadOnly(allocator, path) catch return 0;
+    defer db.close();
+    var stmt = db.prepare("SELECT n FROM t") catch return 0;
+    defer stmt.finalize();
+    var rows: usize = 0;
+    while (stmt.step() == zq.sqlite.c.SQLITE_ROW) rows += 1;
+    return rows;
+}
+
 // ...and on the parallel path, via the same config-supplied allowlist.
 test "dev_capability_policy config enforces egress on parallel fetch" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);

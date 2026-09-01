@@ -291,6 +291,66 @@ test "the kernel's endpoint rule and the base-tier one agree" {
     }
 }
 
+test "the kernel's identifier rule and the base-tier one agree" {
+    // Same arrangement as the endpoint rule above: two implementations in
+    // packages that cannot import each other, one corpus, and every answer must
+    // match including which inputs are refused. The forms that matter here are
+    // the ones a rule is tempted to be helpful about - case, surrounding space,
+    // control bytes - plus both sides of the length cap.
+    try testing.expectEqual(
+        pcc.residual.max_identifier_bytes,
+        zts.identifier.max_identifier_bytes,
+    );
+
+    const longest = [_]u8{'a'} ** zts.identifier.max_identifier_bytes;
+    const one_too_long = [_]u8{'a'} ** (zts.identifier.max_identifier_bytes + 1);
+    const corpus = [_][]const u8{
+        "API_KEY",
+        "api_key",
+        " API_KEY ",
+        "sessions",
+        "listTodos",
+        "a",
+        "name with spaces",
+        "naïve",
+        "API\nKEY",
+        "API\tKEY",
+        "API\x00KEY",
+        "API\x7FKEY",
+        &longest,
+        &one_too_long,
+        "",
+    };
+
+    for (corpus) |value| {
+        var producer_buf: [zts.identifier.max_identifier_bytes]u8 = undefined;
+        var kernel_buf: [pcc.residual.max_identifier_bytes]u8 = undefined;
+        const producer = zts.identifier.normalize(value, &producer_buf);
+        const kernel = pcc.residual.normalize(.identifier_exact_v1, value, &kernel_buf);
+
+        if (producer) |produced| {
+            const checked = kernel catch |err| {
+                std.debug.print(
+                    "base tier normalized an identifier the kernel refused with {s}\n",
+                    .{@errorName(err)},
+                );
+                return error.TestUnexpectedResult;
+            };
+            try testing.expectEqualStrings(produced, checked);
+        } else |producer_error| {
+            if (kernel) |_| {
+                std.debug.print(
+                    "base tier refused an identifier with {s}; the kernel normalized it\n",
+                    .{@errorName(producer_error)},
+                );
+                return error.TestUnexpectedResult;
+            } else |kernel_error| {
+                try testing.expectEqual(producer_error, kernel_error);
+            }
+        }
+    }
+}
+
 test "the producer and the consumer name address scopes with the same bits" {
     inline for (@typeInfo(zts.endpoint.AddressScope).@"enum".fields) |field| {
         const producer: zts.endpoint.AddressScope = @enumFromInt(field.value);
