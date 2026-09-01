@@ -1594,31 +1594,27 @@ pub const StrictChecker = struct {
                     .help = guardedNotCertifiableHelp(entry.kind),
                 });
             },
-            .rejected => |reason| switch (reason) {
-                .missing_policy_section => self.addDiagnostic(.{
-                    .severity = .err,
-                    .kind = .dynamic_capability_access,
-                    .node = arg,
-                    .message = "capability access computes a resource no policy section covers",
-                    .help = missingSectionHelp(
-                        guard_catalog.lookup(module, name, arg_pos).?.kind,
-                    ),
-                }),
-                .family_not_enabled => self.addDiagnostic(.{
-                    .severity = .err,
-                    .kind = .dynamic_capability_access,
-                    .node = arg,
-                    .message = "capability access must use a compiler-visible literal",
-                    .help = "sql.allow_queries names a query without saying whether it reads or writes, so a computed SQL query name cannot be checked against it; use a literal query name",
-                }),
-                .unguarded_surface => self.addDiagnostic(.{
-                    .severity = .err,
-                    .kind = .dynamic_capability_access,
-                    .node = arg,
-                    .message = "capability access must use a compiler-visible literal",
-                    .help = unguardedSurfaceHelp(module, name),
-                }),
-            },
+            .missing_policy_section => |entry| self.addDiagnostic(.{
+                .severity = .err,
+                .kind = .dynamic_capability_access,
+                .node = arg,
+                .message = "capability access computes a resource no policy section covers",
+                .help = missingSectionHelp(entry.kind),
+            }),
+            .family_not_enabled => self.addDiagnostic(.{
+                .severity = .err,
+                .kind = .dynamic_capability_access,
+                .node = arg,
+                .message = "capability access must use a compiler-visible literal",
+                .help = "sql.allow_queries names a query without saying whether it reads or writes, so a computed SQL query name cannot be checked against it; use a literal query name",
+            }),
+            .unguarded_surface => self.addDiagnostic(.{
+                .severity = .err,
+                .kind = .dynamic_capability_access,
+                .node = arg,
+                .message = "capability access must use a compiler-visible literal",
+                .help = unguardedSurfaceHelp(module, name),
+            }),
         }
     }
 

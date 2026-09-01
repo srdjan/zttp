@@ -166,28 +166,25 @@ pub const SectionSet = struct {
     }
 };
 
-/// Why a computed capability argument is refused. Each names a different next
-/// action, so they are distinct values rather than one "not allowed".
-pub const Rejection = enum {
-    /// No catalog row: nothing at the sink decides this resource, so no policy
-    /// edit makes it checkable. A service call, a registered SQL statement, the
-    /// raw `fetchSync`.
-    unguarded_surface,
-    /// The consumer could carry it, but the family has no measured rejection
-    /// behind it yet, or its policy section cannot express what the sink
-    /// enforces.
-    family_not_enabled,
-    /// Supported and enabled, and the author has written no policy section for
-    /// it. Admitting it would produce an artifact whose obligations nothing
-    /// covers.
-    missing_policy_section,
-};
-
+/// What a computed capability argument is. Each answer names a different next
+/// action, so they are distinct values rather than one "not allowed", and the
+/// three that know which row they matched carry it, so a caller never has to
+/// look it up again to say which section it meant.
 pub const Disposition = union(enum) {
     /// The consumer carries this as a residual obligation and the runtime
     /// decides the actual value.
     guarded: Entry,
-    rejected: Rejection,
+    /// Carried and enabled, and the author has written no policy section for
+    /// it. Admitting it would produce an artifact whose obligations nothing
+    /// covers.
+    missing_policy_section: Entry,
+    /// Carried, and the family has no measured rejection behind it yet, or its
+    /// policy section cannot express what the sink enforces.
+    family_not_enabled: Entry,
+    /// No catalog row: nothing at the sink decides this resource, so no policy
+    /// edit makes it checkable. A service call, a registered SQL statement, the
+    /// raw `fetchSync`.
+    unguarded_surface,
 };
 
 pub const ClassifyContext = struct {
@@ -206,12 +203,10 @@ pub fn classifyComputed(
     arg_index: u8,
     ctx: ClassifyContext,
 ) Disposition {
-    const entry = lookup(module, export_name, arg_index) orelse
-        return .{ .rejected = .unguarded_surface };
-    const family = entry.kind.family();
-    if (!ctx.enabled.contains(family)) return .{ .rejected = .family_not_enabled };
+    const entry = lookup(module, export_name, arg_index) orelse return .unguarded_surface;
+    if (!ctx.enabled.contains(entry.kind.family())) return .{ .family_not_enabled = entry };
     if (!ctx.sections.contains(entry.kind.sectionId())) {
-        return .{ .rejected = .missing_policy_section };
+        return .{ .missing_policy_section = entry };
     }
     return .{ .guarded = entry };
 }
@@ -259,7 +254,7 @@ test "classification is exhaustive over the surface" {
         .enabled = measured_families,
         .sections = (SectionSet{}).with(.env),
     });
-    try testing.expectEqual(Rejection.missing_policy_section, uncovered.rejected);
+    try testing.expectEqual(Kind.cache_namespace, uncovered.missing_policy_section.kind);
 
     // Carried, with a section, and not enabled: SQL, whose policy section
     // cannot say read from write.
@@ -267,7 +262,7 @@ test "classification is exhaustive over the surface" {
         .enabled = measured_families,
         .sections = all_sections,
     });
-    try testing.expectEqual(Rejection.family_not_enabled, not_enabled.rejected);
+    try testing.expectEqual(Kind.sql_write, not_enabled.family_not_enabled.kind);
 
     // Not carried at all: no policy edit makes these checkable.
     for ([_][2][]const u8{
@@ -280,7 +275,7 @@ test "classification is exhaustive over the surface" {
             .enabled = measured_families,
             .sections = all_sections,
         });
-        try testing.expectEqual(Rejection.unguarded_surface, refused.rejected);
+        try testing.expect(refused == .unguarded_surface);
     }
 
     // An argument position the catalog does not name is not the guarded one.
@@ -288,7 +283,7 @@ test "classification is exhaustive over the surface" {
         .enabled = measured_families,
         .sections = all_sections,
     });
-    try testing.expectEqual(Rejection.unguarded_surface, other_position.rejected);
+    try testing.expect(other_position == .unguarded_surface);
 }
 
 test "the shipped context classifies the enabled families as guarded" {
@@ -300,7 +295,7 @@ test "the shipped context classifies the enabled families as guarded" {
             .sections = all_sections,
         });
         switch (entry.kind.family()) {
-            .sql => try testing.expectEqual(Rejection.family_not_enabled, disposition.rejected),
+            .sql => try testing.expectEqual(entry.kind, disposition.family_not_enabled.kind),
             else => try testing.expectEqual(entry.kind, disposition.guarded.kind),
         }
     }
