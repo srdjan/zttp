@@ -15,6 +15,7 @@ pub const ResponseHandle = HandlerPool.ResponseHandle;
 pub const HandlerContract = zq.HandlerContract;
 pub const HandlerProperties = zq.HandlerProperties;
 pub const RuntimePolicy = zq.RuntimePolicy;
+pub const endpoint = zq.endpoint;
 /// The configured capability policy file, parsed. It is the only source of
 /// entries for a contract category the compiler could not enumerate.
 pub const HandlerPolicy = zq.handler_policy.HandlerPolicy;

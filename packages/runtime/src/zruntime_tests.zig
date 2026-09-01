@@ -2154,6 +2154,7 @@ test "durable fetch retries 5xx responses and succeeds within the retry budget" 
     const allowed = [_][]const u8{egressEndpoint(url, &endpoint_buf)};
     rt.ctx.capability_policy = .{
         .egress = .{ .enabled = true, .values = &allowed },
+        .egress_scopes = (zq.endpoint.ScopeSet{}).with(.loopback),
     };
 
     const handler_code = try std.fmt.allocPrint(allocator,
@@ -2202,6 +2203,7 @@ test "durable fetch stops retrying once the retry budget is exhausted" {
     const allowed = [_][]const u8{egressEndpoint(url, &endpoint_buf)};
     rt.ctx.capability_policy = .{
         .egress = .{ .enabled = true, .values = &allowed },
+        .egress_scopes = (zq.endpoint.ScopeSet{}).with(.loopback),
     };
 
     const handler_code = try std.fmt.allocPrint(allocator,
@@ -2248,6 +2250,7 @@ test "durable fetch retry loop stops once the step deadline passes instead of ex
     defer rt.deinit();
     rt.ctx.capability_policy = .{
         .egress = .{ .enabled = true, .values = &[_][]const u8{"http://127.0.0.1:18711"} },
+        .egress_scopes = (zq.endpoint.ScopeSet{}).with(.loopback),
     };
 
     const handler_code =
@@ -2722,6 +2725,7 @@ test "fetchSync returns structured errors for invalid init and allowlist failure
     const rt = try HandlerInstance.init(allocator, .{
         .outbound_http_enabled = true,
         .outbound_allow_host = "localhost",
+        .dev_capability_policy = .{ .egress_scopes = (zq.endpoint.ScopeSet{}).with(.loopback) },
     });
     defer rt.deinit();
 
@@ -2786,6 +2790,7 @@ test "a Bytes body is accepted where a number is InvalidBody" {
     const rt = try HandlerInstance.init(allocator, .{
         .outbound_http_enabled = true,
         .outbound_allow_host = "localhost",
+        .dev_capability_policy = .{ .egress_scopes = (zq.endpoint.ScopeSet{}).with(.loopback) },
     });
     defer rt.deinit();
 
@@ -2935,6 +2940,7 @@ test "parallel fetch allows allowlisted host and drops disallowed one" {
     const allowed = [_][]const u8{egressEndpoint(allowed_url, &endpoint_buf)};
     rt.ctx.capability_policy = .{
         .egress = .{ .enabled = true, .values = &allowed },
+        .egress_scopes = (zq.endpoint.ScopeSet{}).with(.loopback),
     };
 
     const handler_code = try std.fmt.allocPrint(allocator,
@@ -2971,6 +2977,117 @@ test "parallel fetch allows allowlisted host and drops disallowed one" {
     // 201 at its own position; the disallowed host's position is undefined.
     try std.testing.expectEqual(@as(i64, 201), obj.get("status").?.integer);
     try std.testing.expect(obj.get("blockedUndefined").?.bool);
+}
+
+// The endpoint check authorizes the name. These two cover what the name
+// answers with: the scope of the resolved address, checked before the socket.
+// `TestHttpServer` accepts exactly one connection and then exits, so a second
+// fetch that still gets served is proof the first one never connected - a
+// denial that returned the right string while opening the socket anyway would
+// consume that single accept and fail here.
+test "a resolved scope outside policy denies before the socket" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var server = try TestHttpServer.init(allocator, .echo_request_json);
+    defer server.join() catch {};
+    try server.start();
+
+    const url = try server.url(allocator, "/ok");
+    defer allocator.free(url);
+
+    const rt = try HandlerInstance.init(allocator, .{ .outbound_http_enabled = true });
+    defer rt.deinit();
+    var endpoint_buf: [512]u8 = undefined;
+    const allowed = [_][]const u8{egressEndpoint(url, &endpoint_buf)};
+    // The endpoint is allowed. Only the scope is not: 127.0.0.1 is loopback.
+    rt.ctx.capability_policy = .{
+        .egress = .{ .enabled = true, .values = &allowed },
+        .egress_scopes = (zq.endpoint.ScopeSet{}).with(.public),
+    };
+
+    const handler_code = try std.fmt.allocPrint(allocator,
+        \\function handler(req) {{
+        \\  const res = fetchSync("{s}");
+        \\  return Response.json({{ status: res.status, error: res.error }});
+        \\}}
+    , .{url});
+    try rt.loadHandler(handler_code, "<egress-scope-denied>");
+
+    var request = HttpRequestOwned{
+        .method = try allocator.dupe(u8, "GET"),
+        .url = try allocator.dupe(u8, "/"),
+        .headers = .empty,
+        .body = null,
+    };
+    defer request.deinit(allocator);
+
+    {
+        var response = try rt.executeHandler(request.asView());
+        defer response.deinit();
+        var parsed = try std.json.parseFromSlice(std.json.Value, allocator, response.body, .{});
+        defer parsed.deinit();
+        const obj = parsed.value.object;
+        try std.testing.expectEqual(@as(i64, 599), obj.get("status").?.integer);
+        try std.testing.expectEqualStrings("AddressScopeNotAllowed", obj.get("error").?.string);
+    }
+
+    // Grant the scope the address actually has. The server still has its one
+    // accept, so this reaches it and echoes 201.
+    rt.ctx.capability_policy.egress_scopes = (zq.endpoint.ScopeSet{}).with(.loopback);
+    {
+        var response = try rt.executeHandler(request.asView());
+        defer response.deinit();
+        var parsed = try std.json.parseFromSlice(std.json.Value, allocator, response.body, .{});
+        defer parsed.deinit();
+        try std.testing.expectEqual(@as(i64, 201), parsed.value.object.get("status").?.integer);
+    }
+}
+
+test "a policy that names no scope permits no connection" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var server = try TestHttpServer.init(allocator, .echo_request_json);
+    defer server.join() catch {};
+    try server.start();
+
+    const url = try server.url(allocator, "/ok");
+    defer allocator.free(url);
+
+    // No capability policy at all: the endpoint list admits everything and the
+    // scope set names nothing, which is the whole decision.
+    const rt = try HandlerInstance.init(allocator, .{ .outbound_http_enabled = true });
+    defer rt.deinit();
+
+    const handler_code = try std.fmt.allocPrint(allocator,
+        \\function handler(req) {{
+        \\  const res = fetchSync("{s}");
+        \\  return Response.json({{ error: res.error }});
+        \\}}
+    , .{url});
+    try rt.loadHandler(handler_code, "<egress-scope-unnamed>");
+
+    var request = HttpRequestOwned{
+        .method = try allocator.dupe(u8, "GET"),
+        .url = try allocator.dupe(u8, "/"),
+        .headers = .empty,
+        .body = null,
+    };
+    defer request.deinit(allocator);
+
+    var response = try rt.executeHandler(request.asView());
+    defer response.deinit();
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, response.body, .{});
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings("AddressScopeNotAllowed", parsed.value.object.get("error").?.string);
+
+    // Drain the server's single accept so `join` returns.
+    rt.ctx.capability_policy.egress_scopes = (zq.endpoint.ScopeSet{}).with(.loopback);
+    var drain = try rt.executeHandler(request.asView());
+    drain.deinit();
 }
 
 // Change 2: the dev/serve contract-derived allowlist arrives via
@@ -3088,6 +3205,7 @@ test "fetchSync sends request data and exposes response helpers" {
     const rt = try HandlerInstance.init(allocator, .{
         .outbound_http_enabled = true,
         .outbound_allow_host = "127.0.0.1",
+        .dev_capability_policy = .{ .egress_scopes = (zq.endpoint.ScopeSet{}).with(.loopback) },
     });
     defer rt.deinit();
 
@@ -3597,6 +3715,7 @@ test "fetchSync enforces response byte limits" {
         .outbound_http_enabled = true,
         .outbound_allow_host = "127.0.0.1",
         .outbound_max_response_bytes = 64,
+        .dev_capability_policy = .{ .egress_scopes = (zq.endpoint.ScopeSet{}).with(.loopback) },
     });
     defer rt.deinit();
 
@@ -3655,6 +3774,7 @@ test "fetchSync times out instead of hanging when upstream accepts and goes sile
         .outbound_http_enabled = true,
         .outbound_allow_host = "127.0.0.1",
         .outbound_timeout_ms = 200,
+        .dev_capability_policy = .{ .egress_scopes = (zq.endpoint.ScopeSet{}).with(.loopback) },
     });
     defer rt.deinit();
 

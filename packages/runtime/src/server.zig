@@ -3644,6 +3644,9 @@ test "SIGTERM graceful shutdown stops accepts and drains an in-flight request" {
             .outbound_http_enabled = true,
             .outbound_allow_host = "127.0.0.1",
             .outbound_timeout_ms = 5_000,
+            .dev_capability_policy = .{
+                .egress_scopes = (engine.endpoint.ScopeSet{}).with(.loopback),
+            },
         },
     });
     defer server.deinit();

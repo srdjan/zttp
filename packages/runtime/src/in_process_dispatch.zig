@@ -739,6 +739,7 @@ test "buildFromSystemConfig applies each target's contract-derived egress policy
             .outbound_http_enabled = true,
             .dev_capability_policy = .{
                 .egress = .{ .enabled = true, .values = &[_][]const u8{"http://localhost:1"} },
+                .egress_scopes = (zq.endpoint.ScopeSet{}).with(.loopback),
             },
         },
         1,

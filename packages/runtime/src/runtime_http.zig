@@ -470,6 +470,136 @@ fn outboundEndpointViolation(rt: *HandlerInstance, url: []const u8, host: []cons
     return null;
 }
 
+/// The widest text an address takes here: an IPv4-mapped IPv6 address written
+/// in full, `::ffff:255.255.255.255`.
+const max_address_text_bytes: usize = 45;
+
+/// One resolved address the policy admits, in the form the connect takes.
+const ResolvedTarget = struct {
+    buffer: [max_address_text_bytes]u8 = undefined,
+    len: usize = 0,
+    scope: zq.endpoint.AddressScope = .unspecified,
+
+    /// The address as the connect target. `HostName.init` validates RFC 1123
+    /// names and would refuse the colons in an IPv6 literal, so this is built
+    /// rather than validated: it is text this process just wrote from bytes
+    /// the resolver returned, and the resolver reads it back as a literal.
+    fn hostName(self: *const ResolvedTarget) std.Io.net.HostName {
+        return .{ .bytes = self.buffer[0..self.len] };
+    }
+};
+
+const ScopeDecision = union(enum) {
+    /// `target` holds an address whose scope the policy admits.
+    allowed,
+    /// The policy admits no address this name answered with.
+    denied: []const u8,
+    /// The name answered with no address, or the resolver failed.
+    unresolved: []const u8,
+};
+
+fn resolvedAddressOf(address: std.Io.net.IpAddress) zq.endpoint.ResolvedAddress {
+    return switch (address) {
+        .ip4 => |v4| .{ .v4 = v4.bytes },
+        .ip6 => |v6| .{ .v6 = v6.bytes },
+    };
+}
+
+fn writeAddressText(address: std.Io.net.IpAddress, target: *ResolvedTarget) bool {
+    var writer = std.Io.Writer.fixed(&target.buffer);
+    switch (address) {
+        .ip4 => |v4| writer.print("{d}.{d}.{d}.{d}", .{
+            v4.bytes[0],
+            v4.bytes[1],
+            v4.bytes[2],
+            v4.bytes[3],
+        }) catch return false,
+        .ip6 => |v6| writer.print("{f}", .{&v6}) catch return false,
+    }
+    target.len = writer.buffered().len;
+    return target.len > 0;
+}
+
+/// What the developer is told when no answer was in scope. One constant per
+/// scope: the scope is the decision, and the address itself is not repeated
+/// back to the handler.
+fn scopeDenialText(scope: zq.endpoint.AddressScope) []const u8 {
+    return switch (scope) {
+        .public => "the name resolved to a public address, which egress.allow_address_scopes does not name",
+        .private => "the name resolved to a private address, which egress.allow_address_scopes does not name",
+        .loopback => "the name resolved to a loopback address, which egress.allow_address_scopes does not name",
+        .link_local => "the name resolved to a link_local address, which egress.allow_address_scopes does not name",
+        .multicast => "the name resolved to a multicast address, which egress.allow_address_scopes does not name",
+        .unspecified => "the name resolved to an unspecified address, which egress.allow_address_scopes does not name",
+    };
+}
+
+/// Classify what the name answered with, before any socket.
+///
+/// `outboundEndpointViolation` authorized a destination the handler named. A
+/// name is not an address: nothing in `https://api.example.com` says the answer
+/// will not be `169.254.169.254`, and the answer is chosen by whoever serves
+/// the zone. So the name is resolved here, every answer is classified, and the
+/// connection is opened to an answer that passed - as a literal, so the connect
+/// resolves nothing. Handing `std.http.Client` the name again would let it
+/// resolve a second time and reach an address this never saw.
+fn resolvedScopeDecision(
+    io: std.Io,
+    policy: *const zq.RuntimePolicy,
+    host: std.Io.net.HostName,
+    port: u16,
+    target: *ResolvedTarget,
+) ScopeDecision {
+    var lookup_buffer: [32]std.Io.net.HostName.LookupResult = undefined;
+    var lookup_queue: std.Io.Queue(std.Io.net.HostName.LookupResult) = .init(&lookup_buffer);
+    var lookup = io.async(std.Io.net.HostName.lookup, .{ host, io, &lookup_queue, .{ .port = port } });
+    defer lookup.cancel(io) catch {};
+
+    var admitted = false;
+    var refused: ?zq.endpoint.AddressScope = null;
+    var text_failed = false;
+    var failure: ?[]const u8 = null;
+
+    // Drain to the end even after one address passes: the resolver writes into
+    // a bounded queue, and a reader that stops reading stops it mid-write.
+    while (lookup_queue.getOne(io)) |result| switch (result) {
+        .canonical_name => continue,
+        .address => |address| {
+            if (admitted) continue;
+            const scope = zq.endpoint.scopeOf(resolvedAddressOf(address));
+            if (!policy.allowsAddressScope(scope)) {
+                if (refused == null) refused = scope;
+                continue;
+            }
+            if (!writeAddressText(address, target)) {
+                text_failed = true;
+                continue;
+            }
+            target.scope = scope;
+            admitted = true;
+        },
+    } else |err| switch (err) {
+        error.Canceled => failure = "outbound name resolution was canceled",
+        error.Closed => lookup.await(io) catch |lookup_err| {
+            failure = switch (lookup_err) {
+                error.UnknownHostName => "name did not resolve",
+                else => "name resolution failed",
+            };
+        },
+    }
+
+    if (admitted) return .allowed;
+    if (refused) |scope| {
+        zq.policy.emitDenied(.{
+            .action = .http_outbound,
+            .resource = .{ .kind = zq.policy.resource_kind_host, .id = host.bytes },
+        }, .not_in_allowlist);
+        return .{ .denied = scopeDenialText(scope) };
+    }
+    if (text_failed) return .{ .unresolved = "resolved address has no text form" };
+    return .{ .unresolved = failure orelse "name did not resolve" };
+}
+
 pub fn fetchSyncNative(ctx_ptr: *anyopaque, _: zq.JSValue, args: []const zq.JSValue) anyerror!zq.JSValue {
     const ctx_for_host: *zq.Context = @ptrCast(@alignCast(ctx_ptr));
     const rt = HandlerInstance.fromContext(ctx_for_host) orelse return error.RuntimeUnavailable;
@@ -897,13 +1027,23 @@ fn fetchSyncResult(rt: *HandlerInstance, args: []const zq.JSValue) !zq.JSValue {
     };
     const timeout_ms = effectiveOutboundTimeoutMs(rt);
     const timeout = outboundTimeout(timeout_ms);
+    const port: u16 = uri.port orelse switch (protocol) {
+        .plain => 80,
+        .tls => 443,
+    };
+    var target: ResolvedTarget = .{};
+    switch (resolvedScopeDecision(client.io, &rt.ctx.capability_policy, host, port, &target)) {
+        .allowed => {},
+        .denied => |details| return createFetchErrorResponse(rt, "AddressScopeNotAllowed", details),
+        .unresolved => |details| return createFetchErrorResponse(rt, "ConnectFailed", details),
+    }
     const connection = client.connectTcpOptions(.{
-        .host = host,
-        .port = uri.port orelse switch (protocol) {
-            .plain => 80,
-            .tls => 443,
-        },
+        // Connect to the address that passed, name the destination for TLS.
+        .host = target.hostName(),
+        .port = port,
         .protocol = protocol,
+        .proxied_host = host,
+        .proxied_port = port,
         .timeout = timeout,
     }) catch |err| {
         return createFetchErrorResponse(rt, "ConnectFailed", @errorName(err));
@@ -1797,9 +1937,14 @@ pub fn ioExecuteFetches(
     const count = descriptors.len;
     if (count == 0) return;
 
+    // Every worker decides against the policy installed on the runtime that
+    // collected these descriptors, so a thread cannot connect under a policy
+    // its own request never had.
+    const policy = rt.ctx.capability_policy;
+
     // For a single fetch, execute inline (no thread overhead)
     if (count == 1) {
-        results[0] = doFetchWorker(rt.allocator, rt.config, &descriptors[0]);
+        results[0] = doFetchWorker(rt.allocator, rt.config, policy, &descriptors[0]);
         return;
     }
 
@@ -1810,6 +1955,7 @@ pub fn ioExecuteFetches(
         threads[i] = std.Thread.spawn(.{}, doFetchThread, .{
             rt.allocator,
             rt.config,
+            policy,
             &descriptors[i],
             &results[i],
         }) catch null;
@@ -1818,7 +1964,7 @@ pub fn ioExecuteFetches(
     // If thread spawn failed for any slot, execute inline as fallback
     for (0..count) |i| {
         if (threads[i] == null) {
-            results[i] = doFetchWorker(rt.allocator, rt.config, &descriptors[i]);
+            results[i] = doFetchWorker(rt.allocator, rt.config, policy, &descriptors[i]);
         }
     }
 
@@ -1832,10 +1978,11 @@ pub fn ioExecuteFetches(
 fn doFetchThread(
     allocator: std.mem.Allocator,
     config: RuntimeConfig,
+    policy: zq.RuntimePolicy,
     desc: *const zq.modules.io.FetchDescriptor,
     result: *zq.modules.io.FetchResult,
 ) void {
-    result.* = doFetchWorker(allocator, config, desc);
+    result.* = doFetchWorker(allocator, config, policy, desc);
 }
 
 /// Execute a single HTTP fetch. Safe to call from any thread.
@@ -1843,9 +1990,10 @@ fn doFetchThread(
 fn doFetchWorker(
     allocator: std.mem.Allocator,
     config: RuntimeConfig,
+    policy: zq.RuntimePolicy,
     desc: *const zq.modules.io.FetchDescriptor,
 ) zq.modules.io.FetchResult {
-    return doFetchWorkerInner(allocator, config, desc) catch |err| {
+    return doFetchWorkerInner(allocator, config, policy, desc) catch |err| {
         return zq.modules.io.FetchResult{
             .status = 599,
             .ok = false,
@@ -1858,6 +2006,7 @@ fn doFetchWorker(
 fn doFetchWorkerInner(
     allocator: std.mem.Allocator,
     config: RuntimeConfig,
+    policy: zq.RuntimePolicy,
     desc: *const zq.modules.io.FetchDescriptor,
 ) !zq.modules.io.FetchResult {
     const uri = try std.Uri.parse(desc.url);
@@ -1898,13 +2047,33 @@ fn doFetchWorkerInner(
         break :blk .{ .duration = .{ .raw = duration, .clock = .awake } };
     };
 
-    const connection = client.connectTcpOptions(.{
-        .host = host,
-        .port = uri.port orelse switch (protocol) {
-            .plain => 80,
-            .tls => 443,
+    const port: u16 = uri.port orelse switch (protocol) {
+        .plain => 80,
+        .tls => 443,
+    };
+    var target: ResolvedTarget = .{};
+    switch (resolvedScopeDecision(client.io, &policy, host, port, &target)) {
+        .allowed => {},
+        .denied => |details| return zq.modules.io.FetchResult{
+            .status = 599,
+            .ok = false,
+            .error_code = try allocator.dupe(u8, "AddressScopeNotAllowed"),
+            .error_details = try allocator.dupe(u8, details),
         },
+        .unresolved => |details| return zq.modules.io.FetchResult{
+            .status = 599,
+            .ok = false,
+            .error_code = try allocator.dupe(u8, "ConnectFailed"),
+            .error_details = try allocator.dupe(u8, details),
+        },
+    }
+    const connection = client.connectTcpOptions(.{
+        // Connect to the address that passed, name the destination for TLS.
+        .host = target.hostName(),
+        .port = port,
         .protocol = protocol,
+        .proxied_host = host,
+        .proxied_port = port,
         .timeout = timeout,
     }) catch |err| {
         return zq.modules.io.FetchResult{
@@ -2215,13 +2384,23 @@ fn httpRequestResultJsonAlloc(rt: *HandlerInstance, args: []const zq.JSValue) ![
     };
     const timeout_ms = effectiveOutboundTimeoutMs(rt);
     const timeout = outboundTimeout(timeout_ms);
+    const port: u16 = uri.port orelse switch (protocol) {
+        .plain => 80,
+        .tls => 443,
+    };
+    var target: ResolvedTarget = .{};
+    switch (resolvedScopeDecision(client.io, &rt.ctx.capability_policy, host, port, &target)) {
+        .allowed => {},
+        .denied => |details| return try httpRequestErrorJsonAlloc(a, "AddressScopeNotAllowed", details),
+        .unresolved => |details| return try httpRequestErrorJsonAlloc(a, "ConnectFailed", details),
+    }
     const connection = client.connectTcpOptions(.{
-        .host = host,
-        .port = uri.port orelse switch (protocol) {
-            .plain => 80,
-            .tls => 443,
-        },
+        // Connect to the address that passed, name the destination for TLS.
+        .host = target.hostName(),
+        .port = port,
         .protocol = protocol,
+        .proxied_host = host,
+        .proxied_port = port,
         .timeout = timeout,
     }) catch |err| {
         return try httpRequestErrorJsonAlloc(a, "ConnectFailed", @errorName(err));

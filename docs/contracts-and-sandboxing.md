@@ -273,7 +273,10 @@ graph before validation.
 
 Omit a section to leave that capability unrestricted. If a section is
 present, dynamic access in that category is rejected because zttp
-cannot fully enumerate it.
+cannot fully enumerate it. `egress.allow_address_scopes` is the one
+exception: an unnamed scope set permits no connection, so a handler that
+makes outbound requests needs this file even when every URL it uses is a
+literal the compiler already proved.
 
 ### Egress names endpoints, not hosts
 
@@ -289,10 +292,18 @@ that would match nothing.
 
 `allow_address_scopes` says which addresses those names may resolve to:
 `public`, `private`, `loopback`, `link_local`, `multicast`, `unspecified`. A
-section that names endpoints and no scopes permits no connection. The list
-exists because a name is not an address: a permitted host that resolves to
-`169.254.169.254` reaches the cloud metadata service, and only the scope says
-whether that is allowed.
+section that names endpoints and no scopes permits no connection, and so does
+no section at all. The list exists because a name is not an address: a
+permitted host that resolves to `169.254.169.254` reaches the cloud metadata
+service, and only the scope says whether that is allowed. A contract cannot
+supply this, whatever it proved about the URL: it knows which name the handler
+asks for, not what that name will answer with.
+
+The runtime resolves the name itself, classifies each address, and connects to
+one that the policy admits - as a literal address, so nothing resolves the name
+a second time. A denied request never reaches a socket, and each retry attempt
+repeats both checks. The response carries `AddressScopeNotAllowed` and names
+the scope that was refused.
 
 `egress.allow_hosts` was the previous key. It is refused with a message naming
 its replacement rather than read, because a host list cannot say which scheme
