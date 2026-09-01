@@ -107,7 +107,12 @@ variable instead of a string literal (`env(someVar)` instead of
 
 The contract is used to derive a `RuntimePolicy` embedded in the
 binary. Sections with `dynamic: false` are restricted to exactly the
-proven literals. Sections with `dynamic: true` remain unrestricted.
+proven literals. Sections with `dynamic: true` take their entries from
+the capability policy file and from nowhere else, so a dynamic section
+with no configured policy permits nothing. A disabled section used to
+mean unrestricted, and the only thing standing between that and an
+allow-all deployment was the compiler refusing a computed capability
+argument, which is a compiler decision guarding a runtime default.
 
 ```text
 Sandbox: complete (all access statically proven)

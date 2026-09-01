@@ -404,7 +404,7 @@ as `default:` rather than `when _:`.
 
 | Code | Rule | Canonical form |
 |---|---|---|
-| ZTS602 | Dynamic capability access | Use literal env keys, cache namespaces, SQL query names, egress URLs, route paths, and service names. |
+| ZTS602 | Dynamic capability access | Use literal env keys, cache namespaces, SQL query names, egress URLs, route paths, and service names. The diagnostic says which of four cases applies: the runtime decides this resource and the policy covers it, it decides it and the policy names no such section, the section cannot express what the sink enforces, or nothing at the sink decides it and no policy edit would. |
 | ZTS604 | Avoidable `let` | Use `const` unless the binding is reassigned. |
 | ZTS605 | Dynamic computed property access | Use a typed field, a literal key, or narrow the object before indexing. |
 | ZTS608 | Reused arrow helper | Give reusable helpers named function declarations; keep arrows for callbacks. |
