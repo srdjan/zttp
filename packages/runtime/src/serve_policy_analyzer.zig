@@ -1,5 +1,7 @@
 const std = @import("std");
 const zts_cli = @import("zts_cli");
+const zts = @import("zts");
+const CheckedPolicy = @import("serve_policy_types.zig").CheckedPolicy;
 
 const precompile = zts_cli.precompile;
 
@@ -9,7 +11,7 @@ pub fn validateConfiguredPolicy(
     sql_schema_path: ?[]const u8,
     system_path: ?[]const u8,
     policy_source: []const u8,
-) !void {
+) !CheckedPolicy {
     var result = try precompile.runCheckOnlyWithOptions(allocator, handler_path, .{
         .sql_schema_path = sql_schema_path,
         .json_mode = true,
@@ -17,7 +19,13 @@ pub fn validateConfiguredPolicy(
         .policy_source = policy_source,
     });
     defer result.deinit(allocator);
-    if (result.policy_errors == 0) return;
+    if (result.totalErrors() == 0) {
+        var policy = try zts.handler_policy.parsePolicyJson(allocator, policy_source);
+        errdefer policy.deinit(allocator);
+        const contract = result.contract orelse return error.PolicyContextFailed;
+        result.contract = null;
+        return .{ .contract = contract, .policy = policy };
+    }
 
     var card_buf: std.ArrayList(u8) = .empty;
     defer card_buf.deinit(allocator);
@@ -27,5 +35,8 @@ pub fn validateConfiguredPolicy(
     if (card_buf.items.len > 0) {
         _ = std.c.write(std.c.STDERR_FILENO, card_buf.items.ptr, card_buf.items.len);
     }
-    return error.PolicyViolation;
+    return if (result.policy_errors > 0)
+        error.PolicyViolation
+    else
+        error.PolicyContextFailed;
 }

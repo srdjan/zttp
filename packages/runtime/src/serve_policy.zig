@@ -13,6 +13,8 @@ const analyzer = if (feature_options.enable_live_reload)
 else
     @import("serve_policy_unavailable.zig");
 
+pub const CheckedPolicy = @import("serve_policy_types.zig").CheckedPolicy;
+
 pub const ConfiguredPolicy = struct {
     path: []u8,
     source: []u8,

@@ -92,11 +92,11 @@ pub const RuntimeConfig = struct {
     /// Soft lease window written into message metadata when receive() leases a
     /// message. The in-memory backend keeps the message in-flight until ack/nack.
     queue_lease_ms: i64 = 30_000,
-    /// Dev/serve live path only: a contract-derived capability policy applied
-    /// instead of the embedded (stub) policy by `applyEmbeddedCapabilityPolicy`.
-    /// Null on AOT paths, which already carry their full policy in
-    /// `embedded_handler.capability_policy`. Borrowed backing storage is owned
-    /// by the dev server and retained across in-flight runtime generations.
+    /// Dev/serve path only: the checked contract plus configured policy,
+    /// projected for installation instead of the embedded stub. Null on AOT
+    /// paths, which carry their full policy in `embedded_handler`. This is an
+    /// input view only. HandlerPool deep-copies it into a refcounted policy
+    /// generation that owns the backing for all in-flight runtimes.
     dev_capability_policy: ?zq.RuntimePolicy = null,
     /// Internal activation bit. Only an accepted artifact with residual guards
     /// sets this before pool construction. Static-only generations keep their

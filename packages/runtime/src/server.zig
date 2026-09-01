@@ -1960,22 +1960,26 @@ pub const Server = struct {
     /// HandlerContract and push it onto the runtime pool (dev/serve live path
     /// only). Fail-closed on allocation failure so a proven-restricted handler
     /// never becomes permissive after a reload.
-    pub fn setDevCapabilityPolicy(self: *Self, contract: *const engine.HandlerContract) !void {
+    pub fn setDevCapabilityPolicy(
+        self: *Self,
+        contract: *const engine.HandlerContract,
+        configured: ?*const engine.HandlerPolicy,
+    ) !void {
         const pool = if (self.pool) |*p| p else return;
         try pool.setDevCapabilityPolicyIndexed(
-            self.stageDevCapabilityPolicy(contract),
+            self.stageDevCapabilityPolicy(contract, configured),
             engine.contractRequiresRuntimePolicyIndex(contract),
         );
     }
 
     /// Return the borrowed contract view. The pool deep-copies it into the new
     /// refcounted generation before this contract can be retired.
-    pub fn stageDevCapabilityPolicy(_: *Self, contract: *const engine.HandlerContract) engine.RuntimePolicy {
-        // No configured policy reaches the live dev path: `zttp dev` compiles
-        // with strict checking on, so every category the contract carries is
-        // one the compiler enumerated. A category it could not enumerate
-        // installs deny-all rather than the allow-all it used to.
-        return engine.contractRuntimePolicy(contract, null);
+    pub fn stageDevCapabilityPolicy(
+        _: *Self,
+        contract: *const engine.HandlerContract,
+        configured: ?*const engine.HandlerPolicy,
+    ) engine.RuntimePolicy {
+        return engine.contractRuntimePolicy(contract, configured);
     }
 
     fn syncStudioCallerReceipt(self: *Self) void {
@@ -2151,10 +2155,14 @@ pub const Server = struct {
             });
         }
 
-        // The accepted deployed tuple determines whether authoritative sink
-        // membership must use the bounded policy index. Embedded AOT handlers
-        // carry the same bit in generated code; the pool combines both inputs.
-        pool_rt_config.runtime_policy_index_required = self.generationIsGuarded();
+        // Either a checked source-policy contract or an accepted deployed
+        // tuple can require authoritative bounded membership. Preserve the
+        // source-policy bit installed before Server.init; AOT handlers also
+        // carry their bit in generated code and the pool combines that input.
+        pool_rt_config.runtime_policy_index_required = requiresRuntimePolicyIndex(
+            pool_rt_config.runtime_policy_index_required,
+            self.generationIsGuarded(),
+        );
 
         var pool_timer = engine.Timer.start() catch null;
         self.pool = try engine.initHandlerPool(
@@ -2831,6 +2839,17 @@ fn enforcedDurableWorkflowProperties(
     var workflow_properties = contract.durable_workflow;
     workflow_properties.enforced = true;
     return workflow_properties;
+}
+
+fn requiresRuntimePolicyIndex(configured_contract: bool, accepted_artifact: bool) bool {
+    return configured_contract or accepted_artifact;
+}
+
+test "server preserves either source or artifact policy-index requirement" {
+    try std.testing.expect(!requiresRuntimePolicyIndex(false, false));
+    try std.testing.expect(requiresRuntimePolicyIndex(true, false));
+    try std.testing.expect(requiresRuntimePolicyIndex(false, true));
+    try std.testing.expect(requiresRuntimePolicyIndex(true, true));
 }
 
 fn logContractSummary(contract: *const ValidatedRuntimeContract) void {

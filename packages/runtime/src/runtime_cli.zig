@@ -3,6 +3,7 @@ const builtin = @import("builtin");
 
 const Server = @import("server.zig").Server;
 const ServerConfig = @import("server.zig").ServerConfig;
+const engine = @import("engine_adapter.zig");
 const edge_server = @import("runtime_features.zig").edge;
 const contract_runtime = @import("contract_runtime.zig");
 const replay_runner = @import("replay_runner.zig");
@@ -357,18 +358,21 @@ fn serveCommandWithDebugPanicPath(
         else => null,
     };
     defer if (configured_policy) |*policy| policy.deinit(allocator);
+    var checked_policy: ?serve_policy.CheckedPolicy = null;
+    defer if (checked_policy) |*policy| policy.deinit(allocator);
     if (configured_policy) |*policy| {
         const handler_path = switch (config.handler) {
             .file_path => |path| path,
             else => unreachable,
         };
-        try serve_policy.validateConfiguredPolicy(
+        checked_policy = try serve_policy.validateConfiguredPolicy(
             allocator,
             handler_path,
             config.runtime_config.sqlite_path,
             config.runtime_config.system_config_path,
             policy.source,
         );
+        applyCheckedServePolicy(&config, &checked_policy.?);
     }
 
     if (config.runtime_config.replay_file_path != null) {
@@ -454,6 +458,15 @@ fn serveCommandWithDebugPanicPath(
             std.process.exit(1);
         };
     }
+}
+
+fn applyCheckedServePolicy(config: *ServerConfig, checked: *const serve_policy.CheckedPolicy) void {
+    config.runtime_config.dev_capability_policy = engine.contractRuntimePolicy(
+        &checked.contract,
+        &checked.policy,
+    );
+    config.runtime_config.runtime_policy_index_required =
+        engine.contractRequiresRuntimePolicyIndex(&checked.contract);
 }
 
 fn replayExitCode(err: anyerror) u8 {
@@ -1029,6 +1042,60 @@ test "serve policy validation never bypasses a configured policy" {
             "{\"env\":{\"allow\":[\"APP_NAME\"]}}",
         ),
     );
+}
+
+test "serve installs the checked configured policy for a computed env key" {
+    if (!feature_options.enable_live_reload) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, "src");
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "zttp.json",
+        .data = "{\"entry\":\"src/handler.ts\",\"policy\":\"policy.json\"}",
+    });
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "policy.json",
+        .data = "{\"env\":{\"allow\":[\"APP_NAME\"]}}",
+    });
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "src/handler.ts",
+        .data =
+        \\import { env } from "zttp:env";
+        \\export function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  env(req.method);
+        \\  return Response.text("checked");
+        \\}
+        ,
+    });
+
+    const handler_path = try tmp.dir.realPathFileAlloc(std.testing.io, "src/handler.ts", allocator);
+    defer allocator.free(handler_path);
+    var discovered = (try serve_policy.discoverConfiguredPolicy(allocator, handler_path)) orelse
+        return error.TestExpectedPolicy;
+    defer discovered.deinit(allocator);
+    var checked = try serve_policy.validateConfiguredPolicy(
+        allocator,
+        handler_path,
+        null,
+        null,
+        discovered.source,
+    );
+    defer checked.deinit(allocator);
+
+    var config = ServerConfig{
+        .handler = .{ .file_path = handler_path },
+        .runtime_config = .{},
+    };
+    applyCheckedServePolicy(&config, &checked);
+
+    const installed = config.runtime_config.dev_capability_policy orelse
+        return error.EmbeddedPolicyNotWired;
+    try std.testing.expect(installed.env.enabled);
+    try std.testing.expect(installed.env.allows("APP_NAME"));
+    try std.testing.expect(!installed.env.allows("OTHER_NAME"));
+    try std.testing.expect(config.runtime_config.runtime_policy_index_required);
 }
 
 test "parseCommonServeFlag: returns false for unrelated flag" {

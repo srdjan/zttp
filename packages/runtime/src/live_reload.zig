@@ -23,6 +23,7 @@ const precompile = zts_cli.precompile;
 const contract_diff = zts.contract_diff;
 const upgrade_verifier = zts_cli.upgrade_verifier;
 const HandlerContract = zts.HandlerContract;
+const HandlerPolicy = zts.HandlerPolicy;
 const deploy_manifest = zts_cli.deploy_manifest;
 const review_facts_mod = @import("zttp_proof_review").review;
 const spec_diagnostic = @import("zttp_proof_review").spec_diagnostic;
@@ -67,14 +68,11 @@ fn shouldSkipContract(config: *const LiveReloadConfig) bool {
 
 /// Why a swap may not proceed.
 ///
-/// A live swap installs an executable that nothing checked: there is no
-/// certificate, no acceptance run, and no residual plan. That is tolerable for
-/// a handler whose capability resources the compiler enumerated, because the
-/// contract-derived allowlist is exact. It is not tolerable in either direction
-/// once a guard is involved - the running generation's coverage was established
-/// for a different executable, and a candidate that computes a resource has no
-/// coverage at all. Both answers are refusals, and a refusal keeps the whole
-/// previous generation, which is what every caller does with `false`.
+/// A live swap has no certificate or consumer acceptance run. Static resources
+/// remain safe because the compiler enumerates an exact contract allowlist. A
+/// computed resource may swap only when this same analysis parsed and checked a
+/// configured policy snapshot, which is installed atomically with the candidate
+/// generation. Without that checked pair, either guarded side is a refusal.
 ///
 /// Separate from `applySwap` so the decision can be read and tested without a
 /// pool, a server, and a file watcher.
@@ -84,17 +82,23 @@ const SwapRefusal = enum {
     candidate_computes_a_capability_resource,
 };
 
-fn swapRefusal(installed_generation_is_guarded: bool, candidate: ?*const HandlerContract) SwapRefusal {
-    if (installed_generation_is_guarded) return .installed_generation_is_guarded;
+fn swapRefusal(
+    installed_generation_is_guarded: bool,
+    candidate: ?*const HandlerContract,
+    candidate_policy_checked: bool,
+) SwapRefusal {
+    if (installed_generation_is_guarded and !candidate_policy_checked) {
+        return .installed_generation_is_guarded;
+    }
     const contract = candidate orelse return .none;
     // The plain-swap and missing-contract branches arrive here with no
     // candidate contract. They are covered by the first check: a swap with
     // nothing to inspect may proceed only when the running generation has no
     // guard to preserve.
-    if (contract.env.dynamic or
+    if (!candidate_policy_checked and (contract.env.dynamic or
         contract.egress.dynamic or
         contract.cache.dynamic or
-        contract.sql.dynamic)
+        contract.sql.dynamic))
     {
         return .candidate_computes_a_capability_resource;
     }
@@ -239,9 +243,21 @@ pub const LiveReloadState = struct {
             },
         ) catch return null;
 
+        const errors = result.totalErrors();
+        var configured_policy: ?HandlerPolicy = null;
+        if (errors == 0) {
+            if (policy_source) |bytes| {
+                configured_policy = zts.handler_policy.parsePolicyJson(self.allocator, bytes) catch {
+                    result.deinit(self.allocator);
+                    return null;
+                };
+            }
+        }
+
         // Deep-copy diagnostics first so that on failure here, `result.deinit`
         // still frees the contract (we have not stolen it yet).
         const diagnostics = ownDiagnostics(self.allocator, result.json_diagnostics.items) catch {
+            if (configured_policy) |*policy| policy.deinit(self.allocator);
             result.deinit(self.allocator);
             return null;
         };
@@ -251,7 +267,6 @@ pub const LiveReloadState = struct {
         // Steal the pre-rendered proof trace before deinit frees it.
         const proof_trace_json = result.proof_trace_json;
         result.proof_trace_json = null;
-        const errors = result.totalErrors();
         const failure_stage = firstFailingStage(&result);
         const pinned_regressions = result.pinned_witness_regressions;
         result.deinit(self.allocator);
@@ -263,6 +278,7 @@ pub const LiveReloadState = struct {
             .pinned_regressions = pinned_regressions,
             .diagnostics = diagnostics,
             .proof_trace_json = proof_trace_json,
+            .configured_policy = configured_policy,
         };
     }
 
@@ -273,6 +289,7 @@ pub const LiveReloadState = struct {
         pinned_regressions: usize,
         diagnostics: []studio_mod.Diagnostic,
         proof_trace_json: ?[]u8 = null,
+        configured_policy: ?HandlerPolicy = null,
 
         fn deinitContract(self: *AnalysisResult, allocator: std.mem.Allocator) void {
             if (self.contract) |*c| c.deinit(allocator);
@@ -283,6 +300,15 @@ pub const LiveReloadState = struct {
             for (self.diagnostics) |*d| d.deinit(allocator);
             allocator.free(self.diagnostics);
             self.diagnostics = &.{};
+        }
+
+        fn deinitConfiguredPolicy(self: *AnalysisResult, allocator: std.mem.Allocator) void {
+            if (self.configured_policy) |*policy| policy.deinit(allocator);
+            self.configured_policy = null;
+        }
+
+        fn configuredPolicy(self: *AnalysisResult) ?*const HandlerPolicy {
+            return if (self.configured_policy) |*policy| policy else null;
         }
     };
 
@@ -317,6 +343,7 @@ pub const LiveReloadState = struct {
         };
         defer if (analysis.contract != null) analysis.deinitContract(self.allocator);
         defer analysis.deinitDiagnostics(self.allocator);
+        defer analysis.deinitConfiguredPolicy(self.allocator);
 
         // Adopt the freshest proof trace; the HUD reads it on every repaint.
         if (self.proof_trace_json) |old| self.allocator.free(old);
@@ -357,7 +384,7 @@ pub const LiveReloadState = struct {
         if (self.config.prove) {
             var new_contract = analysis.contract orelse {
                 printReload("No contract extracted. Reloading without proof.\n", .{});
-                _ = self.doSwap(&new_code, null);
+                _ = self.doSwap(&new_code, null, null);
                 return;
             };
             analysis.contract = null;
@@ -392,7 +419,7 @@ pub const LiveReloadState = struct {
                     &new_contract,
                 ) catch |err| {
                     printProve("Contract diff failed: {}. Reloading without proof.\n", .{err});
-                    if (self.doSwap(&new_code, null)) {
+                    if (self.doSwap(&new_code, null, null)) {
                         self.updateCurrentContract(new_contract);
                     } else {
                         new_contract.deinit(self.allocator);
@@ -411,7 +438,7 @@ pub const LiveReloadState = struct {
                     &new_contract,
                 ) catch |err| {
                     printProve("Upgrade analysis failed: {}. Reloading without proof.\n", .{err});
-                    if (self.doSwap(&new_code, null)) {
+                    if (self.doSwap(&new_code, null, null)) {
                         self.updateCurrentContract(new_contract);
                     } else {
                         new_contract.deinit(self.allocator);
@@ -426,10 +453,13 @@ pub const LiveReloadState = struct {
                     if (verdict != .safe and verdict != .safe_with_additions) {
                         printProve("Verdict: {s}. Applying anyway (--force-swap).\n", .{verdict.toString()});
                     }
-                    if (self.doSwap(&new_code, &new_contract)) {
+                    if (self.doSwap(&new_code, &new_contract, analysis.configuredPolicy())) {
                         self.tryLogSwap(&new_contract, &sha_hex);
                         self.updateCurrentContract(new_contract);
-                        self.refreshDevAttestation(self.previous_code orelse "");
+                        self.refreshDevAttestation(
+                            self.previous_code orelse "",
+                            analysis.configuredPolicy(),
+                        );
                         if (self.current_contract) |*current| self.renderHud(current, null, elapsed_ms, &sha_hex);
                     } else {
                         new_contract.deinit(self.allocator);
@@ -441,17 +471,30 @@ pub const LiveReloadState = struct {
                     new_contract.deinit(self.allocator);
                 }
             } else {
-                if (self.doSwap(&new_code, &new_contract)) {
+                if (self.doSwap(&new_code, &new_contract, analysis.configuredPolicy())) {
                     self.tryLogSwap(&new_contract, &sha_hex);
                     self.updateCurrentContract(new_contract);
-                    self.refreshDevAttestation(self.previous_code orelse "");
+                    self.refreshDevAttestation(
+                        self.previous_code orelse "",
+                        analysis.configuredPolicy(),
+                    );
                     if (self.current_contract) |*current| self.renderHud(current, null, elapsed_ms, &sha_hex);
                 } else {
                     new_contract.deinit(self.allocator);
                 }
             }
         } else {
-            _ = self.doSwap(&new_code, null);
+            if (analysis.configured_policy) |*policy| {
+                var new_contract = analysis.contract orelse {
+                    printReload("Configured policy was checked without a contract. Keeping previous handler.\n", .{});
+                    return;
+                };
+                analysis.contract = null;
+                defer new_contract.deinit(self.allocator);
+                _ = self.doSwap(&new_code, &new_contract, policy);
+            } else {
+                _ = self.doSwap(&new_code, null, null);
+            }
         }
     }
 
@@ -473,6 +516,7 @@ pub const LiveReloadState = struct {
         };
         defer if (analysis.contract != null) analysis.deinitContract(self.allocator);
         defer analysis.deinitDiagnostics(self.allocator);
+        defer analysis.deinitConfiguredPolicy(self.allocator);
 
         // Adopt the freshest proof trace; the HUD reads it on every repaint.
         if (self.proof_trace_json) |old| self.allocator.free(old);
@@ -505,8 +549,8 @@ pub const LiveReloadState = struct {
 
         self.tryLogSwap(&contract, &sha_hex);
         self.updateCurrentContract(contract);
-        self.installRuntimeContract();
-        self.refreshDevAttestation(source);
+        self.installRuntimeContract(analysis.configuredPolicy());
+        self.refreshDevAttestation(source, analysis.configuredPolicy());
         if (self.current_contract) |*current| self.renderHud(current, null, elapsed_ms, &sha_hex);
         printProve("Initial proof ready ({d}ms).\n", .{elapsed_ms});
     }
@@ -516,17 +560,18 @@ pub const LiveReloadState = struct {
         self.current_contract = new_contract;
     }
 
-    fn installRuntimeContract(self: *LiveReloadState) void {
+    fn installRuntimeContract(self: *LiveReloadState, configured_policy: ?*const HandlerPolicy) void {
         if (self.current_contract) |*hc| {
             const raw = contract_runtime.fromHandlerContract(self.allocator, hc) catch |err| {
                 printReload("Failed to build runtime contract: {}.\n", .{err});
                 return;
             };
-            const validated = contract_runtime.validate(raw, .{}) catch |err| {
+            var validated = contract_runtime.validate(raw, .{}) catch |err| {
                 printReload("Contract failed validation: {}.\n", .{err});
                 return;
             };
-            self.server.setDevCapabilityPolicy(hc) catch |err| {
+            self.server.setDevCapabilityPolicy(hc, configured_policy) catch |err| {
+                validated.deinit();
                 printReload("Failed to install runtime policy generation: {}.\n", .{err});
                 return;
             };
@@ -534,12 +579,17 @@ pub const LiveReloadState = struct {
         }
     }
 
-    fn refreshDevAttestation(self: *LiveReloadState, source: []const u8) void {
+    fn refreshDevAttestation(
+        self: *LiveReloadState,
+        source: []const u8,
+        configured_policy: ?*const HandlerPolicy,
+    ) void {
         if (!self.server.config.studio or !self.config.prove or source.len == 0) return;
 
         var compiled = precompile.compileHandler(self.allocator, source, self.handler_path, .{
             .emit_verify = true,
             .emit_contract = true,
+            .policy = if (configured_policy) |policy| policy.* else null,
             .sql_schema_path = self.config.sql_schema_path,
             .system_path = self.config.system_path,
         }) catch |err| {
@@ -809,6 +859,7 @@ pub const LiveReloadState = struct {
         self: *LiveReloadState,
         new_code_ptr: *?[]const u8,
         runtime_contract: ?*const HandlerContract,
+        configured_policy: ?*const HandlerPolicy,
     ) bool {
         const new_code = new_code_ptr.* orelse return false;
 
@@ -821,7 +872,11 @@ pub const LiveReloadState = struct {
             return false;
         };
 
-        switch (swapRefusal(self.server.generationIsGuarded(), runtime_contract)) {
+        switch (swapRefusal(
+            self.server.generationIsGuarded(),
+            runtime_contract,
+            configured_policy != null,
+        )) {
             .none => {},
             .installed_generation_is_guarded => {
                 printReload(
@@ -853,7 +908,7 @@ pub const LiveReloadState = struct {
                 printReload("Contract failed validation: {}. Keeping previous handler active.\n", .{err});
                 return false;
             };
-            dev_policy = self.server.stageDevCapabilityPolicy(hc);
+            dev_policy = self.server.stageDevCapabilityPolicy(hc, configured_policy);
         }
 
         // Switch the pool to the new generation FIRST, under the pool's
@@ -1191,20 +1246,20 @@ test "a swap that would strand a guard is refused from either side" {
     defer contract.deinit(allocator);
 
     // Nothing guarded on either side: an ordinary dev swap.
-    try std.testing.expectEqual(SwapRefusal.none, swapRefusal(false, &contract));
+    try std.testing.expectEqual(SwapRefusal.none, swapRefusal(false, &contract, false));
     // The plain-swap and missing-contract branches, which carry no candidate.
-    try std.testing.expectEqual(SwapRefusal.none, swapRefusal(false, null));
+    try std.testing.expectEqual(SwapRefusal.none, swapRefusal(false, null, false));
 
-    // The running generation guards resources. Its coverage was established
-    // for the executable that is about to be replaced, so no candidate - not
-    // even one with nothing dynamic, and not even none at all - may take over.
+    // Without a checked candidate policy, the running generation's guard
+    // coverage belongs to the executable being replaced. No candidate, not
+    // even a static one or none at all, may take over.
     try std.testing.expectEqual(
         SwapRefusal.installed_generation_is_guarded,
-        swapRefusal(true, &contract),
+        swapRefusal(true, &contract, false),
     );
     try std.testing.expectEqual(
         SwapRefusal.installed_generation_is_guarded,
-        swapRefusal(true, null),
+        swapRefusal(true, null, false),
     );
 
     // A candidate that computes a capability resource has no coverage at all,
@@ -1212,26 +1267,32 @@ test "a swap that would strand a guard is refused from either side" {
     contract.env.dynamic = true;
     try std.testing.expectEqual(
         SwapRefusal.candidate_computes_a_capability_resource,
-        swapRefusal(false, &contract),
+        swapRefusal(false, &contract, false),
     );
     contract.env.dynamic = false;
     contract.egress.dynamic = true;
     try std.testing.expectEqual(
         SwapRefusal.candidate_computes_a_capability_resource,
-        swapRefusal(false, &contract),
+        swapRefusal(false, &contract, false),
     );
     contract.egress.dynamic = false;
     contract.cache.dynamic = true;
     try std.testing.expectEqual(
         SwapRefusal.candidate_computes_a_capability_resource,
-        swapRefusal(false, &contract),
+        swapRefusal(false, &contract, false),
     );
     contract.cache.dynamic = false;
     contract.sql.dynamic = true;
     try std.testing.expectEqual(
         SwapRefusal.candidate_computes_a_capability_resource,
-        swapRefusal(false, &contract),
+        swapRefusal(false, &contract, false),
     );
+
+    // A candidate checked against an explicit policy may replace either a
+    // static or guarded generation because the checked pair is installed as
+    // one pool generation.
+    try std.testing.expectEqual(SwapRefusal.none, swapRefusal(false, &contract, true));
+    try std.testing.expectEqual(SwapRefusal.none, swapRefusal(true, &contract, true));
 }
 
 test "live reload builds a contract when a capability policy is configured" {

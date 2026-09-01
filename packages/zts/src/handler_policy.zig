@@ -533,13 +533,9 @@ pub const PolicyCategory = enum {
     sql,
 };
 
-/// Only one shape survives. `dynamic_not_allowed` was removed with POL002,
-/// POL004, POL006 and POL008: the strict checker reports any non-literal
-/// argument to a capability export as ZTS602 at error severity, and both the
-/// check path and the build path return on strict errors before the contract
-/// is built, so `contract.<category>.dynamic` is never true by the time this
-/// runs. The language refuses all dynamic capability access unconditionally,
-/// which is strictly broader than any allow-list could express.
+/// Policy validation reports literal entries absent from a declared policy.
+/// Computed entries are classified by guard_catalog and may become residual
+/// guards when their policy section is configured.
 pub const ViolationKind = enum {
     literal_not_allowed,
 };
