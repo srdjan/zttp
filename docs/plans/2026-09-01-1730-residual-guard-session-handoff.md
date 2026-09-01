@@ -1,9 +1,7 @@
 # Residual Runtime Guard Addendum - Session Handoff
 
-Written 2026-09-01, paused at `8410fc51` with a clean tree and
-`bash scripts/verify.sh` green as of `d500a3ac` (the four commits after it ran
-their own suites; see Verification below for what has and has not been through
-the full gate).
+Written 2026-09-01, paused at `5fc7bd5b` with a clean tree and
+`bash scripts/verify.sh` green on that commit.
 
 Companion to
 [2026-08-31-1242-feat-residual-runtime-guard-addendum-plan.md](2026-08-31-1242-feat-residual-runtime-guard-addendum-plan.md).
@@ -148,11 +146,10 @@ and the golden-output gates.
 
 ## Verification status
 
-Green at `d500a3ac`: `bash scripts/verify.sh` (full gate, exit 0).
+Green at `5fc7bd5b`, the commit this session paused on: `bash scripts/verify.sh`
+(full gate, exit 0). That run covers every commit listed above, the two U6 ones
+included.
 
-Run individually and green after that commit: `zig build test`, `test-zts`,
+Also run individually and green: `zig build test`, `test-zts`, `test-zts-cli`,
 `test-zruntime`, `test-modules`, `test-standin`, `test-module-boundary`,
 `check-zts-layering.sh`, `zig fmt --check`.
-
-**Not yet through the full gate:** `ff4b0f40` and `8410fc51`, the two U6
-commits. Run `bash scripts/verify.sh` first thing next session.
