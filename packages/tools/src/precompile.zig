@@ -1340,6 +1340,13 @@ fn runCheckOnPreparedSource(
             .type_env = type_env_storage.envPtr(),
             .service_type_context = stc_ptr,
             .module_facts = &module_facts,
+            // Which sections the project's policy declares, so a computed
+            // capability resource gets the diagnostic that matches what the
+            // author has actually written.
+            .policy_sections = if (opts.policy_source) |policy_source|
+                zts.handler_policy.declaredSectionsFromJson(allocator, policy_source)
+            else
+                .{},
         },
     );
     defer resolved.deinit();
@@ -1899,7 +1906,15 @@ pub fn compileHandler(
     var resolved = try zts.pipeline.resolve(
         allocator,
         parsed,
-        .{ .type_env = type_env_storage.envPtr(), .service_type_context = stc_ptr, .strict = opts.strict },
+        .{
+            .type_env = type_env_storage.envPtr(),
+            .service_type_context = stc_ptr,
+            .strict = opts.strict,
+            // Which sections the author wrote, not what is in them: the
+            // classifier needs to know whether a computed resource has anything
+            // that could cover it.
+            .policy_sections = if (policy) |*configured| configured.declaredSections() else .{},
+        },
     );
     defer resolved.deinit();
 

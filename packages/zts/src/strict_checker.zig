@@ -195,6 +195,11 @@ pub const StrictChecker = struct {
     /// collection.
     facts: ?*const module_facts_mod.ModuleFacts = null,
     owned_facts: ?module_facts_mod.ModuleFacts = null,
+    /// Which sections the configured capability policy declares. Injected by
+    /// the orchestrator; empty means no policy file, which is not the same as a
+    /// policy whose sections are empty lists. A computed resource needs its
+    /// section to exist before anything can cover it.
+    policy_sections: guard_catalog.SectionSet = .{},
     /// Sticky failure for diagnostics and profile facts used to decide which
     /// strict rules fire. The void walkers may continue, but no partial result
     /// escapes `check`.
@@ -1537,13 +1542,7 @@ pub const StrictChecker = struct {
                 if (arg_pos < call.args_count) {
                     const arg = self.ir_view.getListIndex(call.args_start, @intCast(arg_pos));
                     if (!self.isLiteralOrStaticTemplate(arg)) {
-                        self.addDiagnostic(.{
-                            .severity = .err,
-                            .kind = .dynamic_capability_access,
-                            .node = arg,
-                            .message = "capability access must use a compiler-visible literal",
-                            .help = "use a literal env key, cache namespace, SQL query name, egress URL, route path, or service name",
-                        });
+                        self.reportComputedCapability(arg, imported.module, imported.name, arg_pos);
                     }
                 }
             }
@@ -1562,6 +1561,64 @@ pub const StrictChecker = struct {
                     });
                 }
             }
+        }
+    }
+
+    /// Say which of the four things happened, because each has a different
+    /// next action: the resource is one the runtime decides and the policy
+    /// covers it, the runtime decides it and the author has written no section,
+    /// the family is one this build keeps rejecting, or nothing at the sink
+    /// decides it at all.
+    fn reportComputedCapability(
+        self: *StrictChecker,
+        arg: NodeIndex,
+        module: []const u8,
+        name: []const u8,
+        arg_pos: u8,
+    ) void {
+        const disposition = guard_catalog.classifyComputed(module, name, arg_pos, .{
+            .sections = self.policy_sections,
+        });
+        switch (disposition) {
+            .guarded => |entry| {
+                // Classification says the consumer would carry this. This build
+                // still refuses it, because the certificate it would produce
+                // cannot hold the obligation; see
+                // guard_catalog.classification_enabled.
+                if (guard_catalog.classification_enabled) return;
+                self.addDiagnostic(.{
+                    .severity = .err,
+                    .kind = .dynamic_capability_access,
+                    .node = arg,
+                    .message = "capability access computes a resource this build cannot certify",
+                    .help = guardedNotCertifiableHelp(entry.kind),
+                });
+            },
+            .rejected => |reason| switch (reason) {
+                .missing_policy_section => self.addDiagnostic(.{
+                    .severity = .err,
+                    .kind = .dynamic_capability_access,
+                    .node = arg,
+                    .message = "capability access computes a resource no policy section covers",
+                    .help = missingSectionHelp(
+                        guard_catalog.lookup(module, name, arg_pos).?.kind,
+                    ),
+                }),
+                .family_not_enabled => self.addDiagnostic(.{
+                    .severity = .err,
+                    .kind = .dynamic_capability_access,
+                    .node = arg,
+                    .message = "capability access must use a compiler-visible literal",
+                    .help = "sql.allow_queries names a query without saying whether it reads or writes, so a computed SQL query name cannot be checked against it; use a literal query name",
+                }),
+                .unguarded_surface => self.addDiagnostic(.{
+                    .severity = .err,
+                    .kind = .dynamic_capability_access,
+                    .node = arg,
+                    .message = "capability access must use a compiler-visible literal",
+                    .help = unguardedSurfaceHelp(module, name),
+                }),
+            },
         }
     }
 
@@ -1980,6 +2037,42 @@ fn ambientGlobalHelp(name: []const u8) []const u8 {
 /// raw `fetchSync`. Those are named here because they are rejections the
 /// catalog will never justify, and they stay rejections after the classifier
 /// starts admitting the families it does carry.
+/// R20's four fields for a resource the consumer would carry: the guard kind,
+/// the policy section, what happens to the assurance grade, and the command
+/// that checks the result.
+fn guardedNotCertifiableHelp(kind: guard_catalog.Kind) []const u8 {
+    return switch (kind) {
+        .env_key => "a computed environment key is decided at run time against env.allow, and the operation is reported as guarded rather than proven; this build cannot carry that obligation yet, so use a literal key and rerun `zttp check --contract`",
+        .egress_endpoint => "a computed URL is decided at run time against egress.allow_endpoints and egress.allow_address_scopes, and the operation is reported as guarded rather than proven; this build cannot carry that obligation yet, so use a literal URL and rerun `zttp check --contract`",
+        .cache_namespace => "a computed cache namespace is decided at run time against cache.allow_namespaces, and the operation is reported as guarded rather than proven; this build cannot carry that obligation yet, so use a literal namespace and rerun `zttp check --contract`",
+        .sql_read, .sql_write => "a computed SQL query name is decided at run time against sql.allow_queries; use a literal name and rerun `zttp check --contract`",
+    };
+}
+
+fn missingSectionHelp(kind: guard_catalog.Kind) []const u8 {
+    return switch (kind) {
+        .env_key => "add env.allow to the capability policy named by zttp.json, or use a literal key; without that section nothing decides the key at run time and the artifact would claim more than it checked. Rerun `zttp check --contract`",
+        .egress_endpoint => "add egress.allow_endpoints and egress.allow_address_scopes to the capability policy named by zttp.json, or use a literal URL; without those nothing decides the destination at run time. Rerun `zttp check --contract`",
+        .cache_namespace => "add cache.allow_namespaces to the capability policy named by zttp.json, or use a literal namespace; without that section nothing decides the namespace at run time. Rerun `zttp check --contract`",
+        .sql_read, .sql_write => "add sql.allow_queries to the capability policy named by zttp.json, or use a literal query name. Rerun `zttp check --contract`",
+    };
+}
+
+/// A surface no policy edit reaches, and why, so the author does not go looking
+/// for a section to add.
+fn unguardedSurfaceHelp(module: []const u8, name: []const u8) []const u8 {
+    if (std.mem.eql(u8, module, "zttp:service")) {
+        return "a service name selects which handler runs, which no capability policy section decides; use a literal service name";
+    }
+    if (std.mem.eql(u8, module, "zttp:sql") and std.mem.eql(u8, name, "sql")) {
+        return "registering a computed SQL statement is a different question from executing a named query, and no policy section decides it; register literal statements";
+    }
+    if (std.mem.eql(u8, module, "zttp:fetch") and std.mem.eql(u8, name, "fetchSync")) {
+        return "fetchSync is outside the guarded egress surface; use fetch or fetchWithRetry with a literal URL";
+    }
+    return "no policy section decides this resource at run time, so no policy edit makes it checkable; use a literal env key, cache namespace, SQL query name, egress URL, route path, or service name";
+}
+
 fn literalRequiredArg(module: []const u8, name: []const u8) ?u8 {
     if (guard_catalog.lookup(module, name, 0) != null) return 0;
     if (std.mem.eql(u8, module, "zttp:fetch") and std.mem.eql(u8, name, "fetchSync")) return 0;

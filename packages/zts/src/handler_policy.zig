@@ -12,6 +12,7 @@ const std = @import("std");
 /// docs/plans/2026-08-07-021-zts-three-module-split-plan.md.
 const contract_mod = @import("zts-contracts").contract_types;
 const endpoint = @import("zts-base").endpoint;
+const guard_catalog = @import("zts-base").guard_catalog;
 
 const HandlerContract = contract_mod.HandlerContract;
 
@@ -57,6 +58,22 @@ pub const HandlerPolicy = struct {
     egress_scopes: endpoint.ScopeSet = .{},
     cache: ?AllowList = null,
     sql: ?AllowList = null,
+
+    /// Which sections this policy file declares.
+    ///
+    /// A section that is absent and a section that is present with an empty list
+    /// are two different answers: the first says the author has not decided, the
+    /// second says the author decided nothing is allowed. The compiler needs the
+    /// first to refuse a computed resource that would have nothing to be checked
+    /// against.
+    pub fn declaredSections(self: *const HandlerPolicy) guard_catalog.SectionSet {
+        var sections = guard_catalog.SectionSet{};
+        if (self.env != null) sections = sections.with(.env);
+        if (self.egress != null) sections = sections.with(.egress);
+        if (self.cache != null) sections = sections.with(.cache);
+        if (self.sql != null) sections = sections.with(.sql);
+        return sections;
+    }
 
     pub fn deinit(self: *HandlerPolicy, allocator: std.mem.Allocator) void {
         if (self.env) |*section| section.deinit(allocator);
@@ -497,6 +514,22 @@ pub const endpoints_field = "allow_endpoints";
 /// The key this file used to read. Named here so the parser can say what
 /// replaced it rather than reporting an unknown key.
 pub const retired_hosts_field = "allow_hosts";
+
+/// The sections a policy file declares, read straight from its bytes.
+///
+/// A file that does not parse declares nothing here. That is not this
+/// function's message to deliver: the policy diagnostics path parses the same
+/// bytes and reports the parse failure with a code and a location, and a
+/// compile that cannot read its policy fails there rather than silently
+/// classifying against an imagined one.
+pub fn declaredSectionsFromJson(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+) guard_catalog.SectionSet {
+    var policy = parsePolicyJson(allocator, source) catch return .{};
+    defer policy.deinit(allocator);
+    return policy.declaredSections();
+}
 
 pub fn parsePolicyJson(allocator: std.mem.Allocator, source: []const u8) !HandlerPolicy {
     var parsed = try std.json.parseFromSlice(std.json.Value, allocator, source, .{});

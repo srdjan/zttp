@@ -45,6 +45,7 @@ const context_mod = @import("zts-engine").context;
 const type_env_mod = @import("type_env.zig");
 const type_pool_mod = @import("type_pool.zig");
 const type_map_mod = @import("zts-base").type_map;
+const guard_catalog = @import("zts-base").guard_catalog;
 const service_types_mod = @import("zts-contracts").service_types;
 const modules_mod = @import("zts-engine").modules;
 const module_types_mod = @import("module_types.zig");
@@ -127,6 +128,9 @@ pub const ResolveOptions = struct {
     /// pointed-to index must outlive the returned ResolvedModule. When null each
     /// analyzer builds a private one, which is what an un-migrated caller does.
     module_facts: ?*const ModuleFacts = null,
+    /// Which sections the configured capability policy declares. Empty means no
+    /// policy file, which is what a caller that has none passes.
+    policy_sections: guard_catalog.SectionSet = .{},
 };
 
 pub const ResolvedModule = struct {
@@ -229,6 +233,7 @@ pub fn resolve(
             tc_ptr,
         );
         sc.facts = opts.module_facts;
+        sc.policy_sections = opts.policy_sections;
         errdefer sc.deinit();
         strict_errors = try sc.check(parsed.root);
         if (type_checker_opt) |*tc| try tc.ensureHealthy();
