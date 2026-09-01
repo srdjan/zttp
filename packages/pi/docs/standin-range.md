@@ -4,7 +4,7 @@
 
 Range version: `step-6-v2`
 
-Range hash: `6ff384e61ac7c2c853c07300c39db35fa926c8aac02a1e3eff781da193e5c379`
+Range hash: `2e967103c1f8b9884f7f7d1a9cbee2a47438f5e1701c62f6947aa8c73495e0ed`
 
 The deterministic playbook server supports the entries below. Use `zig build zttp-standin -- --range` to print this document.
 
@@ -118,6 +118,8 @@ Drafts the stand-in emits expecting the veto to reject them, so the rejection ha
 | `loop-mutation` | `ZTS622` | model_retry |
 | `computed-access` | `ZTS605` | model_retry |
 | `dynamic-capability` | `ZTS602` | model_retry |
+| `dynamic-capability-egress` | `ZTS602` | model_retry |
+| `dynamic-capability-cache` | `ZTS602` | model_retry |
 | `optional-property` | `ZTS309` | compiler_repair |
 | `missing-path-return` | `ZTS302` | compiler_repair |
 | `secret-in-response` | `ZTS400` | model_retry |

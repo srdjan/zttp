@@ -550,11 +550,16 @@ test "stand-in gate: defect seeds are well formed and select by their own code" 
         const selected = defect_seeds.findByAsk(seed.ask) orelse return error.SeedAskSelectsNothing;
         try testing.expectEqualStrings(seed.id, selected.id);
 
-        var duplicates: usize = 0;
+        // Ids, not codes. A code no longer picks out one seed: ZTS602 has three,
+        // one per guarded capability family, and each names its own family's
+        // rejection. What has to stay unique is the id, because that is what
+        // selection matches on, and the assertion above already proves every
+        // ask reaches its own seed.
+        var duplicate_ids: usize = 0;
         for (defect_seeds.seeds) |other| {
-            if (std.mem.eql(u8, other.code, seed.code)) duplicates += 1;
+            if (std.mem.eql(u8, other.id, seed.id)) duplicate_ids += 1;
         }
-        try testing.expectEqual(@as(usize, 1), duplicates);
+        try testing.expectEqual(@as(usize, 1), duplicate_ids);
 
         if (zts.PolicyCatalog.findByCode(seed.code) != null) in_registry += 1;
     }

@@ -268,6 +268,26 @@ const clean_literal_capability =
     \\
 ;
 
+const clean_literal_egress =
+    \\import { fetch } from "zttp:fetch";
+    \\
+    \\function handler(req: Request): Proof<Response, "deterministic"> {
+    \\  const res = fetch("https://api.example.com/status");
+    \\  return Response.json({ status: res.status });
+    \\}
+    \\
+;
+
+const clean_literal_cache =
+    \\import { cacheGet } from "zttp:cache";
+    \\
+    \\function handler(req: Request): Proof<Response, "injection_safe"> {
+    \\  const hit = cacheGet("sessions", "k") ?? "none";
+    \\  return Response.json({ hit: hit });
+    \\}
+    \\
+;
+
 const clean_narrowed_optional =
     \\import { env } from "zttp:env";
     \\
@@ -1251,6 +1271,58 @@ pub const seeds = [_]DefectSeed{
         \\
         ,
         .ask = "Fix the ZTS602 compiler error in handler.ts",
+    },
+    .{
+        .id = "dynamic-capability-egress",
+        .code = "ZTS602",
+        .class = .model_retry,
+        .seed_source = clean_literal_egress,
+        .bad_draft =
+        \\import { fetch } from "zttp:fetch";
+        \\
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const target = req.url;
+        \\  const res = fetch(target);
+        \\  return Response.json({ status: res.status });
+        \\}
+        \\
+        ,
+        .good_draft =
+        \\import { fetch } from "zttp:fetch";
+        \\
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const res = fetch("https://api.example.com/health");
+        \\  return Response.json({ status: res.status });
+        \\}
+        \\
+        ,
+        .ask = "Fix the dynamic-capability-egress ZTS602 compiler error in handler.ts",
+    },
+    .{
+        .id = "dynamic-capability-cache",
+        .code = "ZTS602",
+        .class = .model_retry,
+        .seed_source = clean_literal_cache,
+        .bad_draft =
+        \\import { cacheGet } from "zttp:cache";
+        \\
+        \\function handler(req: Request): Proof<Response, "injection_safe"> {
+        \\  const ns = req.url;
+        \\  const hit = cacheGet(ns, "k") ?? "none";
+        \\  return Response.json({ hit: hit });
+        \\}
+        \\
+        ,
+        .good_draft =
+        \\import { cacheGet } from "zttp:cache";
+        \\
+        \\function handler(req: Request): Proof<Response, "injection_safe"> {
+        \\  const hit = cacheGet("sessions", "k") ?? "miss";
+        \\  return Response.json({ hit: hit });
+        \\}
+        \\
+        ,
+        .ask = "Fix the dynamic-capability-cache ZTS602 compiler error in handler.ts",
     },
     .{
         .id = "optional-property",
@@ -2556,6 +2628,20 @@ pub fn findById(id: []const u8) ?*const DefectSeed {
 /// ZTS604 seed. Returns null when the ask names no code this table carries,
 /// which is the case the playbook must answer with a miss.
 pub fn findByAsk(ask: []const u8) ?*const DefectSeed {
+    // The id first, because a code no longer picks out one seed: three of them
+    // are ZTS602, one per guarded family, and a code match would hand every one
+    // of those asks the first seed's repair. The longest matching id wins,
+    // because one id can be a prefix of another - `dynamic-capability` sits
+    // inside `dynamic-capability-egress`, and the shorter one is not the seed
+    // that ask names. An ask that names no id keeps matching by code, which is
+    // what every existing ask does.
+    var best: ?*const DefectSeed = null;
+    for (&seeds) |*seed| {
+        if (std.mem.indexOf(u8, ask, seed.id) == null) continue;
+        const longer = if (best) |current| seed.id.len > current.id.len else true;
+        if (longer) best = seed;
+    }
+    if (best) |seed| return seed;
     for (&seeds) |*seed| {
         if (std.mem.indexOf(u8, ask, seed.code)) |pos| {
             const end = pos + seed.code.len;
