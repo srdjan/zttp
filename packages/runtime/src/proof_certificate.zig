@@ -89,6 +89,7 @@ pub const Built = struct {
     executable_root: [32]u8,
     ir_root: [32]u8,
     certificate_digest: [32]u8,
+    residual_plan_digest: ?[32]u8,
 
     pub fn deinit(self: *Built) void {
         self.allocator.free(self.bytes);
@@ -223,10 +224,11 @@ pub fn build(allocator: std.mem.Allocator, inputs: Inputs) Error!Built {
     const residual_plan = try residualPlan(allocator, nodes);
     defer allocator.free(residual_plan);
     var artifact = inputs.artifact;
-    artifact.residual_plan_digest = if (residual_plan.len > 0)
+    const residual_plan_digest = if (residual_plan.len > 0)
         cert.residualPlanDigest(residual_plan)
     else
         null;
+    artifact.residual_plan_digest = residual_plan_digest;
     artifact.proof_ir_digest = ir_root;
     artifact.proof_certificate_digest = [_]u8{0} ** 32;
     const members = try allocator.alloc(graph.Member, artifact_graph.max_members);
@@ -295,6 +297,7 @@ pub fn build(allocator: std.mem.Allocator, inputs: Inputs) Error!Built {
         .translation = witnesses,
         .rewrites = rewrites,
         .trusted = trusted,
+        .residual = residual_plan,
     };
 
     const bytes = try allocator.alloc(u8, cert.encodedSize(parts));
@@ -331,6 +334,7 @@ pub fn build(allocator: std.mem.Allocator, inputs: Inputs) Error!Built {
         .executable_root = executable_root,
         .ir_root = ir_root,
         .certificate_digest = certificate_digest,
+        .residual_plan_digest = residual_plan_digest,
     };
 }
 

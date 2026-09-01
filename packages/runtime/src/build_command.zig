@@ -719,6 +719,7 @@ fn writeArtifactTail(
     if (certificate) |value| {
         graph_inputs.proof_ir_digest = value.ir_root;
         graph_inputs.proof_certificate_digest = value.certificate_digest;
+        graph_inputs.residual_plan_digest = value.residual_plan_digest;
     }
     const built = artifact_graph.buildRoot(
         allocator,
@@ -1683,6 +1684,122 @@ test "a real compile reaches policy acceptance, and one changed byte does not" {
     }, pcc.policy.production);
     try std.testing.expect(!rejected.accepted());
     try std.testing.expectEqual(pcc.verdict.Stage.artifact_binding, rejected.rejection.?.stage);
+}
+
+fn acceptCompiledSource(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    configured_policy: zts.HandlerPolicy,
+) !pcc.Assessment {
+    var compiled = try precompile.compileHandler(allocator, source, "handler.ts", .{
+        .emit_verify = true,
+        .emit_contract = true,
+        .emit_proof_evidence = true,
+        .policy = configured_policy,
+    });
+    defer compiled.deinit(allocator);
+
+    const evidence = compiled.proof_evidence orelse return error.TestUnexpectedResult;
+    const contract = compiled.contract orelse return error.TestUnexpectedResult;
+    const contract_json = try serializeContractJson(allocator, &contract);
+    defer allocator.free(contract_json);
+    const runtime_policy = zts.handler_policy.contractToRuntimePolicy(&contract, &configured_policy);
+    const policy_section = try self_extract.serializePolicy(allocator, &runtime_policy);
+    defer allocator.free(policy_section);
+    const policy_digest = artifact_graph.digestOf(policy_section);
+
+    var built = try proof_certificate.build(allocator, .{
+        .evidence = &evidence,
+        .properties = dischargedProperties(&contract),
+        .artifact = .{
+            .bytecode = compiled.bytecode,
+            .dep_bytecodes = compiled.dep_bytecodes orelse &.{},
+            .contract_section = contract_json,
+            .policy_section_digest = policy_digest,
+            .identity = artifact_graph.identityFromContract(&contract),
+        },
+        .contract_digest = artifact_graph.digestOf(contract_json),
+        .runtime_policy_digest = policy_digest,
+    });
+    defer built.deinit();
+
+    var decode_budget = pcc.limits.Budget.init(.{});
+    const decoded = try pcc.certificate.decode(built.bytes, .{}, &decode_budget);
+    try std.testing.expectEqual(
+        decoded.residual.len() > 0,
+        built.residual_plan_digest != null,
+    );
+
+    const activation_inputs = proof_activation.Inputs{
+        .certificate = built.bytes,
+        .bytecode = compiled.bytecode,
+        .dep_bytecodes = compiled.dep_bytecodes orelse &.{},
+        .contract_section = contract_json,
+        .policy_section_digest = policy_digest,
+        .policy_section = policy_section,
+        .identity = artifact_graph.identityFromContract(&contract),
+    };
+    const observed_root = (try proof_activation.observedRoot(allocator, activation_inputs)) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqualSlices(u8, &built.executable_root, &observed_root);
+    return proof_activation.accept(allocator, activation_inputs, pcc.policy.development);
+}
+
+test "real guarded artifacts reach consumer acceptance in expression positions" {
+    const allocator = std.testing.allocator;
+    var policy = try zts.handler_policy.parsePolicyJson(
+        allocator,
+        "{\"env\":{\"allow\":[\"APP_NAME\"]}}",
+    );
+    defer policy.deinit(allocator);
+
+    const static_source =
+        \\import { env } from "zttp:env";
+        \\export function handler(req: Request): Response {
+        \\  if (env("APP_NAME") !== undefined) {
+        \\    return Response.text("set");
+        \\  }
+        \\  return Response.text("missing");
+        \\}
+    ;
+    const static_result = try acceptCompiledSource(allocator, static_source, policy);
+    try std.testing.expect(static_result.accepted());
+    try std.testing.expectEqual(@as(u32, 0), static_result.guards.required);
+
+    const guarded_sources = [_][]const u8{
+        \\import { env } from "zttp:env";
+        \\export function handler(req: Request): Response {
+        \\  const configured = env(req.method) !== undefined;
+        \\  return Response.text(configured ? "set" : "missing");
+        \\}
+        ,
+        \\import { env } from "zttp:env";
+        \\export function handler(req: Request): Response {
+        \\  if (env(req.method) !== undefined) {
+        \\    return Response.text("set");
+        \\  }
+        \\  return Response.text("missing");
+        \\}
+        ,
+    };
+    for (guarded_sources) |source| {
+        const result = try acceptCompiledSource(allocator, source, policy);
+        if (result.rejection) |rejection| {
+            std.debug.print(
+                "guarded artifact rejected at {s} ({s}): {any}\n",
+                .{ rejection.stage.name(), rejection.code.text(), rejection },
+            );
+            return error.TestUnexpectedResult;
+        }
+        try std.testing.expect(result.accepted());
+        try std.testing.expectEqual(@as(u32, 1), result.guards.required);
+        try std.testing.expectEqual(@as(u32, 1), result.guards.covered);
+        try std.testing.expectEqual(@as(u8, 1), result.guards.kinds);
+        try std.testing.expectEqual(
+            static_result.properties.accepted_bits,
+            result.properties.accepted_bits,
+        );
+    }
 }
 
 test "the signed root and the startup rebuild are the same fold" {

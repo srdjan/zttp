@@ -106,6 +106,7 @@ fn graphInputs(inputs: Inputs) artifact_graph.Inputs {
         // authority-bearing section participates in the executable root.
         .proof_ir_digest = if (commitments) |value| value.ir else null,
         .proof_certificate_digest = if (commitments) |value| value.certificate else null,
+        .residual_plan_digest = if (commitments) |value| value.residual_plan else null,
     });
 }
 
@@ -155,6 +156,7 @@ pub fn accept(
 const CertificateCommitments = struct {
     ir: [32]u8,
     certificate: [32]u8,
+    residual_plan: ?[32]u8,
 };
 
 /// Derive the certificate-owned graph members without trusting either one.
@@ -169,6 +171,10 @@ fn certificateCommitments(certificate: []const u8) ?CertificateCommitments {
     return .{
         .ir = decoded.identity.ir_root,
         .certificate = pcc.certificate.commitmentDigest(certificate, decoded) catch return null,
+        .residual_plan = if (decoded.residual.len() > 0)
+            pcc.certificate.residualPlanDigestFromTable(decoded.residual) catch return null
+        else
+            null,
     };
 }
 

@@ -209,10 +209,14 @@ const Lowerer = struct {
             },
             .for_of_stmt, .for_in_stmt => {
                 const loop = self.view.getForIter(index) orelse return;
+                visit(ctx, self, loop.iterable);
                 visit(ctx, self, loop.body);
             },
             .for_stmt, .while_stmt, .do_while_stmt => {
                 const loop = self.view.getLoop(index) orelse return;
+                visit(ctx, self, loop.init);
+                visit(ctx, self, loop.condition);
+                visit(ctx, self, loop.update);
                 visit(ctx, self, loop.body);
             },
             .return_stmt, .expr_stmt => {
@@ -317,20 +321,31 @@ const Lowerer = struct {
             },
             .if_stmt => blk: {
                 const stmt = self.view.getIfStmt(index) orelse break :blk try self.leaf(.plain, index, @intFromEnum(tag));
-                var node = Tree{ .tag = .branch, .source = index, .leaf_kind = 0 };
-                errdefer node.deinit(self.allocator);
-                try node.children.append(self.allocator, try self.build(stmt.then_branch));
+                var branch = Tree{ .tag = .branch, .source = index, .leaf_kind = 0 };
+                errdefer branch.deinit(self.allocator);
+                try branch.children.append(self.allocator, try self.build(stmt.then_branch));
                 // An `if` with no `else` has one arm, and one arm is exactly why
                 // it cannot establish totality. The shape says so.
                 if (stmt.else_branch != null_node) {
-                    try node.children.append(self.allocator, try self.build(stmt.else_branch));
+                    try branch.children.append(self.allocator, try self.build(stmt.else_branch));
                 }
+                if (!self.containsGuarded(stmt.condition)) break :blk branch;
+
+                // Keep the branch's two-arm totality shape intact. The outer
+                // sequence carries only the guarded condition path, which adds
+                // the residual obligation without letting an expression claim
+                // that either branch returns.
+                var node = Tree{ .tag = .sequence, .source = index, .leaf_kind = 0 };
+                errdefer node.deinit(self.allocator);
+                try node.children.append(self.allocator, try self.build(stmt.condition));
+                try node.children.append(self.allocator, branch);
                 break :blk node;
             },
             .for_of_stmt, .for_in_stmt => blk: {
                 const loop = self.view.getForIter(index) orelse break :blk try self.leaf(.loop_node, index, @intFromEnum(tag));
                 var node = Tree{ .tag = .loop_node, .source = index, .leaf_kind = 0 };
                 errdefer node.deinit(self.allocator);
+                try self.appendGuarded(&node, loop.iterable);
                 try node.children.append(self.allocator, try self.build(loop.body));
                 break :blk node;
             },
@@ -338,6 +353,9 @@ const Lowerer = struct {
                 const loop = self.view.getLoop(index) orelse break :blk try self.leaf(.loop_node, index, @intFromEnum(tag));
                 var node = Tree{ .tag = .loop_node, .source = index, .leaf_kind = 0 };
                 errdefer node.deinit(self.allocator);
+                try self.appendGuarded(&node, loop.init);
+                try self.appendGuarded(&node, loop.condition);
+                try self.appendGuarded(&node, loop.update);
                 try node.children.append(self.allocator, try self.build(loop.body));
                 break :blk node;
             },
@@ -355,6 +373,11 @@ const Lowerer = struct {
             try node.children.append(self.allocator, try self.build(child));
         }
         return node;
+    }
+
+    fn appendGuarded(self: *Lowerer, parent: *Tree, child: NodeIndex) Error!void {
+        if (child == null_node or !self.containsGuarded(child)) return;
+        try parent.children.append(self.allocator, try self.build(child));
     }
 
     /// A node with no structural children of its own.
@@ -1004,6 +1027,32 @@ test "a guarded call is reachable wherever an expression is" {
     , resolver);
     defer in_init.deinit();
     try testing.expect(countTag(in_init.proof, .capability_call) >= 1);
+
+    const control_flow_cases = [_][]const u8{
+        \\function handler(req) {
+        \\  if (env("API_KEY")) {
+        \\    return "set";
+        \\  } else {
+        \\    return "missing";
+        \\  }
+        \\}
+        ,
+        \\function handler(req) {
+        \\  for (const current of env("API_KEY")) {
+        \\    return current;
+        \\  }
+        \\  return "missing";
+        \\}
+        ,
+    };
+    for (control_flow_cases, 0..) |source, index| {
+        var lowered = parseAndLowerWith(allocator, source, resolver) catch |err| {
+            std.debug.print("control-flow guard case {d} did not parse: {s}\n", .{ index, @errorName(err) });
+            return err;
+        };
+        defer lowered.deinit();
+        try testing.expectEqual(@as(usize, 1), countTag(lowered.proof, .capability_call));
+    }
 
     // The handler is still total: a guarded call establishes nothing about
     // returning, and it must not take that away either.
