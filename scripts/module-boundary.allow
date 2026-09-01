@@ -43,6 +43,9 @@ runtime endpoint
 runtime equivalence_receipt
 runtime file_io
 runtime handler_contract
+# The compiler's mirror of the acceptance kernel's guard catalog. The pin test
+# runs the two tables against each other, which needs both names in one file.
+runtime guard_catalog
 runtime handler_policy
 runtime http
 # The one guard identifier rule, for the same reason as `endpoint` above: the

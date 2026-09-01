@@ -291,6 +291,32 @@ test "the kernel's endpoint rule and the base-tier one agree" {
     }
 }
 
+test "the compiler's guard catalog and the kernel's are the same table" {
+    // The proof IR carries a catalog row index and nothing else about the row,
+    // so the producer's table and the consumer's must agree on order as well as
+    // content: a row inserted on one side renumbers every obligation after it.
+    // The compiler cannot import the kernel, so this file compares them.
+    try testing.expectEqual(pcc.residual.catalog.len, zts.guard_catalog.entries.len);
+    for (pcc.residual.catalog, zts.guard_catalog.entries) |kernel, producer| {
+        try testing.expectEqualStrings(kernel.module, producer.module);
+        try testing.expectEqualStrings(kernel.export_name, producer.export_name);
+        try testing.expectEqual(kernel.arg_index, producer.arg_index);
+        try testing.expectEqualStrings(kernel.kind.name(), producer.kind.name());
+        try testing.expectEqual(@intFromEnum(kernel.kind), @intFromEnum(producer.kind));
+        try testing.expectEqualStrings(
+            kernel.kind.section().name(),
+            sectionKeyRoot(producer.kind.section()),
+        );
+    }
+}
+
+/// The producer names a policy file key (`cache.allow_namespaces`); the kernel
+/// names the section (`cache`). Compare the part they both claim.
+fn sectionKeyRoot(key: []const u8) []const u8 {
+    const dot = std.mem.indexOfScalar(u8, key, '.') orelse return key;
+    return key[0..dot];
+}
+
 test "the kernel's identifier rule and the base-tier one agree" {
     // Same arrangement as the endpoint rule above: two implementations in
     // packages that cannot import each other, one corpus, and every answer must

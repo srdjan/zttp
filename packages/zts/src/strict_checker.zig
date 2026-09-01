@@ -19,6 +19,7 @@ const module_facts_mod = @import("module_facts.zig");
 const abi_types = @import("abi_types.zig");
 const builtin_modules = @import("zts-engine").builtin_modules;
 const known_globals = @import("zts-base").known_globals;
+const guard_catalog = @import("zts-base").guard_catalog;
 
 pub const RepairIntent = repair_intent_mod.RepairIntent;
 
@@ -1963,10 +1964,25 @@ fn ambientGlobalHelp(name: []const u8) []const u8 {
     return "Import a published virtual-module capability or use an ambient name listed by meta.ambient_names.";
 }
 
+/// Which argument of a capability export has to be compiler-visible.
+///
+/// Two sources, and both are load-bearing. The first is the guard catalog: an
+/// export the consumer can carry as a residual obligation is one whose resource
+/// the runtime decides, so a computed value there is the compiler's business.
+/// Deriving that half rather than restating it is what keeps the two in step -
+/// `fetchWithRetry` had a catalog row and no entry here, so a computed URL
+/// through it passed strict checking, left an empty egress section in the
+/// contract, and failed only later where the certificate could not represent
+/// it.
+///
+/// The second is the surface the catalog deliberately does not carry and the
+/// runtime still cannot decide: a service call, a registered SQL statement, the
+/// raw `fetchSync`. Those are named here because they are rejections the
+/// catalog will never justify, and they stay rejections after the classifier
+/// starts admitting the families it does carry.
 fn literalRequiredArg(module: []const u8, name: []const u8) ?u8 {
-    if (std.mem.eql(u8, module, "zttp:env") and std.mem.eql(u8, name, "env")) return 0;
-    if (std.mem.eql(u8, module, "zttp:fetch") and
-        (std.mem.eql(u8, name, "fetch") or std.mem.eql(u8, name, "fetchSync"))) return 0;
+    if (guard_catalog.lookup(module, name, 0) != null) return 0;
+    if (std.mem.eql(u8, module, "zttp:fetch") and std.mem.eql(u8, name, "fetchSync")) return 0;
     if (std.mem.eql(u8, module, "zttp:service") and std.mem.eql(u8, name, "serviceCall")) return 0;
     if (std.mem.eql(u8, module, "zttp:sql")) return 0;
     if (std.mem.eql(u8, module, "zttp:cache")) return 0;

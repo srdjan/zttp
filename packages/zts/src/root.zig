@@ -118,6 +118,9 @@ pub const endpoint = base.endpoint;
 
 /// The canonical guard identifier rule.
 pub const identifier = base.identifier;
+
+/// The supported guard surface mirrored for the compiler.
+pub const guard_catalog = base.guard_catalog;
 pub const route_match = base.route_match;
 pub const type_map = base.type_map;
 pub const type_pool = compiler.type_pool;

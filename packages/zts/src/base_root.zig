@@ -49,6 +49,10 @@ pub const endpoint = @import("endpoint.zig");
 /// SQL query name - as the policy holds it.
 pub const identifier = @import("identifier.zig");
 
+/// The supported guard surface: which virtual-module export arguments the
+/// consumer can carry as residual obligations.
+pub const guard_catalog = @import("guard_catalog.zig");
+
 /// Whether a request path matches a route pattern, parameter segments included.
 pub const route_match = @import("route_match.zig");
 
