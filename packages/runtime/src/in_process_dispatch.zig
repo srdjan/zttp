@@ -79,6 +79,8 @@ pub const SystemRuntime = struct {
         // It used to install allow-all, and this extraction runs with
         // `strict = false`, so a computed capability argument reaches it.
         target_config.dev_capability_policy = zq.handler_policy.contractToRuntimePolicy(&contract, null);
+        target_config.runtime_policy_index_required =
+            zq.handler_policy.contractRequiresRuntimePolicyIndex(&contract);
 
         const name_owned = try self.allocator.dupe(u8, name);
         errdefer self.allocator.free(name_owned);
@@ -819,6 +821,25 @@ test "buildFromSystemConfig includes imported capabilities in each target policy
     const target = sys.find("entry") orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(usize, 1), target.contract.egress.endpoints.items.len);
     try std.testing.expectEqualStrings("http://localhost:1", target.contract.egress.endpoints.items[0]);
+}
+
+test "computed in-process capability installs a guarded policy index" {
+    const allocator = std.testing.allocator;
+    var sys = SystemRuntime.init(allocator);
+    defer sys.deinit();
+
+    try sys.addHandler(
+        "dynamic-env",
+        "import { env } from \"zttp:env\"; function handler(req) { return Response.text(env(req.url)); }",
+        "dynamic-env.ts",
+        .{},
+        1,
+    );
+
+    const target = sys.find("dynamic-env") orelse return error.TestUnexpectedResult;
+    try std.testing.expect(target.contract.env.dynamic);
+    try std.testing.expect(target.pool.policy_generation.index != null);
+    try std.testing.expect(target.pool.policy_generation.policy.installed_index != null);
 }
 
 test "buildFromSystemConfig rejects a target whose contract cannot compile" {

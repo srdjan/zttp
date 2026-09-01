@@ -29,11 +29,9 @@ const self_extract = @import("../self_extract.zig");
 const static_mod = @import("../server_static.zig");
 const guard_report = @import("guard_report.zig");
 
-/// Bumped to 2 for the certificate component. The verifier checks this for
-/// equality: a version-1 bundle carried hashes and nothing that could be
-/// semantically checked, so reading one under the current rules would report an
-/// assurance it never had.
-pub const tool_version: []const u8 = "zttp-bundle-2";
+/// Bumped to 3 for the residual guard certificate. The verifier checks this for
+/// equality so a bundle cannot be read under proof rules it did not carry.
+pub const tool_version: []const u8 = "zttp-bundle-3";
 
 pub const BundleArgs = struct {
     contract_path: []const u8,
@@ -430,7 +428,7 @@ fn verifyComponents(
         else => return error.InvalidManifest,
     };
     // The bundle format is checked for equality, not for a lower bound. A
-    // version-1 bundle carried component hashes and no certificate; reading one
+    // predecessor bundle was built under different proof rules; reading one
     // here would print an assurance report about evidence it never held.
     const version_value = root.get("toolVersion") orelse {
         try stderr.writeAll("zttp proofs verify: bundle manifest has no toolVersion\n");
@@ -744,7 +742,7 @@ test "a bundle from the previous format is refused with a rebuild diagnostic" {
     const contract_sha = sha256Hex("{}");
     const manifest = try std.fmt.allocPrint(
         std.testing.allocator,
-        "{{\n  \"toolVersion\": \"zttp-bundle-1\",\n  \"components\": {{\n    \"contract\": {{ \"path\": \"handler.contract.json\", \"sha256\": \"{s}\" }}\n  }}\n}}\n",
+        "{{\n  \"toolVersion\": \"zttp-bundle-2\",\n  \"components\": {{\n    \"contract\": {{ \"path\": \"handler.contract.json\", \"sha256\": \"{s}\" }}\n  }}\n}}\n",
         .{contract_sha},
     );
     defer std.testing.allocator.free(manifest);
@@ -760,7 +758,7 @@ test "a bundle from the previous format is refused with a rebuild diagnostic" {
     );
     // The diagnostic names both formats and says what to do about it.
     const text = err.writer.buffered();
-    try std.testing.expect(std.mem.indexOf(u8, text, "zttp-bundle-1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "zttp-bundle-2") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, tool_version) != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "Rebuild") != null);
 }

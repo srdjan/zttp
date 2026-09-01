@@ -220,6 +220,9 @@ pub const Context = struct {
     parallel_collection: parallel_collection.State,
     /// Embedded capability policy for precompiled handlers.
     capability_policy: handler_policy.RuntimePolicy,
+    /// Immutable policy generation pinned by the owning runtime. Guard-denial
+    /// telemetry copies this bounded identifier and never the denied resource.
+    policy_generation: u64,
     /// Per-request virtual-module call counters, reset by the runtime after
     /// request accounting has observed them.
     cost_meter: cost_meter.Meter = .{},
@@ -303,6 +306,7 @@ pub const Context = struct {
             .active_module_scope = null,
             .parallel_collection = .{},
             .capability_policy = .{},
+            .policy_generation = 0,
             .cost_meter = .{},
             .sdk_file_allowlist = .{},
             .sdk_sqlite_allowlist = .{},

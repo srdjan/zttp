@@ -202,17 +202,6 @@ pub fn check(inputs: Inputs, policy: Policy) Assessment {
             .recertifiable = true,
         });
     }
-    // A residual section under a proof system that does not carry residual
-    // guards is not a section to ignore. Ignoring it would let a producer ship
-    // guarded operations to a consumer that never checks their coverage.
-    if (certificate.residual.len() > 0 and !certificate.proof_system.carriesResidualGuards()) {
-        return rejectAt(.parsed, inputs.provenance, budget, limits, .{
-            .stage = .proof_system_identity,
-            .code = .residual_section_not_permitted,
-            .actual = .{ .scalar = @intFromEnum(certificate.proof_system) },
-            .recertifiable = true,
-        });
-    }
     if (!policy.acceptsEpoch(certificate.semantics_epoch)) {
         return rejectAt(.parsed, inputs.provenance, budget, limits, .{
             .stage = .proof_system_identity,
@@ -1329,16 +1318,6 @@ pub const test_support = struct {
         }
     };
 
-    /// The consumer policy a guarded artifact is checked under: the production
-    /// requirements, plus the successor schema and proof system this build can
-    /// read but does not yet read by default.
-    pub fn guardedPolicy() Policy {
-        var value = policy_mod.production;
-        value.schema_versions = &policy_mod.successor_schema_versions;
-        value.proof_systems = &policy_mod.successor_proof_systems;
-        return value;
-    }
-
     /// A handler with one guarded environment read.
     ///
     /// The proof IR carries the guarded call, the certificate carries one
@@ -1398,8 +1377,6 @@ pub const test_support = struct {
 
         pub fn parts(self: *GuardedFixture) cert_mod.Parts {
             return .{
-                .proof_system = .zttp_pcc_v2,
-                .schema_version = ps.schema_version_next,
                 .identity = .{
                     .executable_root = [_]u8{0} ** 32,
                     .ir_root = cert_mod.irRootFromNodes(&self.ir),
@@ -1436,12 +1413,7 @@ pub const test_support = struct {
             built.graph = &self.members;
             const provisional = try cert_mod.encode(built, &self.buffer);
             var budget = Budget.init(.{});
-            const decoded = try cert_mod.decodeAccepting(
-                provisional,
-                &policy_mod.successor_schema_versions,
-                .{},
-                &budget,
-            );
+            const decoded = try cert_mod.decode(provisional, .{}, &budget);
             const certificate_digest = try cert_mod.commitmentDigest(provisional, decoded);
             for (&self.members) |*member| {
                 if (member.kind == .proof_certificate) member.digest = certificate_digest;
@@ -1590,7 +1562,7 @@ pub const test_support = struct {
 
 test "a guarded artifact is accepted, and its guards are counted apart from its properties" {
     var fixture = try test_support.buildGuarded();
-    const result = check(fixture.inputs(), test_support.guardedPolicy());
+    const result = check(fixture.inputs(), policy_mod.production);
 
     if (result.rejection) |rejection| {
         std.debug.print(
@@ -1625,18 +1597,12 @@ test "a certificate with no guarded call is ready with nothing to guard" {
     try testing.expectEqual(@as(u8, 0), result.guards.kinds);
 }
 
-test "a residual section is refused under a proof system that does not carry one" {
+test "the immediate predecessor proof system is refused at decode" {
     var fixture = try test_support.buildGuarded();
-    var parts = fixture.parts();
-    parts.proof_system = .zttp_pcc_v1;
-    const encoded = try cert_mod.encode(parts, &fixture.buffer);
-    fixture.len = encoded.len;
-
-    var permissive = test_support.guardedPolicy();
-    permissive.proof_systems = &[_]ps.ProofSystem{ .zttp_pcc_v1, .zttp_pcc_v2 };
-    const result = check(fixture.inputs(), permissive);
+    std.mem.writeInt(u16, fixture.buffer[10..12], 1, .little);
+    const result = check(fixture.inputs(), policy_mod.production);
     try testing.expectEqual(
-        verdict.ReasonCode.residual_section_not_permitted,
+        verdict.ReasonCode.unknown_enum_member,
         result.rejection.?.code,
     );
 }
@@ -1651,7 +1617,7 @@ test "an omitted, extra, duplicated, or reordered guard rejects" {
     }
     parts.graph = &missing.members;
     try encodeGuardedParts(&missing, parts);
-    var result = check(missing.inputs(), test_support.guardedPolicy());
+    var result = check(missing.inputs(), policy_mod.production);
     try testing.expectEqual(verdict.Stage.guard_coverage, result.rejection.?.stage);
     try testing.expectEqual(verdict.ReasonCode.guard_member_missing, result.rejection.?.code);
 
@@ -1675,7 +1641,7 @@ test "an omitted, extra, duplicated, or reordered guard rejects" {
     }
     extra_parts.graph = &extra.members;
     try encodeGuardedParts(&extra, extra_parts);
-    result = check(extra.inputs(), test_support.guardedPolicy());
+    result = check(extra.inputs(), policy_mod.production);
     try testing.expectEqual(verdict.ReasonCode.guard_member_extra, result.rejection.?.code);
 }
 
@@ -1722,7 +1688,7 @@ test "a guard that disagrees with the consumer's catalog rejects on every field"
         var fixture = try test_support.buildGuarded();
         case.apply(&fixture.residual_plan[0]);
         try fixture.encode();
-        const result = check(fixture.inputs(), test_support.guardedPolicy());
+        const result = check(fixture.inputs(), policy_mod.production);
         testing.expectEqual(case.code, result.rejection.?.code) catch |err| {
             std.debug.print("guard '{s}' mismatch was not refused as expected\n", .{case.name});
             return err;
@@ -1734,7 +1700,7 @@ test "a guarded call naming a catalog row that does not exist rejects" {
     var fixture = try test_support.buildGuarded();
     fixture.ir[2].aux = @intCast(residual.catalog.len);
     try fixture.encode();
-    const result = check(fixture.inputs(), test_support.guardedPolicy());
+    const result = check(fixture.inputs(), policy_mod.production);
     try testing.expectEqual(verdict.ReasonCode.guard_operation_unknown, result.rejection.?.code);
 }
 
@@ -1754,7 +1720,7 @@ test "a guarded operation with no configured category rejects" {
     fixture.policy_len = at;
     try fixture.encode();
 
-    const result = check(fixture.inputs(), test_support.guardedPolicy());
+    const result = check(fixture.inputs(), policy_mod.production);
     try testing.expectEqual(
         verdict.ReasonCode.guard_category_not_configured,
         result.rejection.?.code,
@@ -1765,7 +1731,7 @@ test "a guarded artifact with no policy bytes rejects rather than assuming any" 
     var fixture = try test_support.buildGuarded();
     var inputs = fixture.inputs();
     inputs.runtime_policy = null;
-    const result = check(inputs, test_support.guardedPolicy());
+    const result = check(inputs, policy_mod.production);
     try testing.expectEqual(verdict.ReasonCode.runtime_policy_missing, result.rejection.?.code);
 }
 
@@ -1776,7 +1742,7 @@ test "policy bytes that do not hash to the committed digest reject" {
     other.writePolicy(&.{"OTHER_KEY"});
     var inputs = fixture.inputs();
     inputs.runtime_policy = .{ .bytes = other.policySlice() };
-    const result = check(inputs, test_support.guardedPolicy());
+    const result = check(inputs, policy_mod.production);
     try testing.expectEqual(
         verdict.ReasonCode.runtime_policy_undecodable,
         result.rejection.?.code,
@@ -1792,15 +1758,16 @@ test "a residual plan that is not the one the identity names rejects" {
     }
     parts.graph = &fixture.members;
     try encodeGuardedParts(&fixture, parts);
-    const result = check(fixture.inputs(), test_support.guardedPolicy());
+    const result = check(fixture.inputs(), policy_mod.production);
     try testing.expectEqual(
         verdict.ReasonCode.residual_plan_digest_mismatch,
         result.rejection.?.code,
     );
 }
 
-test "the successor schema is unreachable from the shipped production policy" {
+test "the immediate predecessor schema is refused by production" {
     var fixture = try test_support.buildGuarded();
+    std.mem.writeInt(u16, fixture.buffer[8..10], 2, .little);
     const result = check(fixture.inputs(), policy_mod.production);
     try testing.expectEqual(
         verdict.ReasonCode.unsupported_schema_version,
@@ -1822,12 +1789,7 @@ fn encodeGuardedParts(
     built.identity.executable_root = [_]u8{0} ** 32;
     const provisional = try cert_mod.encode(built, &fixture.buffer);
     var budget = Budget.init(.{});
-    const decoded = try cert_mod.decodeAccepting(
-        provisional,
-        &policy_mod.successor_schema_versions,
-        .{},
-        &budget,
-    );
+    const decoded = try cert_mod.decode(provisional, .{}, &budget);
     const certificate_digest = try cert_mod.commitmentDigest(provisional, decoded);
     for (&fixture.members) |*member| {
         if (member.kind == .proof_certificate) member.digest = certificate_digest;
@@ -1901,7 +1863,7 @@ test "a matching certificate and inventory reach policy acceptance" {
 test "a policy that requires nothing is refused before anything is read" {
     var fixture = try test_support.build();
     const empty = Policy{
-        .proof_systems = &[_]ps.ProofSystem{.zttp_pcc_v1},
+        .proof_systems = &[_]ps.ProofSystem{.zttp_pcc_v2},
         .semantics_epochs = &[_]u32{ps.semantics_epoch},
         .required = &.{},
     };

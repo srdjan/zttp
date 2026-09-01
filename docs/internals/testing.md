@@ -103,7 +103,7 @@ The package suites: `test-zts`, `test-sdk`, `test-modules`,
 
 The audits and gates: `test-capability-audit`, `test-module-boundary`,
 `test-proof-checker-purity`, `test-proof-ratchet`, `test-proof-ratchet-drift`,
-`test-proof-swallow`, `test-zts-layering`, `test-module-governance`,
+`test-residual-guards-drift`, `test-proof-swallow`, `test-zts-layering`, `test-module-governance`,
 `test-runtime-purity`, `test-contract-golden`, `test-expert-golden`,
 `test-docs-drift`, `test-doc-links`, `test-convergence-emitter`,
 `test-production-branch-metric`, `test-comptime-cli-matrix`,
@@ -251,6 +251,17 @@ stays mentioned in prose: a gate that only greps for the name would report a
 pass after exactly the promotion it exists to catch. Both directions were
 confirmed by hand - an undocumented promotion, a doc that drops a disclosure, a
 kernel that re-derives nothing, and an emptied corpus each fail.
+
+`zig build test-residual-guards-drift` runs
+`scripts/check-residual-guards.sh` and the compiled stand-in evidence. The
+script parses every catalog row across whitespace, compares the ordered
+consumer catalog and guard metadata to the compiler mirror and machine-marked
+block in `docs/verification.md`, then compares enabled families to measured
+stand-in conversions. Every registry has a non-empty floor. Internal
+missing-row and extra-row probes make a vacuous comparison fail. The stand-in
+dependency makes a compile failure fail the named gate and executes the
+positive env, egress, and cache conversions. Each conversion must preserve the
+exact proven Property set.
 
 Discarding an error inside the analysis files that decide whether a program is
 proven needs a row in `scripts/proof-swallow.allow` giving the reason it cannot

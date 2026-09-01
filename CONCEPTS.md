@@ -82,6 +82,24 @@ policy; unrelated or below-floor compiler claims remain false. Its counterpart,
 the integrity-bound contract, says only that the contract describes the artifact
 that was loaded, which makes its claims readable but checks none of them.
 
+### Residual guard
+A consumer-owned obligation for a capability resource the compiler could not
+resolve statically. The certificate names the operation, but the acceptance
+kernel reconstructs its kind, normalization, policy section, sink, and
+implementation identity from its own catalog. Exact coverage and the exact
+serialized runtime policy must be accepted before activation.
+
+A residual guard is not a Property. Its three answers stay separate: producer
+property facts, consumer coverage of the guard plan, and the live sink's allow
+or deny decision for one resource under one policy generation.
+
+### Guarded generation
+One immutable runtime tuple containing the executable root, proof-checked
+contract, residual plan, decoded policy index, and policy generation. Startup
+installs none of it until proof acceptance succeeds. Certificate-free live
+reload cannot replace or create a Guarded generation, and a failed candidate
+leaves the previous tuple and its in-flight requests intact.
+
 ## Tracking data through a handler
 
 ### Data label

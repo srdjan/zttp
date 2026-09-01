@@ -23,6 +23,11 @@ Read this end-to-end before adding a new virtual module.
 
 These are governance metadata for the module internals. They do not affect handler-level effect classification (`deterministic`, `read_only`, etc.) or `RuntimePolicy` derivation; those are separate analyses driven by the `effect` annotation on each exported function.
 
+Residual guards are another separate boundary. A module capability authorizes
+which native helper an implementation may reach. A residual guard authorizes
+one runtime resource under a bound handler policy. Neither one proves a handler
+Property, and satisfying one never substitutes for the other.
+
 ## Enforcement model
 
 Every module declares a `ModuleBinding` with three relevant fields:
@@ -62,8 +67,8 @@ The extension SDK and runtime bridge are revision-locked. Native extensions must
 | `zttp:cache` | `clock`, `policy_check` | TTL expiry requires clock; `policy_check` consults the handler's cache-namespace policy. |
 | `zttp:crypto` | `crypto` | SHA256, HMAC, base64. |
 | `zttp:durable` | `runtime_callback` | Replay and live execution dispatch back into the runtime for oplog replay and signal wake-ups. |
-| `zttp:env` | `env`, `policy_check` | Reads `getenv` and then checks the key against the handler's env allowlist. |
-| `zttp:fetch` | `network`, `runtime_callback` | Dispatches outbound HTTP through the runtime callback path after host-policy checks. |
+| `zttp:env` | `env`, `policy_check` | Normalizes and checks the key before reading `getenv`. |
+| `zttp:fetch` | `network`, `runtime_callback` | Checks the normalized endpoint before DNS and the resolved address scope before connecting. |
 | `zttp:id` | `clock`, `random` | UUID v7 and ULID mix clock; nanoid is pure random. |
 | `zttp:io` | `runtime_callback` | `parallel()` and `race()` schedule outbound fetches through the runtime's I/O collector. |
 | `zttp:log` | `clock`, `stderr` | Timestamped log emission. |
@@ -110,6 +115,10 @@ Run it after any change under `modules/`:
 zig build test-capability-audit
 zig build test-module-governance
 ```
+
+Guard-surface changes also run `zig build test-residual-guards-drift`. That gate
+compares the consumer catalog, compiler mirror, enabled families, measured
+stand-in conversions, and the published verification boundary exactly.
 
 The release CI job runs both checks explicitly. Local `zig build test` also depends on `test-module-governance`.
 

@@ -16,7 +16,7 @@ const Ed25519 = std.crypto.sign.Ed25519;
 const Sha256 = std.crypto.hash.sha2.Sha256;
 const b64 = std.base64.url_safe_no_pad;
 
-pub const version_tag: []const u8 = "zttp-attest-v3";
+pub const version_tag: []const u8 = "zttp-attest-v4";
 pub const unpinned_runtime_policy_sha256: []const u8 = "0" ** 64;
 /// A receipt for something that is not a self-extracting artifact - a dev
 /// server, a live-reload swap - has no executable graph to commit to. It says
@@ -96,6 +96,7 @@ pub const VerifyError = error{
     MalformedJws,
     InvalidBase64,
     InvalidJson,
+    UnsupportedAttestationVersion,
     UnsupportedAlgorithm,
     MissingPublicKey,
     SignatureMismatch,
@@ -184,7 +185,11 @@ pub fn verify(
     const signature = Ed25519.Signature.fromBytes(sig_array);
     signature.verify(signing_input, public_key) catch return error.SignatureMismatch;
 
-    const claims = parseClaims(ar, payload_bytes) catch return error.InvalidJson;
+    const claims = parseClaims(ar, payload_bytes) catch |err| switch (err) {
+        error.UnsupportedAttestationVersion => return error.UnsupportedAttestationVersion,
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.InvalidJson,
+    };
 
     return .{
         .claims = claims,
@@ -390,7 +395,7 @@ fn parseClaims(allocator: std.mem.Allocator, payload_bytes: []const u8) !Claims 
 
     const payload_version = obj.get(wire_key.v) orelse return error.InvalidJson;
     if (payload_version != .string or !std.mem.eql(u8, payload_version.string, version_tag)) {
-        return error.InvalidJson;
+        return error.UnsupportedAttestationVersion;
     }
 
     const claims = Claims{
@@ -568,21 +573,21 @@ test "verify refuses a legacy receipt without source identity" {
     const jws = try signPayloadJsonForTest(allocator, payload, key_pair);
     defer allocator.free(jws);
 
-    try std.testing.expectError(error.InvalidJson, verify(allocator, jws));
+    try std.testing.expectError(error.UnsupportedAttestationVersion, verify(allocator, jws));
 }
 
 test "a receipt from the previous attestation version is refused, not reinterpreted" {
     const allocator = std.testing.allocator;
-    // The v2 payload is well formed and correctly signed. It simply commits to
-    // the entry module rather than the executable graph, so reading it under
-    // the current rules would report a coverage it never had.
+    // The v3 payload is complete, well formed, and correctly signed. Its only
+    // fault is naming the immediate predecessor format.
     const payload =
-        "{\"v\":\"zttp-attest-v2\"," ++
+        "{\"v\":\"zttp-attest-v3\"," ++
         "\"contractSha256\":\"" ++ "a" ** 64 ++ "\"," ++
         "\"bytecodeSha256\":\"" ++ "b" ** 64 ++ "\"," ++
         "\"policySha256\":\"" ++ "c" ** 64 ++ "\"," ++
         "\"capabilityHash\":\"" ++ "d" ** 64 ++ "\"," ++
         "\"runtimePolicySha256\":\"" ++ "e" ** 64 ++ "\"," ++
+        "\"executableRootSha256\":\"" ++ "f" ** 64 ++ "\"," ++
         "\"coreProfileId\":\"zts-model-1\"," ++
         "\"coreGrammarSha256\":\"" ++ "1" ** 64 ++ "\"," ++
         "\"semanticsSha256\":\"" ++ "2" ** 64 ++ "\"," ++
@@ -597,7 +602,7 @@ test "a receipt from the previous attestation version is refused, not reinterpre
     const jws = try signPayloadJsonForTest(allocator, payload, key_pair);
     defer allocator.free(jws);
 
-    try std.testing.expectError(error.InvalidJson, verify(allocator, jws));
+    try std.testing.expectError(error.UnsupportedAttestationVersion, verify(allocator, jws));
 }
 
 test "a current receipt without the executable root is refused" {

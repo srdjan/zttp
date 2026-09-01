@@ -253,6 +253,13 @@ pub fn build(b: *std.Build) void {
     const proof_ratchet_drift_step = b.step("test-proof-ratchet-drift", "Check the published trusted boundary against the kernel");
     proof_ratchet_drift_step.dependOn(&proof_ratchet_drift.step);
 
+    // The residual-guard boundary: consumer catalog, compiler mirror, enabled
+    // families, measured conversions, and published documentation.
+    const residual_guards_drift = b.addSystemCommand(&.{ "bash", "scripts/check-residual-guards.sh" });
+    residual_guards_drift.has_side_effects = true;
+    const residual_guards_drift_step = b.step("test-residual-guards-drift", "Check residual guard catalogs, evidence, and docs");
+    residual_guards_drift_step.dependOn(&residual_guards_drift.step);
+
     // The trusted-boundary ratchet. Rooted at its own file because nothing in
     // the product imports it: it is a corpus plus assertions, and a file no
     // analyzed root reaches contributes no tests.
@@ -443,6 +450,10 @@ pub fn build(b: *std.Build) void {
         if (root.standin_only) tests.root_module.addOptions("unseeded_rules", unseeded_rules);
         host_test_runs[i] = b.addRunArtifact(tests);
         b.step(root.step, root.desc).dependOn(&host_test_runs[i].step);
+        // The residual gate's source comparison is useful only if its
+        // behavioral evidence compiles and runs. Keep that dependency on the
+        // named gate so a broken probe cannot be reported as guard agreement.
+        if (root.standin_only) residual_guards_drift_step.dependOn(&host_test_runs[i].step);
     }
 
     // Explicit real-model gate. It is intentionally absent from the aggregate
@@ -1162,6 +1173,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&module_boundary.step);
     test_step.dependOn(&release_workflow.step);
     test_step.dependOn(&proof_swallow.step);
+    test_step.dependOn(&residual_guards_drift.step);
     test_step.dependOn(&zts_layering.step);
     test_step.dependOn(&run_release_check_tests.step);
     test_step.dependOn(&run_release_provenance_tests.step);

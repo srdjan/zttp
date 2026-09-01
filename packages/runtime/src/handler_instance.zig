@@ -62,6 +62,7 @@ const HttpRequestView = http_types.HttpRequestView;
 const HttpResponse = http_types.HttpResponse;
 
 const runtime_config_mod = @import("runtime_config.zig");
+const RuntimePolicyGeneration = @import("runtime_policy_generation.zig").RuntimePolicyGeneration;
 const cost_meter = zq.CostMeter;
 
 /// Public because `HandlerInstance.init` takes one, and the benchmark harness
@@ -123,6 +124,9 @@ pub const HandlerInstance = struct {
     cached_handler_arg_count: u8,
     cached_dispatch: ?*const zq.PatternDispatchTable,
     config: RuntimeConfig,
+    /// Policy tuple retained for this runtime's full lifetime. The Context and
+    /// parallel HTTP workers borrow its policy and optional index.
+    policy_generation: ?*RuntimePolicyGeneration = null,
     /// The pool reload-generation this runtime was compiled for. The pool's
     /// live-reload / egress-policy swap bumps the pool counter; ensureRuntime
     /// rebuilds this runtime when it falls behind. Defaults to 0 so existing
@@ -266,7 +270,7 @@ pub const HandlerInstance = struct {
         errdefer ctx.deinit();
 
         applyRuntimeConfig(ctx, gc_state, heap_state, config);
-        applyEmbeddedCapabilityPolicy(ctx, config);
+        applyEmbeddedCapabilityPolicy(ctx, config, null);
 
         // Install core JS builtins (Array.prototype, Object, Math, JSON, etc.)
         try zq.initBuiltins(ctx);
@@ -309,6 +313,7 @@ pub const HandlerInstance = struct {
             .cached_handler_arg_count = 1,
             .cached_dispatch = null,
             .config = config,
+            .policy_generation = null,
             .outbound_io_backend = if (config.outbound_http_enabled)
                 std.Io.Threaded.init(allocator, .{ .environ = .empty })
             else
@@ -359,10 +364,16 @@ pub const HandlerInstance = struct {
 
     /// Initialize a runtime wrapper on top of a pooled zts runtime.
     /// The pooled runtime owns ctx/gc/heap; this wrapper owns only its own state.
-    pub fn initFromPool(pool_rt: *zq.LockFreePool.Runtime, config: RuntimeConfig) !*Self {
+    pub fn initFromPool(
+        pool_rt: *zq.LockFreePool.Runtime,
+        config: RuntimeConfig,
+        policy_generation: *RuntimePolicyGeneration,
+    ) !*Self {
         const allocator = pool_rt.ctx.allocator;
         const self = try allocator.create(Self);
         errdefer allocator.destroy(self);
+        const retained_policy = policy_generation.retain();
+        errdefer retained_policy.release();
 
         const interp = zq.Interpreter.init(pool_rt.ctx);
 
@@ -380,6 +391,7 @@ pub const HandlerInstance = struct {
             .cached_handler_arg_count = 1,
             .cached_dispatch = null,
             .config = config,
+            .policy_generation = retained_policy,
             .outbound_io_backend = if (config.outbound_http_enabled)
                 std.Io.Threaded.init(allocator, .{ .environ = .empty })
             else
@@ -406,7 +418,8 @@ pub const HandlerInstance = struct {
         };
 
         applyRuntimeConfig(pool_rt.ctx, pool_rt.gc_state, pool_rt.heap_state, config);
-        applyEmbeddedCapabilityPolicy(pool_rt.ctx, config);
+        applyEmbeddedCapabilityPolicy(pool_rt.ctx, config, retained_policy);
+        pool_rt.ctx.policy_generation = retained_policy.id;
 
         // Pooled Contexts outlive this wrapper and are handed to the next
         // wrapper on recycle, so the slot is re-pointed here on every init and
@@ -461,6 +474,7 @@ pub const HandlerInstance = struct {
         if (self.owned_strings) |*owned_strings| {
             owned_strings.deinit();
         }
+        if (self.policy_generation) |generation| generation.release();
         self.allocator.destroy(self);
     }
 

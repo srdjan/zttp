@@ -447,6 +447,7 @@ fn outboundEndpointViolation(rt: *HandlerInstance, url: []const u8, host: []cons
             zq.policy.emitDenied(.{
                 .action = .http_outbound,
                 .resource = .{ .kind = zq.policy.resource_kind_endpoint, .id = host },
+                .policy_generation = rt.ctx.policy_generation,
             }, .not_in_allowlist);
             return allowed_host;
         }
@@ -457,6 +458,7 @@ fn outboundEndpointViolation(rt: *HandlerInstance, url: []const u8, host: []cons
         zq.policy.emitDenied(.{
             .action = .http_outbound,
             .resource = .{ .kind = zq.policy.resource_kind_endpoint, .id = host },
+            .policy_generation = rt.ctx.policy_generation,
         }, .not_in_allowlist);
         return "url names no endpoint this policy can decide";
     };
@@ -464,6 +466,7 @@ fn outboundEndpointViolation(rt: *HandlerInstance, url: []const u8, host: []cons
         zq.policy.emitDenied(.{
             .action = .http_outbound,
             .resource = .{ .kind = zq.policy.resource_kind_endpoint, .id = host },
+            .policy_generation = rt.ctx.policy_generation,
         }, .not_in_allowlist);
         return "capability policy";
     }
@@ -546,6 +549,7 @@ fn scopeDenialText(scope: zq.endpoint.AddressScope) []const u8 {
 fn resolvedScopeDecision(
     io: std.Io,
     policy: *const zq.RuntimePolicy,
+    policy_generation: u64,
     host: std.Io.net.HostName,
     port: u16,
     target: *ResolvedTarget,
@@ -593,6 +597,7 @@ fn resolvedScopeDecision(
         zq.policy.emitDenied(.{
             .action = .http_outbound,
             .resource = .{ .kind = zq.policy.resource_kind_address_scope, .id = host.bytes },
+            .policy_generation = policy_generation,
         }, .address_scope_not_allowed);
         return .{ .denied = scopeDenialText(scope) };
     }
@@ -1032,7 +1037,7 @@ fn fetchSyncResult(rt: *HandlerInstance, args: []const zq.JSValue) !zq.JSValue {
         .tls => 443,
     };
     var target: ResolvedTarget = .{};
-    switch (resolvedScopeDecision(client.io, &rt.ctx.capability_policy, host, port, &target)) {
+    switch (resolvedScopeDecision(client.io, &rt.ctx.capability_policy, rt.ctx.policy_generation, host, port, &target)) {
         .allowed => {},
         .denied => |details| return createFetchErrorResponse(rt, "AddressScopeNotAllowed", details),
         .unresolved => |details| return createFetchErrorResponse(rt, "ConnectFailed", details),
@@ -1941,10 +1946,11 @@ pub fn ioExecuteFetches(
     // collected these descriptors, so a thread cannot connect under a policy
     // its own request never had.
     const policy = rt.ctx.capability_policy;
+    const policy_generation = rt.ctx.policy_generation;
 
     // For a single fetch, execute inline (no thread overhead)
     if (count == 1) {
-        results[0] = doFetchWorker(rt.allocator, rt.config, policy, &descriptors[0]);
+        results[0] = doFetchWorker(rt.allocator, rt.config, policy, policy_generation, &descriptors[0]);
         return;
     }
 
@@ -1956,6 +1962,7 @@ pub fn ioExecuteFetches(
             rt.allocator,
             rt.config,
             policy,
+            policy_generation,
             &descriptors[i],
             &results[i],
         }) catch null;
@@ -1964,7 +1971,7 @@ pub fn ioExecuteFetches(
     // If thread spawn failed for any slot, execute inline as fallback
     for (0..count) |i| {
         if (threads[i] == null) {
-            results[i] = doFetchWorker(rt.allocator, rt.config, policy, &descriptors[i]);
+            results[i] = doFetchWorker(rt.allocator, rt.config, policy, policy_generation, &descriptors[i]);
         }
     }
 
@@ -1979,10 +1986,11 @@ fn doFetchThread(
     allocator: std.mem.Allocator,
     config: RuntimeConfig,
     policy: zq.RuntimePolicy,
+    policy_generation: u64,
     desc: *const zq.modules.io.FetchDescriptor,
     result: *zq.modules.io.FetchResult,
 ) void {
-    result.* = doFetchWorker(allocator, config, policy, desc);
+    result.* = doFetchWorker(allocator, config, policy, policy_generation, desc);
 }
 
 /// Execute a single HTTP fetch. Safe to call from any thread.
@@ -1991,9 +1999,10 @@ fn doFetchWorker(
     allocator: std.mem.Allocator,
     config: RuntimeConfig,
     policy: zq.RuntimePolicy,
+    policy_generation: u64,
     desc: *const zq.modules.io.FetchDescriptor,
 ) zq.modules.io.FetchResult {
-    return doFetchWorkerInner(allocator, config, policy, desc) catch |err| {
+    return doFetchWorkerInner(allocator, config, policy, policy_generation, desc) catch |err| {
         return zq.modules.io.FetchResult{
             .status = 599,
             .ok = false,
@@ -2007,6 +2016,7 @@ fn doFetchWorkerInner(
     allocator: std.mem.Allocator,
     config: RuntimeConfig,
     policy: zq.RuntimePolicy,
+    policy_generation: u64,
     desc: *const zq.modules.io.FetchDescriptor,
 ) !zq.modules.io.FetchResult {
     const uri = try std.Uri.parse(desc.url);
@@ -2052,7 +2062,7 @@ fn doFetchWorkerInner(
         .tls => 443,
     };
     var target: ResolvedTarget = .{};
-    switch (resolvedScopeDecision(client.io, &policy, host, port, &target)) {
+    switch (resolvedScopeDecision(client.io, &policy, policy_generation, host, port, &target)) {
         .allowed => {},
         .denied => |details| return zq.modules.io.FetchResult{
             .status = 599,
@@ -2389,7 +2399,7 @@ fn httpRequestResultJsonAlloc(rt: *HandlerInstance, args: []const zq.JSValue) ![
         .tls => 443,
     };
     var target: ResolvedTarget = .{};
-    switch (resolvedScopeDecision(client.io, &rt.ctx.capability_policy, host, port, &target)) {
+    switch (resolvedScopeDecision(client.io, &rt.ctx.capability_policy, rt.ctx.policy_generation, host, port, &target)) {
         .allowed => {},
         .denied => |details| return try httpRequestErrorJsonAlloc(a, "AddressScopeNotAllowed", details),
         .unresolved => |details| return try httpRequestErrorJsonAlloc(a, "ConnectFailed", details),

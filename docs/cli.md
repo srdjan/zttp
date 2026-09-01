@@ -101,10 +101,11 @@ a runtime after 64 requests, `ttl` after 30 seconds, and `ephemeral` gives each
 request a fresh runtime.
 
 `--security-log` writes one JSON object per line. A capability denial from a new
-gate site is `{"event":"policy_denied","ts":...,"service":...,"action":...,"resource":{"kind":...,"id":...},"reason":...}`;
+gate site is `{"event":"policy_denied","ts":...,"policyGeneration":...,"service":...,"action":...,"resource":{"kind":...,"id":...},"reason":...}`;
 the per-module kinds (`policy_denied_env`, `policy_denied_cache`,
 `policy_denied_sql`, `arena_audit_failure`, `persistent_string_escape`) are
-`{"kind":...,"ts":...,"module":...,"detail":...}`. A background thread drains
+`{"kind":...,"ts":...,"module":...,"detail":...,"policyGeneration":...}` for
+capability denials; non-policy events omit the generation. A background thread drains
 the event queue and flushes it at shutdown.
 
 Observability: per-request access logging is on by default (method, path,
@@ -157,6 +158,11 @@ zttp verify http://127.0.0.1:8080
 `kind=deploy` row to `.zttp/proofs.jsonl`, and signs an attestation by
 default. `--no-attest` disables signing for that build.
 
+The strict artifact chain is certificate schema `3`, proof system
+`zttp_pcc_v2 = 2`, self-extract format `3`, `zttp-attest-v4`, and
+`zttp-bundle-3`. Older artifacts, attestations, and bundles are not upgraded in
+place. Their strict readers return a rebuild-oriented error.
+
 `deploy` takes no arguments: it auto-detects the handler file and the project
 name in the current directory and writes `.zttp/deploy/<project-name>`. No
 credentials, Docker, or network are involved. `--local` and `--target local`
@@ -189,7 +195,7 @@ The old spelling `zttp proof replay` still works as a deprecated alias for one
 release and prints a migration note. It is no longer listed in `zttp help --all`.
 
 `zttp proofs verify` checks the bundle manifest before it hashes anything. The
-manifest must declare the current `toolVersion` and name a `contract`
+manifest must declare `"toolVersion": "zttp-bundle-3"` and name a `contract`
 component; it may add `binary`, `certificate`, and `replay`. Each component
 needs its own relative path inside the bundle and a lowercase sha256. The
 verifier opens every path segment without following symlinks, so a component
@@ -344,6 +350,13 @@ zttp verify-module-manifest <manifest.json> [--json]
 zttp extension-status --module-manifest <path>... [--json]
 ```
 
+With a configured policy, computed env keys, egress endpoints, and cache
+namespaces compile as residual guards. The contract records them separately
+from proven Properties, and `zttp check <handler.ts> --contract` is the exact
+command to inspect the result. Missing policy sections still report `ZTS602`.
+Computed SQL names remain `ZTS602` because `sql.allow_queries` cannot express
+the read or write distinction enforced by the sink.
+
 Use JSON mode for IDEs, CI, and review-bot integrations.
 
 `zttp agent --stdin-json` is the only version-2 surface. It reads one request
@@ -404,7 +417,7 @@ as `default:` rather than `when _:`.
 
 | Code | Rule | Canonical form |
 |---|---|---|
-| ZTS602 | Dynamic capability access | Use literal env keys, cache namespaces, SQL query names, egress URLs, route paths, and service names. The diagnostic says which of four cases applies: the runtime decides this resource and the policy covers it, it decides it and the policy names no such section, the section cannot express what the sink enforces, or nothing at the sink decides it and no policy edit would. |
+| ZTS602 | Dynamic capability access | A configured policy can cover computed env keys, egress endpoints, and cache namespaces as residual guards. The diagnostic names the guard kind, required section, assurance consequence, and `zttp check <handler.ts> --contract`. Computed SQL names, route paths, service names, and unguarded exports remain literal-only and explain why no policy edit applies. |
 | ZTS604 | Avoidable `let` | Use `const` unless the binding is reassigned. |
 | ZTS605 | Dynamic computed property access | Use a typed field, a literal key, or narrow the object before indexing. |
 | ZTS608 | Reused arrow helper | Give reusable helpers named function declarations; keep arrows for callbacks. |

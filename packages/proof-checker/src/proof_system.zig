@@ -10,40 +10,24 @@ const std = @import("std");
 /// The certificate wire schema. Bumped for any layout change; the kernel checks
 /// equality, never a range, so an older or newer certificate is refused with a
 /// rebuild diagnostic instead of being reinterpreted.
-pub const schema_version: u16 = 2;
+pub const schema_version: u16 = 3;
 
-/// The proof system a certificate claims to be written in. `zttp_pcc_v1` is the
-/// initial small-kernel system: closed rules over the canonical proof IR, plus
-/// translation witnesses down to the final optimized bytecode.
+/// The proof system a certificate claims to be written in. The only accepted
+/// system carries closed rules over the canonical proof IR, translation
+/// witnesses down to the final optimized bytecode, and residual guards.
 pub const ProofSystem = enum(u16) {
-    zttp_pcc_v1 = 1,
-    /// Adds residual guard obligations: operations whose resource the compiler
-    /// could not resolve, checked at an authoritative runtime sink against a
-    /// bound capability policy. Not the strict default until the cutover.
+    /// Residual guard obligations cover operations whose resource the compiler
+    /// could not resolve. An authoritative runtime sink checks them against a
+    /// bound capability policy.
     zttp_pcc_v2 = 2,
 
     pub fn fromWire(value: u16) ?ProofSystem {
         return switch (value) {
-            1 => .zttp_pcc_v1,
             2 => .zttp_pcc_v2,
             else => null,
         };
     }
-
-    /// Whether this system carries residual guard obligations at all. A
-    /// certificate that names a residual section under a system without them is
-    /// refused rather than read with the section ignored.
-    pub fn carriesResidualGuards(self: ProofSystem) bool {
-        return switch (self) {
-            .zttp_pcc_v1 => false,
-            .zttp_pcc_v2 => true,
-        };
-    }
 };
-
-/// The successor schema. Reachable only through a consumer policy that lists
-/// it; the shipped production policy does not, until the cutover.
-pub const schema_version_next: u16 = 3;
 
 /// The semantics registry generation the producer compiled against. The
 /// consumer pins the epochs it accepts; a certificate from a different epoch
@@ -296,6 +280,8 @@ pub const TrustReason = enum(u16) {
 };
 
 test "wire decoders refuse values outside the alphabet" {
+    try std.testing.expectEqual(@as(u16, 3), schema_version);
+    try std.testing.expectEqual(@as(?ProofSystem, null), ProofSystem.fromWire(1));
     try std.testing.expectEqual(@as(?ProofSystem, null), ProofSystem.fromWire(0));
     try std.testing.expectEqual(@as(?ProofSystem, null), ProofSystem.fromWire(3));
     try std.testing.expectEqual(@as(?Property, null), Property.fromWire(0));

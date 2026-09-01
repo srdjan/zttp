@@ -73,6 +73,7 @@ pub const PolicyInput = struct {
     resource: ?Resource = null,
     env: Environment = .{},
     timestamp_ns: u64 = 0,
+    policy_generation: u64 = 0,
 };
 
 pub const DenyReason = enum {
@@ -166,6 +167,7 @@ pub fn emitDenied(input: PolicyInput, reason: DenyReason) void {
         resource.kind,
         sinkFor(input.action),
         reason.toString(),
+        input.policy_generation,
     ));
 }
 
@@ -190,6 +192,7 @@ test "a denial event carries the sink, not the value that was refused" {
     emitDenied(.{
         .action = .http_outbound,
         .resource = .{ .kind = resource_kind_endpoint, .id = "https://evil.example.com:443" },
+        .policy_generation = 41,
     }, .not_in_allowlist);
 
     const stream = security_events.getGlobal() orelse return error.TestUnexpectedResult;
@@ -203,6 +206,7 @@ test "a denial event carries the sink, not the value that was refused" {
     try std.testing.expectEqualStrings(resource_kind_endpoint, event.resourceKindSlice());
     try std.testing.expectEqualStrings("egress_connect", event.resourceIdSlice());
     try std.testing.expectEqualStrings("not_in_allowlist", event.detailSlice());
+    try std.testing.expectEqual(@as(u64, 41), event.policy_generation);
     // The refused endpoint appears nowhere in the event, in whole or in part.
     for ([_][]const u8{ "evil.example.com", "evil", "443" }) |part| {
         try std.testing.expect(std.mem.indexOf(u8, event.resourceIdSlice(), part) == null);

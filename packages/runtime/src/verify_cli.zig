@@ -112,7 +112,10 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !u8 {
     defer allocator.free(attest_jws);
 
     var result = envelope.verify(allocator, attest_jws) catch |err| {
-        writeStderrFmt("verify: signature verification failed: {t}\n", .{err});
+        if (verificationFailureMessage(err)) |message|
+            writeStderr(message)
+        else
+            writeStderrFmt("verify: signature verification failed: {t}\n", .{err});
         return exit_signature_invalid;
     };
     defer result.deinit();
@@ -136,6 +139,13 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !u8 {
         writeClaimsHuman(opts.url, &result);
     }
     return exit_ok;
+}
+
+fn verificationFailureMessage(err: envelope.VerifyError) ?[]const u8 {
+    return switch (err) {
+        error.UnsupportedAttestationVersion => "verify: attestation format is not supported; rebuild the artifact with this zttp version\n",
+        else => null,
+    };
 }
 
 /// Fetch the URL, extract the Zttp-Attest header value, return an owned
@@ -357,6 +367,12 @@ test "parseArgs: --help signals via error" {
 
 test "parseArgs: rejects multiple positional args" {
     try std.testing.expectError(error.TooManyArguments, parseArgs(&.{ "http://a", "http://b" }));
+}
+
+test "the predecessor attestation error tells the caller to rebuild" {
+    const message = verificationFailureMessage(error.UnsupportedAttestationVersion) orelse
+        return error.TestExpectedEqual;
+    try std.testing.expect(std.mem.indexOf(u8, message, "rebuild") != null);
 }
 
 test "renderClaimsJson uses JSON string escaping" {

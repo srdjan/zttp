@@ -15,8 +15,8 @@ Every precompilation extracts a contract from the handler's IR. Add
 - **Virtual modules** imported and which functions are used
 - **Environment variables** accessed via `env("NAME")`; literal names
   are enumerated, dynamic access is flagged
-- **Outbound hosts** called via `fetchSync("https://...")`; hosts
-  extracted from URL literals
+- **Outbound endpoints** called via `fetch` or `fetchWithRetry`; normalized
+  scheme, host, and effective port are extracted from URL literals
 - **Internal service calls** made via `serviceCall("name", "METHOD
   /path", init)`; service names, route signatures, and statically
   proven params/query/header/body keys are captured
@@ -53,7 +53,7 @@ Every precompilation extracts a contract from the handler's IR. Add
     "zttp:scope": ["scope", "ensure"]
   },
   "env": { "literal": ["JWT_SECRET"], "dynamic": false },
-  "egress": { "endpoints": ["api.example.com"], "dynamic": false },
+  "egress": { "endpoints": ["https://api.example.com:443"], "dynamic": false },
   "cache": { "namespaces": ["sessions"], "dynamic": false },
   "scope": {
     "used": true, "names": ["request", "enrich-user"],
@@ -103,6 +103,12 @@ compiler enumerated every value statically." When a handler uses a
 variable instead of a string literal (`env(someVar)` instead of
 `env("JWT_SECRET")`), the contract honestly reports `"dynamic": true`.
 
+Computed env keys, egress endpoints, and cache namespaces are accepted only
+when the configured capability policy declares the matching section. The
+compiler records those calls as residual guards. They do not add any proven
+Property. Computed SQL names remain rejected because `sql.allow_queries`
+cannot distinguish the read or write operation enforced by the sink.
+
 ## Auto-Sandboxing
 
 The contract is used to derive a `RuntimePolicy` embedded in the
@@ -117,7 +123,7 @@ argument, which is a compiler decision guarding a runtime default.
 ```text
 Sandbox: complete (all access statically proven)
   env: restricted to [JWT_SECRET] (1 proven, no dynamic access)
-  egress: restricted to [api.example.com] (1 proven, no dynamic access)
+  egress: restricted to [https://api.example.com:443] (1 proven, no dynamic access)
   cache: restricted to [sessions] (1 proven, no dynamic access)
   sql: restricted to [listTodos] (1 proven, no dynamic access)
 Handler Properties:
@@ -180,6 +186,11 @@ won't boot" and "individual requests get rejected".
   conservative policy because source contracts are not artifact
   certificates. The current production policy does not accept the
   lifecycle properties, so deployed artifacts also stay bounded.
+- Production accepts certificate schema 3 and `zttp_pcc_v2 = 2` only. For a
+  guarded artifact, the kernel independently decodes the exact serialized
+  runtime policy and requires exact residual-plan coverage before pool init or
+  prewarm. A predecessor or mismatched plan produces rebuild guidance and the
+  process serves nothing.
 - Attestation envelope (`Zttp-Attest`) is materialized for
   `GET /.well-known/zttp-attest`.
 
@@ -207,16 +218,12 @@ won't boot" and "individual requests get rejected".
   binding-level declaration of which gates it consults;
   `ctx.capability_policy` is the contract-derived allow/deny data
   those gates consult.
-- Outbound egress: handled inside the runtime's `fetch` path
-  (`zruntime.zig:outboundHostViolation`) via the unwrapped
-  `ctx.capability_policy.allowsEgressHost(host)`. The check sits in
-  the shared `parseFetchArgs`, so it covers both the sequential and
-  the `zttp:io` parallel/race fetch paths. This is a runtime-
-  initiated check on the URL host, not an SDK module call, so it
-  does not go through the `*ForActiveModule` wrappers and does not
-  require any binding to declare `.policy_check`. The allowlist
-  matches on host only: it does not restrict the port, so an allowed
-  host permits any port on that host.
+- Outbound egress: handled inside `runtime_http.zig`. The runtime normalizes
+  scheme, host, and effective port and authorizes that endpoint before DNS. It
+  resolves the name itself, classifies the returned address, and authorizes the
+  address scope before opening a socket. The connect uses the checked literal
+  address while TLS retains the original host name. Sequential, parallel, race,
+  and retry paths all repeat the check under the request's pinned generation.
 
 **Hot swap** (`--watch --prove`):
 - Re-runs the build-time contract diff against the running version
@@ -243,6 +250,9 @@ won't boot" and "individual requests get rejected".
   pooling unless an explicit lifecycle override was configured.
   In-flight requests finish on the old runtime generation; later
   acquisitions use the conservative lifecycle policy.
+- A running guarded generation or a candidate with residual operations is
+  refused by the certificate-free live-swap path. The previous executable,
+  contract, residual plan, policy, and in-flight request pins stay intact.
 - In a `-Dhandler` binary the capability policy is a comptime
   constant. In a deployed self-extracting binary it comes from signed
   payload section 4. Neither policy is hot-swapped; tightening or
@@ -276,12 +286,13 @@ graph before validation.
 }
 ```
 
-Omit a section to leave that capability unrestricted. If a section is
-present, dynamic access in that category is rejected because zttp
-cannot fully enumerate it. `egress.allow_address_scopes` is the one
-exception: an unnamed scope set permits no connection, so a handler that
-makes outbound requests needs this file even when every URL it uses is a
-literal the compiler already proved.
+Omitting a section does not create dynamic authority. A computed env key,
+egress endpoint, or cache namespace remains a build error until its section is
+present. Static literals remain bounded by the contract-derived lists.
+Computed SQL remains literal-only even when `sql.allow_queries` is present.
+An unnamed `egress.allow_address_scopes` set permits no connection, so a
+handler that makes outbound requests needs this section even when every URL is
+a literal the compiler already proved.
 
 ### Egress names endpoints, not hosts
 

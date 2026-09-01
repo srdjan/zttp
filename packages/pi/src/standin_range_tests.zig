@@ -522,6 +522,71 @@ const veto = @import("veto.zig");
 const zts = @import("zts");
 const edit_simulate = @import("zts_cli").edit_simulate;
 
+const GuardEvidenceCase = struct {
+    seed_id: []const u8,
+    family: zts.guard_catalog.Family,
+    guarded_source: []const u8,
+    literal_source: []const u8,
+};
+
+const guard_evidence_cases = [_]GuardEvidenceCase{
+    .{
+        .seed_id = "dynamic-capability",
+        .family = .env,
+        .guarded_source =
+        \\import { env } from "zttp:env";
+        \\function key(): string { return "APP_NAME"; }
+        \\function handler(req: Request): Proof<Response, "cost_bounded"> { env(key()); return Response.json({ ok: true }); }
+        \\
+        ,
+        .literal_source =
+        \\import { env } from "zttp:env";
+        \\function key(): string { return "APP_NAME"; }
+        \\function handler(req: Request): Proof<Response, "cost_bounded"> { env("APP_NAME"); return Response.json({ ok: true }); }
+        \\
+        ,
+    },
+    .{
+        .seed_id = "dynamic-capability-egress",
+        .family = .egress,
+        .guarded_source =
+        \\import { fetch } from "zttp:fetch";
+        \\function endpoint(): string { return "https://allowed.example.com"; }
+        \\function handler(req: Request): Proof<Response, "cost_bounded"> { fetch(endpoint()); return Response.json({ ok: true }); }
+        \\
+        ,
+        .literal_source =
+        \\import { fetch } from "zttp:fetch";
+        \\function endpoint(): string { return "https://allowed.example.com"; }
+        \\function handler(req: Request): Proof<Response, "cost_bounded"> { fetch("https://allowed.example.com"); return Response.json({ ok: true }); }
+        \\
+        ,
+    },
+    .{
+        .seed_id = "dynamic-capability-cache",
+        .family = .cache,
+        .guarded_source =
+        \\import { cacheGet } from "zttp:cache";
+        \\function namespace(): string { return "allowed_ns"; }
+        \\function handler(req: Request): Proof<Response, "cost_bounded"> { cacheGet(namespace(), "key"); return Response.json({ ok: true }); }
+        \\
+        ,
+        .literal_source =
+        \\import { cacheGet } from "zttp:cache";
+        \\function namespace(): string { return "allowed_ns"; }
+        \\function handler(req: Request): Proof<Response, "cost_bounded"> { cacheGet("allowed_ns", "key"); return Response.json({ ok: true }); }
+        \\
+        ,
+    },
+};
+
+fn guardEvidenceCase(seed_id: []const u8) ?GuardEvidenceCase {
+    for (guard_evidence_cases) |case| {
+        if (std.mem.eql(u8, seed_id, case.seed_id)) return case;
+    }
+    return null;
+}
+
 test "stand-in gate: defect seeds are well formed and select by their own code" {
     // Floors first. Both loops below are per-seed and per-class, so an emptied
     // table reports agreement over nothing.
@@ -576,14 +641,19 @@ test "stand-in gate: defect seeds are well formed and select by their own code" 
     );
 }
 
-test "stand-in gate: every enabled guard family has a seed the compiler rejects" {
+test "stand-in gate: every enabled guard family has rejection and property-preserving guarded evidence" {
     // R19's rule, checked rather than asserted in a comment: a guard family may
-    // be enabled only where a checked-in operation exists that this compiler
-    // rejects today. Which family a seed covers is read from what the compiler
-    // says about it - the section its diagnostic tells the author to write - not
-    // from anything the seed declares about itself.
+    // be enabled only where a checked-in operation rejects without policy and
+    // becomes guarded with policy without changing any proven Property. Which
+    // family a seed covers is read from the policy section in the compiler's
+    // diagnostic, not from anything the seed declares about itself.
     var covered = zts.guard_catalog.FamilySet{};
+    var admitted = zts.guard_catalog.FamilySet{};
     var capability_seeds: usize = 0;
+    const guard_policy =
+        \\{ "env": { "allow": ["APP_NAME"] }, "egress": { "allow_endpoints": ["https://allowed.example.com"], "allow_address_scopes": ["public"] }, "cache": { "allow_namespaces": ["allowed_ns"] } }
+        \\
+    ;
 
     for (defect_seeds.seeds) |seed| {
         if (!std.mem.eql(u8, seed.code, "ZTS602")) continue;
@@ -598,15 +668,97 @@ test "stand-in gate: every enabled guard family has a seed the compiler rejects"
         });
         defer raw.deinit(testing.allocator);
 
+        var seed_family: ?zts.guard_catalog.Family = null;
         for (raw.violations.items) |violation| {
             if (!violation.introduced_by_patch) continue;
             if (!std.mem.eql(u8, violation.code, "ZTS602")) continue;
             const help = violation.help orelse continue;
-            if (std.mem.indexOf(u8, help, "env.allow") != null) covered = covered.with(.env);
-            if (std.mem.indexOf(u8, help, "egress.allow_endpoints") != null) covered = covered.with(.egress);
-            if (std.mem.indexOf(u8, help, "cache.allow_namespaces") != null) covered = covered.with(.cache);
-            if (std.mem.indexOf(u8, help, "sql.allow_queries") != null) covered = covered.with(.sql);
+            if (std.mem.indexOf(u8, help, "env.allow") != null) seed_family = .env;
+            if (std.mem.indexOf(u8, help, "egress.allow_endpoints") != null) seed_family = .egress;
+            if (std.mem.indexOf(u8, help, "cache.allow_namespaces") != null) seed_family = .cache;
+            if (std.mem.indexOf(u8, help, "sql.allow_queries") != null) seed_family = .sql;
         }
+        const family = seed_family orelse return error.CapabilitySeedHasNoFamily;
+        covered = covered.with(family);
+        const evidence = guardEvidenceCase(seed.id) orelse return error.CapabilitySeedHasNoPositiveFixture;
+        if (evidence.family != family) return error.CapabilitySeedFamilyMismatch;
+
+        var uncovered = try edit_simulate.simulate(testing.allocator, .{
+            .file = "handler.ts",
+            .content = evidence.guarded_source,
+            .before = null,
+            .policy_source = "{}",
+            .sql_schema_path = null,
+        });
+        defer uncovered.deinit(testing.allocator);
+        var refused_without_policy = false;
+        for (uncovered.violations.items) |violation| {
+            if (std.mem.eql(u8, violation.severity, "error") and
+                std.mem.eql(u8, violation.code, "ZTS602"))
+            {
+                refused_without_policy = true;
+            }
+        }
+        if (!refused_without_policy) return error.GuardFixtureDidNotRequirePolicy;
+
+        var guarded = try edit_simulate.simulate(testing.allocator, .{
+            .file = "handler.ts",
+            .content = evidence.guarded_source,
+            .before = null,
+            .policy_source = guard_policy,
+            .sql_schema_path = null,
+        });
+        defer guarded.deinit(testing.allocator);
+
+        for (guarded.violations.items) |violation| {
+            if (!std.mem.eql(u8, violation.severity, "error")) continue;
+            std.debug.print(
+                "[standin-gate] covered family {s} still reports {s}: {s}\n",
+                .{ @tagName(family), violation.code, violation.message },
+            );
+            if (std.mem.eql(u8, violation.code, "ZTS602")) return error.CoveredGuardStillRejected;
+            return error.CoveredGuardHasOtherError;
+        }
+        var literal = try edit_simulate.simulate(testing.allocator, .{
+            .file = "handler.ts",
+            .content = evidence.literal_source,
+            .before = null,
+            .policy_source = guard_policy,
+            .sql_schema_path = null,
+        });
+        defer literal.deinit(testing.allocator);
+        for (literal.violations.items) |violation| {
+            if (std.mem.eql(u8, violation.severity, "error")) return error.LiteralGuardFixtureHasError;
+        }
+        const literal_properties = literal.properties orelse return error.LiteralSeedHasNoProperties;
+        const guarded_properties = guarded.properties orelse return error.GuardedSeedHasNoProperties;
+        var literal_names: [zts.HandlerProperties.max_proven_specs]?[]const u8 = .{null} ** zts.HandlerProperties.max_proven_specs;
+        var guarded_names: [zts.HandlerProperties.max_proven_specs]?[]const u8 = .{null} ** zts.HandlerProperties.max_proven_specs;
+        const literal_count = literal_properties.provenSpecNames(&literal_names);
+        const guarded_count = guarded_properties.provenSpecNames(&guarded_names);
+        if (guarded_count != literal_count) {
+            std.debug.print(
+                "[standin-gate] guarded family {s} has {d} proven Properties; literal equivalent has {d}\n",
+                .{ @tagName(family), guarded_count, literal_count },
+            );
+            return error.GuardChangedProperties;
+        }
+        for (guarded_names[0..guarded_count]) |maybe_name| {
+            const name = maybe_name orelse return error.GuardedPropertyNameMissing;
+            var existed = false;
+            for (literal_names[0..literal_count]) |maybe_literal_name| {
+                const literal_name = maybe_literal_name orelse continue;
+                if (std.mem.eql(u8, name, literal_name)) existed = true;
+            }
+            if (!existed) {
+                std.debug.print(
+                    "[standin-gate] guarded family {s} changed proven Property set with {s}\n",
+                    .{ @tagName(family), name },
+                );
+                return error.GuardChangedProperties;
+            }
+        }
+        admitted = admitted.with(family);
     }
 
     // Floor: a loop over no capability seed reports every family covered by
@@ -629,11 +781,18 @@ test "stand-in gate: every enabled guard family has a seed the compiler rejects"
             );
             return error.EnabledFamilyHasNoSeed;
         }
+        if (enabled and !admitted.contains(family)) {
+            std.debug.print(
+                "[standin-gate] guard family {s} is enabled with no positive guarded evidence\n",
+                .{field.name},
+            );
+            return error.EnabledFamilyHasNoGuardedEvidence;
+        }
     }
 
     std.debug.print(
-        "[standin-gate] capability seeds {d}; enabled families {d} of {d} covered\n",
-        .{ capability_seeds, @popCount(covered.bits & zts.guard_catalog.enabled_families.bits), @popCount(zts.guard_catalog.enabled_families.bits) },
+        "[standin-gate] capability seeds {d}; enabled families {d} of {d} covered and property-preserving\n",
+        .{ capability_seeds, @popCount(admitted.bits & zts.guard_catalog.enabled_families.bits), @popCount(zts.guard_catalog.enabled_families.bits) },
     );
 }
 

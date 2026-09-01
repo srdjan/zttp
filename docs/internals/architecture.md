@@ -148,6 +148,12 @@ per request, the runtime uses that policy to gate native capabilities such as
 env access, cache, SQL, outbound HTTP, filesystem-backed state, and runtime
 callbacks.
 
+Computed env keys, egress endpoints, and cache namespaces are represented as
+residual obligations. The compiler records them, the acceptance kernel
+reconstructs their exact catalog coverage, and the authoritative sink decides
+the actual runtime value. SQL stays literal-only. These guard channels never
+promote a static Property.
+
 The same contract feeds:
 
 - proof card rendering;
@@ -171,16 +177,24 @@ for every candidate, so tightening it blocks newly forbidden code without a
 restart. A candidate that violates the current policy, and a policy that cannot
 be read, both keep the previous handler serving.
 
+A generation with residual guards cannot use the certificate-free live-swap
+path. A candidate that adds or strands a guard is refused, so the old executable,
+contract, residual plan, policy, and in-flight request pins remain together.
+
 ## Deploy Artifact
 
 `zttp deploy` builds a self-contained local binary under
 `.zttp/deploy/<project-name>`. The output starts with the `zttp-runtime`
-template and appends a payload (format v2) containing bytecode, dependency
+template and appends a payload (format v3) containing bytecode, dependency
 bytecode, contract JSON, runtime policy, a proof certificate, and optional JWS
 attestation. `self_extract.zig` validates the trailer, loads the payload, and
 starts the runtime. The payload version is checked for equality and an unknown
 section is refused: a section this reader does not know is a malformed artifact,
 not a future one.
+
+The certificate is schema 3 under `zttp_pcc_v2 = 2`. Attestations use
+`zttp-attest-v4`, and proof bundles use `zttp-bundle-3`. Immediate predecessors
+are refused with rebuild guidance rather than compatibility decoding.
 
 Attestation signs the contract, bytecode, policy, and capability hashes, plus
 the root of the artifact's executable graph. The running server emits proof
@@ -202,7 +216,9 @@ Startup runs four stages before a handler pool exists, in this order:
    the embedded certificate to the acceptance kernel; `contract_runtime.promote`
    turns only the properties that cleared the active policy floor into a
    `ProofCheckedContract`. Unrequired or below-floor claims remain false. A
-   deployed artifact that fails any of this does not serve.
+   deployed artifact that fails any of this does not serve. For a guarded
+   artifact, the same check independently decodes the exact runtime-policy bytes
+   and requires exact residual coverage.
 4. **Pool init and prewarm.** Only now, so a refused artifact never has a warm
    runtime.
 
@@ -223,6 +239,7 @@ zig build test
 zig build test-zts
 zig build test-zruntime
 zig build test-module-governance
+zig build test-residual-guards-drift
 zig build test-capability-audit
 zig build test-docs-drift test-doc-links
 bash scripts/test-examples.sh

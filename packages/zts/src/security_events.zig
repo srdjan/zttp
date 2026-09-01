@@ -27,6 +27,9 @@ pub const max_resource_id_len: usize = 64;
 pub const SecurityEvent = struct {
     kind: SecurityEventKind,
     timestamp_ns: u64 = 0,
+    /// Pinned runtime policy generation for capability denials. Zero names a
+    /// direct or legacy context with no installed pool generation.
+    policy_generation: u64 = 0,
     module_buf: [max_module_len]u8 = undefined,
     module_len: u8 = 0,
     detail_buf: [max_detail_len]u8 = undefined,
@@ -62,8 +65,10 @@ pub const SecurityEvent = struct {
         resource_kind: []const u8,
         resource_id: []const u8,
         reason: []const u8,
+        policy_generation: u64,
     ) SecurityEvent {
         var event = SecurityEvent.init(.policy_denied, service, reason);
+        event.policy_generation = policy_generation;
         const an = @min(action.len, max_action_len);
         @memcpy(event.action_buf[0..an], action[0..an]);
         event.action_len = @intCast(an);
@@ -222,8 +227,8 @@ pub fn emitGlobal(event: SecurityEvent) void {
 pub fn writeJsonLine(event: *const SecurityEvent, writer: anytype) !void {
     if (event.kind == .policy_denied) {
         try writer.print(
-            "{{\"event\":\"policy_denied\",\"ts\":{d},\"service\":\"",
-            .{event.timestamp_ns},
+            "{{\"event\":\"policy_denied\",\"ts\":{d},\"policyGeneration\":{d},\"service\":\"",
+            .{ event.timestamp_ns, event.policy_generation },
         );
         try json_utils.writeJsonStringContent(writer, event.moduleSlice());
         try writer.writeAll("\",\"action\":\"");
@@ -245,7 +250,12 @@ pub fn writeJsonLine(event: *const SecurityEvent, writer: anytype) !void {
     try json_utils.writeJsonStringContent(writer, event.moduleSlice());
     try writer.writeAll("\",\"detail\":\"");
     try json_utils.writeJsonStringContent(writer, event.detailSlice());
-    try writer.writeAll("\"}\n");
+    switch (event.kind) {
+        .policy_denied_env, .policy_denied_cache, .policy_denied_sql => {
+            try writer.print("\",\"policyGeneration\":{d}}}\n", .{event.policy_generation});
+        },
+        else => try writer.writeAll("\"}\n"),
+    }
 }
 
 // =========================================================================
@@ -311,6 +321,7 @@ test "writeJsonLine emits valid JSONL" {
 
     var event = SecurityEvent.init(.policy_denied_env, "zttp:env", "KEY\"with\\quotes");
     event.timestamp_ns = 12345;
+    event.policy_generation = 9;
     try writeJsonLine(&event, &aw.writer);
     output = aw.toArrayList();
 
@@ -318,6 +329,7 @@ test "writeJsonLine emits valid JSONL" {
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"ts\":12345") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"module\":\"zttp:env\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "KEY\\\"with\\\\quotes") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"policyGeneration\":9") != null);
     try std.testing.expectEqual(@as(u8, '\n'), output.items[output.items.len - 1]);
 }
 
@@ -333,12 +345,14 @@ test "writeJsonLine emits spec-section-12 shape for policy_denied" {
         "sql_query",
         "drop_table",
         "not_in_allowlist",
+        17,
     );
     event.timestamp_ns = 99;
     try writeJsonLine(&event, &aw.writer);
     output = aw.toArrayList();
 
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"event\":\"policy_denied\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"policyGeneration\":17") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"service\":\"zttp\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"action\":\"db.write\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"resource\":{\"kind\":\"sql_query\",\"id\":\"drop_table\"}") != null);
@@ -347,11 +361,12 @@ test "writeJsonLine emits spec-section-12 shape for policy_denied" {
 
 test "initPolicyDenied truncates over-long fields" {
     const long = "a" ** 256;
-    const event = SecurityEvent.initPolicyDenied("zttp", long, long, long, long);
+    const event = SecurityEvent.initPolicyDenied("zttp", long, long, long, long, 23);
     try std.testing.expectEqual(max_action_len, event.actionSlice().len);
     try std.testing.expectEqual(max_resource_kind_len, event.resourceKindSlice().len);
     try std.testing.expectEqual(max_resource_id_len, event.resourceIdSlice().len);
     try std.testing.expectEqual(max_detail_len, event.detailSlice().len);
+    try std.testing.expectEqual(@as(u64, 23), event.policy_generation);
 }
 
 test "global stream init/deinit/emit" {

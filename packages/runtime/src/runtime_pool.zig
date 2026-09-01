@@ -15,6 +15,7 @@ const embedded_handler = @import("embedded_handler");
 
 const runtime_config_mod = @import("runtime_config.zig");
 const RuntimeConfig = runtime_config_mod.RuntimeConfig;
+const RuntimePolicyGeneration = @import("runtime_policy_generation.zig").RuntimePolicyGeneration;
 const openTraceFile = runtime_config_mod.openTraceFile;
 const PercentileTracker = @import("runtime_percentile.zig").PercentileTracker;
 
@@ -69,6 +70,10 @@ pub const HandlerPool = struct {
     /// lazily on their next acquire (under runtime_init_mutex) instead of being
     /// torn down from the reload thread while a worker may be executing on them.
     reload_generation: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
+    /// Pool-owned reference to the immutable capability-policy generation.
+    /// HandlerInstance retains its own reference while checked out or idle.
+    policy_generation: *RuntimePolicyGeneration,
+    next_policy_generation: u64,
     /// Pre-compiled bytecode embedded at build time (from -Dhandler option)
     embedded_bytecode: ?[]const u8,
     /// HandlerInstance-provided dependency bytecodes (from self-extracting binary)
@@ -173,16 +178,33 @@ pub const HandlerPool = struct {
         embedded_bytecode: ?[]const u8,
         runtime_dep_bytecodes: ?[]const []const u8,
     ) !Self {
-        const pool = try zq.LockFreePool.init(allocator, .{
+        const source_policy = config.dev_capability_policy orelse embedded_handler.capability_policy;
+        const policy_generation = try RuntimePolicyGeneration.create(
+            allocator,
+            1,
+            source_policy,
+            config.runtime_policy_index_required or embedded_handler.runtime_policy_index_required,
+        );
+
+        const pool = zq.LockFreePool.init(allocator, .{
             .max_size = max_size,
             .gc_config = .{ .nursery_size = config.nursery_size },
             .arena_config = .{ .size = config.arena_size },
             .use_hybrid_allocation = config.use_hybrid_allocation,
-        });
+        }) catch |err| {
+            policy_generation.release();
+            return err;
+        };
+
+        var installed_config = config;
+        // The generation owns the policy backing from here on. Keeping the
+        // caller's borrowed view in the long-lived config would leave a stale
+        // pointer even though capability installation no longer reads it.
+        installed_config.dev_capability_policy = null;
 
         var self = Self{
             .allocator = allocator,
-            .config = config,
+            .config = installed_config,
             .handler_code = handler_code,
             .handler_filename = handler_filename,
             .max_size = max_size,
@@ -206,6 +228,8 @@ pub const HandlerPool = struct {
             .cache_mutex = .{},
             .cache_disabled = std.atomic.Value(bool).init(false),
             .runtime_init_mutex = .{},
+            .policy_generation = policy_generation,
+            .next_policy_generation = 2,
             .embedded_bytecode = embedded_bytecode,
             .runtime_dep_bytecodes = runtime_dep_bytecodes,
             .trace_file = null,
@@ -231,6 +255,7 @@ pub const HandlerPool = struct {
 
     pub fn deinit(self: *Self) void {
         self.pool.deinit();
+        self.policy_generation.release();
         self.cache.deinit();
         if (self.trace_file) |fd| std.Io.Threaded.closeFd(fd);
         if (self.trace_mutex) |m| self.allocator.destroy(m);
@@ -247,7 +272,7 @@ pub const HandlerPool = struct {
     /// lifetime of both old and new code (keep the previous generation alive
     /// until the next reload cycle to avoid use-after-free on in-flight
     /// runtimes).
-    pub fn reloadHandler(self: *Self, new_code: []const u8, new_filename: []const u8) usize {
+    pub fn reloadHandler(self: *Self, new_code: []const u8, new_filename: []const u8) !usize {
         return self.reloadHandlerWithPolicy(new_code, new_filename, null);
     }
 
@@ -259,20 +284,43 @@ pub const HandlerPool = struct {
         new_code: []const u8,
         new_filename: []const u8,
         dev_policy: ?zq.RuntimePolicy,
-    ) usize {
+    ) !usize {
         self.runtime_init_mutex.lock();
+        if (self.policy_generation.index != null) {
+            self.runtime_init_mutex.unlock();
+            return error.GuardedGenerationSwapRefused;
+        }
+
+        var candidate: ?*RuntimePolicyGeneration = null;
+        if (dev_policy) |policy| {
+            candidate = RuntimePolicyGeneration.create(
+                self.allocator,
+                self.next_policy_generation,
+                policy,
+                false,
+            ) catch |err| {
+                self.runtime_init_mutex.unlock();
+                return err;
+            };
+        }
+
         self.cache_mutex.lock();
 
         self.handler_code = new_code;
         self.handler_filename = new_filename;
         self.cache.clear();
         self.embedded_bytecode = null;
-        if (dev_policy) |policy| {
-            self.config.dev_capability_policy = policy;
-        }
+        const previous_policy = if (candidate) |generation| blk: {
+            const previous = self.policy_generation;
+            self.policy_generation = generation;
+            self.next_policy_generation += 1;
+            break :blk previous;
+        } else null;
 
         self.cache_mutex.unlock();
+        _ = self.reload_generation.fetchAdd(1, .acq_rel);
         self.runtime_init_mutex.unlock();
+        if (previous_policy) |generation| generation.release();
 
         // Bump the reload generation rather than tearing idle runtimes down from
         // this (watcher) thread: a worker may have just CAS-acquired a slot and
@@ -281,7 +329,6 @@ pub const HandlerPool = struct {
         // under runtime_init_mutex, on its next acquire. In-flight requests
         // finish on the old generation. We count currently-idle runtimes purely
         // for the caller's log line.
-        _ = self.reload_generation.fetchAdd(1, .acq_rel);
         var invalidated: usize = 0;
         for (self.pool.slots) |*slot| {
             if (slot.load(.acquire) != null) invalidated += 1;
@@ -291,21 +338,43 @@ pub const HandlerPool = struct {
     }
 
     /// Dev/serve live path only: pin a contract-derived capability policy onto
-    /// the pool config and invalidate idle runtimes so they re-create enforcing
-    /// it. Recreated runtimes read `self.config` in `ensureRuntime`. In-flight
-    /// (checked-out) runtimes finish under the previous policy, so the caller
-    /// must keep the previous policy's backing storage alive one generation.
-    /// Mirrors `reloadHandler`'s locking.
-    pub fn setDevCapabilityPolicy(self: *Self, policy: zq.RuntimePolicy) void {
+    /// an immutable pool generation and invalidate idle runtimes so they
+    /// re-create enforcing it. Checked-out runtimes retain the prior generation
+    /// until release.
+    pub fn setDevCapabilityPolicy(self: *Self, policy: zq.RuntimePolicy) !void {
+        return self.setDevCapabilityPolicyIndexed(policy, false);
+    }
+
+    pub fn setDevCapabilityPolicyIndexed(
+        self: *Self,
+        policy: zq.RuntimePolicy,
+        index_required: bool,
+    ) !void {
         self.runtime_init_mutex.lock();
-        self.config.dev_capability_policy = policy;
+        if (self.policy_generation.index != null) {
+            self.runtime_init_mutex.unlock();
+            return error.GuardedGenerationSwapRefused;
+        }
+        const candidate = RuntimePolicyGeneration.create(
+            self.allocator,
+            self.next_policy_generation,
+            policy,
+            index_required,
+        ) catch |err| {
+            self.runtime_init_mutex.unlock();
+            return err;
+        };
+        const previous = self.policy_generation;
+        self.policy_generation = candidate;
+        self.next_policy_generation += 1;
+        _ = self.reload_generation.fetchAdd(1, .acq_rel);
         self.runtime_init_mutex.unlock();
+        previous.release();
 
         // Same rationale as reloadHandler: bump the generation so idle runtimes
         // rebuild lazily (reading the new config) under runtime_init_mutex on
         // their next acquire, instead of being freed from this thread underneath
         // an in-flight request.
-        _ = self.reload_generation.fetchAdd(1, .acq_rel);
     }
 
     fn nextRequestId(self: *Self) u64 {
@@ -864,7 +933,11 @@ pub const HandlerPool = struct {
             runtimeUserDeinit(base_rt, self.allocator);
         }
 
-        const rt = try HandlerInstance.initFromPool(base_rt, self.config);
+        const rt = try HandlerInstance.initFromPool(
+            base_rt,
+            self.config,
+            self.policy_generation,
+        );
         rt.pool_generation = gen;
         errdefer rt.deinit();
 
@@ -1648,7 +1721,7 @@ test "reloadHandler swaps handler code and new requests use new handler" {
 
     // Reload with new handler
     const new_code = "function handler(req) { return Response.text('v2'); }";
-    const invalidated = pool.reloadHandler(new_code, "<handler>");
+    const invalidated = try pool.reloadHandler(new_code, "<handler>");
     try std.testing.expect(invalidated > 0);
 
     // Execute with new handler - should return v2
@@ -1686,7 +1759,7 @@ test "reloadHandler clears bytecode cache" {
     try std.testing.expect(pool.cache.count() > 0);
 
     // Reload clears cache
-    _ = pool.reloadHandler(
+    _ = try pool.reloadHandler(
         "function handler(req) { return Response.text('cached-v2'); }",
         "<handler>",
     );
@@ -1698,6 +1771,95 @@ test "reloadHandler clears bytecode cache" {
         defer response.deinit();
         try std.testing.expectEqualStrings("cached-v2", response.body);
     }
+}
+
+test "policy swap retains the old generation for an in-flight runtime" {
+    const allocator = std.testing.allocator;
+    const handler_code = "function handler(req) { return Response.text('ok'); }";
+    var pool = try HandlerPool.init(
+        allocator,
+        .{ .dev_capability_policy = .{
+            .env = .{ .enabled = true, .values = &.{"OLD_KEY"} },
+        } },
+        handler_code,
+        "<handler>",
+        2,
+        0,
+    );
+    defer pool.deinit();
+
+    var old_lease = try pool.acquireWorkerRuntime();
+    defer old_lease.deinit();
+    const old_generation = old_lease.runtime.policy_generation.?;
+    try std.testing.expectEqual(@as(u64, 1), old_generation.id);
+    try std.testing.expectEqual(old_generation.id, old_lease.runtime.ctx.policy_generation);
+
+    try pool.setDevCapabilityPolicy(.{
+        .env = .{ .enabled = true, .values = &.{"NEW_KEY"} },
+    });
+
+    var new_lease = try pool.acquireWorkerRuntime();
+    defer new_lease.deinit();
+    const new_generation = new_lease.runtime.policy_generation.?;
+    try std.testing.expectEqual(@as(u64, 2), new_generation.id);
+    try std.testing.expectEqual(new_generation.id, new_lease.runtime.ctx.policy_generation);
+    try std.testing.expect(old_generation != new_generation);
+    try std.testing.expect(old_generation.policy.allowsEnv("OLD_KEY"));
+    try std.testing.expect(!old_generation.policy.allowsEnv("NEW_KEY"));
+    try std.testing.expect(new_generation.policy.allowsEnv("NEW_KEY"));
+    try std.testing.expect(!new_generation.policy.allowsEnv("OLD_KEY"));
+}
+
+test "fallible policy and handler swaps leave the active generation unchanged" {
+    const allocator = std.testing.allocator;
+    const old_code = "function handler(req) { return Response.text('old'); }";
+    var pool = try HandlerPool.init(allocator, .{}, old_code, "<old>", 1, 0);
+    defer pool.deinit();
+
+    const old_generation = pool.policy_generation;
+    const old_reload = pool.reload_generation.load(.acquire);
+    const duplicate = [_][]const u8{ "DUP", "DUP" };
+    const invalid = zq.RuntimePolicy{
+        .env = .{ .enabled = true, .values = &duplicate },
+    };
+
+    try std.testing.expectError(error.DuplicateEntry, pool.setDevCapabilityPolicy(invalid));
+    try std.testing.expect(pool.policy_generation == old_generation);
+    try std.testing.expectEqual(old_reload, pool.reload_generation.load(.acquire));
+
+    try std.testing.expectError(
+        error.DuplicateEntry,
+        pool.reloadHandlerWithPolicy("function handler(req) { return Response.text('new'); }", "<new>", invalid),
+    );
+    try std.testing.expectEqualStrings(old_code, pool.handler_code);
+    try std.testing.expectEqualStrings("<old>", pool.handler_filename);
+    try std.testing.expect(pool.policy_generation == old_generation);
+    try std.testing.expectEqual(old_reload, pool.reload_generation.load(.acquire));
+}
+
+test "a guarded pool owns one index and refuses an unchecked reload" {
+    const allocator = std.testing.allocator;
+    var pool = try HandlerPool.init(
+        allocator,
+        .{
+            .dev_capability_policy = .{
+                .egress = .{ .enabled = true, .values = &.{"https://guarded.example:443"} },
+            },
+            .runtime_policy_index_required = true,
+        },
+        "function handler(req) { return Response.text('guarded'); }",
+        "<handler>",
+        1,
+        0,
+    );
+    defer pool.deinit();
+
+    try std.testing.expect(pool.policy_generation.index != null);
+    try std.testing.expect(pool.policy_generation.policy.installed_index != null);
+    try std.testing.expectError(
+        error.GuardedGenerationSwapRefused,
+        pool.reloadHandler("function handler(req) { return Response.text('unchecked'); }", "<new>"),
+    );
 }
 // Probe HandlerPool.init under FailingAllocator at every allocation site.
 // The pool init walks LockFreePool slot allocation, GC arenas per slot,

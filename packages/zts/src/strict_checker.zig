@@ -1580,20 +1580,7 @@ pub const StrictChecker = struct {
             .sections = self.policy_sections,
         });
         switch (disposition) {
-            .guarded => |entry| {
-                // Classification says the consumer would carry this. This build
-                // still refuses it, because the certificate it would produce
-                // cannot hold the obligation; see
-                // guard_catalog.classification_enabled.
-                if (guard_catalog.classification_enabled) return;
-                self.addDiagnostic(.{
-                    .severity = .err,
-                    .kind = .dynamic_capability_access,
-                    .node = arg,
-                    .message = "capability access computes a resource this build cannot certify",
-                    .help = guardedNotCertifiableHelp(entry.kind),
-                });
-            },
+            .guarded => return,
             .missing_policy_section => |entry| self.addDiagnostic(.{
                 .severity = .err,
                 .kind = .dynamic_capability_access,
@@ -2033,24 +2020,12 @@ fn ambientGlobalHelp(name: []const u8) []const u8 {
 /// raw `fetchSync`. Those are named here because they are rejections the
 /// catalog will never justify, and they stay rejections after the classifier
 /// starts admitting the families it does carry.
-/// R20's four fields for a resource the consumer would carry: the guard kind,
-/// the policy section, what happens to the assurance grade, and the command
-/// that checks the result.
-fn guardedNotCertifiableHelp(kind: guard_catalog.Kind) []const u8 {
-    return switch (kind) {
-        .env_key => "a computed environment key is decided at run time against env.allow, and the operation is reported as guarded rather than proven; this build cannot carry that obligation yet, so use a literal key and rerun `zttp check --contract`",
-        .egress_endpoint => "a computed URL is decided at run time against egress.allow_endpoints and egress.allow_address_scopes, and the operation is reported as guarded rather than proven; this build cannot carry that obligation yet, so use a literal URL and rerun `zttp check --contract`",
-        .cache_namespace => "a computed cache namespace is decided at run time against cache.allow_namespaces, and the operation is reported as guarded rather than proven; this build cannot carry that obligation yet, so use a literal namespace and rerun `zttp check --contract`",
-        .sql_read, .sql_write => "a computed SQL query name is decided at run time against sql.allow_queries; use a literal name and rerun `zttp check --contract`",
-    };
-}
-
 fn missingSectionHelp(kind: guard_catalog.Kind) []const u8 {
     return switch (kind) {
-        .env_key => "add env.allow to the capability policy named by zttp.json, or use a literal key; without that section nothing decides the key at run time and the artifact would claim more than it checked. Rerun `zttp check --contract`",
-        .egress_endpoint => "add egress.allow_endpoints and egress.allow_address_scopes to the capability policy named by zttp.json, or use a literal URL; without those nothing decides the destination at run time. Rerun `zttp check --contract`",
-        .cache_namespace => "add cache.allow_namespaces to the capability policy named by zttp.json, or use a literal namespace; without that section nothing decides the namespace at run time. Rerun `zttp check --contract`",
-        .sql_read, .sql_write => "add sql.allow_queries to the capability policy named by zttp.json, or use a literal query name. Rerun `zttp check --contract`",
+        .env_key => "residual guard env_key requires env.allow; when configured, the operation is guarded rather than proven. Add the section to the policy named by zttp.json, or use a literal key. Rerun `zttp check <handler.ts> --contract`",
+        .egress_endpoint => "residual guard egress_endpoint requires egress.allow_endpoints and egress.allow_address_scopes; when configured, the operation is guarded rather than proven. Add both to the policy named by zttp.json, or use a literal URL. Rerun `zttp check <handler.ts> --contract`",
+        .cache_namespace => "residual guard cache_namespace requires cache.allow_namespaces; when configured, the operation is guarded rather than proven. Add the section to the policy named by zttp.json, or use a literal namespace. Rerun `zttp check <handler.ts> --contract`",
+        .sql_read, .sql_write => "SQL stays literal-only because sql.allow_queries cannot distinguish a read from a write. Use a literal query name and rerun `zttp check <handler.ts> --contract`",
     };
 }
 
@@ -2539,7 +2514,10 @@ const StrippedHarness = struct {
     }
 };
 
-fn checkStripped(source: []const u8) !*StrippedHarness {
+fn checkStrippedWithSections(
+    source: []const u8,
+    policy_sections: guard_catalog.SectionSet,
+) !*StrippedHarness {
     const h = try testing.allocator.create(StrippedHarness);
     errdefer testing.allocator.destroy(h);
     h.stripped = try @import("zts-engine").stripper.strip(testing.allocator, source, .{});
@@ -2552,8 +2530,42 @@ fn checkStripped(source: []const u8) !*StrippedHarness {
     h.tc = TypeChecker.init(testing.allocator, view, null, &h.env, null);
     _ = try h.tc.check(root);
     h.checker = StrictChecker.init(testing.allocator, view, null, &h.env, &h.tc);
+    h.checker.policy_sections = policy_sections;
     _ = try h.checker.check(root);
     return h;
+}
+
+fn checkStripped(source: []const u8) !*StrippedHarness {
+    return checkStrippedWithSections(source, .{});
+}
+
+test "covered computed env egress and cache resources are guarded rather than rejected" {
+    const cases = [_]struct {
+        source: []const u8,
+        section: guard_catalog.Section,
+    }{
+        .{
+            .source = "import { env } from \"zttp:env\";\nfunction handler(req: Request): Response { const value = env(req.url); return Response.json({ value: value }); }\n",
+            .section = .env,
+        },
+        .{
+            .source = "import { fetch } from \"zttp:fetch\";\nfunction handler(req: Request): Response { const result = fetch(req.url); return Response.json({ status: result.status }); }\n",
+            .section = .egress,
+        },
+        .{
+            .source = "import { cacheGet } from \"zttp:cache\";\nfunction handler(req: Request): Response { const value = cacheGet(req.url, \"key\"); return Response.json({ value: value }); }\n",
+            .section = .cache,
+        },
+    };
+
+    for (cases) |case| {
+        var h = try checkStrippedWithSections(
+            case.source,
+            (guard_catalog.SectionSet{}).with(case.section),
+        );
+        defer h.deinit();
+        try expectNoKind(&h.checker, .dynamic_capability_access);
+    }
 }
 
 test "a multi-line signature is fully annotated" {

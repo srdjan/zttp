@@ -23,9 +23,7 @@ const ps = pcc.proof_system;
 
 pub const Error = error{
     OutOfMemory,
-    /// The handler has guarded operations and the caller asked for a
-    /// certificate that cannot carry them. Refusing beats emitting a
-    /// certificate that describes a program without its guarded calls.
+    /// A guarded operation names no row in the consumer-owned catalog.
     GuardedOperationsNotRepresentable,
     BufferTooSmall,
     /// The proof IR carries no function, so there is no entry function for the
@@ -82,12 +80,6 @@ pub const Inputs = struct {
     /// recomputes it from the bytes it is handed, so this is what ties a guard
     /// plan to one policy rather than to any policy.
     runtime_policy_digest: [32]u8 = [_]u8{0} ** 32,
-    /// Emit the successor schema and proof system, which can carry residual
-    /// guard obligations. Off by default: until the cutover, the strict default
-    /// is the predecessor pair, and a producer that emitted successor evidence
-    /// while consumers still read the predecessor would be writing certificates
-    /// nothing accepts.
-    emit_successor: bool = false,
 };
 
 pub const Built = struct {
@@ -230,14 +222,6 @@ pub fn build(allocator: std.mem.Allocator, inputs: Inputs) Error!Built {
 
     const residual_plan = try residualPlan(allocator, nodes);
     defer allocator.free(residual_plan);
-    // A certificate that cannot carry residual obligations must not be built
-    // for a handler that has them. Emitting one would describe a program
-    // without its guarded calls, which is the omission the consumer's exact-set
-    // comparison exists to catch and would have nothing to catch it with.
-    if (residual_plan.len > 0 and !inputs.emit_successor) {
-        return error.GuardedOperationsNotRepresentable;
-    }
-
     var artifact = inputs.artifact;
     artifact.residual_plan_digest = if (residual_plan.len > 0)
         cert.residualPlanDigest(residual_plan)

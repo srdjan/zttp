@@ -14,11 +14,10 @@ const handler_policy = zts.handler_policy;
 // 24      8     magic
 
 pub const MAGIC: u64 = 0x5A54_5042_4331_0000; // "ZTPBC1\0\0"
-/// Bumped to 2 for the executable-graph cutover. The reader checks equality,
-/// not an upper bound: a version-1 payload committed to the entry module alone,
-/// so reinterpreting one under the current rules would report a coverage the
-/// artifact never had.
-pub const FORMAT_VERSION: u16 = 2;
+/// Bumped to 3 for the strict residual-guard certificate chain. The reader
+/// checks equality, not an upper bound. Version 2 cannot carry that chain, so
+/// interpreting it under current rules would report coverage it never held.
+pub const FORMAT_VERSION: u16 = 3;
 pub const TRAILER_SIZE: usize = 32;
 const base_copy_chunk_size: usize = 64 * 1024;
 
@@ -424,6 +423,7 @@ pub fn parse(allocator: std.mem.Allocator, data: []const u8) !?Payload {
     var policy_section: ?[]const u8 = null;
     var policy_section_sha256 = [_]u8{0} ** 32;
     var policy_strings: std.ArrayList([]const u8) = .empty;
+    var seen_sections = [_]bool{false} ** 8;
     errdefer {
         if (bytecode) |b| allocator.free(b);
         if (dep_bytecodes) |deps| {
@@ -434,6 +434,7 @@ pub fn parse(allocator: std.mem.Allocator, data: []const u8) !?Payload {
         if (policy_section) |section| allocator.free(section);
         if (attestation_jws) |a| allocator.free(a);
         if (certificate) |c| allocator.free(c);
+        freePolicyArrays(allocator, policy);
         for (policy_strings.items) |s| allocator.free(s);
         policy_strings.deinit(allocator);
     }
@@ -445,9 +446,13 @@ pub fn parse(allocator: std.mem.Allocator, data: []const u8) !?Payload {
         const section_type = data[pos];
         pos += 1;
         const section_size = try readU32(data, &pos);
-        if (pos + section_size > data.len) return null;
+        if (section_size > data.len - pos) return null;
         const section_data = data[pos .. pos + section_size];
         pos += section_size;
+
+        if (section_type >= seen_sections.len) return error.UnknownPayloadSection;
+        if (seen_sections[section_type]) return error.DuplicatePayloadSection;
+        seen_sections[section_type] = true;
 
         switch (section_type) {
             @intFromEnum(Section.bytecode) => {
@@ -460,6 +465,7 @@ pub fn parse(allocator: std.mem.Allocator, data: []const u8) !?Payload {
                 contract_json = try allocator.dupe(u8, section_data);
             },
             @intFromEnum(Section.policy) => {
+                if (section_data.len > handler_policy.max_policy_bytes) return error.PolicyTooLarge;
                 std.crypto.hash.sha2.Sha256.hash(section_data, &policy_section_sha256, .{});
                 policy_section = try allocator.dupe(u8, section_data);
                 policy = try deserializePolicy(allocator, section_data, &policy_strings);
@@ -479,6 +485,7 @@ pub fn parse(allocator: std.mem.Allocator, data: []const u8) !?Payload {
     }
 
     if (bytecode == null) return null;
+    if (pos != data.len) return error.InvalidPayload;
 
     return .{
         .bytecode = bytecode.?,
@@ -491,6 +498,13 @@ pub fn parse(allocator: std.mem.Allocator, data: []const u8) !?Payload {
         .attestation_jws = attestation_jws,
         .certificate = certificate,
     };
+}
+
+fn freePolicyArrays(allocator: std.mem.Allocator, policy: zts.RuntimePolicy) void {
+    if (policy.env.values.len > 0) allocator.free(policy.env.values);
+    if (policy.egress.values.len > 0) allocator.free(policy.egress.values);
+    if (policy.cache.values.len > 0) allocator.free(policy.cache.values);
+    if (policy.sql.queries.len > 0) allocator.free(policy.sql.queries);
 }
 
 fn parseDeps(allocator: std.mem.Allocator, data: []const u8) ![]const []const u8 {
@@ -528,6 +542,7 @@ fn parseDeps(allocator: std.mem.Allocator, data: []const u8) ![]const []const u8
 // which is what the certificate identity commits to.
 
 pub const PolicyFormatError = error{
+    PolicyTooLarge,
     PolicyTooManyEntries,
     PolicyEntryTooLong,
     PolicyEntryEmpty,
@@ -552,6 +567,8 @@ pub fn serializePolicy(allocator: std.mem.Allocator, policy: *const zts.RuntimeP
     // Which resolved-address scopes a connection may land in. Empty denies all
     // of them, which is what a policy that named endpoints and no scopes said.
     try buf.append(allocator, policy.egress_scopes.bits);
+
+    if (buf.items.len > handler_policy.max_policy_bytes) return error.PolicyTooLarge;
 
     return buf.toOwnedSlice(allocator);
 }
@@ -648,10 +665,32 @@ fn deserializePolicy(
     strings: *std.ArrayList([]const u8),
 ) !zts.RuntimePolicy {
     var pos: usize = 0;
-    const env = try deserializeAllowList(allocator, data, &pos, strings);
-    const egress = try deserializeAllowList(allocator, data, &pos, strings);
-    const cache = try deserializeAllowList(allocator, data, &pos, strings);
+    const env = try deserializeAllowList(
+        allocator,
+        data,
+        &pos,
+        strings,
+        handler_policy.max_identifier_bytes,
+    );
+    errdefer if (env.values.len > 0) allocator.free(env.values);
+    const egress = try deserializeAllowList(
+        allocator,
+        data,
+        &pos,
+        strings,
+        handler_policy.max_endpoint_bytes,
+    );
+    errdefer if (egress.values.len > 0) allocator.free(egress.values);
+    const cache = try deserializeAllowList(
+        allocator,
+        data,
+        &pos,
+        strings,
+        handler_policy.max_identifier_bytes,
+    );
+    errdefer if (cache.values.len > 0) allocator.free(cache.values);
     const sql = try deserializeSqlAllowList(allocator, data, &pos, strings);
+    errdefer if (sql.queries.len > 0) allocator.free(sql.queries);
 
     // The scope byte, and nothing after it. A section this reader ran out of
     // bytes for used to come back disabled, and a disabled section admits every
@@ -677,22 +716,39 @@ fn deserializeSqlAllowList(
     strings: *std.ArrayList([]const u8),
 ) !handler_policy.RuntimeSqlAllowList {
     if (pos.* >= data.len) return error.InvalidPayload;
-    const enabled = data[pos.*] != 0;
+    if (data[pos.*] > 1) return error.InvalidPayload;
+    const enabled = data[pos.*] == 1;
     pos.* += 1;
 
     const count = try readU16(data, pos);
+    if (count > handler_policy.max_policy_entries) return error.PolicyTooManyEntries;
+    if (count == 0) return .{ .enabled = enabled };
     var queries = try allocator.alloc(handler_policy.SqlQueryInfo, count);
     var filled: usize = 0;
     errdefer allocator.free(queries);
 
     while (filled < count) : (filled += 1) {
         if (pos.* >= data.len) return error.InvalidPayload;
-        const read_only = data[pos.*] != 0;
+        if (data[pos.*] > 1) return error.InvalidPayload;
+        const read_only = data[pos.*] == 1;
         pos.* += 1;
         const len = try readU16(data, pos);
-        if (pos.* + len > data.len) return error.InvalidPayload;
-        const name = try allocator.dupe(u8, data[pos.* .. pos.* + len]);
-        try strings.append(allocator, name); // freed via policy_strings
+        if (len == 0) return error.PolicyEntryEmpty;
+        if (len > handler_policy.max_identifier_bytes) return error.PolicyEntryTooLong;
+        if (len > data.len - pos.*) return error.InvalidPayload;
+        const raw_name = data[pos.* .. pos.* + len];
+        if (filled > 0) {
+            switch (std.mem.order(u8, queries[filled - 1].name, raw_name)) {
+                .lt => {},
+                .eq => return error.PolicyDuplicateEntry,
+                .gt => return error.PolicyEntriesNotSorted,
+            }
+        }
+        const name = try allocator.dupe(u8, raw_name);
+        strings.append(allocator, name) catch |err| {
+            allocator.free(name);
+            return err;
+        };
         // statement/tables stay empty; read-only-ness is encoded in `operation`.
         queries[filled] = handler_policy.normalizedSqlQuery(name, read_only);
         pos.* += len;
@@ -706,24 +762,38 @@ fn deserializeAllowList(
     data: []const u8,
     pos: *usize,
     strings: *std.ArrayList([]const u8),
+    max_entry_bytes: usize,
 ) !handler_policy.RuntimeAllowList {
     if (pos.* >= data.len) return error.InvalidPayload;
-    const enabled = data[pos.*] != 0;
+    if (data[pos.*] > 1) return error.InvalidPayload;
+    const enabled = data[pos.*] == 1;
     pos.* += 1;
 
     const count = try readU16(data, pos);
+    if (count > handler_policy.max_policy_entries) return error.PolicyTooManyEntries;
+    if (count == 0) return .{ .enabled = enabled };
     var values = try allocator.alloc([]const u8, count);
     var filled: usize = 0;
-    errdefer {
-        for (values[0..filled]) |v| allocator.free(v);
-        allocator.free(values);
-    }
+    errdefer allocator.free(values);
 
     while (filled < count) : (filled += 1) {
         const len = try readU16(data, pos);
-        if (pos.* + len > data.len) return error.InvalidPayload;
-        const s = try allocator.dupe(u8, data[pos.* .. pos.* + len]);
-        try strings.append(allocator, s);
+        if (len == 0) return error.PolicyEntryEmpty;
+        if (len > max_entry_bytes) return error.PolicyEntryTooLong;
+        if (len > data.len - pos.*) return error.InvalidPayload;
+        const raw_value = data[pos.* .. pos.* + len];
+        if (filled > 0) {
+            switch (std.mem.order(u8, values[filled - 1], raw_value)) {
+                .lt => {},
+                .eq => return error.PolicyDuplicateEntry,
+                .gt => return error.PolicyEntriesNotSorted,
+            }
+        }
+        const s = try allocator.dupe(u8, raw_value);
+        strings.append(allocator, s) catch |err| {
+            allocator.free(s);
+            return err;
+        };
         values[filled] = s;
         pos.* += len;
     }
@@ -1224,6 +1294,92 @@ test "roundtrip: payload policy with populated allow lists" {
     try std.testing.expect(!parsed.policy.allowsSqlQuery("dropTodos"));
 }
 
+test "policy decoder rejects invalid limits flags duplicates and ordering before activation" {
+    const allocator = std.testing.allocator;
+
+    {
+        var strings: std.ArrayList([]const u8) = .empty;
+        defer strings.deinit(allocator);
+        try std.testing.expectError(
+            error.PolicyTooManyEntries,
+            deserializePolicy(allocator, &.{ 1, 1, 1 }, &strings),
+        );
+    }
+    {
+        var strings: std.ArrayList([]const u8) = .empty;
+        defer strings.deinit(allocator);
+        try std.testing.expectError(
+            error.PolicyEntryTooLong,
+            deserializePolicy(allocator, &.{ 1, 1, 0, 0, 1 }, &strings),
+        );
+    }
+    {
+        var strings: std.ArrayList([]const u8) = .empty;
+        defer {
+            for (strings.items) |value| allocator.free(value);
+            strings.deinit(allocator);
+        }
+        try std.testing.expectError(
+            error.PolicyDuplicateEntry,
+            deserializePolicy(allocator, &.{ 1, 2, 0, 1, 0, 'a', 1, 0, 'a' }, &strings),
+        );
+    }
+    {
+        var strings: std.ArrayList([]const u8) = .empty;
+        defer {
+            for (strings.items) |value| allocator.free(value);
+            strings.deinit(allocator);
+        }
+        try std.testing.expectError(
+            error.PolicyEntriesNotSorted,
+            deserializePolicy(allocator, &.{ 1, 2, 0, 1, 0, 'b', 1, 0, 'a' }, &strings),
+        );
+    }
+    {
+        var strings: std.ArrayList([]const u8) = .empty;
+        defer strings.deinit(allocator);
+        try std.testing.expectError(
+            error.InvalidPayload,
+            deserializePolicy(allocator, &.{ 2, 0, 0 }, &strings),
+        );
+    }
+    {
+        var strings: std.ArrayList([]const u8) = .empty;
+        defer {
+            for (strings.items) |value| allocator.free(value);
+            strings.deinit(allocator);
+        }
+        try std.testing.expectError(
+            error.PolicyEntriesNotSorted,
+            deserializePolicy(allocator, &.{
+                0, 0, 0, // env
+                0, 0, 0, // egress
+                0, 0, 0, // cache
+                1, 2, 0, 1, 1, 0, 'b', 0, 1, 0, 'a', // SQL
+            }, &strings),
+        );
+    }
+}
+
+test "payload parser rejects oversized and duplicate policy sections" {
+    const allocator = std.testing.allocator;
+    const oversized = try allocator.alloc(u8, handler_policy.max_policy_bytes + 1);
+    defer allocator.free(oversized);
+    @memset(oversized, 0);
+
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try writeU16(&encoded, allocator, 1);
+    try writeSection(&encoded, allocator, .policy, oversized);
+    try std.testing.expectError(error.PolicyTooLarge, parse(allocator, encoded.items));
+
+    encoded.clearRetainingCapacity();
+    try writeU16(&encoded, allocator, 2);
+    try writeSection(&encoded, allocator, .bytecode, "first");
+    try writeSection(&encoded, allocator, .bytecode, "second");
+    try std.testing.expectError(error.DuplicatePayloadSection, parse(allocator, encoded.items));
+}
+
 test "getCleanBinarySize: no trailer returns full size" {
     const data = "just some binary data without a trailer";
     try std.testing.expectEqual(data.len, getCleanBinarySize(data));
@@ -1262,7 +1418,8 @@ fn buildTrailer(payload_offset: u64, payload_size: u64, version: u16) [TRAILER_S
 }
 
 test "a trailer from the previous payload format is refused with a rebuild diagnostic" {
-    const trailer = buildTrailer(100, 50, 1);
+    try std.testing.expectEqual(@as(u16, 3), FORMAT_VERSION);
+    const trailer = buildTrailer(100, 50, 2);
     try std.testing.expectError(
         error.UnsupportedArtifactFormat,
         readTrailer(100 + 50 + TRAILER_SIZE, &trailer),

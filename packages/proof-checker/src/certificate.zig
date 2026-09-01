@@ -898,10 +898,10 @@ pub fn commitmentDigest(bytes: []const u8, certificate: Certificate) DecodeError
 /// canonical bytes. The encoder lives beside the decoder so the two cannot
 /// drift; it is not part of the acceptance kernel and takes no authority.
 pub const Parts = struct {
-    /// The schema this certificate is written in. Defaults to the shipped one;
-    /// a producer of successor evidence names the successor explicitly.
+    /// The schema this certificate is written in. Producers and consumers use
+    /// one strict version and rebuild across version boundaries.
     schema_version: u16 = ps.schema_version,
-    proof_system: ps.ProofSystem = .zttp_pcc_v1,
+    proof_system: ps.ProofSystem = .zttp_pcc_v2,
     semantics_epoch: u32 = ps.semantics_epoch,
     identity: Identity,
     graph: []const graph_mod.Member,
@@ -1189,7 +1189,7 @@ test "a minimal certificate round trips through the canonical codec" {
     var budget = Budget.init(.{});
     const cert = try decode(bytes, .{}, &budget);
     try testing.expectEqual(ps.schema_version, cert.schema_version);
-    try testing.expectEqual(ps.ProofSystem.zttp_pcc_v1, cert.proof_system);
+    try testing.expectEqual(ps.ProofSystem.zttp_pcc_v2, cert.proof_system);
     try testing.expectEqual(@as(u32, 8), cert.graph.len());
     try testing.expectEqual(@as(u32, 1), cert.obligations.len());
     try testing.expectEqual(@as(u32, 2), cert.ir.len());
@@ -1201,6 +1201,21 @@ test "a minimal certificate round trips through the canonical codec" {
     const entry = try cert.evidence.get(0);
     try testing.expectEqual(EdgeKind.proved, entry.edge);
     try testing.expectEqual(@as(?ps.Rule, .return_total), entry.rule);
+}
+
+test "the immediate predecessor certificate is refused rather than reinterpreted" {
+    var buf: [4096]u8 = undefined;
+    const bytes = try buildMinimal(&buf);
+    var predecessor: [4096]u8 = undefined;
+    @memcpy(predecessor[0..bytes.len], bytes);
+    std.mem.writeInt(u16, predecessor[8..10], 2, .little);
+    std.mem.writeInt(u16, predecessor[10..12], 1, .little);
+
+    var budget = Budget.init(.{});
+    try testing.expectError(
+        error.UnsupportedSchemaVersion,
+        decode(predecessor[0..bytes.len], .{}, &budget),
+    );
 }
 
 test "encoding is deterministic and sized exactly" {
@@ -1292,7 +1307,7 @@ test "a missing required section rejects" {
     var cursor = Cursor{ .buf = &buf };
     try cursor.u64At(magic);
     try cursor.u16At(ps.schema_version);
-    try cursor.u16At(@intFromEnum(ps.ProofSystem.zttp_pcc_v1));
+    try cursor.u16At(@intFromEnum(ps.ProofSystem.zttp_pcc_v2));
     try cursor.u32At(ps.semantics_epoch);
     try cursor.u16At(4);
     try cursor.u16At(@intFromEnum(SectionTag.identity));

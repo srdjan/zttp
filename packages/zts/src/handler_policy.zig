@@ -90,10 +90,11 @@ pub const HandlerPolicy = struct {
 /// it. A test in `packages/runtime`, which sees both, pins the two sets equal,
 /// so a change on either side fails there rather than at a deployed guard.
 pub const max_policy_entries: usize = 256;
+/// The serialized runtime capability policy accepted by either decoder.
+pub const max_policy_bytes: usize = 256 * 1024;
 /// An environment key, cache namespace, or SQL query name.
 pub const max_identifier_bytes: usize = 255;
-/// A normalized `scheme://host:port`. Egress entries are bare host names until
-/// the endpoint move, and the larger cap already covers those.
+/// A normalized `scheme://host:port`.
 pub const max_endpoint_bytes: usize = 512;
 /// Probes one category lookup may cost at `max_policy_entries`. Nine, measured
 /// over the search rather than read off log2 of the cap.
@@ -160,8 +161,15 @@ pub const RuntimePolicy = struct {
     egress_scopes: endpoint.ScopeSet = .{},
     cache: RuntimeAllowList = .{},
     sql: RuntimeSqlAllowList = .{},
+    /// Present only on a consumer-accepted guarded runtime generation. The
+    /// generation owns this index and outlives every RuntimePolicy copy that
+    /// points at it. Static-only generations leave it null and retain the
+    /// literal allowlist path.
+    installed_index: ?*const RuntimePolicyIndex = null,
 
     pub fn allowsEnv(self: RuntimePolicy, key: []const u8) bool {
+        if (!self.env.enabled) return true;
+        if (self.installed_index) |index| return index.allows(.env, key);
         return self.env.allows(key);
     }
 
@@ -171,6 +179,8 @@ pub const RuntimePolicy = struct {
     /// no entry matches, which denies. That is the safe direction, and it is
     /// why this takes the canonical form rather than a URL.
     pub fn allowsEgressEndpoint(self: RuntimePolicy, normalized: []const u8) bool {
+        if (!self.egress.enabled) return true;
+        if (self.installed_index) |index| return index.allows(.egress, normalized);
         return self.egress.allows(normalized);
     }
 
@@ -180,14 +190,20 @@ pub const RuntimePolicy = struct {
     }
 
     pub fn allowsCacheNamespace(self: RuntimePolicy, ns: []const u8) bool {
+        if (!self.cache.enabled) return true;
+        if (self.installed_index) |index| return index.allows(.cache, ns);
         return self.cache.allows(ns);
     }
 
     pub fn allowsSqlQuery(self: RuntimePolicy, name: []const u8) bool {
+        if (!self.sql.enabled) return true;
+        if (self.installed_index) |index| return index.allows(.sql_read, name);
         return self.sql.allowsRead(name);
     }
 
     pub fn allowsSqlWrite(self: RuntimePolicy, name: []const u8) bool {
+        if (!self.sql.enabled) return true;
+        if (self.installed_index) |index| return index.allows(.sql_write, name);
         return self.sql.allowsWrite(name);
     }
 };
@@ -275,6 +291,16 @@ pub fn contractToRuntimePolicy(
     };
 }
 
+/// Whether a contract has a capability resource that must be decided by a
+/// residual runtime guard. Such generations install the bounded lookup index;
+/// fully static generations keep the literal lookup path and no index.
+pub fn contractRequiresRuntimePolicyIndex(contract: *const HandlerContract) bool {
+    return contract.env.dynamic or
+        contract.egress.dynamic or
+        contract.cache.dynamic or
+        contract.sql.dynamic;
+}
+
 fn projectSection(
     dynamic: bool,
     literals: []const []const u8,
@@ -328,20 +354,21 @@ pub const IndexError = error{
 /// Entries are borrowed. The policy, and whatever the policy borrows from,
 /// must outlive the index. Only the pointer arrays are owned.
 ///
-/// Egress is absent on purpose: an egress entry is compared case-insensitively
-/// today, and a byte-sorted list cannot answer a case-insensitive question.
-/// It joins when egress entries become normalized endpoints, which are already
-/// case-folded, and the comparison becomes exact.
+/// Egress entries are normalized endpoints, so their comparison is exact just
+/// like every other section. Case folding and default-port expansion happen
+/// before either the policy or a request reaches this index.
 pub const RuntimePolicyIndex = struct {
     env: []const []const u8,
+    egress: []const []const u8,
     cache: []const []const u8,
     sql_read: []const []const u8,
     sql_write: []const []const u8,
 
-    pub const Section = enum { env, cache, sql_read, sql_write };
+    pub const Section = enum { env, egress, cache, sql_read, sql_write };
 
     pub fn deinit(self: *RuntimePolicyIndex, allocator: std.mem.Allocator) void {
         allocator.free(self.env);
+        allocator.free(self.egress);
         allocator.free(self.cache);
         allocator.free(self.sql_read);
         allocator.free(self.sql_write);
@@ -351,6 +378,7 @@ pub const RuntimePolicyIndex = struct {
     pub fn entries(self: *const RuntimePolicyIndex, section: Section) []const []const u8 {
         return switch (section) {
             .env => self.env,
+            .egress => self.egress,
             .cache => self.cache,
             .sql_read => self.sql_read,
             .sql_write => self.sql_write,
@@ -393,9 +421,12 @@ fn searchCounting(values: []const []const u8, candidate: []const u8, comparisons
 /// sink: an oversized, empty, or duplicated entry is a policy that cannot be
 /// enforced as written, and installing it would enforce something else.
 pub fn buildIndex(allocator: std.mem.Allocator, policy: RuntimePolicy) IndexError!RuntimePolicyIndex {
-    const env = try sortedSection(allocator, policy.env.values);
+    try validateRuntimePolicy(policy);
+    const env = try sortedSection(allocator, policy.env.values, max_identifier_bytes);
     errdefer allocator.free(env);
-    const cache = try sortedSection(allocator, policy.cache.values);
+    const egress = try sortedSection(allocator, policy.egress.values, max_endpoint_bytes);
+    errdefer allocator.free(egress);
+    const cache = try sortedSection(allocator, policy.cache.values, max_identifier_bytes);
     errdefer allocator.free(cache);
 
     var read_names: std.ArrayList([]const u8) = .empty;
@@ -413,23 +444,70 @@ pub fn buildIndex(allocator: std.mem.Allocator, policy: RuntimePolicy) IndexErro
             try write_names.append(allocator, query.name);
     }
 
-    const sql_read = try sortedSection(allocator, read_names.items);
+    const sql_read = try sortedSection(allocator, read_names.items, max_identifier_bytes);
     errdefer allocator.free(sql_read);
-    const sql_write = try sortedSection(allocator, write_names.items);
+    const sql_write = try sortedSection(allocator, write_names.items, max_identifier_bytes);
 
     return .{
         .env = env,
+        .egress = egress,
         .cache = cache,
         .sql_read = sql_read,
         .sql_write = sql_write,
     };
 }
 
-fn sortedSection(allocator: std.mem.Allocator, values: []const []const u8) IndexError![]const []const u8 {
+/// Validate the limits and uniqueness a runtime generation relies on before
+/// allocating owned backing. Static-only generations call this too, without
+/// constructing an index, so malformed borrowed input never becomes an
+/// oversized long-lived allocation.
+pub fn validateRuntimePolicy(policy: RuntimePolicy) IndexError!void {
+    try validateRuntimeValues(policy.env.values, max_identifier_bytes);
+    try validateRuntimeValues(policy.egress.values, max_endpoint_bytes);
+    try validateRuntimeValues(policy.cache.values, max_identifier_bytes);
+
+    const sql_count = std.math.add(
+        usize,
+        policy.sql.values.len,
+        policy.sql.queries.len,
+    ) catch return error.TooManyEntries;
+    if (sql_count > max_policy_entries) return error.TooManyEntries;
+    try validateRuntimeValues(policy.sql.values, max_identifier_bytes);
+    for (policy.sql.queries, 0..) |query, index| {
+        try validateRuntimeValue(query.name, max_identifier_bytes);
+        for (policy.sql.values) |value| {
+            if (std.mem.eql(u8, value, query.name)) return error.DuplicateEntry;
+        }
+        for (policy.sql.queries[0..index]) |previous| {
+            if (std.mem.eql(u8, previous.name, query.name)) return error.DuplicateEntry;
+        }
+    }
+}
+
+fn validateRuntimeValues(values: []const []const u8, max_entry_bytes: usize) IndexError!void {
+    if (values.len > max_policy_entries) return error.TooManyEntries;
+    for (values, 0..) |value, index| {
+        try validateRuntimeValue(value, max_entry_bytes);
+        for (values[0..index]) |previous| {
+            if (std.mem.eql(u8, previous, value)) return error.DuplicateEntry;
+        }
+    }
+}
+
+fn validateRuntimeValue(value: []const u8, max_entry_bytes: usize) IndexError!void {
+    if (value.len == 0) return error.EntryEmpty;
+    if (value.len > max_entry_bytes) return error.EntryTooLong;
+}
+
+fn sortedSection(
+    allocator: std.mem.Allocator,
+    values: []const []const u8,
+    max_entry_bytes: usize,
+) IndexError![]const []const u8 {
     if (values.len > max_policy_entries) return error.TooManyEntries;
     for (values) |value| {
         if (value.len == 0) return error.EntryEmpty;
-        if (value.len > max_identifier_bytes) return error.EntryTooLong;
+        if (value.len > max_entry_bytes) return error.EntryTooLong;
     }
 
     const out = try allocator.alloc([]const u8, values.len);
@@ -532,6 +610,7 @@ pub fn declaredSectionsFromJson(
 }
 
 pub fn parsePolicyJson(allocator: std.mem.Allocator, source: []const u8) !HandlerPolicy {
+    if (source.len > max_policy_bytes) return error.PolicyTooLarge;
     var parsed = try std.json.parseFromSlice(std.json.Value, allocator, source, .{});
     defer parsed.deinit();
 
@@ -591,6 +670,7 @@ fn parseEgressSection(allocator: std.mem.Allocator, root: std.json.ObjectMap) !E
 
     const raw_allow = section_obj.get(endpoints_field) orelse return error.InvalidPolicy;
     if (raw_allow != .array) return error.InvalidPolicy;
+    if (raw_allow.array.items.len > max_policy_entries) return error.TooManyEntries;
 
     var allow = AllowList{};
     errdefer allow.deinit(allocator);
@@ -598,6 +678,7 @@ fn parseEgressSection(allocator: std.mem.Allocator, root: std.json.ObjectMap) !E
         if (item != .string or item.string.len == 0) return error.InvalidPolicy;
         var buf: [endpoint.max_endpoint_bytes]u8 = undefined;
         const normalized = endpoint.normalize(item.string, &buf) catch return error.InvalidEgressEndpoint;
+        if (allow.contains(normalized)) return error.DuplicateEntry;
         try allow.appendUnique(allocator, normalized);
     }
 
@@ -608,6 +689,7 @@ fn parseEgressSection(allocator: std.mem.Allocator, root: std.json.ObjectMap) !E
             if (item != .string) return error.InvalidPolicy;
             const scope = endpoint.AddressScope.fromText(item.string) orelse
                 return error.UnknownAddressScope;
+            if (scopes.contains(scope)) return error.DuplicateEntry;
             scopes = scopes.with(scope);
         }
     }
@@ -708,12 +790,15 @@ fn parseSection(
 
     const raw_allow = section_obj.get(field_name) orelse return error.InvalidPolicy;
     if (raw_allow != .array) return error.InvalidPolicy;
+    if (raw_allow.array.items.len > max_policy_entries) return error.TooManyEntries;
 
     var section = AllowList{};
     errdefer section.deinit(allocator);
 
     for (raw_allow.array.items) |item| {
         if (item != .string or item.string.len == 0) return error.InvalidPolicy;
+        if (item.string.len > max_identifier_bytes) return error.EntryTooLong;
+        if (section.contains(item.string)) return error.DuplicateEntry;
         try section.appendUnique(allocator, item.string);
     }
 
@@ -842,6 +927,22 @@ test "parse policy json rejects unknown sections" {
     try std.testing.expectError(error.InvalidPolicy, parsePolicyJson(allocator, source));
 }
 
+test "policy readers reject oversized and duplicate authority" {
+    const allocator = std.testing.allocator;
+
+    const oversized = try allocator.alloc(u8, max_policy_bytes + 1);
+    defer allocator.free(oversized);
+    @memset(oversized, ' ');
+    try std.testing.expectError(error.PolicyTooLarge, parsePolicyJson(allocator, oversized));
+
+    try std.testing.expectError(error.DuplicateEntry, parsePolicyJson(allocator,
+        \\{ "env": { "allow": ["API_KEY", "API_KEY"] } }
+    ));
+    try std.testing.expectError(error.DuplicateEntry, parsePolicyJson(allocator,
+        \\{ "egress": { "allow_endpoints": ["https://API.example", "https://api.example:443"] } }
+    ));
+}
+
 test "validate contract rejects disallowed literals" {
     const allocator = std.testing.allocator;
 
@@ -966,6 +1067,7 @@ test "contractToRuntimePolicy restricts static sections" {
     defer contract.deinit(allocator);
 
     const policy = contractToRuntimePolicy(&contract, null);
+    try std.testing.expect(!contractRequiresRuntimePolicyIndex(&contract));
 
     // All sections should be restricted
     try std.testing.expect(policy.env.enabled);
@@ -1047,6 +1149,7 @@ test "a dynamic section denies everything unless a policy names it" {
     // it, both sections came back disabled, and a disabled section admits every
     // value a handler asks for.
     const denied = contractToRuntimePolicy(&contract, null);
+    try std.testing.expect(contractRequiresRuntimePolicyIndex(&contract));
     try std.testing.expect(denied.env.enabled);
     try std.testing.expect(!denied.allowsEnv("ANYTHING"));
     try std.testing.expect(!denied.allowsEnv("API_KEY"));
@@ -1108,6 +1211,45 @@ test "the installed index answers inside the measured comparison bound" {
     try std.testing.expectEqual(max_lookup_comparisons, worst);
 }
 
+test "authoritative policy membership selects the installed index" {
+    const allocator = std.testing.allocator;
+    const queries = [_]contract_mod.SqlQueryInfo{
+        normalizedSqlQuery("read-indexed", true),
+        normalizedSqlQuery("write-indexed", false),
+    };
+    var index = try buildIndex(allocator, .{
+        .env = .{ .enabled = true, .values = &.{"ENV_INDEXED"} },
+        .egress = .{ .enabled = true, .values = &.{"https://indexed.example:443"} },
+        .cache = .{ .enabled = true, .values = &.{"cache-indexed"} },
+        .sql = .{ .enabled = true, .queries = &queries },
+    });
+    defer index.deinit(allocator);
+
+    var installed = RuntimePolicy{
+        .env = .{ .enabled = true, .values = &.{"ENV_LINEAR"} },
+        .egress = .{ .enabled = true, .values = &.{"https://linear.example:443"} },
+        .cache = .{ .enabled = true, .values = &.{"cache-linear"} },
+        .sql = .{ .enabled = true, .values = &.{"sql-linear"} },
+        .installed_index = &index,
+    };
+
+    try std.testing.expect(installed.allowsEnv("ENV_INDEXED"));
+    try std.testing.expect(!installed.allowsEnv("ENV_LINEAR"));
+    try std.testing.expect(installed.allowsEgressEndpoint("https://indexed.example:443"));
+    try std.testing.expect(!installed.allowsEgressEndpoint("https://linear.example:443"));
+    try std.testing.expect(installed.allowsCacheNamespace("cache-indexed"));
+    try std.testing.expect(!installed.allowsCacheNamespace("cache-linear"));
+    try std.testing.expect(installed.allowsSqlQuery("read-indexed"));
+    try std.testing.expect(!installed.allowsSqlWrite("read-indexed"));
+    try std.testing.expect(installed.allowsSqlWrite("write-indexed"));
+    try std.testing.expect(!installed.allowsSqlQuery("write-indexed"));
+    try std.testing.expect(!installed.allowsSqlQuery("sql-linear"));
+
+    // Disabled remains permissive even when a generation carries an index.
+    installed.env.enabled = false;
+    try std.testing.expect(installed.allowsEnv("not-indexed"));
+}
+
 test "the index refuses a policy it could not enforce as written" {
     const allocator = std.testing.allocator;
 
@@ -1149,6 +1291,17 @@ test "the index refuses a policy it could not enforce as written" {
         .env = .{ .enabled = true, .values = over_values[0..max_policy_entries] },
     });
     at_entry_cap.deinit(allocator);
+
+    var endpoint_limit: [max_endpoint_bytes + 1]u8 = @splat('e');
+    const endpoint_at_limit = [_][]const u8{endpoint_limit[0..max_endpoint_bytes]};
+    var endpoint_ok = try buildIndex(allocator, .{
+        .egress = .{ .enabled = true, .values = &endpoint_at_limit },
+    });
+    endpoint_ok.deinit(allocator);
+    const endpoint_over_limit = [_][]const u8{&endpoint_limit};
+    try std.testing.expectError(error.EntryTooLong, buildIndex(allocator, .{
+        .egress = .{ .enabled = true, .values = &endpoint_over_limit },
+    }));
 }
 
 test "the index keeps a named read out of the write section" {

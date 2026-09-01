@@ -490,6 +490,53 @@ the edge. `results_checked` is the next one - the result-binding dataflow is the
 smallest analysis the kernel does not yet model, and it is the property with the
 most direct security consequence after totality.
 
+### Residual runtime guard boundary
+
+A computed environment key, egress endpoint, or cache namespace can compile
+only when the configured capability policy declares its section. The compiler
+records a residual obligation. The consumer reconstructs the obligation from
+its own catalog, binds the exact serialized policy bytes, and requires exact
+coverage before activation. SQL remains literal-only because
+`sql.allow_queries` cannot distinguish a read from a write.
+
+Guard coverage is not a Property. Producer property facts, consumer guard
+coverage, and live allow or deny decisions are three separate channels. A
+covered operation must leave the proven Property set unchanged. At runtime, the
+actual resource is checked at the authoritative sink against the installed
+policy generation.
+
+The machine-marked boundary below is checked by
+`scripts/check-residual-guards.sh`. Catalog order is significant because the
+proof IR carries the row index. The same gate checks the compiler mirror, the
+enabled families, and the stand-in conversions in both directions.
+
+<!-- residual-guards: catalog -->
+- `zttp:env|env|0|env_key|identifier_exact_v1|env|env_read|env_read_v1=1`
+- `zttp:fetch|fetch|0|egress_endpoint|endpoint_v1|egress|egress_connect|egress_connect_v1=1`
+- `zttp:fetch|fetchWithRetry|0|egress_endpoint|endpoint_v1|egress|egress_connect|egress_connect_v1=1`
+- `zttp:cache|cacheGet|0|cache_namespace|identifier_exact_v1|cache|cache_operation|cache_operation_v1=1`
+- `zttp:cache|cacheSet|0|cache_namespace|identifier_exact_v1|cache|cache_operation|cache_operation_v1=1`
+- `zttp:cache|cacheDelete|0|cache_namespace|identifier_exact_v1|cache|cache_operation|cache_operation_v1=1`
+- `zttp:cache|cacheIncr|0|cache_namespace|identifier_exact_v1|cache|cache_operation|cache_operation_v1=1`
+- `zttp:cache|cacheStats|0|cache_namespace|identifier_exact_v1|cache|cache_operation|cache_operation_v1=1`
+- `zttp:sql|sqlOne|0|sql_read|identifier_exact_v1|sql|sql_execute|sql_execute_v1=1`
+- `zttp:sql|sqlMany|0|sql_read|identifier_exact_v1|sql|sql_execute|sql_execute_v1=1`
+- `zttp:sql|sqlExec|0|sql_write|identifier_exact_v1|sql|sql_execute|sql_execute_v1=1`
+<!-- residual-guards: enabled -->
+- `env`
+- `egress`
+- `cache`
+<!-- residual-guards: evidence -->
+- `env|dynamic-capability`
+- `egress|dynamic-capability-egress`
+- `cache|dynamic-capability-cache`
+<!-- residual-guards: end -->
+
+Each policy category accepts at most 256 entries. Exact membership lookup uses
+an immutable sorted index and takes at most nine comparisons at that maximum.
+The serialized policy is capped at 256 KiB. Non-endpoint identifiers are capped
+at 255 bytes and normalized endpoints at 512 bytes.
+
 ### What proof acceptance unlocks, and what it does not
 
 Only a proof-checked contract drives behavior that is unsound if a claim is
@@ -501,6 +548,10 @@ A development server, a live-reload swap, and a `-Dhandler` build carry no
 artifact and no certificate, so they get none of those. That is the same rule
 seen from the other side, not an exemption: there is no consumer, so there is
 nothing checked, so nothing is promoted.
+
+A guarded installed generation is not eligible for the certificate-free live
+swap path. A candidate that would add or strand a residual guard is refused and
+the previous generation stays active.
 
 Nothing about acceptance relaxes a runtime control. Bytecode structural
 verification, capability enforcement, request isolation, authorization, limits,
@@ -524,11 +575,12 @@ artifact, so that command reports provenance and says so.
 
 ### Format cutover
 
-The self-extract payload is v2, the attestation envelope is `zttp-attest-v3`,
-and the proof bundle is `zttp-bundle-2`. All three are checked for equality
-rather than a lower bound, and a predecessor is refused with a rebuild
-diagnostic. A v1 payload committed to the entry module alone; reinterpreting one
-under the current rules would report a coverage it never had.
+Production accepts certificate schema `3` and proof system `zttp_pcc_v2 = 2`
+only. The self-extract payload is v3, the attestation envelope is
+`zttp-attest-v4`, and the proof bundle is `zttp-bundle-3`. Every identity is
+checked for equality rather than a lower bound. An immediate predecessor is
+refused with a rebuild diagnostic instead of being reinterpreted under the
+current proof and guard rules.
 
 ## Running Tests
 

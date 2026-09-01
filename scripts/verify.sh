@@ -134,6 +134,9 @@ bash scripts/check-proof-checker.sh
 step "bash scripts/check-proof-ratchet.sh  (published trusted boundary matches the kernel)"
 bash scripts/check-proof-ratchet.sh
 
+step "bash scripts/check-residual-guards.sh  (guard catalogs, evidence, and docs agree)"
+bash scripts/check-residual-guards.sh
+
 step "bash scripts/check-semantics-spec.sh  (strict semantics spec gate)"
 bash scripts/check-semantics-spec.sh
 

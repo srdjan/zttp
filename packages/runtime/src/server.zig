@@ -1311,98 +1311,6 @@ pub const AppendedPayload = execution_spec.AppendedPayload;
 // Server Implementation
 // ============================================================================
 
-/// Deep-copy a borrowed string list into freshly owned slices. On failure the
-/// partial allocation is unwound so nothing leaks.
-fn dupeStringList(allocator: std.mem.Allocator, values: []const []const u8) ![]const []const u8 {
-    const out = try allocator.alloc([]const u8, values.len);
-    errdefer allocator.free(out);
-    var filled: usize = 0;
-    errdefer for (out[0..filled]) |value| allocator.free(value);
-    for (values, 0..) |value, i| {
-        out[i] = try allocator.dupe(u8, value);
-        filled = i + 1;
-    }
-    return out;
-}
-
-fn freeStringList(allocator: std.mem.Allocator, values: []const []const u8) void {
-    for (values) |value| allocator.free(value);
-    allocator.free(values);
-}
-
-const OwnedDevPolicy = struct {
-    policy: engine.RuntimePolicy,
-    env_values: ?[]const []const u8 = null,
-    egress_values: ?[]const []const u8 = null,
-    cache_values: ?[]const []const u8 = null,
-    // Normalized per-query allowlist (name owned, operation static, no
-    // statement). Freed by hand below, never via SqlQueryInfo.deinit.
-    sql_queries: ?[]engine.SqlQueryInfo = null,
-
-    fn deinit(self: *OwnedDevPolicy, allocator: std.mem.Allocator) void {
-        if (self.env_values) |values| freeStringList(allocator, values);
-        if (self.egress_values) |values| freeStringList(allocator, values);
-        if (self.cache_values) |values| freeStringList(allocator, values);
-        if (self.sql_queries) |queries| {
-            for (queries) |query| allocator.free(query.name);
-            allocator.free(queries);
-        }
-        self.* = .{ .policy = .{} };
-    }
-};
-
-fn ownDevPolicy(
-    allocator: std.mem.Allocator,
-    contract: *const engine.HandlerContract,
-    configured: ?*const engine.HandlerPolicy,
-) !OwnedDevPolicy {
-    const borrowed = engine.contractRuntimePolicy(contract, configured);
-    var owned = OwnedDevPolicy{ .policy = borrowed };
-    errdefer owned.deinit(allocator);
-
-    if (borrowed.env.values.len > 0) {
-        owned.env_values = try dupeStringList(allocator, borrowed.env.values);
-        owned.policy.env.values = owned.env_values.?;
-    }
-    if (borrowed.egress.values.len > 0) {
-        owned.egress_values = try dupeStringList(allocator, borrowed.egress.values);
-        owned.policy.egress.values = owned.egress_values.?;
-    }
-    if (borrowed.cache.values.len > 0) {
-        owned.cache_values = try dupeStringList(allocator, borrowed.cache.values);
-        owned.policy.cache.values = owned.cache_values.?;
-    }
-    if (borrowed.sql.queries.len > 0) {
-        // Keep the per-query operation (read/write) instead of flattening to a
-        // name list, so a dev/serve generation enforces the same db.read/db.write
-        // split the deployed binary does. Names are duped; operation is encoded
-        // statically via normalizedSqlQuery.
-        const queries = try allocator.alloc(engine.SqlQueryInfo, borrowed.sql.queries.len);
-        errdefer allocator.free(queries);
-        var filled: usize = 0;
-        errdefer for (queries[0..filled]) |query| allocator.free(query.name);
-        for (borrowed.sql.queries, 0..) |query, i| {
-            const name = try allocator.dupe(u8, query.name);
-            queries[i] = engine.normalizedSqlQuery(name, engine.sqlQueryIsReadOnly(query));
-            filled = i + 1;
-        }
-        owned.sql_queries = queries;
-        owned.policy.sql = .{ .enabled = borrowed.sql.enabled, .queries = queries };
-    }
-
-    return owned;
-}
-
-fn denyAllDevPolicy() engine.RuntimePolicy {
-    return .{
-        .env = .{ .enabled = true, .values = &.{} },
-        .egress = .{ .enabled = true, .values = &.{} },
-        .egress_scopes = .{},
-        .cache = .{ .enabled = true, .values = &.{} },
-        .sql = .{ .enabled = true, .values = &.{}, .queries = &.{} },
-    };
-}
-
 /// Ignore SIGPIPE process-wide so a client that disconnects mid-response turns
 /// a write into EPIPE (surfaced as error.BrokenPipe, an expected network error)
 /// instead of delivering SIGPIPE, whose default disposition kills the whole
@@ -1500,18 +1408,6 @@ pub const Server = struct {
     /// Process-owned in-memory actor queue for opt-in `zttp:queue` delivery.
     /// Deinitialised after handler pools so no runtime can hold a queue pointer.
     actor_queue: ?actor_queue.ActorQueue = null,
-    /// Dev/serve policy backing storage. The contract-derived RuntimePolicy
-    /// handed to the pool borrows string slices from these structs. Three
-    /// generations are kept so that runtimes that started under policy N can
-    /// still read its slices through up to two subsequent reloads. A proper
-    /// fix would ref-count OwnedDevPolicy and defer its deinit until all
-    /// runtimes that acquired it under that generation have released it; the
-    /// three-generation window is a best-effort mitigation for dev use only.
-    /// All three generations are freed in `deinit`. Null on AOT/embedded paths.
-    dev_policy_current: ?OwnedDevPolicy = null,
-    dev_policy_previous: ?OwnedDevPolicy = null,
-    dev_policy_prev_prev: ?OwnedDevPolicy = null,
-
     const Self = @This();
     const IoBackend = Io.Threaded;
 
@@ -1595,9 +1491,6 @@ pub const Server = struct {
         if (self.well_known_doc) |*wkd| wkd.deinit(self.allocator);
         if (self.security_logger) |logger| logger.deinit();
         if (self.studio) |*studio| studio.deinit();
-        if (self.dev_policy_prev_prev) |*pp| pp.deinit(self.allocator);
-        if (self.dev_policy_previous) |*prev| prev.deinit(self.allocator);
-        if (self.dev_policy_current) |*cur| cur.deinit(self.allocator);
         engine.deinitSecurityEvents();
         self.static_cache.deinit();
         if (self.evented_ready) {
@@ -1804,10 +1697,16 @@ pub const Server = struct {
         };
         var verify_result = attest_envelope.verify(self.allocator, jws) catch |err| {
             if (!builtin.is_test) {
-                std.log.err(
-                    "attestation: embedded JWS failed self-verification ({s}); refusing to serve",
-                    .{@errorName(err)},
-                );
+                switch (err) {
+                    error.UnsupportedAttestationVersion => std.log.err(
+                        "attestation: embedded receipt uses an unsupported format; rebuild the artifact before serving",
+                        .{},
+                    ),
+                    else => std.log.err(
+                        "attestation: embedded JWS failed self-verification ({s}); refusing to serve",
+                        .{@errorName(err)},
+                    ),
+                }
             }
             return error.InvalidEmbeddedAttestation;
         };
@@ -2061,32 +1960,22 @@ pub const Server = struct {
     /// HandlerContract and push it onto the runtime pool (dev/serve live path
     /// only). Fail-closed on allocation failure so a proven-restricted handler
     /// never becomes permissive after a reload.
-    pub fn setDevCapabilityPolicy(self: *Self, contract: *const engine.HandlerContract) void {
+    pub fn setDevCapabilityPolicy(self: *Self, contract: *const engine.HandlerContract) !void {
         const pool = if (self.pool) |*p| p else return;
-        pool.setDevCapabilityPolicy(self.stageDevCapabilityPolicy(contract));
+        try pool.setDevCapabilityPolicyIndexed(
+            self.stageDevCapabilityPolicy(contract),
+            engine.contractRequiresRuntimePolicyIndex(contract),
+        );
     }
 
-    /// Prepare owned backing storage for a contract-derived dev policy and
-    /// return the borrowed runtime view. The next call keeps this generation in
-    /// `previous` so in-flight runtimes can finish safely.
-    pub fn stageDevCapabilityPolicy(self: *Self, contract: *const engine.HandlerContract) engine.RuntimePolicy {
-        // Rotate generations: free gen N-2, keep gen N-1 alive for in-flight
-        // runtimes still referencing it.
-        if (self.dev_policy_prev_prev) |*pp| pp.deinit(self.allocator);
-        self.dev_policy_prev_prev = self.dev_policy_previous;
-        self.dev_policy_previous = self.dev_policy_current;
-        self.dev_policy_current = null;
-
+    /// Return the borrowed contract view. The pool deep-copies it into the new
+    /// refcounted generation before this contract can be retired.
+    pub fn stageDevCapabilityPolicy(_: *Self, contract: *const engine.HandlerContract) engine.RuntimePolicy {
         // No configured policy reaches the live dev path: `zttp dev` compiles
         // with strict checking on, so every category the contract carries is
         // one the compiler enumerated. A category it could not enumerate
         // installs deny-all rather than the allow-all it used to.
-        const owned = ownDevPolicy(self.allocator, contract, null) catch {
-            return denyAllDevPolicy();
-        };
-        const policy = owned.policy;
-        self.dev_policy_current = owned;
-        return policy;
+        return engine.contractRuntimePolicy(contract, null);
     }
 
     fn syncStudioCallerReceipt(self: *Self) void {
@@ -2261,6 +2150,11 @@ pub const Server = struct {
                 self.system_runtime.?.targets.items.len, system_path,
             });
         }
+
+        // The accepted deployed tuple determines whether authoritative sink
+        // membership must use the bounded policy index. Embedded AOT handlers
+        // carry the same bit in generated code; the pool combines both inputs.
+        pool_rt_config.runtime_policy_index_required = self.generationIsGuarded();
 
         var pool_timer = engine.Timer.start() catch null;
         self.pool = try engine.initHandlerPool(
@@ -3977,29 +3871,6 @@ test "findHeaderEnd handles short buffers" {
     try std.testing.expectEqual(@as(?usize, null), findHeaderEnd(""));
     try std.testing.expectEqual(@as(?usize, null), findHeaderEnd("\r\n\r"));
     try std.testing.expectEqual(@as(?usize, 0), findHeaderEnd("\r\n\r\n"));
-}
-
-test "dupeStringList round-trips into independent allocations" {
-    const allocator = std.testing.allocator;
-    const hosts = [_][]const u8{ "api.stripe.com", "localhost" };
-    const dup = try dupeStringList(allocator, &hosts);
-    defer freeStringList(allocator, dup);
-
-    try std.testing.expectEqual(@as(usize, 2), dup.len);
-    try std.testing.expectEqualStrings("api.stripe.com", dup[0]);
-    try std.testing.expectEqualStrings("localhost", dup[1]);
-    // Not aliasing the borrowed input.
-    try std.testing.expect(dup[0].ptr != hosts[0].ptr);
-}
-
-test "dupeStringList unwinds partial allocation on failure" {
-    const hosts = [_][]const u8{ "a", "b", "c" };
-    // Allocations: outer slice, dupe("a"), dupe("b") <- fails here.
-    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 2 });
-    const result = dupeStringList(failing.allocator(), &hosts);
-    try std.testing.expectError(error.OutOfMemory, result);
-    // No leak report from testing.allocator confirms the errdefer ladder freed
-    // the outer slice and the host duped before the failure.
 }
 
 test "attestationClaimsMatchContract rejects JWS describing different bytecode" {

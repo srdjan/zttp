@@ -3485,6 +3485,11 @@ fn writeCapabilityPolicy(writer: anytype, policy: ?HandlerPolicy, contract: ?*co
         try writePolicySectionFromAllowList(writer, "sql", null);
     }
     try writer.writeAll("};\n");
+    try writer.writeAll("pub const runtime_policy_index_required = ");
+    try writer.writeAll(if (contract) |c|
+        if (handler_policy.contractRequiresRuntimePolicyIndex(c)) "true;\n" else "false;\n"
+    else
+        "false;\n");
 }
 
 fn writePolicySectionFromAllowList(writer: anytype, field_name: []const u8, section: ?handler_policy.AllowList) !void {
@@ -6098,6 +6103,15 @@ test "writeCapabilityPolicy emits zig-fmt stable empty allowlists" {
 
     try std.testing.expect(std.mem.indexOf(u8, output.items, ".values = &[_][]const u8{},") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, ".values = &[_][]const u8{\n        },") == null);
+    try std.testing.expect(std.mem.indexOf(u8, output.items, "runtime_policy_index_required = false;") != null);
+
+    output.clearRetainingCapacity();
+    aw = .fromArrayList(allocator, &output);
+    var guarded = handler_contract.emptyContract("borrowed-test-path.ts");
+    guarded.env.dynamic = true;
+    try writeCapabilityPolicy(&aw.writer, null, &guarded);
+    output = aw.toArrayList();
+    try std.testing.expect(std.mem.indexOf(u8, output.items, "runtime_policy_index_required = true;") != null);
 }
 
 test {

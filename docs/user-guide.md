@@ -417,6 +417,10 @@ the analyzer. It checks:
 - a capability policy named by the `policy` entry in `zttp.json` is enforced
   against the handler, and a policy that cannot be read stops the command
   instead of producing an unrestricted verdict;
+- computed environment keys, egress endpoints, and cache namespaces are
+  admitted only when that policy declares the matching section. They become
+  residual guards, not proven Properties. Computed SQL names remain rejected
+  because the policy cannot distinguish reads from writes;
 - flow checks catch secret, credential, validation, injection, and PII issues
   where enough structure is visible.
 
@@ -488,6 +492,13 @@ missing, does not describe the bytes that were loaded, or does not meet the
 production policy, the process refuses to serve and says at which stage and for
 what reason. That check happens before any runtime is warmed, so a refused
 artifact never has a handler ready.
+
+Production artifacts use certificate schema `3`, proof system
+`zttp_pcc_v2 = 2`, self-extract format `3`, attestation
+`zttp-attest-v4`, and bundle format `zttp-bundle-3`. Immediate predecessor
+formats are refused with a rebuild instruction. A guarded artifact must also
+have exact residual-plan and runtime-policy coverage before startup. Guarded
+installed generations cannot use the certificate-free live-swap path.
 
 Two commands answer two different questions:
 

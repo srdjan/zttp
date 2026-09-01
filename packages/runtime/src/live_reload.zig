@@ -526,8 +526,11 @@ pub const LiveReloadState = struct {
                 printReload("Contract failed validation: {}.\n", .{err});
                 return;
             };
+            self.server.setDevCapabilityPolicy(hc) catch |err| {
+                printReload("Failed to install runtime policy generation: {}.\n", .{err});
+                return;
+            };
             self.server.updateContract(validated);
-            self.server.setDevCapabilityPolicy(hc);
         }
     }
 
@@ -858,7 +861,11 @@ pub const LiveReloadState = struct {
         // prior generation is it safe to retire older code. Freeing before
         // the swap (the previous bug) raced a concurrent worker reading the
         // freed handler_code in ensureRuntime on a rapid second save.
-        const invalidated = pool.reloadHandlerWithPolicy(new_code, self.handler_path, dev_policy);
+        const invalidated = pool.reloadHandlerWithPolicy(new_code, self.handler_path, dev_policy) catch |err| {
+            if (validated_contract) |*validated| validated.deinit();
+            printReload("Failed to install handler generation: {}. Keeping previous handler active.\n", .{err});
+            return false;
+        };
         new_code_ptr.* = null;
         self.rotateGenerations(new_code);
 

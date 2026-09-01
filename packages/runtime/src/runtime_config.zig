@@ -6,6 +6,7 @@ const std = @import("std");
 const zq = @import("zts");
 const embedded_handler = @import("embedded_handler");
 const fault_explain = @import("fault_explain.zig");
+const RuntimePolicyGeneration = @import("runtime_policy_generation.zig").RuntimePolicyGeneration;
 
 const cost_meter = zq.CostMeter;
 
@@ -98,6 +99,10 @@ pub const RuntimeConfig = struct {
     /// `embedded_handler.capability_policy`. Borrowed backing storage is owned
     /// by the dev server and retained across in-flight runtime generations.
     dev_capability_policy: ?zq.RuntimePolicy = null,
+    /// Internal activation bit. Only an accepted artifact with residual guards
+    /// sets this before pool construction. Static-only generations keep their
+    /// installed index absent and use the existing literal allowlist path.
+    runtime_policy_index_required: bool = false,
     /// Per-request handler execution deadline in ms. 0 = disabled.
     /// Checked cooperatively at interpreter loop back-edges and call entries.
     request_timeout_ms: u32 = 0,
@@ -181,7 +186,15 @@ pub fn applyRuntimeConfig(ctx: *zq.Context, gc_state: *zq.GC, heap_state: *zq.He
     }
 }
 
-pub fn applyEmbeddedCapabilityPolicy(ctx: *zq.Context, config: RuntimeConfig) void {
+pub fn applyEmbeddedCapabilityPolicy(
+    ctx: *zq.Context,
+    config: RuntimeConfig,
+    installed: ?*const RuntimePolicyGeneration,
+) void {
+    if (installed) |generation| {
+        ctx.capability_policy = generation.policy;
+        return;
+    }
     ctx.capability_policy = embedded_handler.capability_policy;
     // Dev/serve override: the embedded policy is the empty stub here, so the
     // full contract-derived policy is the enforcement source in interpreted

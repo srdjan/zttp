@@ -475,11 +475,13 @@ fn normalizedIdentifier(value_bytes: []const u8, out: []u8) ?[]const u8 {
 }
 
 fn emitPolicyDenial(ctx: *const context.Context, kind: security_events.SecurityEventKind) void {
-    security_events.emitGlobal(security_events.SecurityEvent.init(
+    var event = security_events.SecurityEvent.init(
         kind,
         currentActiveModuleSpecifier(ctx),
         sinkName(kind),
-    ));
+    );
+    event.policy_generation = ctx.policy_generation;
+    security_events.emitGlobal(event);
 }
 
 pub fn allowsCacheNamespaceForActiveModule(
@@ -559,6 +561,7 @@ pub fn allowsSqlWriteForActiveModule(
         policy.emitDenied(.{
             .action = .db_write,
             .resource = .{ .kind = policy.resource_kind_sql_query, .id = canonical },
+            .policy_generation = ctx.policy_generation,
         }, .not_in_allowlist);
     }
     return allowed;

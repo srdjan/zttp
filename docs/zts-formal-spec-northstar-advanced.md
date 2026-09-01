@@ -183,10 +183,11 @@ semantics. Twelve IR nodes and seven opcodes are specified directly, one
 opcode path is translation-validated, and the remaining reachable items are
 explicitly trusted with narrow reasons.
 
-The deployed artifact now carries a schema-v2 certificate for
-`zttp_pcc_v1`. The leaf consumer reconstructs the required obligations, binds
+The deployed artifact now carries a schema-3 certificate for
+`zttp_pcc_v2`. The leaf consumer reconstructs the required obligations, binds
 the complete executable graph and authority-bearing certificate sections, and
-checks policy before the process serves. Assurance is deliberately staged:
+checks static proof and residual guard policy before the process serves.
+Assurance is deliberately staged:
 `response_total` is re-derived, the bytecode opcode relation remains trusted,
 and `results_checked`, `no_secret_leakage`, and `capability_bounded` enter the
 production floor at `tested`. Production solver edges are disabled.
@@ -2320,7 +2321,7 @@ The target canonical bundle binds:
 
 Hashes without authenticated retrieval and reconstruction are insufficient.
 
-The shipped `zttp-bundle-2` is a staged subset of that target. Its manifest
+The shipped `zttp-bundle-3` is a staged subset of that target. Its manifest
 binds the contract and optional binary, certificate, and replay components. If
 the binary and certificate are present, `zttp proofs verify` reconstructs the
 artifact's executable graph and invokes the independent consumer. The graph

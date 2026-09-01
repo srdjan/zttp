@@ -23,6 +23,7 @@ pub const SourceIdentity = zq.SourceIdentity;
 pub const SqlQueryInfo = zq.handler_policy.SqlQueryInfo;
 pub const normalizedSqlQuery = zq.handler_policy.normalizedSqlQuery;
 pub const sqlQueryIsReadOnly = zq.handler_policy.sqlQueryIsReadOnly;
+pub const contractRequiresRuntimePolicyIndex = zq.handler_policy.contractRequiresRuntimePolicyIndex;
 pub const JSValue = zq.JSValue;
 pub const Instant = zq.compat.Instant;
 pub const Timer = zq.compat.Timer;

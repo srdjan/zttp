@@ -55,6 +55,7 @@ const runtime_config_mod = @import("runtime_config.zig");
 const cost_meter = zq.CostMeter;
 
 const RuntimeConfig = runtime_config_mod.RuntimeConfig;
+const RuntimePolicyGeneration = @import("runtime_policy_generation.zig").RuntimePolicyGeneration;
 
 /// In-process registry of co-located sub-handlers, used by zttp:workflow to
 /// dispatch from an orchestrator handler without HTTP.
@@ -691,15 +692,17 @@ test "a pooled wrapper re-points the host slot and clears it on deinit" {
     var pool = try zq.LockFreePool.init(allocator, .{ .max_size = 1 });
     defer pool.deinit();
     const base_rt = try pool.acquire();
+    const policy_generation = try RuntimePolicyGeneration.create(allocator, 1, .{}, false);
+    defer policy_generation.release();
 
     // The pooled Context outlives each wrapper, so the slot must follow the
     // current wrapper and must be empty in between.
-    const first = try HandlerInstance.initFromPool(base_rt, .{});
+    const first = try HandlerInstance.initFromPool(base_rt, .{}, policy_generation);
     try std.testing.expectEqual(@as(?*HandlerInstance, first), HandlerInstance.fromContext(base_rt.ctx));
     first.deinit();
     try std.testing.expectEqual(@as(?*anyopaque, null), base_rt.ctx.host);
 
-    const second = try HandlerInstance.initFromPool(base_rt, .{});
+    const second = try HandlerInstance.initFromPool(base_rt, .{}, policy_generation);
     defer second.deinit();
     try std.testing.expectEqual(@as(?*HandlerInstance, second), HandlerInstance.fromContext(base_rt.ctx));
 }

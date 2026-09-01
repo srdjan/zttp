@@ -147,21 +147,12 @@ pub const measured_families = (FamilySet{})
     .with(.egress)
     .with(.cache);
 
-/// Whether a guarded operation may compile.
-///
-/// Off, deliberately. The classification is real and runs today - it is what
-/// decides which diagnostic an author gets - but a guarded operation is still a
-/// build error, because a guarded handler produces an artifact only the
-/// successor certificate can carry. Admit one while the producer still emits
-/// the predecessor and `zttp build` fails at
-/// `GuardedOperationsNotRepresentable` instead of giving the author anything to
-/// read. The U7 cutover turns this on in the same commit that makes the
-/// successor certificate the strict default, and nowhere else.
-pub const classification_enabled = false;
+/// The production classification gate. The cutover pins this true and the
+/// residual-guard drift gate rejects any disabled production state.
+pub const classification_enabled = true;
 
 /// The families the classifier admits. Which operations are guarded is a
-/// question about evidence, and it does not change with the switch above; what
-/// changes is whether a guarded one is fatal.
+/// question about checked evidence and remains independent of catalog size.
 pub const enabled_families: FamilySet = measured_families;
 
 pub const Section = enum { env, egress, cache, sql };
@@ -299,8 +290,7 @@ test "classification is exhaustive over the surface" {
 }
 
 test "the shipped context classifies the enabled families as guarded" {
-    // Classification does not wait for the cutover. Only fatality does, and
-    // that decision lives at the diagnostic site, not here.
+    try testing.expect(classification_enabled);
     const all_sections = (SectionSet{}).with(.env).with(.egress).with(.cache).with(.sql);
     for (entries) |entry| {
         const disposition = classifyComputed(entry.module, entry.export_name, entry.arg_index, .{

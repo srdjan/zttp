@@ -7,7 +7,7 @@ repository is in scope.
 ## Assets
 
 - Handler source, compiled bytecode, contracts, generated policies, proof
-  certificates, and producer receipts.
+  certificates, residual guard plans, and producer receipts.
 - Request data crossing the HTTP boundary: method, path, headers, query, and
   body.
 - Runtime capabilities exposed through `zttp:*` modules: env, outbound HTTP,
@@ -45,6 +45,12 @@ repository is in scope.
   the compiler or the server, so the authority surface an auditor has to read is
   one directory. What it does not re-derive is published in
   `docs/verification.md` and pinned by `scripts/check-proof-ratchet.sh`.
+- A residual guard is consumer-owned runtime authority, not a static proof.
+  Certificate schema 3 binds the exact serialized runtime policy and residual
+  plan into the executable graph. The kernel reconstructs exact coverage before
+  startup. The authoritative sink then decides the actual resource under the
+  request's pinned policy generation. Producer Properties, guard coverage, and
+  live allow or deny outcomes never substitute for one another.
 - Developer tools can read and write the local workspace. They are not a
   sandbox boundary; use normal source-control review for generated changes.
 
@@ -73,6 +79,8 @@ repository is in scope.
 - Static files must stay within the configured root after canonical path
   resolution and must not follow symlink escapes.
 - Runtime policy denies must emit security events.
+- Default guard telemetry contains only a stable guard identity, kind, outcome,
+  and policy generation. It contains no raw resource or resource-derived hash.
 - Dev-mode execution is not treated as sandboxed; precompiled and deploy paths
   are the sandboxed surfaces.
 - Only bytecode that passes `packages/zts/src/bytecode_verifier.zig`
@@ -82,12 +90,23 @@ repository is in scope.
 - A configured capability policy that cannot be read, parsed, or applied stops
   the command. No analyzer boundary substitutes an unrestricted policy and then
   publishes a verdict, a contract, an artifact, or a proof capsule.
+- Computed env, egress, and cache resources require their policy sections.
+  Computed SQL remains rejected because its policy cannot distinguish reads
+  from writes. An unnamed egress address scope permits no connection.
+- Egress authorizes the normalized scheme, host, and effective port before DNS,
+  then authorizes the resolved address scope before opening a socket. Every
+  retry repeats both checks under one pinned generation.
+- Production starts no pool, prewarms no runtime, and serves no request until
+  schema 3 and `zttp_pcc_v2` proof acceptance includes exact guard coverage.
+  Guarded generations cannot enter the certificate-free live-swap path.
 - A proof bundle is untrusted input. `zttp proofs verify` accepts only the
-  `contract`, `binary`, and `replay` components, requires a `contract`, and
+  `contract`, `binary`, `certificate`, and `replay` components, requires a `contract`, and
   requires each component to carry a distinct relative path and a lowercase
   sha256. Every path segment is opened without following symlinks, so a
   component that resolves outside the bundle directory is refused rather than
   hashed.
+- Self-extract format 3, `zttp-attest-v4`, and `zttp-bundle-3` are equality
+  checks. Immediate predecessors are refused with rebuild guidance.
 
 ## Known Footguns
 
