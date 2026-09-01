@@ -418,7 +418,7 @@ pub const HandlerInstance = struct {
         };
 
         applyRuntimeConfig(pool_rt.ctx, pool_rt.gc_state, pool_rt.heap_state, config);
-        applyEmbeddedCapabilityPolicy(pool_rt.ctx, config, retained_policy);
+        applyEmbeddedCapabilityPolicy(pool_rt.ctx, config, retained_policy.policy);
         pool_rt.ctx.policy_generation = retained_policy.id;
 
         // Pooled Contexts outlive this wrapper and are handed to the next

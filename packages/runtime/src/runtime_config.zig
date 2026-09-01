@@ -6,7 +6,6 @@ const std = @import("std");
 const zq = @import("zts");
 const embedded_handler = @import("embedded_handler");
 const fault_explain = @import("fault_explain.zig");
-const RuntimePolicyGeneration = @import("runtime_policy_generation.zig").RuntimePolicyGeneration;
 
 const cost_meter = zq.CostMeter;
 
@@ -189,10 +188,10 @@ pub fn applyRuntimeConfig(ctx: *zq.Context, gc_state: *zq.GC, heap_state: *zq.He
 pub fn applyEmbeddedCapabilityPolicy(
     ctx: *zq.Context,
     config: RuntimeConfig,
-    installed: ?*const RuntimePolicyGeneration,
+    installed: ?zq.RuntimePolicy,
 ) void {
-    if (installed) |generation| {
-        ctx.capability_policy = generation.policy;
+    if (installed) |policy| {
+        ctx.capability_policy = policy;
         return;
     }
     ctx.capability_policy = embedded_handler.capability_policy;
