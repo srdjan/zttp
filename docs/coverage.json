@@ -1,5 +1,5 @@
 {
-  "runId": "09e0a69c4d59-1788247346069-45521",
+  "runId": "a14504fc51c6-1788264095706-41254",
   "complete": true,
   "publishable": true,
   "publicationMode": true,
@@ -25,24 +25,24 @@
   "securityProbeHash": "331b2826a8e9c8496720c24b05ff0a5923073a469010e951885214f9109c7792",
   "thresholdHash": "7c8a65863f5fe1e294fb71ded1ca6e26ea28a224281055e34f63b4511507c343",
   "manifestHash": "b1a729d52dae19439252fe91baf0d03c0abe1feb89ea6a81dfecf4b07893583e",
-  "resultRunHash": "9251cc85c99142ee82d2052a65095e5dcc72e99bb32918eaa2911633413a4ff2",
+  "resultRunHash": "7772bd1c7a1cca351895bbd6c19c635a77050acfcac8517a75ea40c653c1aea0",
   "promptPersonaHash": "5ae842d6cd259973f4dabb373887b0c067fbbd0adbc8b1b3b43a7d6146bb2cb4",
   "providerNeutralCatalogHash": "b190e14269c9c021d71467bcdbc174141df2e7c5df5bbe5be3cb9e55092b354f",
   "providerSerializedCatalogHash": "fe8d3a3bb01106b66571e8e500bf4f5d85aed40fa4449543599275e9e6af6a99",
-  "schemaHash": "c22a5b048fc30217b1c03f2cfd822628173528697dbf7d87b28d80960c72d8cc",
-  "metaHash": "2ecbae00e2192a0945ec3a41ad5d86c510e9c22374fbada92ea39a88b45d3784",
+  "schemaHash": "102ec8a15eb173122acd11fd4d2612b7c48cbbc5b6c5145923df4751e298b6df",
+  "metaHash": "eb7a9c237e4a05b7aeba090bafad263df8b0a3608dfc0302f2eaeae9dd2b9b10",
   "grammarHash": "8c555c6dfe5afb98cf73d034a548dd5f18db5a6b540f334a43f0ac871f4d73be",
   "semanticsHash": "83b822bd0dee8e5f9a9231501f0f95b34fa48a0f08c671ade7a8bee822b877b8",
   "diagnosticHash": "92a76ec1e2323333f5a8abecd9d6bdb010dd0bd4a966f78e4f13e3f7053e3694",
   "policyHash": "97aec67e484acda2ee3c13bf9fa8cd9de9becd8ea24cd51509092f2ca0068bc7",
-  "sourceCommit": "09e0a69c4d596716a7351828d3fbd60914b9a2cb",
+  "sourceCommit": "a14504fc51c6f1b2bdc2e951d55577284479a4ca",
   "sourceDirty": false,
   "rulesTotal": 59,
   "rulesTripped": 3,
   "tripped": [
     "ZTS400",
     "ZTS500",
-    "ZTS501"
+    "ZTS509"
   ],
   "untripped": [
     "ZTS302",
@@ -53,6 +53,7 @@
     "ZTS308",
     "ZTS309",
     "ZTS310",
+    "ZTS501",
     "ZTS502",
     "ZTS600",
     "ZTS629",
@@ -86,7 +87,6 @@
     "ZTS506",
     "ZTS508",
     "ZTS607",
-    "ZTS509",
     "ZTS510",
     "ZTS511",
     "ZTS512",
@@ -104,8 +104,11 @@
   ],
   "offRegistry": [
     "ZTS001",
-    "ZTS202",
-    "ZTS214"
+    "ZTS002",
+    "ZTS042",
+    "ZTS056",
+    "ZTS200",
+    "ZTS202"
   ],
   "recorded": "2026-09-01",
   "seedSuite": {
@@ -180,7 +183,7 @@
   },
   "corpusUnion": {
     "corpusVersion": "0012ad8ca6d5d08ac5023862378fe0c971b3672dadbc079256fb47d810033516",
-    "observations": 18,
+    "observations": 19,
     "distinctSets": 5,
     "smallestSet": 2,
     "largestSet": 5,
