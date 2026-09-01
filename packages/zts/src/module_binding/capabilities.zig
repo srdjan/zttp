@@ -656,6 +656,45 @@ test "wrapModuleFnWithCapabilities invocation activates Context authorization" {
     try std.testing.expect(ctx.active_module_scope == null);
 }
 
+test "the env read enforces the allowlist without the optional pre-check" {
+    const allocator = std.testing.allocator;
+    var gc_state = try gc.GC.init(allocator, .{});
+    defer gc_state.deinit();
+    const ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const Observed = struct {
+        var denied_read: ?[]const u8 = "not run";
+    };
+
+    // A module that declares .env and never calls allowsEnv still cannot read
+    // outside the list: the read itself is the sink, and the pre-check is a
+    // convenience in front of it.
+    const module_fn: ModuleFn = struct {
+        fn f(handle: *ModuleHandle, _: value.JSValue, _: []const value.JSValue) anyerror!value.JSValue {
+            const active_ctx = handleToContext(handle);
+            Observed.denied_read = try readEnvChecked(active_ctx, "PATH");
+            return value.JSValue.true_val;
+        }
+    }.f;
+
+    const wrapped = comptime wrapModuleFnWithCapabilities(
+        module_fn,
+        "zttp:env",
+        &.{.env},
+    );
+
+    // The positive case first, so a run where PATH is simply unset fails here
+    // rather than passing the denial below for the wrong reason.
+    ctx.capability_policy = .{ .env = .{ .enabled = true, .values = &[_][]const u8{"PATH"} } };
+    _ = try wrapped(ctx, value.JSValue.undefined_val, &.{});
+    try std.testing.expect(Observed.denied_read != null);
+
+    ctx.capability_policy = .{ .env = .{ .enabled = true, .values = &[_][]const u8{"ALLOWED_ONLY"} } };
+    _ = try wrapped(ctx, value.JSValue.undefined_val, &.{});
+    try std.testing.expect(Observed.denied_read == null);
+}
+
 test "the guard refuses an identifier no policy entry can hold" {
     const allocator = std.testing.allocator;
     var gc_state = try gc.GC.init(allocator, .{});

@@ -3251,19 +3251,26 @@ test "a denied cache namespace never creates the store" {
         try std.testing.expect(rt.ctx.module_state[cache_slot] != null);
     }
 
-    // A denied one does not. The guard runs before getOrCreateStore, so there
-    // is no store to have read, mutated, or counted - which is a stronger
-    // statement than "the deny helper returned false".
-    {
+    // A denied one does not, for any of the five operations. The guard runs
+    // before getOrCreateStore, so there is no store to have read, mutated, or
+    // counted - a stronger statement than "the deny helper returned false".
+    const denied_calls = [_][]const u8{
+        "cacheGet(\"blocked\", \"k\")",
+        "cacheSet(\"blocked\", \"k\", \"v\")",
+        "cacheDelete(\"blocked\", \"k\")",
+        "cacheIncr(\"blocked\", \"k\", 1)",
+        "cacheStats(\"blocked\")",
+    };
+    for (denied_calls) |call| {
         const rt = try HandlerInstance.init(allocator, .{ .dev_capability_policy = policy });
         defer rt.deinit();
-        try rt.loadHandler(
-            \\import { cacheSet } from "zttp:cache";
-            \\function handler(req) {
-            \\  cacheSet("blocked", "k", "v");
-            \\  return Response.json({ wrote: true });
-            \\}
-        , "<cache-denied>");
+        const code = try std.fmt.allocPrint(allocator,
+            \\import {{ cacheGet, cacheSet, cacheDelete, cacheIncr, cacheStats }} from "zttp:cache";
+            \\function handler(req) {{
+            \\  return Response.json({{ out: {s} }});
+            \\}}
+        , .{call});
+        try rt.loadHandler(code, "<cache-denied>");
         const request_val = try rt.createRequestObject(request.asView());
         try std.testing.expectError(
             error.NativeFunctionError,

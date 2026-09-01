@@ -31,6 +31,7 @@
 zts-base base_root.zig
 zts-base compat.zig
 zts-base endpoint.zig
+zts-base identifier.zig
 zts-base json_utils.zig
 zts-base json_wire.zig
 zts-base known_globals.zig
