@@ -1979,14 +1979,7 @@ pub const StrictChecker = struct {
     /// check does, and two answers to one question is how a guarded call ends
     /// up in one list and not the other.
     pub fn isLiteralOrStaticTemplate(self: *const StrictChecker, node: NodeIndex) bool {
-        const tag = self.ir_view.getTag(node) orelse return false;
-        if (tag == .lit_string) return true;
-        if (tag == .lit_int) return true;
-        if (tag == .identifier) {
-            const binding = self.ir_view.getBinding(node) orelse return false;
-            return self.static_literal_bindings.contains(bindingKey(binding));
-        }
-        return false;
+        return self.isStaticComputedKey(node);
     }
 
     fn resolveAtomName(self: *const StrictChecker, atom_value: u32) ?[]const u8 {
