@@ -104,6 +104,9 @@ pi contract_diff
 pi counterexample
 pi file_io
 pi flow_checker
+# Which guard families the compiler enables, so the stand-in gate can refuse a
+# family that is enabled with no seed the compiler rejects.
+pi guard_catalog
 pi parser
 pi repair_plan
 pi witness_corpus
