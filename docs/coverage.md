@@ -33,7 +33,7 @@ publishing first-draft, intent, or round-trip measurements still requires the
 named model. Developing and verifying the harness, veto, salvage, repair, and
 hole-loop machinery does not.
 
-Recorded 2026-08-28 over corpus `0012ad8ca6d5`. The replay fails
+Recorded 2026-09-01 over corpus `0012ad8ca6d5`. The replay fails
 when this page drifts from the run, so it is regenerated in the same commit as
 whatever moved it, and `git log docs/coverage.json` is the history.
 
@@ -63,7 +63,7 @@ Untripped: `ZTS302`, `ZTS303`, `ZTS304`, `ZTS305`, `ZTS306`, `ZTS308`, `ZTS309`,
 The row above is one draw. The same prompts, seeds, provider, model and
 compiler have measured a different set each time they were recorded, because a
 rule is counted only when the model happens to make the mistake that trips it.
-Across the 17 published runs of corpus `0012ad8ca6d5`, the
+Across the 18 published runs of corpus `0012ad8ca6d5`, the
 tripped set took 5 distinct shapes, the smallest naming
 2 rules and the largest 5.
 
@@ -94,7 +94,7 @@ is printed.
 
 | Rules advertised | Verified firing by a seed | Seeds |
 |---|---|---|
-| 59 | 58 | 59 |
+| 59 | 58 | 61 |
 
 Verified: `POL001`, `POL003`, `POL005`, `POL007`, `ZTS061`, `ZTS302`, `ZTS303`, `ZTS304`, `ZTS305`, `ZTS306`, `ZTS308`, `ZTS309`, `ZTS310`, `ZTS400`, `ZTS401`, `ZTS402`, `ZTS403`, `ZTS404`, `ZTS405`, `ZTS406`, `ZTS407`, `ZTS500`, `ZTS501`, `ZTS502`, `ZTS503`, `ZTS504`, `ZTS505`, `ZTS506`, `ZTS509`, `ZTS510`, `ZTS511`, `ZTS512`, `ZTS600`, `ZTS601`, `ZTS602`, `ZTS603`, `ZTS604`, `ZTS605`, `ZTS606`, `ZTS607`, `ZTS608`, `ZTS609`, `ZTS610`, `ZTS611`, `ZTS612`, `ZTS613`, `ZTS614`, `ZTS616`, `ZTS620`, `ZTS621`, `ZTS622`, `ZTS623`, `ZTS624`, `ZTS625`, `ZTS626`, `ZTS627`, `ZTS628`, `ZTS629`
 
