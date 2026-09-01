@@ -6098,7 +6098,7 @@ test "writeCapabilityPolicy emits zig-fmt stable empty allowlists" {
     const policy = HandlerPolicy{
         .env = .{},
         .egress = .{},
-        .egress_scopes = (zts.endpoint.ScopeSet{}).with(.public).with(.loopback),
+        .egress_scopes = .{ .bits = 5 },
         .cache = .{},
         .sql = .{},
     };
