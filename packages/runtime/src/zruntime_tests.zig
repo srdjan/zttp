@@ -3045,6 +3045,81 @@ test "a resolved scope outside policy denies before the socket" {
     }
 }
 
+test "a denial names the guard, not the request's own bytes" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    try zq.security_events.initGlobal(std.testing.allocator, 32);
+    defer zq.security_events.deinitGlobal();
+
+    var server = try TestHttpServer.init(allocator, .echo_request_json);
+    defer server.join() catch {};
+    try server.start();
+
+    const url = try server.url(allocator, "/secret-looking-path");
+    defer allocator.free(url);
+
+    const rt = try HandlerInstance.init(allocator, .{ .outbound_http_enabled = true });
+    defer rt.deinit();
+    var endpoint_buf: [512]u8 = undefined;
+    const allowed = [_][]const u8{egressEndpoint(url, &endpoint_buf)};
+    rt.ctx.capability_policy = .{
+        .egress = .{ .enabled = true, .values = &allowed },
+        .egress_scopes = (zq.endpoint.ScopeSet{}).with(.public),
+    };
+
+    const handler_code = try std.fmt.allocPrint(allocator,
+        \\function handler(req) {{
+        \\  return Response.json({{ error: fetchSync("{s}").error }});
+        \\}}
+    , .{url});
+    try rt.loadHandler(handler_code, "<denial-telemetry>");
+
+    var request = HttpRequestOwned{
+        .method = try allocator.dupe(u8, "GET"),
+        .url = try allocator.dupe(u8, "/"),
+        .headers = .empty,
+        .body = null,
+    };
+    defer request.deinit(allocator);
+
+    {
+        var response = try rt.executeHandler(request.asView());
+        defer response.deinit();
+    }
+
+    const stream = zq.security_events.getGlobal() orelse return error.TestUnexpectedResult;
+    var drained: [32]zq.security_events.SecurityEvent = undefined;
+    const count = stream.drain(&drained);
+    // Floor: no event means the assertions below hold over nothing.
+    try std.testing.expect(count >= 1);
+
+    var saw_denial = false;
+    for (drained[0..count]) |event| {
+        if (event.kind != .policy_denied) continue;
+        saw_denial = true;
+        try std.testing.expectEqualStrings("http.outbound", event.actionSlice());
+        try std.testing.expectEqualStrings("address_scope", event.resourceKindSlice());
+        // The sink that refused, not the destination the request asked for.
+        try std.testing.expectEqualStrings("egress_connect", event.resourceIdSlice());
+        try std.testing.expectEqualStrings("address_scope_not_allowed", event.detailSlice());
+        // Nothing the request chose reaches the stream: not the host, not the
+        // port, not the path.
+        for ([_][]const u8{ "127.0.0.1", "secret-looking-path" }) |chosen| {
+            try std.testing.expect(std.mem.indexOf(u8, event.resourceIdSlice(), chosen) == null);
+            try std.testing.expect(std.mem.indexOf(u8, event.detailSlice(), chosen) == null);
+            try std.testing.expect(std.mem.indexOf(u8, event.moduleSlice(), chosen) == null);
+        }
+    }
+    try std.testing.expect(saw_denial);
+
+    // Drain the server's single accept so `join` returns.
+    rt.ctx.capability_policy.egress_scopes = (zq.endpoint.ScopeSet{}).with(.loopback);
+    var drain = try rt.executeHandler(request.asView());
+    drain.deinit();
+}
+
 test "a policy that names no scope permits no connection" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

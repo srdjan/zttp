@@ -57,6 +57,18 @@ pub const Kind = enum(u8) {
         };
     }
 
+    /// The sink that decides this kind, named the way the acceptance kernel
+    /// names it. One of four, so a denial that reports it says which guard
+    /// refused without saying what it refused.
+    pub fn sink(self: Kind) []const u8 {
+        return switch (self) {
+            .env_key => "env_read",
+            .egress_endpoint => "egress_connect",
+            .cache_namespace => "cache_operation",
+            .sql_read, .sql_write => "sql_execute",
+        };
+    }
+
     /// What the author computed, in the words the diagnostic uses.
     pub fn resourceNoun(self: Kind) []const u8 {
         return switch (self) {

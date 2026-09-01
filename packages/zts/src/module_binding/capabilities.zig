@@ -369,11 +369,11 @@ pub fn readEnvForActiveModule(ctx: *context.Context, name_z: [:0]const u8) Activ
     // built-in module's behavior exactly and only closes the bypass.
     var buf: [identifier.max_identifier_bytes]u8 = undefined;
     const canonical = normalizedIdentifier(name_z, &buf) orelse {
-        emitPolicyDenial(ctx, .policy_denied_env, unrepresentable_identifier);
+        emitPolicyDenial(ctx, .policy_denied_env);
         return null;
     };
     if (!ctx.capability_policy.allowsEnv(canonical)) {
-        emitPolicyDenial(ctx, .policy_denied_env, canonical);
+        emitPolicyDenial(ctx, .policy_denied_env);
         return null;
     }
     const result = std.c.getenv(name_z) orelse return null;
@@ -446,10 +446,22 @@ pub fn hmacSha256Checked(
     hmacSha256ForActiveModule(ctx, out, data, key) catch |err| return panicCapabilityError(ctx, err, .crypto);
 }
 
-/// The resource named in a denial whose identifier the rule refused. The raw
-/// bytes are not emitted: the reason it was refused is that it carries a
-/// control byte or runs past the cap, and neither belongs in an event stream.
-const unrepresentable_identifier = "<unrepresentable>";
+/// What a per-module denial names in the shared event stream: the sink that
+/// refused, never the resource it refused.
+///
+/// The resource is what the decision is about, and it is also the part a
+/// request can choose. An event carrying it gives one distinct event per
+/// distinct attempt and copies caller-supplied text into an operator's log,
+/// so the stream gets the guard identity and the handler's own error gets the
+/// value. `policy.emitDenied` does the same for the generic event.
+fn sinkName(kind: security_events.SecurityEventKind) []const u8 {
+    return switch (kind) {
+        .policy_denied_env => "env_read",
+        .policy_denied_cache => "cache_operation",
+        .policy_denied_sql => "sql_execute",
+        else => "unknown_sink",
+    };
+}
 
 /// Canonicalize before deciding.
 ///
@@ -462,11 +474,11 @@ fn normalizedIdentifier(value_bytes: []const u8, out: []u8) ?[]const u8 {
     return identifier.normalize(value_bytes, out) catch null;
 }
 
-fn emitPolicyDenial(ctx: *const context.Context, kind: security_events.SecurityEventKind, name: []const u8) void {
+fn emitPolicyDenial(ctx: *const context.Context, kind: security_events.SecurityEventKind) void {
     security_events.emitGlobal(security_events.SecurityEvent.init(
         kind,
         currentActiveModuleSpecifier(ctx),
-        name,
+        sinkName(kind),
     ));
 }
 
@@ -477,11 +489,11 @@ pub fn allowsCacheNamespaceForActiveModule(
     try requireActiveCapability(ctx, .policy_check);
     var buf: [identifier.max_identifier_bytes]u8 = undefined;
     const canonical = normalizedIdentifier(ns, &buf) orelse {
-        emitPolicyDenial(ctx, .policy_denied_cache, unrepresentable_identifier);
+        emitPolicyDenial(ctx, .policy_denied_cache);
         return false;
     };
     const allowed = ctx.capability_policy.allowsCacheNamespace(canonical);
-    if (!allowed) emitPolicyDenial(ctx, .policy_denied_cache, canonical);
+    if (!allowed) emitPolicyDenial(ctx, .policy_denied_cache);
     return allowed;
 }
 
@@ -496,11 +508,11 @@ pub fn allowsEnvForActiveModule(
     try requireActiveCapability(ctx, .policy_check);
     var buf: [identifier.max_identifier_bytes]u8 = undefined;
     const canonical = normalizedIdentifier(name, &buf) orelse {
-        emitPolicyDenial(ctx, .policy_denied_env, unrepresentable_identifier);
+        emitPolicyDenial(ctx, .policy_denied_env);
         return false;
     };
     const allowed = ctx.capability_policy.allowsEnv(canonical);
-    if (!allowed) emitPolicyDenial(ctx, .policy_denied_env, canonical);
+    if (!allowed) emitPolicyDenial(ctx, .policy_denied_env);
     return allowed;
 }
 
@@ -515,11 +527,11 @@ pub fn allowsSqlQueryForActiveModule(
     try requireActiveCapability(ctx, .policy_check);
     var buf: [identifier.max_identifier_bytes]u8 = undefined;
     const canonical = normalizedIdentifier(name, &buf) orelse {
-        emitPolicyDenial(ctx, .policy_denied_sql, unrepresentable_identifier);
+        emitPolicyDenial(ctx, .policy_denied_sql);
         return false;
     };
     const allowed = ctx.capability_policy.allowsSqlQuery(canonical);
-    if (!allowed) emitPolicyDenial(ctx, .policy_denied_sql, canonical);
+    if (!allowed) emitPolicyDenial(ctx, .policy_denied_sql);
     return allowed;
 }
 
@@ -534,7 +546,7 @@ pub fn allowsSqlWriteForActiveModule(
     try requireActiveCapability(ctx, .policy_check);
     var buf: [identifier.max_identifier_bytes]u8 = undefined;
     const canonical = normalizedIdentifier(name, &buf) orelse {
-        emitPolicyDenial(ctx, .policy_denied_sql, unrepresentable_identifier);
+        emitPolicyDenial(ctx, .policy_denied_sql);
         return false;
     };
     const allowed = ctx.capability_policy.allowsSqlWrite(canonical);
@@ -542,7 +554,7 @@ pub fn allowsSqlWriteForActiveModule(
         // Phase 1 dual-emit: legacy per-module event for existing JSONL
         // consumers, generic policy_denied for spec section 12 shape.
         // Phase 4 deprecates the legacy kinds once consumers migrate.
-        emitPolicyDenial(ctx, .policy_denied_sql, canonical);
+        emitPolicyDenial(ctx, .policy_denied_sql);
         const policy = @import("../policy.zig");
         policy.emitDenied(.{
             .action = .db_write,

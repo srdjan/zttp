@@ -307,6 +307,10 @@ test "the compiler's guard catalog and the kernel's are the same table" {
             kernel.kind.section().name(),
             sectionKeyRoot(producer.kind.section()),
         );
+        // The sink a denial names has to be the sink the kernel binds the
+        // obligation to, or an operator reading one and a verifier reading the
+        // other are talking about different code.
+        try testing.expectEqualStrings(kernel.kind.sink().name(), producer.kind.sink());
     }
 }
 

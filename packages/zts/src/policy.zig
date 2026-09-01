@@ -12,7 +12,13 @@ const security_events = @import("security_events.zig");
 
 const RuntimePolicy = handler_policy.RuntimePolicy;
 
-pub const resource_kind_host = "host";
+/// What a denial names. Each is one of a fixed set, and none of them is a
+/// value the request chose: an egress decision is about an endpoint, and the
+/// endpoint a denied request asked for is attacker-influenced text.
+pub const resource_kind_endpoint = "endpoint";
+pub const resource_kind_address_scope = "address_scope";
+pub const resource_kind_env_key = "env_key";
+pub const resource_kind_cache_namespace = "cache_namespace";
 pub const resource_kind_sql_query = "sql_query";
 
 pub const Action = enum {
@@ -73,6 +79,10 @@ pub const DenyReason = enum {
     unknown_action,
     missing_resource,
     not_in_allowlist,
+    /// The endpoint was allowed and the address it resolved to was not. A
+    /// separate reason because it is a separate check: the name passed and the
+    /// answer did not.
+    address_scope_not_allowed,
     policy_unavailable,
 
     pub fn toString(self: DenyReason) []const u8 {
@@ -80,6 +90,7 @@ pub const DenyReason = enum {
             .unknown_action => "unknown_action",
             .missing_resource => "missing_resource",
             .not_in_allowlist => "not_in_allowlist",
+            .address_scope_not_allowed => "address_scope_not_allowed",
             .policy_unavailable => "policy_unavailable",
         };
     }
@@ -137,21 +148,86 @@ pub const WasmPolicyChecker = struct {
 
 /// Emit a generic policy_denied event to the process-wide security stream.
 /// Spec section 12: every denial fires; allow-decisions may be sampled.
+///
+/// The event names the guard that refused and not the value it refused. That
+/// is deliberate and it is why `input.resource.id` is read for the decision
+/// and dropped here: a denied value is chosen by the request, so an event
+/// carrying it gives one distinct event per distinct attempt - an unbounded
+/// set for whatever aggregates these - and copies attacker-supplied text into
+/// an operator's log. What stays is bounded: the action, the resource kind,
+/// the sink, and the reason. The developer still sees the actual value, in the
+/// error the handler receives, which goes to whoever wrote the handler rather
+/// than to everyone reading the stream.
 pub fn emitDenied(input: PolicyInput, reason: DenyReason) void {
     const resource = input.resource orelse Resource{ .kind = "", .id = "" };
-    const id = resource.id orelse "";
     security_events.emitGlobal(security_events.SecurityEvent.initPolicyDenied(
         input.env.service,
         input.action.toString(),
         resource.kind,
-        id,
+        sinkFor(input.action),
         reason.toString(),
     ));
+}
+
+/// The sink each action is decided at, named as the acceptance kernel names it.
+fn sinkFor(action: Action) []const u8 {
+    return switch (action) {
+        .env_read => "env_read",
+        .cache_read, .cache_write => "cache_operation",
+        .db_read, .db_write => "sql_execute",
+        .http_outbound => "egress_connect",
+    };
 }
 
 // =========================================================================
 // Tests
 // =========================================================================
+
+test "a denial event carries the sink, not the value that was refused" {
+    try security_events.initGlobal(std.testing.allocator, 8);
+    defer security_events.deinitGlobal();
+
+    emitDenied(.{
+        .action = .http_outbound,
+        .resource = .{ .kind = resource_kind_endpoint, .id = "https://evil.example.com:443" },
+    }, .not_in_allowlist);
+
+    const stream = security_events.getGlobal() orelse return error.TestUnexpectedResult;
+    var drained: [8]security_events.SecurityEvent = undefined;
+    const count = stream.drain(&drained);
+    // Floor: an empty drain makes every assertion below vacuous.
+    try std.testing.expectEqual(@as(usize, 1), count);
+
+    const event = drained[0];
+    try std.testing.expectEqualStrings("http.outbound", event.actionSlice());
+    try std.testing.expectEqualStrings(resource_kind_endpoint, event.resourceKindSlice());
+    try std.testing.expectEqualStrings("egress_connect", event.resourceIdSlice());
+    try std.testing.expectEqualStrings("not_in_allowlist", event.detailSlice());
+    // The refused endpoint appears nowhere in the event, in whole or in part.
+    for ([_][]const u8{ "evil.example.com", "evil", "443" }) |part| {
+        try std.testing.expect(std.mem.indexOf(u8, event.resourceIdSlice(), part) == null);
+        try std.testing.expect(std.mem.indexOf(u8, event.detailSlice(), part) == null);
+        try std.testing.expect(std.mem.indexOf(u8, event.resourceKindSlice(), part) == null);
+        try std.testing.expect(std.mem.indexOf(u8, event.moduleSlice(), part) == null);
+    }
+}
+
+test "every action names the sink that decides it" {
+    // The set is closed, so a new action cannot reach the stream without a
+    // sink name chosen for it.
+    const cases = [_]struct { action: Action, sink: []const u8 }{
+        .{ .action = .env_read, .sink = "env_read" },
+        .{ .action = .cache_read, .sink = "cache_operation" },
+        .{ .action = .cache_write, .sink = "cache_operation" },
+        .{ .action = .db_read, .sink = "sql_execute" },
+        .{ .action = .db_write, .sink = "sql_execute" },
+        .{ .action = .http_outbound, .sink = "egress_connect" },
+    };
+    try std.testing.expectEqual(@typeInfo(Action).@"enum".fields.len, cases.len);
+    for (cases) |case| {
+        try std.testing.expectEqualStrings(case.sink, sinkFor(case.action));
+    }
+}
 
 test "Action round-trips through fromString/toString" {
     const cases = [_]Action{ .env_read, .cache_read, .cache_write, .db_read, .db_write, .http_outbound };
@@ -212,7 +288,7 @@ test "WasmPolicyChecker fails closed while phase 2 is unavailable" {
     const checker = WasmPolicyChecker{};
     const result = checker.check(.{
         .action = .http_outbound,
-        .resource = .{ .kind = resource_kind_host, .id = "api.example.com" },
+        .resource = .{ .kind = resource_kind_endpoint, .id = "https://api.example.com:443" },
     });
     try std.testing.expectEqual(DenyReason.policy_unavailable, result.deny);
 }
@@ -346,20 +422,20 @@ test "http.outbound is decided on the endpoint, not the host" {
     const checker = LocalPolicyChecker.init(&policy);
     const allowed = checker.check(.{
         .action = .http_outbound,
-        .resource = .{ .kind = resource_kind_host, .id = "https://api.stripe.com:443" },
+        .resource = .{ .kind = resource_kind_endpoint, .id = "https://api.stripe.com:443" },
     });
     try std.testing.expectEqual(PolicyResult.allow, allowed);
 
     // The same host under another scheme or port is another server.
     const other_scheme = checker.check(.{
         .action = .http_outbound,
-        .resource = .{ .kind = resource_kind_host, .id = "http://api.stripe.com:80" },
+        .resource = .{ .kind = resource_kind_endpoint, .id = "http://api.stripe.com:80" },
     });
     try std.testing.expectEqual(DenyReason.not_in_allowlist, other_scheme.deny);
 
     const other = checker.check(.{
         .action = .http_outbound,
-        .resource = .{ .kind = resource_kind_host, .id = "https://evil.example.com:443" },
+        .resource = .{ .kind = resource_kind_endpoint, .id = "https://evil.example.com:443" },
     });
     try std.testing.expectEqual(DenyReason.not_in_allowlist, other.deny);
 }

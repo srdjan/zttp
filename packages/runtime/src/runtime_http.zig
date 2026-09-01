@@ -446,7 +446,7 @@ fn outboundEndpointViolation(rt: *HandlerInstance, url: []const u8, host: []cons
         if (!ascii.eqlIgnoreCase(host, allowed_host)) {
             zq.policy.emitDenied(.{
                 .action = .http_outbound,
-                .resource = .{ .kind = zq.policy.resource_kind_host, .id = host },
+                .resource = .{ .kind = zq.policy.resource_kind_endpoint, .id = host },
             }, .not_in_allowlist);
             return allowed_host;
         }
@@ -456,14 +456,14 @@ fn outboundEndpointViolation(rt: *HandlerInstance, url: []const u8, host: []cons
     const normalized = zq.endpoint.normalize(url, &buf) catch {
         zq.policy.emitDenied(.{
             .action = .http_outbound,
-            .resource = .{ .kind = zq.policy.resource_kind_host, .id = host },
+            .resource = .{ .kind = zq.policy.resource_kind_endpoint, .id = host },
         }, .not_in_allowlist);
         return "url names no endpoint this policy can decide";
     };
     if (!rt.ctx.capability_policy.allowsEgressEndpoint(normalized)) {
         zq.policy.emitDenied(.{
             .action = .http_outbound,
-            .resource = .{ .kind = zq.policy.resource_kind_host, .id = host },
+            .resource = .{ .kind = zq.policy.resource_kind_endpoint, .id = host },
         }, .not_in_allowlist);
         return "capability policy";
     }
@@ -592,8 +592,8 @@ fn resolvedScopeDecision(
     if (refused) |scope| {
         zq.policy.emitDenied(.{
             .action = .http_outbound,
-            .resource = .{ .kind = zq.policy.resource_kind_host, .id = host.bytes },
-        }, .not_in_allowlist);
+            .resource = .{ .kind = zq.policy.resource_kind_address_scope, .id = host.bytes },
+        }, .address_scope_not_allowed);
         return .{ .denied = scopeDenialText(scope) };
     }
     if (text_failed) return .{ .unresolved = "resolved address has no text form" };
