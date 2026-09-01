@@ -576,6 +576,67 @@ test "stand-in gate: defect seeds are well formed and select by their own code" 
     );
 }
 
+test "stand-in gate: every enabled guard family has a seed the compiler rejects" {
+    // R19's rule, checked rather than asserted in a comment: a guard family may
+    // be enabled only where a checked-in operation exists that this compiler
+    // rejects today. Which family a seed covers is read from what the compiler
+    // says about it - the section its diagnostic tells the author to write - not
+    // from anything the seed declares about itself.
+    var covered = zts.guard_catalog.FamilySet{};
+    var capability_seeds: usize = 0;
+
+    for (defect_seeds.seeds) |seed| {
+        if (!std.mem.eql(u8, seed.code, "ZTS602")) continue;
+        capability_seeds += 1;
+
+        var raw = try edit_simulate.simulate(testing.allocator, .{
+            .file = "handler.ts",
+            .content = seed.bad_draft,
+            .before = seed.seed_source,
+            .policy_source = seed.policy_json,
+            .sql_schema_path = null,
+        });
+        defer raw.deinit(testing.allocator);
+
+        for (raw.violations.items) |violation| {
+            if (!violation.introduced_by_patch) continue;
+            if (!std.mem.eql(u8, violation.code, "ZTS602")) continue;
+            const help = violation.help orelse continue;
+            if (std.mem.indexOf(u8, help, "env.allow") != null) covered = covered.with(.env);
+            if (std.mem.indexOf(u8, help, "egress.allow_endpoints") != null) covered = covered.with(.egress);
+            if (std.mem.indexOf(u8, help, "cache.allow_namespaces") != null) covered = covered.with(.cache);
+            if (std.mem.indexOf(u8, help, "sql.allow_queries") != null) covered = covered.with(.sql);
+        }
+    }
+
+    // Floor: a loop over no capability seed reports every family covered by
+    // vacuity, which is the shape this file exists to refuse.
+    if (capability_seeds < 3) {
+        std.debug.print(
+            "[standin-gate] only {d} capability seeds; one per enabled family is the minimum\n",
+            .{capability_seeds},
+        );
+        return error.CapabilitySeedsMissing;
+    }
+
+    inline for (@typeInfo(zts.guard_catalog.Family).@"enum".fields) |field| {
+        const family: zts.guard_catalog.Family = @enumFromInt(field.value);
+        const enabled = zts.guard_catalog.enabled_families.contains(family);
+        if (enabled and !covered.contains(family)) {
+            std.debug.print(
+                "[standin-gate] guard family {s} is enabled with no seed the compiler rejects\n",
+                .{field.name},
+            );
+            return error.EnabledFamilyHasNoSeed;
+        }
+    }
+
+    std.debug.print(
+        "[standin-gate] capability seeds {d}; enabled families {d} of {d} covered\n",
+        .{ capability_seeds, @popCount(covered.bits & zts.guard_catalog.enabled_families.bits), @popCount(zts.guard_catalog.enabled_families.bits) },
+    );
+}
+
 test "stand-in gate: every defect seed reproduces its declared veto class through the real veto" {
     for (defect_seeds.seeds) |seed| {
         // A seed whose drafts import `zttp:sql` needs a schema on disk: the
