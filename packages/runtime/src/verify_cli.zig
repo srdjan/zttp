@@ -184,10 +184,13 @@ fn fetchAttestHeader(
 // relies on the `parseArgs` unit tests, the `envelope.verify` unit tests, and
 // manual end-to-end runs documented in the slice-1 spec.
 
-fn writeClaimsHuman(url: []const u8, result: *const envelope.VerifyResult) void {
-    var buf: [4096]u8 = undefined;
-    const out = std.fmt.bufPrint(
-        &buf,
+fn renderClaimsHuman(
+    buffer: []u8,
+    url: []const u8,
+    result: *const envelope.VerifyResult,
+) std.fmt.BufPrintError![]const u8 {
+    return std.fmt.bufPrint(
+        buffer,
         \\Signature verified: {s}
         \\  This checks provenance, not proof. The endpoint returns a signed
         \\  claim about an artifact; it does not return the artifact. Nothing
@@ -205,6 +208,7 @@ fn writeClaimsHuman(url: []const u8, result: *const envelope.VerifyResult) void 
         \\  capability hash:  {s}
         \\  routes count:     {d}
         \\  claimed chips:    {s}
+        \\  guarded categories: {s}
         \\  durable workflow: proof={s}, retrySafe={s}, idempotent={s}, faultCovered={s}
         \\
     ,
@@ -220,12 +224,18 @@ fn writeClaimsHuman(url: []const u8, result: *const envelope.VerifyResult) void 
             result.claims.capability_hash,
             result.claims.routes_count,
             if (result.claims.property_summary.len > 0) result.claims.property_summary else "(none)",
+            if (result.claims.guarded_categories.len > 0) result.claims.guarded_categories else "(none)",
             result.claims.durable_workflow_proof_level,
             boolString(result.claims.durable_workflow_retry_safe),
             boolString(result.claims.durable_workflow_idempotent),
             boolString(result.claims.durable_workflow_fault_covered),
         },
-    ) catch return;
+    );
+}
+
+fn writeClaimsHuman(url: []const u8, result: *const envelope.VerifyResult) void {
+    var buf: [4096]u8 = undefined;
+    const out = renderClaimsHuman(&buf, url, result) catch return;
     _ = std.c.write(std.c.STDOUT_FILENO, out.ptr, out.len);
 }
 
@@ -276,6 +286,8 @@ fn renderClaimsJson(allocator: std.mem.Allocator, url: []const u8, result: *cons
     try json.write(result.claims.routes_count);
     try json.objectField("propertySummary");
     try json.write(result.claims.property_summary);
+    try json.objectField("guardedCategories");
+    try json.write(result.claims.guarded_categories);
     try json.objectField("durableWorkflowProofLevel");
     try json.write(result.claims.durable_workflow_proof_level);
     try json.objectField("durableWorkflowRetrySafe");
@@ -364,6 +376,7 @@ test "renderClaimsJson uses JSON string escaping" {
             .compiler_version = "zttp\"dev\\test",
             .signed_at_unix = 1_700_000_000,
             .property_summary = "quote\" slash\\ newline\n",
+            .guarded_categories = "env,cache",
             .routes_count = 2,
             .durable_workflow_proof_level = "partial",
             .durable_workflow_retry_safe = false,
@@ -388,6 +401,9 @@ test "renderClaimsJson uses JSON string escaping" {
     try testing.expectEqualStrings("zts-model-1", root.get("coreProfileId").?.string);
     try testing.expectEqualStrings("zts-tsx-1", root.get("frontendProfileId").?.string);
     try testing.expectEqualStrings("quote\" slash\\ newline\n", root.get("propertySummary").?.string);
+    try testing.expectEqualStrings("env,cache", root.get("guardedCategories").?.string);
+    try testing.expectEqualStrings("provenance_only", root.get("assurance").?.string);
+    try testing.expect(root.get("propertySummary").? == .string);
     try testing.expectEqualStrings("partial", root.get("durableWorkflowProofLevel").?.string);
     try testing.expect(!root.get("durableWorkflowRetrySafe").?.bool);
     try testing.expect(root.get("durableWorkflowIdempotent").?.bool);
@@ -396,4 +412,78 @@ test "renderClaimsJson uses JSON string escaping" {
     try testing.expectEqual(@as(i64, 2), root.get("routesCount").?.integer);
     try testing.expect(std.mem.indexOf(u8, out, "\\\"") != null);
     try testing.expect(std.mem.endsWith(u8, out, "\n"));
+}
+
+test "renderClaimsHuman keeps static guarded categories separate from claimed chips" {
+    const testing = std.testing;
+    var result = envelope.VerifyResult{
+        .claims = .{
+            .contract_sha256 = "a" ** 64,
+            .bytecode_sha256 = "b" ** 64,
+            .policy_sha256 = "c" ** 64,
+            .capability_hash = "d" ** 64,
+            .core_profile_id = "zts-model-1",
+            .core_grammar_sha256 = "1" ** 64,
+            .semantics_sha256 = "2" ** 64,
+            .compiler_version = "test",
+            .signed_at_unix = 7,
+            .property_summary = "pure",
+            .guarded_categories = "",
+            .routes_count = 1,
+        },
+        .public_key = [_]u8{0} ** std.crypto.sign.Ed25519.PublicKey.encoded_length,
+        .fingerprint_hex = [_]u8{'f'} ** 64,
+        .arena = std.heap.ArenaAllocator.init(testing.allocator),
+    };
+    defer result.deinit();
+
+    var buffer: [4096]u8 = undefined;
+    const out = try renderClaimsHuman(&buffer, "https://example.test", &result);
+    try testing.expectEqualStrings(
+        "Signature verified: https://example.test\n" ++
+            "  This checks provenance, not proof. The endpoint returns a signed\n" ++
+            "  claim about an artifact; it does not return the artifact. Nothing\n" ++
+            "  here reconstructed an obligation or checked a derivation, so no\n" ++
+            "  proof or policy acceptance is reported. For that, check the\n" ++
+            "  artifact itself: `zttp proofs verify <bundle-dir> --require-proof`.\n" ++
+            "\n" ++
+            "  key fingerprint:  " ++ "f" ** 64 ++ "\n" ++
+            "  compiler version: test\n" ++
+            "  signed at:        7 (unix)\n" ++
+            "  contract sha256:  " ++ "a" ** 64 ++ "\n" ++
+            "  bytecode sha256:  " ++ "b" ** 64 ++ "\n" ++
+            "  executable root:  " ++ "0" ** 64 ++ "\n" ++
+            "  policy sha256:    " ++ "c" ** 64 ++ "\n" ++
+            "  capability hash:  " ++ "d" ** 64 ++ "\n" ++
+            "  routes count:     1\n" ++
+            "  claimed chips:    pure\n" ++
+            "  guarded categories: (none)\n" ++
+            "  durable workflow: proof=none, retrySafe=false, idempotent=false, faultCovered=false\n",
+        out,
+    );
+
+    result.claims.guarded_categories = "env,egress,cache,sql";
+    const guarded = try renderClaimsHuman(&buffer, "https://example.test", &result);
+    try testing.expectEqualStrings(
+        "Signature verified: https://example.test\n" ++
+            "  This checks provenance, not proof. The endpoint returns a signed\n" ++
+            "  claim about an artifact; it does not return the artifact. Nothing\n" ++
+            "  here reconstructed an obligation or checked a derivation, so no\n" ++
+            "  proof or policy acceptance is reported. For that, check the\n" ++
+            "  artifact itself: `zttp proofs verify <bundle-dir> --require-proof`.\n" ++
+            "\n" ++
+            "  key fingerprint:  " ++ "f" ** 64 ++ "\n" ++
+            "  compiler version: test\n" ++
+            "  signed at:        7 (unix)\n" ++
+            "  contract sha256:  " ++ "a" ** 64 ++ "\n" ++
+            "  bytecode sha256:  " ++ "b" ** 64 ++ "\n" ++
+            "  executable root:  " ++ "0" ** 64 ++ "\n" ++
+            "  policy sha256:    " ++ "c" ** 64 ++ "\n" ++
+            "  capability hash:  " ++ "d" ** 64 ++ "\n" ++
+            "  routes count:     1\n" ++
+            "  claimed chips:    pure\n" ++
+            "  guarded categories: env,egress,cache,sql\n" ++
+            "  durable workflow: proof=none, retrySafe=false, idempotent=false, faultCovered=false\n",
+        guarded,
+    );
 }

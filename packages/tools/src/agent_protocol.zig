@@ -99,7 +99,7 @@ pub const operations = [_]OperationSpec{
         "graph", "builtins", "extensions", "rejected", "module_graph_hash",
     } },
     .{ .op = .check, .status = .implemented, .input_fields = &.{"file"}, .payload_fields = &.{
-        "file", "source_digest", "counts", "properties", "paths", "contract_available", "contract_body",
+        "file", "source_digest", "counts", "properties", "guarded_categories", "paths", "contract_available", "contract_body",
     } },
     .{ .op = .canonicalize, .status = .implemented, .input_fields = &.{ "file", "simulate" }, .payload_fields = &.{
         "file", "source_digest", "candidates", "simulation",
@@ -2079,6 +2079,25 @@ fn writeCheckPayload(
         } else try json.write(null);
     } else try json.write(null);
 
+    // This operation reports source-analysis facts from the contract. It does
+    // not reconstruct residual obligations or claim consumer coverage. Only
+    // `zttp proofs verify` answers whether the artifact covers its guards.
+    try json.objectField("guarded_categories");
+    if (result) |r| {
+        if (r.contract) |*contract| {
+            try json.beginArray();
+            inline for (.{
+                .{ "env", contract.env.dynamic },
+                .{ "egress", contract.egress.dynamic },
+                .{ "cache", contract.cache.dynamic },
+                .{ "sql", contract.sql.dynamic },
+            }) |category| {
+                if (category[1]) try json.write(category[0]);
+            }
+            try json.endArray();
+        } else try json.write(null);
+    } else try json.write(null);
+
     try json.objectField("paths");
     if (result) |r| {
         try json.beginObject();
@@ -3646,6 +3665,52 @@ test "check on a clean handler succeeds with no diagnostics" {
     try testing.expectEqual(@as(i64, 2), contract_version.integer);
     try testing.expect(contract_body.object.get("service_calls") != null);
     try testing.expect(contract_body.object.get("serviceCalls") == null);
+}
+
+test "check payload reports guarded categories separately from properties" {
+    const allocator = testing.allocator;
+    const digest = [_]u8{'0'} ** 64;
+
+    var no_result_output: std.Io.Writer.Allocating = .init(allocator);
+    defer no_result_output.deinit();
+    var no_result_json: std.json.Stringify = .{ .writer = &no_result_output.writer };
+    try writeCheckPayload(&no_result_json, null, "handler.ts", digest, 1, 0);
+    var no_result = try parse(allocator, no_result_output.writer.buffered());
+    defer no_result.deinit();
+    try testing.expect(no_result.value.object.get("guarded_categories").? == .null);
+
+    var static_result = precompile.CheckResult{
+        .contract = zts.handler_contract.emptyContract(try allocator.dupe(u8, "handler.ts")),
+    };
+    defer static_result.deinit(allocator);
+    var static_output: std.Io.Writer.Allocating = .init(allocator);
+    defer static_output.deinit();
+    var static_json: std.json.Stringify = .{ .writer = &static_output.writer };
+    try writeCheckPayload(&static_json, &static_result, "handler.ts", digest, 0, 0);
+    var static_payload = try parse(allocator, static_output.writer.buffered());
+    defer static_payload.deinit();
+    try testing.expectEqual(@as(usize, 0), static_payload.value.object.get("guarded_categories").?.array.items.len);
+
+    var guarded_result = precompile.CheckResult{
+        .contract = zts.handler_contract.emptyContract(try allocator.dupe(u8, "handler.ts")),
+    };
+    defer guarded_result.deinit(allocator);
+    guarded_result.contract.?.env.dynamic = true;
+    guarded_result.contract.?.egress.dynamic = true;
+    guarded_result.contract.?.cache.dynamic = true;
+    guarded_result.contract.?.sql.dynamic = true;
+    var guarded_output: std.Io.Writer.Allocating = .init(allocator);
+    defer guarded_output.deinit();
+    var guarded_json: std.json.Stringify = .{ .writer = &guarded_output.writer };
+    try writeCheckPayload(&guarded_json, &guarded_result, "handler.ts", digest, 0, 0);
+    var guarded_payload = try parse(allocator, guarded_output.writer.buffered());
+    defer guarded_payload.deinit();
+    const categories = guarded_payload.value.object.get("guarded_categories").?.array;
+    try testing.expectEqual(@as(usize, 4), categories.items.len);
+    for (categories.items, [_][]const u8{ "env", "egress", "cache", "sql" }) |actual, expected| {
+        try testing.expectEqualStrings(expected, actual.string);
+    }
+    try testing.expect(guarded_payload.value.object.get("properties").? == .null);
 }
 
 test "check response is identical for identical projects at different roots" {

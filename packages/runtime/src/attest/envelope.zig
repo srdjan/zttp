@@ -46,6 +46,7 @@ pub const Claims = struct {
     compiler_version: []const u8,
     signed_at_unix: i64,
     property_summary: []const u8,
+    guarded_categories: []const u8 = "",
     routes_count: u64,
     durable_workflow_proof_level: []const u8 = "none",
     durable_workflow_retry_safe: bool = false,
@@ -293,6 +294,7 @@ const wire_key = struct {
     const compiler_version = "compilerVersion";
     const signed_at = "signedAt";
     const property_summary = "propertySummary";
+    const guarded_categories = "guardedCategories";
     const routes_count = "routesCount";
     const durable_workflow_proof_level = "durableWorkflowProofLevel";
     const durable_workflow_retry_safe = "durableWorkflowRetrySafe";
@@ -331,6 +333,8 @@ fn buildPayloadJson(allocator: std.mem.Allocator, claims: Claims) ![]u8 {
     try json.write(claims.signed_at_unix);
     try json.objectField(wire_key.property_summary);
     try json.write(claims.property_summary);
+    try json.objectField(wire_key.guarded_categories);
+    try json.write(claims.guarded_categories);
     try json.objectField(wire_key.routes_count);
     try json.write(claims.routes_count);
     try json.objectField(wire_key.durable_workflow_proof_level);
@@ -403,6 +407,7 @@ fn parseClaims(allocator: std.mem.Allocator, payload_bytes: []const u8) !Claims 
         .frontend_grammar_sha256 = try dupOptionalString(allocator, obj, wire_key.frontend_grammar_sha256),
         .compiler_version = try dupString(allocator, obj, wire_key.compiler_version),
         .property_summary = try dupString(allocator, obj, wire_key.property_summary),
+        .guarded_categories = try dupStringDefault(allocator, obj, wire_key.guarded_categories, ""),
         .signed_at_unix = try readI64(obj, wire_key.signed_at),
         .routes_count = try readU64(obj, wire_key.routes_count),
         .durable_workflow_proof_level = try dupStringDefault(allocator, obj, wire_key.durable_workflow_proof_level, "none"),
@@ -480,6 +485,7 @@ fn testClaims() Claims {
         .compiler_version = "0.0.0-test",
         .signed_at_unix = 1_700_000_000,
         .property_summary = "pure,read_only,injection_safe",
+        .guarded_categories = "env,cache",
         .routes_count = 3,
         .durable_workflow_proof_level = "complete",
         .durable_workflow_retry_safe = true,
@@ -509,6 +515,7 @@ test "sign then verify recovers the same claims" {
     try std.testing.expectEqualStrings("3" ** 64, result.claims.frontend_grammar_sha256.?);
     try std.testing.expectEqualStrings("0.0.0-test", result.claims.compiler_version);
     try std.testing.expectEqualStrings("pure,read_only,injection_safe", result.claims.property_summary);
+    try std.testing.expectEqualStrings("env,cache", result.claims.guarded_categories);
     try std.testing.expectEqual(@as(i64, 1_700_000_000), result.claims.signed_at_unix);
     try std.testing.expectEqual(@as(u64, 3), result.claims.routes_count);
     try std.testing.expectEqualStrings("complete", result.claims.durable_workflow_proof_level);
@@ -674,10 +681,12 @@ test "parseClaims defaults missing durable workflow fields" {
         allocator.free(claims.semantics_sha256);
         allocator.free(claims.compiler_version);
         allocator.free(claims.property_summary);
+        allocator.free(claims.guarded_categories);
         allocator.free(claims.durable_workflow_proof_level);
     }
 
     try std.testing.expectEqualStrings("none", claims.durable_workflow_proof_level);
+    try std.testing.expectEqualStrings("", claims.guarded_categories);
     try std.testing.expectEqualStrings("e" ** 64, claims.runtime_policy_sha256);
     try std.testing.expectEqualStrings("zts-model-1", claims.core_profile_id);
     try std.testing.expect(claims.frontend_profile_id == null);

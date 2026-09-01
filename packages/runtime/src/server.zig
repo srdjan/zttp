@@ -4034,6 +4034,7 @@ test "attestationClaimsMatchContract rejects JWS describing different bytecode" 
         .compiler_version = "test",
         .signed_at_unix = 0,
         .property_summary = "",
+        .guarded_categories = "",
         .routes_count = 0,
     };
 
@@ -4089,6 +4090,7 @@ test "attestation source identity binds the optional TSX frontend" {
         .compiler_version = "test",
         .signed_at_unix = 0,
         .property_summary = "",
+        .guarded_categories = "",
         .routes_count = 0,
     };
 
@@ -4131,6 +4133,7 @@ fn runtimePolicyClaimsForTest(runtime_policy_sha256: []const u8) attest_envelope
         .compiler_version = "test",
         .signed_at_unix = 0,
         .property_summary = "",
+        .guarded_categories = "",
         .routes_count = 0,
     };
 }

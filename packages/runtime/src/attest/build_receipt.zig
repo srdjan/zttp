@@ -11,6 +11,28 @@ const proof_ledger = @import("../proof_ledger.zig");
 const Ed25519 = std.crypto.sign.Ed25519;
 
 pub const compiler_version_tag: []const u8 = "zttp-attest-source-identity-v2";
+const max_guarded_categories_bytes = "env,egress,cache,sql".len;
+
+fn guardedCategories(
+    buffer: *[max_guarded_categories_bytes]u8,
+    contract: *const zts.HandlerContract,
+) []const u8 {
+    var writer = std.Io.Writer.fixed(buffer);
+    var wrote_any = false;
+    inline for (.{
+        .{ "env", contract.env.dynamic },
+        .{ "egress", contract.egress.dynamic },
+        .{ "cache", contract.cache.dynamic },
+        .{ "sql", contract.sql.dynamic },
+    }) |category| {
+        if (category[1]) {
+            if (wrote_any) writer.writeByte(',') catch unreachable;
+            writer.writeAll(category[0]) catch unreachable;
+            wrote_any = true;
+        }
+    }
+    return writer.buffered();
+}
 
 /// Produces a compact JWS for build/deploy artifacts. Uses the persistent
 /// identity under ~/.zttp/attest and fails if that identity cannot be
@@ -135,6 +157,8 @@ fn buildJwsWithKey(
     };
     const property_summary = try header_strings.formatProofChips(allocator, props_or_default);
     defer if (property_summary.len > 0) allocator.free(property_summary);
+    var guarded_categories_buffer: [max_guarded_categories_bytes]u8 = undefined;
+    const guarded_categories = guardedCategories(&guarded_categories_buffer, contract);
 
     const claims = envelope.Claims{
         .contract_sha256 = &contract_sha_hex,
@@ -151,6 +175,7 @@ fn buildJwsWithKey(
         .compiler_version = compiler_version_tag,
         .signed_at_unix = @divTrunc(proof_ledger.defaultNowMs(), std.time.ms_per_s),
         .property_summary = property_summary,
+        .guarded_categories = guarded_categories,
         .routes_count = @intCast(contract.api.routes.items.len),
         .durable_workflow_proof_level = contract.durable.workflow.proof_level.toString(),
         .durable_workflow_retry_safe = contract.durable.workflow.properties.retry_safe,
@@ -266,9 +291,37 @@ test "build receipt refuses unstamped contracts and signs exact source identity"
     try std.testing.expectEqualStrings(&semantics_hex, verified.claims.semantics_sha256);
     try std.testing.expectEqualStrings(contract.source_identity.frontend.?.profile.id(), verified.claims.frontend_profile_id.?);
     try std.testing.expectEqualStrings(&frontend_grammar_hex, verified.claims.frontend_grammar_sha256.?);
+    try std.testing.expectEqualStrings("", verified.claims.guarded_categories);
     // The receipt carries the executable-graph root it was handed, not a
     // recomputation of its own: the signer commits, the consumer checks.
     try std.testing.expectEqualStrings("9" ** 64, verified.claims.executable_root_sha256);
+}
+
+test "build receipt signs dynamic capability categories in stable order" {
+    const allocator = std.testing.allocator;
+    var contract = zts.handler_contract.emptyContract(try allocator.dupe(u8, "handler.ts"));
+    defer contract.deinit(allocator);
+    contract.source_identity = zts.sourceIdentityForPath(contract.handler.path);
+    contract.env.dynamic = true;
+    contract.egress.dynamic = true;
+    contract.cache.dynamic = true;
+    contract.sql.dynamic = true;
+    const key_pair = try envelope.keyPairFromSeed([_]u8{0x43} ** Ed25519.KeyPair.seed_length);
+
+    const jws = try buildJwsWithKey(
+        allocator,
+        "{}",
+        "bytecode",
+        &contract,
+        envelope.unpinned_runtime_policy_sha256,
+        "9" ** 64,
+        key_pair,
+    );
+    defer allocator.free(jws);
+
+    var verified = try envelope.verify(allocator, jws);
+    defer verified.deinit();
+    try std.testing.expectEqualStrings("env,egress,cache,sql", verified.claims.guarded_categories);
 }
 
 test "a dev receipt states that it commits to no executable graph" {
