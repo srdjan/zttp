@@ -239,6 +239,7 @@ pub const ReasonCode = enum(u16) {
     residual_section_not_permitted = 1913,
     runtime_policy_missing = 1914,
     runtime_policy_undecodable = 1915,
+    guard_family_disabled = 1916,
     semantics_epoch_not_selected = 1806,
 
     pub fn text(self: ReasonCode) []const u8 {

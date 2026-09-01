@@ -63,7 +63,49 @@ pub const GuardKind = enum(u8) {
             .sql_read, .sql_write => .sql_execute,
         };
     }
+
+    pub fn family(self: GuardKind) Family {
+        return switch (self) {
+            .env_key => .env,
+            .egress_endpoint => .egress,
+            .cache_namespace => .cache,
+            .sql_read, .sql_write => .sql,
+        };
+    }
 };
+
+/// One release gate per policy family. A catalog row records a known operation;
+/// this set independently decides which known families production accepts.
+pub const Family = enum(u3) {
+    env = 0,
+    egress = 1,
+    cache = 2,
+    sql = 3,
+
+    pub fn bit(self: Family) u8 {
+        return @as(u8, 1) << @intFromEnum(self);
+    }
+};
+
+pub const FamilySet = struct {
+    bits: u8 = 0,
+
+    pub fn with(self: FamilySet, family: Family) FamilySet {
+        return .{ .bits = self.bits | family.bit() };
+    }
+
+    pub fn contains(self: FamilySet, family: Family) bool {
+        return self.bits & family.bit() != 0;
+    }
+};
+
+/// The checker-owned production boundary. SQL remains catalogued so the
+/// consumer can reject it by name, but it is not enabled until policy can
+/// preserve the read/write distinction enforced at the sink.
+pub const enabled_families = (FamilySet{})
+    .with(.env)
+    .with(.egress)
+    .with(.cache);
 
 /// How a resource is canonicalized before it is compared with a policy entry.
 ///
@@ -467,7 +509,13 @@ test "a guard kind decides its own rule, section, and sink" {
         _ = kind.normalization();
         _ = kind.section();
         _ = kind.sink();
+        _ = kind.family();
     }
+
+    try testing.expect(enabled_families.contains(.env));
+    try testing.expect(enabled_families.contains(.egress));
+    try testing.expect(enabled_families.contains(.cache));
+    try testing.expect(!enabled_families.contains(.sql));
 }
 
 test "an unknown scope bit is refused rather than read as permissive" {

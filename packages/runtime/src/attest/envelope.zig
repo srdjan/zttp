@@ -398,50 +398,115 @@ fn parseClaims(allocator: std.mem.Allocator, payload_bytes: []const u8) !Claims 
         return error.UnsupportedAttestationVersion;
     }
 
+    // Validate the borrowed JSON view before duplicating any strings. A
+    // missing or malformed required claim must not leak the fields parsed
+    // before it.
     const claims = Claims{
-        .contract_sha256 = try dupString(allocator, obj, wire_key.contract_sha256),
-        .bytecode_sha256 = try dupString(allocator, obj, wire_key.bytecode_sha256),
-        .policy_sha256 = try dupString(allocator, obj, wire_key.policy_sha256),
-        .capability_hash = try dupString(allocator, obj, wire_key.capability_hash),
-        .runtime_policy_sha256 = try dupString(allocator, obj, wire_key.runtime_policy_sha256),
-        .executable_root_sha256 = try dupString(allocator, obj, wire_key.executable_root_sha256),
-        .core_profile_id = try dupString(allocator, obj, wire_key.core_profile_id),
-        .core_grammar_sha256 = try dupString(allocator, obj, wire_key.core_grammar_sha256),
-        .semantics_sha256 = try dupString(allocator, obj, wire_key.semantics_sha256),
-        .frontend_profile_id = try dupOptionalString(allocator, obj, wire_key.frontend_profile_id),
-        .frontend_grammar_sha256 = try dupOptionalString(allocator, obj, wire_key.frontend_grammar_sha256),
-        .compiler_version = try dupString(allocator, obj, wire_key.compiler_version),
-        .property_summary = try dupString(allocator, obj, wire_key.property_summary),
-        .guarded_categories = try dupStringDefault(allocator, obj, wire_key.guarded_categories, ""),
+        .contract_sha256 = try readString(obj, wire_key.contract_sha256),
+        .bytecode_sha256 = try readString(obj, wire_key.bytecode_sha256),
+        .policy_sha256 = try readString(obj, wire_key.policy_sha256),
+        .capability_hash = try readString(obj, wire_key.capability_hash),
+        .runtime_policy_sha256 = try readString(obj, wire_key.runtime_policy_sha256),
+        .executable_root_sha256 = try readString(obj, wire_key.executable_root_sha256),
+        .core_profile_id = try readString(obj, wire_key.core_profile_id),
+        .core_grammar_sha256 = try readString(obj, wire_key.core_grammar_sha256),
+        .semantics_sha256 = try readString(obj, wire_key.semantics_sha256),
+        .frontend_profile_id = try readOptionalString(obj, wire_key.frontend_profile_id),
+        .frontend_grammar_sha256 = try readOptionalString(obj, wire_key.frontend_grammar_sha256),
+        .compiler_version = try readString(obj, wire_key.compiler_version),
+        .property_summary = try readString(obj, wire_key.property_summary),
+        .guarded_categories = try readString(obj, wire_key.guarded_categories),
         .signed_at_unix = try readI64(obj, wire_key.signed_at),
         .routes_count = try readU64(obj, wire_key.routes_count),
-        .durable_workflow_proof_level = try dupStringDefault(allocator, obj, wire_key.durable_workflow_proof_level, "none"),
+        .durable_workflow_proof_level = try readStringDefault(obj, wire_key.durable_workflow_proof_level, "none"),
         .durable_workflow_retry_safe = try readBoolDefault(obj, wire_key.durable_workflow_retry_safe, false),
         .durable_workflow_idempotent = try readBoolDefault(obj, wire_key.durable_workflow_idempotent, false),
         .durable_workflow_fault_covered = try readBoolDefault(obj, wire_key.durable_workflow_fault_covered, false),
     };
     validateClaims(claims) catch return error.InvalidJson;
-    return claims;
+    return duplicateClaims(allocator, claims);
 }
 
-fn dupString(allocator: std.mem.Allocator, obj: std.json.ObjectMap, key: []const u8) ![]const u8 {
+fn readString(obj: std.json.ObjectMap, key: []const u8) ![]const u8 {
     const val = obj.get(key) orelse return error.InvalidJson;
     if (val != .string) return error.InvalidJson;
-    return try allocator.dupe(u8, val.string);
+    return val.string;
 }
 
-fn dupStringDefault(allocator: std.mem.Allocator, obj: std.json.ObjectMap, key: []const u8, default: []const u8) ![]const u8 {
-    const val = obj.get(key) orelse return try allocator.dupe(u8, default);
+fn readStringDefault(obj: std.json.ObjectMap, key: []const u8, default: []const u8) ![]const u8 {
+    const val = obj.get(key) orelse return default;
     if (val != .string) return error.InvalidJson;
-    return try allocator.dupe(u8, val.string);
+    return val.string;
 }
 
-fn dupOptionalString(allocator: std.mem.Allocator, obj: std.json.ObjectMap, key: []const u8) !?[]const u8 {
+fn readOptionalString(obj: std.json.ObjectMap, key: []const u8) !?[]const u8 {
     const val = obj.get(key) orelse return error.InvalidJson;
     return switch (val) {
         .null => null,
-        .string => |value| try allocator.dupe(u8, value),
+        .string => |value| value,
         else => error.InvalidJson,
+    };
+}
+
+fn duplicateClaims(allocator: std.mem.Allocator, claims: Claims) !Claims {
+    const contract_sha256 = try allocator.dupe(u8, claims.contract_sha256);
+    errdefer allocator.free(contract_sha256);
+    const bytecode_sha256 = try allocator.dupe(u8, claims.bytecode_sha256);
+    errdefer allocator.free(bytecode_sha256);
+    const policy_sha256 = try allocator.dupe(u8, claims.policy_sha256);
+    errdefer allocator.free(policy_sha256);
+    const capability_hash = try allocator.dupe(u8, claims.capability_hash);
+    errdefer allocator.free(capability_hash);
+    const runtime_policy_sha256 = try allocator.dupe(u8, claims.runtime_policy_sha256);
+    errdefer allocator.free(runtime_policy_sha256);
+    const executable_root_sha256 = try allocator.dupe(u8, claims.executable_root_sha256);
+    errdefer allocator.free(executable_root_sha256);
+    const core_profile_id = try allocator.dupe(u8, claims.core_profile_id);
+    errdefer allocator.free(core_profile_id);
+    const core_grammar_sha256 = try allocator.dupe(u8, claims.core_grammar_sha256);
+    errdefer allocator.free(core_grammar_sha256);
+    const semantics_sha256 = try allocator.dupe(u8, claims.semantics_sha256);
+    errdefer allocator.free(semantics_sha256);
+    const frontend_profile_id = if (claims.frontend_profile_id) |value|
+        try allocator.dupe(u8, value)
+    else
+        null;
+    errdefer if (frontend_profile_id) |value| allocator.free(value);
+    const frontend_grammar_sha256 = if (claims.frontend_grammar_sha256) |value|
+        try allocator.dupe(u8, value)
+    else
+        null;
+    errdefer if (frontend_grammar_sha256) |value| allocator.free(value);
+    const compiler_version = try allocator.dupe(u8, claims.compiler_version);
+    errdefer allocator.free(compiler_version);
+    const property_summary = try allocator.dupe(u8, claims.property_summary);
+    errdefer allocator.free(property_summary);
+    const guarded_categories = try allocator.dupe(u8, claims.guarded_categories);
+    errdefer allocator.free(guarded_categories);
+    const durable_workflow_proof_level = try allocator.dupe(u8, claims.durable_workflow_proof_level);
+    errdefer allocator.free(durable_workflow_proof_level);
+
+    return .{
+        .contract_sha256 = contract_sha256,
+        .bytecode_sha256 = bytecode_sha256,
+        .policy_sha256 = policy_sha256,
+        .capability_hash = capability_hash,
+        .runtime_policy_sha256 = runtime_policy_sha256,
+        .executable_root_sha256 = executable_root_sha256,
+        .core_profile_id = core_profile_id,
+        .core_grammar_sha256 = core_grammar_sha256,
+        .semantics_sha256 = semantics_sha256,
+        .frontend_profile_id = frontend_profile_id,
+        .frontend_grammar_sha256 = frontend_grammar_sha256,
+        .compiler_version = compiler_version,
+        .signed_at_unix = claims.signed_at_unix,
+        .property_summary = property_summary,
+        .guarded_categories = guarded_categories,
+        .routes_count = claims.routes_count,
+        .durable_workflow_proof_level = durable_workflow_proof_level,
+        .durable_workflow_retry_safe = claims.durable_workflow_retry_safe,
+        .durable_workflow_idempotent = claims.durable_workflow_idempotent,
+        .durable_workflow_fault_covered = claims.durable_workflow_fault_covered,
     };
 }
 
@@ -568,6 +633,7 @@ test "verify refuses a legacy receipt without source identity" {
         "\"compilerVersion\":\"0.0.0-test\"," ++
         "\"signedAt\":1700000000," ++
         "\"propertySummary\":\"pure\"," ++
+        "\"guardedCategories\":\"\"," ++
         "\"routesCount\":1}";
     const key_pair = try keyPairFromSeed(test_seed);
     const jws = try signPayloadJsonForTest(allocator, payload, key_pair);
@@ -596,6 +662,7 @@ test "a receipt from the previous attestation version is refused, not reinterpre
         "\"compilerVersion\":\"0.0.0-test\"," ++
         "\"signedAt\":1700000000," ++
         "\"propertySummary\":\"pure\"," ++
+        "\"guardedCategories\":\"\"," ++
         "\"routesCount\":1}";
 
     const key_pair = try keyPairFromSeed(test_seed);
@@ -671,6 +738,7 @@ test "parseClaims defaults missing durable workflow fields" {
         "\"compilerVersion\":\"0.0.0-test\"," ++
         "\"signedAt\":1700000000," ++
         "\"propertySummary\":\"pure\"," ++
+        "\"guardedCategories\":\"\"," ++
         "\"routesCount\":1}";
 
     const claims = try parseClaims(allocator, payload);
@@ -699,6 +767,29 @@ test "parseClaims defaults missing durable workflow fields" {
     try std.testing.expect(!claims.durable_workflow_retry_safe);
     try std.testing.expect(!claims.durable_workflow_idempotent);
     try std.testing.expect(!claims.durable_workflow_fault_covered);
+}
+
+test "parseClaims requires guardedCategories in v4" {
+    const allocator = std.testing.allocator;
+    const payload =
+        "{\"v\":\"" ++ version_tag ++ "\"," ++
+        "\"contractSha256\":\"" ++ "a" ** 64 ++ "\"," ++
+        "\"bytecodeSha256\":\"" ++ "b" ** 64 ++ "\"," ++
+        "\"policySha256\":\"" ++ "c" ** 64 ++ "\"," ++
+        "\"capabilityHash\":\"" ++ "d" ** 64 ++ "\"," ++
+        "\"runtimePolicySha256\":\"" ++ "e" ** 64 ++ "\"," ++
+        "\"executableRootSha256\":\"" ++ "f" ** 64 ++ "\"," ++
+        "\"coreProfileId\":\"zts-model-1\"," ++
+        "\"coreGrammarSha256\":\"" ++ "1" ** 64 ++ "\"," ++
+        "\"semanticsSha256\":\"" ++ "2" ** 64 ++ "\"," ++
+        "\"frontendProfileId\":null," ++
+        "\"frontendGrammarSha256\":null," ++
+        "\"compilerVersion\":\"0.0.0-test\"," ++
+        "\"signedAt\":1700000000," ++
+        "\"propertySummary\":\"pure\"," ++
+        "\"routesCount\":1}";
+
+    try std.testing.expectError(error.InvalidJson, parseClaims(allocator, payload));
 }
 
 test "signing is deterministic for a fixed seed" {

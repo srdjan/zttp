@@ -3484,6 +3484,9 @@ fn writeCapabilityPolicy(writer: anytype, policy: ?HandlerPolicy, contract: ?*co
         try writePolicySectionFromAllowList(writer, "cache", null);
         try writePolicySectionFromAllowList(writer, "sql", null);
     }
+    try writer.print("    .egress_scopes = .{{ .bits = {d} }},\n", .{
+        if (policy) |p| p.egress_scopes.bits else 0,
+    });
     try writer.writeAll("};\n");
     try writer.writeAll("pub const runtime_policy_index_required = ");
     try writer.writeAll(if (contract) |c|
@@ -6095,6 +6098,7 @@ test "writeCapabilityPolicy emits zig-fmt stable empty allowlists" {
     const policy = HandlerPolicy{
         .env = .{},
         .egress = .{},
+        .egress_scopes = (zts.endpoint.ScopeSet{}).with(.public).with(.loopback),
         .cache = .{},
         .sql = .{},
     };
@@ -6103,6 +6107,7 @@ test "writeCapabilityPolicy emits zig-fmt stable empty allowlists" {
 
     try std.testing.expect(std.mem.indexOf(u8, output.items, ".values = &[_][]const u8{},") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, ".values = &[_][]const u8{\n        },") == null);
+    try std.testing.expect(std.mem.indexOf(u8, output.items, ".egress_scopes = .{ .bits = 5 },") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "runtime_policy_index_required = false;") != null);
 
     output.clearRetainingCapacity();

@@ -33,6 +33,7 @@ trap 'rm -rf "$tmp_dir"' EXIT
 checker_catalog="$tmp_dir/checker-catalog"
 checker_doc_catalog="$tmp_dir/checker-doc-catalog"
 mirror_catalog="$tmp_dir/mirror-catalog"
+checker_enabled="$tmp_dir/checker-enabled"
 enabled="$tmp_dir/enabled"
 evidence="$tmp_dir/evidence"
 doc_catalog="$tmp_dir/doc-catalog"
@@ -41,13 +42,13 @@ doc_evidence="$tmp_dir/doc-evidence"
 
 if ! python3 - \
   "$checker" "$mirror" \
-  "$checker_catalog" "$checker_doc_catalog" "$mirror_catalog" "$enabled" <<'PY'
+  "$checker_catalog" "$checker_doc_catalog" "$mirror_catalog" "$checker_enabled" "$enabled" <<'PY'
 import json
 import pathlib
 import re
 import sys
 
-checker_path, mirror_path, basic_out, doc_out, mirror_out, enabled_out = sys.argv[1:]
+checker_path, mirror_path, basic_out, doc_out, mirror_out, checker_enabled_out, enabled_out = sys.argv[1:]
 checker = pathlib.Path(checker_path).read_text()
 mirror = pathlib.Path(mirror_path).read_text()
 
@@ -148,21 +149,27 @@ for module, export_name, arg_index, kind, impl in checker_rows:
 
 mirror_lines = ["|".join(row[:4]) for row in mirror_rows]
 
-measured = re.search(r"pub const measured_families\s*=\s*(.*?);", mirror, re.DOTALL)
-if measured is None:
-    raise ValueError("missing measured_families declaration")
-enabled_families = re.findall(r"\.with\(\.([a-z0-9_]+)\)", measured.group(1))
-enabled_residue = re.sub(r"\.with\(\.[a-z0-9_]+\)", "", measured.group(1))
-enabled_residue = enabled_residue.replace("(FamilySet{})", "")
-if re.sub(r"\s", "", enabled_residue):
-    raise ValueError("measured_families contains an unparsed expression")
-if not enabled_families:
-    raise ValueError("measured_families is empty")
+def family_set(source: str, name: str):
+    declaration = re.search(rf"pub const {re.escape(name)}\s*=\s*(.*?);", source, re.DOTALL)
+    if declaration is None:
+        raise ValueError(f"missing {name} declaration")
+    families = re.findall(r"\.with\(\.([a-z0-9_]+)\)", declaration.group(1))
+    residue = re.sub(r"\.with\(\.[a-z0-9_]+\)", "", declaration.group(1))
+    residue = residue.replace("(FamilySet{})", "")
+    if re.sub(r"\s", "", residue):
+        raise ValueError(f"{name} contains an unparsed expression")
+    if not families:
+        raise ValueError(f"{name} is empty")
+    return families
+
+checker_enabled_families = family_set(checker, "enabled_families")
+enabled_families = family_set(mirror, "measured_families")
 
 for path, lines in (
     (basic_out, basic_lines),
     (doc_out, doc_lines),
     (mirror_out, mirror_lines),
+    (checker_enabled_out, checker_enabled_families),
     (enabled_out, enabled_families),
 ):
     pathlib.Path(path).write_text("\n".join(lines) + "\n")
@@ -231,6 +238,7 @@ exact_matches() {
 
 require_floor "checker catalog" "$checker_catalog" 3
 require_floor "compiler mirror" "$mirror_catalog" 3
+require_floor "checker enabled-family set" "$checker_enabled" 1
 require_floor "enabled-family set" "$enabled" 1
 require_floor "guard evidence" "$evidence" 1
 require_floor "documented catalog" "$doc_catalog" 3
@@ -240,12 +248,14 @@ require_floor "documented evidence" "$doc_evidence" 1
 for item in \
   "checker catalog:$checker_catalog" \
   "compiler mirror:$mirror_catalog" \
+  "checker enabled-family set:$checker_enabled" \
   "enabled-family set:$enabled" \
   "guard evidence:$evidence"; do
   require_unique "${item%%:*}" "${item#*:}"
 done
 
 compare_exact "compiler mirror and checker catalog" "$checker_catalog" "$mirror_catalog" || true
+compare_exact "checker and compiler enabled families" "$checker_enabled" "$enabled" || true
 compare_exact "documented catalog and checker guard metadata" "$checker_doc_catalog" "$doc_catalog" || true
 compare_exact "documented and enabled families" "$enabled" "$doc_enabled" || true
 compare_exact "documented and measured evidence" "$evidence" "$doc_evidence" || true

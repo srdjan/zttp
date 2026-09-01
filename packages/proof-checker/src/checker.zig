@@ -417,6 +417,9 @@ const Session = struct {
                 return .{ .rejected = reject(.guard_coverage, .guard_operation_unknown, .{ .ir_node = node.id }) };
             }
             const entry = residual.catalog[node.aux];
+            if (!residual.enabled_families.contains(entry.kind.family())) {
+                return .{ .rejected = reject(.guard_coverage, .guard_family_disabled, .{ .ir_node = node.id }) };
+            }
             const expected = cert_mod.ResidualObligation{
                 .kind = entry.kind,
                 .normalization = entry.kind.normalization(),
@@ -1375,6 +1378,32 @@ pub const test_support = struct {
             self.policy_len = at;
         }
 
+        /// Serialize a valid SQL-only policy. The read/write tag makes this a
+        /// stronger negative than an absent policy: every supplied byte would
+        /// cover the SQL row if the independent family gate were missing.
+        pub fn writeSqlPolicy(self: *GuardedFixture, name: []const u8, read_only: bool) void {
+            var at: usize = 0;
+            for (0..3) |_| {
+                self.policy_bytes[at] = 0;
+                at += 1;
+                std.mem.writeInt(u16, self.policy_bytes[at..][0..2], 0, .little);
+                at += 2;
+            }
+            self.policy_bytes[at] = 1;
+            at += 1;
+            std.mem.writeInt(u16, self.policy_bytes[at..][0..2], 1, .little);
+            at += 2;
+            self.policy_bytes[at] = if (read_only) 1 else 0;
+            at += 1;
+            std.mem.writeInt(u16, self.policy_bytes[at..][0..2], @intCast(name.len), .little);
+            at += 2;
+            @memcpy(self.policy_bytes[at..][0..name.len], name);
+            at += name.len;
+            self.policy_bytes[at] = 0;
+            at += 1;
+            self.policy_len = at;
+        }
+
         pub fn parts(self: *GuardedFixture) cert_mod.Parts {
             return .{
                 .identity = .{
@@ -1702,6 +1731,28 @@ test "a guarded call naming a catalog row that does not exist rejects" {
     try fixture.encode();
     const result = check(fixture.inputs(), policy_mod.production);
     try testing.expectEqual(verdict.ReasonCode.guard_operation_unknown, result.rejection.?.code);
+}
+
+test "a fully consistent SQL guard remains disabled" {
+    var fixture = try test_support.buildGuarded();
+    const row = residual.lookupIndex("zttp:sql", "sqlOne", 0) orelse
+        return error.TestUnexpectedResult;
+    const entry = residual.catalog[row];
+    fixture.ir[2].aux = row;
+    fixture.residual_plan[0] = .{
+        .kind = entry.kind,
+        .normalization = entry.kind.normalization(),
+        .sink = entry.kind.sink(),
+        .section = entry.kind.section(),
+        .impl_id = entry.impl_id,
+        .operation_id = 2,
+    };
+    fixture.writeSqlPolicy("listTodos", true);
+    try fixture.encode();
+
+    const result = check(fixture.inputs(), policy_mod.production);
+    try testing.expectEqual(verdict.Stage.guard_coverage, result.rejection.?.stage);
+    try testing.expectEqual(verdict.ReasonCode.guard_family_disabled, result.rejection.?.code);
 }
 
 test "a guarded operation with no configured category rejects" {

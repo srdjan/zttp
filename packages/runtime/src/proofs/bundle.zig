@@ -62,10 +62,28 @@ pub fn writeBundle(allocator: std.mem.Allocator, args: BundleArgs, stdout: *std.
     if (args.replay_path) |p| try rejectSuspiciousPath(p);
     try rejectSuspiciousPath(args.out_dir);
 
-    try ensureDir(allocator, args.out_dir);
+    // Read and classify the artifact before creating the output directory. A
+    // predecessor artifact is a rebuild request, not a hash-only bundle, and
+    // refusing before writes avoids leaving a partial bundle behind.
+    var binary_bytes: ?[]u8 = null;
+    defer if (binary_bytes) |bytes| allocator.free(bytes);
+    var binary_payload: ?self_extract.Payload = null;
+    defer if (binary_payload) |*payload| payload.deinit(allocator);
+    if (args.binary_path) |path| {
+        const bytes = try zts.file_io.readFile(allocator, path, 256 * 1024 * 1024);
+        binary_bytes = bytes;
+        binary_payload = payloadFromBinary(allocator, bytes) catch |err| switch (err) {
+            error.UnsupportedArtifactFormat => {
+                try writeRebuildDiagnostic(stderr, "bundle");
+                return err;
+            },
+            error.OutOfMemory => return err,
+        };
+    }
 
     const contract_bytes = try zts.file_io.readFile(allocator, args.contract_path, 256 * 1024 * 1024);
     defer allocator.free(contract_bytes);
+    try ensureDir(allocator, args.out_dir);
     const contract_sha = sha256Hex(contract_bytes);
     const contract_dest = try std.fs.path.join(allocator, &.{ args.out_dir, "handler.contract.json" });
     defer allocator.free(contract_dest);
@@ -73,14 +91,12 @@ pub fn writeBundle(allocator: std.mem.Allocator, args: BundleArgs, stdout: *std.
 
     var binary_sha_hex: ?[64]u8 = null;
     var certificate_sha_hex: ?[64]u8 = null;
-    if (args.binary_path) |path| {
-        const binary_bytes = try zts.file_io.readFile(allocator, path, 256 * 1024 * 1024);
-        defer allocator.free(binary_bytes);
-        const sha = sha256Hex(binary_bytes);
+    if (binary_bytes) |bytes| {
+        const sha = sha256Hex(bytes);
         binary_sha_hex = sha;
         const bin_dest = try std.fs.path.join(allocator, &.{ args.out_dir, "binary" });
         defer allocator.free(bin_dest);
-        try zts.file_io.writeFile(allocator, bin_dest, binary_bytes);
+        try zts.file_io.writeFile(allocator, bin_dest, bytes);
         const sha_dest = try std.fs.path.join(allocator, &.{ args.out_dir, "binary.sha256" });
         defer allocator.free(sha_dest);
         try zts.file_io.writeFile(allocator, sha_dest, &sha);
@@ -90,9 +106,7 @@ pub fn writeBundle(allocator: std.mem.Allocator, args: BundleArgs, stdout: *std.
         // the binary on purpose: it is what makes `certificate` a component
         // with its own hash in the manifest, and the verifier checks it against
         // the artifact anyway.
-        if (payloadFromBinary(allocator, binary_bytes)) |parsed| {
-            var payload = parsed;
-            defer payload.deinit(allocator);
+        if (binary_payload) |payload| {
             if (payload.certificate) |certificate| {
                 certificate_sha_hex = sha256Hex(certificate);
                 const cert_dest = try std.fs.path.join(allocator, &.{ args.out_dir, "certificate" });
@@ -296,7 +310,13 @@ fn verifySemantics(
     };
     defer allocator.free(binary_bytes);
 
-    var payload = payloadFromBinary(allocator, binary_bytes) orelse {
+    var payload = payloadFromBinary(allocator, binary_bytes) catch |err| switch (err) {
+        error.UnsupportedArtifactFormat => {
+            try writeRebuildDiagnostic(stderr, "verify");
+            return err;
+        },
+        error.OutOfMemory => return err,
+    } orelse {
         try stdout.writeAll(
             "Proof:     not checked - the bundled file carries no readable deployment payload\n",
         );
@@ -625,20 +645,36 @@ fn isSupportedComponent(name: []const u8) bool {
 /// Returns null when the file is a plain binary. A payload framed correctly in
 /// a format this build cannot read is not null: `readTrailer` says so, and the
 /// caller reports it rather than treating the artifact as unproven.
-fn payloadFromBinary(allocator: std.mem.Allocator, bytes: []const u8) ?self_extract.Payload {
+fn payloadFromBinary(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+) error{ OutOfMemory, UnsupportedArtifactFormat }!?self_extract.Payload {
     if (bytes.len < self_extract.TRAILER_SIZE) return null;
     const trailer_start = bytes.len - self_extract.TRAILER_SIZE;
     const trailer = self_extract.readTrailer(
         @intCast(bytes.len),
         bytes[trailer_start..][0..self_extract.TRAILER_SIZE],
-    ) catch return null;
+    ) catch |err| switch (err) {
+        error.NoPayload => return null,
+        error.UnsupportedArtifactFormat => return error.UnsupportedArtifactFormat,
+    };
 
     const start: usize = @intCast(trailer.payload_offset);
     const size: usize = @intCast(trailer.payload_size);
     if (start + size > bytes.len) return null;
     const payload_bytes = bytes[start..][0..size];
     if (std.hash.crc.Crc32.hash(payload_bytes) != trailer.checksum) return null;
-    return (self_extract.parse(allocator, payload_bytes) catch return null) orelse null;
+    return self_extract.parse(allocator, payload_bytes) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return null,
+    };
+}
+
+fn writeRebuildDiagnostic(stderr: *std.Io.Writer, command: []const u8) !void {
+    try stderr.print(
+        "zttp proofs {s}: the artifact uses a predecessor self-extract format; this build requires version {d}. Rebuild the handler with the current zttp binary.\n",
+        .{ command, self_extract.FORMAT_VERSION },
+    );
 }
 
 fn parseSha256(value: []const u8) ?[64]u8 {
@@ -700,6 +736,95 @@ test "bundle manifest accepts only supported names and lowercase digests" {
 }
 
 const test_chdir = @import("../proof_ledger.zig").chdirTmpForTest;
+
+fn predecessorArtifact(allocator: std.mem.Allocator) ![]u8 {
+    const base = "test-runtime";
+    const payload = "predecessor-payload";
+    const artifact = try allocator.alloc(u8, base.len + payload.len + self_extract.TRAILER_SIZE);
+    @memcpy(artifact[0..base.len], base);
+    @memcpy(artifact[base.len..][0..payload.len], payload);
+
+    const trailer = artifact[base.len + payload.len ..];
+    std.mem.writeInt(u64, trailer[0..8], base.len, .little);
+    std.mem.writeInt(u64, trailer[8..16], payload.len, .little);
+    std.mem.writeInt(u16, trailer[16..18], self_extract.FORMAT_VERSION - 1, .little);
+    std.mem.writeInt(u16, trailer[18..20], 0, .little);
+    std.mem.writeInt(u32, trailer[20..24], std.hash.crc.Crc32.hash(payload), .little);
+    std.mem.writeInt(u64, trailer[24..32], self_extract.MAGIC, .little);
+    return artifact;
+}
+
+test "bundle refuses a predecessor artifact before creating output" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const old_cwd = try test_chdir(&tmp);
+    defer std.testing.allocator.free(old_cwd);
+    defer std.Io.Threaded.chdir(old_cwd) catch {};
+
+    try zts.file_io.writeFile(std.testing.allocator, "contract.json", "{}");
+    const artifact = try predecessorArtifact(std.testing.allocator);
+    defer std.testing.allocator.free(artifact);
+    try zts.file_io.writeFile(std.testing.allocator, "handler", artifact);
+
+    var out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer out.deinit();
+    var err = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer err.deinit();
+    try std.testing.expectError(error.UnsupportedArtifactFormat, writeBundle(
+        std.testing.allocator,
+        .{
+            .contract_path = "contract.json",
+            .binary_path = "handler",
+            .out_dir = "bundle",
+        },
+        &out.writer,
+        &err.writer,
+    ));
+    try std.testing.expect(std.mem.indexOf(u8, err.writer.buffered(), "Rebuild") != null);
+    try std.testing.expectError(
+        error.FileNotFound,
+        std.Io.Dir.access(std.Io.Dir.cwd(), std.testing.io, "bundle", .{}),
+    );
+}
+
+test "verify refuses a predecessor artifact after integrity succeeds" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const old_cwd = try test_chdir(&tmp);
+    defer std.testing.allocator.free(old_cwd);
+    defer std.Io.Threaded.chdir(old_cwd) catch {};
+
+    const contract = "{}";
+    const certificate = "certificate";
+    const artifact = try predecessorArtifact(std.testing.allocator);
+    defer std.testing.allocator.free(artifact);
+    try ensureDir(std.testing.allocator, "bundle");
+    try zts.file_io.writeFile(std.testing.allocator, "bundle/handler.contract.json", contract);
+    try zts.file_io.writeFile(std.testing.allocator, "bundle/binary", artifact);
+    try zts.file_io.writeFile(std.testing.allocator, "bundle/certificate", certificate);
+
+    var manifest = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer manifest.deinit();
+    try writeManifest(&manifest.writer, .{
+        .contract_sha = sha256Hex(contract),
+        .binary_sha = sha256Hex(artifact),
+        .certificate_sha = sha256Hex(certificate),
+        .replay_sha = null,
+        .replay_basename = null,
+    });
+    try zts.file_io.writeFile(std.testing.allocator, "bundle/bundle.json", manifest.writer.buffered());
+
+    var out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer out.deinit();
+    var err = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer err.deinit();
+    try std.testing.expectError(
+        error.UnsupportedArtifactFormat,
+        verify(std.testing.allocator, "bundle", false, &out.writer, &err.writer),
+    );
+    try std.testing.expect(std.mem.indexOf(u8, out.writer.buffered(), "Integrity: verified") != null);
+    try std.testing.expect(std.mem.indexOf(u8, err.writer.buffered(), "Rebuild") != null);
+}
 
 test "verify rejects a manifest component path with parent traversal" {
     var tmp = std.testing.tmpDir(.{});
