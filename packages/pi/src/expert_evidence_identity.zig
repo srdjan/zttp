@@ -43,6 +43,39 @@ pub const ThresholdIdentity = TypedIdentity("zttp-expert-thresholds-v1");
 pub const ManifestIdentity = TypedIdentity("zttp-expert-manifest-v1");
 pub const ResultRunIdentity = TypedIdentity("zttp-expert-result-run-v1");
 
+comptime {
+    // Every identity above has the same single `bytes: [64]u8` field, so what
+    // makes them distinct types is `domain_tag` capturing the comptime domain.
+    // A struct returned by a comptime function is distinct only for the values
+    // its body captures. Deleting that line is caught by the compiler as an
+    // unused parameter, but discarding the domain in the function body instead
+    // compiles and silently collapses all sixteen into one type: a
+    // ContentDigest would then pass where a PolicyIdentity is required, and
+    // `eql` would compare across domains. This reads the identities back out of
+    // the file, so a new one needs no edit here.
+    const decls = @typeInfo(@This()).@"struct".decls;
+    var identities: [decls.len]type = undefined;
+    var found: usize = 0;
+    for (decls) |decl| {
+        const Candidate = @field(@This(), decl.name);
+        if (@TypeOf(Candidate) != type) continue;
+        const info = @typeInfo(Candidate);
+        if (info != .@"struct") continue;
+        const fields = info.@"struct".fields;
+        if (fields.len != 1) continue;
+        if (!std.mem.eql(u8, fields[0].name, "bytes")) continue;
+        if (fields[0].type != [64]u8) continue;
+        identities[found] = Candidate;
+        found += 1;
+    }
+    if (found < 2) @compileError("the identity types are no longer discoverable here");
+    for (0..found) |left| for (left + 1..found) |right| {
+        if (identities[left] == identities[right]) {
+            @compileError("two identities share one type: the domain is no longer captured");
+        }
+    };
+}
+
 pub const HeadlineCase = struct {
     name: []const u8,
     prompt: []const u8,
