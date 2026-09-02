@@ -47,12 +47,21 @@ comptime {
     // Every identity above has the same single `bytes: [64]u8` field, so what
     // makes them distinct types is `domain_tag` capturing the comptime domain.
     // A struct returned by a comptime function is distinct only for the values
-    // its body captures. Deleting that line is caught by the compiler as an
-    // unused parameter, but discarding the domain in the function body instead
-    // compiles and silently collapses all sixteen into one type: a
-    // ContentDigest would then pass where a PolicyIdentity is required, and
-    // `eql` would compare across domains. This reads the identities back out of
-    // the file, so a new one needs no edit here.
+    // its body captures.
+    //
+    // Deleting `domain_tag` is already a compile error, twice over: the sixteen
+    // `FramedHasher.init(X.domain_tag)` call sites below read it, and the
+    // parameter would go unused. That regression needs no guard.
+    //
+    // This guards the one that compiles: a `domain_tag` that still exists but
+    // stops deriving from the parameter, such as a hardcoded string. The call
+    // sites keep resolving, so nothing complains, while every identity collapses
+    // into one type and every hasher silently shares one domain. A ContentDigest
+    // would pass where a PolicyIdentity is required and `eql` would compare
+    // across domains.
+    //
+    // This reads the identities back out of the file by shape, so a new one
+    // needs no edit here.
     const decls = @typeInfo(@This()).@"struct".decls;
     var identities: [decls.len]type = undefined;
     var found: usize = 0;
