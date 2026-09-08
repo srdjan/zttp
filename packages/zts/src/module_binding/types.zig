@@ -687,6 +687,20 @@ pub fn validateBindings(comptime bindings: []const ModuleBinding) void {
                 if (f.param_types[from.param_index] != .unknown) {
                     @compileError(b.specifier ++ "." ++ f.name ++ " reads its return type from an argument whose declared kind is not `.unknown`; a callback or pass-through argument has no fixed kind to name");
                 }
+                // An `.identity` return hands the argument back unchanged, so
+                // its result carries every label that argument carried. The
+                // flow checker learns that from `derives_from_args` and from
+                // nothing else: `scanImports` populates
+                // `module_fn_arg_derived` from that field alone, so an
+                // `.identity` declaration on its own is invisible to label
+                // propagation. `zttp:scope.using` shipped that way and
+                // laundered `secret` and `credential` through a pass-through
+                // the checker credited with closure labels only. A pass-through
+                // that must not propagate does not exist: if it transforms its
+                // argument it is not `.identity`.
+                if (from.kind == .identity and !f.derives_from_args) {
+                    @compileError(b.specifier ++ "." ++ f.name ++ " returns an argument unchanged (`.identity`) but does not declare `derives_from_args`; the flow checker propagates labels from that field alone, so the return would launder every label the argument carried");
+                }
             }
             if (f.laws.len > 0) {
                 if (b.comptime_only) {

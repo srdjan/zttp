@@ -4871,6 +4871,58 @@ test "mask still declassifies, because that is what it is for" {
     try std.testing.expect(try runNoSecretLeakage(std.testing.allocator, source));
 }
 
+test "the direct return of a secret is refused" {
+    // The control for the two probes below. Without it a `false` from either
+    // one could mean the harness refuses everything, which would make the
+    // probe pass while checking nothing.
+    const source =
+        \\import { env } from "zttp:env";
+        \\function handler(req) {
+        \\  return Response.json({ v: env("API_SECRET") });
+        \\}
+    ;
+    try std.testing.expect(!try runNoSecretLeakage(std.testing.allocator, source));
+}
+
+test "scope.using does not launder the resource it hands back" {
+    // `using` returns argument 0 unchanged at runtime. It declared
+    // `returns_from_param = .identity` and no `derives_from_args`, and
+    // `scanImports` populates `module_fn_arg_derived` from that field alone, so
+    // the identity return was never wired to label propagation: the call was
+    // credited with closure labels only and the secret arrived unlabelled.
+    const source =
+        \\import { env } from "zttp:env";
+        \\import { using } from "zttp:scope";
+        \\function handler(req) {
+        \\  return Response.json({ v: using(env("API_SECRET"), (r) => r) });
+        \\}
+    ;
+    try std.testing.expect(!try runNoSecretLeakage(std.testing.allocator, source));
+}
+
+test "scope.using does not launder a credential either" {
+    const source =
+        \\import { using } from "zttp:scope";
+        \\function handler(req) {
+        \\  const token = req.headers.get("authorization");
+        \\  return Response.json({ v: using(token, (r) => r) });
+        \\}
+    ;
+    try std.testing.expect(!try runNoCredentialLeakage(std.testing.allocator, source));
+}
+
+test "scope.using still proves clean for an ordinary resource" {
+    // The pass-through has to keep working for the handlers it exists for.
+    // A propagating export is only useful if it does not refuse those.
+    const source =
+        \\import { using } from "zttp:scope";
+        \\function handler(req) {
+        \\  return Response.json({ v: using("plain", (r) => r) });
+        \\}
+    ;
+    try std.testing.expect(try runNoSecretLeakage(std.testing.allocator, source));
+}
+
 test "ordinary text through the same exports still proves clean" {
     // The control for the whole sweep. Propagating every argument label is only
     // useful if it does not refuse the handlers these modules exist for.
