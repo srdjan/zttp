@@ -78,22 +78,13 @@ pub const DiagnosticKind = enum {
     module_scope_mutation,
 
     // WebSocket event exports (Check 8)
-    // Author-declared spec discharge (Check 9)
-    /// The author declared `Proof<T, "name">` but the corresponding
-    /// `HandlerProperties` field is false. The compiler refuses to
-    /// build because the handler does not satisfy its own stated
-    /// obligation.
-    spec_not_discharged,
-    /// The author declared a spec that contradicts an import already
-    /// present in the contract (e.g. `Proof<T, "read_only">` while
-    /// importing a writing function from `zttp:cache`). Failing
-    /// fast keeps the autoloop from burning turns trying to remove
-    /// the user's actual feature.
-    spec_incompatible_with_import,
-    /// The author declared a spec name not in the v1 set. Surfaced
-    /// with the list of valid names so the author can correct the
-    /// typo or pick a defined spec.
-    spec_unknown_name,
+    // Author-declared spec discharge (Check 9) does NOT appear here. ZTS500,
+    // ZTS501 and ZTS502 are emitted through
+    // `contract_types.SpecDiagnostic.Kind` by `spec_discharge.zig`; this enum
+    // carried three variants naming the same three codes that no code path
+    // ever constructed. Because the coverage gate keys on the code and the
+    // codes are live, nothing could report the variants as dead. Their
+    // registry rows now hang on the enum that emits them.
 };
 
 pub const Diagnostic = struct {

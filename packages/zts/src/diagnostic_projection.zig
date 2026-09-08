@@ -199,11 +199,20 @@ const all_codes: [code_count]CodeEntry = blk: {
 };
 
 test "checker diagnostic codes are globally unique" {
-    // 66 after the three dead verifier variants went (ZTS300, ZTS301, ZTS307).
+    // 63 after three more dead verifier variants went - spec_not_discharged,
+    // spec_incompatible_with_import and spec_unknown_name, which named
+    // ZTS500/501/502 while `spec_discharge.zig` emitted those codes through
+    // `contract_types.SpecDiagnostic.Kind` and nothing constructed these. That
+    // is the same class as the ZTS300/ZTS301/ZTS307 removal this count last
+    // moved for, and it survived longer because the codes were live: a
+    // coverage gate keyed on `rule.code` is permanently satisfied by the real
+    // producer. `scripts/check-diagnostic-producers.sh` now asks the other
+    // question - does anything CONSTRUCT the variant.
+    //
     // The count is here so a projection that silently stops enumerating a
     // checker cannot pass the uniqueness loop below over a shorter list; it
     // moves whenever a checker's kind set does.
-    try std.testing.expectEqual(@as(usize, 66), allCodes().len);
+    try std.testing.expectEqual(@as(usize, 63), allCodes().len);
 
     var seen: std.StringHashMapUnmanaged(CodeEntry) = .empty;
     defer seen.deinit(std.testing.allocator);

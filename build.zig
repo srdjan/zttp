@@ -247,6 +247,15 @@ pub fn build(b: *std.Build) void {
     const proof_checker_purity_step = b.step("test-proof-checker-purity", "Check the acceptance kernel is a leaf with a non-empty suite");
     proof_checker_purity_step.dependOn(&proof_checker_purity.step);
 
+    // Every advertised diagnostic variant must have a construction site. The
+    // rule-coverage gate in packages/pi keys on `rule.code`, so a dead variant
+    // sharing a code with a live producer is permanently satisfied and cannot
+    // be reported - three did exactly that.
+    const diagnostic_producers = b.addSystemCommand(&.{ "bash", "scripts/check-diagnostic-producers.sh" });
+    diagnostic_producers.has_side_effects = true;
+    const diagnostic_producers_step = b.step("test-diagnostic-producers", "Check every advertised diagnostic variant has a producer");
+    diagnostic_producers_step.dependOn(&diagnostic_producers.step);
+
     // The published trusted boundary against the one the kernel implements.
     const proof_ratchet_drift = b.addSystemCommand(&.{ "bash", "scripts/check-proof-ratchet.sh" });
     proof_ratchet_drift.has_side_effects = true;
@@ -1203,6 +1212,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_proof_ratchet_tests.step);
     test_step.dependOn(&proof_ratchet_drift.step);
     test_step.dependOn(&proof_checker_purity.step);
+    test_step.dependOn(&diagnostic_producers.step);
     test_step.dependOn(expert_golden_step);
     test_step.dependOn(contract_golden_step);
     test_step.dependOn(&runtime_purity_cmd.step);

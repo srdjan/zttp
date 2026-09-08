@@ -16,6 +16,7 @@
 const std = @import("std");
 const diagnostic_catalog = @import("diagnostic_catalog.zig");
 const handler_verifier = @import("handler_verifier.zig");
+const contract_types = @import("zts-contracts").contract_types;
 const strict_checker = @import("strict_checker.zig");
 const handler_policy = @import("zts-engine").handler_policy;
 const flow_checker = @import("flow_checker.zig");
@@ -130,8 +131,38 @@ const verifier_meta = [_]struct {
         // Refactor across two scopes: not a single primitive.
         .repair = null,
     },
+};
+
+// ---------------------------------------------------------------------------
+// Author-declared spec discharge (ZTS500-502)
+// ---------------------------------------------------------------------------
+
+// These three rows were part of `verifier_meta`, keyed on three
+// `handler_verifier.DiagnosticKind` variants that no code path ever
+// constructed. The codes are live - `spec_discharge.zig` emits them through
+// `contract_types.SpecDiagnostic.Kind` - so the coverage gate, which keys on
+// `rule.code`, was permanently satisfied by the real producer and could not see
+// that the variants beside these rows were dead. The mechanism that caught the
+// nineteen-row drift in scripts/unseeded-rules.allow is blind to that shape.
+//
+// The rows are now keyed on the enum that actually emits them, and the dead
+// variants are gone. `name` stays the published string rather than
+// `@tagName(kind)`: the registry identity is hashed and consumed, and renaming
+// a rule is a separate decision from fixing which enum it hangs on. The
+// comptime check below ties each row to its producer, so a code that drifts
+// from the emitting enum is a compile error.
+const spec_meta = [_]struct {
+    kind: contract_types.SpecDiagnostic.Kind,
+    name: []const u8,
+    code: []const u8,
+    description: []const u8,
+    example: ?[]const u8,
+    help: []const u8,
+    repair: ?RepairIntent,
+}{
     .{
-        .kind = .spec_not_discharged,
+        .kind = .not_discharged,
+        .name = "spec_not_discharged",
         .code = "ZTS500",
         .description = "Handler declared a Proof<T, \"name\"> obligation but the inferred property is false.",
         .example = "structural Guardrails<T> = Proof<T, \"idempotent\">; function handler(req): Guardrails<Response> { return Response.json({ now: Date.now() }); }",
@@ -139,7 +170,8 @@ const verifier_meta = [_]struct {
         .repair = .add_spec_assertion,
     },
     .{
-        .kind = .spec_incompatible_with_import,
+        .kind = .incompatible_with_import,
+        .name = "spec_incompatible_with_import",
         .code = "ZTS501",
         .description = "Handler declared a spec that contradicts an imported virtual-module function.",
         .example = "structural G<T> = Proof<T, \"read_only\">; import { cacheSet } from 'zttp:cache'; // write violates read_only",
@@ -147,7 +179,8 @@ const verifier_meta = [_]struct {
         .repair = null,
     },
     .{
-        .kind = .spec_unknown_name,
+        .kind = .unknown_name,
+        .name = "spec_unknown_name",
         .code = "ZTS502",
         .description = "Handler declared Proof<T, \"NAME\"> with a name not in the v1 spec set.",
         .example = "structural G<T> = Proof<T, \"made_up\">;",
@@ -155,6 +188,14 @@ const verifier_meta = [_]struct {
         .repair = null,
     },
 };
+
+comptime {
+    for (spec_meta) |row| {
+        if (!std.mem.eql(u8, row.kind.code(), row.code)) {
+            @compileError("spec_meta row " ++ row.name ++ " declares " ++ row.code ++ " but its producing kind emits " ++ row.kind.code());
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Strict rules (ZTS061 and ZTS6xx) - default expert language profile
@@ -633,7 +674,7 @@ fn flowName(kind: flow_checker.DiagnosticKind) []const u8 {
     return @tagName(kind);
 }
 
-const total_count = verifier_meta.len + strict_meta.len + capsule_meta.len + policy_meta.len + flow_meta.len;
+const total_count = verifier_meta.len + spec_meta.len + strict_meta.len + capsule_meta.len + policy_meta.len + flow_meta.len;
 
 pub const all_rules: [total_count]RuleEntry = blk: {
     var rules: [total_count]RuleEntry = undefined;
@@ -648,6 +689,19 @@ pub const all_rules: [total_count]RuleEntry = blk: {
             .example = v.example,
             .help = v.help,
             .repair = v.repair,
+        };
+        i += 1;
+    }
+
+    for (spec_meta) |sp| {
+        rules[i] = .{
+            .name = sp.name,
+            .code = sp.code,
+            .category = .verifier,
+            .description = sp.description,
+            .example = sp.example,
+            .help = sp.help,
+            .repair = sp.repair,
         };
         i += 1;
     }

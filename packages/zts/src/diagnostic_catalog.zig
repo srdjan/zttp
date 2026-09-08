@@ -250,9 +250,6 @@ pub fn verifierCode(kind: handler_verifier.DiagnosticKind) []const u8 {
         .unchecked_optional_use => "ZTS308",
         .unchecked_optional_access => "ZTS309",
         .module_scope_mutation => "ZTS310",
-        .spec_not_discharged => "ZTS500",
-        .spec_incompatible_with_import => "ZTS501",
-        .spec_unknown_name => "ZTS502",
     };
 }
 
@@ -431,10 +428,6 @@ fn verifierMetadata(kind: handler_verifier.DiagnosticKind) Metadata {
             .unchecked_optional_access,
             => .runtime_safety,
             .module_scope_mutation => .state_isolation,
-            .spec_not_discharged,
-            .spec_incompatible_with_import,
-            .spec_unknown_name,
-            => .proof_contract,
             .unused_variable, .unused_import => .canonical_form,
         },
         .risk = if (kind == .module_scope_mutation) .security_critical else .correctness,
@@ -627,7 +620,13 @@ test "diagnostic catalog is nonempty exhaustive and deterministic" {
 }
 
 test "only explicitly shared semantic faults have multiple producers" {
-    const shared_codes = [_][]const u8{ "ZTS008", "ZTS500", "ZTS501", "ZTS502" };
+    // ZTS500/501/502 were on this list and are not any more. They were listed
+    // as one semantic fault with two producers - the verifier kind set and the
+    // contract spec kind set - but only the contract half ever constructed
+    // anything: no code path built the three verifier variants, so the second
+    // producer was declared and never wired. Deleting them leaves ZTS008 as
+    // the only genuinely shared code.
+    const shared_codes = [_][]const u8{"ZTS008"};
     var duplicate_count: usize = 0;
     for (all_entries, 0..) |entry, index| {
         for (all_entries[index + 1 ..]) |other| {
