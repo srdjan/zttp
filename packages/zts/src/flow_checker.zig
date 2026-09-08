@@ -4923,6 +4923,87 @@ test "scope.using still proves clean for an ordinary resource" {
     try std.testing.expect(try runNoSecretLeakage(std.testing.allocator, source));
 }
 
+test "a secret written to the cache and read back is not proven clean" {
+    // The read call holds no reference to what the write put there, so the
+    // checker cannot follow the provenance - and the export answered with a
+    // benign `.internal` label rather than with ignorance. That reported
+    // `no_secret_leakage` PROVEN for a secret round-tripped through the store.
+    //
+    // `derives_from_args` is the WRONG fix here and is a no-op:
+    // `argDerivedLabels` unions only the current call's own arguments, which
+    // for `cacheGet("ns", "k")` are two string literals - never the secret a
+    // separate `cacheSet` wrote. The primitive that fits is `.unknown`.
+    const source =
+        \\import { env } from "zttp:env";
+        \\import { cacheSet, cacheGet } from "zttp:cache";
+        \\function handler(req) {
+        \\  cacheSet("ns", "k", env("API_SECRET"));
+        \\  return Response.json({ v: cacheGet("ns", "k") });
+        \\}
+    ;
+    try std.testing.expect(!try runNoSecretLeakage(std.testing.allocator, source));
+}
+
+test "a queue read is not proven clean" {
+    const source =
+        \\import { env } from "zttp:env";
+        \\import { send, receive } from "zttp:queue";
+        \\function handler(req) {
+        \\  send("q", env("API_SECRET"));
+        \\  return Response.json({ v: receive("q") });
+        \\}
+    ;
+    try std.testing.expect(!try runNoSecretLeakage(std.testing.allocator, source));
+}
+
+test "a sql row read is not proven clean" {
+    const source =
+        \\import { sqlOne } from "zttp:sql";
+        \\function handler(req) {
+        \\  return Response.json({ row: sqlOne("getUser") });
+        \\}
+    ;
+    try std.testing.expect(!try runNoSecretLeakage(std.testing.allocator, source));
+}
+
+test "a sql row set read is not proven clean" {
+    const source =
+        \\import { sqlMany } from "zttp:sql";
+        \\function handler(req) {
+        \\  return Response.json({ rows: sqlMany("listUsers") });
+        \\}
+    ;
+    try std.testing.expect(!try runNoSecretLeakage(std.testing.allocator, source));
+}
+
+test "a durable signal payload is not proven clean" {
+    // `waitSignalNative` returns `callbacks.wait_signal_fn(...)` directly -
+    // literally the `payload` argument of a separate `signal(key, name,
+    // payload)` call - and relabelled it `.external`.
+    const source =
+        \\import { waitSignal } from "zttp:durable";
+        \\function handler(req) {
+        \\  return Response.json({ v: waitSignal("approved") });
+        \\}
+    ;
+    try std.testing.expect(!try runNoSecretLeakage(std.testing.allocator, source));
+}
+
+test "a rate-limit counter is still proven clean" {
+    // The control that keeps the sweep honest. `rateCheck` declares
+    // `.internal` in the same shape as the five store reads, and is correctly
+    // excluded: it returns a counter derived from the limiter's own state, and
+    // no caller ever writes a value into it. Marking it `.unknown` would cost
+    // every rate-limited handler three properties for no provenance gap.
+    const source =
+        \\import { rateCheck } from "zttp:ratelimit";
+        \\function handler(req) {
+        \\  return Response.json({ allowed: rateCheck("ip", 10, 60) });
+        \\}
+    ;
+    try std.testing.expect(try runNoSecretLeakage(std.testing.allocator, source));
+}
+
 test "ordinary text through the same exports still proves clean" {
     // The control for the whole sweep. Propagating every argument label is only
     // useful if it does not refuse the handlers these modules exist for.

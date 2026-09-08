@@ -541,15 +541,21 @@ pub const module_examples = [_]ModuleExample{
         \\
         \\import { run, waitSignal, signal } from "zttp:durable";
         \\
+        \\// `waitSignal` returns a payload some separate `signal` call wrote, so
+        \\// its provenance is unknowable to the checker and the binding declares
+        \\// `unknown`. Reaching the response with that clears the three
+        \\// properties the response sink decides - `no_secret_leakage`,
+        \\// `no_credential_leakage`, `deterministic` - and `idempotent` follows
+        \\// determinism, so none of the four are on this list. The presence test
+        \\// `approval !== undefined` does not narrow that: the checker unions
+        \\// labels through a comparison rather than treating it as a fact about
+        \\// the value. `retry_safe` still holds, which is the property this
+        \\// example is about.
         \\structural ApprovalProof<T> = Proof<T,
-        \\  | "deterministic"
         \\  | "retry_safe"
-        \\  | "idempotent"
         \\  | "state_isolated"
         \\  | "result_safe"
         \\  | "optional_safe"
-        \\  | "no_secret_leakage"
-        \\  | "no_credential_leakage"
         \\  | "input_validated"
         \\  | "pii_contained"
         \\  | "injection_safe"

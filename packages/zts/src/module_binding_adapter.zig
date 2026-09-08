@@ -156,6 +156,7 @@ fn adaptFunctionBinding(
             .external = binding.return_labels.external,
             .validated = binding.return_labels.validated,
             .nondeterministic = binding.return_labels.nondeterministic,
+            .unknown = binding.return_labels.unknown,
         },
         .failure_severity = @enumFromInt(@intFromEnum(binding.failure_severity)),
         .laws = &laws,

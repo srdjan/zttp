@@ -27,6 +27,13 @@ pub const QueueCallbacks = struct {
     }
 };
 
+// `receive` declares `.unknown` alongside `.external`. It returns a message a
+// separate `send` put on the queue, and this call holds no reference to that
+// value, so the checker cannot follow the provenance. `.unknown` is the claim
+// of ignorance: the sink clears every property it decides rather than holding
+// it on a benign-looking label. `derives_from_args` would be a no-op -
+// `argDerivedLabels` unions only this call's own arguments, which are the queue
+// name, never the payload.
 pub const binding = mb.ModuleBinding{
     .specifier = "zttp:queue",
     .name = "queue",
@@ -37,7 +44,7 @@ pub const binding = mb.ModuleBinding{
         .{ .name = "send", .func = sendNative, .arg_count = 2, .effect = .write, .returns = .result, .param_types = &.{ .string, .unknown }, .param_names = &.{ "queue", "message" }, .failure_severity = .expected, .traceable = true, .json_encodable_args = &.{1} },
         .{ .name = "request", .func = requestNative, .arg_count = 2, .effect = .write, .returns = .result, .param_types = &.{ .string, .unknown }, .param_names = &.{ "queue", "message" }, .failure_severity = .expected, .traceable = true, .json_encodable_args = &.{1} },
         // actor is optional (defaults to "main"), so required_arg_count = 0.
-        .{ .name = "receive", .func = receiveNative, .arg_count = 1, .required_arg_count = 0, .effect = .write, .returns = .result, .param_types = &.{.string}, .param_names = &.{"queue"}, .failure_severity = .expected, .traceable = true, .return_labels = .{ .external = true } },
+        .{ .name = "receive", .func = receiveNative, .arg_count = 1, .required_arg_count = 0, .effect = .write, .returns = .result, .param_types = &.{.string}, .param_names = &.{"queue"}, .failure_severity = .expected, .traceable = true, .return_labels = .{ .external = true, .unknown = true } },
         .{ .name = "ack", .func = ackNative, .arg_count = 1, .effect = .write, .returns = .result, .param_types = &.{.string}, .param_names = &.{"messageId"}, .failure_severity = .expected, .traceable = true, .signature = .{ .params = &.{"MessageId"}, .returns = "{ ok: boolean; value?: unknown; error?: unknown; errors?: unknown }" } },
         // trailing reason is optional (defaults to "nack"), so required_arg_count = 1.
         .{ .name = "nack", .func = nackNative, .arg_count = 2, .required_arg_count = 1, .effect = .write, .returns = .result, .param_types = &.{ .string, .string }, .param_names = &.{ "messageId", "reason" }, .failure_severity = .expected, .traceable = true, .signature = .{ .params = &.{ "MessageId", "string" }, .returns = "{ ok: boolean; value?: unknown; error?: unknown; errors?: unknown }" } },
