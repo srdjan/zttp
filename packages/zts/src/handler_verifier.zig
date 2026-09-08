@@ -129,22 +129,97 @@ const ReturnStatus = enum {
 /// expression is itself the return value.
 pub fn functionAlwaysReturns(ir_view: IrView, body: NodeIndex) bool {
     const tag = ir_view.getTag(body) orelse return false;
+    // Exhaustive over `NodeTag` on purpose. This answer is written straight
+    // into `CapsuleFacts.total` by `function_specs.discharge`, which feeds
+    // `spec_discharge` and the `response_total` property, and the switch used
+    // to end in `else => true`: a statement tag added to the IR and not added
+    // to the false arm became silently "always returns", granting a proof
+    // instead of costing one. There is no catch-all now, so a new tag is a
+    // compile error and someone has to classify it. If a catch-all is ever
+    // reintroduced it returns `false` - the unknown case must cost a refusal.
     return switch (tag) {
+        // Bodies the walk understands.
         .block, .program => pureBlockReturns(ir_view, body) == .always,
         .return_stmt => true,
         .if_stmt => pureStmtReturns(ir_view, body) == .always,
-        .for_of_stmt,
-        .var_decl,
+
+        // An expression-bodied arrow: the expression IS the return value, so
+        // every path returns. Only shapes that can stand alone as a complete
+        // expression body belong here.
+        .lit_int,
+        .lit_float,
+        .lit_string,
+        .lit_bool,
+        .lit_null,
+        .lit_undefined,
+        .identifier,
+        .binary_op,
+        .unary_op,
+        .ternary,
+        .call,
+        .method_call,
+        .member_access,
+        .computed_access,
+        .optional_chain,
+        .assignment,
+        .array_literal,
+        .object_literal,
+        .function_expr,
+        .arrow_function,
+        .await_expr,
+        .yield_expr,
+        .sequence_expr,
+        .comma_expr,
+        .match_expr,
+        => true,
+
+        // Every remaining tag: a statement other than the three handled above,
+        // a declaration, a pattern, a module form, or a sub-node that is never
+        // a function body on its own (an object member, a spread, a match arm
+        // or pattern, a list marker). None of them return on every path, and
+        // for the sub-nodes `false` is the fail-closed answer to a shape that
+        // should not have reached here at all.
+        .object_property,
+        .object_method,
+        .object_getter,
+        .object_setter,
+        .object_spread,
+        .spread,
+        .match_arm,
+        .match_pattern,
+        .match_type_test,
         .expr_stmt,
-        .import_decl,
-        .export_decl,
-        .function_decl,
+        .var_decl,
+        .for_stmt,
+        .for_of_stmt,
+        .for_in_stmt,
+        .while_stmt,
+        .do_while_stmt,
+        .switch_stmt,
+        .case_clause,
+        .assert_stmt,
+        .throw_stmt,
         .break_stmt,
         .continue_stmt,
+        .try_stmt,
+        .labeled_stmt,
+        .function_decl,
+        .array_pattern,
+        .pattern_element,
+        .pattern_rest,
+        .pattern_default,
+        .import_decl,
+        .import_specifier,
+        .import_default,
+        .import_namespace,
+        .export_decl,
+        .export_specifier,
+        .export_default,
+        .export_all,
+        .param_list,
+        .arg_list,
+        .stmt_list,
         => false,
-        // Anything else is an expression-bodied arrow; the expression is the
-        // return value, so every path returns.
-        else => true,
     };
 }
 
@@ -1949,6 +2024,91 @@ test "ZTS309 stays silent once the optional is narrowed" {
 }
 
 const import_corpus = @import("tests/import_corpus.zig");
+
+/// Parse `source` and answer `functionAlwaysReturns` for the first node
+/// carrying `tag`. Used to reach a body shape by tag rather than by position,
+/// so the totality classification can be probed per tag.
+fn totalityOfFirstNode(source: []const u8, tag: NodeTag) !bool {
+    const allocator = std.testing.allocator;
+    var parser = try @import("zts-engine").parser.JsParser.init(allocator, source);
+    defer parser.deinit();
+    _ = try parser.parse();
+    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    for (0..view.nodeCount()) |idx| {
+        const i: NodeIndex = @intCast(idx);
+        if (view.getTag(i) == tag) return functionAlwaysReturns(view, i);
+    }
+    return error.TagNotFound;
+}
+
+test "an assert statement is not a total function body" {
+    // The discriminating probe for the fail-open this switch used to carry.
+    // `functionAlwaysReturns` enumerated the tags that return false and ended
+    // in `else => true`, so `.assert_stmt` - a statement that returns on no
+    // path - was credited with "every path returns". The answer is written
+    // straight into `CapsuleFacts.total`, which feeds `spec_discharge` and the
+    // `response_total` property, so the unknown case granted a proof.
+    //
+    // A tag added to the IR and not classified is now a compile error rather
+    // than a silent `true`. This test is the runtime half: it fails if a
+    // catch-all returning `true` is ever reintroduced.
+    try std.testing.expect(!try totalityOfFirstNode(
+        "function handler(req) { assert req; return Response.text(\"ok\"); }",
+        .assert_stmt,
+    ));
+}
+
+test "a for-of statement is not a total function body" {
+    // The loop may run zero times, so the body returning is not the function
+    // returning. Already classified before the switch was made exhaustive;
+    // pinned so the classification cannot drift with the rewrite.
+    try std.testing.expect(!try totalityOfFirstNode(
+        "function handler(req) { for (const x of [1]) { return x; } return 0; }",
+        .for_of_stmt,
+    ));
+}
+
+test "an expression-bodied arrow is a total function body" {
+    // The reason the old catch-all existed, kept as an explicit arm: the
+    // expression IS the return value. The control for the two probes above -
+    // without it a rewrite that answered `false` everywhere would pass them
+    // while breaking every helper capsule's `total` fact.
+    try std.testing.expect(try totalityOfFirstNode(
+        "const f = (x) => x + 1;",
+        .binary_op,
+    ));
+}
+
+/// Parse `source` and answer `functionAlwaysReturns` for the body of its first
+/// arrow function. Reached through the arrow node rather than by finding a
+/// `.block` by tag: the parser emits the inner blocks first, so scanning for a
+/// tag lands on the wrong one.
+fn totalityOfFirstArrowBody(source: []const u8) !bool {
+    const allocator = std.testing.allocator;
+    var parser = try @import("zts-engine").parser.JsParser.init(allocator, source);
+    defer parser.deinit();
+    _ = try parser.parse();
+    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    for (0..view.nodeCount()) |idx| {
+        const i: NodeIndex = @intCast(idx);
+        if (view.getTag(i) != .arrow_function) continue;
+        const fe = view.getFunction(i) orelse return error.TagNotFound;
+        return functionAlwaysReturns(view, fe.body);
+    }
+    return error.TagNotFound;
+}
+
+test "a block body that returns on only one path is not total" {
+    try std.testing.expect(!try totalityOfFirstArrowBody("const f = (x) => { if (x) { return 1; } };"));
+}
+
+test "a block body that returns on every path is total" {
+    // The other half of the block arm, so a rewrite cannot satisfy the test
+    // above by answering `false` for every block.
+    try std.testing.expect(try totalityOfFirstArrowBody(
+        "const f = (x) => { if (x) { return 1; } return 2; };",
+    ));
+}
 
 test "the import scan splits tracked builtins into result and optional slots" {
     // Replaces the differential that proved this scan matches the pre-C1
