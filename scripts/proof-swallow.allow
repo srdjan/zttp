@@ -50,3 +50,35 @@ packages/zts/src/type_checker.zig extractTypeofGuard catch-return
 packages/zts/src/type_checker.zig extractIsArrayGuard catch-return
 packages/zts/src/type_checker.zig extractIsDictGuard catch-return
 packages/zts/src/type_checker.zig extractIsBytesGuard catch-return
+
+# --- Consumer-side acceptance kernel ---
+#
+# markDeclared marks the nodes a certificate DECLARES total rather than proves.
+# A `continue` past an obligation it could not read leaves that node unmarked,
+# and an unmarked node is one the consumer's own totality fold must settle for
+# itself. The failure therefore costs the producer a declaration it wanted and
+# can never grant one it did not earn.
+packages/proof-checker/src/checker.zig markDeclared catch-continue
+
+# Both entries reject. The `catch return` is `budget.spend(2)` answering with a
+# Rejection value - this function returns `?Rejection` and non-null IS the
+# refusal - so exhausting the work budget refuses the artifact rather than
+# accepting it.
+#
+# The `catch break` entries are the two searches for the proof_ir and
+# proof_certificate graph members, and they read indices the root-folding loop
+# directly above already read successfully: that loop walks the same 0..len
+# range and returns `.graph_member_missing` on any failure, so it has bound
+# every member before either search starts. If a decode somehow failed here the
+# search would end without finding its member, and the executable-root
+# comparison the loop above performs has already covered those bytes.
+packages/proof-checker/src/checker.zig bindExecutableGraph catch-return
+packages/proof-checker/src/checker.zig bindExecutableGraph catch-break
+
+# Null means "no certificate-owned members", and this value only ever
+# populates the OBSERVED graph the kernel decides against. Omitting a member
+# makes the observed root disagree with the root the certificate states, which
+# is a rejection; and `accept` hands the same raw certificate bytes to
+# `pcc.check`, which decodes them independently and refuses at the decode stage
+# if they are undecodable. Neither path can buy acceptance with a null.
+packages/runtime/src/proof_activation.zig certificateCommitments catch-return

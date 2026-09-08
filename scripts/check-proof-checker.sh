@@ -100,6 +100,35 @@ for pattern in "${forbidden[@]}"; do
   fi
 done
 
+# The list above is written in dotted form, so it only sees a capability reached
+# as `std.fs.cwd()`. Every one of the fourteen is evaded by a rebinding:
+# `const fs = std.fs;` puts `fs.cwd()` beyond `std\.fs\.`, and
+# `const s = @import("std");` puts `s.fs.cwd()` beyond all of them. The
+# patterns are therefore only sound while `std` is reached through exactly one
+# name, so that is what this asserts. The kernel is clean today; this is what
+# keeps the fourteen above meaningful rather than decorative.
+#
+# Two alias targets are permitted, and each is permitted for the same reason the
+# capability list already gives: `std.testing` is reachable only from a `test`
+# block, and SHA-256 over caller-supplied bytes is pure. Anything else - a bare
+# `std`, or a namespace that could reach one of the fourteen - is refused,
+# because the alias is where the dotted form disappears.
+permitted_aliases='std\.testing|std\.crypto\.hash\.sha2\.Sha256'
+if hits="$(grep -nE '^[[:space:]]*(pub )?const [A-Za-z_][A-Za-z0-9_]* = (std|std\.[A-Za-z_][A-Za-z0-9_.]*);' "${sources[@]}" | grep -vE "= ($permitted_aliases);\$" || true)"; [[ -n "$hits" ]]; then
+  note "the kernel aliases std or one of its namespaces; the capability patterns above only match the dotted form, so an alias makes them blind:"
+  printf '%s\n' "$hits" >&2
+fi
+# Floor on the line above: the permitted set must actually match something, or a
+# rename has turned the alias check into a pattern that refuses nothing and
+# passes everything.
+if ! grep -qE "= ($permitted_aliases);\$" "${sources[@]}"; then
+  note "no permitted std alias matches in the kernel; the alias check is vacuous - update permitted_aliases"
+fi
+if hits="$(grep -nE '@import\("std"\)' "${sources[@]}" | grep -vE 'const std = @import\("std"\);' || true)"; [[ -n "$hits" ]]; then
+  note "the kernel binds @import(\"std\") to a name other than 'std'; reach std through one name so the capability patterns above can see it:"
+  printf '%s\n' "$hits" >&2
+fi
+
 # Allocation. The kernel is allocation-free so a certificate cannot choose how
 # much memory a consumer spends.
 if hits="$(grep -nE 'std\.mem\.Allocator|allocator' "${sources[@]}" || true)"; [[ -n "$hits" ]]; then

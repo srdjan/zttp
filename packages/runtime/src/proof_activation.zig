@@ -85,6 +85,10 @@ pub fn observedRoot(allocator: std.mem.Allocator, inputs: Inputs) Error!?[32]u8 
     defer allocator.free(members);
     const observed = artifact_graph.build(allocator, graphInputs(inputs), members) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
+        // exhaustive: any other build error means the graph could not be
+        // reconstructed, so a caller comparing two rebuilds has nothing to
+        // compare. Null is the absence of a root, not a matching one, and the
+        // comparison this feeds refuses on it - no failure reads as agreement.
         else => return null,
     };
     return graph.computeRoot(observed) catch null;
@@ -125,6 +129,9 @@ pub fn accept(
 
     const observed = artifact_graph.build(allocator, graphInputs(inputs), members) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
+        // exhaustive: any other build error is answered by the refusal on this
+        // line. The arm is not silent - it IS the rejection, so no ignored case
+        // reaches the kernel.
         else => return refusal(.artifact_binding, .graph_member_missing, inputs.provenance, true),
     };
 
