@@ -84,8 +84,12 @@ step "zig build test-cli -Dstudio  (studio workbench unit tests)"
 # with studio enabled so they are actually exercised.
 zig build test-cli -Dstudio
 
-step "bash scripts/test-examples.sh  (example handler tests)"
-bash scripts/test-examples.sh
+# The example suites are not run here any more: `zig build test` above depends
+# on them, the same way it owns the docs-drift and link gates. They used to run
+# only from this script, so `zig build test` reported a pass while 56 suites
+# went unrun - and an example claiming a proof property the compiler had
+# stopped discharging surfaced only here. Running them twice would just cost
+# another 24 seconds.
 
 step "bash scripts/check-normalize-idempotent.sh  (double-normalize byte-idempotence)"
 bash scripts/check-normalize-idempotent.sh
@@ -133,6 +137,9 @@ bash scripts/check-proof-checker.sh
 
 step "bash scripts/check-diagnostic-producers.sh  (every advertised diagnostic variant has a producer)"
 bash scripts/check-diagnostic-producers.sh
+
+step "bash scripts/check-script-reachability.sh  (every script is invoked or declared manual)"
+bash scripts/check-script-reachability.sh
 
 step "bash scripts/check-proof-ratchet.sh  (published trusted boundary matches the kernel)"
 bash scripts/check-proof-ratchet.sh

@@ -247,6 +247,15 @@ pub fn build(b: *std.Build) void {
     const proof_checker_purity_step = b.step("test-proof-checker-purity", "Check the acceptance kernel is a leaf with a non-empty suite");
     proof_checker_purity_step.dependOn(&proof_checker_purity.step);
 
+    // Every script in scripts/ must be invoked by something or say why not. A
+    // gate nothing runs reports nothing, which reads the same as a gate that
+    // found nothing - and scripts/test-zruntime.sh sat in the tree invoking a
+    // root file that had been deleted, called by nobody.
+    const script_reachability = b.addSystemCommand(&.{ "bash", "scripts/check-script-reachability.sh" });
+    script_reachability.has_side_effects = true;
+    const script_reachability_step = b.step("test-script-reachability", "Check every script in scripts/ is invoked or declared manual");
+    script_reachability_step.dependOn(&script_reachability.step);
+
     // Every advertised diagnostic variant must have a construction site. The
     // rule-coverage gate in packages/pi keys on `rule.code`, so a dead variant
     // sharing a code with a live producer is permanently satisfied and cannot
@@ -1213,6 +1222,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&proof_ratchet_drift.step);
     test_step.dependOn(&proof_checker_purity.step);
     test_step.dependOn(&diagnostic_producers.step);
+    test_step.dependOn(&script_reachability.step);
     test_step.dependOn(expert_golden_step);
     test_step.dependOn(contract_golden_step);
     test_step.dependOn(&runtime_purity_cmd.step);
@@ -1243,6 +1253,23 @@ pub fn build(b: *std.Build) void {
     const server_test_step = b.step("test-server", "Run server/runtime facade integration tests");
     server_test_step.dependOn(&run_server_tests.step);
     test_step.dependOn(&run_server_tests.step);
+
+    // Example handler suites. These were left out of `zig build test` and run
+    // only from scripts/verify.sh, and the exclusion was documented rather than
+    // enforced - so `zig build test` reported a pass while 56 suites went
+    // unrun, and an example claiming a proof property the compiler had stopped
+    // discharging (examples/sql/sql-crud.ts, ZTS500) surfaced only in verify.
+    // The suites take about 24 seconds, which does not buy an exclusion.
+    //
+    // The binary comes in as a file argument rather than the script building
+    // the tree itself: a nested `zig build` inside a running build would
+    // re-enter the build graph.
+    const examples_cmd = b.addSystemCommand(&.{ "/bin/bash", "scripts/test-examples.sh" });
+    examples_cmd.addFileArg(cli_exe.getEmittedBin());
+    examples_cmd.has_side_effects = true;
+    const examples_test_step = b.step("test-examples", "Run the example handler suites");
+    examples_test_step.dependOn(&examples_cmd.step);
+    test_step.dependOn(&examples_cmd.step);
 
     // Benchmark executable
     const bench_exe = b.addExecutable(.{

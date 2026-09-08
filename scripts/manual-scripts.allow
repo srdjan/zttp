@@ -1,0 +1,45 @@
+# Scripts in scripts/ that nothing in the repository invokes, and why that is
+# correct. Enforced in both directions by scripts/check-script-reachability.sh:
+# an unreferenced script with no row here fails, and so does a row for a script
+# that something now invokes, or a row naming a script that no longer exists.
+#
+# One row per (script, reason slug), with the finding above it. A row is a claim
+# that this script is a tool a developer runs by hand, not a gate that was
+# written and wired nowhere. The distinction matters: a gate nothing invokes
+# reports nothing and is then cited as coverage, which is how
+# scripts/test-zruntime.zig's script sat in the tree pointing at a root file
+# that had been deleted.
+#
+# The list only ratchets down. Adding a row is a deliberate widening.
+
+# Manual macOS experiment in dyld load overhead. Builds and times the binary;
+# asserts nothing, so there is no verdict for a gate to consume.
+build_minimal_dyld.sh manual-experiment
+
+# Publishes the wasm analyzer into a separate website repository under a
+# content-hashed filename. It writes outside this tree and needs that checkout,
+# so it cannot run in CI. What CI does check is that the artifact still builds:
+# `zig build wasm`, which scripts/verify.sh runs.
+build-wasm-playground.sh publishes-outside-tree
+
+# Two lines: build a TSX example ReleaseFast and serve it on port 3000. A
+# convenience for looking at the JSX frontend by hand; it blocks on a server, so
+# nothing automated can wait on it.
+run-jsx.sh interactive-server
+
+# Developer machine setup. Runs before the tree can be built at all, so no build
+# step or gate could depend on it.
+setup.sh developer-setup
+
+# Spends real model time on three complete expert cohorts and prints a decision
+# report. Report-only by design - it promotes no cassettes and edits no default -
+# so there is no artifact for a gate to check, and running it automatically
+# would spend on every build. docs/internals/cassette-recording.md is where the
+# command is written down.
+qualify-expert.sh manual-model-spend
+
+# Regenerates docs/restrictions-to-proofs.md from restriction_registry.zig. The
+# drift between the two is already gated - check-docs-drift.sh compares the
+# rendered table against the registry row by row - so this script is the
+# author-side fix for a failure that gate reports, not a check of its own.
+update-restrictions-doc.sh regeneration-tool

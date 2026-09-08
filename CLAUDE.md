@@ -15,7 +15,7 @@ Validated on Zig 0.16.0 stable. The build produces three binaries: `zttp` (devel
 
 ```bash
 zig build                                            # Debug build (all three binaries)
-zig build test                                       # Bulk unit suite (excludes zruntime root, smoke, panic-isolation, examples)
+zig build test                                       # Bulk unit suite (excludes zruntime root, smoke, panic-isolation)
 bash scripts/verify.sh                               # Full local gate mirroring CI, including zig fmt --check
 zig build run -- examples/handler/handler.ts -p 3000 # Run zttp
 ```
