@@ -1203,7 +1203,10 @@ test "fuzz: parseRequestLineBorrowed slices stay inside the input" {
             try testing.expect(method_ptr >= input_base and method_ptr + line.method.len <= input_end);
             try testing.expect(url_ptr >= input_base and url_ptr + line.url.len <= input_end);
         } else |err| switch (err) {
-            error.InvalidRequest, error.UriTooLong => {},
+            // Exhaustive on purpose: a new refusal reason has to be classified
+            // here rather than absorbed, since this fuzz loop is what asserts
+            // the returned slices point into the caller's buffer.
+            error.InvalidRequest, error.UriTooLong, error.UnknownMethod => {},
         }
     }
 }

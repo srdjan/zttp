@@ -427,23 +427,14 @@ pub const UpvalueInfo = struct {
     index: u8, // Index in parent's locals or upvalues array
 };
 
-/// Call count threshold before a function becomes a JIT candidate
-pub const JIT_THRESHOLD: u32 = 100;
-
-/// Back-edge threshold for detecting hot loops
+/// Back-edge threshold for detecting hot loops. Read by
+/// `interpreter.zig:100`, the one surviving reader of this group: four
+/// siblings - JIT_THRESHOLD, LOOP_JIT_THRESHOLD, OPTIMIZED_THRESHOLD and
+/// OPTIMIZED_LOOP_THRESHOLD - were tier-promotion thresholds for the tiered
+/// JIT, which was removed after measurement, and nothing read them. Unlike the
+/// `jit_hints` bit above, a constant is not at a fixed offset in a serialized
+/// layout, so removing it costs nothing.
 pub const LOOP_THRESHOLD: u32 = 1000;
-
-/// Back-edge threshold for triggering early JIT compilation of functions with hot loops.
-/// Lower than LOOP_THRESHOLD because functions with loops should JIT faster than
-/// functions that get called many times - the loop already proves the function is hot.
-pub const LOOP_JIT_THRESHOLD: u32 = 50;
-
-/// Execution count threshold for promoting baseline to optimized tier
-pub const OPTIMIZED_THRESHOLD: u32 = 160; // Execution count for baseline -> optimized promotion (after baseline warmup at 150)
-
-/// Back-edge threshold for promoting baseline to optimized tier via hot loops
-/// Lower than call-based threshold since hot loops indicate optimization potential
-pub const OPTIMIZED_LOOP_THRESHOLD: u32 = 5000;
 
 /// Global counter for generating unique guard IDs
 var guard_id_counter: u64 = 1;
