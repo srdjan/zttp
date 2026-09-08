@@ -236,7 +236,6 @@ pub const ReasonCode = enum(u16) {
     guard_operation_unknown = 1910,
     guard_category_not_configured = 1911,
     residual_plan_digest_mismatch = 1912,
-    residual_section_not_permitted = 1913,
     runtime_policy_missing = 1914,
     runtime_policy_undecodable = 1915,
     guard_family_disabled = 1916,

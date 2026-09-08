@@ -24,6 +24,10 @@ pub const BytecodeHeader = packed struct(u88) {
 };
 
 /// Bytecode flags
+/// `jit_hints` is residue of the tiered JIT, which was removed after
+/// measurement, and nothing reads it. It stays for the same reason
+/// `HandlerFlags.pure_dispatch` does: this is a serialized bit at a fixed
+/// offset, and removing it changes what already-written bytecode decodes to.
 pub const BytecodeFlags = packed struct(u8) {
     has_source_map: bool = false,
     optimized: bool = false,
@@ -503,7 +507,14 @@ pub const FunctionFlags = packed struct(u8) {
 // HTTP Handler Fast Path Structures
 // ============================================================================
 
-/// Handler flags for fast path optimization
+/// Handler flags for fast path optimization.
+///
+/// `pure_dispatch` has no reader and is kept anyway. This is a packed struct in
+/// a serialized format: the field is one bit at a fixed offset, and deleting it
+/// would either shift `_reserved` - changing what previously written bytes
+/// decode to - or leave a hole that reads as a rename. A dead bit in a wire
+/// layout is not the same thing as a dead function, and the cost of removing it
+/// is paid by every artifact already on disk.
 pub const HandlerFlags = packed struct(u8) {
     is_http_handler: bool = false,
     has_static_routes: bool = false,
