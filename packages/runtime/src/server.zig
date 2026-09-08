@@ -1070,9 +1070,13 @@ const ConnectionPool = struct {
             error.UriTooLong, error.QueryTooLong => 414,
             error.TooManyHeaders, error.HeaderStorageExhausted, error.HeaderKeyTooLong => 431,
             error.FileTooBig => 413,
-            error.UnsupportedTransferEncoding => 501,
-            // InvalidRequest, DuplicateContentLength, InvalidContentLength,
-            // IncompleteBody, and anything else: a malformed request.
+            // A well-formed method token this runtime does not implement, and
+            // a transfer coding it does not support, are both "understood the
+            // message, will not act on it".
+            error.UnsupportedTransferEncoding, error.UnknownMethod => 501,
+            // InvalidRequest, InvalidHeaderName, DuplicateContentLength,
+            // InvalidContentLength, IncompleteBody, and anything else: a
+            // malformed request.
             else => 400,
         };
     }

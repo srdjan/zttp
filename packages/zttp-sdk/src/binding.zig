@@ -239,6 +239,20 @@ pub const FunctionBinding = struct {
     contract_extractions: []const ContractExtraction = &.{},
     contract_flags: ContractFlags = .{},
     return_labels: LabelSet = .{},
+
+    /// The argument that bounds how much this export declassifies. Set only on
+    /// an export whose purpose is to make a labelled value publishable, and
+    /// whose declared labels therefore replace its input's instead of joining
+    /// them.
+    ///
+    /// The declassification holds only while that argument is a compile-time
+    /// literal. `mask(text, visible)` reveals the trailing `visible` bytes, so
+    /// a runtime `visible` lets whatever computes it decide how much of the
+    /// secret survives: `mask(env("SECRET_KEY"), bytesLength(requestBody(req)))`
+    /// is request-controlled declassification. With a non-literal bound the
+    /// analyzer keeps the input's labels, and the ordinary sink diagnostic
+    /// reports the secret reaching the response.
+    declassify_bound_arg: ?u8 = null,
     /// The return value can contain data that arrived as an argument, and this
     /// export validates nothing. The flow checker then unions every argument's
     /// labels into the call's result instead of answering `return_labels`

@@ -107,10 +107,32 @@ pub fn parseRequestLine(
     };
 }
 
+/// The methods this runtime dispatches. The same closed set the outbound and
+/// service paths already enforce through `runtime_http.parseHttpMethod`, so an
+/// inbound request cannot name a method the rest of the runtime would refuse.
+const known_methods = [_][]const u8{
+    "GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "TRACE", "CONNECT",
+};
+
+fn isKnownMethod(method: []const u8) bool {
+    for (known_methods) |candidate| {
+        if (std.mem.eql(u8, method, candidate)) return true;
+    }
+    return false;
+}
+
 pub fn parseRequestLineBorrowed(request_line: []const u8, max_url_length: usize) !RequestLine {
     var parts = std.mem.splitScalar(u8, request_line, ' ');
     const method = parts.next() orelse return error.InvalidRequest;
     const url = parts.next() orelse return error.InvalidRequest;
+
+    // The method was taken verbatim and checked against nothing, which is why
+    // seven body bytes that had bled in from a mis-framed previous request
+    // arrived as a method and were dispatched 200. RFC 7230 section 3.1.1 makes
+    // the method a token, so a non-token is a malformed message (400); a
+    // well-formed token this runtime does not implement is 501.
+    if (!isValidHeaderName(method)) return error.InvalidRequest;
+    if (!isKnownMethod(method)) return error.UnknownMethod;
 
     if (url.len > max_url_length) return error.UriTooLong;
 
@@ -276,7 +298,12 @@ fn processHeaderLineBorrowed(
     allocator: std.mem.Allocator,
     fast_slots: *FastHeaderSlots,
 ) !void {
+    // A line with no colon at all is not a header and never was; keep
+    // skipping it. A line WITH a colon whose field-name is not a token is a
+    // malformed message, and skipping it is what let a mis-parsed
+    // Content-Length desynchronise the connection. Reject instead.
     const header = splitHeaderLine(line) orelse return;
+    if (!isValidHeaderName(header.key)) return error.InvalidHeaderName;
     const key = header.key;
     const value = header.value;
     try headers.append(allocator, .{ .key = key, .value = value });
@@ -308,6 +335,36 @@ fn parseTransferEncodingValue(value: []const u8) !TransferEncoding {
     return error.UnsupportedTransferEncoding;
 }
 
+/// RFC 7230 tchar: the characters a header field-name may contain. Anything
+/// else - a space before the colon most of all - makes the line malformed.
+fn isTokenChar(c: u8) bool {
+    return switch (c) {
+        'a'...'z', 'A'...'Z', '0'...'9' => true,
+        '!', '#', '$', '%', '&', '\'', '*', '+', '-', '.', '^', '_', '`', '|', '~' => true,
+        else => false,
+    };
+}
+
+/// True when every byte of `name` is a tchar and there is at least one.
+pub fn isValidHeaderName(name: []const u8) bool {
+    if (name.len == 0) return false;
+    for (name) |c| {
+        if (!isTokenChar(c)) return false;
+    }
+    return true;
+}
+
+/// Split `Name: value`. The field-name is taken verbatim and is NOT trimmed,
+/// because a space before the colon is not whitespace to tolerate - RFC 7230
+/// section 3.2.4 requires rejecting the message. Callers must validate the key
+/// with `isValidHeaderName`; `processHeaderLineBorrowed` does, and returns
+/// `error.InvalidHeaderName` so the connection answers 400.
+///
+/// `Content-Length : 7` was the shape that mattered. The untrimmed name failed
+/// the `eqlIgnoreCase` match in both framing paths, `content_length` resolved
+/// to 0, and the declared-but-unconsumed body bytes bled into the next
+/// pipelined request's request-line - where `parseRequestLineBorrowed` accepted
+/// the seven injected bytes as a method and dispatched it 200.
 pub fn splitHeaderLine(line: []const u8) ?struct { key: []const u8, value: []const u8 } {
     const idx = std.mem.indexOfScalar(u8, line, ':') orelse return null;
     const key = line[0..idx];
@@ -680,6 +737,71 @@ test "splitHeaderLine: trims leading whitespace from value" {
     const h = splitHeaderLine("X-Pad:\t  value").?;
     try testing.expectEqualStrings("X-Pad", h.key);
     try testing.expectEqualStrings("value", h.value);
+}
+
+test "isValidHeaderName rejects a space before the colon" {
+    // The exact shape that desynchronised a connection. `Content-Length : 7`
+    // has a field-name of "Content-Length " - one trailing space - which failed
+    // the eqlIgnoreCase match in both framing paths, so content_length resolved
+    // to 0 and the seven declared body bytes stayed in the buffer.
+    try testing.expect(!isValidHeaderName("Content-Length "));
+    try testing.expect(isValidHeaderName("Content-Length"));
+}
+
+test "isValidHeaderName rejects an empty name and accepts the token set" {
+    try testing.expect(!isValidHeaderName(""));
+    try testing.expect(isValidHeaderName("X-Custom_Header.1"));
+    try testing.expect(isValidHeaderName("!#$%&'*+-.^_`|~"));
+    try testing.expect(!isValidHeaderName("X Custom"));
+    try testing.expect(!isValidHeaderName("X\tCustom"));
+}
+
+test "a header line with a non-token name is rejected, not skipped" {
+    // Skipping it is what made the desync possible: the line was dropped and
+    // the request was accepted with the wrong framing. The error maps to 400.
+    var headers: std.ArrayListUnmanaged(HttpHeader) = .empty;
+    defer headers.deinit(testing.allocator);
+    var slots: FastHeaderSlots = .{};
+    try testing.expectError(
+        error.InvalidHeaderName,
+        processHeaderLineBorrowed("Content-Length : 7", &headers, testing.allocator, &slots),
+    );
+    try testing.expectEqual(@as(?usize, null), slots.content_length);
+}
+
+test "a line with no colon is still skipped" {
+    // The control. A line with no colon was never a header, and turning that
+    // into a rejection would refuse messages this server has always accepted.
+    var headers: std.ArrayListUnmanaged(HttpHeader) = .empty;
+    defer headers.deinit(testing.allocator);
+    var slots: FastHeaderSlots = .{};
+    try processHeaderLineBorrowed("not a header", &headers, testing.allocator, &slots);
+    try testing.expectEqual(@as(usize, 0), headers.items.len);
+}
+
+test "the request line refuses a method nothing checked before" {
+    // Seven body bytes that bled in from a mis-framed previous request arrived
+    // concatenated with the real method and were dispatched 200.
+    try testing.expectError(
+        error.UnknownMethod,
+        parseRequestLineBorrowed("XXXXXXXGET /second HTTP/1.1", 1024),
+    );
+    // A non-token method is malformed rather than unimplemented.
+    try testing.expectError(
+        error.InvalidRequest,
+        parseRequestLineBorrowed("GE\x00T /second HTTP/1.1", 1024),
+    );
+}
+
+test "the request line still accepts every method the runtime dispatches" {
+    // The control for the check above: a closed set is only useful if it holds
+    // the methods handlers actually receive.
+    for (known_methods) |method| {
+        var buf: [64]u8 = undefined;
+        const line = try std.fmt.bufPrint(&buf, "{s} /path HTTP/1.1", .{method});
+        const parsed = try parseRequestLineBorrowed(line, 1024);
+        try testing.expectEqualStrings(method, parsed.method);
+    }
 }
 
 test "splitHeaderLine: no colon returns null" {

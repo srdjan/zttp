@@ -143,9 +143,8 @@ fn adaptFunctionBinding(
             .sets_bearer_auth = binding.contract_flags.sets_bearer_auth,
             .sets_jwt_auth = binding.contract_flags.sets_jwt_auth,
         },
-        // Field by field, not a bitcast: the internal set carries `unknown`,
-        // which the analysis assigns and an extension author cannot declare,
-        // so the two types no longer share a width.
+        // Field by field, not a bitcast: the two sets mirror each other by
+        // name but not by width, since the internal one reserves spare bits.
         .derives_from_args = binding.derives_from_args,
         .return_labels = .{
             .secret = binding.return_labels.secret,
@@ -158,6 +157,7 @@ fn adaptFunctionBinding(
             .nondeterministic = binding.return_labels.nondeterministic,
             .unknown = binding.return_labels.unknown,
         },
+        .declassify_bound_arg = binding.declassify_bound_arg,
         .failure_severity = @enumFromInt(@intFromEnum(binding.failure_severity)),
         .laws = &laws,
     };
