@@ -35,14 +35,21 @@ const build_gate_markers = [_][]const u8{
     "test-capability-audit",
     "test-docs-drift",
     "test-evidence-marker",
+    // The example suites moved here from `verify_script_markers` when they
+    // stopped being a `verify.sh` line of their own and became a dependency of
+    // `zig build test`. The gate follows the wiring rather than the old call
+    // site, so it still asserts that something runs them.
+    "test-examples",
 };
 
 const ci_gate_markers = [_][]const u8{
     "bash scripts/verify.sh",
 };
 
-// `test-docs-drift` and `test-doc-links` are dependencies of `zig build test`.
-// The verifier must carry every other repository gate explicitly.
+// `test-docs-drift`, `test-doc-links` and `test-examples` are dependencies of
+// `zig build test` and are asserted against `build.zig` in
+// `build_gate_markers`. The verifier must carry every other repository gate
+// explicitly as a `verify.sh` line.
 const verify_script_markers = [_][]const u8{
     "zig build test",
     "zig build test-zruntime",
@@ -51,7 +58,6 @@ const verify_script_markers = [_][]const u8{
     "zig build smoke-v1",
     "zig build test-panic-isolation",
     "zig build test-cli -Dstudio",
-    "bash scripts/test-examples.sh",
     "bash scripts/check-normalize-idempotent.sh",
     "bash scripts/check-idiom-table.sh",
     "bash scripts/check-canonical-style.sh",
@@ -652,7 +658,8 @@ test "pending receipt-backed measurement note tolerates markdown wrapping" {
 test "release gate requirements require semantics and doctor wiring" {
     const build_zig =
         "smoke-v1 test-panic-isolation smoke-getting-started smoke-demo smoke-studio " ++
-        "test-module-governance test-capability-audit test-docs-drift test-evidence-marker";
+        "test-module-governance test-capability-audit test-docs-drift test-evidence-marker " ++
+        "test-examples";
     const ci_yml = "bash scripts/verify.sh\n";
     const release_yml =
         "bash scripts/verify.sh --release\n" ++
@@ -662,7 +669,7 @@ test "release gate requirements require semantics and doctor wiring" {
         "zig build test\nzig build test-zruntime\n" ++
         "zig build -Doptimize=ReleaseFast\nzig build wasm\nzig build smoke-v1\nzig build test-panic-isolation\n" ++
         "zig build test-cli -Dstudio\n" ++
-        "bash scripts/test-examples.sh\nbash scripts/test-install-archive-safety.sh\n" ++
+        "bash scripts/test-install-archive-safety.sh\n" ++
         "bash scripts/check-normalize-idempotent.sh\nbash scripts/check-idiom-table.sh\n" ++
         "bash scripts/check-canonical-style.sh\nbash scripts/check-grammar-drift.sh\n" ++
         "bash scripts/check-decision-registry.sh\nbash scripts/check-meta-drift.sh\n" ++
@@ -845,6 +852,7 @@ fn writeReleaseDoctorFixture(io: std.Io, tmp: *std.testing.TmpDir, opts: Release
         \\// test-capability-audit
         \\// test-docs-drift
         \\// test-evidence-marker
+        \\// test-examples
         ,
     });
     try tmp.dir.writeFile(io, .{ .sub_path = "scripts/smoke-v1.sh", .data = "#!/bin/sh\n" });
@@ -862,7 +870,6 @@ fn writeReleaseDoctorFixture(io: std.Io, tmp: *std.testing.TmpDir, opts: Release
         \\zig build smoke-v1
         \\zig build test-panic-isolation
         \\zig build test-cli -Dstudio
-        \\bash scripts/test-examples.sh
         \\bash scripts/check-normalize-idempotent.sh
         \\bash scripts/check-idiom-table.sh
         \\bash scripts/check-canonical-style.sh
