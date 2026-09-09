@@ -330,6 +330,7 @@ fn atomicWrite(io: std.Io, path: []const u8, content: []const u8, replace: bool)
     });
     defer atomic_file.deinit(io);
     try atomic_file.file.writeStreamingAll(io, content);
+    try atomic_file.file.setPermissions(io, std.Io.File.Permissions.fromMode(0o644));
     try atomic_file.file.sync(io);
     if (replace) {
         try atomic_file.replace(io);
@@ -689,6 +690,11 @@ fn tmpPath(allocator: std.mem.Allocator, tmp: *std.testing.TmpDir) ![]u8 {
     return allocator.dupe(u8, buffer[0..length]);
 }
 
+fn expectFileMode(io: std.Io, path: []const u8, expected: std.posix.mode_t) !void {
+    const stat = try std.Io.Dir.cwd().statFile(io, path, .{});
+    try std.testing.expectEqual(expected, stat.permissions.toMode() & 0o777);
+}
+
 fn writeWebsite(allocator: std.mem.Allocator, root: []const u8, content: []const u8) ![]u8 {
     const static = try std.fs.path.join(allocator, &.{ root, "static" });
     defer allocator.free(static);
@@ -755,6 +761,39 @@ test "publication updates both references and removes the superseded artifact" {
     const old_path = try std.fs.path.join(allocator, &.{ destination.static, old_name });
     defer allocator.free(old_path);
     try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().statFile(std.testing.io, old_path, .{}));
+}
+
+test "publication preserves public file modes under restrictive umask" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmpPath(allocator, &tmp);
+    defer allocator.free(root);
+    const old_name = try writeWebsite(allocator, root, "\x00asm old wasm");
+    defer allocator.free(old_name);
+    const source_path = try std.fs.path.join(allocator, &.{ root, "new.wasm" });
+    defer allocator.free(source_path);
+    try atomicWrite(std.testing.io, source_path, "\x00asm new wasm", false);
+
+    var result = publish: {
+        const previous_umask = std.c.umask(0o077);
+        defer _ = std.c.umask(previous_umask);
+        break :publish try publishWasm(allocator, std.testing.io, root, source_path, .{});
+    };
+    defer result.deinit(allocator);
+
+    const static = try std.fs.path.join(allocator, &.{ root, "static" });
+    defer allocator.free(static);
+    const index_path = try std.fs.path.join(allocator, &.{ static, "index.html" });
+    defer allocator.free(index_path);
+    const playground_path = try std.fs.path.join(allocator, &.{ static, "playground.js" });
+    defer allocator.free(playground_path);
+    const wasm_path = try std.fs.path.join(allocator, &.{ static, result.wasm_name });
+    defer allocator.free(wasm_path);
+
+    try expectFileMode(std.testing.io, index_path, 0o644);
+    try expectFileMode(std.testing.io, playground_path, 0o644);
+    try expectFileMode(std.testing.io, wasm_path, 0o644);
 }
 
 test "unchanged publication is idempotent" {
