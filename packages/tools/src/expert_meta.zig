@@ -6,7 +6,31 @@ const zts = @import("zts");
 const policy_catalog = zts.PolicyCatalog;
 const moduleMetadata = zts.ModuleMetadata;
 
-pub const compiler_version = zts.version.string;
+/// Identity of the analyzer surface a recording was made against, emitted as
+/// the envelope's `compiler_version`.
+///
+/// Deliberately **not** `zts.version.string`. This value reaches the recorded
+/// model transcript through the `zts_expert_query` meta tool result, so it is
+/// covered by the cassette digests: changing it stales every cassette at once.
+/// While it tracked the release version, shipping a release invalidated the
+/// whole corpus and forced a re-record that measured nothing new about the
+/// compiler - it only re-rolled the draw and moved the published convergence
+/// number. `docs/internals/cassette-recording.md` records that going from
+/// 0.18.0 to 0.19.0 staled 16 of 19 cases for exactly this reason.
+///
+/// Nothing is lost by decoupling, because the analyzer's observable surface is
+/// already covered by content: the same manifest carries `metaHash`,
+/// `grammarHash`, `semanticsHash`, `diagnosticHash`, `policyHash`,
+/// `schemaHash` and `module_registry_hash`, each derived from the thing it
+/// names. This string was the one hand-maintained identity among them, so it
+/// contributed false staleness rather than detection.
+///
+/// Move it when the analyzer's observable surface moves in a way the hashes
+/// above cannot express, and treat that move as owing a full re-record. Do not
+/// move it to match a release.
+pub const analyzer_surface_version = "0.19.0";
+
+pub const compiler_version = analyzer_surface_version;
 pub const policy_version = "2026.04.2";
 pub const mode = "embedded";
 
@@ -105,7 +129,7 @@ pub fn writeText(writer: anytype, info: *const MetaInfo) !void {
 
 test "compute fills all fields" {
     const info = compute();
-    try std.testing.expectEqualStrings(zts.version.string, info.compiler_version);
+    try std.testing.expectEqualStrings(analyzer_surface_version, info.compiler_version);
     try std.testing.expectEqualStrings("2026.04.2", info.policy_version);
     try std.testing.expectEqualStrings("embedded", info.mode);
     try std.testing.expectEqual(@as(usize, 64), info.module_registry_hash.len);
@@ -124,7 +148,7 @@ test "writeJson produces parseable v1 envelope" {
     buf = aw.toArrayList();
     const s = buf.items;
 
-    try std.testing.expect(std.mem.indexOf(u8, s, "\"compiler_version\":\"" ++ zts.version.string ++ "\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, s, "\"compiler_version\":\"" ++ analyzer_surface_version ++ "\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, s, "\"policy_version\":\"2026.04.2\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, s, "\"module_registry_hash\":\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, s, "\"mode\":\"embedded\"") != null);
@@ -144,7 +168,7 @@ test "writeText emits the human-readable report with pinned versions" {
     const s = buf.items;
 
     try std.testing.expect(std.mem.indexOf(u8, s, "zts policy") != null);
-    try std.testing.expect(std.mem.indexOf(u8, s, "compiler: " ++ zts.version.string) != null);
+    try std.testing.expect(std.mem.indexOf(u8, s, "compiler: " ++ analyzer_surface_version) != null);
     try std.testing.expect(std.mem.indexOf(u8, s, "policy:   2026.04.2") != null);
     try std.testing.expect(std.mem.indexOf(u8, s, "modules:  ") != null);
     try std.testing.expect(std.mem.indexOf(u8, s, "mode:     embedded") != null);

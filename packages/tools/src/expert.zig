@@ -709,7 +709,13 @@ fn printVerifyModuleManifestHelp() void {
 // ---------------------------------------------------------------------------
 
 test "v1 contract: compiler_version pinned" {
-    try std.testing.expectEqualStrings(zts.version.string, compiler_version);
+    // Pinned to the analyzer surface identity, deliberately not to
+    // `zts.version.string`. The envelope reaches the recorded model transcript,
+    // so this value is covered by the cassette digests and a release bump used
+    // to stale the whole corpus through it. See the reasoning on
+    // `expert_meta.analyzer_surface_version`.
+    try std.testing.expectEqualStrings(expert_meta.analyzer_surface_version, compiler_version);
+    try std.testing.expectEqualStrings("0.19.0", compiler_version);
 }
 
 test "v1 contract: policy_version pinned" {
