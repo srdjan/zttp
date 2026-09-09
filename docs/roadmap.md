@@ -29,7 +29,8 @@ behavior lives in [User Guide](user-guide.md).
 - Hosted cloud deploy is not part of the current CLI surface. `deploy` builds a
   local binary, `deploy --cloud` parses and rejects with a "not available in
   this beta" message, and the account verbs (`login`, `logout`, `review`,
-  `grants`, `revoke-grant`) are not dispatched at all.
+  `grants`, `revoke-grant`) are not dispatched, each naming itself as deferred
+  rather than as an unknown command.
 - The runtime uses the threaded HTTP server path. The evented `std.Io`
   networking path is not a supported request backend.
 - Handlers receive raw `multipart/form-data` bodies from the HTTP server. Use

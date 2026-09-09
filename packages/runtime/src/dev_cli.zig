@@ -599,9 +599,34 @@ pub fn main(init: std.process.Init.Minimal) !void {
         });
     }
 
+    // A verb that belongs to the deferred hosted control plane is not a typo,
+    // and saying "Unknown command" invites the user to go looking for the right
+    // spelling. `deploy --cloud` already names itself as deferred; these read
+    // the same way.
+    if (deferredAccountVerb(command)) {
+        std.debug.print(
+            "zttp {s} is part of hosted account management, which is not available in this beta.\n" ++
+                "Local deploy needs no account: `zttp deploy` builds a self-contained binary,\n" ++
+                "and `zttp proofs verify <bundle-dir>` checks one without a control plane.\n",
+            .{command},
+        );
+        std.process.exit(1);
+    }
+
     std.debug.print("Unknown command: {s}\n\n", .{command});
     cli_help.printHelp();
     std.process.exit(1);
+}
+
+/// Verbs of the deferred hosted control plane. They are not dispatched, and
+/// `docs/roadmap.md` lists them as deferred from this beta; this is only about
+/// which diagnostic a user gets when they try one.
+fn deferredAccountVerb(command: []const u8) bool {
+    const verbs = [_][]const u8{ "login", "logout", "review", "grants", "revoke-grant" };
+    for (verbs) |verb| {
+        if (std.mem.eql(u8, command, verb)) return true;
+    }
+    return false;
 }
 
 fn commandInjectsStoredProviders(command: []const u8) bool {
