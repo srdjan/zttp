@@ -15,6 +15,7 @@
 const std = @import("std");
 const zts = @import("zts");
 const release_provenance = @import("release_provenance");
+const release_version = @import("release_version.zig");
 
 const release_verify_commands = [_][]const u8{
     "bash scripts/verify.sh",
@@ -318,7 +319,7 @@ fn collectReleasePassportWithProvenance(
 ) !ReleasePassport {
     const zon = readOptionalFile(allocator, "build.zig.zon", 256 * 1024);
     defer if (zon) |bytes| allocator.free(bytes);
-    const version = if (zon) |bytes| extractZonVersion(bytes) orelse "unknown" else "unknown";
+    const version = if (zon) |bytes| release_version.extractZonVersion(bytes) orelse "unknown" else "unknown";
     var passport = try ReleasePassport.init(allocator, version);
     errdefer passport.deinit(allocator);
 
@@ -344,30 +345,14 @@ fn addVersionCheck(allocator: std.mem.Allocator, passport: *ReleasePassport, zon
     const runtime_zon = readOptionalFile(allocator, "packages/runtime/build.zig.zon", 256 * 1024);
     defer if (runtime_zon) |bytes| allocator.free(bytes);
 
-    const version = if (zon) |bytes| extractZonVersion(bytes) else null;
-    if (version == null or root == null or zts_zon == null or runtime_zon == null or version_file == null) {
-        try passport.add(allocator, "version", "Version alignment", .fail, "VERSION, a release package manifest, or packages/zts/src/root.zig is missing", "zig build test-zts");
-        return;
-    }
-
-    const marker_version = extractVersionMarker(version_file.?) orelse {
-        try passport.add(allocator, "version", "Version alignment", .fail, "VERSION must contain exactly one SemVer line ending in a newline", "zig build test-zts");
-        return;
+    const alignment = release_version.check(zon, version_file, root, zts_zon, runtime_zon);
+    const row: struct { status: ReleaseCheckStatus, detail: []const u8 } = switch (alignment) {
+        .missing => .{ .status = .fail, .detail = "VERSION, a release package manifest, or packages/zts/src/root.zig is missing" },
+        .malformed_marker => .{ .status = .fail, .detail = "VERSION must contain exactly one SemVer line ending in a newline" },
+        .mismatch => .{ .status = .fail, .detail = "VERSION, root, zts, runtime, and binary versions do not agree" },
+        .aligned => .{ .status = .ok, .detail = "VERSION, root, zts, runtime, and binary versions agree" },
     };
-
-    const root_bytes = root.?;
-    const expected = try std.fmt.allocPrint(allocator, "string = \"{s}\"", .{version.?});
-    defer allocator.free(expected);
-    if (std.mem.indexOf(u8, root_bytes, expected) == null or
-        !std.mem.eql(u8, marker_version, version.?) or
-        !std.mem.eql(u8, extractZonVersion(zts_zon.?) orelse "", version.?) or
-        !std.mem.eql(u8, extractZonVersion(runtime_zon.?) orelse "", version.?))
-    {
-        try passport.add(allocator, "version", "Version alignment", .fail, "VERSION, root, zts, runtime, and binary versions do not agree", "zig build test-zts");
-        return;
-    }
-
-    try passport.add(allocator, "version", "Version alignment", .ok, "VERSION, root, zts, runtime, and binary versions agree", "zig build test-zts");
+    try passport.add(allocator, "version", "Version alignment", row.status, row.detail, "zig build release-check");
 }
 
 fn addReleaseEvidenceCheck(allocator: std.mem.Allocator, passport: *ReleasePassport) !void {
@@ -601,23 +586,6 @@ fn readOptionalFile(allocator: std.mem.Allocator, path: []const u8, max_size: us
     return zts.file_io.readFile(allocator, path, max_size) catch null;
 }
 
-fn extractZonVersion(bytes: []const u8) ?[]const u8 {
-    const marker = ".version = \"";
-    const start = std.mem.indexOf(u8, bytes, marker) orelse return null;
-    const value_start = start + marker.len;
-    const rest = bytes[value_start..];
-    const value_end = std.mem.indexOfScalar(u8, rest, '"') orelse return null;
-    return rest[0..value_end];
-}
-
-fn extractVersionMarker(bytes: []const u8) ?[]const u8 {
-    if (bytes.len < 2 or bytes[bytes.len - 1] != '\n') return null;
-    const version = bytes[0 .. bytes.len - 1];
-    if (std.mem.indexOfAny(u8, version, "\r\n") != null) return null;
-    _ = std.SemanticVersion.parse(version) catch return null;
-    return version;
-}
-
 fn containsAny(haystack: []const u8, needles: []const []const u8) bool {
     for (needles) |needle| {
         if (std.mem.indexOf(u8, haystack, needle) != null) return true;
@@ -707,14 +675,6 @@ test "release gate requirements require semantics and doctor wiring" {
         "zig build bench-check\nzig build release-check\ncontents: write\n";
     try std.testing.expect(!releaseGateRequirementsPresent(build_zig, ci_yml, per_commit_release_yml, verify_sh));
 }
-
-// ---------------------------------------------------------------------------
-// Tests
-//
-// The passport reads the repository it runs in, so every test stages a fixture
-// tree in a tmp dir and runs from there. `chdirTmpForTest` is local rather than
-// borrowed from the runtime package: this tool depends on std and zts only.
-// ---------------------------------------------------------------------------
 
 fn chdirTmpForTest(tmp: *std.testing.TmpDir) ![:0]u8 {
     const old_cwd = try std.process.currentPathAlloc(std.testing.io, std.testing.allocator);
@@ -861,6 +821,13 @@ fn expectVersionFixtureBlocked(version_marker: VersionMarkerFixture) !void {
     var passport = try collectReleasePassportWithProvenance(testing.allocator, true);
     defer passport.deinit(testing.allocator);
     try testing.expectEqual(ReleaseVerdict.blocked, passport.verdict());
+    if (version_marker == .malformed) {
+        const version_check = passport.checks.items[0];
+        try testing.expectEqualStrings(
+            "VERSION must contain exactly one SemVer line ending in a newline",
+            version_check.detail,
+        );
+    }
 }
 
 fn writeReleaseDoctorFixture(io: std.Io, tmp: *std.testing.TmpDir, opts: ReleaseDoctorFixtureOptions) !void {

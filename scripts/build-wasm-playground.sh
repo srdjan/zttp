@@ -6,10 +6,6 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
-echo "Building wasm analyzer (ReleaseSmall)..."
-zig build wasm -Doptimize=ReleaseSmall
-
-source_wasm="$repo_root/zig-out/wasm/zts-analyzer.wasm"
-python3 "$repo_root/scripts/wasm-playground-publish.py" \
-  --website-root "$repo_root/../zttp-website" \
-  --wasm "$source_wasm"
+echo "Building and publishing wasm analyzer (ReleaseSmall)..."
+zig build wasm-playground-publish -Doptimize=ReleaseSmall -- \
+  --website-root "$repo_root/../zttp-website"

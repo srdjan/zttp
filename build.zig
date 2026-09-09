@@ -948,8 +948,28 @@ pub fn build(b: *std.Build) void {
     });
     const wasm_step = b.step("wasm", "Build the zts analyzer as a wasm64-freestanding module for the web playground");
     wasm_step.dependOn(&wasm_install.step);
-    const wasm_publish_test_cmd = b.addSystemCommand(&.{ "python3", "scripts/test-wasm-playground-publish.py" });
-    wasm_publish_test_cmd.has_side_effects = true;
+    const wasm_publish_mod = b.createModule(.{
+        .root_source_file = b.path("tooling/wasm_playground_publish.zig"),
+        .target = b.graph.host,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    const wasm_publish_exe = b.addExecutable(.{
+        .name = "wasm-playground-publish",
+        .root_module = wasm_publish_mod,
+    });
+    const wasm_publish_cmd = b.addRunArtifact(wasm_publish_exe);
+    wasm_publish_cmd.addArg("--wasm");
+    wasm_publish_cmd.addFileArg(wasm_exe.getEmittedBin());
+    if (b.args) |args| wasm_publish_cmd.addArgs(args);
+    wasm_publish_cmd.has_side_effects = true;
+    const wasm_publish_step = b.step("wasm-playground-publish", "Build and publish the website analyzer WASM");
+    wasm_publish_step.dependOn(&wasm_publish_cmd.step);
+    const wasm_publish_tests = b.addTest(.{
+        .filters = test_filters,
+        .root_module = wasm_publish_mod,
+    });
+    const wasm_publish_test_cmd = b.addRunArtifact(wasm_publish_tests);
     const wasm_publish_test_step = b.step("test-wasm-playground-publish", "Run website WASM publication tests");
     wasm_publish_test_step.dependOn(&wasm_publish_test_cmd.step);
 
@@ -1291,10 +1311,21 @@ pub fn build(b: *std.Build) void {
         bench_cmd.addArgs(args);
     }
 
-    // Run the benchmark binary multiple times through bench-diff.sh directly
-    // (best-of-N handling lives in the script to tame microbench variance).
-    const bench_check_cmd = b.addSystemCommand(&.{ "/bin/bash", "scripts/bench-diff.sh" });
-    bench_check_cmd.addArg("--baseline");
+    // Release benchmark policy is implemented in Zig beside the other
+    // repository tooling. Best-of-N sampling tames microbenchmark variance.
+    const benchmark_tool_mod = b.createModule(.{
+        .root_source_file = b.path("tooling/benchmark.zig"),
+        .target = b.graph.host,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    benchmark_tool_mod.addImport("zts", zts_host_mod);
+    const benchmark_tool_exe = b.addExecutable(.{
+        .name = "zttp-benchmark",
+        .root_module = benchmark_tool_mod,
+    });
+    const bench_check_cmd = b.addRunArtifact(benchmark_tool_exe);
+    bench_check_cmd.addArgs(&.{ "check", "--baseline" });
     bench_check_cmd.addFileArg(b.path("benchmarks/perf-baseline.json"));
     bench_check_cmd.addArg("--bench");
     bench_check_cmd.addFileArg(bench_exe.getEmittedBin());
@@ -1307,16 +1338,19 @@ pub fn build(b: *std.Build) void {
     bench_step.dependOn(&bench_cmd.step);
     const bench_check_step = b.step("bench-check", "Compare benchmark output against the checked-in perf baseline");
     bench_check_step.dependOn(&bench_check_cmd.step);
-    const bench_record_cmd = b.addSystemCommand(&.{ "/bin/bash", "scripts/bench-record.sh" });
-    bench_record_cmd.addArg("--baseline");
+    const bench_record_cmd = b.addRunArtifact(benchmark_tool_exe);
+    bench_record_cmd.addArgs(&.{ "record", "--baseline" });
     bench_record_cmd.addFileArg(b.path("benchmarks/perf-baseline.json"));
     bench_record_cmd.addArg("--bench");
     bench_record_cmd.addFileArg(bench_exe.getEmittedBin());
     bench_record_cmd.has_side_effects = true;
     const bench_record_step = b.step("bench-record", "Record a five-run benchmark baseline from clean committed source");
     bench_record_step.dependOn(&bench_record_cmd.step);
-    const bench_diff_test_cmd = b.addSystemCommand(&.{ "python3", "scripts/test-bench-diff.py" });
-    bench_diff_test_cmd.has_side_effects = true;
+    const benchmark_tool_tests = b.addTest(.{
+        .filters = test_filters,
+        .root_module = benchmark_tool_mod,
+    });
+    const bench_diff_test_cmd = b.addRunArtifact(benchmark_tool_tests);
     const bench_diff_test_step = b.step("test-bench-diff", "Run benchmark sampling and comparison tests");
     bench_diff_test_step.dependOn(&bench_diff_test_cmd.step);
     test_step.dependOn(bench_diff_test_step);

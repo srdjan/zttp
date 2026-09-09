@@ -99,7 +99,7 @@ input, tools, edits, or turn completion.
 
 The package suites: `test-zts`, `test-sdk`, `test-modules`,
 `test-proof-review`, `test-proof-checker`, `test-release-check`, `test-server`,
-`test-compile-bench`.
+`test-compile-bench`, `test-bench-diff`, `test-wasm-playground-publish`.
 
 The audits and gates: `test-capability-audit`, `test-module-boundary`,
 `test-proof-checker-purity`, `test-proof-ratchet`, `test-proof-ratchet-drift`,
@@ -119,6 +119,16 @@ test references them. That is not hypothetical: when the JIT was removed,
 `verify.sh` passed while `zttp-bench` was broken, because the gate never built
 it. Compiling catches that class of breakage. Running the benchmarks here would
 import their measurement noise into the gate, so `bench-check` stays separate.
+The benchmark sampler, threshold policy, and atomic baseline writer live in
+`tooling/benchmark.zig`; the website WASM publisher and its rollback probes live
+in `tooling/wasm_playground_publish.zig`. Both are native Zig test roots. The
+publisher serializes writers and journals cross-file updates so an interrupted
+run can recover. Prior content-addressed WASM files remain available for open
+tabs that have not performed their lazy fetch yet.
+
+`build.zig.zon` remains the release-version authority. Root `VERSION` is a
+convenience mirror, and `test-release-check` rejects a missing, malformed, or
+stale marker before release.
 
 ## What `zig build test` Excludes
 

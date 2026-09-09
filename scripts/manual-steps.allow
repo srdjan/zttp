@@ -38,6 +38,10 @@ production-branch-metric-json measurement
 # release maintainer runs it explicitly after deciding to recalibrate.
 bench-record release-operation
 
+# Builds the analyzer and publishes a journaled, content-addressed artifact to
+# the sibling website checkout. The in-tree test exercises recovery and locking.
+wasm-playground-publish release-operation
+
 # Spends real model time against a live provider. `expert-qualification`
 # consumes three report-only live runs and edits no default; running it on
 # every build would bill every build.
