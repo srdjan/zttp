@@ -49,7 +49,7 @@ const Benchmark = struct {
 };
 
 const Report = struct {
-    schema_version: u64 = 1,
+    schema_version: u64,
     benchmarks: []Benchmark,
 };
 
@@ -376,6 +376,7 @@ fn sampleBenchmarks(
 }
 
 fn validateReport(report: Report) !void {
+    if (report.schema_version != 1) return error.InvalidBenchmarkSchema;
     if (report.benchmarks.len == 0) return error.NoBenchmarks;
     for (report.benchmarks, 0..) |entry, i| {
         if (entry.name.len == 0) return error.InvalidBenchmarkName;
@@ -560,7 +561,7 @@ fn renderBaseline(allocator: std.mem.Allocator, report: Report, provenance: Prov
 }
 
 fn makeReport(entries: []Benchmark) Report {
-    return .{ .benchmarks = entries };
+    return .{ .schema_version = 1, .benchmarks = entries };
 }
 
 test "thresholds and skip set remain stable" {
@@ -701,11 +702,11 @@ const FakeSampler = struct {
 
 test "sampler keeps each benchmark best across five runs" {
     const reports = [_][]const u8{
-        "{\"benchmarks\":[{\"name\":\"alpha\",\"success\":true,\"ops_per_sec\":10},{\"name\":\"beta\",\"success\":true,\"ops_per_sec\":50}]}",
-        "{\"benchmarks\":[{\"name\":\"alpha\",\"success\":true,\"ops_per_sec\":20},{\"name\":\"beta\",\"success\":true,\"ops_per_sec\":40}]}",
-        "{\"benchmarks\":[{\"name\":\"alpha\",\"success\":true,\"ops_per_sec\":30},{\"name\":\"beta\",\"success\":true,\"ops_per_sec\":30}]}",
-        "{\"benchmarks\":[{\"name\":\"alpha\",\"success\":true,\"ops_per_sec\":40},{\"name\":\"beta\",\"success\":true,\"ops_per_sec\":20}]}",
-        "{\"benchmarks\":[{\"name\":\"alpha\",\"success\":true,\"ops_per_sec\":50},{\"name\":\"beta\",\"success\":true,\"ops_per_sec\":10}]}",
+        "{\"schema_version\":1,\"benchmarks\":[{\"name\":\"alpha\",\"success\":true,\"ops_per_sec\":10},{\"name\":\"beta\",\"success\":true,\"ops_per_sec\":50}]}",
+        "{\"schema_version\":1,\"benchmarks\":[{\"name\":\"alpha\",\"success\":true,\"ops_per_sec\":20},{\"name\":\"beta\",\"success\":true,\"ops_per_sec\":40}]}",
+        "{\"schema_version\":1,\"benchmarks\":[{\"name\":\"alpha\",\"success\":true,\"ops_per_sec\":30},{\"name\":\"beta\",\"success\":true,\"ops_per_sec\":30}]}",
+        "{\"schema_version\":1,\"benchmarks\":[{\"name\":\"alpha\",\"success\":true,\"ops_per_sec\":40},{\"name\":\"beta\",\"success\":true,\"ops_per_sec\":20}]}",
+        "{\"schema_version\":1,\"benchmarks\":[{\"name\":\"alpha\",\"success\":true,\"ops_per_sec\":50},{\"name\":\"beta\",\"success\":true,\"ops_per_sec\":10}]}",
     };
     var fake: FakeSampler = .{ .reports = &reports };
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -721,8 +722,8 @@ test "sampler keeps each benchmark best across five runs" {
 
 test "sampler rejects changing benchmark sets" {
     const reports = [_][]const u8{
-        "{\"benchmarks\":[{\"name\":\"alpha\",\"success\":true,\"ops_per_sec\":10}]}",
-        "{\"benchmarks\":[{\"name\":\"beta\",\"success\":true,\"ops_per_sec\":10}]}",
+        "{\"schema_version\":1,\"benchmarks\":[{\"name\":\"alpha\",\"success\":true,\"ops_per_sec\":10}]}",
+        "{\"schema_version\":1,\"benchmarks\":[{\"name\":\"beta\",\"success\":true,\"ops_per_sec\":10}]}",
     };
     var fake: FakeSampler = .{ .reports = &reports };
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -734,6 +735,30 @@ test "sampler rejects changing benchmark sets" {
         2,
         .{ .context = &fake, .run = FakeSampler.run },
     ));
+}
+
+test "sampler rejects missing and unsupported report schemas" {
+    const reports = [_][]const u8{
+        "{\"benchmarks\":[{\"name\":\"alpha\",\"success\":true,\"ops_per_sec\":10}]}",
+        "{\"schema_version\":2,\"benchmarks\":[{\"name\":\"alpha\",\"success\":true,\"ops_per_sec\":10}]}",
+    };
+    for (reports) |report| {
+        var fake: FakeSampler = .{ .reports = &.{report} };
+        var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena_state.deinit();
+        const result = sampleBenchmarks(
+            arena_state.allocator(),
+            std.testing.io,
+            "unused",
+            1,
+            .{ .context = &fake, .run = FakeSampler.run },
+        );
+        if (std.mem.indexOf(u8, report, "schema_version") == null) {
+            try std.testing.expectError(error.InvalidBenchmarkReport, result);
+        } else {
+            try std.testing.expectError(error.InvalidBenchmarkSchema, result);
+        }
+    }
 }
 
 test "argument parser rejects non-finite thresholds" {

@@ -273,14 +273,17 @@ fn publishMutations(
     try hooks.after(hooks.context, .journal_written);
 
     mutations.new_created = try ensureArtifact(allocator, io, new_path, source_content);
+    if (mutations.new_created) try syncDirectory(io, destination.static);
     try hooks.after(hooks.context, .new_wasm_created);
 
     try atomicWrite(io, destination.playground_path, patched_playground, true);
     mutations.playground_changed = true;
+    try syncDirectory(io, destination.static);
     try hooks.after(hooks.context, .playground_written);
 
     try atomicWrite(io, destination.index_path, patched_index, true);
     mutations.index_changed = true;
+    try syncDirectory(io, destination.static);
     try hooks.after(hooks.context, .index_written);
 
     try std.Io.Dir.cwd().deleteFile(io, destination.wasm_path);
@@ -312,6 +315,7 @@ fn rollback(
     if (mutations.old_deleted) try atomicWrite(io, destination.wasm_path, destination.wasm_content, false);
     if (mutations.new_created) try std.Io.Dir.cwd().deleteFile(io, new_path);
     if (mutations.journal_created) try std.Io.Dir.cwd().deleteFile(io, journal_path);
+    try syncDirectory(io, destination.static);
     try syncDirectory(io, destination.root);
 }
 
@@ -328,7 +332,6 @@ fn atomicWrite(io: std.Io, path: []const u8, content: []const u8, replace: bool)
     } else {
         try atomic_file.link(io);
     }
-    try syncDirectory(io, std.fs.path.dirname(path) orelse return error.InvalidTargetPath);
 }
 
 fn ensureArtifact(
@@ -340,7 +343,6 @@ fn ensureArtifact(
     const existing = readFile(allocator, io, path, max_wasm_bytes) catch |err| switch (err) {
         error.FileNotFound => {
             try atomicWrite(io, path, content, false);
-            try syncDirectory(io, std.fs.path.dirname(path) orelse return error.InvalidWasmPath);
             return true;
         },
         else => return err,
@@ -351,11 +353,13 @@ fn ensureArtifact(
 }
 
 fn acquirePublisherLock(allocator: std.mem.Allocator, root: []const u8) !PublisherLock {
-    const temp_root = if (std.c.getenv("TMPDIR")) |raw| std.mem.span(raw) else "/tmp";
+    var digest: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(root, &digest, .{});
+    const hex = std.fmt.bytesToHex(digest, .lower);
     const path = try std.fmt.allocPrint(
         allocator,
-        "{s}/zttp-wasm-publish-{x}.lock",
-        .{ std.mem.trimEnd(u8, temp_root, "/"), std.hash.Wyhash.hash(0, root) },
+        "/tmp/zttp-wasm-publish-{s}.lock",
+        .{hex},
     );
     errdefer allocator.free(path);
     const path_z = try allocator.dupeZ(u8, path);
@@ -446,6 +450,7 @@ fn recoverInterruptedPublication(allocator: std.mem.Allocator, io: std.Io, root:
         const patched = try replaceWasmReference(allocator, playground, current_name, target_name);
         defer allocator.free(patched);
         try atomicWrite(io, playground_path, patched, true);
+        try syncDirectory(io, website.static);
     }
 
     const index_path = try std.fs.path.join(allocator, &.{ website.static, "index.html" });
@@ -460,6 +465,7 @@ fn recoverInterruptedPublication(allocator: std.mem.Allocator, io: std.Io, root:
         const patched = try replaceCacheVersion(allocator, index, current_cache, target_cache);
         defer allocator.free(patched);
         try atomicWrite(io, index_path, patched, true);
+        try syncDirectory(io, website.static);
     }
 
     if (new_exists and old_exists) {
