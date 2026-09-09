@@ -168,6 +168,31 @@ restructure, and which nothing had called since; the real path is
 build outside the tree, two block on a server or a model run, one is machine
 setup, and one regenerates a doc whose drift is already gated.
 
+The build-step form of the same question is `zig build test-step-coverage`,
+which lives in `build.zig` because only a build can answer it. A named step is
+not what the aggregate step depends on: `test_step.dependOn(&run_server_tests
+.step)` names the Run step, and `b.step("test-server", ...)` names a separate
+top-level step over the same Run, so "is `test-server` reachable from `test`"
+is the wrong question. The gate walks the real dependency graph instead and
+asks, for each of the 90 top-level steps, whether every step in its closure is
+run by something: reached by `zig build test`, reached by a step
+`scripts/verify.sh` or a CI workflow invokes, or - for five steps that only
+wrap a shell gate - the same script run directly by one of those. The workflow
+directory is read rather than listed, so a workflow added later becomes a
+coverage source without anyone remembering this gate.
+
+Eleven steps are declared manual in `scripts/manual-steps.allow`: two
+interactive run commands, one blocking server, three measurements that pass
+regardless, one that spends real model time, two that need a local MLX server
+or a browser, and two release operations. Both directions are enforced, and a
+row for a step something now runs fails the same gate.
+
+Four floors sit under it, because a coverage check over an empty input reports
+that everything is covered: the CI workflow read must find at least one file,
+the coverage text must name at least one `zig build` invocation, the covered
+closure must be plausibly large, and the allowlist must parse at least one row.
+Each was verified by breaking it.
+
 It also runs seven registry-drift and determinism gates, most of which need the
 built binary. `ci.yml` runs the same seven:
 

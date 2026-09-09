@@ -1,0 +1,57 @@
+# Build steps whose work nothing runs automatically, and why that is correct.
+#
+# Enforced in both directions by the step-coverage gate in build.zig, which
+# walks the real dependency graph rather than parsing source: a top-level step
+# whose dependency closure is not reached by `zig build test`, by a step
+# `scripts/verify.sh` or a CI workflow invokes, or by a shell gate one of those
+# runs directly, must appear here. A row for a step that something now runs
+# fails the same gate, and so does a row naming a step that no longer exists.
+#
+# One row per (step, reason slug). A row is a claim that this step is an
+# operation a human asks for, not a check that was wired and forgotten. That
+# distinction is the whole point: `scripts/test-examples.sh` was documented as
+# outside `zig build test` and run only from verify.sh, so 56 example suites
+# went unrun while `zig build test` reported a pass.
+#
+# The list only ratchets down. Adding a row is a deliberate widening.
+
+# Manual run commands. `zig build run -- handler.ts` and `zig build cli -- ...`
+# start a process for a human to interact with; there is no verdict to consume.
+run interactive
+cli interactive
+
+# Runs the deterministic playbook server and blocks. `zig build test` already
+# compiles the executable - deliberately, since nothing installs it and a break
+# would otherwise surface only when somebody ran this by hand - so what is
+# uncovered here is the server run, not the build.
+zttp-standin interactive-server
+
+# Measurements, not assertions. Both print numbers and pass regardless, so
+# there is no failure for a gate to catch. The gated forms exist and do run:
+# `bench-check` compares against benchmarks/perf-baseline.json in CI, and
+# `test-compile-bench` runs the unit tests behind the compile benchmarks.
+bench measurement
+compile-bench measurement
+production-branch-metric-json measurement
+
+# Spends real model time against a live provider. `expert-qualification`
+# consumes three report-only live runs and edits no default; running it on
+# every build would bill every build.
+expert-qualification manual-model-spend
+
+# Needs a local MLX server, which this project never starts or manages. The
+# absence from the aggregate step is stated at its definition in build.zig.
+test-expert-mlx-e2e needs-local-server
+
+# Needs Chrome and Node, which are not build dependencies of this repository.
+# The step fails loudly when either is missing, which is why it stays explicit
+# rather than being folded into a suite that would then fail on a clean machine.
+test-zts-overview-browser needs-browser
+
+# Emits a sealed training bundle and refuses a dirty tree, so it cannot run
+# inside a build that is itself producing artifacts.
+zts-training-export release-artifact
+
+# Verifies a demo passport against a live artifact. `test-demo-passport-check`
+# runs the unit tests behind it; this step is the operation.
+demo-passport-check release-operation
