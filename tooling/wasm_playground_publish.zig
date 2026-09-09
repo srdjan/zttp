@@ -14,6 +14,7 @@ const Phase = enum {
     new_wasm_created,
     playground_written,
     index_written,
+    old_wasm_deleted,
     final_validation,
 };
 
@@ -250,6 +251,7 @@ const MutationState = struct {
     new_created: bool = false,
     playground_changed: bool = false,
     index_changed: bool = false,
+    old_deleted: bool = false,
 };
 
 fn publishMutations(
@@ -281,6 +283,11 @@ fn publishMutations(
     mutations.index_changed = true;
     try hooks.after(hooks.context, .index_written);
 
+    try std.Io.Dir.cwd().deleteFile(io, destination.wasm_path);
+    mutations.old_deleted = true;
+    try syncDirectory(io, destination.static);
+    try hooks.after(hooks.context, .old_wasm_deleted);
+
     var final = try validateDestination(allocator, io, destination.root);
     defer final.deinit(allocator);
     if (!std.mem.eql(u8, final.wasm_name, std.fs.path.basename(new_path))) {
@@ -302,6 +309,7 @@ fn rollback(
 ) !void {
     if (mutations.index_changed) try atomicWrite(io, destination.index_path, destination.index, true);
     if (mutations.playground_changed) try atomicWrite(io, destination.playground_path, destination.playground, true);
+    if (mutations.old_deleted) try atomicWrite(io, destination.wasm_path, destination.wasm_content, false);
     if (mutations.new_created) try std.Io.Dir.cwd().deleteFile(io, new_path);
     if (mutations.journal_created) try std.Io.Dir.cwd().deleteFile(io, journal_path);
     try syncDirectory(io, destination.root);
@@ -418,10 +426,11 @@ fn recoverInterruptedPublication(allocator: std.mem.Allocator, io: std.Io, root:
     defer website.deinit(allocator);
     const old_path = try std.fs.path.join(allocator, &.{ website.static, journal.old_name });
     defer allocator.free(old_path);
-    if (!try artifactMatches(allocator, io, old_path, journal.old_name)) return error.InvalidPublicationJournal;
+    const old_exists = try artifactMatches(allocator, io, old_path, journal.old_name);
     const new_path = try std.fs.path.join(allocator, &.{ website.static, journal.new_name });
     defer allocator.free(new_path);
     const new_exists = try artifactMatches(allocator, io, new_path, journal.new_name);
+    if (!old_exists and !new_exists) return error.InvalidPublicationJournal;
     const target_name = if (new_exists) journal.new_name else journal.old_name;
     const target_cache = if (new_exists) journal.new_cache_version else journal.old_cache_version;
 
@@ -451,6 +460,11 @@ fn recoverInterruptedPublication(allocator: std.mem.Allocator, io: std.Io, root:
         const patched = try replaceCacheVersion(allocator, index, current_cache, target_cache);
         defer allocator.free(patched);
         try atomicWrite(io, index_path, patched, true);
+    }
+
+    if (new_exists and old_exists) {
+        try std.Io.Dir.cwd().deleteFile(io, old_path);
+        try syncDirectory(io, website.static);
     }
 
     var recovered = try validateDestination(allocator, io, root);
@@ -520,6 +534,7 @@ fn validateDestination(allocator: std.mem.Allocator, io: std.Io, website_root: [
     var static_dir = try std.Io.Dir.openDirAbsolute(io, website.static, .{ .iterate = true });
     defer static_dir.close(io);
     var iterator = static_dir.iterate();
+    var wasm_count: usize = 0;
     var wasm_name: ?[]u8 = null;
     errdefer if (wasm_name) |name_value| allocator.free(name_value);
     var wasm_path: ?[]u8 = null;
@@ -528,6 +543,8 @@ fn validateDestination(allocator: std.mem.Allocator, io: std.Io, website_root: [
     errdefer if (wasm_content) |content_value| allocator.free(content_value);
     while (try iterator.next(io)) |entry| {
         if (!std.mem.endsWith(u8, entry.name, wasm_suffix)) continue;
+        wasm_count += 1;
+        if (wasm_count > 1) return error.MultipleWasmArtifacts;
         if (entry.kind != .file) return error.InvalidWasmArtifact;
         if (!validWasmName(entry.name)) return error.InvalidWasmName;
         const artifact_path = try std.fs.path.join(allocator, &.{ website.static, entry.name });
@@ -700,7 +717,7 @@ fn expectOriginalTree(
     try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().statFile(std.testing.io, new_path, .{}));
 }
 
-test "publication updates both references and retains the old immutable artifact" {
+test "publication updates both references and removes the superseded artifact" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -725,8 +742,7 @@ test "publication updates both references and retains the old immutable artifact
     try std.testing.expectEqual(@as(u64, 17), destination.cache_version);
     const old_path = try std.fs.path.join(allocator, &.{ destination.static, old_name });
     defer allocator.free(old_path);
-    const old_stat = try std.Io.Dir.cwd().statFile(std.testing.io, old_path, .{});
-    try std.testing.expectEqual(std.Io.File.Kind.file, old_stat.kind);
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().statFile(std.testing.io, old_path, .{}));
 }
 
 test "unchanged publication is idempotent" {
@@ -786,7 +802,7 @@ test "every publication mutation boundary rolls back to the original tree" {
     }
 }
 
-test "destination validation allows retained artifacts and rejects duplicate references" {
+test "destination validation rejects duplicate artifacts and references" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -802,8 +818,9 @@ test "destination validation allows retained artifacts and rejects duplicate ref
     const duplicate = try std.fs.path.join(allocator, &.{ static, duplicate_name });
     defer allocator.free(duplicate);
     try atomicWrite(std.testing.io, duplicate, duplicate_content, false);
-    var destination = try validateDestination(allocator, std.testing.io, root);
-    destination.deinit(allocator);
+    try std.testing.expectError(error.MultipleWasmArtifacts, validateDestination(allocator, std.testing.io, root));
+
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, duplicate);
 
     const playground_path = try std.fs.path.join(allocator, &.{ static, "playground.js" });
     defer allocator.free(playground_path);
@@ -881,6 +898,11 @@ test "interrupted publication journal recovers every durable phase" {
             const patched = try replaceCacheVersion(allocator, index, 16, 17);
             defer allocator.free(patched);
             try atomicWrite(std.testing.io, index_path, patched, true);
+        }
+        if (@intFromEnum(phase) >= @intFromEnum(Phase.old_wasm_deleted)) {
+            const old_path = try std.fs.path.join(allocator, &.{ static, old_name });
+            defer allocator.free(old_path);
+            try std.Io.Dir.cwd().deleteFile(std.testing.io, old_path);
         }
 
         try recoverInterruptedPublication(allocator, std.testing.io, root);

@@ -123,8 +123,7 @@ The benchmark sampler, threshold policy, and atomic baseline writer live in
 `tooling/benchmark.zig`; the website WASM publisher and its rollback probes live
 in `tooling/wasm_playground_publish.zig`. Both are native Zig test roots. The
 publisher serializes writers and journals cross-file updates so an interrupted
-run can recover. Prior content-addressed WASM files remain available for open
-tabs that have not performed their lazy fetch yet.
+run can recover before it removes the superseded WASM.
 
 `build.zig.zon` remains the release-version authority. Root `VERSION` is a
 convenience mirror, and `test-release-check` rejects a missing, malformed, or
