@@ -131,7 +131,7 @@ stale marker before release.
 
 ## What `zig build test` Excludes
 
-Five build steps:
+Six build steps:
 
 - **`test-zruntime`**, the `zruntime_tests.zig` root. See the next section.
 - **`test-module-scope-panic`**, a focused executable that proves authorization
@@ -146,6 +146,9 @@ Five build steps:
   `scripts/verify.sh` compiles it after the native release binaries so changes
   cannot retain POSIX, libc, SQLite, or other runtime-only dependencies in the
   browser artifact.
+- **`wasm-playground-publish`**, the manual release operation that writes the
+  content-addressed analyzer into the sibling website checkout. Its in-tree
+  recovery and locking tests run under `test-wasm-playground-publish`.
 
 Everything driven by a shell script rather than a build step is also outside
 it: `smoke-v1`, `scripts/test-install-archive-safety.sh`,
@@ -183,18 +186,19 @@ not what the aggregate step depends on: `test_step.dependOn(&run_server_tests
 .step)` names the Run step, and `b.step("test-server", ...)` names a separate
 top-level step over the same Run, so "is `test-server` reachable from `test`"
 is the wrong question. The gate walks the real dependency graph instead and
-asks, for each of the 90 top-level steps, whether every step in its closure is
+asks, for each of the 94 top-level steps, whether every step in its closure is
 run by something: reached by `zig build test`, reached by a step
 `scripts/verify.sh` or a CI workflow invokes, or - for five steps that only
 wrap a shell gate - the same script run directly by one of those. The workflow
 directory is read rather than listed, so a workflow added later becomes a
 coverage source without anyone remembering this gate.
 
-Twelve steps are declared manual in `scripts/manual-steps.allow`: two
+Thirteen steps are declared manual in `scripts/manual-steps.allow`: two
 interactive run commands, one blocking server, three measurements that pass
 regardless, one that spends real model time, two that need a local MLX server
-or a browser, and two release operations. Both directions are enforced, and a
-row for a step something now runs fails the same gate.
+or a browser, three release operations, and one release-artifact producer. Both
+directions are enforced, and a row for a step something now runs fails the same
+gate.
 
 Four floors sit under it, because a coverage check over an empty input reports
 that everything is covered: the CI workflow read must find at least one file,

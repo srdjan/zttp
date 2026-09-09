@@ -155,7 +155,11 @@ fn collectArgs(allocator: std.mem.Allocator, vector: std.process.Args) ![]const 
     defer iterator.deinit();
     var args: std.ArrayList([]const u8) = .empty;
     errdefer freeArgs(allocator, args.items);
-    while (iterator.next()) |arg| try args.append(allocator, try allocator.dupe(u8, arg));
+    while (iterator.next()) |arg| {
+        const owned = try allocator.dupe(u8, arg);
+        errdefer allocator.free(owned);
+        try args.append(allocator, owned);
+    }
     return args.toOwnedSlice(allocator);
 }
 
@@ -179,7 +183,7 @@ fn publishWasm(
     defer publisher_lock.deinit();
     try recoverInterruptedPublication(allocator, io, root);
 
-    var destination = try validateDestination(allocator, io, website_root);
+    var destination = try validateDestination(allocator, io, root);
     defer destination.deinit(allocator);
 
     const source_real = try std.Io.Dir.realPathFileAlloc(std.Io.Dir.cwd(), io, wasm_source, allocator);
@@ -572,6 +576,8 @@ fn validateDestination(allocator: std.mem.Allocator, io: std.Io, website_root: [
         }
     }
     const owned_wasm_name = wasm_name orelse return error.WasmReferenceMissing;
+    const owned_wasm_path = wasm_path orelse return error.WasmReferenceMissing;
+    const owned_wasm_content = wasm_content orelse return error.WasmReferenceMissing;
     const cache_version = try parseCacheVersion(index);
 
     return .{
@@ -582,9 +588,9 @@ fn validateDestination(allocator: std.mem.Allocator, io: std.Io, website_root: [
         .index_path = index_path,
         .index = index,
         .cache_version = cache_version,
-        .wasm_path = wasm_path.?,
+        .wasm_path = owned_wasm_path,
         .wasm_name = owned_wasm_name,
-        .wasm_content = wasm_content.?,
+        .wasm_content = owned_wasm_content,
     };
 }
 
@@ -616,7 +622,7 @@ fn allocWasmName(allocator: std.mem.Allocator, content: []const u8) ![]u8 {
 
 fn parseWasmReference(playground: []const u8) ![]const u8 {
     if (std.mem.count(u8, playground, wasm_url_prefix) != 1) return error.InvalidWasmReferenceCount;
-    const prefix_start = std.mem.indexOf(u8, playground, wasm_url_prefix).?;
+    const prefix_start = std.mem.indexOf(u8, playground, wasm_url_prefix) orelse return error.InvalidWasmReferenceCount;
     const value_start = prefix_start + wasm_url_prefix.len;
     const suffix_start = std.mem.indexOfPos(u8, playground, value_start, "\";") orelse return error.InvalidWasmReference;
     const url = playground[value_start..suffix_start];
@@ -628,7 +634,7 @@ fn parseWasmReference(playground: []const u8) ![]const u8 {
 
 fn parseCacheVersion(index: []const u8) !u64 {
     if (std.mem.count(u8, index, cache_prefix) != 1) return error.InvalidCacheTargetCount;
-    const prefix_start = std.mem.indexOf(u8, index, cache_prefix).?;
+    const prefix_start = std.mem.indexOf(u8, index, cache_prefix) orelse return error.InvalidCacheTargetCount;
     const value_start = prefix_start + cache_prefix.len;
     const suffix_start = std.mem.indexOfScalarPos(u8, index, value_start, '"') orelse return error.InvalidCacheTarget;
     if (suffix_start == value_start) return error.InvalidCacheTarget;
@@ -668,7 +674,7 @@ fn replaceExactlyOne(
     new: []const u8,
 ) ![]u8 {
     if (std.mem.count(u8, input, old) != 1) return error.InvalidReplacementCount;
-    const start = std.mem.indexOf(u8, input, old).?;
+    const start = std.mem.indexOf(u8, input, old) orelse return error.InvalidReplacementCount;
     const output_len = input.len - old.len + new.len;
     const output = try allocator.alloc(u8, output_len);
     @memcpy(output[0..start], input[0..start]);
@@ -774,7 +780,8 @@ const FailingHook = struct {
     phase: Phase,
 
     fn after(context: ?*anyopaque, phase: Phase) !void {
-        const self: *FailingHook = @ptrCast(@alignCast(context.?));
+        const context_ptr = context orelse return error.MissingHookContext;
+        const self: *FailingHook = @ptrCast(@alignCast(context_ptr));
         if (phase == self.phase) return error.InjectedFailure;
     }
 };
@@ -840,7 +847,7 @@ test "destination validation rejects duplicate artifacts and references" {
     try std.testing.expectError(error.InvalidWasmReferenceCount, validateDestination(allocator, std.testing.io, root));
 }
 
-test "destination validation rejects malformed content hash and cache target" {
+test "destination validation rejects malformed content hash" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -854,6 +861,76 @@ test "destination validation rejects malformed content hash and cache target" {
     defer allocator.free(old_path);
     try atomicWrite(std.testing.io, old_path, "\x00asm altered", true);
     try std.testing.expectError(error.WasmHashMismatch, validateDestination(allocator, std.testing.io, root));
+}
+
+test "malformed cache targets abort publication without mutation" {
+    const allocator = std.testing.allocator;
+    const cases = [_]struct {
+        index: []const u8,
+        expected_error: anyerror,
+    }{
+        .{ .index = "<script defer></script>\n", .expected_error = error.InvalidCacheTargetCount },
+        .{
+            .index = "<script src=\"/playground.js?v=16\"></script>\n<script src=\"/playground.js?v=17\"></script>\n",
+            .expected_error = error.InvalidCacheTargetCount,
+        },
+        .{
+            .index = "<script src=\"/playground.js?v=invalid\" defer></script>\n",
+            .expected_error = error.InvalidCacheTarget,
+        },
+    };
+
+    for (cases) |case| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        const root = try tmpPath(allocator, &tmp);
+        defer allocator.free(root);
+        const old_content = "\x00asm old wasm";
+        const old_name = try writeWebsite(allocator, root, old_content);
+        defer allocator.free(old_name);
+        const source_path = try std.fs.path.join(allocator, &.{ root, "new.wasm" });
+        defer allocator.free(source_path);
+        const new_content = "\x00asm new wasm";
+        try atomicWrite(std.testing.io, source_path, new_content, false);
+        const new_name = try allocWasmName(allocator, new_content);
+        defer allocator.free(new_name);
+
+        const static = try std.fs.path.join(allocator, &.{ root, "static" });
+        defer allocator.free(static);
+        const index_path = try std.fs.path.join(allocator, &.{ static, "index.html" });
+        defer allocator.free(index_path);
+        try atomicWrite(std.testing.io, index_path, case.index, true);
+        const playground_path = try std.fs.path.join(allocator, &.{ static, "playground.js" });
+        defer allocator.free(playground_path);
+        const playground_before = try readFile(allocator, std.testing.io, playground_path, max_text_bytes);
+        defer allocator.free(playground_before);
+
+        try std.testing.expectError(case.expected_error, publishWasm(
+            allocator,
+            std.testing.io,
+            root,
+            source_path,
+            .{},
+        ));
+
+        const index_after = try readFile(allocator, std.testing.io, index_path, max_text_bytes);
+        defer allocator.free(index_after);
+        try std.testing.expectEqualStrings(case.index, index_after);
+        const playground_after = try readFile(allocator, std.testing.io, playground_path, max_text_bytes);
+        defer allocator.free(playground_after);
+        try std.testing.expectEqualStrings(playground_before, playground_after);
+        const old_path = try std.fs.path.join(allocator, &.{ static, old_name });
+        defer allocator.free(old_path);
+        const old_after = try readFile(allocator, std.testing.io, old_path, max_wasm_bytes);
+        defer allocator.free(old_after);
+        try std.testing.expectEqualStrings(old_content, old_after);
+        const new_path = try std.fs.path.join(allocator, &.{ static, new_name });
+        defer allocator.free(new_path);
+        try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().statFile(std.testing.io, new_path, .{}));
+        const journal_path = try publicationJournalPath(allocator, root);
+        defer allocator.free(journal_path);
+        try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().statFile(std.testing.io, journal_path, .{}));
+    }
 }
 
 test "interrupted publication journal recovers every durable phase" {
