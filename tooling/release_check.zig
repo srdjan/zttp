@@ -416,10 +416,13 @@ fn addReleaseGateCheck(allocator: std.mem.Allocator, passport: *ReleasePassport)
     const examples_ok = zts.file_io.fileExists(allocator, "scripts/test-examples.sh");
     const installer_ok = zts.file_io.fileExists(allocator, "scripts/test-install-archive-safety.sh");
     const semantics_ok = zts.file_io.fileExists(allocator, "scripts/check-semantics-spec.sh");
-    const workflow_ok = if (build_zig != null and ci_yml != null and release_yml != null and verify_sh != null)
-        releaseGateRequirementsPresent(build_zig.?, ci_yml.?, release_yml.?, verify_sh.?)
-    else
-        false;
+    const workflow_ok = workflow: {
+        const build_bytes = build_zig orelse break :workflow false;
+        const ci_bytes = ci_yml orelse break :workflow false;
+        const release_bytes = release_yml orelse break :workflow false;
+        const verify_bytes = verify_sh orelse break :workflow false;
+        break :workflow releaseGateRequirementsPresent(build_bytes, ci_bytes, release_bytes, verify_bytes);
+    };
 
     if (smoke_ok and examples_ok and installer_ok and semantics_ok and workflow_ok) {
         try passport.add(allocator, "release_gates", "Release gates", .ok, "CI, release workflow, local verifier, browser analyzer, installer, semantics, docs, smoke, and doctor gates are wired", "bash scripts/verify.sh && zig build release-check");
@@ -434,27 +437,31 @@ fn addPublicClaimsCheck(allocator: std.mem.Allocator, passport: *ReleasePassport
     const perf = readOptionalFile(allocator, "docs/performance.md", 2 * 1024 * 1024);
     defer if (perf) |bytes| allocator.free(bytes);
 
-    if (readme == null or perf == null) {
+    const readme_bytes = readme orelse {
         try passport.add(allocator, "public_claims", "Public performance claims", .fail, "README or performance doc is missing", null);
         return;
-    }
+    };
+    const perf_bytes = perf orelse {
+        try passport.add(allocator, "public_claims", "Public performance claims", .fail, "README or performance doc is missing", null);
+        return;
+    };
 
     const stale_readme =
-        containsAny(readme.?, &.{ "1.2MB binary", "4MB memory baseline", "3ms runtime init", "71ms", "79,743" });
+        containsAny(readme_bytes, &.{ "1.2MB binary", "4MB memory baseline", "3ms runtime init", "71ms", "79,743" });
     const stale_perf =
-        containsAny(perf.?, &.{ "71ms", "71 ms", "79,743", "0.76x Deno" });
+        containsAny(perf_bytes, &.{ "71ms", "71 ms", "79,743", "0.76x Deno" });
     const has_measured_baseline =
-        std.mem.indexOf(u8, readme.?, "3.5") != null and
-        std.mem.indexOf(u8, readme.?, "7-15") != null and
-        std.mem.indexOf(u8, readme.?, "13 MB") != null and
-        std.mem.indexOf(u8, readme.?, "112k") != null and
-        std.mem.indexOf(u8, perf.?, "3.5") != null and
-        std.mem.indexOf(u8, perf.?, "7-15") != null and
-        std.mem.indexOf(u8, perf.?, "13 MB") != null and
-        std.mem.indexOf(u8, perf.?, "112k") != null;
+        std.mem.indexOf(u8, readme_bytes, "3.5") != null and
+        std.mem.indexOf(u8, readme_bytes, "7-15") != null and
+        std.mem.indexOf(u8, readme_bytes, "13 MB") != null and
+        std.mem.indexOf(u8, readme_bytes, "112k") != null and
+        std.mem.indexOf(u8, perf_bytes, "3.5") != null and
+        std.mem.indexOf(u8, perf_bytes, "7-15") != null and
+        std.mem.indexOf(u8, perf_bytes, "13 MB") != null and
+        std.mem.indexOf(u8, perf_bytes, "112k") != null;
     const has_pending_receipt_note =
-        hasPendingReceiptBackedMeasurementNote(readme.?) and
-        hasPendingReceiptBackedMeasurementNote(perf.?);
+        hasPendingReceiptBackedMeasurementNote(readme_bytes) and
+        hasPendingReceiptBackedMeasurementNote(perf_bytes);
 
     if (stale_readme or stale_perf or !has_measured_baseline) {
         try passport.add(allocator, "public_claims", "Public performance claims", .fail, "public numbers are stale or missing from README/performance docs", "zig build bench-check");
@@ -473,10 +480,18 @@ fn addCurrentDocsScopeCheck(allocator: std.mem.Allocator, passport: *ReleasePass
     const roadmap = readOptionalFile(allocator, "docs/roadmap.md", 512 * 1024);
     defer if (roadmap) |bytes| allocator.free(bytes);
 
-    if (readme == null or docs_index == null or roadmap == null) {
+    const readme_bytes = readme orelse {
         try passport.add(allocator, "docs_scope", "Current docs scope", .fail, "README, docs index, or roadmap is missing", null);
         return;
-    }
+    };
+    const docs_index_bytes = docs_index orelse {
+        try passport.add(allocator, "docs_scope", "Current docs scope", .fail, "README, docs index, or roadmap is missing", null);
+        return;
+    };
+    const roadmap_bytes = roadmap orelse {
+        try passport.add(allocator, "docs_scope", "Current docs scope", .fail, "README, docs index, or roadmap is missing", null);
+        return;
+    };
 
     const stale_markers = [_][]const u8{
         "Release Scope",
@@ -485,9 +500,9 @@ fn addCurrentDocsScopeCheck(allocator: std.mem.Allocator, passport: *ReleasePass
         "migration instructions",
         "old plans",
     };
-    if (containsAny(readme.?, &stale_markers) or
-        containsAny(docs_index.?, &stale_markers) or
-        containsAny(roadmap.?, &stale_markers))
+    if (containsAny(readme_bytes, &stale_markers) or
+        containsAny(docs_index_bytes, &stale_markers) or
+        containsAny(roadmap_bytes, &stale_markers))
     {
         try passport.add(allocator, "docs_scope", "Current docs scope", .fail, "front-door docs still point at historical release material", null);
     } else {
@@ -498,12 +513,12 @@ fn addCurrentDocsScopeCheck(allocator: std.mem.Allocator, passport: *ReleasePass
 fn addReliabilityKnownIssuesCheck(allocator: std.mem.Allocator, passport: *ReleasePassport) !void {
     const reliability = readOptionalFile(allocator, "docs/reliability.md", 512 * 1024);
     defer if (reliability) |bytes| allocator.free(bytes);
-    if (reliability == null) {
+    const reliability_bytes = reliability orelse {
         try passport.add(allocator, "known_issues", "Known reliability issues", .fail, "docs/reliability.md is missing", null);
         return;
-    }
-    if (std.mem.indexOf(u8, reliability.?, "closes the connection without") != null and
-        std.mem.indexOf(u8, reliability.?, "413") != null)
+    };
+    if (std.mem.indexOf(u8, reliability_bytes, "closes the connection without") != null and
+        std.mem.indexOf(u8, reliability_bytes, "413") != null)
     {
         try passport.add(allocator, "known_issues", "Known reliability issues", .warn, "oversized request bodies are documented as a known 413 gap", null);
     } else {
@@ -525,19 +540,27 @@ fn addProofSurfaceCheck(allocator: std.mem.Allocator, passport: *ReleasePassport
     const proofs_cli_source = readOptionalFile(allocator, "packages/runtime/src/proofs_cli.zig", 2 * 1024 * 1024);
     defer if (proofs_cli_source) |bytes| allocator.free(bytes);
 
-    if (help_source == null or build_source == null or proofs_cli_source == null) {
+    const help_bytes = help_source orelse {
         try passport.add(allocator, "proof_surface", "Proof surface", .fail, "developer CLI or proof ledger CLI source is missing", "zig build test-cli");
         return;
-    }
+    };
+    const build_bytes = build_source orelse {
+        try passport.add(allocator, "proof_surface", "Proof surface", .fail, "developer CLI or proof ledger CLI source is missing", "zig build test-cli");
+        return;
+    };
+    const proofs_cli_bytes = proofs_cli_source orelse {
+        try passport.add(allocator, "proof_surface", "Proof surface", .fail, "developer CLI or proof ledger CLI source is missing", "zig build test-cli");
+        return;
+    };
 
     const dev_ok =
-        std.mem.indexOf(u8, help_source.?, "zttp verify <url>") != null and
-        std.mem.indexOf(u8, help_source.?, "proofs") != null and
-        std.mem.indexOf(u8, build_source.?, "--no-attest") != null;
+        std.mem.indexOf(u8, help_bytes, "zttp verify <url>") != null and
+        std.mem.indexOf(u8, help_bytes, "proofs") != null and
+        std.mem.indexOf(u8, build_bytes, "--no-attest") != null;
     const proofs_ok =
-        std.mem.indexOf(u8, proofs_cli_source.?, "badge") != null and
-        std.mem.indexOf(u8, proofs_cli_source.?, "bundle") != null and
-        std.mem.indexOf(u8, proofs_cli_source.?, "verify") != null;
+        std.mem.indexOf(u8, proofs_cli_bytes, "badge") != null and
+        std.mem.indexOf(u8, proofs_cli_bytes, "bundle") != null and
+        std.mem.indexOf(u8, proofs_cli_bytes, "verify") != null;
     if (dev_ok and proofs_ok) {
         try passport.add(allocator, "proof_surface", "Proof surface", .ok, "proof receipts, ledger, badge, bundle, and verify surfaces are present", "zig build test-cli");
     } else {
@@ -688,7 +711,8 @@ fn chdirTmpForTest(tmp: *std.testing.TmpDir) ![:0]u8 {
 test "release doctor options parse json and out path" {
     const opts = try parseReleaseDoctorOptions(&.{ "--json", "--out", ".zttp/release-passport.json" });
     try std.testing.expect(opts.json);
-    try std.testing.expectEqualStrings(".zttp/release-passport.json", opts.out_path.?);
+    const out_path = opts.out_path orelse return error.MissingOutputPath;
+    try std.testing.expectEqualStrings(".zttp/release-passport.json", out_path);
     try std.testing.expectError(error.InvalidArgument, parseReleaseDoctorOptions(&.{"--out"}));
     try std.testing.expectError(error.InvalidArgument, parseReleaseDoctorOptions(&.{"--bad"}));
 }

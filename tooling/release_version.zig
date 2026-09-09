@@ -16,15 +16,17 @@ pub fn check(
     zts_zon: ?[]const u8,
     runtime_zon: ?[]const u8,
 ) Alignment {
-    if (zon == null or marker == null or root == null or zts_zon == null or runtime_zon == null) {
-        return .missing;
-    }
-    const version = extractZonVersion(zon.?) orelse return .missing;
-    const marker_version = extractVersionMarker(marker.?) orelse return .malformed_marker;
+    const zon_bytes = zon orelse return .missing;
+    const marker_bytes = marker orelse return .missing;
+    const root_bytes = root orelse return .missing;
+    const zts_zon_bytes = zts_zon orelse return .missing;
+    const runtime_zon_bytes = runtime_zon orelse return .missing;
+    const version = extractZonVersion(zon_bytes) orelse return .missing;
+    const marker_version = extractVersionMarker(marker_bytes) orelse return .malformed_marker;
     if (!std.mem.eql(u8, marker_version, version) or
-        !rootHasVersion(root.?, version) or
-        !std.mem.eql(u8, extractZonVersion(zts_zon.?) orelse "", version) or
-        !std.mem.eql(u8, extractZonVersion(runtime_zon.?) orelse "", version))
+        !rootHasVersion(root_bytes, version) or
+        !std.mem.eql(u8, extractZonVersion(zts_zon_bytes) orelse "", version) or
+        !std.mem.eql(u8, extractZonVersion(runtime_zon_bytes) orelse "", version))
     {
         return .mismatch;
     }
@@ -58,7 +60,8 @@ fn rootHasVersion(bytes: []const u8, expected: []const u8) bool {
 }
 
 test "VERSION requires one SemVer line with a trailing newline" {
-    try std.testing.expectEqualStrings("0.20.0", extractVersionMarker("0.20.0\n").?);
+    const version = extractVersionMarker("0.20.0\n") orelse return error.MissingVersion;
+    try std.testing.expectEqualStrings("0.20.0", version);
     try std.testing.expectEqual(@as(?[]const u8, null), extractVersionMarker("0.20.0"));
     try std.testing.expectEqual(@as(?[]const u8, null), extractVersionMarker("0.20.0\nextra\n"));
     try std.testing.expectEqual(@as(?[]const u8, null), extractVersionMarker("0.20.0\r\n"));
