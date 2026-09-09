@@ -1,31 +1,33 @@
 {
   "schema_version": 1,
+  "provenance": {
+    "source_commit": "024c4722eb845a3444d453186d3053245a9a3ab6",
+    "source_dirty": false,
+    "zig_version": "0.16.0",
+    "host": {
+      "os": "Darwin",
+      "os_release": "25.6.0",
+      "architecture": "arm64",
+      "processor": "Apple M4 Pro"
+    },
+    "run_count": 5,
+    "aggregation": "per-benchmark best ops_per_sec"
+  },
   "benchmarks": [
     {
       "name": "intArithmetic",
       "iterations": 50000,
       "success": true,
-      "time_ms": 2.232,
-      "ops_per_sec": 22401433,
+      "time_ms": 2.337,
+      "ops_per_sec": 21394950,
       "error": null,
       "perf": {
-        "backedge_count": 0,
+        "backedge_count": 50000,
         "pic_hits": 0,
         "pic_misses": 0,
-        "deopt_count": 0,
         "mega_recoveries": 0,
-        "promotion_attempted": 0,
-        "promotion_succeeded": 0,
-        "promotion_rejected_deopt_storm": 0,
         "opcode_histogram_enabled": false,
-        "opcode_histogram_nonzero": 0,
-        "tier_promotions": {
-          "interpreted": 0,
-          "baseline_candidate": 0,
-          "baseline": 0,
-          "optimized_candidate": 0,
-          "optimized": 0
-        }
+        "opcode_histogram_nonzero": 0
       },
       "opt_stats": {
         "get_loc_add_count": 0,
@@ -37,49 +39,22 @@
         "bytes_saved": 4,
         "dispatches_saved": 2,
         "total_fusions": 2
-      },
-      "feedback_summary": {
-        "value": {
-          "sites": 0,
-          "monomorphic": 0,
-          "polymorphic": 0,
-          "megamorphic": 0,
-          "total_hits": 0
-        },
-        "calls": {
-          "sites": 0,
-          "monomorphic": 0,
-          "polymorphic": 0,
-          "megamorphic": 0,
-          "total_hits": 0
-        }
       }
     },
     {
       "name": "stringConcat",
       "iterations": 50000,
       "success": true,
-      "time_ms": 1.931,
-      "ops_per_sec": 25893319,
+      "time_ms": 7.86,
+      "ops_per_sec": 6361323,
       "error": null,
       "perf": {
-        "backedge_count": 0,
+        "backedge_count": 50000,
         "pic_hits": 0,
-        "pic_misses": 0,
-        "deopt_count": 0,
+        "pic_misses": 50000,
         "mega_recoveries": 0,
-        "promotion_attempted": 0,
-        "promotion_succeeded": 0,
-        "promotion_rejected_deopt_storm": 0,
         "opcode_histogram_enabled": false,
-        "opcode_histogram_nonzero": 0,
-        "tier_promotions": {
-          "interpreted": 0,
-          "baseline_candidate": 0,
-          "baseline": 0,
-          "optimized_candidate": 0,
-          "optimized": 0
-        }
+        "opcode_histogram_nonzero": 0
       },
       "opt_stats": {
         "get_loc_add_count": 0,
@@ -91,49 +66,22 @@
         "bytes_saved": 3,
         "dispatches_saved": 1,
         "total_fusions": 1
-      },
-      "feedback_summary": {
-        "value": {
-          "sites": 0,
-          "monomorphic": 0,
-          "polymorphic": 0,
-          "megamorphic": 0,
-          "total_hits": 0
-        },
-        "calls": {
-          "sites": 0,
-          "monomorphic": 0,
-          "polymorphic": 0,
-          "megamorphic": 0,
-          "total_hits": 0
-        }
       }
     },
     {
       "name": "stringOps",
       "iterations": 50000,
       "success": true,
-      "time_ms": 2.51,
-      "ops_per_sec": 19920318,
+      "time_ms": 2.31,
+      "ops_per_sec": 21645021,
       "error": null,
       "perf": {
-        "backedge_count": 0,
+        "backedge_count": 50000,
         "pic_hits": 0,
         "pic_misses": 0,
-        "deopt_count": 0,
         "mega_recoveries": 0,
-        "promotion_attempted": 0,
-        "promotion_succeeded": 0,
-        "promotion_rejected_deopt_storm": 0,
         "opcode_histogram_enabled": false,
-        "opcode_histogram_nonzero": 0,
-        "tier_promotions": {
-          "interpreted": 0,
-          "baseline_candidate": 0,
-          "baseline": 0,
-          "optimized_candidate": 0,
-          "optimized": 0
-        }
+        "opcode_histogram_nonzero": 0
       },
       "opt_stats": {
         "get_loc_add_count": 0,
@@ -145,49 +93,22 @@
         "bytes_saved": 4,
         "dispatches_saved": 2,
         "total_fusions": 2
-      },
-      "feedback_summary": {
-        "value": {
-          "sites": 0,
-          "monomorphic": 0,
-          "polymorphic": 0,
-          "megamorphic": 0,
-          "total_hits": 0
-        },
-        "calls": {
-          "sites": 0,
-          "monomorphic": 0,
-          "polymorphic": 0,
-          "megamorphic": 0,
-          "total_hits": 0
-        }
       }
     },
     {
       "name": "objectCreate",
       "iterations": 50000,
       "success": true,
-      "time_ms": 3.552,
-      "ops_per_sec": 14076576,
+      "time_ms": 3.42,
+      "ops_per_sec": 14619883,
       "error": null,
       "perf": {
-        "backedge_count": 0,
+        "backedge_count": 50000,
         "pic_hits": 0,
         "pic_misses": 100001,
-        "deopt_count": 0,
         "mega_recoveries": 0,
-        "promotion_attempted": 0,
-        "promotion_succeeded": 0,
-        "promotion_rejected_deopt_storm": 0,
         "opcode_histogram_enabled": false,
-        "opcode_histogram_nonzero": 0,
-        "tier_promotions": {
-          "interpreted": 0,
-          "baseline_candidate": 0,
-          "baseline": 0,
-          "optimized_candidate": 0,
-          "optimized": 0
-        }
+        "opcode_histogram_nonzero": 0
       },
       "opt_stats": {
         "get_loc_add_count": 0,
@@ -199,49 +120,22 @@
         "bytes_saved": 3,
         "dispatches_saved": 1,
         "total_fusions": 1
-      },
-      "feedback_summary": {
-        "value": {
-          "sites": 0,
-          "monomorphic": 0,
-          "polymorphic": 0,
-          "megamorphic": 0,
-          "total_hits": 0
-        },
-        "calls": {
-          "sites": 0,
-          "monomorphic": 0,
-          "polymorphic": 0,
-          "megamorphic": 0,
-          "total_hits": 0
-        }
       }
     },
     {
       "name": "propertyAccess",
       "iterations": 50000,
       "success": true,
-      "time_ms": 2.753,
-      "ops_per_sec": 18162005,
+      "time_ms": 2.454,
+      "ops_per_sec": 20374898,
       "error": null,
       "perf": {
-        "backedge_count": 0,
+        "backedge_count": 50000,
         "pic_hits": 249995,
         "pic_misses": 5,
-        "deopt_count": 0,
         "mega_recoveries": 0,
-        "promotion_attempted": 0,
-        "promotion_succeeded": 0,
-        "promotion_rejected_deopt_storm": 0,
         "opcode_histogram_enabled": false,
-        "opcode_histogram_nonzero": 0,
-        "tier_promotions": {
-          "interpreted": 0,
-          "baseline_candidate": 0,
-          "baseline": 0,
-          "optimized_candidate": 0,
-          "optimized": 0
-        }
+        "opcode_histogram_nonzero": 0
       },
       "opt_stats": {
         "get_loc_add_count": 0,
@@ -253,49 +147,22 @@
         "bytes_saved": 4,
         "dispatches_saved": 2,
         "total_fusions": 2
-      },
-      "feedback_summary": {
-        "value": {
-          "sites": 0,
-          "monomorphic": 0,
-          "polymorphic": 0,
-          "megamorphic": 0,
-          "total_hits": 0
-        },
-        "calls": {
-          "sites": 0,
-          "monomorphic": 0,
-          "polymorphic": 0,
-          "megamorphic": 0,
-          "total_hits": 0
-        }
       }
     },
     {
       "name": "arrayOps",
       "iterations": 50000,
       "success": true,
-      "time_ms": 3.119,
-      "ops_per_sec": 16030779,
+      "time_ms": 2.983,
+      "ops_per_sec": 16761649,
       "error": null,
       "perf": {
-        "backedge_count": 0,
+        "backedge_count": 99995,
         "pic_hits": 0,
         "pic_misses": 100000,
-        "deopt_count": 0,
         "mega_recoveries": 0,
-        "promotion_attempted": 0,
-        "promotion_succeeded": 0,
-        "promotion_rejected_deopt_storm": 0,
         "opcode_histogram_enabled": false,
-        "opcode_histogram_nonzero": 0,
-        "tier_promotions": {
-          "interpreted": 0,
-          "baseline_candidate": 0,
-          "baseline": 0,
-          "optimized_candidate": 0,
-          "optimized": 0
-        }
+        "opcode_histogram_nonzero": 0
       },
       "opt_stats": {
         "get_loc_add_count": 0,
@@ -307,49 +174,22 @@
         "bytes_saved": 4,
         "dispatches_saved": 2,
         "total_fusions": 2
-      },
-      "feedback_summary": {
-        "value": {
-          "sites": 0,
-          "monomorphic": 0,
-          "polymorphic": 0,
-          "megamorphic": 0,
-          "total_hits": 0
-        },
-        "calls": {
-          "sites": 0,
-          "monomorphic": 0,
-          "polymorphic": 0,
-          "megamorphic": 0,
-          "total_hits": 0
-        }
       }
     },
     {
       "name": "functionCalls",
       "iterations": 50000,
       "success": true,
-      "time_ms": 3.961,
-      "ops_per_sec": 12623074,
+      "time_ms": 3.888,
+      "ops_per_sec": 12860082,
       "error": null,
       "perf": {
-        "backedge_count": 0,
+        "backedge_count": 50000,
         "pic_hits": 0,
         "pic_misses": 0,
-        "deopt_count": 0,
         "mega_recoveries": 0,
-        "promotion_attempted": 3,
-        "promotion_succeeded": 3,
-        "promotion_rejected_deopt_storm": 0,
         "opcode_histogram_enabled": false,
-        "opcode_histogram_nonzero": 0,
-        "tier_promotions": {
-          "interpreted": 0,
-          "baseline_candidate": 2,
-          "baseline": 2,
-          "optimized_candidate": 1,
-          "optimized": 0
-        }
+        "opcode_histogram_nonzero": 0
       },
       "opt_stats": {
         "get_loc_add_count": 0,
@@ -361,49 +201,22 @@
         "bytes_saved": 4,
         "dispatches_saved": 2,
         "total_fusions": 2
-      },
-      "feedback_summary": {
-        "value": {
-          "sites": 0,
-          "monomorphic": 0,
-          "polymorphic": 0,
-          "megamorphic": 0,
-          "total_hits": 0
-        },
-        "calls": {
-          "sites": 1,
-          "monomorphic": 1,
-          "polymorphic": 0,
-          "megamorphic": 0,
-          "total_hits": 50
-        }
       }
     },
     {
       "name": "recursion",
       "iterations": 25,
       "success": true,
-      "time_ms": 9.415,
-      "ops_per_sec": 2655,
+      "time_ms": 9.463,
+      "ops_per_sec": 2641,
       "error": null,
       "perf": {
         "backedge_count": 0,
         "pic_hits": 0,
         "pic_misses": 0,
-        "deopt_count": 0,
         "mega_recoveries": 0,
-        "promotion_attempted": 2,
-        "promotion_succeeded": 2,
-        "promotion_rejected_deopt_storm": 0,
         "opcode_histogram_enabled": false,
-        "opcode_histogram_nonzero": 0,
-        "tier_promotions": {
-          "interpreted": 0,
-          "baseline_candidate": 1,
-          "baseline": 1,
-          "optimized_candidate": 1,
-          "optimized": 0
-        }
+        "opcode_histogram_nonzero": 0
       },
       "opt_stats": {
         "get_loc_add_count": 0,
@@ -415,49 +228,22 @@
         "bytes_saved": 0,
         "dispatches_saved": 0,
         "total_fusions": 0
-      },
-      "feedback_summary": {
-        "value": {
-          "sites": 2,
-          "monomorphic": 2,
-          "polymorphic": 0,
-          "megamorphic": 0,
-          "total_hits": 92
-        },
-        "calls": {
-          "sites": 2,
-          "monomorphic": 2,
-          "polymorphic": 0,
-          "megamorphic": 0,
-          "total_hits": 67
-        }
       }
     },
     {
       "name": "jsonOps",
       "iterations": 5000,
       "success": true,
-      "time_ms": 1.308,
-      "ops_per_sec": 3822629,
+      "time_ms": 1.24,
+      "ops_per_sec": 4032258,
       "error": null,
       "perf": {
-        "backedge_count": 0,
+        "backedge_count": 5000,
         "pic_hits": 14997,
         "pic_misses": 5003,
-        "deopt_count": 0,
         "mega_recoveries": 0,
-        "promotion_attempted": 0,
-        "promotion_succeeded": 0,
-        "promotion_rejected_deopt_storm": 0,
         "opcode_histogram_enabled": false,
-        "opcode_histogram_nonzero": 0,
-        "tier_promotions": {
-          "interpreted": 0,
-          "baseline_candidate": 0,
-          "baseline": 0,
-          "optimized_candidate": 0,
-          "optimized": 0
-        }
+        "opcode_histogram_nonzero": 0
       },
       "opt_stats": {
         "get_loc_add_count": 0,
@@ -469,49 +255,22 @@
         "bytes_saved": 4,
         "dispatches_saved": 2,
         "total_fusions": 2
-      },
-      "feedback_summary": {
-        "value": {
-          "sites": 0,
-          "monomorphic": 0,
-          "polymorphic": 0,
-          "megamorphic": 0,
-          "total_hits": 0
-        },
-        "calls": {
-          "sites": 0,
-          "monomorphic": 0,
-          "polymorphic": 0,
-          "megamorphic": 0,
-          "total_hits": 0
-        }
       }
     },
     {
       "name": "gcPressure",
       "iterations": 50000,
       "success": true,
-      "time_ms": 5.978,
-      "ops_per_sec": 8364001,
+      "time_ms": 5.942,
+      "ops_per_sec": 8414675,
       "error": null,
       "perf": {
-        "backedge_count": 0,
+        "backedge_count": 50000,
         "pic_hits": 49999,
         "pic_misses": 1,
-        "deopt_count": 0,
         "mega_recoveries": 0,
-        "promotion_attempted": 0,
-        "promotion_succeeded": 0,
-        "promotion_rejected_deopt_storm": 0,
         "opcode_histogram_enabled": false,
-        "opcode_histogram_nonzero": 0,
-        "tier_promotions": {
-          "interpreted": 0,
-          "baseline_candidate": 0,
-          "baseline": 0,
-          "optimized_candidate": 0,
-          "optimized": 0
-        }
+        "opcode_histogram_nonzero": 0
       },
       "opt_stats": {
         "get_loc_add_count": 0,
@@ -523,49 +282,22 @@
         "bytes_saved": 4,
         "dispatches_saved": 2,
         "total_fusions": 2
-      },
-      "feedback_summary": {
-        "value": {
-          "sites": 0,
-          "monomorphic": 0,
-          "polymorphic": 0,
-          "megamorphic": 0,
-          "total_hits": 0
-        },
-        "calls": {
-          "sites": 0,
-          "monomorphic": 0,
-          "polymorphic": 0,
-          "megamorphic": 0,
-          "total_hits": 0
-        }
       }
     },
     {
       "name": "httpHandler",
       "iterations": 5000,
       "success": true,
-      "time_ms": 0.747,
-      "ops_per_sec": 6693440,
+      "time_ms": 0.716,
+      "ops_per_sec": 6983240,
       "error": null,
       "perf": {
-        "backedge_count": 0,
+        "backedge_count": 5000,
         "pic_hits": 9998,
         "pic_misses": 2,
-        "deopt_count": 0,
         "mega_recoveries": 0,
-        "promotion_attempted": 0,
-        "promotion_succeeded": 0,
-        "promotion_rejected_deopt_storm": 0,
         "opcode_histogram_enabled": false,
-        "opcode_histogram_nonzero": 0,
-        "tier_promotions": {
-          "interpreted": 0,
-          "baseline_candidate": 0,
-          "baseline": 0,
-          "optimized_candidate": 0,
-          "optimized": 0
-        }
+        "opcode_histogram_nonzero": 0
       },
       "opt_stats": {
         "get_loc_add_count": 0,
@@ -577,49 +309,22 @@
         "bytes_saved": 4,
         "dispatches_saved": 2,
         "total_fusions": 2
-      },
-      "feedback_summary": {
-        "value": {
-          "sites": 0,
-          "monomorphic": 0,
-          "polymorphic": 0,
-          "megamorphic": 0,
-          "total_hits": 0
-        },
-        "calls": {
-          "sites": 0,
-          "monomorphic": 0,
-          "polymorphic": 0,
-          "megamorphic": 0,
-          "total_hits": 0
-        }
       }
     },
     {
       "name": "httpHandlerHeavy",
       "iterations": 2000,
       "success": true,
-      "time_ms": 1.641,
-      "ops_per_sec": 1218769,
+      "time_ms": 1.827,
+      "ops_per_sec": 1094690,
       "error": null,
       "perf": {
-        "backedge_count": 0,
+        "backedge_count": 2000,
         "pic_hits": 7996,
-        "pic_misses": 5,
-        "deopt_count": 0,
+        "pic_misses": 2005,
         "mega_recoveries": 0,
-        "promotion_attempted": 0,
-        "promotion_succeeded": 0,
-        "promotion_rejected_deopt_storm": 0,
         "opcode_histogram_enabled": false,
-        "opcode_histogram_nonzero": 0,
-        "tier_promotions": {
-          "interpreted": 0,
-          "baseline_candidate": 0,
-          "baseline": 0,
-          "optimized_candidate": 0,
-          "optimized": 0
-        }
+        "opcode_histogram_nonzero": 0
       },
       "opt_stats": {
         "get_loc_add_count": 0,
@@ -631,49 +336,22 @@
         "bytes_saved": 4,
         "dispatches_saved": 2,
         "total_fusions": 2
-      },
-      "feedback_summary": {
-        "value": {
-          "sites": 0,
-          "monomorphic": 0,
-          "polymorphic": 0,
-          "megamorphic": 0,
-          "total_hits": 0
-        },
-        "calls": {
-          "sites": 0,
-          "monomorphic": 0,
-          "polymorphic": 0,
-          "megamorphic": 0,
-          "total_hits": 0
-        }
       }
     },
     {
       "name": "forOfLoop",
       "iterations": 50000,
       "success": true,
-      "time_ms": 0.812,
-      "ops_per_sec": 61576354,
+      "time_ms": 0.754,
+      "ops_per_sec": 66312997,
       "error": null,
       "perf": {
-        "backedge_count": 0,
+        "backedge_count": 50600,
         "pic_hits": 0,
         "pic_misses": 100,
-        "deopt_count": 0,
         "mega_recoveries": 0,
-        "promotion_attempted": 0,
-        "promotion_succeeded": 0,
-        "promotion_rejected_deopt_storm": 0,
         "opcode_histogram_enabled": false,
-        "opcode_histogram_nonzero": 0,
-        "tier_promotions": {
-          "interpreted": 0,
-          "baseline_candidate": 0,
-          "baseline": 0,
-          "optimized_candidate": 0,
-          "optimized": 0
-        }
+        "opcode_histogram_nonzero": 0
       },
       "opt_stats": {
         "get_loc_add_count": 0,
@@ -685,24 +363,7 @@
         "bytes_saved": 6,
         "dispatches_saved": 4,
         "total_fusions": 4
-      },
-      "feedback_summary": {
-        "value": {
-          "sites": 0,
-          "monomorphic": 0,
-          "polymorphic": 0,
-          "megamorphic": 0,
-          "total_hits": 0
-        },
-        "calls": {
-          "sites": 0,
-          "monomorphic": 0,
-          "polymorphic": 0,
-          "megamorphic": 0,
-          "total_hits": 0
-        }
       }
     }
-  ],
-  "total_ms": 39.604
+  ]
 }
