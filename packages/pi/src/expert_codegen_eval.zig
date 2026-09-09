@@ -162,6 +162,95 @@ pub fn runCase(
     return cr;
 }
 
+/// An intent check together with the output the run produced. The output is
+/// the only truthful account of why a check failed: a later re-run gets a fresh
+/// durable directory and an empty oplog, so it can pass while the run being
+/// explained did not, and it can also fail for reasons the first run created.
+/// A caller that needs to explain a failure keeps this instead of asking again.
+pub const IntentRun = struct {
+    outcome: IntentOutcome,
+    /// Empty when the check never reached the point of running the spec.
+    stdout: []u8 = &.{},
+    stderr: []u8 = &.{},
+    /// How the child ended: "exited", "signal", "stopped" or "unknown".
+    term: []const u8 = "",
+    exit_code: ?u8 = null,
+    /// Whether the three buffers above are owned allocations. A captured run
+    /// with genuinely empty output still owns them, so emptiness cannot stand
+    /// in for this and `deinit` must not infer ownership from length.
+    owns_output: bool = false,
+
+    pub fn deinit(self: *IntentRun, allocator: std.mem.Allocator) void {
+        if (self.owns_output) {
+            allocator.free(self.stdout);
+            allocator.free(self.stderr);
+            allocator.free(self.term);
+        }
+        self.* = .{ .outcome = .failed };
+    }
+
+    /// Write the run's own output where a reader will see it, prefixed so it is
+    /// not mistaken for the surrounding test's output.
+    pub fn report(self: *const IntentRun, label: []const u8) void {
+        std.debug.print(
+            "[codegen-intent] {s}: `zttp test` ended {s}",
+            .{ label, if (self.term.len > 0) self.term else "without running" },
+        );
+        if (self.exit_code) |code| std.debug.print(" with code {d}", .{code});
+        std.debug.print(
+            "\nstdout:\n{s}\nstderr:\n{s}\n",
+            .{ self.stdout, self.stderr },
+        );
+    }
+};
+
+/// `runIntentCheck` with the run's output retained. Prefer this wherever a
+/// failure has to be explained; `runIntentCheck` discards the output and is for
+/// callers that only score the outcome.
+pub fn runIntentCheckCaptured(
+    allocator: std.mem.Allocator,
+    intent: IntentCheck,
+    workspace_abs: []const u8,
+    zttp_bin: []const u8,
+) IntentRun {
+    const spec_rel = "intent.test.jsonl";
+    writeRuntimeFiles(allocator, workspace_abs, intent) catch return .{ .outcome = .failed };
+    writeWorkspaceFile(allocator, workspace_abs, spec_rel, intent.tests_jsonl) catch
+        return .{ .outcome = .failed };
+
+    const config = if (intent.zttp_json) |verbatim|
+        allocator.dupe(u8, verbatim) catch return .{ .outcome = .failed }
+    else
+        std.fmt.allocPrint(
+            allocator,
+            "{{\n  \"entry\": \"{s}\"\n}}\n",
+            .{intent.handler_path},
+        ) catch return .{ .outcome = .failed };
+    defer allocator.free(config);
+    writeWorkspaceFile(allocator, workspace_abs, "zttp.json", config) catch
+        return .{ .outcome = .failed };
+
+    const outcome = tools_common.runCommand(
+        allocator,
+        workspace_abs,
+        &.{ zttp_bin, "test", spec_rel },
+    ) catch return .{ .outcome = .failed };
+
+    // The three buffers move into the returned run and are freed by its
+    // `deinit`, so `outcome.deinit` is deliberately not called here.
+    return .{
+        // Killed, stopped, or signalled: the run did not get to demonstrate
+        // anything, which is not evidence the handler does the task. `ok` is
+        // already false for each of those.
+        .outcome = if (outcome.ok) .passed else .failed,
+        .stdout = outcome.stdout,
+        .stderr = outcome.stderr,
+        .term = outcome.term,
+        .exit_code = outcome.exit_code,
+        .owns_output = true,
+    };
+}
+
 /// Run a case's intent check against the handler the turn produced.
 ///
 /// Shells out to the built `zttp test` rather than driving the engine here.
@@ -180,39 +269,9 @@ pub fn runIntentCheck(
     workspace_abs: []const u8,
     zttp_bin: []const u8,
 ) IntentOutcome {
-    const spec_rel = "intent.test.jsonl";
-    writeRuntimeFiles(allocator, workspace_abs, intent) catch return .failed;
-    writeWorkspaceFile(allocator, workspace_abs, spec_rel, intent.tests_jsonl) catch return .failed;
-
-    const config = if (intent.zttp_json) |verbatim|
-        allocator.dupe(u8, verbatim) catch return .failed
-    else
-        std.fmt.allocPrint(
-            allocator,
-            "{{\n  \"entry\": \"{s}\"\n}}\n",
-            .{intent.handler_path},
-        ) catch return .failed;
-    defer allocator.free(config);
-    writeWorkspaceFile(allocator, workspace_abs, "zttp.json", config) catch return .failed;
-
-    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
-    defer io_backend.deinit();
-    const io = io_backend.io();
-
-    var child = std.process.spawn(io, .{
-        .argv = &.{ zttp_bin, "test", spec_rel },
-        .cwd = .{ .path = workspace_abs },
-        .stdin = .ignore,
-        .stdout = .ignore,
-        .stderr = .ignore,
-    }) catch return .failed;
-    const term = child.wait(io) catch return .failed;
-    return switch (term) {
-        .exited => |code| if (code == 0) .passed else .failed,
-        // Killed, stopped, or signalled: the run did not get to demonstrate
-        // anything, which is not evidence the handler does the task.
-        else => .failed,
-    };
+    var run = runIntentCheckCaptured(allocator, intent, workspace_abs, zttp_bin);
+    defer run.deinit(allocator);
+    return run.outcome;
 }
 
 fn writeRuntimeFiles(

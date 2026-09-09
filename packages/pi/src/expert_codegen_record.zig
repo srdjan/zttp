@@ -2138,24 +2138,23 @@ test "durable runtime intents match their pinned committed outcome" {
         for (rc.seed_files) |seed| try tmp.writeFile(testing.allocator, seed.path, seed.bytes);
         try tmp.writeFile(testing.allocator, intent.handler_path, handler.?);
 
-        const outcome = codegen.runIntentCheck(
+        var run = codegen.runIntentCheckCaptured(
             testing.allocator,
             intent,
             tmp.abs_path,
             zttp_bin,
         );
-        const observed_pass = outcome == .passed;
+        defer run.deinit(testing.allocator);
+        const observed_pass = run.outcome == .passed;
         if (observed_pass != rc.expect_committed_intent_pass) {
-            if (!observed_pass) {
-                var diagnostic = try tool_common.runCommand(
-                    testing.allocator,
-                    tmp.abs_path,
-                    &.{ zttp_bin, "test", "intent.test.jsonl" },
-                );
-                defer diagnostic.deinit(testing.allocator);
-                std.debug.print("[codegen-intent] committed handler failed: {s}\n", .{name});
-                std.debug.print("stdout:\n{s}\nstderr:\n{s}\n", .{ diagnostic.stdout, diagnostic.stderr });
-            }
+            // Report the failing run's own output. This used to re-run
+            // `zttp test` in the same workspace to ask again, which describes a
+            // different run than the one being explained: the second run
+            // inherits the first's unconsumed signal artifacts and its oplog, so
+            // it reports leftover state as though it were the defect, and when
+            // the first failure was a flake the re-run passes and prints nothing
+            // that matches the failure at all.
+            if (!observed_pass) run.report(name);
             std.debug.print(
                 "[codegen-intent] {s}: pinned expect_committed_intent_pass={} but observed {}." ++
                     " If the recording measured this outcome, move the pin in the same commit" ++
