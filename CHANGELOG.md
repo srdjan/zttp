@@ -10,6 +10,8 @@ For releases prior to v0.16 see git tags and [RELEASE_CHECKLIST.md](RELEASE_CHEC
 
 ## [Unreleased]
 
+## [0.20.0] - 2026-09-09
+
 ### Breaking changes
 
 - **Five store reads now report what they cannot know, so a handler that
@@ -495,7 +497,8 @@ See git tags and `RELEASE_CHECKLIST.md` for the record of shipped items. Known-i
 - Static file path traversal via symlinks blocked with check-before-open + `follow_symlinks=false`.
 - HandlerPool test flake under the build runner (root cause was the closure destroyFull bug above).
 
-[Unreleased]: https://github.com/srdjan/zigttp/compare/v0.19.0...HEAD
+[Unreleased]: https://github.com/srdjan/zigttp/compare/v0.20.0...HEAD
+[0.20.0]: https://github.com/srdjan/zigttp/compare/v0.19.0...v0.20.0
 [0.19.0]: https://github.com/srdjan/zigttp/compare/v0.18.0...v0.19.0
 [0.18.0]: https://github.com/srdjan/zigttp/compare/v0.17.0...v0.18.0
 [0.17.0]: https://github.com/srdjan/zigttp/compare/v0.1.1-beta...v0.17.0
