@@ -10,6 +10,90 @@ For releases prior to v0.16 see git tags and [RELEASE_CHECKLIST.md](RELEASE_CHEC
 
 ## [Unreleased]
 
+### Breaking changes
+
+- **Five store reads now report what they cannot know, so a handler that
+  proved a property through one may stop proving it.** `cacheGet`, `sqlOne`,
+  `sqlMany`, `queue.receive`, and `durable.waitSignal` hand back a value some
+  separate write put there, and the reading call holds no reference to that
+  value, so no dataflow rule can reach it. Each now declares `unknown` in its
+  return labels. A handler that reported `no_secret_leakage: PROVEN` through
+  one of these reports a weaker verdict after upgrading, **with no change to
+  its own source**. Declaring the property it can still prove, or moving the
+  read behind a validator, is the repair.
+
+- **`zttp:scope`'s `using` no longer launders the resource it hands back.** It
+  returns its first argument unchanged, and the label propagation was never
+  wired to that, so a secret passed through it arrived at the response
+  unlabelled. A handler relying on that silence to prove
+  `no_secret_leakage` or `no_credential_leakage` now fails the check.
+
+- **A dynamic capability category denies instead of admitting.** Env, cache,
+  and SQL capability decisions are made on the normalized identifier, and an
+  egress rule names the destination rather than the host string, checked
+  before the socket opens. A policy that leaned on the previous looser
+  categorization may need its resources spelled out.
+
+- **`mask` is bounded by the argument that decides how much it reveals.** The
+  declassification holds only while that argument is a compile-time literal;
+  a runtime value puts the magnitude of the declassification in whatever
+  computes it. Malformed durable framing is refused rather than parsed.
+
+### Added
+
+- **Artifact-level proof-carrying code, with a consumer-owned checker.** A
+  deploy artifact carries a certificate over the whole executable graph, not
+  just the entry module, together with canonical proof IR and translation
+  witnesses. `packages/proof-checker` is an independent acceptance kernel that
+  reconstructs the obligations and checks the evidence before the runtime may
+  serve the handler, and runtime authority is granted only after acceptance.
+
+- **The CLI reports the assurance a consumer actually established**, and the
+  disclosed trusted boundary is pinned in both directions by
+  `zig build test-proof-ratchet` and `test-proof-ratchet-drift`. One of the
+  eight properties, `response_total`, is re-derived by the consumer; the other
+  seven are disclosed at a weaker grade and are accepted on the producer's
+  word. [docs/verification.md](docs/verification.md) says which, in as many
+  words.
+
+- **Residual capability guards.** A computed capability resource is
+  classified and guarded rather than refused outright. Guard coverage is
+  reported beside the proof and never folded into it, and a denial names the
+  guard that fired instead of echoing the request's bytes.
+
+### Changed
+
+- **The published convergence and coverage evidence was re-recorded.**
+  Declaring `unknown` on the five store reads changed the module graph hash,
+  which every cassette covers, so the DeepSeek corpus was re-recorded. The
+  first-attempt-green rate moved from 57% (11/19) to 42% (8/19). Read the
+  attribution beside the number rather than the number alone: of the five
+  cases that regressed, only `sql-users` and `cache-counter-holes` carry
+  spec-discharge codes this change can cause, and one draw per case cannot
+  separate a three-case move from noise. See
+  [docs/convergence.md](docs/convergence.md).
+
+### Fixed
+
+- Several artifact-acceptance fail-opens closed, and totality is decided
+  exhaustively instead of by an `else` arm that answered true.
+- Three dead diagnostic variants removed. They shared their codes with a live
+  producer, so a gate keyed on the code could never have found them.
+- The `sql-crud` example claims only what a database read can prove.
+- The fuzz switch handles `UnknownMethod`; four dead JIT tier-promotion
+  constants removed.
+- A failing intent check now reports its own output. The pin test used to
+  re-run `zttp test` in the same workspace and print that instead, which
+  inherits the first run's leftover state and describes a different run.
+
+### Build
+
+- `zig build test` now runs the 56 example handler suites, which previously
+  ran only from `scripts/verify.sh`.
+- Two gates added: every script under `scripts/` must be invoked by something
+  or carry a reason, and every top-level build step's work must be run by
+  something. The second walks the real build graph rather than parsing source.
+
 ## [0.19.0] - 2026-08-27
 
 ### Breaking changes
