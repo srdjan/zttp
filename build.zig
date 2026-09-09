@@ -1343,6 +1343,7 @@ pub fn build(b: *std.Build) void {
     bench_record_cmd.addFileArg(b.path("benchmarks/perf-baseline.json"));
     bench_record_cmd.addArg("--bench");
     bench_record_cmd.addFileArg(bench_exe.getEmittedBin());
+    bench_record_cmd.addArgs(&.{ "--zig", b.graph.zig_exe });
     bench_record_cmd.has_side_effects = true;
     const bench_record_step = b.step("bench-record", "Record a five-run benchmark baseline from clean committed source");
     bench_record_step.dependOn(&bench_record_cmd.step);

@@ -91,11 +91,21 @@ const RecordOptions = struct {
     bench: []const u8,
     zig: []const u8 = "zig",
     runs: usize = default_run_count,
+    source_root: []const u8 = ".",
 };
 
 const Mode = union(enum) {
     check: CheckOptions,
     record: RecordOptions,
+};
+
+const RecordResult = struct {
+    benchmark_count: usize,
+    source_commit: []u8,
+
+    fn deinit(self: *RecordResult, allocator: std.mem.Allocator) void {
+        allocator.free(self.source_commit);
+    }
 };
 
 const SampleCapability = struct {
@@ -181,7 +191,14 @@ fn run(allocator: std.mem.Allocator, io: std.Io, mode: Mode) !void {
                 },
             }
         },
-        .record => |opts| try recordBaseline(allocator, io, opts),
+        .record => |opts| {
+            var result = try recordBaseline(allocator, io, opts);
+            defer result.deinit(allocator);
+            std.debug.print(
+                "bench-record ok: recorded {d} benchmarks from {d} runs at {s}\n",
+                .{ result.benchmark_count, opts.runs, result.source_commit },
+            );
+        },
     }
 }
 
@@ -265,7 +282,11 @@ fn collectArgs(allocator: std.mem.Allocator, vector: std.process.Args) ![]const 
     defer iterator.deinit();
     var args: std.ArrayList([]const u8) = .empty;
     errdefer freeArgs(allocator, args.items);
-    while (iterator.next()) |arg| try args.append(allocator, try allocator.dupe(u8, arg));
+    while (iterator.next()) |arg| {
+        const owned = try allocator.dupe(u8, arg);
+        errdefer allocator.free(owned);
+        try args.append(allocator, owned);
+    }
     return args.toOwnedSlice(allocator);
 }
 
@@ -364,7 +385,7 @@ fn sampleBenchmarks(
         if (best) |*current_best| {
             if (!sameBenchmarkSet(current_best.*, report)) return error.BenchmarkSetChanged;
             for (current_best.benchmarks) |*entry| {
-                const candidate = findBenchmark(report, entry.name).?;
+                const candidate = findBenchmark(report, entry.name) orelse return error.BenchmarkSetChanged;
                 if (candidate.ops_per_sec > entry.ops_per_sec) entry.* = candidate;
             }
         } else {
@@ -446,9 +467,9 @@ fn isSkipped(name: []const u8) bool {
     return false;
 }
 
-fn recordBaseline(allocator: std.mem.Allocator, io: std.Io, opts: RecordOptions) !void {
-    const source_commit = try cleanSourceCommit(allocator, io);
-    defer allocator.free(source_commit);
+fn recordBaseline(allocator: std.mem.Allocator, io: std.Io, opts: RecordOptions) !RecordResult {
+    const source_commit = try cleanSourceCommit(allocator, io, opts.source_root);
+    errdefer allocator.free(source_commit);
 
     var arena_state = std.heap.ArenaAllocator.init(allocator);
     defer arena_state.deinit();
@@ -456,7 +477,7 @@ fn recordBaseline(allocator: std.mem.Allocator, io: std.Io, opts: RecordOptions)
         .context = null,
         .run = runBenchmark,
     });
-    const after_commit = try cleanSourceCommit(allocator, io);
+    const after_commit = try cleanSourceCommit(allocator, io, opts.source_root);
     defer allocator.free(after_commit);
     if (!std.mem.eql(u8, source_commit, after_commit)) return error.SourceChanged;
 
@@ -478,20 +499,41 @@ fn recordBaseline(allocator: std.mem.Allocator, io: std.Io, opts: RecordOptions)
         .run_count = opts.runs,
     });
     defer allocator.free(output);
-    try zts.file_io.writeFile(allocator, opts.baseline, output);
-    std.debug.print(
-        "bench-record ok: recorded {d} benchmarks from {d} runs at {s}\n",
-        .{ sampled.benchmarks.len, opts.runs, source_commit },
-    );
+    try writePublicBaseline(allocator, io, opts.baseline, output);
+    return .{ .benchmark_count = sampled.benchmarks.len, .source_commit = source_commit };
 }
 
-fn cleanSourceCommit(allocator: std.mem.Allocator, io: std.Io) ![]u8 {
-    const commit = try commandOutput(allocator, io, &.{ "git", "rev-parse", "HEAD" });
+fn cleanSourceCommit(allocator: std.mem.Allocator, io: std.Io, source_root: []const u8) ![]u8 {
+    const commit = try commandOutput(allocator, io, &.{ "git", "-C", source_root, "rev-parse", "HEAD" });
     errdefer allocator.free(commit);
-    const status = try commandOutput(allocator, io, &.{ "git", "status", "--porcelain=v1", "--untracked-files=all" });
+    const status = try commandOutput(allocator, io, &.{ "git", "-C", source_root, "status", "--porcelain=v1", "--untracked-files=all" });
     defer allocator.free(status);
     if (status.len != 0) return error.DirtySource;
     return commit;
+}
+
+fn writePublicBaseline(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    path: []const u8,
+    data: []const u8,
+) !void {
+    var atomic_file = try std.Io.Dir.cwd().createFileAtomic(io, path, .{
+        .permissions = std.Io.File.Permissions.fromMode(0o644),
+        .replace = true,
+    });
+    defer atomic_file.deinit(io);
+    try atomic_file.file.writeStreamingAll(io, data);
+    try atomic_file.file.setPermissions(io, std.Io.File.Permissions.fromMode(0o644));
+    try atomic_file.file.sync(io);
+    try atomic_file.replace(io);
+
+    const parent_path = std.fs.path.dirname(path) orelse ".";
+    const parent_real = try std.Io.Dir.realPathFileAlloc(std.Io.Dir.cwd(), io, parent_path, allocator);
+    defer allocator.free(parent_real);
+    var parent = try std.Io.Dir.openDirAbsolute(io, parent_real, .{ .iterate = true });
+    defer parent.close(io);
+    if (std.c.fsync(parent.handle) != 0) return error.DirectorySyncFailed;
 }
 
 fn commandOutput(allocator: std.mem.Allocator, io: std.Io, argv: []const []const u8) ![]u8 {
@@ -501,14 +543,10 @@ fn commandOutput(allocator: std.mem.Allocator, io: std.Io, argv: []const []const
         .stderr_limit = .limited(256 * 1024),
     });
     defer allocator.free(result.stderr);
-    if (!termSucceeded(result.term)) {
-        allocator.free(result.stdout);
-        return error.CommandFailed;
-    }
+    defer allocator.free(result.stdout);
+    if (!termSucceeded(result.term)) return error.CommandFailed;
     const trimmed = std.mem.trim(u8, result.stdout, " \t\r\n");
-    const owned = try allocator.dupe(u8, trimmed);
-    allocator.free(result.stdout);
-    return owned;
+    return allocator.dupe(u8, trimmed);
 }
 
 const Provenance = struct {
@@ -568,7 +606,110 @@ test "thresholds and skip set remain stable" {
     try std.testing.expectEqual(@as(usize, 5), default_run_count);
     try std.testing.expectEqual(@as(f64, 8.0), default_regression_pct);
     try std.testing.expectEqual(@as(f64, 3.0), default_geomean_pct);
-    try std.testing.expectEqual(@as(usize, 4), skipped_benchmarks.len);
+    const expected = [_][]const u8{
+        "forOfLoop",
+        "httpHandler",
+        "httpHandlerHeavy",
+        "stringConcat",
+    };
+    try std.testing.expectEqual(expected.len, skipped_benchmarks.len);
+    for (expected, skipped_benchmarks) |expected_name, actual_name| {
+        try std.testing.expectEqualStrings(expected_name, actual_name);
+    }
+}
+
+fn runTestCommand(allocator: std.mem.Allocator, io: std.Io, argv: []const []const u8) !void {
+    const output = try commandOutput(allocator, io, argv);
+    allocator.free(output);
+}
+
+fn makeTestExecutable(allocator: std.mem.Allocator, path: []const u8, data: []const u8) !void {
+    try zts.file_io.writeFile(allocator, path, data);
+    const path_z = try allocator.dupeZ(u8, path);
+    defer allocator.free(path_z);
+    if (std.c.chmod(path_z, 0o755) != 0) return error.ChmodFailed;
+}
+
+test "recording writes five-run provenance and refuses dirty source" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", allocator);
+    defer allocator.free(root);
+    const repo = try std.fs.path.join(allocator, &.{ root, "repo" });
+    defer allocator.free(repo);
+    try std.Io.Dir.cwd().createDirPath(io, repo);
+
+    const source_path = try std.fs.path.join(allocator, &.{ repo, "source.txt" });
+    defer allocator.free(source_path);
+    try zts.file_io.writeFile(allocator, source_path, "clean\n");
+    const bench_path = try std.fs.path.join(allocator, &.{ repo, "fake-bench" });
+    defer allocator.free(bench_path);
+    try makeTestExecutable(
+        allocator,
+        bench_path,
+        "#!/bin/sh\nprintf '%s\\n' '{\"schema_version\":1,\"benchmarks\":[{\"name\":\"alpha\",\"success\":true,\"ops_per_sec\":100}]}'\n",
+    );
+    const zig_path = try std.fs.path.join(allocator, &.{ repo, "fake-zig" });
+    defer allocator.free(zig_path);
+    try makeTestExecutable(allocator, zig_path, "#!/bin/sh\nprintf '%s\\n' '0.16.0-test'\n");
+
+    try runTestCommand(allocator, io, &.{ "git", "-C", repo, "init", "--quiet" });
+    try runTestCommand(allocator, io, &.{ "git", "-C", repo, "add", "." });
+    try runTestCommand(allocator, io, &.{
+        "git",                                  "-C",                       repo,
+        "-c",                                   "user.name=Benchmark Test", "-c",
+        "user.email=benchmark@example.invalid", "commit",                   "--quiet",
+        "-m",                                   "fixture",
+    });
+
+    const baseline_path = try std.fs.path.join(allocator, &.{ root, "baseline.json" });
+    defer allocator.free(baseline_path);
+    var record = record: {
+        const previous_umask = std.c.umask(0o077);
+        defer _ = std.c.umask(previous_umask);
+        break :record try recordBaseline(allocator, io, .{
+            .baseline = baseline_path,
+            .bench = bench_path,
+            .zig = zig_path,
+            .source_root = repo,
+        });
+    };
+    defer record.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), record.benchmark_count);
+
+    const baseline_bytes = try zts.file_io.readFile(allocator, baseline_path, max_report_bytes);
+    defer allocator.free(baseline_bytes);
+    var baseline = try std.json.parseFromSlice(std.json.Value, allocator, baseline_bytes, .{});
+    defer baseline.deinit();
+    try validateBaselineValue(baseline.value);
+    const provenance_value = baseline.value.object.get("provenance") orelse return error.MissingProvenance;
+    if (provenance_value != .object) return error.InvalidProvenance;
+    const provenance = provenance_value.object;
+    const zig_version = provenance.get("zig_version") orelse return error.MissingZigVersion;
+    if (zig_version != .string) return error.InvalidZigVersion;
+    try std.testing.expectEqualStrings("0.16.0-test", zig_version.string);
+    const run_count = provenance.get("run_count") orelse return error.MissingRunCount;
+    if (run_count != .integer) return error.InvalidRunCount;
+    try std.testing.expectEqual(@as(i64, default_run_count), run_count.integer);
+    const source_commit_value = provenance.get("source_commit") orelse return error.MissingSourceCommit;
+    if (source_commit_value != .string) return error.InvalidSourceCommit;
+    const source_commit = source_commit_value.string;
+    const actual_commit = try cleanSourceCommit(allocator, io, repo);
+    defer allocator.free(actual_commit);
+    try std.testing.expectEqualStrings(actual_commit, source_commit);
+
+    const baseline_z = try allocator.dupeZ(u8, baseline_path);
+    defer allocator.free(baseline_z);
+    const baseline_fd = try std.posix.openatZ(std.posix.AT.FDCWD, baseline_z, .{ .ACCMODE = .RDONLY }, 0);
+    defer std.Io.Threaded.closeFd(baseline_fd);
+    const baseline_stat = try zts.file_io.fstatFd(baseline_fd);
+    try std.testing.expectEqual(@as(u32, 0o644), baseline_stat.mode & 0o777);
+
+    try zts.file_io.writeFile(allocator, source_path, "dirty\n");
+    try std.testing.expectError(error.DirtySource, cleanSourceCommit(allocator, io, repo));
 }
 
 test "comparison accepts equal reports" {
@@ -693,7 +834,8 @@ const FakeSampler = struct {
     index: usize = 0,
 
     fn run(context: ?*anyopaque, allocator: std.mem.Allocator, _: std.Io, _: []const u8) ![]u8 {
-        const self: *FakeSampler = @ptrCast(@alignCast(context.?));
+        const context_ptr = context orelse return error.MissingSamplerContext;
+        const self: *FakeSampler = @ptrCast(@alignCast(context_ptr));
         if (self.index >= self.reports.len) return error.NoFixtureReport;
         defer self.index += 1;
         return allocator.dupe(u8, self.reports[self.index]);
@@ -716,8 +858,10 @@ test "sampler keeps each benchmark best across five runs" {
         .run = FakeSampler.run,
     });
     try std.testing.expectEqual(@as(usize, 5), fake.index);
-    try std.testing.expectEqual(@as(f64, 50), findBenchmark(sampled, "alpha").?.ops_per_sec);
-    try std.testing.expectEqual(@as(f64, 50), findBenchmark(sampled, "beta").?.ops_per_sec);
+    const alpha = findBenchmark(sampled, "alpha") orelse return error.MissingAlphaBenchmark;
+    const beta = findBenchmark(sampled, "beta") orelse return error.MissingBetaBenchmark;
+    try std.testing.expectEqual(@as(f64, 50), alpha.ops_per_sec);
+    try std.testing.expectEqual(@as(f64, 50), beta.ops_per_sec);
 }
 
 test "sampler rejects changing benchmark sets" {
