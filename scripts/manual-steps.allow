@@ -34,6 +34,10 @@ bench measurement
 compile-bench measurement
 production-branch-metric-json measurement
 
+# Replaces the committed performance baseline and refuses dirty source. A
+# release maintainer runs it explicitly after deciding to recalibrate.
+bench-record release-operation
+
 # Spends real model time against a live provider. `expert-qualification`
 # consumes three report-only live runs and edits no default; running it on
 # every build would bill every build.

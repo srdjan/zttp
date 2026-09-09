@@ -181,7 +181,7 @@ wrap a shell gate - the same script run directly by one of those. The workflow
 directory is read rather than listed, so a workflow added later becomes a
 coverage source without anyone remembering this gate.
 
-Eleven steps are declared manual in `scripts/manual-steps.allow`: two
+Twelve steps are declared manual in `scripts/manual-steps.allow`: two
 interactive run commands, one blocking server, three measurements that pass
 regardless, one that spends real model time, two that need a local MLX server
 or a browser, and two release operations. Both directions are enforced, and a
