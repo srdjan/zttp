@@ -948,6 +948,10 @@ pub fn build(b: *std.Build) void {
     });
     const wasm_step = b.step("wasm", "Build the zts analyzer as a wasm64-freestanding module for the web playground");
     wasm_step.dependOn(&wasm_install.step);
+    const wasm_publish_test_cmd = b.addSystemCommand(&.{ "python3", "scripts/test-wasm-playground-publish.py" });
+    wasm_publish_test_cmd.has_side_effects = true;
+    const wasm_publish_test_step = b.step("test-wasm-playground-publish", "Run website WASM publication tests");
+    wasm_publish_test_step.dependOn(&wasm_publish_test_cmd.step);
 
     const run_module_governance = b.addRunArtifact(zts_exe);
     run_module_governance.addArgs(&.{ "verify-modules", "--builtins", "--strict", "--json" });
@@ -1196,6 +1200,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_release_check_tests.step);
     test_step.dependOn(&run_release_provenance_tests.step);
     test_step.dependOn(&run_demo_passport_check_tests.step);
+    test_step.dependOn(wasm_publish_test_step);
     test_step.dependOn(production_branch_metric_test_step);
     test_step.dependOn(comptime_cli_step);
     test_step.dependOn(generic_intersection_cli_step);
@@ -1302,6 +1307,19 @@ pub fn build(b: *std.Build) void {
     bench_step.dependOn(&bench_cmd.step);
     const bench_check_step = b.step("bench-check", "Compare benchmark output against the checked-in perf baseline");
     bench_check_step.dependOn(&bench_check_cmd.step);
+    const bench_record_cmd = b.addSystemCommand(&.{ "/bin/bash", "scripts/bench-record.sh" });
+    bench_record_cmd.addArg("--baseline");
+    bench_record_cmd.addFileArg(b.path("benchmarks/perf-baseline.json"));
+    bench_record_cmd.addArg("--bench");
+    bench_record_cmd.addFileArg(bench_exe.getEmittedBin());
+    bench_record_cmd.has_side_effects = true;
+    const bench_record_step = b.step("bench-record", "Record a five-run benchmark baseline from clean committed source");
+    bench_record_step.dependOn(&bench_record_cmd.step);
+    const bench_diff_test_cmd = b.addSystemCommand(&.{ "python3", "scripts/test-bench-diff.py" });
+    bench_diff_test_cmd.has_side_effects = true;
+    const bench_diff_test_step = b.step("test-bench-diff", "Run benchmark sampling and comparison tests");
+    bench_diff_test_step.dependOn(&bench_diff_test_cmd.step);
+    test_step.dependOn(bench_diff_test_step);
 
     // End-to-end smoke for the v1 user flow:
     // init -> doctor -> check -> build -> deploy.

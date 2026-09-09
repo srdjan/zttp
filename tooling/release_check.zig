@@ -335,6 +335,8 @@ fn collectReleasePassportWithProvenance(
 }
 
 fn addVersionCheck(allocator: std.mem.Allocator, passport: *ReleasePassport, zon: ?[]const u8) !void {
+    const version_file = readOptionalFile(allocator, "VERSION", 256);
+    defer if (version_file) |bytes| allocator.free(bytes);
     const root = readOptionalFile(allocator, "packages/zts/src/root.zig", 256 * 1024);
     defer if (root) |bytes| allocator.free(bytes);
     const zts_zon = readOptionalFile(allocator, "packages/zts/build.zig.zon", 256 * 1024);
@@ -343,23 +345,29 @@ fn addVersionCheck(allocator: std.mem.Allocator, passport: *ReleasePassport, zon
     defer if (runtime_zon) |bytes| allocator.free(bytes);
 
     const version = if (zon) |bytes| extractZonVersion(bytes) else null;
-    if (version == null or root == null or zts_zon == null or runtime_zon == null) {
-        try passport.add(allocator, "version", "Version alignment", .fail, "a release package manifest or packages/zts/src/root.zig is missing", "zig build test-zts");
+    if (version == null or root == null or zts_zon == null or runtime_zon == null or version_file == null) {
+        try passport.add(allocator, "version", "Version alignment", .fail, "VERSION, a release package manifest, or packages/zts/src/root.zig is missing", "zig build test-zts");
         return;
     }
+
+    const marker_version = extractVersionMarker(version_file.?) orelse {
+        try passport.add(allocator, "version", "Version alignment", .fail, "VERSION must contain exactly one SemVer line ending in a newline", "zig build test-zts");
+        return;
+    };
 
     const root_bytes = root.?;
     const expected = try std.fmt.allocPrint(allocator, "string = \"{s}\"", .{version.?});
     defer allocator.free(expected);
     if (std.mem.indexOf(u8, root_bytes, expected) == null or
+        !std.mem.eql(u8, marker_version, version.?) or
         !std.mem.eql(u8, extractZonVersion(zts_zon.?) orelse "", version.?) or
         !std.mem.eql(u8, extractZonVersion(runtime_zon.?) orelse "", version.?))
     {
-        try passport.add(allocator, "version", "Version alignment", .fail, "root, zts, runtime, and binary versions do not agree", "zig build test-zts");
+        try passport.add(allocator, "version", "Version alignment", .fail, "VERSION, root, zts, runtime, and binary versions do not agree", "zig build test-zts");
         return;
     }
 
-    try passport.add(allocator, "version", "Version alignment", .ok, "root, zts, runtime, and binary versions agree", "zig build test-zts");
+    try passport.add(allocator, "version", "Version alignment", .ok, "VERSION, root, zts, runtime, and binary versions agree", "zig build test-zts");
 }
 
 fn addReleaseEvidenceCheck(allocator: std.mem.Allocator, passport: *ReleasePassport) !void {
@@ -602,6 +610,14 @@ fn extractZonVersion(bytes: []const u8) ?[]const u8 {
     return rest[0..value_end];
 }
 
+fn extractVersionMarker(bytes: []const u8) ?[]const u8 {
+    if (bytes.len < 2 or bytes[bytes.len - 1] != '\n') return null;
+    const version = bytes[0 .. bytes.len - 1];
+    if (std.mem.indexOfAny(u8, version, "\r\n") != null) return null;
+    _ = std.SemanticVersion.parse(version) catch return null;
+    return version;
+}
+
 fn containsAny(haystack: []const u8, needles: []const []const u8) bool {
     for (needles) |needle| {
         if (std.mem.indexOf(u8, haystack, needle) != null) return true;
@@ -717,7 +733,7 @@ test "release doctor options parse json and out path" {
     try std.testing.expectError(error.InvalidArgument, parseReleaseDoctorOptions(&.{"--bad"}));
 }
 
-test "release passport reports known issue for pending public measurement receipts" {
+test "release passport accepts matching VERSION and reports pending measurement" {
     const testing = std.testing;
 
     var io_backend = std.Io.Threaded.init(testing.allocator, .{ .environ = .empty });
@@ -740,6 +756,18 @@ test "release passport reports known issue for pending public measurement receip
     defer testing.allocator.free(json);
     try testing.expect(std.mem.indexOf(u8, json, "\"verdict\":\"ready_with_known_issues\"") != null);
     try testing.expect(std.mem.indexOf(u8, json, "\"release\":\"0.18.0\"") != null);
+}
+
+test "release passport blocks a missing VERSION marker" {
+    try expectVersionFixtureBlocked(.missing);
+}
+
+test "release passport blocks a malformed VERSION marker" {
+    try expectVersionFixtureBlocked(.malformed);
+}
+
+test "release passport blocks a stale VERSION marker" {
+    try expectVersionFixtureBlocked(.stale);
 }
 
 test "release passport blocks stale public claims" {
@@ -805,7 +833,35 @@ test "release passport warns for documented reliability gap" {
 const ReleaseDoctorFixtureOptions = struct {
     stale_readme: bool = false,
     document_413_gap: bool = false,
+    version_marker: VersionMarkerFixture = .matching,
 };
+
+const VersionMarkerFixture = enum {
+    matching,
+    missing,
+    malformed,
+    stale,
+};
+
+fn expectVersionFixtureBlocked(version_marker: VersionMarkerFixture) !void {
+    const testing = std.testing;
+
+    var io_backend = std.Io.Threaded.init(testing.allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    const io = io_backend.io();
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const old_cwd = try chdirTmpForTest(&tmp);
+    defer testing.allocator.free(old_cwd);
+    defer std.Io.Threaded.chdir(old_cwd) catch {};
+
+    try writeReleaseDoctorFixture(io, &tmp, .{ .version_marker = version_marker });
+
+    var passport = try collectReleasePassportWithProvenance(testing.allocator, true);
+    defer passport.deinit(testing.allocator);
+    try testing.expectEqual(ReleaseVerdict.blocked, passport.verdict());
+}
 
 fn writeReleaseDoctorFixture(io: std.Io, tmp: *std.testing.TmpDir, opts: ReleaseDoctorFixtureOptions) !void {
     try tmp.dir.createDirPath(io, "packages/zts/src");
@@ -824,6 +880,12 @@ fn writeReleaseDoctorFixture(io: std.Io, tmp: *std.testing.TmpDir, opts: Release
         \\}
         ,
     });
+    switch (opts.version_marker) {
+        .matching => try tmp.dir.writeFile(io, .{ .sub_path = "VERSION", .data = "0.18.0\n" }),
+        .missing => {},
+        .malformed => try tmp.dir.writeFile(io, .{ .sub_path = "VERSION", .data = "v0.18.0\n" }),
+        .stale => try tmp.dir.writeFile(io, .{ .sub_path = "VERSION", .data = "0.17.0\n" }),
+    }
     try tmp.dir.writeFile(io, .{
         .sub_path = "packages/zts/src/root.zig",
         .data =
