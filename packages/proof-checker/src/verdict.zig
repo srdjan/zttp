@@ -124,6 +124,8 @@ pub const Stage = enum(u8) {
     policy = 9,
     /// Residual guard reconstruction and coverage.
     guard_coverage = 10,
+    /// Application invariant specification and protected-operation coverage.
+    invariant_coverage = 11,
 
     pub fn name(self: Stage) []const u8 {
         return switch (self) {
@@ -137,6 +139,7 @@ pub const Stage = enum(u8) {
             .solver => "solver",
             .policy => "policy",
             .guard_coverage => "guard_coverage",
+            .invariant_coverage => "invariant_coverage",
         };
     }
 };
@@ -242,6 +245,25 @@ pub const ReasonCode = enum(u16) {
     guard_family_disabled = 1916,
     semantics_epoch_not_selected = 1806,
 
+    // application invariants
+    invariant_spec_missing = 2001,
+    invariant_spec_undecodable = 2002,
+    invariant_spec_digest_mismatch = 2003,
+    invariant_spec_member_missing = 2004,
+    invariant_adapter_member_missing = 2005,
+    invariant_adapter_identity_mismatch = 2006,
+    invariant_operation_required = 2007,
+    invariant_member_missing = 2008,
+    invariant_member_extra = 2009,
+    invariant_member_duplicate = 2010,
+    invariant_member_out_of_order = 2011,
+    invariant_operation_unknown = 2012,
+    invariant_operation_mismatch = 2013,
+    invariant_sink_mismatch = 2014,
+    invariant_impl_identity_mismatch = 2015,
+    invariant_translation_missing = 2016,
+    invariant_observed_mismatch = 2017,
+
     pub fn text(self: ReasonCode) []const u8 {
         return @tagName(self);
     }
@@ -284,6 +306,24 @@ pub const GuardVerdicts = struct {
     /// to guard.
     pub fn ready(self: GuardVerdicts) bool {
         return self.required == self.covered;
+    }
+};
+
+/// What the consumer established about a configured application invariant.
+/// This remains separate from static property grades and residual guards.
+pub const InvariantVerdicts = struct {
+    configured: bool = false,
+    /// Protected operations reconstructed from proof IR.
+    required: u32 = 0,
+    /// Operations related to final bytecode and independently observed calls.
+    covered: u32 = 0,
+    /// Covered operations that can modify protected ledger state.
+    writes: u32 = 0,
+    /// One bit per configured invariant kind.
+    kind_bits: u8 = 0,
+
+    pub fn ready(self: InvariantVerdicts) bool {
+        return self.configured and self.required > 0 and self.required == self.covered;
     }
 };
 
@@ -353,6 +393,9 @@ pub const Assessment = struct {
     /// verdicts, never folded into either: a covered guard is a promise to
     /// check at run time, and a passing check is not a theorem.
     guards: GuardVerdicts = .{},
+    /// Application invariant coverage. Runtime enforcement remains a separate
+    /// deployment condition and does not raise a static proof grade.
+    invariants: InvariantVerdicts = .{},
 
     pub fn accepted(self: Assessment) bool {
         return self.rejection == null and self.semantic == .policy_accepted;

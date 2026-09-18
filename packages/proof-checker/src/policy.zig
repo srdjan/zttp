@@ -102,7 +102,7 @@ pub const Policy = struct {
 };
 
 const default_schema_versions = [_]u16{ps.schema_version};
-const default_proof_systems = [_]ps.ProofSystem{.zttp_pcc_v2};
+const default_proof_systems = [_]ps.ProofSystem{.zttp_pcc_v3};
 const default_epochs = [_]u32{ps.semantics_epoch};
 
 const production_requirements = [_]Requirement{
@@ -190,9 +190,9 @@ test "production refuses development artifacts and solver edges" {
 }
 
 test "policy pins its proof system and epoch" {
-    try testing.expect(production.acceptsSchema(3));
-    try testing.expect(!production.acceptsSchema(2));
-    try testing.expect(production.acceptsProofSystem(.zttp_pcc_v2));
+    try testing.expect(production.acceptsSchema(4));
+    try testing.expect(!production.acceptsSchema(3));
+    try testing.expect(production.acceptsProofSystem(.zttp_pcc_v3));
     try testing.expect(production.acceptsEpoch(ps.semantics_epoch));
     try testing.expect(!production.acceptsEpoch(ps.semantics_epoch + 1));
 }

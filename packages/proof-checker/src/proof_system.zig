@@ -10,7 +10,7 @@ const std = @import("std");
 /// The certificate wire schema. Bumped for any layout change; the kernel checks
 /// equality, never a range, so an older or newer certificate is refused with a
 /// rebuild diagnostic instead of being reinterpreted.
-pub const schema_version: u16 = 3;
+pub const schema_version: u16 = 4;
 
 /// The proof system a certificate claims to be written in. The only accepted
 /// system carries closed rules over the canonical proof IR, translation
@@ -19,11 +19,11 @@ pub const ProofSystem = enum(u16) {
     /// Residual guard obligations cover operations whose resource the compiler
     /// could not resolve. An authoritative runtime sink checks them against a
     /// bound capability policy.
-    zttp_pcc_v2 = 2,
+    zttp_pcc_v3 = 3,
 
     pub fn fromWire(value: u16) ?ProofSystem {
         return switch (value) {
-            2 => .zttp_pcc_v2,
+            3 => .zttp_pcc_v3,
             else => null,
         };
     }
@@ -230,6 +230,9 @@ pub const NodeTag = enum(u16) {
     /// can count the guarded operations for itself instead of reading the
     /// producer's list of them.
     capability_call = 7,
+    /// A call to the protected `zttp:ledger` interface. `aux` names the row in
+    /// the consumer-owned invariant operation catalog.
+    ledger_call = 8,
 
     pub fn fromWire(value: u16) ?NodeTag {
         return switch (value) {
@@ -240,6 +243,7 @@ pub const NodeTag = enum(u16) {
             5 => .return_node,
             6 => .plain,
             7 => .capability_call,
+            8 => .ledger_call,
             else => null,
         };
     }
@@ -248,7 +252,7 @@ pub const NodeTag = enum(u16) {
     /// Every other tag must leave it zero, so the field cannot become a place
     /// to smuggle data past the decoder.
     pub fn usesAux(self: NodeTag) bool {
-        return self == .capability_call;
+        return self == .capability_call or self == .ledger_call;
     }
 };
 
@@ -280,14 +284,14 @@ pub const TrustReason = enum(u16) {
 };
 
 test "wire decoders refuse values outside the alphabet" {
-    try std.testing.expectEqual(@as(u16, 3), schema_version);
+    try std.testing.expectEqual(@as(u16, 4), schema_version);
     try std.testing.expectEqual(@as(?ProofSystem, null), ProofSystem.fromWire(1));
     try std.testing.expectEqual(@as(?ProofSystem, null), ProofSystem.fromWire(0));
-    try std.testing.expectEqual(@as(?ProofSystem, null), ProofSystem.fromWire(3));
+    try std.testing.expectEqual(@as(?ProofSystem, null), ProofSystem.fromWire(2));
     try std.testing.expectEqual(@as(?Property, null), Property.fromWire(0));
     try std.testing.expectEqual(@as(?Property, null), Property.fromWire(9));
     try std.testing.expectEqual(@as(?Rule, null), Rule.fromWire(9));
-    try std.testing.expectEqual(@as(?NodeTag, null), NodeTag.fromWire(8));
+    try std.testing.expectEqual(@as(?NodeTag, null), NodeTag.fromWire(9));
     try std.testing.expectEqual(@as(?TrustReason, null), TrustReason.fromWire(6));
 }
 

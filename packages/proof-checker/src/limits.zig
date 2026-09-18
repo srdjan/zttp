@@ -35,6 +35,8 @@ pub const Limits = struct {
     /// Residual guard obligations. One per guarded call site; a handler with
     /// more than this is refused rather than partly checked.
     max_residual_obligations: u32 = 4096,
+    /// Protected-ledger operations. One per independently observed call site.
+    max_invariant_operations: u32 = 4096,
     /// Deepest proof-IR walk. The subset has no back edges, so a real handler
     /// is far below this; the bound exists for a producer that lies.
     max_depth: u16 = 256,

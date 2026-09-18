@@ -14,6 +14,7 @@ const std = @import("std");
 const limits_mod = @import("limits.zig");
 const ps = @import("proof_system.zig");
 const graph_mod = @import("executable_graph.zig");
+const invariant = @import("invariant.zig");
 const residual = @import("residual.zig");
 const verdict = @import("verdict.zig");
 
@@ -79,6 +80,8 @@ pub const SectionTag = enum(u16) {
     /// Residual guard obligations. Present only under a proof system that
     /// carries them.
     residual = 10,
+    /// Protected-ledger operation witnesses for a configured invariant.
+    invariant = 11,
 
     pub fn fromWire(value: u16) ?SectionTag {
         return switch (value) {
@@ -92,6 +95,7 @@ pub const SectionTag = enum(u16) {
             8 => .trusted,
             9 => .solver,
             10 => .residual,
+            11 => .invariant,
             else => null,
         };
     }
@@ -99,7 +103,7 @@ pub const SectionTag = enum(u16) {
     pub fn required(self: SectionTag) bool {
         return switch (self) {
             .identity, .graph, .obligations, .proof_ir, .evidence => true,
-            .translation, .rewrites, .trusted, .solver, .residual => false,
+            .translation, .rewrites, .trusted, .solver, .residual, .invariant => false,
         };
     }
 };
@@ -108,7 +112,7 @@ pub const SectionTag = enum(u16) {
 // Records
 // ---------------------------------------------------------------------------
 
-pub const identity_size = 161;
+pub const identity_size = 193;
 
 pub const Identity = struct {
     /// Root over the canonical executable graph.
@@ -124,6 +128,9 @@ pub const Identity = struct {
     /// was built against. The checker recomputes it from the bytes it is given,
     /// so this is what ties a guard plan to one policy rather than to any.
     runtime_policy_digest: [32]u8 = [_]u8{0} ** 32,
+    /// Digest of the canonical structured invariant specification. All zero
+    /// when this artifact declares no application invariant.
+    invariant_spec_digest: [32]u8 = [_]u8{0} ** 32,
     /// The artifact was built with an ephemeral identity or an unpinned runtime
     /// policy. It can be checked; it can never satisfy production acceptance.
     development: bool,
@@ -365,6 +372,28 @@ pub const ResidualObligation = struct {
     }
 };
 
+pub const invariant_record_size = 28;
+
+/// One protected-ledger call related to proof IR and final bytecode.
+pub const InvariantWitness = struct {
+    ir_node: u32,
+    scope_ir_node: u32,
+    function_ordinal: u32,
+    code_offset: u32,
+    translation_index: u32,
+    operation: invariant.Operation,
+    sink: invariant.SinkId,
+    impl_id: u32,
+
+    /// Canonical order follows the independently observed final-code location.
+    pub fn order(a: InvariantWitness, b: InvariantWitness) std.math.Order {
+        if (a.function_ordinal != b.function_ordinal) return std.math.order(a.function_ordinal, b.function_ordinal);
+        if (a.code_offset != b.code_offset) return std.math.order(a.code_offset, b.code_offset);
+        if (a.ir_node != b.ir_node) return std.math.order(a.ir_node, b.ir_node);
+        return std.math.order(@intFromEnum(a.operation), @intFromEnum(b.operation));
+    }
+};
+
 pub const solver_record_size = 8;
 
 pub const SolverQueryKind = enum(u16) {
@@ -419,6 +448,7 @@ pub const RewriteTable = Table(Rewrite, rewrite_record_size);
 pub const TrustedTable = Table(TrustedEdge, trusted_record_size);
 pub const SolverTable = Table(SolverQuery, solver_record_size);
 pub const ResidualTable = Table(ResidualObligation, residual_record_size);
+pub const InvariantTable = Table(InvariantWitness, invariant_record_size);
 
 fn u16At(bytes: []const u8, offset: usize) u16 {
     return std.mem.readInt(u16, bytes[offset..][0..2], .little);
@@ -544,6 +574,21 @@ fn decodeRecord(comptime Record: type, bytes: []const u8) DecodeError!Record {
                 .operation_id = u32At(bytes, 8),
             };
         },
+        InvariantWitness => blk: {
+            const operation = invariant.Operation.fromWire(bytes[20]) orelse return error.UnknownEnumMember;
+            const sink = invariant.SinkId.fromWire(bytes[21]) orelse return error.UnknownEnumMember;
+            try requireZero(bytes[22..24]);
+            break :blk InvariantWitness{
+                .ir_node = u32At(bytes, 0),
+                .scope_ir_node = u32At(bytes, 4),
+                .function_ordinal = u32At(bytes, 8),
+                .code_offset = u32At(bytes, 12),
+                .translation_index = u32At(bytes, 16),
+                .operation = operation,
+                .sink = sink,
+                .impl_id = u32At(bytes, 24),
+            };
+        },
         SolverQuery => blk: {
             const kind = SolverQueryKind.fromWire(u16At(bytes, 4)) orelse return error.UnknownEnumMember;
             try requireZero(bytes[6..8]);
@@ -574,6 +619,7 @@ pub const Certificate = struct {
     trusted: TrustedTable = .{},
     solver: SolverTable = .{},
     residual: ResidualTable = .{},
+    invariants: InvariantTable = .{},
 };
 
 fn countLimitFor(tag: SectionTag, limits: Limits) u32 {
@@ -588,6 +634,7 @@ fn countLimitFor(tag: SectionTag, limits: Limits) u32 {
         .trusted => limits.max_trusted_edges,
         .solver => limits.max_solver_queries,
         .residual => limits.max_residual_obligations,
+        .invariant => limits.max_invariant_operations,
     };
 }
 
@@ -603,6 +650,7 @@ fn recordSizeFor(tag: SectionTag) usize {
         .trusted => trusted_record_size,
         .solver => solver_record_size,
         .residual => residual_record_size,
+        .invariant => invariant_record_size,
     };
 }
 
@@ -707,7 +755,8 @@ fn decodeSection(
         @memcpy(&identity.contract_digest, payload[64..96]);
         @memcpy(&identity.residual_plan_digest, payload[96..128]);
         @memcpy(&identity.runtime_policy_digest, payload[128..160]);
-        const flags = payload[160];
+        @memcpy(&identity.invariant_spec_digest, payload[160..192]);
+        const flags = payload[192];
         if (flags & ~@as(u8, 0x01) != 0) return error.ReservedFieldNonZero;
         identity.development = (flags & 0x01) != 0;
         cert.identity = identity;
@@ -734,6 +783,7 @@ fn decodeSection(
         .trusted => cert.trusted = .{ .bytes = records, .count = count },
         .solver => cert.solver = .{ .bytes = records, .count = count },
         .residual => cert.residual = .{ .bytes = records, .count = count },
+        .invariant => cert.invariants = .{ .bytes = records, .count = count },
     }
 
     // Validate every enum-bearing field now, so a caller walking the table
@@ -752,6 +802,7 @@ fn decodeSection(
             .trusted => _ = try cert.trusted.get(i),
             .solver => _ = try cert.solver.get(i),
             .residual => _ = try cert.residual.get(i),
+            .invariant => _ = try cert.invariants.get(i),
         }
     }
 }
@@ -901,7 +952,7 @@ pub const Parts = struct {
     /// The schema this certificate is written in. Producers and consumers use
     /// one strict version and rebuild across version boundaries.
     schema_version: u16 = ps.schema_version,
-    proof_system: ps.ProofSystem = .zttp_pcc_v2,
+    proof_system: ps.ProofSystem = .zttp_pcc_v3,
     semantics_epoch: u32 = ps.semantics_epoch,
     identity: Identity,
     graph: []const graph_mod.Member,
@@ -913,6 +964,7 @@ pub const Parts = struct {
     trusted: []const TrustedEdge = &.{},
     solver: []const SolverQuery = &.{},
     residual: []const ResidualObligation = &.{},
+    invariants: []const InvariantWitness = &.{},
 };
 
 pub const EncodeError = error{BufferTooSmall};
@@ -930,6 +982,7 @@ pub fn encodedSize(parts: Parts) usize {
     if (parts.trusted.len > 0) total += section_header_size + 4 + parts.trusted.len * trusted_record_size;
     if (parts.solver.len > 0) total += section_header_size + 4 + parts.solver.len * solver_record_size;
     if (parts.residual.len > 0) total += section_header_size + 4 + parts.residual.len * residual_record_size;
+    if (parts.invariants.len > 0) total += section_header_size + 4 + parts.invariants.len * invariant_record_size;
     return total;
 }
 
@@ -980,6 +1033,7 @@ fn sectionCount(parts: Parts) u16 {
     if (parts.trusted.len > 0) count += 1;
     if (parts.solver.len > 0) count += 1;
     if (parts.residual.len > 0) count += 1;
+    if (parts.invariants.len > 0) count += 1;
     return count;
 }
 
@@ -1001,6 +1055,7 @@ pub fn encode(parts: Parts, out: []u8) EncodeError![]u8 {
     try cursor.raw(&parts.identity.contract_digest);
     try cursor.raw(&parts.identity.residual_plan_digest);
     try cursor.raw(&parts.identity.runtime_policy_digest);
+    try cursor.raw(&parts.identity.invariant_spec_digest);
     try cursor.u8At(if (parts.identity.development) 0x01 else 0x00);
 
     try writeTable(&cursor, .graph, parts.graph.len, graph_record_size);
@@ -1101,6 +1156,21 @@ pub fn encode(parts: Parts, out: []u8) EncodeError![]u8 {
         }
     }
 
+    if (parts.invariants.len > 0) {
+        try writeTable(&cursor, .invariant, parts.invariants.len, invariant_record_size);
+        for (parts.invariants) |witness| {
+            try cursor.u32At(witness.ir_node);
+            try cursor.u32At(witness.scope_ir_node);
+            try cursor.u32At(witness.function_ordinal);
+            try cursor.u32At(witness.code_offset);
+            try cursor.u32At(witness.translation_index);
+            try cursor.u8At(@intFromEnum(witness.operation));
+            try cursor.u8At(@intFromEnum(witness.sink));
+            try cursor.zeros(2);
+            try cursor.u32At(witness.impl_id);
+        }
+    }
+
     return out[0..cursor.at];
 }
 
@@ -1189,7 +1259,7 @@ test "a minimal certificate round trips through the canonical codec" {
     var budget = Budget.init(.{});
     const cert = try decode(bytes, .{}, &budget);
     try testing.expectEqual(ps.schema_version, cert.schema_version);
-    try testing.expectEqual(ps.ProofSystem.zttp_pcc_v2, cert.proof_system);
+    try testing.expectEqual(ps.ProofSystem.zttp_pcc_v3, cert.proof_system);
     try testing.expectEqual(@as(u32, 8), cert.graph.len());
     try testing.expectEqual(@as(u32, 1), cert.obligations.len());
     try testing.expectEqual(@as(u32, 2), cert.ir.len());
@@ -1307,7 +1377,7 @@ test "a missing required section rejects" {
     var cursor = Cursor{ .buf = &buf };
     try cursor.u64At(magic);
     try cursor.u16At(ps.schema_version);
-    try cursor.u16At(@intFromEnum(ps.ProofSystem.zttp_pcc_v2));
+    try cursor.u16At(@intFromEnum(ps.ProofSystem.zttp_pcc_v3));
     try cursor.u32At(ps.semantics_epoch);
     try cursor.u16At(4);
     try cursor.u16At(@intFromEnum(SectionTag.identity));

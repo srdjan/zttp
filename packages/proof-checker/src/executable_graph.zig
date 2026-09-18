@@ -53,6 +53,10 @@ pub const MemberKind = enum(u16) {
     /// certificate that contains it so a mutated plan names itself rather than
     /// surfacing as a whole-certificate mismatch.
     residual_plan = 16,
+    /// Canonical structured application invariant specification bytes.
+    invariant_spec = 17,
+    /// Identity of the authoritative protected-ledger native adapter.
+    invariant_ledger_adapter = 18,
 
     pub fn fromWire(value: u16) ?MemberKind {
         return switch (value) {
@@ -72,6 +76,8 @@ pub const MemberKind = enum(u16) {
             14 => .proof_ir,
             15 => .proof_certificate,
             16 => .residual_plan,
+            17 => .invariant_spec,
+            18 => .invariant_ledger_adapter,
             else => null,
         };
     }
@@ -105,6 +111,8 @@ pub const MemberKind = enum(u16) {
             // empty plan and no plan are the same statement and one of them
             // would then be required.
             .residual_plan,
+            .invariant_spec,
+            .invariant_ledger_adapter,
             => false,
         };
     }
@@ -312,7 +320,7 @@ test "required kinds must all be present" {
 
 test "member kind wire decoding is closed" {
     try testing.expectEqual(@as(?MemberKind, null), MemberKind.fromWire(0));
-    try testing.expectEqual(@as(?MemberKind, null), MemberKind.fromWire(17));
+    try testing.expectEqual(@as(?MemberKind, null), MemberKind.fromWire(19));
     inline for (@typeInfo(MemberKind).@"enum".fields) |field| {
         const kind: MemberKind = @enumFromInt(field.value);
         try testing.expectEqual(@as(?MemberKind, kind), MemberKind.fromWire(field.value));

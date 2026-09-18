@@ -10,6 +10,7 @@ const std = @import("std");
 const capability_policy = @import("capability_policy.zig");
 const cert_mod = @import("certificate.zig");
 const graph = @import("executable_graph.zig");
+const invariant = @import("invariant.zig");
 const limits_mod = @import("limits.zig");
 const policy_mod = @import("policy.zig");
 const ps = @import("proof_system.zig");
@@ -29,7 +30,7 @@ const SemanticState = verdict.SemanticState;
 /// stack keeps the acceptance path off a large frame in whatever thread the
 /// server happens to run startup on.
 pub fn scratchBytes(limits: limits_mod.Limits) usize {
-    return irBitBytes(limits) * 2 + depthBytes(limits) + rangeStackBytes(limits);
+    return irBitBytes(limits) * 3 + depthBytes(limits) + rangeStackBytes(limits);
 }
 
 fn irBitBytes(limits: limits_mod.Limits) usize {
@@ -145,6 +146,11 @@ pub const Inputs = struct {
     /// bytes and decodes them itself; bytes are required, and a digest without
     /// bytes proves only that two sides hashed the same blob.
     runtime_policy: ?RuntimeCapabilityPolicyInput = null,
+    /// Exact canonical invariant specification bytes supplied by the
+    /// deployment artifact. The checker decodes and hashes them itself.
+    invariant_spec: ?[]const u8 = null,
+    /// Ledger calls decoded independently from final bytecode by the loader.
+    observed_invariant_operations: []const invariant.ObservedOperation = &.{},
 };
 
 pub const RuntimeCapabilityPolicyInput = struct {
@@ -234,7 +240,8 @@ pub fn check(inputs: Inputs, policy: Policy) Assessment {
     }
 
     const bit_bytes = irBitBytes(limits);
-    const depth_start = bit_bytes * 2;
+    const invariant_start = bit_bytes * 2;
+    const depth_start = bit_bytes * 3;
     const range_start = depth_start + depthBytes(limits);
     var session = Session{
         .certificate = certificate,
@@ -243,9 +250,12 @@ pub fn check(inputs: Inputs, policy: Policy) Assessment {
         .solver_results = inputs.solver_results,
         .budget = &budget,
         .total = BitSet.init(inputs.scratch[0..bit_bytes]),
-        .declared = BitSet.init(inputs.scratch[bit_bytes..depth_start]),
+        .declared = BitSet.init(inputs.scratch[bit_bytes..invariant_start]),
+        .invariant_nodes = BitSet.init(inputs.scratch[invariant_start..depth_start]),
         .depths = .{ .bytes = inputs.scratch[depth_start..range_start] },
         .active_ranges = .{ .bytes = inputs.scratch[range_start..] },
+        .invariant_spec = inputs.invariant_spec,
+        .observed_invariant_operations = inputs.observed_invariant_operations,
     };
 
     const outcome = session.run() catch |err| {
@@ -272,6 +282,7 @@ pub fn check(inputs: Inputs, policy: Policy) Assessment {
             .rejection = rejection,
             .work_spent = budget.spent(limits),
             .guards = outcome.guards,
+            .invariants = outcome.invariants,
             .properties = outcome.properties,
             .disclosed_edges = outcome.disclosed_edges,
         };
@@ -287,6 +298,7 @@ pub fn check(inputs: Inputs, policy: Policy) Assessment {
         .disclosed_edges = outcome.disclosed_edges,
         .properties = outcome.properties,
         .guards = outcome.guards,
+        .invariants = outcome.invariants,
     };
 }
 
@@ -297,6 +309,7 @@ const Outcome = struct {
     properties: verdict.PropertyVerdicts = .{},
     disclosed_edges: u32 = 0,
     guards: verdict.GuardVerdicts = .{},
+    invariants: verdict.InvariantVerdicts = .{},
 };
 
 /// One acceptance run's working state.
@@ -316,6 +329,9 @@ const Session = struct {
     declared: BitSet,
     depths: DepthTable,
     active_ranges: RangeStack,
+    invariant_nodes: BitSet,
+    invariant_spec: ?[]const u8,
+    observed_invariant_operations: []const invariant.ObservedOperation,
 
     const SessionError = cert_mod.DecodeError;
 
@@ -348,6 +364,11 @@ const Session = struct {
 
         if (try self.checkTranslation()) |rejection| return rejection;
 
+        const invariants = switch (try self.checkInvariantCoverage()) {
+            .rejected => |outcome| return outcome,
+            .covered => |covered| covered,
+        };
+
         const guards = switch (try self.checkGuardCoverage()) {
             .rejected => |outcome| return outcome,
             .covered => |verdicts| verdicts,
@@ -355,7 +376,200 @@ const Session = struct {
 
         var outcome = try self.checkEvidence();
         outcome.guards = guards;
+        outcome.invariants = invariants;
         return outcome;
+    }
+
+    const InvariantOutcome = union(enum) {
+        covered: verdict.InvariantVerdicts,
+        rejected: Outcome,
+    };
+
+    /// Relate the structured specification, proof IR, translation witnesses,
+    /// and independently decoded final-bytecode ledger calls.
+    fn checkInvariantCoverage(self: *Session) SessionError!InvariantOutcome {
+        const zero = [_]u8{0} ** 32;
+        const declared_digest = self.certificate.identity.invariant_spec_digest;
+        const configured = !std.mem.eql(u8, &declared_digest, &zero);
+
+        if (!configured) {
+            if (self.invariant_spec != null) {
+                return .{ .rejected = reject(.invariant_coverage, .invariant_spec_digest_mismatch, .none) };
+            }
+            if (self.certificate.invariants.len() != 0 or self.observed_invariant_operations.len != 0) {
+                return .{ .rejected = reject(.invariant_coverage, .invariant_spec_missing, .none) };
+            }
+            var graph_index: u32 = 0;
+            while (graph_index < self.certificate.graph.len()) : (graph_index += 1) {
+                try self.budget.spend(1);
+                const member = try self.certificate.graph.get(graph_index);
+                if (member.kind == .invariant_spec or member.kind == .invariant_ledger_adapter) {
+                    return .{ .rejected = reject(.invariant_coverage, .invariant_spec_missing, .{
+                        .graph_member = .{ .kind = @intFromEnum(member.kind), .ordinal = member.ordinal },
+                    }) };
+                }
+            }
+            var node_index: u32 = 0;
+            while (node_index < self.certificate.ir.len()) : (node_index += 1) {
+                try self.budget.spend(1);
+                if ((try self.certificate.ir.get(node_index)).tag == .ledger_call) {
+                    return .{ .rejected = reject(.invariant_coverage, .invariant_spec_missing, .{ .ir_node = node_index }) };
+                }
+            }
+            return .{ .covered = .{} };
+        }
+
+        const spec_bytes = self.invariant_spec orelse
+            return .{ .rejected = reject(.invariant_coverage, .invariant_spec_missing, .none) };
+        const spec = invariant.decode(spec_bytes) catch
+            return .{ .rejected = reject(.invariant_coverage, .invariant_spec_undecodable, .none) };
+        const spec_digest = invariant.digest(spec_bytes);
+        if (!std.mem.eql(u8, &spec_digest, &declared_digest)) {
+            return .{ .rejected = .{ .state = .integrity_verified, .rejection = .{
+                .stage = .invariant_coverage,
+                .code = .invariant_spec_digest_mismatch,
+                .expected = .{ .digest = declared_digest },
+                .actual = .{ .digest = spec_digest },
+                .recertifiable = true,
+            } } };
+        }
+
+        var spec_members: u32 = 0;
+        var adapter_members: u32 = 0;
+        const adapter_digest = invariant.adapterDigest();
+        var graph_index: u32 = 0;
+        while (graph_index < self.certificate.graph.len()) : (graph_index += 1) {
+            try self.budget.spend(1);
+            const member = try self.certificate.graph.get(graph_index);
+            switch (member.kind) {
+                .invariant_spec => {
+                    spec_members += 1;
+                    if (member.ordinal != 0 or !std.mem.eql(u8, &member.digest, &spec_digest)) {
+                        return .{ .rejected = reject(.invariant_coverage, .invariant_spec_digest_mismatch, .{
+                            .graph_member = .{ .kind = @intFromEnum(member.kind), .ordinal = member.ordinal },
+                        }) };
+                    }
+                },
+                .invariant_ledger_adapter => {
+                    adapter_members += 1;
+                    if (member.ordinal != 0 or !std.mem.eql(u8, &member.digest, &adapter_digest)) {
+                        return .{ .rejected = reject(.invariant_coverage, .invariant_adapter_identity_mismatch, .{
+                            .graph_member = .{ .kind = @intFromEnum(member.kind), .ordinal = member.ordinal },
+                        }) };
+                    }
+                },
+                else => {},
+            }
+        }
+        if (spec_members != 1) {
+            return .{ .rejected = reject(.invariant_coverage, .invariant_spec_member_missing, .none) };
+        }
+        if (adapter_members != 1) {
+            return .{ .rejected = reject(.invariant_coverage, .invariant_adapter_member_missing, .none) };
+        }
+        if (self.certificate.invariants.len() == 0 and self.observed_invariant_operations.len == 0) {
+            return .{ .rejected = reject(.invariant_coverage, .invariant_operation_required, .none) };
+        }
+        if (self.observed_invariant_operations.len > self.policy.limits.max_invariant_operations) {
+            return .{ .rejected = reject(.limits, .work_budget_exhausted, .none) };
+        }
+
+        var result = verdict.InvariantVerdicts{
+            .configured = true,
+            .kind_bits = @as(u8, 1) << @intCast(@intFromEnum(spec.kind) - 1),
+        };
+        var previous_witness: ?cert_mod.InvariantWitness = null;
+        var previous_observed: ?invariant.ObservedOperation = null;
+        var index: u32 = 0;
+        while (index < self.certificate.invariants.len()) : (index += 1) {
+            try self.budget.spend(4);
+            const supplied = try self.certificate.invariants.get(index);
+            if (previous_witness) |previous| {
+                switch (cert_mod.InvariantWitness.order(previous, supplied)) {
+                    .lt => {},
+                    .eq => return .{ .rejected = reject(.invariant_coverage, .invariant_member_duplicate, .{ .code_offset = supplied.code_offset }) },
+                    .gt => return .{ .rejected = reject(.invariant_coverage, .invariant_member_out_of_order, .{ .code_offset = supplied.code_offset }) },
+                }
+            }
+            previous_witness = supplied;
+
+            if (index >= self.observed_invariant_operations.len) {
+                return .{ .rejected = reject(.invariant_coverage, .invariant_member_extra, .{ .code_offset = supplied.code_offset }) };
+            }
+            const observed = self.observed_invariant_operations[index];
+            if (previous_observed) |previous| {
+                if (invariant.ObservedOperation.order(previous, observed) != .lt) {
+                    return .{ .rejected = reject(.invariant_coverage, .invariant_observed_mismatch, .{ .code_offset = observed.code_offset }) };
+                }
+            }
+            previous_observed = observed;
+            if (observed.function_ordinal != supplied.function_ordinal or
+                observed.code_offset != supplied.code_offset or
+                observed.operation != supplied.operation)
+            {
+                return .{ .rejected = reject(.invariant_coverage, .invariant_observed_mismatch, .{ .code_offset = supplied.code_offset }) };
+            }
+
+            if (supplied.ir_node >= self.certificate.ir.len()) {
+                return .{ .rejected = reject(.invariant_coverage, .invariant_member_extra, .{ .ir_node = supplied.ir_node }) };
+            }
+            const node = try self.certificate.ir.get(supplied.ir_node);
+            if (node.tag != .ledger_call) {
+                return .{ .rejected = reject(.invariant_coverage, .invariant_member_extra, .{ .ir_node = supplied.ir_node }) };
+            }
+            if (node.aux >= invariant.catalog.len) {
+                return .{ .rejected = reject(.invariant_coverage, .invariant_operation_unknown, .{ .ir_node = supplied.ir_node }) };
+            }
+            if (self.invariant_nodes.get(supplied.ir_node)) {
+                return .{ .rejected = reject(.invariant_coverage, .invariant_member_duplicate, .{ .ir_node = supplied.ir_node }) };
+            }
+            self.invariant_nodes.set(supplied.ir_node, true);
+            const expected = invariant.catalog[node.aux];
+            if (supplied.operation != expected.operation) {
+                return .{ .rejected = reject(.invariant_coverage, .invariant_operation_mismatch, .{ .ir_node = supplied.ir_node }) };
+            }
+            if (supplied.sink != expected.sink) {
+                return .{ .rejected = reject(.invariant_coverage, .invariant_sink_mismatch, .{ .ir_node = supplied.ir_node }) };
+            }
+            if (supplied.impl_id != expected.impl_id) {
+                return .{ .rejected = reject(.invariant_coverage, .invariant_impl_identity_mismatch, .{ .ir_node = supplied.ir_node }) };
+            }
+
+            if (supplied.translation_index >= self.certificate.translation.len()) {
+                return .{ .rejected = reject(.invariant_coverage, .invariant_translation_missing, .{ .ir_node = supplied.ir_node }) };
+            }
+            const emission = try self.certificate.translation.get(supplied.translation_index);
+            if (emission.kind != .emission or emission.ir_node != supplied.ir_node or
+                emission.scope_ir_node != supplied.scope_ir_node or emission.code_start != supplied.code_offset)
+            {
+                return .{ .rejected = reject(.invariant_coverage, .invariant_translation_missing, .{ .ir_node = supplied.ir_node }) };
+            }
+
+            result.covered += 1;
+            if (expected.writes) result.writes += 1;
+        }
+        if (self.observed_invariant_operations.len > self.certificate.invariants.len()) {
+            const extra = self.observed_invariant_operations[self.certificate.invariants.len()];
+            return .{ .rejected = reject(.invariant_coverage, .invariant_member_missing, .{ .code_offset = extra.code_offset }) };
+        }
+
+        var node_index: u32 = 0;
+        while (node_index < self.certificate.ir.len()) : (node_index += 1) {
+            try self.budget.spend(1);
+            const node = try self.certificate.ir.get(node_index);
+            if (node.tag != .ledger_call) continue;
+            result.required += 1;
+            if (node.aux >= invariant.catalog.len) {
+                return .{ .rejected = reject(.invariant_coverage, .invariant_operation_unknown, .{ .ir_node = node_index }) };
+            }
+            if (!self.invariant_nodes.get(node_index)) {
+                return .{ .rejected = reject(.invariant_coverage, .invariant_member_missing, .{ .ir_node = node_index }) };
+            }
+        }
+        if (!result.ready()) {
+            return .{ .rejected = reject(.invariant_coverage, .invariant_member_missing, .none) };
+        }
+        return .{ .covered = result };
     }
 
     const GuardOutcome = union(enum) {
@@ -666,7 +880,7 @@ const Session = struct {
                 .branch => node.child_count == 2 and self.allChildrenTotal(node),
                 // A guarded call returns a value; it never returns a Response
                 // from the handler, so it establishes no totality.
-                .loop_node, .plain, .capability_call => false,
+                .loop_node, .plain, .capability_call, .ledger_call => false,
             };
             self.total.set(index, value or self.declared.get(index));
         }
@@ -699,7 +913,7 @@ const Session = struct {
             else
                 null,
             .loop_node => .loop_never_total,
-            .function, .plain, .capability_call => null,
+            .function, .plain, .capability_call, .ledger_call => null,
         };
     }
 
@@ -1589,6 +1803,221 @@ pub const test_support = struct {
     }
 };
 
+const test_invariant_spec = invariant.magic.* ++ [_]u8{
+    1, 0, // schema
+    1, 0, // balance_conservation_v1
+    6, 0, // ledger id length
+    1, 0, // currency count
+} ++ "ledger" ++ "USD" ++ [_]u8{2};
+
+const InvariantTestFixture = struct {
+    members: [11]graph.Member,
+    ir: [4]cert_mod.IrNode,
+    obligations: [8]cert_mod.Obligation,
+    evidence: [10]cert_mod.Evidence,
+    translation: [3]cert_mod.Witness,
+    trusted: [1]cert_mod.TrustedEdge,
+    invariant_witnesses: [1]cert_mod.InvariantWitness,
+    observed: [1]invariant.ObservedOperation,
+    buffer: [8192]u8 = undefined,
+    len: usize = 0,
+    scratch: [scratchBytes(.{})]u8 = undefined,
+
+    fn parts(self: *InvariantTestFixture, invariant_witnesses: []const cert_mod.InvariantWitness) cert_mod.Parts {
+        return .{
+            .identity = .{
+                .executable_root = graph.computeRoot(&self.members) catch unreachable,
+                .ir_root = cert_mod.irRootFromNodes(&self.ir),
+                .contract_digest = test_support.digest(2),
+                .invariant_spec_digest = invariant.digest(test_invariant_spec),
+                .development = false,
+            },
+            .graph = &self.members,
+            .obligations = &self.obligations,
+            .ir = &self.ir,
+            .evidence = &self.evidence,
+            .translation = &self.translation,
+            .trusted = &self.trusted,
+            .invariants = invariant_witnesses,
+        };
+    }
+
+    fn encodeWith(self: *InvariantTestFixture, invariant_witnesses: []const cert_mod.InvariantWitness) !void {
+        for (&self.members) |*member| {
+            if (member.kind == .proof_ir) member.digest = cert_mod.irRootFromNodes(&self.ir);
+            if (member.kind == .proof_certificate) member.digest = [_]u8{0} ** 32;
+        }
+        std.mem.sort(graph.Member, &self.members, {}, struct {
+            fn lessThan(_: void, a: graph.Member, b: graph.Member) bool {
+                return graph.Member.order(a, b) == .lt;
+            }
+        }.lessThan);
+
+        var built = self.parts(invariant_witnesses);
+        built.identity.executable_root = [_]u8{0} ** 32;
+        const provisional = try cert_mod.encode(built, &self.buffer);
+        var budget = Budget.init(.{});
+        const decoded = try cert_mod.decode(provisional, .{}, &budget);
+        const certificate_digest = try cert_mod.commitmentDigest(provisional, decoded);
+        for (&self.members) |*member| {
+            if (member.kind == .proof_certificate) member.digest = certificate_digest;
+        }
+        built.graph = &self.members;
+        built.identity.executable_root = try graph.computeRoot(&self.members);
+        self.len = (try cert_mod.encode(built, &self.buffer)).len;
+    }
+
+    fn inputs(self: *InvariantTestFixture) Inputs {
+        return .{
+            .certificate = self.buffer[0..self.len],
+            .observed_graph = &self.members,
+            .scratch = &self.scratch,
+            .invariant_spec = test_invariant_spec,
+            .observed_invariant_operations = &self.observed,
+        };
+    }
+};
+
+fn buildInvariantFixture() !InvariantTestFixture {
+    var fixture = InvariantTestFixture{
+        .members = .{
+            .{ .kind = .main_bytecode, .ordinal = 0, .digest = test_support.digest(1) },
+            .{ .kind = .contract_bytes, .ordinal = 0, .digest = test_support.digest(2) },
+            .{ .kind = .runtime_policy_bytes, .ordinal = 0, .digest = test_support.digest(3) },
+            .{ .kind = .source_profile_core, .ordinal = 0, .digest = test_support.digest(4) },
+            .{ .kind = .core_grammar, .ordinal = 0, .digest = test_support.digest(5) },
+            .{ .kind = .semantics, .ordinal = 0, .digest = test_support.digest(6) },
+            .{ .kind = .capability_matrix, .ordinal = 0, .digest = test_support.digest(7) },
+            .{ .kind = .proof_ir, .ordinal = 0, .digest = test_support.digest(8) },
+            .{ .kind = .proof_certificate, .ordinal = 0, .digest = test_support.digest(9) },
+            .{ .kind = .invariant_spec, .ordinal = 0, .digest = invariant.digest(test_invariant_spec) },
+            .{ .kind = .invariant_ledger_adapter, .ordinal = 0, .digest = invariant.adapterDigest() },
+        },
+        .ir = .{
+            .{ .id = 0, .tag = .function, .is_handler = true, .parent = 0, .first_child = 1, .child_count = 1, .digest = test_support.digest(20) },
+            .{ .id = 1, .tag = .sequence, .parent = 0, .first_child = 2, .child_count = 2, .digest = test_support.digest(21) },
+            .{ .id = 2, .tag = .ledger_call, .parent = 1, .first_child = 0, .child_count = 0, .digest = test_support.digest(22), .aux = 0 },
+            .{ .id = 3, .tag = .return_node, .parent = 1, .first_child = 0, .child_count = 0, .digest = test_support.digest(23) },
+        },
+        .obligations = .{
+            .{ .property = .response_total, .subject_kind = .function, .subject_id = 0 },
+            .{ .property = .results_checked, .subject_kind = .handler, .subject_id = 0 },
+            .{ .property = .no_secret_leakage, .subject_kind = .handler, .subject_id = 0 },
+            .{ .property = .state_isolated, .subject_kind = .handler, .subject_id = 0 },
+            .{ .property = .deterministic, .subject_kind = .handler, .subject_id = 0 },
+            .{ .property = .read_only, .subject_kind = .handler, .subject_id = 0 },
+            .{ .property = .retry_safe, .subject_kind = .handler, .subject_id = 0 },
+            .{ .property = .capability_bounded, .subject_kind = .handler, .subject_id = 0 },
+        },
+        .evidence = .{
+            .{ .obligation_index = 0, .edge = .proved, .rule = .sequence_member_total, .node_id = 1, .aux = 0 },
+            .{ .obligation_index = 0, .edge = .translation_validated, .rule = .emission_contiguous, .node_id = 0, .aux = 0 },
+            .{ .obligation_index = 0, .edge = .translation_validated, .rule = .jump_target_resolved, .node_id = 0, .aux = 0 },
+            test_support.testedFor(1),
+            test_support.testedFor(2),
+            test_support.testedFor(3),
+            test_support.testedFor(4),
+            test_support.testedFor(5),
+            test_support.testedFor(6),
+            test_support.testedFor(7),
+        },
+        .translation = .{
+            .{ .ir_node = 1, .code_start = 0, .code_len = 8, .target_ir = 1, .target_offset = 0, .scope_ir_node = 0, .kind = .emission },
+            .{ .ir_node = 2, .code_start = 2, .code_len = 1, .target_ir = 2, .target_offset = 2, .scope_ir_node = 0, .kind = .emission },
+            .{ .ir_node = 3, .code_start = 4, .code_len = 2, .target_ir = 3, .target_offset = 4, .scope_ir_node = 0, .kind = .emission },
+        },
+        .trusted = .{
+            .{ .family = .opcode, .member_id = 0, .reason = .not_modeled, .grade = .trusted },
+        },
+        .invariant_witnesses = .{
+            .{
+                .ir_node = 2,
+                .scope_ir_node = 0,
+                .function_ordinal = 0,
+                .code_offset = 2,
+                .translation_index = 1,
+                .operation = .post,
+                .sink = .ledger_post,
+                .impl_id = invariant.catalog[0].impl_id,
+            },
+        },
+        .observed = .{
+            .{ .function_ordinal = 0, .code_offset = 2, .operation = .post },
+        },
+    };
+    try fixture.encodeWith(&fixture.invariant_witnesses);
+    return fixture;
+}
+
+test "a configured invariant is checked independently from property and guard verdicts" {
+    var fixture = try buildInvariantFixture();
+    const result = check(fixture.inputs(), policy_mod.production);
+    if (result.rejection) |rejection| {
+        std.debug.print("unexpected invariant rejection: {s} / {s}\n", .{
+            rejection.stage.name(),
+            rejection.code.text(),
+        });
+        return error.TestUnexpectedResult;
+    }
+    try testing.expect(result.accepted());
+    try testing.expect(result.invariants.configured);
+    try testing.expectEqual(@as(u32, 1), result.invariants.required);
+    try testing.expectEqual(@as(u32, 1), result.invariants.covered);
+    try testing.expectEqual(@as(u32, 1), result.invariants.writes);
+    try testing.expect(result.invariants.ready());
+    try testing.expectEqual(@as(u32, 0), result.guards.required);
+}
+
+test "missing and extra invariant witnesses reject" {
+    var missing = try buildInvariantFixture();
+    try missing.encodeWith(&.{});
+    var result = check(missing.inputs(), policy_mod.production);
+    try testing.expectEqual(verdict.Stage.invariant_coverage, result.rejection.?.stage);
+    try testing.expectEqual(verdict.ReasonCode.invariant_member_missing, result.rejection.?.code);
+
+    var extra = try buildInvariantFixture();
+    const witnesses = [_]cert_mod.InvariantWitness{
+        extra.invariant_witnesses[0],
+        .{
+            .ir_node = 2,
+            .scope_ir_node = 0,
+            .function_ordinal = 0,
+            .code_offset = 3,
+            .translation_index = 1,
+            .operation = .post,
+            .sink = .ledger_post,
+            .impl_id = invariant.catalog[0].impl_id,
+        },
+    };
+    try extra.encodeWith(&witnesses);
+    result = check(extra.inputs(), policy_mod.production);
+    try testing.expectEqual(verdict.ReasonCode.invariant_member_extra, result.rejection.?.code);
+}
+
+test "a forged invariant operation cannot borrow a real call site" {
+    var fixture = try buildInvariantFixture();
+    var forged = fixture.invariant_witnesses;
+    forged[0].operation = .balance;
+    forged[0].sink = .ledger_balance;
+    forged[0].impl_id = invariant.catalog[1].impl_id;
+    fixture.observed[0].operation = .balance;
+    try fixture.encodeWith(&forged);
+
+    const result = check(fixture.inputs(), policy_mod.production);
+    try testing.expectEqual(verdict.Stage.invariant_coverage, result.rejection.?.stage);
+    try testing.expectEqual(verdict.ReasonCode.invariant_operation_mismatch, result.rejection.?.code);
+}
+
+test "tampered invariant specification bytes reject before coverage" {
+    var fixture = try buildInvariantFixture();
+    var tampered = test_invariant_spec.*;
+    tampered[tampered.len - 1] = 3;
+    var inputs = fixture.inputs();
+    inputs.invariant_spec = &tampered;
+    const result = check(inputs, policy_mod.production);
+    try testing.expectEqual(verdict.ReasonCode.invariant_spec_digest_mismatch, result.rejection.?.code);
+}
+
 test "a guarded artifact is accepted, and its guards are counted apart from its properties" {
     var fixture = try test_support.buildGuarded();
     const result = check(fixture.inputs(), policy_mod.production);
@@ -1914,7 +2343,7 @@ test "a matching certificate and inventory reach policy acceptance" {
 test "a policy that requires nothing is refused before anything is read" {
     var fixture = try test_support.build();
     const empty = Policy{
-        .proof_systems = &[_]ps.ProofSystem{.zttp_pcc_v2},
+        .proof_systems = &[_]ps.ProofSystem{.zttp_pcc_v3},
         .semantics_epochs = &[_]u32{ps.semantics_epoch},
         .required = &.{},
     };
@@ -2401,8 +2830,8 @@ test "scratch smaller than the kernel needs is refused rather than truncated" {
     try testing.expect(!result.rejection.?.recertifiable);
 }
 
-test "scratchBytes covers two bits per node at the configured bound" {
+test "scratchBytes covers three bits per node at the configured bound" {
     const needed = scratchBytes(.{ .max_ir_nodes = 64, .max_witnesses = 4 });
-    try testing.expectEqual(@as(usize, 176), needed);
+    try testing.expectEqual(@as(usize, 184), needed);
     try testing.expect(scratchBytes(.{}) > 0);
 }

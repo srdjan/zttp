@@ -10,6 +10,7 @@ comptime {
     _ = @import("checker.zig");
     _ = @import("executable_graph.zig");
     _ = @import("limits.zig");
+    _ = @import("invariant.zig");
     _ = @import("policy.zig");
     _ = @import("proof_system.zig");
     _ = @import("residual.zig");
