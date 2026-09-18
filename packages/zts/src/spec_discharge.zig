@@ -517,8 +517,9 @@ pub const capsule_property_names = blk: {
 };
 
 /// Facts the compiler proved about one function, used to discharge its
-/// declared capsule. A recursive function is treated as unproven for every
-/// property: slice 1 does not certify specs at a recursive fixed point.
+/// declared capsule. A recursive function is unproven for `total` only:
+/// termination is what a recursive fixed point leaves open, while the effect
+/// row behind the other three properties converges over the cycle.
 pub const CapsuleFacts = struct {
     total: bool = false,
     pure: bool = false,
@@ -532,7 +533,18 @@ pub const CapsuleFacts = struct {
     lower_bound: bool = false,
 
     pub fn holds(self: CapsuleFacts, prop: CapsuleProperty) bool {
-        if (self.recursive or self.lower_bound) return false;
+        // A lower-bound row under-reports every field it carries, so no
+        // property may be read off it at all.
+        if (self.lower_bound) return false;
+        // Recursion refuses `total` and nothing else. The deferral cited spec
+        // 5.6, which is about totality and cost, but the guard was written
+        // across every property. `pure`, `read_only` and `deterministic` need
+        // no termination argument: they are read off the effect row, and
+        // `effect_inference.propagate` is a monotone join to a fixed point, so
+        // a cycle converges to the join over the whole cycle rather than
+        // stopping short of it. A non-converged pass is the one case that
+        // would under-report, and it now marks every row `lower_bound` above.
+        if (self.recursive and prop == .total) return false;
         return switch (prop) {
             .total => self.total,
             .pure => self.pure,
@@ -556,7 +568,8 @@ const lower_bound_capsule_suggestion =
     "can be proved about it; call the helper by name instead.";
 
 const recursive_capsule_suggestion =
-    "recursive functions are not yet supported for capsule discharge; inline or remove the recursion.";
+    "a recursive function has no termination proof, so its `total` property cannot be discharged; " ++
+    "inline or remove the recursion, or drop `total` from the capsule.";
 
 /// ZTS502 suggestion for an unknown capsule property name. Caller frees.
 fn suggestionForUnknownCapsule(allocator: std.mem.Allocator, name: []const u8) !?[]const u8 {
@@ -596,7 +609,11 @@ pub fn dischargeCapsule(
 
         const spec_name = try allocator.dupe(u8, name);
         errdefer allocator.free(spec_name);
-        const text = if (facts.recursive)
+        // Recursion now explains a `total` refusal only. Reaching for it on a
+        // `pure` refusal would tell an author to remove recursion when the
+        // real cause is a module call, which is a wrong repair, not just a
+        // vague one.
+        const text = if (facts.recursive and prop == .total)
             recursive_capsule_suggestion
         else if (facts.lower_bound)
             lower_bound_capsule_suggestion
@@ -1390,7 +1407,12 @@ test "dischargeCapsule unknown name emits ZTS502 with suggestion" {
     try std.testing.expect(std.mem.indexOf(u8, diags.items[0].suggestion.?, "read_only") != null);
 }
 
-test "dischargeCapsule recursive function fails every declared property" {
+test "dischargeCapsule recursive function fails total and nothing else" {
+    // The guard used to refuse every property at a recursive fixed point, for
+    // a reason (spec 5.6) that is about totality and cost. `pure`,
+    // `read_only` and `deterministic` are read off the effect row, which
+    // `effect_inference.propagate` joins to a fixed point over the cycle, so
+    // they are answerable for a recursive function and were being withheld.
     const allocator = std.testing.allocator;
     const facts = CapsuleFacts{
         .total = true,
@@ -1399,12 +1421,62 @@ test "dischargeCapsule recursive function fails every declared property" {
         .deterministic = true,
         .recursive = true,
     };
-    const declared: [1][]const u8 = .{"pure"};
+    const declared: [4][]const u8 = .{ "total", "pure", "read_only", "deterministic" };
     var diags = try dischargeCapsule(allocator, &declared, facts);
     defer freeDiags(allocator, &diags);
+
+    // Exactly one refusal, and it is `total`. Asserting the name rather than
+    // the count alone: a run in which some other property was refused instead
+    // would satisfy a bare count of 1.
     try std.testing.expectEqual(@as(usize, 1), diags.items.len);
     try std.testing.expectEqual(SpecDiagnostic.Kind.not_discharged, diags.items[0].kind);
-    try std.testing.expect(std.mem.indexOf(u8, diags.items[0].suggestion.?, "recursive") != null);
+    try std.testing.expectEqualStrings("total", diags.items[0].spec_name);
+    try std.testing.expect(std.mem.indexOf(u8, diags.items[0].suggestion.?, "termination") != null);
+}
+
+test "dischargeCapsule recursion does not launder a property the row refuses" {
+    // The direction that matters. Narrowing the recursive guard must not turn
+    // into "recursive functions now pass": a recursive function whose row says
+    // it is impure still fails `pure`, and the suggestion names the real cause
+    // rather than telling the author to remove the recursion.
+    const allocator = std.testing.allocator;
+    const facts = CapsuleFacts{
+        .total = true,
+        .pure = false,
+        .read_only = false,
+        .deterministic = false,
+        .recursive = true,
+    };
+    const declared: [3][]const u8 = .{ "pure", "read_only", "deterministic" };
+    var diags = try dischargeCapsule(allocator, &declared, facts);
+    defer freeDiags(allocator, &diags);
+
+    try std.testing.expectEqual(@as(usize, 3), diags.items.len);
+    for (diags.items) |d| {
+        try std.testing.expectEqual(SpecDiagnostic.Kind.not_discharged, d.kind);
+        // The recursion suggestion is now reserved for `total`, so none of
+        // these may carry it.
+        try std.testing.expect(std.mem.indexOf(u8, d.suggestion.?, "remove the recursion") == null);
+    }
+}
+
+test "dischargeCapsule a lower-bound row still refuses every property" {
+    // Unchanged by the narrowing above, and the reason it is safe: a row that
+    // under-reports is refused wholesale, which is what a non-converged
+    // propagation pass now marks itself as.
+    const allocator = std.testing.allocator;
+    const facts = CapsuleFacts{
+        .total = true,
+        .pure = true,
+        .read_only = true,
+        .deterministic = true,
+        .recursive = true,
+        .lower_bound = true,
+    };
+    const declared: [4][]const u8 = .{ "total", "pure", "read_only", "deterministic" };
+    var diags = try dischargeCapsule(allocator, &declared, facts);
+    defer freeDiags(allocator, &diags);
+    try std.testing.expectEqual(@as(usize, 4), diags.items.len);
 }
 
 test "the durable suggestions name the write that cannot move" {
