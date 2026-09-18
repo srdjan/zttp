@@ -23,6 +23,7 @@
 | `CONCEPTS.md` | Shared domain vocabulary - entities, named processes, and status concepts with project-specific meaning; relevant when orienting to the codebase or discussing domain concepts |
 
 ## Coding Style & Naming Conventions
+- No Python. This is a Zig project. Do not add a `.py` file and do not add a `python3` heredoc or `-c` invocation to a shell script. New tooling is a Zig command or a Zig build step. Existing Python (four tracked `.py` scripts under `scripts/`, plus fifteen shell scripts that invoke `python3`) is legacy to be removed as each area is touched, never a precedent to extend.
 - Keep APIs explicit: the engine/runtime use native Zig error unions (`!T`); `Result<T>` is a user-facing JS/verification construct in handlers, not a Zig engine pattern.
 - Shell scripts that enumerate files should use `git ls-files -z | xargs -0` for safe path handling (handles spaces and special characters).
 
