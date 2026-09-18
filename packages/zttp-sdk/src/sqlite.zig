@@ -27,6 +27,7 @@ pub const SqliteError = capability.ModuleCapabilityError || error{
 extern fn zttpSdkAllowsSqlQuery(handle: *ModuleHandle, name_ptr: [*]const u8, name_len: usize) bool;
 extern fn zttpSdkAllowsSqlWrite(handle: *ModuleHandle, name_ptr: [*]const u8, name_len: usize) bool;
 extern fn zttpSdkSqliteOpen(handle: *ModuleHandle, path_ptr: [*]const u8, path_len: usize, out: **SqliteDb) bool;
+extern fn zttpSdkLedgerOpen(handle: *ModuleHandle, out: **SqliteDb) bool;
 extern fn zttpSdkSqliteClose(db: *SqliteDb) void;
 extern fn zttpSdkSqliteChanges(db: *SqliteDb) i32;
 extern fn zttpSdkSqliteLastInsertRowId(db: *SqliteDb) i64;
@@ -67,6 +68,15 @@ pub fn sqliteOpen(handle: *ModuleHandle, path: []const u8) SqliteError!*SqliteDb
     try capability.requireCapability(handle, .sqlite);
     var out: *SqliteDb = undefined;
     if (!zttpSdkSqliteOpen(handle, path.ptr, path.len, &out)) return error.SqliteOpenFailed;
+    return out;
+}
+
+/// Open the host-configured protected ledger. Only zttp:ledger can use this
+/// operation. No module-supplied path or generic SQLite grant authorizes it.
+pub fn ledgerOpen(handle: *ModuleHandle) SqliteError!*SqliteDb {
+    try capability.requireCapability(handle, .sqlite);
+    var out: *SqliteDb = undefined;
+    if (!zttpSdkLedgerOpen(handle, &out)) return error.SqliteOpenFailed;
     return out;
 }
 

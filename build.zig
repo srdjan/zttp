@@ -166,7 +166,7 @@ pub fn build(b: *std.Build) void {
         if (std.mem.eql(u8, entry.name, "zts-engine")) {
             root.addCSourceFile(.{
                 .file = zts_dep.path("deps/sqlite/sqlite3.c"),
-                .flags = &.{ "-D_GNU_SOURCE", "-DHAVE_MREMAP=0", "-DSQLITE_THREADSAFE=0", "-DSQLITE_OMIT_LOAD_EXTENSION", "-DSQLITE_DQS=0" },
+                .flags = &.{ "-D_GNU_SOURCE", "-DHAVE_MREMAP=0", "-DSQLITE_THREADSAFE=2", "-DSQLITE_OMIT_LOAD_EXTENSION", "-DSQLITE_DQS=0" },
             });
             root.addIncludePath(zts_dep.path("deps/sqlite"));
         }

@@ -345,6 +345,73 @@ pub fn allowSdkSqlitePath(ctx: *context.Context, path: []const u8) !void {
     try ctx.allowSdkSqlitePathCanonical(canonical);
 }
 
+/// Host-only installation, before any module is invoked. A generation cannot
+/// redirect an installed ledger to a different store.
+pub fn installProtectedLedgerPath(ctx: *context.Context, path: []const u8) !void {
+    const canonical = try canonicalizeCreatablePath(ctx.allocator, path);
+    errdefer ctx.allocator.free(canonical);
+    if (ctx.protected_ledger_path) |existing| {
+        if (!std.mem.eql(u8, existing, canonical)) return error.LedgerStoreMismatch;
+        ctx.allocator.free(canonical);
+        return;
+    }
+    ctx.protected_ledger_path = canonical;
+}
+
+fn ledgerSqlAuthorizer(_: ?*anyopaque, action: c_int, _: [*c]const u8, _: [*c]const u8, _: [*c]const u8, _: [*c]const u8) callconv(.c) c_int {
+    // ATTACH (including VACUUM INTO) otherwise bypasses the checked open path.
+    return if (action == sqlite_runtime.c.SQLITE_ATTACH) sqlite_runtime.c.SQLITE_DENY else sqlite_runtime.c.SQLITE_OK;
+}
+
+fn protectSqliteConnection(db: *sqlite_runtime.Db) !void {
+    if (sqlite_runtime.c.sqlite3_set_authorizer(db.handle, ledgerSqlAuthorizer, null) != sqlite_runtime.c.SQLITE_OK)
+        return error.SqliteOpenFailed;
+}
+
+pub fn openLedgerDbChecked(ctx: *context.Context) !sqlite_runtime.Db {
+    try sqliteCapabilityChecked(ctx);
+    if (!std.mem.eql(u8, currentActiveModuleSpecifier(ctx), "zttp:ledger")) return error.LedgerModuleRequired;
+    const path = ctx.protected_ledger_path orelse return error.LedgerNotConfigured;
+    var db = try sqlite_runtime.Db.openReadWriteCreate(ctx.allocator, path);
+    errdefer db.close();
+    try protectSqliteConnection(&db);
+    return db;
+}
+
+test "protected ledger rejects generic opens and attachment bypasses" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ledger_path = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/ledger.db", .{tmp.sub_path});
+    defer allocator.free(ledger_path);
+    const other_path = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/other.db", .{tmp.sub_path});
+    defer allocator.free(other_path);
+    var gc_state = try gc.GC.init(allocator, .{});
+    defer gc_state.deinit();
+    const ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+    try allowSdkSqlitePath(ctx, ledger_path);
+    try allowSdkSqlitePath(ctx, other_path);
+    try installProtectedLedgerPath(ctx, ledger_path);
+    const token = pushActiveModuleContext(ctx, "zttp:sql", &.{.sqlite});
+    defer popActiveModuleContext(token);
+    try std.testing.expectError(error.SqlitePathNotAllowed, openSqliteDbChecked(ctx, ledger_path));
+    try std.testing.expectError(error.LedgerModuleRequired, openLedgerDbChecked(ctx));
+    var other = try openSqliteDbChecked(ctx, other_path);
+    defer other.close();
+    try std.testing.expectError(error.SqlitePrepareFailed, other.prepare("ATTACH ':memory:' AS bypass"));
+    const ledger_token = pushActiveModuleContext(ctx, "zttp:ledger", &.{.sqlite});
+    defer popActiveModuleContext(ledger_token);
+    var ledger_db = try openLedgerDbChecked(ctx);
+    defer ledger_db.close();
+    try ledger_db.exec(allocator, "CREATE TABLE boundary_probe(value INTEGER)");
+    try allowSdkFilePath(ctx, ledger_path);
+    const file_token = pushActiveModuleContext(ctx, "zttp:other", &.{.filesystem});
+    defer popActiveModuleContext(file_token);
+    try std.testing.expectError(error.FilePathNotAllowed, readFileChecked(ctx, ledger_path, 1024));
+    try std.testing.expectError(error.LedgerStoreMismatch, installProtectedLedgerPath(ctx, other_path));
+}
+
 pub fn readFileChecked(
     ctx: *context.Context,
     path: []const u8,
@@ -405,7 +472,10 @@ pub fn openSqliteDbChecked(
     const canonical = try canonicalizeCreatablePath(ctx.allocator, path);
     defer ctx.allocator.free(canonical);
     if (!ctx.allowsSdkSqlitePathCanonical(canonical)) return error.SqlitePathNotAllowed;
-    return sqlite_runtime.Db.openReadWriteCreate(ctx.allocator, path);
+    var db = try sqlite_runtime.Db.openReadWriteCreate(ctx.allocator, canonical);
+    errdefer db.close();
+    if (ctx.protected_ledger_path != null) try protectSqliteConnection(&db);
+    return db;
 }
 
 pub fn hmacSha256ForActiveModule(

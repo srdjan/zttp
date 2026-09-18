@@ -524,6 +524,12 @@ pub const sdk_bridge = struct {
         return true;
     }
 
+    pub export fn zttpSdkLedgerOpen(handle: *ModuleHandle, out: **SdkSqliteDb) bool {
+        const db = capabilities.openLedgerDbChecked(handleToContext(handle)) catch return false;
+        out.* = @ptrCast(db.handle);
+        return true;
+    }
+
     pub export fn zttpSdkSqliteClose(opaque_db: *SdkSqliteDb) void {
         const raw: *sqlite_runtime.c.sqlite3 = @ptrCast(@alignCast(opaque_db));
         _ = sqlite_runtime.c.sqlite3_close(raw);

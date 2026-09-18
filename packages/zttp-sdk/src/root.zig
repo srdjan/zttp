@@ -106,6 +106,7 @@ pub const SqliteError = sqlite.SqliteError;
 pub const allowsSqlQuery = sqlite.allowsSqlQuery;
 pub const allowsSqlWrite = sqlite.allowsSqlWrite;
 pub const sqliteOpen = sqlite.sqliteOpen;
+pub const ledgerOpen = sqlite.ledgerOpen;
 pub const sqliteClose = sqlite.sqliteClose;
 pub const sqliteChanges = sqlite.sqliteChanges;
 pub const sqliteLastInsertRowId = sqlite.sqliteLastInsertRowId;

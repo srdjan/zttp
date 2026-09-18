@@ -254,6 +254,10 @@ pub export fn zttpSdkSqliteOpen(_: *sdk.ModuleHandle, _: [*]const u8, _: usize, 
     return false;
 }
 
+pub export fn zttpSdkLedgerOpen(_: *sdk.ModuleHandle, _: **sdk.SqliteDb) bool {
+    return false;
+}
+
 pub export fn zttpSdkSqliteClose(_: *sdk.SqliteDb) void {}
 
 pub export fn zttpSdkSqliteChanges(_: *sdk.SqliteDb) i32 {

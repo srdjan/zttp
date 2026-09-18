@@ -230,6 +230,8 @@ pub const Context = struct {
     sdk_file_allowlist: SdkPathAllowList,
     /// Canonical SQLite database paths that SDK modules may open. Empty means deny.
     sdk_sqlite_allowlist: SdkPathAllowList,
+    /// Owned canonical path. Generic SDK file and SQLite access cannot reach it.
+    protected_ledger_path: ?[]const u8 = null,
     /// Cooperative per-request interrupt. Self-set by the deadline check at loop
     /// back-edges; may be set by any thread (atomic) for forced aborts.
     interrupt_requested: std.atomic.Value(bool),
@@ -664,6 +666,7 @@ pub const Context = struct {
 
         self.sdk_sqlite_allowlist.deinit(self.allocator);
         self.sdk_file_allowlist.deinit(self.allocator);
+        if (self.protected_ledger_path) |path| self.allocator.free(path);
 
         // Clean up object literal shapes
         self.literal_shapes.deinit(self.allocator);
@@ -698,11 +701,22 @@ pub const Context = struct {
     }
 
     pub fn allowsSdkFilePathCanonical(self: *const Context, canonical_path: []const u8) bool {
+        if (self.isProtectedLedgerPath(canonical_path)) return false;
         return self.sdk_file_allowlist.contains(canonical_path);
     }
 
     pub fn allowsSdkSqlitePathCanonical(self: *const Context, canonical_path: []const u8) bool {
+        if (self.isProtectedLedgerPath(canonical_path)) return false;
         return self.sdk_sqlite_allowlist.contains(canonical_path);
+    }
+
+    pub fn isProtectedLedgerPath(self: *const Context, path: []const u8) bool {
+        const ledger = self.protected_ledger_path orelse return false;
+        if (std.mem.eql(u8, ledger, path)) return true;
+        if (!std.mem.startsWith(u8, path, ledger)) return false;
+        const suffix = path[ledger.len..];
+        return std.mem.eql(u8, suffix, "-wal") or std.mem.eql(u8, suffix, "-shm") or
+            std.mem.eql(u8, suffix, "-journal");
     }
 
     // ========================================================================

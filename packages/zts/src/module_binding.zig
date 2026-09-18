@@ -67,6 +67,7 @@ pub const runtimeCallbackCapabilityChecked = capabilities.runtimeCallbackCapabil
 pub const getRuntimeCallbackStateChecked = capabilities.getRuntimeCallbackStateChecked;
 pub const allowSdkFilePath = capabilities.allowSdkFilePath;
 pub const allowSdkSqlitePath = capabilities.allowSdkSqlitePath;
+pub const installProtectedLedgerPath = capabilities.installProtectedLedgerPath;
 pub const readFileChecked = capabilities.readFileChecked;
 pub const readEnvForActiveModule = capabilities.readEnvForActiveModule;
 pub const readEnvChecked = capabilities.readEnvChecked;
