@@ -65,6 +65,9 @@ pub const Inputs = struct {
     /// no guarded operation, which is a different statement from an empty plan
     /// and is why the member is absent rather than zero.
     residual_plan_digest: ?[32]u8 = null,
+    /// Digest of the exact canonical invariant specification section. The
+    /// protected ledger adapter is committed beside it when present.
+    invariant_spec_digest: ?[32]u8 = null,
 };
 
 /// The identity half of the commitment: which modules the handler imports, and
@@ -116,6 +119,7 @@ pub const ArtifactInputs = struct {
     proof_ir_digest: ?[32]u8 = null,
     proof_certificate_digest: ?[32]u8 = null,
     residual_plan_digest: ?[32]u8 = null,
+    invariant_spec_digest: ?[32]u8 = null,
 };
 
 /// Project the artifact onto the graph inputs.
@@ -135,6 +139,7 @@ pub fn fromArtifact(inputs: ArtifactInputs) Inputs {
         .proof_ir_digest = inputs.proof_ir_digest,
         .proof_certificate_digest = inputs.proof_certificate_digest,
         .residual_plan_digest = inputs.residual_plan_digest,
+        .invariant_spec_digest = inputs.invariant_spec_digest,
     };
 }
 
@@ -241,6 +246,10 @@ pub fn build(
     }
     if (inputs.residual_plan_digest) |digest| {
         try collector.add(.residual_plan, 0, digest);
+    }
+    if (inputs.invariant_spec_digest) |digest| {
+        try collector.add(.invariant_spec, 0, digest);
+        try collector.add(.invariant_ledger_adapter, 0, pcc.invariant.adapterDigest());
     }
 
     const members = out[0..collector.count];
@@ -353,6 +362,7 @@ fn sampleInputs(main: []const u8, deps: []const []const u8) Inputs {
         .capability_hash = [_]u8{0xC3} ** 32,
         .proof_ir_digest = [_]u8{0xD4} ** 32,
         .proof_certificate_digest = [_]u8{0xE5} ** 32,
+        .invariant_spec_digest = [_]u8{0xF6} ** 32,
     };
 }
 
@@ -476,6 +486,11 @@ test "mutating any member class moves the root" {
         .{ .name = "proof certificate", .apply = struct {
             fn f(i: *Inputs) void {
                 i.proof_certificate_digest = [_]u8{0xE6} ** 32;
+            }
+        }.f },
+        .{ .name = "invariant spec", .apply = struct {
+            fn f(i: *Inputs) void {
+                i.invariant_spec_digest = [_]u8{0xF7} ** 32;
             }
         }.f },
     };

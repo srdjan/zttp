@@ -24,6 +24,7 @@ Use `zttp modules --json` for the live export list from the built binary.
 | `zttp:id` | `uuid`, `ulid`, `nanoid` | `clock`, `random` |
 | `zttp:io` | `parallel`, `race` | `runtime_callback` |
 | `zttp:json` | `parseJson`, `parseJsonBytes`, `stringifyJson` | none |
+| `zttp:ledger` | `post`, `balance` | `sqlite`, `crypto` |
 | `zttp:log` | `logDebug`, `logInfo`, `logWarn`, `logError` | `clock`, `stderr` |
 | `zttp:queue` | `send`, `request`, `receive`, `ack`, `nack`, `reply` | `runtime_callback` |
 | `zttp:ratelimit` | `rateCheck`, `rateReset` | `clock` |

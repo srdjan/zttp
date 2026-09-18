@@ -16,6 +16,7 @@ const artifact_graph = @import("artifact_graph.zig");
 const pcc = @import("zttp_proof_checker");
 const proof_activation = @import("proof_activation.zig");
 const proof_certificate = @import("proof_certificate.zig");
+const invariant_observer = @import("invariant_observer.zig");
 const self_extract = @import("self_extract.zig");
 const attest_build_receipt = @import("attest/build_receipt.zig");
 const live_reload = @import("live_reload.zig");
@@ -169,6 +170,8 @@ pub fn compileCommand(allocator: std.mem.Allocator, argv: []const []const u8) !v
         .sql_schema_path = compile_context.sql_schema_path,
         .system_path = compile_context.system_path,
         .policy = compile_context.policyPtr(),
+        .invariant_spec = compile_context.invariant_spec,
+        .protected_ledger_path = compile_context.ledger_path,
         .attest_requested = opts.attest_requested,
     });
 }
@@ -177,6 +180,8 @@ const ProjectCompileContext = struct {
     sql_schema_path: ?[]u8 = null,
     system_path: ?[]u8 = null,
     policy: ?zts.HandlerPolicy = null,
+    invariant_spec: ?[]u8 = null,
+    ledger_path: ?[]u8 = null,
 
     fn init(
         allocator: std.mem.Allocator,
@@ -187,6 +192,14 @@ const ProjectCompileContext = struct {
 
         context.sql_schema_path = try project.resolvedSqlitePath(allocator);
         context.system_path = try project.resolvedSystemPath(allocator);
+        context.ledger_path = try project.resolvedLedgerPath(allocator);
+        context.invariant_spec = project.readInvariantSpec(allocator) catch |err| {
+            std.debug.print(
+                "Configured invariant specification '{s}' could not be loaded: {s}\n",
+                .{ project.invariants orelse "", @errorName(err) },
+            );
+            return error.InvariantContextFailed;
+        };
 
         const policy_source = project.readPolicySource(allocator) catch |err| {
             std.debug.print(
@@ -214,6 +227,8 @@ const ProjectCompileContext = struct {
         if (self.sql_schema_path) |path| allocator.free(path);
         if (self.system_path) |path| allocator.free(path);
         if (self.policy) |*policy| policy.deinit(allocator);
+        if (self.invariant_spec) |bytes| allocator.free(bytes);
+        if (self.ledger_path) |path| allocator.free(path);
         self.* = .{};
     }
 
@@ -267,6 +282,7 @@ fn prepareProjectArtifact(
     var project_opt = try project_config_mod.discover(allocator, io, null);
     errdefer if (project_opt) |*p| p.deinit(allocator);
     var project = project_opt orelse return error.NoProjectConfig;
+    project_opt = null;
     errdefer project.deinit(allocator);
 
     var compile_context = try ProjectCompileContext.init(allocator, &project);
@@ -354,6 +370,31 @@ fn failBuildCommandArgs(err: CommandArgError) !void {
     }
 }
 
+fn projectRunCommand(allocator: std.mem.Allocator, artifact: *const ProjectArtifact) ![]u8 {
+    const ledger_path = try artifact.project.resolvedLedgerPath(allocator) orelse
+        return allocator.dupe(u8, artifact.output_path);
+    defer allocator.free(ledger_path);
+    const output_path = try std.fmt.allocPrint(allocator, "{s}{s}", .{
+        if (std.fs.path.isAbsolute(artifact.output_path)) "" else "./", artifact.output_path,
+    });
+    defer allocator.free(output_path);
+    var command: std.ArrayList(u8) = .empty;
+    errdefer command.deinit(allocator);
+    for ([_][]const u8{ output_path, ledger_path }, 0..) |argument, index| {
+        if (index != 0) try command.appendSlice(allocator, " --ledger ");
+        try command.append(allocator, '\'');
+        for (argument) |char| {
+            if (char == '\'') {
+                try command.appendSlice(allocator, "'\\''");
+            } else {
+                try command.append(allocator, char);
+            }
+        }
+        try command.append(allocator, '\'');
+    }
+    return command.toOwnedSlice(allocator);
+}
+
 pub fn buildCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
     const opts = switch (parseBuildCommandArgs(argv)) {
         .help => {
@@ -376,15 +417,19 @@ pub fn buildCommand(allocator: std.mem.Allocator, argv: []const []const u8) !voi
         .sql_schema_path = artifact.compile_context.sql_schema_path,
         .system_path = artifact.compile_context.system_path,
         .policy = artifact.compile_context.policyPtr(),
+        .invariant_spec = artifact.compile_context.invariant_spec,
+        .protected_ledger_path = artifact.compile_context.ledger_path,
         .attest_requested = opts.attest_requested,
     });
 
+    const run_command = try projectRunCommand(allocator, &artifact);
+    defer allocator.free(run_command);
     std.debug.print(
         \\
         \\Built: {s}
         \\Run:   {s}
         \\
-    , .{ artifact.output_path, artifact.output_path });
+    , .{ artifact.output_path, run_command });
 }
 
 fn parseLocalDeployCommandArgs(argv: []const []const u8) LocalDeployCommandParse {
@@ -485,10 +530,14 @@ pub fn localDeployCommand(allocator: std.mem.Allocator, argv: []const []const u8
         .sql_schema_path = artifact.compile_context.sql_schema_path,
         .system_path = artifact.compile_context.system_path,
         .policy = artifact.compile_context.policyPtr(),
+        .invariant_spec = artifact.compile_context.invariant_spec,
+        .protected_ledger_path = artifact.compile_context.ledger_path,
         .ledger_service_name = artifact.project_name,
         .attest_requested = opts.attest_requested,
     });
 
+    const run_command = try projectRunCommand(allocator, &artifact);
+    defer allocator.free(run_command);
     std.debug.print(
         \\
         \\Deployed: {s}
@@ -501,7 +550,7 @@ pub fn localDeployCommand(allocator: std.mem.Allocator, argv: []const []const u8
         \\
         \\Inspect the proof ledger: zttp proofs list
         \\
-    , .{ artifact.output_path, artifact.output_path, artifact.project.host, artifact.project.port });
+    , .{ artifact.output_path, run_command, artifact.project.host, artifact.project.port });
 }
 
 /// Produces a compact JWS committing to (contract_json, bytecode,
@@ -553,6 +602,9 @@ const ArtifactTailInput = struct {
     /// captured them. Absent means no certificate is embedded, which the strict
     /// activation path refuses rather than treats as permission.
     proof_evidence: ?*const zts.ProofEvidence = null,
+    /// Exact canonical invariant specification selected by project config.
+    /// The same bytes feed certificate construction and payload embedding.
+    invariant_spec: ?[]const u8 = null,
     /// The configured capability policy, when the project has one. It is the
     /// only source of entries for a contract category the compiler could not
     /// enumerate; without it such a category ships denying everything.
@@ -678,6 +730,10 @@ fn writeArtifactTail(
             artifact_graph.identityFromContract(contract)
         else
             .{},
+        .invariant_spec_digest = if (input.invariant_spec) |bytes|
+            pcc.invariant.digest(bytes)
+        else
+            null,
     };
 
     // The certificate, when the compile captured the evidence for one. Building
@@ -697,6 +753,7 @@ fn writeArtifactTail(
             // certificate names which one rather than leaving the consumer to
             // accept whichever policy it happens to be handed.
             .runtime_policy_digest = runtime_policy_digest,
+            .invariant_spec = input.invariant_spec,
         }) catch |err| {
             if (!builtin.is_test) {
                 std.log.err(
@@ -769,6 +826,7 @@ fn writeArtifactTail(
             .policy_section = policy_section,
             .attestation = attestation_jws,
             .certificate = if (certificate) |value| value.bytes else null,
+            .invariant_section = input.invariant_spec,
         },
     );
 }
@@ -825,6 +883,9 @@ pub const BuildRequest = struct {
     sql_schema_path: ?[]const u8 = null,
     system_path: ?[]const u8 = null,
     policy: ?*const zts.HandlerPolicy = null,
+    /// Canonical application invariant bytes loaded from project config.
+    invariant_spec: ?[]const u8 = null,
+    protected_ledger_path: ?[]const u8 = null,
     /// Service name to record in the proof ledger entry. Null when the
     /// build is not part of a named project (`compile`/`build` paths);
     /// set to the project name on the `deploy --local` path.
@@ -931,6 +992,13 @@ fn runBuild(
     request: BuildRequest,
     caps: BuildCapabilities,
 ) !BuildReceipt {
+    if (request.protected_ledger_path) |ledger| {
+        try zts.module_binding.validateLedgerOutputPath(allocator, ledger, request.output_path);
+        if (request.sql_schema_path) |sql| try zts.module_binding.validateLedgerOutputPath(allocator, ledger, sql);
+        if (request.ledger_service_name != null) {
+            try zts.module_binding.validateLedgerOutputPath(allocator, ledger, proof_ledger.ledgerPath());
+        }
+    }
     const handler_path = request.handler_path;
     const output_path = request.output_path;
     const ledger_service_name = request.ledger_service_name;
@@ -1002,6 +1070,7 @@ fn runBuild(
         .contract = if (compiled.contract) |*contract| contract else null,
         .proof_evidence = if (compiled.proof_evidence) |*evidence| evidence else null,
         .configured_policy = request.policy,
+        .invariant_spec = request.invariant_spec,
     });
 
     caps.codesign(caps.context, allocator, output_path);
@@ -1581,6 +1650,222 @@ test "a real compile produces a certificate that binds its own IR and artifact" 
     }
 }
 
+test "ledger calls including a fused literal call are independently observed and accepted" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { post, balance } from "zttp:ledger";
+        \\export function handler(req: Request): Proof<Response, "state_isolated"> {
+        \\  const current = balance("main", "USD", "cash");
+        \\  if (!current.ok) return Response.text(current.error, { status: 500 });
+        \\  const result = post({ ledger: "main", currency: "USD", idempotencyKey: req.url, entries: [
+        \\    { account: "cash", amount: "100" },
+        \\    { account: "clearing", amount: "-100" }
+        \\  ] });
+        \\  if (!result.ok) return Response.text(result.error, { status: 400 });
+        \\  return Response.text(current.value);
+        \\}
+    ;
+    const invariant_spec = try project_config_mod.invariant_config.parse(allocator,
+        \\{"version":1,"kind":"balance_conservation_v1","ledger":"main","currencies":[{"code":"USD","scale":2}]}
+    );
+    defer allocator.free(invariant_spec);
+
+    var compiled = try precompile.compileHandler(allocator, source, "handler.ts", .{
+        .emit_verify = true,
+        .emit_contract = true,
+        .emit_proof_evidence = true,
+    });
+    defer compiled.deinit(allocator);
+    const evidence = compiled.proof_evidence orelse return error.TestUnexpectedResult;
+    const contract = compiled.contract orelse return error.TestUnexpectedResult;
+    const contract_json = try serializeContractJson(allocator, &contract);
+    defer allocator.free(contract_json);
+    const policy = zts.handler_policy.contractToRuntimePolicy(&contract, null);
+    const policy_section = try self_extract.serializePolicy(allocator, &policy);
+    defer allocator.free(policy_section);
+    try std.testing.expectError(error.MissingInvariantSpec, proof_certificate.build(allocator, .{
+        .evidence = &evidence,
+        .properties = dischargedProperties(&contract),
+        .artifact = .{
+            .bytecode = compiled.bytecode,
+            .dep_bytecodes = compiled.dep_bytecodes orelse &.{},
+            .contract_section = contract_json,
+            .policy_section_digest = artifact_graph.digestOf(policy_section),
+            .identity = artifact_graph.identityFromContract(&contract),
+        },
+        .contract_digest = artifact_graph.digestOf(contract_json),
+        .runtime_policy_digest = artifact_graph.digestOf(policy_section),
+    }));
+
+    var built = try proof_certificate.build(allocator, .{
+        .evidence = &evidence,
+        .properties = dischargedProperties(&contract),
+        .artifact = .{
+            .bytecode = compiled.bytecode,
+            .dep_bytecodes = compiled.dep_bytecodes orelse &.{},
+            .contract_section = contract_json,
+            .policy_section_digest = artifact_graph.digestOf(policy_section),
+            .identity = artifact_graph.identityFromContract(&contract),
+            .invariant_spec_digest = pcc.invariant.digest(invariant_spec),
+        },
+        .contract_digest = artifact_graph.digestOf(contract_json),
+        .runtime_policy_digest = artifact_graph.digestOf(policy_section),
+        .invariant_spec = invariant_spec,
+    });
+    defer built.deinit();
+
+    const assessment = try proof_activation.accept(allocator, .{
+        .certificate = built.bytes,
+        .bytecode = compiled.bytecode,
+        .dep_bytecodes = compiled.dep_bytecodes orelse &.{},
+        .contract_section = contract_json,
+        .policy_section_digest = artifact_graph.digestOf(policy_section),
+        .policy_section = policy_section,
+        .identity = artifact_graph.identityFromContract(&contract),
+        .invariant_spec = invariant_spec,
+    }, pcc.policy.development);
+    try std.testing.expect(assessment.accepted());
+    try std.testing.expect(assessment.invariants.ready());
+    try std.testing.expectEqual(@as(u32, 2), assessment.invariants.required);
+    try std.testing.expectEqual(@as(u32, 2), assessment.invariants.covered);
+    try std.testing.expectEqual(@as(u32, 1), assessment.invariants.writes);
+
+    // The embedded section is part of both the executable graph and the
+    // certificate identity. Removing it or changing one canonical byte must
+    // refuse the artifact before any runtime is installed.
+    const missing_spec = try proof_activation.accept(allocator, .{
+        .certificate = built.bytes,
+        .bytecode = compiled.bytecode,
+        .dep_bytecodes = compiled.dep_bytecodes orelse &.{},
+        .contract_section = contract_json,
+        .policy_section_digest = artifact_graph.digestOf(policy_section),
+        .policy_section = policy_section,
+        .identity = artifact_graph.identityFromContract(&contract),
+    }, pcc.policy.development);
+    try std.testing.expect(!missing_spec.accepted());
+
+    const changed_spec = try allocator.dupe(u8, invariant_spec);
+    defer allocator.free(changed_spec);
+    changed_spec[changed_spec.len - 1] = 3;
+    const tampered_spec = try proof_activation.accept(allocator, .{
+        .certificate = built.bytes,
+        .bytecode = compiled.bytecode,
+        .dep_bytecodes = compiled.dep_bytecodes orelse &.{},
+        .contract_section = contract_json,
+        .policy_section_digest = artifact_graph.digestOf(policy_section),
+        .policy_section = policy_section,
+        .identity = artifact_graph.identityFromContract(&contract),
+        .invariant_spec = changed_spec,
+    }, pcc.policy.development);
+    try std.testing.expect(!tampered_spec.accepted());
+}
+
+test "ledger function escapes are refused even beside a directly observed call" {
+    const allocator = std.testing.allocator;
+    const sources = [_][]const u8{
+        \\import { post } from "zttp:ledger";
+        \\function invoke(fn, group) { return fn(group); }
+        \\export function handler(req) {
+        \\  return invoke(post, { ledger: "main", currency: "USD", idempotencyKey: req.url, entries: [] });
+        \\}
+        ,
+        \\import { post } from "zttp:ledger";
+        \\export function handler(req) {
+        \\  const ledger = { post: post };
+        \\  return ledger.post({ ledger: "main", currency: "USD", idempotencyKey: req.url, entries: [] });
+        \\}
+        ,
+        \\import { post } from "zttp:ledger";
+        \\export function handler(req) {
+        \\  const fn = post;
+        \\  fn({ ledger: "main", currency: "USD", idempotencyKey: "known", entries: [] });
+        \\  const holder = { fn: fn };
+        \\  return holder.fn({ ledger: "main", currency: "USD", idempotencyKey: req.url, entries: [] });
+        \\}
+        ,
+        \\import { post } from "zttp:ledger";
+        \\export function handler(req) {
+        \\  const fn = post;
+        \\  if (req.url) { const marker = "branch"; }
+        \\  return fn({ ledger: "main", currency: "USD", idempotencyKey: req.url, entries: [] });
+        \\}
+        ,
+        \\import { post } from "zttp:ledger";
+        \\export function handler(req) {
+        \\  const fn = post;
+        \\  const invoke = () => fn({ ledger: "main", currency: "USD", idempotencyKey: req.url, entries: [] });
+        \\  return invoke();
+        \\}
+        ,
+        \\import { post } from "zttp:ledger";
+        \\const storedPost = post;
+        \\export function handler(req) {
+        \\  return storedPost({ ledger: "main", currency: "USD", idempotencyKey: req.url, entries: [] });
+        \\}
+        ,
+    };
+
+    for (sources) |source| {
+        var compiled = try precompile.compileHandler(allocator, source, "handler.ts", .{
+            .strict = false,
+        });
+        defer compiled.deinit(allocator);
+        try std.testing.expectError(
+            error.UnsupportedLedgerEscape,
+            invariant_observer.observe(allocator, compiled.bytecode, compiled.dep_bytecodes orelse &.{}),
+        );
+    }
+}
+
+test "ledger operations do not erase secret labels" {
+    const allocator = std.testing.allocator;
+    const sources = [_][]const u8{
+        \\import { env } from "zttp:env";
+        \\export function handler(req: Request): Proof<Response, "no_secret_leakage"> {
+        \\  const secret = env("API_KEY") ?? "";
+        \\  return Response.text(secret);
+        \\}
+        ,
+        \\import { env } from "zttp:env";
+        \\import { post } from "zttp:ledger";
+        \\export function handler(req: Request): Proof<Response, "no_secret_leakage"> {
+        \\  const secret = env("API_KEY") ?? "";
+        \\  const result = post({ ledger: "main", currency: "USD", idempotencyKey: secret, entries: [] });
+        \\  if (!result.ok) return Response.text(result.error);
+        \\  return Response.text(result.value);
+        \\}
+        ,
+        \\import { balance } from "zttp:ledger";
+        \\export function handler(req: Request): Proof<Response, "no_secret_leakage"> {
+        \\  const result = balance("main", "USD", "cash");
+        \\  if (!result.ok) return Response.text(result.error);
+        \\  return Response.text(result.value);
+        \\}
+        ,
+    };
+
+    for (sources) |source| {
+        var checked = try precompile.runCheckOnlyFromSource(
+            allocator,
+            source,
+            "handler.ts",
+            null,
+            true,
+            null,
+            false,
+        );
+        defer checked.deinit(allocator);
+        try std.testing.expect(checked.flow_errors > 0);
+        var saw_secret_diagnostic = false;
+        for (checked.json_diagnostics.items) |diagnostic| {
+            if (std.mem.indexOf(u8, diagnostic.message, "secret data flows into response body") != null) {
+                saw_secret_diagnostic = true;
+            }
+        }
+        try std.testing.expect(saw_secret_diagnostic);
+    }
+}
+
 test "a real compile reaches policy acceptance, and one changed byte does not" {
     const allocator = std.testing.allocator;
     const source =
@@ -2024,6 +2309,49 @@ test "prepareProjectArtifact default path: <root>/.zttp/<subdir>/<basename>" {
 
     // Handler path resolves to the manifest entry.
     try testing.expectStringEndsWith(artifact.handler_path, "src/handler.ts");
+}
+
+test "build commands preserve protected ledger files on output collision" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const old_cwd = try proof_ledger.chdirTmpForTest(&tmp);
+    defer allocator.free(old_cwd);
+    defer std.Io.Threaded.chdir(old_cwd) catch {};
+    try tmp.dir.writeFile(io, .{ .sub_path = "invariant.json", .data =
+        \\{"version":1,"kind":"balance_conservation_v1","ledger":"main","currencies":[{"code":"USD","scale":2}]}
+    });
+    try tmp.dir.writeFile(io, .{ .sub_path = "zttp.json", .data =
+        \\{"entry":"handler.ts","invariants":"invariant.json","ledger":"ledger.sqlite"}
+    });
+    // Refusal precedes compilation, so even a missing handler cannot mask it.
+    for ([_][]const u8{ "", "-wal", "-shm", "-journal" }) |suffix| {
+        const output = try std.fmt.allocPrint(allocator, "ledger.sqlite{s}", .{suffix});
+        defer allocator.free(output);
+        try tmp.dir.writeFile(io, .{ .sub_path = output, .data = "protected bytes" });
+        try std.testing.expectError(error.ProtectedLedgerPath, buildCommand(allocator, &.{ "-o", output, "--no-attest" }));
+        try std.testing.expectError(error.ProtectedLedgerPath, compileCommand(allocator, &.{ "handler.ts", "-o", output, "--no-attest" }));
+        const unchanged = try zts.file_io.readFile(allocator, output, 1024);
+        defer allocator.free(unchanged);
+        try std.testing.expectEqualStrings("protected bytes", unchanged);
+    }
+    // Deploy has a fixed output path and also writes a separate proof ledger.
+    const root = try tmp.dir.realPathFileAlloc(io, ".", allocator);
+    defer allocator.free(root);
+    const deploy_output = try std.fmt.allocPrint(allocator, ".zttp/deploy/{s}", .{std.fs.path.basename(root)});
+    defer allocator.free(deploy_output);
+    try tmp.dir.createDirPath(io, ".zttp/deploy");
+    for ([_][]const u8{ deploy_output, ".zttp/proofs.jsonl" }) |output| {
+        const config = try std.fmt.allocPrint(allocator, "{{\"entry\":\"handler.ts\",\"invariants\":\"invariant.json\",\"ledger\":\"{s}\"}}", .{output});
+        defer allocator.free(config);
+        try tmp.dir.writeFile(io, .{ .sub_path = "zttp.json", .data = config });
+        try tmp.dir.writeFile(io, .{ .sub_path = output, .data = "protected bytes" });
+        try std.testing.expectError(error.ProtectedLedgerPath, localDeployCommand(allocator, &.{ "--local", "--no-attest" }));
+        const unchanged = try zts.file_io.readFile(allocator, output, 1024);
+        defer allocator.free(unchanged);
+        try std.testing.expectEqualStrings("protected bytes", unchanged);
+    }
 }
 
 test "prepareProjectArtifact override path: passes through unchanged, no parent created" {

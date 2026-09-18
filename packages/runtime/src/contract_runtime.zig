@@ -124,6 +124,11 @@ pub const ProofCheckedContract = struct {
     /// depends on the installed policy, which is what makes a hot swap - it
     /// replaces the executable without re-running acceptance - inadmissible.
     guards: pcc.verdict.GuardVerdicts,
+    /// Application-invariant coverage and activation state. Coverage comes
+    /// from the acceptance kernel. Runtime readiness starts as not checked and
+    /// changes to ready only after pool construction installs and validates
+    /// the protected native store.
+    invariants: InvariantStatus,
     /// The policy this generation was accepted against. The executable root,
     /// the contract, the residual plan, and this digest install and retire
     /// together; a request reads one generation's tuple or none of it.
@@ -162,10 +167,51 @@ pub fn promote(
         .grade = grade,
         .development_only = assessment.development_only,
         .guards = assessment.guards,
+        .invariants = InvariantStatus.fromVerdicts(assessment.invariants),
         .runtime_policy_digest = runtime_policy_digest,
         ._proof = validation_proof,
     };
 }
+
+pub const NativeAdapterAssumption = enum {
+    not_applicable,
+    trusted,
+};
+
+pub const InvariantRuntimeReadiness = enum {
+    not_applicable,
+    not_checked,
+    ready,
+};
+
+/// Machine-readable invariant status for an accepted artifact generation.
+/// Static coverage and live runtime readiness remain separate fields because
+/// the acceptance kernel does not open or validate the protected store.
+pub const InvariantStatus = struct {
+    configured: bool = false,
+    required: u32 = 0,
+    covered: u32 = 0,
+    writes: u32 = 0,
+    reads: u32 = 0,
+    native_adapter_assumption: NativeAdapterAssumption = .not_applicable,
+    runtime_readiness: InvariantRuntimeReadiness = .not_applicable,
+
+    pub fn fromVerdicts(verdicts: pcc.verdict.InvariantVerdicts) InvariantStatus {
+        return .{
+            .configured = verdicts.configured,
+            .required = verdicts.required,
+            .covered = verdicts.covered,
+            .writes = verdicts.writes,
+            .reads = verdicts.required -| verdicts.writes,
+            .native_adapter_assumption = if (verdicts.configured) .trusted else .not_applicable,
+            .runtime_readiness = if (verdicts.configured) .not_checked else .not_applicable,
+        };
+    }
+
+    pub fn coverageReady(self: InvariantStatus) bool {
+        return self.configured and self.required > 0 and self.required == self.covered;
+    }
+};
 
 fn acceptedProperties(
     claimed: Properties,
@@ -200,6 +246,7 @@ fn promotedForTest(validated: *const ValidatedRuntimeContract) ProofCheckedContr
         .grade = .translation_validated,
         .development_only = false,
         .guards = .{},
+        .invariants = .{},
         .runtime_policy_digest = [_]u8{0} ** 32,
         ._proof = validation_proof,
     };
@@ -1493,6 +1540,8 @@ test "promotion exposes only properties that cleared the policy" {
     // the question open.
     try std.testing.expectEqualSlices(u8, &digest, &promoted.runtime_policy_digest);
     try std.testing.expectEqual(@as(u32, 0), promoted.guards.required);
+    try std.testing.expect(!promoted.invariants.configured);
+    try std.testing.expectEqual(InvariantRuntimeReadiness.not_applicable, promoted.invariants.runtime_readiness);
 
     // An accepted assessment whose guards are not all covered describes
     // operations nothing accounted for. It does not become a weaker promotion;
@@ -1508,6 +1557,21 @@ test "promotion exposes only properties that cleared the policy" {
     // Guard coverage is beside the properties, never inside them: the same
     // property set comes back.
     try std.testing.expectEqual(promoted.properties, guarded.properties);
+
+    var invariant_covered = assessment;
+    invariant_covered.invariants = .{
+        .configured = true,
+        .required = 2,
+        .covered = 2,
+        .writes = 1,
+        .kind_bits = 1,
+    };
+    const invariant_contract = promote(&validated, invariant_covered, digest) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(invariant_contract.invariants.coverageReady());
+    try std.testing.expectEqual(@as(u32, 1), invariant_contract.invariants.reads);
+    try std.testing.expectEqual(NativeAdapterAssumption.trusted, invariant_contract.invariants.native_adapter_assumption);
+    try std.testing.expectEqual(InvariantRuntimeReadiness.not_checked, invariant_contract.invariants.runtime_readiness);
 }
 
 test "ValidationProof argument type is a file-private opaque" {

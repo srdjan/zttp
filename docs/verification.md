@@ -298,6 +298,68 @@ from real function bodies, never an assumed claim. The opt-in
 `zts check --require-export-capsules` docs mode additionally warns
 (**ZTS508**) when an exported helper carries no `Proof<...>` capsule.
 
+## Application Invariants
+
+An application invariant is a condition that must hold after each committed
+change to protected state. The first supported kind is
+`balance_conservation_v1`. It requires the signed entries in each posting group
+to sum to zero for one declared ledger and currency.
+
+The author confirms a structured invariant in project configuration. ZTTP
+stores the ledger identifier and the sorted currency scales in a canonical
+binary section. The plain-language sentence helps the author select the
+template. It is not proof input. Jev can help classify the sentence, but its
+answer cannot approve an artifact or remove an obligation.
+
+The consumer checks four related inputs:
+
+- The executable graph binds the invariant section and the protected ledger
+  adapter identity.
+- The proof IR names each `zttp:ledger` operation from a closed catalog.
+- A translation witness relates each named operation to its final bytecode
+  position.
+- The runtime loader independently finds each `post` and `balance` call in the
+  final bytecode. The loader does not use the compiler effect summary for this
+  search.
+
+The acceptance kernel requires an exact match. A missing, extra, reordered, or
+changed operation refuses the artifact. The result is an invariant verdict. It
+is separate from Property verdicts and residual guard verdicts. A ready
+invariant verdict states that the consumer covered all protected operations. It
+does not turn a runtime check into a static proof.
+
+The native ledger uses canonical signed decimal strings at the handler
+boundary. It converts them to checked integers. It commits all entries and the
+idempotency record in one SQLite transaction. It rejects a posting group when
+the exact sum is not zero. The runtime also validates an existing ledger before
+it serves requests. These native actions enforce the invariant. The native
+adapter remains a disclosed trusted boundary.
+
+The current certificate format is certificate schema 4 with proof system
+`zttp_pcc_v3`. An older consumer refuses this evidence instead of interpreting
+it as an older certificate.
+
+The following rows are the published closed operation catalog. The build gate
+compares them with the kernel, compiler resolver, native exports, bytecode
+observer, and adapter identity.
+
+<!-- application-invariants: catalog -->
+- `0|post|ledger_post|0x4c500001|write`
+- `1|balance|ledger_balance|0x4c420001|read`
+<!-- application-invariants: evidence -->
+
+`zig build test-invariant-drift` requires the source drift gate, author
+self-test, proof-checker, compiler, native module, runtime activation, and
+project-configuration test roots to pass. The gate requires nonempty evidence
+for accepted coverage, missing and extra evidence, a forged operation,
+executable graph binding, exact zero-sum arithmetic, and canonical
+configuration. It also deletes and changes catalog rows in temporary probes
+and requires each probe to fail. `zig build test-zruntime` separately runs the
+end-to-end protected-store behavior because that suite must remain outside the
+aggregate on macOS.
+
+<!-- application-invariants: end -->
+
 ### Runtime Optimizations from Verification
 
 Some verified facts control runtime behavior, but they cross different trust
@@ -575,12 +637,12 @@ artifact, so that command reports provenance and says so.
 
 ### Format cutover
 
-Production accepts certificate schema `3` and proof system `zttp_pcc_v2 = 2`
-only. The self-extract payload is v3, the attestation envelope is
+Production accepts certificate schema `4` and proof system `zttp_pcc_v3 = 3`
+only. The self-extract payload is v4, the attestation envelope is
 `zttp-attest-v4`, and the proof bundle is `zttp-bundle-3`. Every identity is
 checked for equality rather than a lower bound. An immediate predecessor is
 refused with a rebuild diagnostic instead of being reinterpreted under the
-current proof and guard rules.
+current proof, guard, and invariant rules.
 
 ## Running Tests
 

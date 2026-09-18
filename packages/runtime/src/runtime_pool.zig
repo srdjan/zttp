@@ -178,6 +178,8 @@ pub const HandlerPool = struct {
         embedded_bytecode: ?[]const u8,
         runtime_dep_bytecodes: ?[]const []const u8,
     ) !Self {
+        try runtime_config_mod.validateLedgerOutputPaths(allocator, config, null);
+        if (config.invariant_section != null and max_size == 0) return error.InvariantPoolRequiresCapacity;
         const source_policy = config.dev_capability_policy orelse embedded_handler.capability_policy;
         const policy_generation = try RuntimePolicyGeneration.create(
             allocator,
@@ -286,6 +288,10 @@ pub const HandlerPool = struct {
         dev_policy: ?zq.RuntimePolicy,
     ) !usize {
         self.runtime_init_mutex.lock();
+        if (self.config.invariant_section != null) {
+            self.runtime_init_mutex.unlock();
+            return error.InvariantGenerationSwapRefused;
+        }
         if (self.policy_generation.index != null) {
             self.runtime_init_mutex.unlock();
             return error.GuardedGenerationSwapRefused;

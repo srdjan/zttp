@@ -158,8 +158,8 @@ zttp verify http://127.0.0.1:8080
 `kind=deploy` row to `.zttp/proofs.jsonl`, and signs an attestation by
 default. `--no-attest` disables signing for that build.
 
-The strict artifact chain is certificate schema `3`, proof system
-`zttp_pcc_v2 = 2`, self-extract format `3`, `zttp-attest-v4`, and
+The strict artifact chain is certificate schema `4`, proof system
+`zttp_pcc_v3 = 3`, self-extract format `4`, `zttp-attest-v4`, and
 `zttp-bundle-3`. Older artifacts, attestations, and bundles are not upgraded in
 place. Their strict readers return a rebuild-oriented error.
 

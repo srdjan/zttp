@@ -145,6 +145,130 @@ Result-producing virtual-module calls must be checked before `.value` access.
 Optional-producing calls must be narrowed before use. The verifier enforces both
 patterns.
 
+## Application Invariants
+
+An application invariant states what must remain true after a committed state
+change. The first supported template is `balance_conservation_v1`: for each
+declared currency in one ledger, all signed account balances sum to zero.
+This does not prove correct recipients, authorization, sufficient funds, or
+correct business amounts.
+
+Add both paths to `zttp.json`. Paths are relative to that file:
+
+```json
+{
+  "entry": "src/handler.ts",
+  "invariants": "invariant.json",
+  "ledger": "ledger.sqlite"
+}
+```
+
+Review and save the structured claim in `invariant.json`:
+
+```json
+{
+  "version": 1,
+  "kind": "balance_conservation_v1",
+  "statement": "The sum of all balances in this ledger is zero",
+  "ledger": "main",
+  "currencies": [{ "code": "USD", "scale": 2 }]
+}
+```
+
+The structured fields define the claim. `statement` is a human annotation.
+Currency codes must contain three uppercase ASCII letters. Scale is between
+0 and 18. Scale 2 means that `"100"` represents one major unit. Currencies are
+checked separately. There is no conversion between currencies.
+
+Use the protected module for every posting:
+
+```ts
+import { post } from "zttp:ledger";
+
+export function handler(req: Request): Proof<Response, "state_isolated"> {
+    const result = post({
+        ledger: "main",
+        currency: "USD",
+        idempotencyKey: req.url,
+        entries: [
+            { account: "cash", amount: "100" },
+            { account: "clearing", amount: "-100" }
+        ]
+    });
+    if (!result.ok) {
+        return Response.text("posting refused", { status: 400 });
+    }
+    return Response.text(result.value.replayed ? "replayed" : "posted");
+}
+```
+
+This example uses the URL as the retry key. A real application must select a
+stable key for each business operation. A retry with the same key and ordered
+entries returns `{ replayed: true }`. Reuse with different entries returns an
+`idempotency_conflict` error. The key is scoped to the ledger and currency.
+
+`balance(ledger, currency, account)` returns `Result<string>`. An account with
+no postings has balance `"0"`. Amounts and returned balances are canonical
+signed decimal integer strings in the signed 64-bit range. Numbers, leading
+zeros, `+1`, `-0`, fractions, and exponent notation are refused. Group totals use
+checked signed 128-bit arithmetic. Each account balance must remain in the
+signed 64-bit range. An unbalanced or overflowing posting leaves no committed
+entries, balance changes, or retry record.
+
+Expected failures are Results with an `error.tag`, such as `unbalanced`,
+`balance_overflow`, `idempotency_conflict`, or `storage_busy`. A busy transaction
+can be retried with the same key. Balance results carry a secret label. Both
+exports preserve argument labels. A handler that declares `no_secret_leakage`
+cannot expose a labelled result through its response.
+
+Build the project, then select the protected store on the target host:
+
+```bash
+zttp build
+./.zttp/build/my-app --ledger /srv/my-app/ledger.sqlite
+```
+
+The artifact carries the exact specification. Startup checks its certificate
+and operation coverage, then validates the stored schema, configuration,
+posting groups, and materialized balances under a write lock. Only then can
+the runtime serve requests. A new empty store starts with zero balances.
+An unreadable or invalid existing store is refused. A changed specification
+cannot reopen the old store. Automatic migration is not supported.
+
+This release requires a built artifact for an invariant project. Source
+`serve`, `dev`, and certificate-free live replacement are refused. Rebuild and
+restart after a change. Analyzer success alone does not establish invariant
+coverage or store readiness. Only direct calls through a ledger import are supported. Local aliases and
+indirect ledger calls are refused when the artifact is built. Invariant
+artifacts also refuse `--system`: separately loaded handlers do not carry the
+main artifact's invariant coverage.
+
+General SQLite and SDK file access cannot open the protected database or its
+journal files. Startup also rejects log paths that share those files and a
+ledger inside the durable output directory. Create the parent directories for
+configured storage and log paths before startup.
+The host must prevent external writers, filesystem aliases that bypass these
+path checks (including hard links), and
+filesystem replacement while the application runs. The guarantee depends on
+the native ledger adapter, SQLite transactions, and this deployment isolation.
+It is separate from a static handler property and from resource-policy guards.
+See [Verification](verification.md#application-invariants) for the checked evidence.
+
+To draft a candidate from a sentence in a source checkout:
+
+```bash
+python3 scripts/invariant-author.py \
+  --statement "The sum of all balances is zero" \
+  --ledger main --currency USD:2
+```
+
+Add `--jev` to send only the sentence to TypeSafe Jev for advisory template
+selection. This requires `TYPESAFE_API_KEY`. Review the result and save only
+its `candidate` object. A missing, malformed, or unsupported answer produces
+no candidate. Jev confidence is not proof. Builds, certificate checks, and
+posting acceptance never call a model. Live Jev classification quality and
+latency need to be measured for your statements.
+
 ## TypeScript Source Profile
 
 zts supports a practical server-side TypeScript subset and rejects constructs that
@@ -493,8 +617,8 @@ production policy, the process refuses to serve and says at which stage and for
 what reason. That check happens before any runtime is warmed, so a refused
 artifact never has a handler ready.
 
-Production artifacts use certificate schema `3`, proof system
-`zttp_pcc_v2 = 2`, self-extract format `3`, attestation
+Production artifacts use certificate schema `4`, proof system
+`zttp_pcc_v3 = 3`, self-extract format `4`, attestation
 `zttp-attest-v4`, and bundle format `zttp-bundle-3`. Immediate predecessor
 formats are refused with a rebuild instruction. A guarded artifact must also
 have exact residual-plan and runtime-policy coverage before startup. Guarded

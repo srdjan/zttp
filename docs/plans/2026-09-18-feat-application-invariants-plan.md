@@ -50,3 +50,41 @@ The first release supports local protected SQLite ledgers and the closed
 currency conversion, and automatic migration are deferred. Existing algebraic
 law metadata keeps its name. Work on local main and commit complete isolated
 units; do not push or include pre-existing user changes.
+
+## Implementation status
+
+The specification, protected ledger, compiler evidence, independent bytecode
+observation, consumer checks, artifact activation, status reporting, and advisory
+authoring tool are implemented. Artifact format 4 and certificate schema 4
+reject their predecessors. The first release requires direct ledger imports in
+a built artifact. It refuses source serving, unchecked reload, and system
+manifests. The public pool reload API also preserves the accepted generation.
+
+Runtime and build outputs cannot share the configured ledger or its SQLite
+sidecars. The ledger must be outside the durable output directory. The native
+adapter, SQLite, and exclusion of external writers remain trust assumptions.
+Baseline validation runs when each handler instance opens its store. Its cost
+on a large ledger needs measurement. The performance review identified repeated
+statement preparation during posting, queries for each posting during baseline
+validation, and repeated scans as the pool grows. Account updates already use
+the net delta for each distinct account. Statement reuse and validation once per
+generation are deferred until measurements justify the added state and trust
+boundary. Runtime initialization is serialized within a pool, but a new
+instance's exclusive validation lock can conflict with active posting.
+The independent observer also has operand-dependent stack rules. Changes to
+the bytecode instruction set must keep those rules and their regressions in
+step with the verifier.
+
+The affected acceptance, CLI, server, compiler, module, and runtime tests pass.
+The browser analyzer builds. A built artifact passes posting, retry, restart,
+interrupted-write recovery, invalid-baseline, changed-evidence, and output-path
+collision checks. Review regressions cover fused calls, branches before ledger
+calls, duplicate accounts at the amount limit, posting-hash tampering, sidecar
+access, and refused reloads.
+
+Full repository validation remains pending. The new module changes the tool
+request bytes, so the committed model replay corpus requires a fresh provider
+capture. Historical model responses were not rewritten. The release build
+reached the 110-second execution limit. Both longer runs need approval under
+the repository's two-minute script rule. The pre-existing deletion of
+`docs/zts-advanced-v2.1.md` also leaves an unrelated documentation link broken.

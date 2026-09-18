@@ -62,7 +62,8 @@ EXPECTED_RESTRICTION_HASH="3409f9e0490c698e67dcd1e7a6e3465f0d14c50e0a611bbe96520
 # statement into the argument that takes a registered query name. Summarising
 # all 26 modules doubled the discovery payload to 14,616 bytes; four leaves it
 # at 11,061 against a 7,213-byte baseline.
-EXPECTED_BUILTIN_HASH="a866c20081b735604ce1b0e1253fa5f125275f2bfe4bbbf8e9398e08959e7f2b"
+# Moved 2026-09-18: zttp:ledger adds protected post and balance exports.
+EXPECTED_BUILTIN_HASH="722433aa905540f621f9eaa73c29e6e9e22ef9a8250453af9f9d2992cd671281"
 
 fail() {
   printf 'meta drift: %s\n' "$1" >&2

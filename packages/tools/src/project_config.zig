@@ -1,6 +1,11 @@
 const std = @import("std");
 
 const zts = @import("zts");
+pub const invariant_config = @import("invariant_config.zig");
+
+test {
+    _ = invariant_config;
+}
 
 pub const ProjectConfig = struct {
     root_dir: []const u8,
@@ -10,6 +15,8 @@ pub const ProjectConfig = struct {
     host: []const u8 = "127.0.0.1",
     static_dir: ?[]const u8 = null,
     sqlite: ?[]const u8 = null,
+    invariants: ?[]const u8 = null,
+    ledger: ?[]const u8 = null,
     /// Path to the capability-policy JSON this project's handlers are checked
     /// against. Resolved like `sqlite`: relative to the manifest directory.
     policy: ?[]const u8 = null,
@@ -25,6 +32,8 @@ pub const ProjectConfig = struct {
         allocator.free(self.host);
         if (self.static_dir) |path| allocator.free(path);
         if (self.sqlite) |path| allocator.free(path);
+        if (self.invariants) |path| allocator.free(path);
+        if (self.ledger) |path| allocator.free(path);
         if (self.policy) |path| allocator.free(path);
         if (self.durable_dir) |path| allocator.free(path);
         if (self.system) |path| allocator.free(path);
@@ -51,6 +60,20 @@ pub const ProjectConfig = struct {
     pub fn resolvedSqlitePath(self: *const ProjectConfig, allocator: std.mem.Allocator) !?[]u8 {
         const path = self.sqlite orelse return null;
         return try self.resolvePath(allocator, path);
+    }
+
+    pub fn resolvedInvariantsPath(self: *const ProjectConfig, allocator: std.mem.Allocator) !?[]u8 {
+        return if (self.invariants) |path| try self.resolvePath(allocator, path) else null;
+    }
+
+    pub fn resolvedLedgerPath(self: *const ProjectConfig, allocator: std.mem.Allocator) !?[]u8 {
+        return if (self.ledger) |path| try self.resolvePath(allocator, path) else null;
+    }
+
+    pub fn readInvariantSpec(self: *const ProjectConfig, allocator: std.mem.Allocator) !?[]u8 {
+        const path = try self.resolvedInvariantsPath(allocator) orelse return null;
+        defer allocator.free(path);
+        return try invariant_config.loadFile(allocator, path);
     }
 
     pub fn resolvedPolicyPath(self: *const ProjectConfig, allocator: std.mem.Allocator) !?[]u8 {
@@ -137,6 +160,8 @@ pub fn loadAbsolute(
         .host = host,
         .static_dir = try dupOptionalStringField(allocator, obj, "staticDir"),
         .sqlite = try dupOptionalStringField(allocator, obj, "sqlite"),
+        .invariants = try dupOptionalStringField(allocator, obj, "invariants"),
+        .ledger = try dupOptionalStringField(allocator, obj, "ledger"),
         .policy = try dupOptionalStringField(allocator, obj, "policy"),
         .durable_dir = try dupOptionalStringField(allocator, obj, "durableDir"),
         .system = try dupOptionalStringField(allocator, obj, "system"),
@@ -144,6 +169,14 @@ pub fn loadAbsolute(
         .outbound_hosts = try dupStringArrayField(allocator, obj, "outboundHosts"),
     };
     errdefer config.deinit(allocator);
+
+    if ((config.invariants == null) != (config.ledger == null)) return error.IncompleteInvariantConfig;
+    // Every project-aware command rejects an unreadable or unsupported
+    // invariant. Analysis alone does not establish operation coverage.
+    if (try config.readInvariantSpec(allocator)) |spec| allocator.free(spec);
+    if (config.ledger) |path| {
+        if (path.len == 0) return error.InvalidLedgerPath;
+    }
 
     if (config.static_dir == null) {
         const public_path = try std.fs.path.resolve(allocator, &.{ config.root_dir, "public" });
@@ -363,4 +396,33 @@ test "discover finds manifest from relative handler path" {
 
     try std.testing.expectEqualStrings(expected_root, config.root_dir);
     try std.testing.expectEqualStrings("src/handler.ts", config.entry);
+}
+
+test "project discovery requires a readable confirmed invariant and paired store" {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "zttp.json", .data =
+        \\{"invariants":"invariant.json","ledger":"ledger.db"}
+    });
+    const manifest = try tmp.dir.realPathFileAlloc(io, "zttp.json", a);
+    defer a.free(manifest);
+    try std.testing.expectError(error.FileNotFound, discover(a, io, manifest));
+    try tmp.dir.writeFile(io, .{ .sub_path = "invariant.json", .data =
+        \\{"version":1,"kind":"unsupported","ledger":"main","currencies":[{"code":"USD","scale":2}]}
+    });
+    try std.testing.expectError(error.UnsupportedInvariantKind, discover(a, io, manifest));
+    try tmp.dir.writeFile(io, .{ .sub_path = "invariant.json", .data =
+        \\{"version":1,"kind":"balance_conservation_v1","ledger":"main","currencies":[{"code":"USD","scale":2}]}
+    });
+    var config = (try discover(a, io, manifest)).?;
+    defer config.deinit(a);
+    const path = (try config.resolvedLedgerPath(a)).?;
+    defer a.free(path);
+    const expected = try std.fs.path.resolve(a, &.{ config.root_dir, "ledger.db" });
+    defer a.free(expected);
+    try std.testing.expectEqualStrings(expected, path);
+    try tmp.dir.writeFile(io, .{ .sub_path = "zttp.json", .data = "{\"ledger\":\"ledger.db\"}" });
+    try std.testing.expectError(error.IncompleteInvariantConfig, discover(a, io, manifest));
 }

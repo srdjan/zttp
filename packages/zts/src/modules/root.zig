@@ -15,6 +15,7 @@ pub const module_graph = @import("internal/module_graph.zig");
 pub const compiler = @import("internal/compiler.zig");
 
 pub const sql = @import("data/sql.zig");
+pub const ledger = @import("data/ledger.zig");
 
 pub const io = @import("workflow/io.zig");
 pub const scope = @import("workflow/scope.zig");

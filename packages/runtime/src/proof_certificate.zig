@@ -16,6 +16,7 @@ const zts = @import("zts");
 const pcc = @import("zttp_proof_checker");
 
 const artifact_graph = @import("artifact_graph.zig");
+const invariant_observer = @import("invariant_observer.zig");
 
 const cert = pcc.certificate;
 const graph = pcc.executable_graph;
@@ -37,6 +38,12 @@ pub const Error = error{
     DuplicateMember,
     MissingRequiredKind,
     ZeroCommitment,
+    InvalidInvariantSpec,
+    MissingInvariantObservation,
+    DuplicateInvariantObservation,
+    InvariantOperationMismatch,
+    MissingInvariantSpec,
+    InvariantObservationMismatch,
 };
 
 /// What the contract says the compiler discharged. Read once, at the call site
@@ -80,6 +87,8 @@ pub const Inputs = struct {
     /// recomputes it from the bytes it is handed, so this is what ties a guard
     /// plan to one policy rather than to any policy.
     runtime_policy_digest: [32]u8 = [_]u8{0} ** 32,
+    /// Exact canonical invariant bytes configured for this artifact.
+    invariant_spec: ?[]const u8 = null,
 };
 
 pub const Built = struct {
@@ -164,6 +173,7 @@ fn tagFor(tag: zts.ProofIrTag) ps.NodeTag {
         .return_node => .return_node,
         .plain => .plain,
         .capability_call => .capability_call,
+        .ledger_call => .ledger_call,
     };
 }
 
@@ -231,6 +241,11 @@ pub fn build(allocator: std.mem.Allocator, inputs: Inputs) Error!Built {
     artifact.residual_plan_digest = residual_plan_digest;
     artifact.proof_ir_digest = ir_root;
     artifact.proof_certificate_digest = [_]u8{0} ** 32;
+    const invariant_spec_digest = if (inputs.invariant_spec) |bytes| blk: {
+        _ = pcc.invariant.decode(bytes) catch return error.InvalidInvariantSpec;
+        break :blk pcc.invariant.digest(bytes);
+    } else null;
+    artifact.invariant_spec_digest = invariant_spec_digest;
     const members = try allocator.alloc(graph.Member, artifact_graph.max_members);
     errdefer allocator.free(members);
     const built_members = try artifact_graph.build(allocator, artifact_graph.fromArtifact(artifact), members);
@@ -274,8 +289,24 @@ pub fn build(allocator: std.mem.Allocator, inputs: Inputs) Error!Built {
         }
     }.lt);
 
-    const witnesses = try translationWitnesses(allocator, inputs.evidence);
-    defer allocator.free(witnesses);
+    const observed = invariant_observer.observe(
+        allocator,
+        inputs.artifact.bytecode,
+        inputs.artifact.dep_bytecodes,
+    ) catch |err| return switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        else => error.MalformedBytecodeStream,
+    };
+    defer allocator.free(observed);
+    if (inputs.invariant_spec == null and observed.len != 0) return error.MissingInvariantSpec;
+    if (inputs.invariant_spec != null and observed.len == 0) return error.MissingInvariantObservation;
+    var invariant_translation = try translationAndInvariantWitnesses(
+        allocator,
+        inputs.evidence,
+        nodes,
+        observed,
+    );
+    defer invariant_translation.deinit();
     const rewrites = try rewriteRecords(allocator, inputs.evidence);
     defer allocator.free(rewrites);
     const trusted = try trustedEdges(allocator, inputs.evidence);
@@ -288,16 +319,18 @@ pub fn build(allocator: std.mem.Allocator, inputs: Inputs) Error!Built {
             .contract_digest = inputs.contract_digest,
             .residual_plan_digest = cert.residualPlanDigest(residual_plan),
             .runtime_policy_digest = inputs.runtime_policy_digest,
+            .invariant_spec_digest = invariant_spec_digest orelse [_]u8{0} ** 32,
             .development = inputs.development,
         },
         .graph = built_members,
         .obligations = builder.obligations.items,
         .ir = nodes,
         .evidence = builder.evidence.items,
-        .translation = witnesses,
+        .translation = invariant_translation.translation,
         .rewrites = rewrites,
         .trusted = trusted,
         .residual = residual_plan,
+        .invariants = invariant_translation.invariants,
     };
 
     const bytes = try allocator.alloc(u8, cert.encodedSize(parts));
@@ -403,17 +436,50 @@ fn appendTotalityEvidence(
     }
 }
 
-fn translationWitnesses(
+const InvariantTranslation = struct {
+    allocator: std.mem.Allocator,
+    translation: []cert.Witness,
+    invariants: []cert.InvariantWitness,
+
+    fn deinit(self: *InvariantTranslation) void {
+        self.allocator.free(self.translation);
+        self.allocator.free(self.invariants);
+    }
+};
+
+fn translationAndInvariantWitnesses(
     allocator: std.mem.Allocator,
     evidence: *const zts.ProofEvidence,
-) Error![]cert.Witness {
+    nodes: []const cert.IrNode,
+    observed: []const invariant_observer.Observed,
+) Error!InvariantTranslation {
     const total = evidence.emissions.len + evidence.jumps.len;
     const out = try allocator.alloc(cert.Witness, total);
     errdefer allocator.free(out);
+    var invariants: std.ArrayList(cert.InvariantWitness) = .empty;
+    errdefer invariants.deinit(allocator);
     var index: usize = 0;
     for (evidence.emissions) |emission| {
+        var invariant_observation: ?invariant_observer.Observed = null;
+        if (emission.node < nodes.len and nodes[emission.node].tag == .ledger_call) {
+            for (observed) |candidate| {
+                if (candidate.function_ordinal != emission.function_ordinal) continue;
+                if (candidate.code_offset < emission.code_start) continue;
+                if (@as(u64, candidate.code_offset) >= @as(u64, emission.code_start) + emission.code_len) continue;
+                if (invariant_observation != null) return error.DuplicateInvariantObservation;
+                invariant_observation = candidate;
+            }
+            const operation = invariant_observation orelse return error.MissingInvariantObservation;
+            const catalog_index = nodes[emission.node].aux;
+            if (catalog_index >= pcc.invariant.catalog.len) return error.InvariantOperationMismatch;
+            if (pcc.invariant.catalog[catalog_index].operation != operation.operation) {
+                return error.InvariantOperationMismatch;
+            }
+        }
         out[index] = .{
             .ir_node = emission.node,
+            // Keep the complete expression span: branch targets can enter
+            // before the call opcode while its arguments are evaluated.
             .code_start = emission.code_start,
             .code_len = emission.code_len,
             .target_ir = emission.node,
@@ -421,6 +487,19 @@ fn translationWitnesses(
             .scope_ir_node = emission.scope,
             .kind = .emission,
         };
+        if (invariant_observation) |operation| {
+            const catalog = pcc.invariant.catalog[nodes[emission.node].aux];
+            try invariants.append(allocator, .{
+                .ir_node = emission.node,
+                .scope_ir_node = emission.scope,
+                .function_ordinal = operation.function_ordinal,
+                .code_offset = operation.code_offset,
+                .translation_index = 0,
+                .operation = operation.operation,
+                .sink = catalog.sink,
+                .impl_id = catalog.impl_id,
+            });
+        }
         index += 1;
     }
     for (evidence.jumps) |jump| {
@@ -443,7 +522,30 @@ fn translationWitnesses(
             return cert.Witness.order(a, b) == .lt;
         }
     }.lt);
-    return out;
+    for (invariants.items) |*invariant| {
+        var translation_index: ?u32 = null;
+        for (out, 0..) |witness, witness_index| {
+            if (witness.kind != .emission) continue;
+            if (witness.ir_node != invariant.ir_node) continue;
+            if (witness.scope_ir_node != invariant.scope_ir_node) continue;
+            if (invariant.code_offset < witness.code_start or
+                @as(u64, invariant.code_offset) >= @as(u64, witness.code_start) + witness.code_len) continue;
+            if (translation_index != null) return error.DuplicateInvariantObservation;
+            translation_index = @intCast(witness_index);
+        }
+        invariant.translation_index = translation_index orelse return error.MissingInvariantObservation;
+    }
+    std.mem.sort(cert.InvariantWitness, invariants.items, {}, struct {
+        fn lt(_: void, a: cert.InvariantWitness, b: cert.InvariantWitness) bool {
+            return cert.InvariantWitness.order(a, b) == .lt;
+        }
+    }.lt);
+    if (invariants.items.len != observed.len) return error.InvariantObservationMismatch;
+    return .{
+        .allocator = allocator,
+        .translation = out,
+        .invariants = try invariants.toOwnedSlice(allocator),
+    };
 }
 
 fn rewriteRecords(

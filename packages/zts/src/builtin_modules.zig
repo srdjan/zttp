@@ -42,6 +42,7 @@ const ported = struct {
 // module invocation — they can't go through the SDK's handle-gated
 // setModuleState and stay on this side of the peer-package boundary.
 const sql_mod = @import("modules/data/sql.zig");
+const ledger_mod = @import("modules/data/ledger.zig");
 const service_mod = @import("modules/net/service.zig");
 const fetch_mod = @import("modules/net/fetch.zig");
 
@@ -72,6 +73,7 @@ const runtime_builtins = [_]ModuleBinding{
     json_mod.binding,
     result_mod.binding,
     sql_mod.binding,
+    ledger_mod.binding,
     io_mod.binding,
     scope_mod.binding,
     durable_mod.binding,
@@ -172,6 +174,7 @@ pub const builtin_governance_entries = [_]BuiltinGovernanceEntry{
     .{ .specifier = "zttp:json", .module_path = "packages/zts/src/modules/data/json_mod.zig", .spec_path = "packages/modules/module-specs/data/json.json" },
     .{ .specifier = "zttp:result", .module_path = "packages/zts/src/modules/data/result_mod.zig", .spec_path = "packages/modules/module-specs/data/result.json" },
     .{ .specifier = "zttp:sql", .module_path = "packages/modules/src/data/sql.zig", .spec_path = "packages/modules/module-specs/data/sql.json" },
+    .{ .specifier = "zttp:ledger", .module_path = "packages/modules/src/data/ledger.zig", .spec_path = "packages/modules/module-specs/data/ledger.json" },
     .{ .specifier = "zttp:io", .module_path = "packages/zts/src/modules/workflow/io.zig", .spec_path = "packages/modules/module-specs/workflow/io.json" },
     .{ .specifier = "zttp:scope", .module_path = "packages/zts/src/modules/workflow/scope.zig", .spec_path = "packages/modules/module-specs/workflow/scope.json" },
     .{ .specifier = "zttp:durable", .module_path = "packages/zts/src/modules/workflow/durable.zig", .spec_path = "packages/modules/module-specs/workflow/durable.json" },

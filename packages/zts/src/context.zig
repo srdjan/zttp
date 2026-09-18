@@ -712,11 +712,11 @@ pub const Context = struct {
 
     pub fn isProtectedLedgerPath(self: *const Context, path: []const u8) bool {
         const ledger = self.protected_ledger_path orelse return false;
-        if (std.mem.eql(u8, ledger, path)) return true;
-        if (!std.mem.startsWith(u8, path, ledger)) return false;
+        if (std.ascii.eqlIgnoreCase(ledger, path)) return true;
+        if (path.len < ledger.len or !std.ascii.eqlIgnoreCase(path[0..ledger.len], ledger)) return false;
         const suffix = path[ledger.len..];
-        return std.mem.eql(u8, suffix, "-wal") or std.mem.eql(u8, suffix, "-shm") or
-            std.mem.eql(u8, suffix, "-journal");
+        return std.ascii.eqlIgnoreCase(suffix, "-wal") or std.ascii.eqlIgnoreCase(suffix, "-shm") or
+            std.ascii.eqlIgnoreCase(suffix, "-journal");
     }
 
     // ========================================================================

@@ -28,6 +28,7 @@ const contract_runtime = @import("../contract_runtime.zig");
 const self_extract = @import("../self_extract.zig");
 const static_mod = @import("../server_static.zig");
 const guard_report = @import("guard_report.zig");
+const invariant_report = @import("invariant_report.zig");
 
 /// Bumped to 3 for the residual guard certificate. The verifier checks this for
 /// equality so a bundle cannot be read under proof rules it did not carry.
@@ -356,6 +357,7 @@ fn verifySemantics(
         .policy_section_digest = payload.policy_section_sha256,
         .identity = identity,
         .provenance = if (payload.attestation_jws != null) .unchecked else .absent,
+        .invariant_spec = payload.invariant_section,
     }, pcc.policy.production);
 
     if (assessment.rejection) |rejection| {
@@ -386,6 +388,13 @@ fn verifySemantics(
     var guard_writer = std.Io.Writer.fixed(&guard_buf);
     guard_report.writeSummary(&guard_writer, assessment.guards) catch {};
     try stdout.print("Guards:    {s}\n", .{guard_writer.buffered()});
+    var invariant_buf: [256]u8 = undefined;
+    var invariant_writer = std.Io.Writer.fixed(&invariant_buf);
+    invariant_report.writeSummary(
+        &invariant_writer,
+        contract_runtime.InvariantStatus.fromVerdicts(assessment.invariants),
+    ) catch {};
+    try stdout.print("Invariant: {s}\n", .{invariant_writer.buffered()});
     try stdout.print(
         "Signature: {s}\n",
         .{switch (assessment.provenance) {

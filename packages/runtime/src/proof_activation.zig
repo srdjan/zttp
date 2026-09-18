@@ -16,6 +16,7 @@ const pcc = @import("zttp_proof_checker");
 const zts = @import("zts");
 
 const artifact_graph = @import("artifact_graph.zig");
+const invariant_observer = @import("invariant_observer.zig");
 
 const graph = pcc.executable_graph;
 
@@ -47,6 +48,10 @@ pub const Inputs = struct {
     /// the kernel. Empty means no solver ran, and the kernel treats an
     /// unanswered solver edge as inconclusive.
     solver_results: []const bool = &.{},
+    /// Exact canonical invariant specification section loaded with the
+    /// artifact. Null means this deployment configures no application
+    /// invariant.
+    invariant_spec: ?[]const u8 = null,
 };
 
 pub const Error = error{
@@ -107,6 +112,10 @@ fn graphInputs(inputs: Inputs) artifact_graph.Inputs {
         .proof_ir_digest = if (commitments) |value| value.ir else null,
         .proof_certificate_digest = if (commitments) |value| value.certificate else null,
         .residual_plan_digest = if (commitments) |value| value.residual_plan else null,
+        .invariant_spec_digest = if (inputs.invariant_spec) |bytes|
+            pcc.invariant.digest(bytes)
+        else
+            null,
     });
 }
 
@@ -143,6 +152,30 @@ pub fn accept(
     const scratch = try allocator.alloc(u8, pcc.checker.scratchBytes(policy.limits));
     defer allocator.free(scratch);
 
+    const observed_invariants = invariant_observer.observe(
+        allocator,
+        inputs.bytecode,
+        inputs.dep_bytecodes,
+    ) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return refusal(
+            .invariant_coverage,
+            .invariant_observed_mismatch,
+            inputs.provenance,
+            true,
+        ),
+    };
+    defer allocator.free(observed_invariants);
+    const observed_operations = try allocator.alloc(pcc.invariant.ObservedOperation, observed_invariants.len);
+    defer allocator.free(observed_operations);
+    for (observed_invariants, 0..) |operation, index| {
+        observed_operations[index] = .{
+            .function_ordinal = operation.function_ordinal,
+            .code_offset = operation.code_offset,
+            .operation = operation.operation,
+        };
+    }
+
     return pcc.check(.{
         .certificate = certificate,
         .observed_graph = observed,
@@ -150,6 +183,8 @@ pub fn accept(
         .scratch = scratch,
         .solver_results = inputs.solver_results,
         .runtime_policy = if (inputs.policy_section) |bytes| .{ .bytes = bytes } else null,
+        .invariant_spec = inputs.invariant_spec,
+        .observed_invariant_operations = observed_operations,
     }, policy);
 }
 

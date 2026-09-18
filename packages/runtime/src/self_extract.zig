@@ -14,10 +14,11 @@ const handler_policy = zts.handler_policy;
 // 24      8     magic
 
 pub const MAGIC: u64 = 0x5A54_5042_4331_0000; // "ZTPBC1\0\0"
-/// Bumped to 3 for the strict residual-guard certificate chain. The reader
-/// checks equality, not an upper bound. Version 2 cannot carry that chain, so
-/// interpreting it under current rules would report coverage it never held.
-pub const FORMAT_VERSION: u16 = 3;
+/// Bumped to 4 for the application-invariant specification section. The reader
+/// checks equality, not an upper bound. Version 3 cannot carry the invariant
+/// section, so interpreting it under current rules would report coverage it
+/// never held.
+pub const FORMAT_VERSION: u16 = 4;
 pub const TRAILER_SIZE: usize = 32;
 const base_copy_chunk_size: usize = 64 * 1024;
 
@@ -33,6 +34,8 @@ pub const Section = enum(u8) {
     /// discharges, the evidence for each, and the executable-graph inventory
     /// the consumer compares against what it loaded.
     certificate = 7,
+    /// Canonical structured application invariant specification bytes.
+    invariant = 8,
 };
 
 pub const Payload = struct {
@@ -56,6 +59,7 @@ pub const Payload = struct {
     /// carries none, which the strict activation path refuses separately: an
     /// absent certificate is a missing proof, not a permissive default.
     certificate: ?[]const u8 = null,
+    invariant_section: ?[]const u8 = null,
 
     pub fn deinit(self: *const Payload, allocator: std.mem.Allocator) void {
         allocator.free(self.bytecode);
@@ -65,6 +69,7 @@ pub const Payload = struct {
         if (self.policy_section) |section| allocator.free(section);
         if (self.attestation_jws) |a| allocator.free(a);
         if (self.certificate) |c| allocator.free(c);
+        if (self.invariant_section) |section| allocator.free(section);
         // Free the values arrays inside each policy allow list
         if (self.policy.env.values.len > 0) allocator.free(self.policy.env.values);
         if (self.policy.egress.values.len > 0) allocator.free(self.policy.egress.values);
@@ -199,6 +204,8 @@ pub const PayloadInput = struct {
     /// verbatim, so the bytes the consumer decodes are the bytes that were
     /// bound into the executable graph.
     certificate: ?[]const u8 = null,
+    /// Exact canonical invariant bytes committed by the proof certificate.
+    invariant_section: ?[]const u8 = null,
 };
 
 const ArtifactWriteCapability = struct {
@@ -362,6 +369,7 @@ pub fn serializePayload(allocator: std.mem.Allocator, input: PayloadInput) ![]u8
     section_count += 1; // policy always present
     if (input.attestation != null) section_count += 1;
     if (input.certificate != null) section_count += 1;
+    if (input.invariant_section != null) section_count += 1;
 
     try buf.ensureTotalCapacity(allocator, input.bytecode.len + 256);
     try writeU16(&buf, allocator, section_count);
@@ -405,6 +413,11 @@ pub fn serializePayload(allocator: std.mem.Allocator, input: PayloadInput) ![]u8
         try writeSection(&buf, allocator, .certificate, certificate);
     }
 
+    // Section 8: canonical application invariant (if configured)
+    if (input.invariant_section) |invariant_section| {
+        try writeSection(&buf, allocator, .invariant, invariant_section);
+    }
+
     return buf.toOwnedSlice(allocator);
 }
 
@@ -419,11 +432,12 @@ pub fn parse(allocator: std.mem.Allocator, data: []const u8) !?Payload {
     var contract_json: ?[]const u8 = null;
     var attestation_jws: ?[]const u8 = null;
     var certificate: ?[]const u8 = null;
+    var invariant_section: ?[]const u8 = null;
     var policy: zts.RuntimePolicy = .{};
     var policy_section: ?[]const u8 = null;
     var policy_section_sha256 = [_]u8{0} ** 32;
     var policy_strings: std.ArrayList([]const u8) = .empty;
-    var seen_sections = [_]bool{false} ** 8;
+    var seen_sections = [_]bool{false} ** 9;
     errdefer {
         if (bytecode) |b| allocator.free(b);
         if (dep_bytecodes) |deps| {
@@ -434,6 +448,7 @@ pub fn parse(allocator: std.mem.Allocator, data: []const u8) !?Payload {
         if (policy_section) |section| allocator.free(section);
         if (attestation_jws) |a| allocator.free(a);
         if (certificate) |c| allocator.free(c);
+        if (invariant_section) |section| allocator.free(section);
         freePolicyArrays(allocator, policy);
         for (policy_strings.items) |s| allocator.free(s);
         policy_strings.deinit(allocator);
@@ -476,6 +491,10 @@ pub fn parse(allocator: std.mem.Allocator, data: []const u8) !?Payload {
             @intFromEnum(Section.certificate) => {
                 certificate = try allocator.dupe(u8, section_data);
             },
+            @intFromEnum(Section.invariant) => {
+                if (section_data.len > @import("zttp_proof_checker").invariant.max_spec_bytes) return error.InvalidPayload;
+                invariant_section = try allocator.dupe(u8, section_data);
+            },
             // No forward-compatibility skip. The payload version is checked for
             // equality, so a section this reader does not know is not a future
             // artifact - it is a malformed one, and reading the rest of it would
@@ -497,6 +516,7 @@ pub fn parse(allocator: std.mem.Allocator, data: []const u8) !?Payload {
         .policy_section = policy_section,
         .attestation_jws = attestation_jws,
         .certificate = certificate,
+        .invariant_section = invariant_section,
     };
 }
 
@@ -1168,12 +1188,14 @@ test "roundtrip: serialize and parse payload" {
 
     const bytecode = "test bytecode data";
     const contract = "{\"routes\":[]}";
+    const invariant_section = "canonical invariant bytes";
     const policy = zts.RuntimePolicy{};
 
     const serialized = try serializePayload(allocator, .{
         .bytecode = bytecode,
         .contract_json = contract,
         .policy = &policy,
+        .invariant_section = invariant_section,
     });
     defer allocator.free(serialized);
 
@@ -1184,6 +1206,7 @@ test "roundtrip: serialize and parse payload" {
     try std.testing.expectEqualStrings(contract, parsed.contract_json.?);
     try std.testing.expectEqual(@as(usize, 0), parsed.dep_bytecodes.len);
     try std.testing.expect(parsed.attestation_jws == null);
+    try std.testing.expectEqualStrings(invariant_section, parsed.invariant_section.?);
 }
 
 test "roundtrip: payload with deps" {
@@ -1418,7 +1441,7 @@ fn buildTrailer(payload_offset: u64, payload_size: u64, version: u16) [TRAILER_S
 }
 
 test "a trailer from the previous payload format is refused with a rebuild diagnostic" {
-    try std.testing.expectEqual(@as(u16, 3), FORMAT_VERSION);
+    try std.testing.expectEqual(@as(u16, 4), FORMAT_VERSION);
     const trailer = buildTrailer(100, 50, 2);
     try std.testing.expectError(
         error.UnsupportedArtifactFormat,

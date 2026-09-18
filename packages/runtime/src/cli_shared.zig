@@ -156,6 +156,7 @@ pub fn findPositionalPath(argv: []const []const u8) ?[]const u8 {
             std.mem.eql(u8, arg, "--security-log") or
             std.mem.eql(u8, arg, "--lifecycle") or
             std.mem.eql(u8, arg, "--sqlite") or
+            std.mem.eql(u8, arg, "--ledger") or
             std.mem.eql(u8, arg, "--trace") or
             std.mem.eql(u8, arg, "--incident-log") or
             std.mem.eql(u8, arg, "--replay") or
@@ -255,6 +256,9 @@ pub fn buildWatchSet(allocator: std.mem.Allocator, argv: []const []const u8) !Wa
         }
         if (try cfg.resolvedPolicyPath(allocator)) |policy_path| {
             try paths.append(allocator, policy_path);
+        }
+        if (try cfg.resolvedInvariantsPath(allocator)) |invariant_path| {
+            try paths.append(allocator, invariant_path);
         }
     } else if (explicit_path) |path| {
         if (looksLikeHandlerFile(path)) {

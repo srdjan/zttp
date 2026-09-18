@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "specifier": "zttp:ledger",
+  "source": "packages/modules/src/data/ledger.zig",
+  "summary": "Post one balanced group to the configured protected ledger and read committed balances. Amounts are canonical signed decimal strings in declared minor units.",
+  "requiredCapabilities": [
+    "sqlite",
+    "crypto"
+  ],
+  "exports": [
+    {
+      "name": "post",
+      "effect": "write",
+      "returns": "result",
+      "params": [
+        "object"
+      ],
+      "paramNames": [
+        "group"
+      ],
+      "failureSeverity": "critical"
+    },
+    {
+      "name": "balance",
+      "effect": "read",
+      "returns": "result",
+      "params": [
+        "string",
+        "string",
+        "string"
+      ],
+      "paramNames": [
+        "ledger",
+        "currency",
+        "account"
+      ],
+      "failureSeverity": "expected"
+    }
+  ]
+}

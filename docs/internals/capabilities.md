@@ -71,6 +71,7 @@ The extension SDK and runtime bridge are revision-locked. Native extensions must
 | `zttp:fetch` | `network`, `runtime_callback` | Checks the normalized endpoint before DNS and the resolved address scope before connecting. |
 | `zttp:id` | `clock`, `random` | UUID v7 and ULID mix clock; nanoid is pure random. |
 | `zttp:io` | `runtime_callback` | `parallel()` and `race()` schedule outbound fetches through the runtime's I/O collector. |
+| `zttp:ledger` | `sqlite`, `crypto` | Protected SQLite store and posting content hashes. The SDK excludes generic file and SQL access to the store. |
 | `zttp:log` | `clock`, `stderr` | Timestamped log emission. |
 | `zttp:queue` | `runtime_callback` | Mailbox send, lease, ack, nack, and reply dispatch through the server-owned actor queue. |
 | `zttp:ratelimit` | `clock` | Token bucket expiry. |

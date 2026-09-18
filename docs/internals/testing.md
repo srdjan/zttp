@@ -103,7 +103,8 @@ The package suites: `test-zts`, `test-sdk`, `test-modules`,
 
 The audits and gates: `test-capability-audit`, `test-module-boundary`,
 `test-proof-checker-purity`, `test-proof-ratchet`, `test-proof-ratchet-drift`,
-`test-residual-guards-drift`, `test-proof-swallow`, `test-zts-layering`, `test-module-governance`,
+`test-residual-guards-drift`, `test-invariant-drift`, `test-proof-swallow`,
+`test-zts-layering`, `test-module-governance`,
 `test-runtime-purity`, `test-contract-golden`, `test-expert-golden`,
 `test-docs-drift`, `test-doc-links`, `test-convergence-emitter`,
 `test-production-branch-metric`, `test-comptime-cli-matrix`,
@@ -262,6 +263,20 @@ missing-row and extra-row probes make a vacuous comparison fail. The stand-in
 dependency makes a compile failure fail the named gate and executes the
 positive env, egress, and cache conversions. Each conversion must preserve the
 exact proven Property set.
+
+`zig build test-invariant-drift` runs `scripts/check-invariants.sh` and the
+invariant author self-test. The build target also requires the proof-checker,
+ZTS, native module, runtime activation, and project-configuration test roots to
+pass. The script compares the closed `post` and `balance` catalog with the
+compiler resolver, proof IR tag, native exports, final-bytecode observer,
+producer mapping, adapter identity, and the machine-marked rows in
+`docs/verification.md`. It requires nonempty compiled evidence for acceptance
+and for missing, extra, and forged evidence. Deletion and mutation probes must
+make the comparison fail. The author self-test also proves that an advisory
+response cannot bypass structured confirmation. `zig build test-zruntime`
+separately runs end-to-end protected-store behavior. It is not a dependency of
+the drift target because the ZRuntime suite must not overlap the aggregate on
+macOS.
 
 Discarding an error inside the analysis files that decide whether a program is
 proven needs a row in `scripts/proof-swallow.allow` giving the reason it cannot

@@ -248,6 +248,7 @@ pub const HandlerInstance = struct {
     }
 
     pub fn init(allocator: std.mem.Allocator, config: RuntimeConfig) !*Self {
+        try runtime_config_mod.validateLedgerOutputPaths(allocator, config, null);
         const self = try allocator.create(Self);
         errdefer allocator.destroy(self);
 
@@ -499,6 +500,7 @@ pub const HandlerInstance = struct {
         try self.installVirtualModules();
         try self.installScopeModuleState();
         try self.installSqlModuleState();
+        try self.installLedgerModuleState();
         if (self.config.system_config_path) |_| {
             try self.installServiceModuleState();
         }
@@ -943,6 +945,28 @@ pub const HandlerInstance = struct {
 
     fn installSqlModuleState(self: *Self) !void {
         try zq.modules.sql.installStore(self.ctx, self.config.sqlite_path);
+    }
+
+    fn installLedgerModuleState(self: *Self) !void {
+        const bytes = self.config.invariant_section orelse {
+            if (self.config.ledger_path != null) return error.MissingInvariantSpec;
+            return;
+        };
+        if (!self.config.invariant_coverage_accepted) return error.InvariantCoverageNotAccepted;
+        const path = self.config.ledger_path orelse return error.LedgerNotConfigured;
+        const invariant = @import("zttp_proof_checker").invariant;
+        const spec = try invariant.decode(bytes);
+        const currencies = try self.allocator.alloc(zq.modules.ledger.Currency, spec.currency_count);
+        defer self.allocator.free(currencies);
+        for (currencies, 0..) |*currency, i| {
+            const start = i * invariant.currency_record_size;
+            currency.* = .{ .code = spec.currency_bytes[start..][0..3], .scale = spec.currency_bytes[start + 3] };
+        }
+        try zq.modules.ledger.installStore(self.ctx, path, .{
+            .ledger = spec.ledger_id,
+            .currencies = currencies,
+            .invariant_digest = invariant.digest(bytes),
+        });
     }
 
     fn installServiceModuleState(self: *Self) !void {

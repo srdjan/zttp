@@ -18,6 +18,7 @@ pub const Slot = enum(u4) {
     // reserved so the slots after it keep their identity.
     workflow = 13,
     queue = 14,
+    ledger = 15,
 };
 
 pub fn ownerSpecifier(slot: usize) ?[]const u8 {
@@ -33,6 +34,7 @@ pub fn ownerSpecifier(slot: usize) ?[]const u8 {
         @intFromEnum(Slot.fetch) => "zttp:fetch",
         @intFromEnum(Slot.workflow) => "zttp:workflow",
         @intFromEnum(Slot.queue) => "zttp:queue",
+        @intFromEnum(Slot.ledger) => "zttp:ledger",
         else => null,
     };
 }
@@ -64,5 +66,6 @@ test "module state slots are owned by one active module specifier" {
     try testing.expect(!isOwnedBySpecifier(@intFromEnum(Slot.cache), "zttp:decode"));
     try testing.expect(isOwnedBySpecifier(@intFromEnum(Slot.queue), "zttp:queue"));
     try testing.expect(ownerSpecifier(@intFromEnum(Slot.replay)) == null);
-    try testing.expect(ownerSpecifier(15) == null);
+    try testing.expect(isOwnedBySpecifier(@intFromEnum(Slot.ledger), "zttp:ledger"));
+    try testing.expect(!isOwnedBySpecifier(@intFromEnum(Slot.ledger), "zttp:sql"));
 }

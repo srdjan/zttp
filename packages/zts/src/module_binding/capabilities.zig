@@ -358,6 +358,37 @@ pub fn installProtectedLedgerPath(ctx: *context.Context, path: []const u8) !void
     ctx.protected_ledger_path = canonical;
 }
 
+/// Host outputs must not share the protected database or its SQLite sidecars.
+pub fn validateLedgerOutputPath(allocator: std.mem.Allocator, ledger_path: []const u8, output_path: []const u8) !void {
+    const ledger = try canonicalizeCreatablePath(allocator, ledger_path);
+    defer allocator.free(ledger);
+    const output = try canonicalizeCreatablePath(allocator, output_path);
+    defer allocator.free(output);
+    for ([_][]const u8{ "", "-wal", "-shm", "-journal" }) |suffix| {
+        // Reserve ASCII case variants even before a store or sidecar exists.
+        // realpath cannot normalize the basename of a future file.
+        if (output.len == ledger.len + suffix.len and
+            std.ascii.eqlIgnoreCase(output[0..ledger.len], ledger) and std.ascii.eqlIgnoreCase(output[ledger.len..], suffix))
+            return error.ProtectedLedgerPath;
+    }
+}
+
+/// Durable output names depend on requests. Exclude the whole output tree.
+pub fn validateLedgerOutputDirectory(allocator: std.mem.Allocator, ledger_path: []const u8, output_dir: []const u8) !void {
+    const ledger = try canonicalizeCreatablePath(allocator, ledger_path);
+    defer allocator.free(ledger);
+    const directory = try canonicalizeCreatablePath(allocator, output_dir);
+    defer allocator.free(directory);
+    for ([_][]const u8{ "", "-wal", "-shm", "-journal" }) |suffix| {
+        const protected = try std.mem.concat(allocator, u8, &.{ ledger, suffix });
+        defer allocator.free(protected);
+        if (std.ascii.eqlIgnoreCase(protected, directory) or
+            (protected.len > directory.len and std.ascii.eqlIgnoreCase(protected[0..directory.len], directory) and
+                (std.mem.endsWith(u8, directory, "/") or protected[directory.len] == '/')))
+            return error.ProtectedLedgerPath;
+    }
+}
+
 fn ledgerSqlAuthorizer(_: ?*anyopaque, action: c_int, _: [*c]const u8, _: [*c]const u8, _: [*c]const u8, _: [*c]const u8) callconv(.c) c_int {
     // ATTACH (including VACUUM INTO) otherwise bypasses the checked open path.
     return if (action == sqlite_runtime.c.SQLITE_ATTACH) sqlite_runtime.c.SQLITE_DENY else sqlite_runtime.c.SQLITE_OK;
@@ -409,6 +440,19 @@ test "protected ledger rejects generic opens and attachment bypasses" {
     const file_token = pushActiveModuleContext(ctx, "zttp:other", &.{.filesystem});
     defer popActiveModuleContext(file_token);
     try std.testing.expectError(error.FilePathNotAllowed, readFileChecked(ctx, ledger_path, 1024));
+    for ([_][]const u8{ "-wal", "-shm", "-journal" }) |suffix| {
+        const name = try std.fmt.allocPrint(allocator, "ledger.db{s}", .{suffix});
+        defer allocator.free(name);
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = name, .data = "protected sidecar" });
+        const path = try std.fmt.allocPrint(allocator, "{s}{s}", .{ ledger_path, suffix });
+        defer allocator.free(path);
+        try allowSdkFilePath(ctx, path);
+        try allowSdkSqlitePath(ctx, path);
+        try std.testing.expectError(error.FilePathNotAllowed, readFileChecked(ctx, path, 1024));
+        const sql_token = pushActiveModuleContext(ctx, "zttp:sql", &.{.sqlite});
+        defer popActiveModuleContext(sql_token);
+        try std.testing.expectError(error.SqlitePathNotAllowed, openSqliteDbChecked(ctx, path));
+    }
     try std.testing.expectError(error.LedgerStoreMismatch, installProtectedLedgerPath(ctx, other_path));
 }
 

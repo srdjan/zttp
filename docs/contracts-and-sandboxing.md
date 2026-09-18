@@ -186,7 +186,7 @@ won't boot" and "individual requests get rejected".
   conservative policy because source contracts are not artifact
   certificates. The current production policy does not accept the
   lifecycle properties, so deployed artifacts also stay bounded.
-- Production accepts certificate schema 3 and `zttp_pcc_v2 = 2` only. For a
+- Production accepts certificate schema 4 and `zttp_pcc_v3 = 3` only. For a
   guarded artifact, the kernel independently decodes the exact serialized
   runtime policy and requires exact residual-plan coverage before pool init or
   prewarm. A predecessor or mismatched plan produces rebuild guidance and the

@@ -32,6 +32,7 @@ pub const data = struct {
     pub const ratelimit = @import("data/ratelimit.zig");
     pub const cache = @import("data/cache.zig");
     pub const sql = @import("data/sql.zig");
+    pub const ledger = @import("data/ledger.zig");
 };
 
 pub const net = struct {
@@ -60,6 +61,7 @@ pub const catalog = struct {
     pub const ratelimit = data.ratelimit.binding;
     pub const cache = data.cache.binding;
     pub const sql = data.sql.binding;
+    pub const ledger = data.ledger.binding;
 
     pub const fetch = net.fetch.binding;
     pub const service = net.service.binding;
@@ -81,6 +83,7 @@ pub const all_bindings = [_]sdk.ModuleBinding{
     catalog.ratelimit,
     catalog.cache,
     catalog.sql,
+    catalog.ledger,
     catalog.fetch,
     catalog.service,
 };
@@ -107,6 +110,7 @@ test {
     _ = data.ratelimit;
     _ = data.cache;
     _ = data.sql;
+    _ = data.ledger;
     _ = net.fetch;
     _ = net.service;
 }

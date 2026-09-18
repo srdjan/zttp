@@ -4760,3 +4760,352 @@ test "durable run refuses the oplog while a recovery claim holds it" {
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, source, "\"fn\":\"Math.random\""));
     try std.testing.expect(!std.mem.containsAtLeast(u8, source, 1, "\"type\":\"complete\""));
 }
+
+fn ledgerInvariantBytes(buffer: []u8, scale: u8) ![]u8 {
+    const invariant = @import("zttp_proof_checker").invariant;
+    const size = invariant.header_size + "main".len + invariant.currency_record_size;
+    if (buffer.len < size) return error.BufferTooSmall;
+    @memcpy(buffer[0..8], invariant.magic);
+    std.mem.writeInt(u16, buffer[8..10], invariant.schema_version, .little);
+    std.mem.writeInt(u16, buffer[10..12], @intFromEnum(invariant.Kind.balance_conservation_v1), .little);
+    std.mem.writeInt(u16, buffer[12..14], "main".len, .little);
+    std.mem.writeInt(u16, buffer[14..16], 1, .little);
+    @memcpy(buffer[invariant.header_size..][0..4], "main");
+    @memcpy(buffer[invariant.header_size + 4 ..][0..3], "USD");
+    buffer[invariant.header_size + 7] = scale;
+    const encoded = buffer[0..size];
+    _ = try invariant.decode(encoded);
+    return encoded;
+}
+
+fn ledgerTwoCurrencyInvariantBytes(buffer: []u8, usd_scale: u8) ![]u8 {
+    const invariant = @import("zttp_proof_checker").invariant;
+    const size = invariant.header_size + "main".len + 2 * invariant.currency_record_size;
+    if (buffer.len < size) return error.BufferTooSmall;
+    @memcpy(buffer[0..8], invariant.magic);
+    std.mem.writeInt(u16, buffer[8..10], invariant.schema_version, .little);
+    std.mem.writeInt(u16, buffer[10..12], @intFromEnum(invariant.Kind.balance_conservation_v1), .little);
+    std.mem.writeInt(u16, buffer[12..14], "main".len, .little);
+    std.mem.writeInt(u16, buffer[14..16], 2, .little);
+    @memcpy(buffer[invariant.header_size..][0..4], "main");
+    @memcpy(buffer[invariant.header_size + 4 ..][0..3], "EUR");
+    buffer[invariant.header_size + 7] = 2;
+    @memcpy(buffer[invariant.header_size + 8 ..][0..3], "USD");
+    buffer[invariant.header_size + 11] = usd_scale;
+    const encoded = buffer[0..size];
+    _ = try invariant.decode(encoded);
+    return encoded;
+}
+
+test "protected ledger posts atomically and validates its baseline on reopen" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try durableTestDirPath(allocator, &tmp);
+    const ledger_path = try std.fmt.allocPrint(allocator, "{s}/ledger.sqlite", .{dir});
+    var invariant_buffer: [64]u8 = undefined;
+    const invariant_bytes = try ledgerTwoCurrencyInvariantBytes(&invariant_buffer, 2);
+    const config = RuntimeConfig{
+        .ledger_path = ledger_path,
+        .invariant_section = invariant_bytes,
+        .invariant_coverage_accepted = true,
+    };
+
+    {
+        const rt = try HandlerInstance.init(allocator, config);
+        defer rt.deinit();
+        try rt.loadHandler(
+            \\import { post, balance } from "zttp:ledger";
+            \\function handler(req) {
+            \\  const first = post({ ledger: "main", currency: "USD", idempotencyKey: "initial", entries: [
+            \\    { account: "source", amount: "9223372036854775807" },
+            \\    { account: "sink", amount: "-9223372036854775807" }
+            \\  ] });
+            \\  const replay = post({ ledger: "main", currency: "USD", idempotencyKey: "initial", entries: [
+            \\    { account: "source", amount: "9223372036854775807" },
+            \\    { account: "sink", amount: "-9223372036854775807" }
+            \\  ] });
+            \\  const conflict = post({ ledger: "main", currency: "USD", idempotencyKey: "initial", entries: [
+            \\    { account: "source", amount: "1" }, { account: "sink", amount: "-1" }
+            \\  ] });
+            \\  const unbalanced = post({ ledger: "main", currency: "USD", idempotencyKey: "unbalanced", entries: [
+            \\    { account: "source", amount: "1" }
+            \\  ] });
+            \\  const invalid = post({ ledger: "main", currency: "USD", idempotencyKey: "invalid", entries: [
+            \\    { account: "source", amount: "+1" }, { account: "sink", amount: "-1" }
+            \\  ] });
+            \\  const overflow = post({ ledger: "main", currency: "USD", idempotencyKey: "overflow", entries: [
+            \\    { account: "source", amount: "1" }, { account: "sink", amount: "-1" }
+            \\  ] });
+            \\  const eur = post({ ledger: "main", currency: "EUR", idempotencyKey: "eur", entries: [
+            \\    { account: "source", amount: "10" }, { account: "sink", amount: "-10" }
+            \\  ] });
+            \\  const cancelForward = post({ ledger: "main", currency: "USD", idempotencyKey: "cancel-forward", entries: [
+            \\    { account: "source", amount: "1" }, { account: "source", amount: "-1" }
+            \\  ] });
+            \\  const cancelReverse = post({ ledger: "main", currency: "USD", idempotencyKey: "cancel-reverse", entries: [
+            \\    { account: "source", amount: "-1" }, { account: "source", amount: "1" }
+            \\  ] });
+            \\  const source = balance("main", "USD", "source");
+            \\  const sink = balance("main", "USD", "sink");
+            \\  const eurSource = balance("main", "EUR", "source");
+            \\  return Response.json({ firstOk: first.ok, firstReplayed: first.value.replayed,
+            \\    replayOk: replay.ok, replayReplayed: replay.value.replayed,
+            \\    conflictTag: conflict.error.tag, unbalancedTag: unbalanced.error.tag,
+            \\    invalidTag: invalid.error.tag, overflowTag: overflow.error.tag,
+            \\    eurOk: eur.ok, cancelForwardOk: cancelForward.ok, cancelReverseOk: cancelReverse.ok,
+            \\    source: source.value, sink: sink.value, eurSource: eurSource.value });
+            \\}
+        , "<ledger-atomic>");
+
+        var request = try makeTestRequest(allocator, "GET", "/", null);
+        defer request.deinit(allocator);
+        var response = try rt.executeHandler(request.asView());
+        defer response.deinit();
+        try std.testing.expectEqual(@as(u16, 200), response.status);
+        var parsed = try std.json.parseFromSlice(std.json.Value, allocator, response.body, .{});
+        defer parsed.deinit();
+        const body = parsed.value.object;
+        try std.testing.expect(body.get("firstOk").?.bool);
+        try std.testing.expect(!body.get("firstReplayed").?.bool);
+        try std.testing.expect(body.get("replayOk").?.bool);
+        try std.testing.expect(body.get("replayReplayed").?.bool);
+        try std.testing.expectEqualStrings("idempotency_conflict", body.get("conflictTag").?.string);
+        try std.testing.expectEqualStrings("unbalanced", body.get("unbalancedTag").?.string);
+        try std.testing.expectEqualStrings("invalid_input", body.get("invalidTag").?.string);
+        try std.testing.expectEqualStrings("balance_overflow", body.get("overflowTag").?.string);
+        try std.testing.expect(body.get("eurOk").?.bool);
+        try std.testing.expect(body.get("cancelForwardOk").?.bool);
+        try std.testing.expect(body.get("cancelReverseOk").?.bool);
+        try std.testing.expectEqualStrings("9223372036854775807", body.get("source").?.string);
+        try std.testing.expectEqualStrings("-9223372036854775807", body.get("sink").?.string);
+        try std.testing.expectEqualStrings("10", body.get("eurSource").?.string);
+    }
+
+    // A new runtime validates the existing baseline before it can serve and
+    // reads the same committed balances.
+    {
+        const rt = try HandlerInstance.init(allocator, config);
+        defer rt.deinit();
+        try rt.loadHandler(
+            \\import { balance } from "zttp:ledger";
+            \\function handler(req) {
+            \\  const source = balance("main", "USD", "source");
+            \\  return Response.json({ source: source.value });
+            \\}
+        , "<ledger-reopen>");
+        var request = try makeTestRequest(allocator, "GET", "/", null);
+        defer request.deinit(allocator);
+        var response = try rt.executeHandler(request.asView());
+        defer response.deinit();
+        var parsed = try std.json.parseFromSlice(std.json.Value, allocator, response.body, .{});
+        defer parsed.deinit();
+        try std.testing.expectEqualStrings("9223372036854775807", parsed.value.object.get("source").?.string);
+    }
+
+    // A changed scale changes the invariant digest and cannot reopen the store.
+    var changed_buffer: [64]u8 = undefined;
+    const changed_invariant = try ledgerTwoCurrencyInvariantBytes(&changed_buffer, 3);
+    try std.testing.expectError(error.LedgerConfigMismatch, HandlerInstance.init(allocator, .{
+        .ledger_path = ledger_path,
+        .invariant_section = changed_invariant,
+        .invariant_coverage_accepted = true,
+    }));
+
+    // Tampering with a materialized balance is detected before the next
+    // runtime becomes usable.
+    var db = try zq.sqlite.Db.openReadWriteCreate(allocator, ledger_path);
+    try db.exec(allocator, "UPDATE ledger_balances SET balance = balance - 1 WHERE account = 'source'");
+    db.close();
+    try std.testing.expectError(error.InvariantViolated, HandlerInstance.init(allocator, config));
+}
+
+test "protected ledger busy write is retryable after the competing transaction ends" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try durableTestDirPath(allocator, &tmp);
+    const ledger_path = try std.fmt.allocPrint(allocator, "{s}/ledger.sqlite", .{dir});
+    var invariant_buffer: [64]u8 = undefined;
+    const invariant_bytes = try ledgerInvariantBytes(&invariant_buffer, 2);
+    const config = RuntimeConfig{
+        .ledger_path = ledger_path,
+        .invariant_section = invariant_bytes,
+        .invariant_coverage_accepted = true,
+    };
+    const rt = try HandlerInstance.init(allocator, config);
+    defer rt.deinit();
+    try rt.loadHandler(
+        \\import { post } from "zttp:ledger";
+        \\function handler(req) {
+        \\  const result = post({ ledger: "main", currency: "USD", idempotencyKey: "retry", entries: [
+        \\    { account: "a", amount: "7" }, { account: "b", amount: "-7" }
+        \\  ] });
+        \\  return Response.text(result.ok ? "ok" : result.error.tag);
+        \\}
+    , "<ledger-busy>");
+
+    var competing = try zq.sqlite.Db.openReadWriteCreate(allocator, ledger_path);
+    defer competing.close();
+    try competing.exec(allocator, "BEGIN IMMEDIATE");
+
+    var request = try makeTestRequest(allocator, "POST", "/", null);
+    defer request.deinit(allocator);
+    var blocked = try rt.executeHandler(request.asView());
+    defer blocked.deinit();
+    try std.testing.expectEqualStrings("storage_busy", blocked.body);
+
+    try competing.exec(allocator, "ROLLBACK");
+    var retried = try rt.executeHandler(request.asView());
+    defer retried.deinit();
+    try std.testing.expectEqualStrings("ok", retried.body);
+
+    // Reopening validates that the failed attempt left no partial rows and the
+    // retry committed one balanced group.
+    const reopened = try HandlerInstance.init(allocator, config);
+    reopened.deinit();
+}
+
+test "protected ledger refuses schema objects outside the trusted adapter" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try durableTestDirPath(allocator, &tmp);
+    var invariant_buffer: [64]u8 = undefined;
+    const invariant_bytes = try ledgerInvariantBytes(&invariant_buffer, 2);
+    const cases = [_]struct { name: []const u8, ddl: []const u8 }{
+        .{ .name = "trigger", .ddl = "CREATE TRIGGER alter_post AFTER INSERT ON ledger_postings BEGIN UPDATE ledger_balances SET balance = balance + 1; END" },
+        .{ .name = "view", .ddl = "CREATE VIEW leaked_balances AS SELECT * FROM ledger_balances" },
+        .{ .name = "index", .ddl = "CREATE INDEX alternate_balance_path ON ledger_balances(account)" },
+    };
+
+    const view_only_path = try std.fmt.allocPrint(allocator, "{s}/view-only.sqlite", .{dir});
+    var view_only_db = try zq.sqlite.Db.openReadWriteCreate(allocator, view_only_path);
+    try view_only_db.exec(allocator, "CREATE VIEW unexpected AS SELECT 1 AS value");
+    view_only_db.close();
+    try std.testing.expectError(error.InvalidLedgerSchema, HandlerInstance.init(allocator, .{
+        .ledger_path = view_only_path,
+        .invariant_section = invariant_bytes,
+        .invariant_coverage_accepted = true,
+    }));
+
+    for (cases) |case| {
+        const ledger_path = try std.fmt.allocPrint(allocator, "{s}/{s}.sqlite", .{ dir, case.name });
+        const config = RuntimeConfig{
+            .ledger_path = ledger_path,
+            .invariant_section = invariant_bytes,
+            .invariant_coverage_accepted = true,
+        };
+        {
+            const rt = try HandlerInstance.init(allocator, config);
+            rt.deinit();
+        }
+        var db = try zq.sqlite.Db.openReadWriteCreate(allocator, ledger_path);
+        try db.exec(allocator, case.ddl);
+        db.close();
+        try std.testing.expectError(error.InvalidLedgerSchema, HandlerInstance.init(allocator, config));
+    }
+}
+
+test "protected ledger rejects a changed posting hash with balanced rows" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try durableTestDirPath(allocator, &tmp);
+    const path = try std.fs.path.join(allocator, &.{ dir, "ledger.sqlite" });
+    var buffer: [64]u8 = undefined;
+    const spec = try ledgerInvariantBytes(&buffer, 2);
+    const config: RuntimeConfig = .{ .ledger_path = path, .invariant_section = spec, .invariant_coverage_accepted = true };
+    {
+        const rt = try HandlerInstance.init(allocator, config);
+        defer rt.deinit();
+        try rt.loadHandler(
+            \\import { post } from "zttp:ledger";
+            \\function handler(req) {
+            \\  const result = post({ ledger: "main", currency: "USD", idempotencyKey: "hash", entries: [
+            \\    { account: "cash", amount: "1" }, { account: "clearing", amount: "-1" }
+            \\  ] });
+            \\  return Response.text(result.ok ? "posted" : "failed");
+            \\}
+        , "<ledger-hash>");
+        var request = try makeTestRequest(allocator, "GET", "/", null);
+        defer request.deinit(allocator);
+        var response = try rt.executeHandler(request.asView());
+        defer response.deinit();
+        try std.testing.expectEqualStrings("posted", response.body);
+    }
+    var db = try zq.sqlite.Db.openReadWriteCreate(allocator, path);
+    // Change exactly one hex digit. Entries and materialized balances stay intact.
+    try db.exec(allocator, "UPDATE ledger_postings SET content_hash = (CASE substr(content_hash, 1, 1) WHEN '0' THEN '1' ELSE '0' END) || substr(content_hash, 2)");
+    db.close();
+    try std.testing.expectError(error.CorruptLedger, HandlerInstance.init(allocator, config));
+    try std.testing.expectError(error.CorruptLedger, @import("runtime_pool.zig").HandlerPool.init(
+        allocator,
+        config,
+        "function handler(req) { return Response.text('unused'); }",
+        "<unused>",
+        1,
+        0,
+    ));
+}
+
+test "an invariant pool refuses reload and keeps serving its accepted generation" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try durableTestDirPath(allocator, &tmp);
+    const path = try std.fs.path.join(allocator, &.{ dir, "ledger.sqlite" });
+    var buffer: [64]u8 = undefined;
+    const spec = try ledgerInvariantBytes(&buffer, 2);
+    const config: RuntimeConfig = .{
+        .ledger_path = path,
+        .invariant_section = spec,
+        .invariant_coverage_accepted = true,
+    };
+    var conflicting = config;
+    conflicting.trace_file_path = path;
+    try std.testing.expectError(error.ProtectedLedgerPath, @import("runtime_pool.zig").HandlerPool.init(
+        allocator,
+        conflicting,
+        "function handler(req) { return Response.text('unused'); }",
+        "<unused>",
+        0,
+        0,
+    ));
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().openFile(std.testing.io, path, .{}));
+    try std.testing.expectError(error.InvariantPoolRequiresCapacity, @import("runtime_pool.zig").HandlerPool.init(
+        allocator,
+        config,
+        "function handler(req) { return Response.text('unused'); }",
+        "<unused>",
+        0,
+        0,
+    ));
+    var pool = try @import("runtime_pool.zig").HandlerPool.init(allocator, config, "function handler(req) { return Response.text('accepted'); }", "<accepted>", 1, 0);
+    defer pool.deinit();
+    var request = try makeTestRequest(allocator, "GET", "/", null);
+    defer request.deinit(allocator);
+    var before = try pool.executeHandler(request.asView());
+    defer before.deinit();
+    try std.testing.expectEqualStrings("accepted", before.body);
+    try std.testing.expectError(error.InvariantGenerationSwapRefused, pool.reloadHandler(
+        "function handler(req) { return Response.text('unchecked'); }",
+        "<unchecked>",
+    ));
+    var after = try pool.executeHandler(request.asView());
+    defer after.deinit();
+    try std.testing.expectEqualStrings("accepted", after.body);
+}

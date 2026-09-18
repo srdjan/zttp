@@ -260,6 +260,19 @@ pub fn build(b: *std.Build) void {
     const residual_guards_drift_step = b.step("test-residual-guards-drift", "Check residual guard catalogs, evidence, and docs");
     residual_guards_drift_step.dependOn(&residual_guards_drift.step);
 
+    // Application-invariant drift is useful only with compiled evidence from
+    // the kernel, compiler, protected native module, and runtime observer.
+    const invariant_drift = b.addSystemCommand(&.{ "bash", "scripts/check-invariants.sh" });
+    invariant_drift.has_side_effects = true;
+    const invariant_author_test = b.addSystemCommand(&.{ "python3", "scripts/invariant-author.py", "--self-test" });
+    invariant_author_test.has_side_effects = true;
+    const invariant_drift_step = b.step("test-invariant-drift", "Check invariant catalogs, compiled evidence, and docs");
+    invariant_drift_step.dependOn(&invariant_drift.step);
+    invariant_drift_step.dependOn(&invariant_author_test.step);
+    invariant_drift_step.dependOn(&run_proof_checker_tests.step);
+    invariant_drift_step.dependOn(&run_modules_tests.step);
+    invariant_drift_step.dependOn(zts_test_step);
+
     // The trusted-boundary ratchet. Rooted at its own file because nothing in
     // the product imports it: it is a corpus plus assertions, and a file no
     // analyzed root reaches contributes no tests.
@@ -454,6 +467,9 @@ pub fn build(b: *std.Build) void {
         // behavioral evidence compiles and runs. Keep that dependency on the
         // named gate so a broken probe cannot be reported as guard agreement.
         if (root.standin_only) residual_guards_drift_step.dependOn(&host_test_runs[i].step);
+        if (std.mem.eql(u8, root.step, "test-project-config")) {
+            invariant_drift_step.dependOn(&host_test_runs[i].step);
+        }
     }
 
     // Explicit real-model gate. It is intentionally absent from the aggregate
@@ -1148,6 +1164,7 @@ pub fn build(b: *std.Build) void {
     // `scripts/verify.sh` runs it separately.
     attachEmbeddedHandlerStub(unit_tests, runtime_dep, zts_mod);
     const run_unit_tests = b.addRunArtifact(unit_tests);
+    invariant_drift_step.dependOn(&run_unit_tests.step);
 
     // Dev-CLI-side tests (cli_main.zig root) — covers dev_cli and its
     // dependencies (deploy, pi_app wiring, zts_cli delegation).
@@ -1174,6 +1191,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&release_workflow.step);
     test_step.dependOn(&proof_swallow.step);
     test_step.dependOn(&residual_guards_drift.step);
+    test_step.dependOn(invariant_drift_step);
     test_step.dependOn(&zts_layering.step);
     test_step.dependOn(&run_release_check_tests.step);
     test_step.dependOn(&run_release_provenance_tests.step);

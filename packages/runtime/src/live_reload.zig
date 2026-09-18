@@ -79,14 +79,19 @@ fn shouldSkipContract(config: *const LiveReloadConfig) bool {
 const SwapRefusal = enum {
     none,
     installed_generation_is_guarded,
+    installed_generation_has_invariant,
     candidate_computes_a_capability_resource,
 };
 
 fn swapRefusal(
     installed_generation_is_guarded: bool,
+    installed_generation_has_invariant: bool,
     candidate: ?*const HandlerContract,
     candidate_policy_checked: bool,
 ) SwapRefusal {
+    if (installed_generation_has_invariant) {
+        return .installed_generation_has_invariant;
+    }
     if (installed_generation_is_guarded and !candidate_policy_checked) {
         return .installed_generation_is_guarded;
     }
@@ -874,6 +879,7 @@ pub const LiveReloadState = struct {
 
         switch (swapRefusal(
             self.server.generationIsGuarded(),
+            self.server.generationHasInvariant(),
             runtime_contract,
             configured_policy != null,
         )) {
@@ -881,6 +887,13 @@ pub const LiveReloadState = struct {
             .installed_generation_is_guarded => {
                 printReload(
                     "Running artifact guards capability resources at run time. Live swap refused; the old handler stays active.\n",
+                    .{},
+                );
+                return false;
+            },
+            .installed_generation_has_invariant => {
+                printReload(
+                    "Running artifact has accepted application-invariant coverage. Live swap refused; the old handler stays active.\n",
                     .{},
                 );
                 return false;
@@ -1246,20 +1259,20 @@ test "a swap that would strand a guard is refused from either side" {
     defer contract.deinit(allocator);
 
     // Nothing guarded on either side: an ordinary dev swap.
-    try std.testing.expectEqual(SwapRefusal.none, swapRefusal(false, &contract, false));
+    try std.testing.expectEqual(SwapRefusal.none, swapRefusal(false, false, &contract, false));
     // The plain-swap and missing-contract branches, which carry no candidate.
-    try std.testing.expectEqual(SwapRefusal.none, swapRefusal(false, null, false));
+    try std.testing.expectEqual(SwapRefusal.none, swapRefusal(false, false, null, false));
 
     // Without a checked candidate policy, the running generation's guard
     // coverage belongs to the executable being replaced. No candidate, not
     // even a static one or none at all, may take over.
     try std.testing.expectEqual(
         SwapRefusal.installed_generation_is_guarded,
-        swapRefusal(true, &contract, false),
+        swapRefusal(true, false, &contract, false),
     );
     try std.testing.expectEqual(
         SwapRefusal.installed_generation_is_guarded,
-        swapRefusal(true, null, false),
+        swapRefusal(true, false, null, false),
     );
 
     // A candidate that computes a capability resource has no coverage at all,
@@ -1267,32 +1280,44 @@ test "a swap that would strand a guard is refused from either side" {
     contract.env.dynamic = true;
     try std.testing.expectEqual(
         SwapRefusal.candidate_computes_a_capability_resource,
-        swapRefusal(false, &contract, false),
+        swapRefusal(false, false, &contract, false),
     );
     contract.env.dynamic = false;
     contract.egress.dynamic = true;
     try std.testing.expectEqual(
         SwapRefusal.candidate_computes_a_capability_resource,
-        swapRefusal(false, &contract, false),
+        swapRefusal(false, false, &contract, false),
     );
     contract.egress.dynamic = false;
     contract.cache.dynamic = true;
     try std.testing.expectEqual(
         SwapRefusal.candidate_computes_a_capability_resource,
-        swapRefusal(false, &contract, false),
+        swapRefusal(false, false, &contract, false),
     );
     contract.cache.dynamic = false;
     contract.sql.dynamic = true;
     try std.testing.expectEqual(
         SwapRefusal.candidate_computes_a_capability_resource,
-        swapRefusal(false, &contract, false),
+        swapRefusal(false, false, &contract, false),
     );
 
     // A candidate checked against an explicit policy may replace either a
     // static or guarded generation because the checked pair is installed as
     // one pool generation.
-    try std.testing.expectEqual(SwapRefusal.none, swapRefusal(false, &contract, true));
-    try std.testing.expectEqual(SwapRefusal.none, swapRefusal(true, &contract, true));
+    try std.testing.expectEqual(SwapRefusal.none, swapRefusal(false, false, &contract, true));
+    try std.testing.expectEqual(SwapRefusal.none, swapRefusal(true, false, &contract, true));
+
+    // A capability-policy verdict does not cover an application invariant.
+    // This live-reload path has no invariant acceptance step, so it always
+    // keeps the installed invariant generation.
+    try std.testing.expectEqual(
+        SwapRefusal.installed_generation_has_invariant,
+        swapRefusal(true, true, &contract, true),
+    );
+    try std.testing.expectEqual(
+        SwapRefusal.installed_generation_has_invariant,
+        swapRefusal(true, true, null, true),
+    );
 }
 
 test "live reload builds a contract when a capability policy is configured" {

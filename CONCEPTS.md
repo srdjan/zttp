@@ -93,6 +93,23 @@ A residual guard is not a Property. Its three answers stay separate: producer
 property facts, consumer coverage of the guard plan, and the live sink's allow
 or deny decision for one resource under one policy generation.
 
+### Application invariant
+A versioned condition that every committed change to protected application
+state must preserve. The first supported invariant is balance conservation for
+one declared ledger and its currencies.
+
+The author confirms a structured specification. The executable graph binds
+that specification and the protected adapter. The acceptance kernel then
+matches the proof IR, translation witnesses, and ledger calls that the runtime
+finds independently in final bytecode. This produces an Invariant verdict. The
+verdict stays separate from Property and Residual guard verdicts.
+
+The invariant has two parts. Consumer coverage shows that all protected calls
+use the named native boundary. Runtime enforcement makes each posting atomic
+and rejects a posting whose signed entries do not sum to zero. Coverage does
+not convert the native boundary into a static proof. The accepted artifact
+therefore records the native adapter as a trusted dependency.
+
 ### Guarded generation
 One immutable runtime tuple containing the executable root, proof-checked
 contract, residual plan, decoded policy index, and policy generation. Startup

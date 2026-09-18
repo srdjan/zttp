@@ -1307,6 +1307,12 @@ pub const ServerConfig = struct {
 pub const HandlerSource = execution_spec.HandlerSource;
 pub const AppendedPayload = execution_spec.AppendedPayload;
 
+fn validateInvariantRuntimeTopology(config: RuntimeConfig) !void {
+    if (config.invariant_section != null and config.system_config_path != null) {
+        return error.UnsupportedInvariantSystem;
+    }
+}
+
 // ============================================================================
 // Server Implementation
 // ============================================================================
@@ -1514,7 +1520,14 @@ pub const Server = struct {
     /// a new handler standing on the old policy's coverage.
     pub fn generationIsGuarded(self: *const Self) bool {
         const promoted = self.proof_checked orelse return false;
-        return promoted.guards.required > 0;
+        return promoted.guards.required > 0 or promoted.invariants.configured;
+    }
+
+    /// Whether the accepted generation depends on invariant coverage. A live
+    /// reload candidate has no invariant certificate and cannot replace it.
+    pub fn generationHasInvariant(self: *const Self) bool {
+        const promoted = self.proof_checked orelse return false;
+        return promoted.invariants.configured;
     }
 
     /// Replace the runtime contract and reconfigure the proof cache.
@@ -1755,6 +1768,15 @@ pub const Server = struct {
         };
 
         if (!is_production_artifact) {
+            if (self.config.runtime_config.invariant_section != null) {
+                if (!builtin.is_test) {
+                    std.log.err(
+                        "activation: a configured invariant requires an embedded proof certificate; build the project before serving it",
+                        .{},
+                    );
+                }
+                return error.InvariantCertificateRequired;
+            }
             if (self.config.certificate != null and !builtin.is_test) {
                 std.log.info("Proof certificate present but this is not a deployed artifact; running unpromoted", .{});
             }
@@ -1794,6 +1816,7 @@ pub const Server = struct {
                 .signature_verified
             else
                 .absent,
+            .invariant_spec = self.config.runtime_config.invariant_section,
         }, pcc.policy.production);
 
         self.proof_checked = contract_runtime.promote(contract, assessment, policy_digest);
@@ -1813,6 +1836,10 @@ pub const Server = struct {
                 }
             }
             return error.ProofAcceptanceFailed;
+        }
+
+        if (self.config.runtime_config.invariant_section != null and !assessment.invariants.ready()) {
+            return error.InvariantCoverageMissing;
         }
 
         if (!builtin.is_test) {
@@ -1859,6 +1886,7 @@ pub const Server = struct {
             .contract_section = self.config.contract_json,
             .policy_section_digest = policy_section_sha256,
             .identity = self.observedArtifactIdentity(),
+            .invariant_spec = self.config.runtime_config.invariant_section,
         }) catch |err| {
             if (!builtin.is_test) {
                 std.log.err(
@@ -2004,6 +2032,12 @@ pub const Server = struct {
     }
 
     pub fn start(self: *Self) !void {
+        // A system manifest loads independent handler source into child pools.
+        // Those executables are outside the accepted artifact graph and cannot
+        // inherit its invariant authority.
+        try validateInvariantRuntimeTopology(self.config.runtime_config);
+        try @import("runtime_config.zig").validateLedgerOutputPaths(self.allocator, self.config.runtime_config, self.config.security_log_path);
+
         try initIoBackend(&self.io_backend, self.allocator);
         self.evented_ready = true;
         const io = self.io_backend.io();
@@ -2103,6 +2137,8 @@ pub const Server = struct {
         // interpreter's cooperative deadline check is enforced per handler call.
         var pool_rt_config = self.config.runtime_config;
         pool_rt_config.request_timeout_ms = self.config.timeout_ms;
+        pool_rt_config.invariant_coverage_accepted = self.config.runtime_config.invariant_section != null and
+            self.proof_checked != null;
         // Result and optional safety let the interpreter skip checks a handler
         // is proven not to need. That is only sound on a proof-checked
         // contract; an integrity-bound one has made a claim nobody checked.
@@ -2161,7 +2197,7 @@ pub const Server = struct {
         // carry their bit in generated code and the pool combines that input.
         pool_rt_config.runtime_policy_index_required = requiresRuntimePolicyIndex(
             pool_rt_config.runtime_policy_index_required,
-            self.generationIsGuarded(),
+            if (self.proof_checked) |promoted| promoted.guards.required > 0 else false,
         );
 
         var pool_timer = engine.Timer.start() catch null;
@@ -2175,6 +2211,25 @@ pub const Server = struct {
             self.embedded_bytecode,
             self.runtime_dep_bytecodes,
         );
+        // Pool construction prewarms at least one runtime. A configured
+        // invariant cannot reach this point unless the ledger store opened,
+        // validated its baseline, and installed the accepted generation.
+        if (self.proof_checked) |*contract| {
+            if (contract.invariants.configured) {
+                contract.invariants.runtime_readiness = .ready;
+                if (!builtin.is_test) {
+                    std.log.info(
+                        "Invariant ready: coverage {d} of {d} ({d} write, {d} read); native adapter is a trusted assumption; baseline validated and generation installed",
+                        .{
+                            contract.invariants.covered,
+                            contract.invariants.required,
+                            contract.invariants.writes,
+                            contract.invariants.reads,
+                        },
+                    );
+                }
+            }
+        }
         if (pool_rt_config.debug_panic_path) |path| {
             self.pool.?.debug_panic_path = path;
         }
@@ -2850,6 +2905,88 @@ test "server preserves either source or artifact policy-index requirement" {
     try std.testing.expect(requiresRuntimePolicyIndex(true, false));
     try std.testing.expect(requiresRuntimePolicyIndex(false, true));
     try std.testing.expect(requiresRuntimePolicyIndex(true, true));
+}
+
+test "configured invariant refuses an unchecked system topology" {
+    try std.testing.expectError(error.UnsupportedInvariantSystem, validateInvariantRuntimeTopology(.{
+        .invariant_section = "canonical-spec",
+        .system_config_path = "system.json",
+        .invariant_coverage_accepted = true,
+    }));
+    try validateInvariantRuntimeTopology(.{ .system_config_path = "system.json" });
+    try validateInvariantRuntimeTopology(.{ .invariant_section = "canonical-spec" });
+}
+
+test "appended invariant refuses log and SQL collisions before opening files" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try tmp.dir.realPathFileAlloc(std.testing.io, ".", allocator);
+    defer allocator.free(dir);
+    const ledger = try std.fs.path.join(allocator, &.{ dir, "ledger.sqlite" });
+    defer allocator.free(ledger);
+    for ([_][]const u8{ "ledger.sqlite", "ledger.sqlite-wal", "ledger.sqlite-shm", "ledger.sqlite-journal", "LEDGER.SQLITE", "LEDGER.SQLITE-WAL" }) |name| {
+        const output = try std.fmt.allocPrint(allocator, "{s}/./{s}", .{ dir, name });
+        defer allocator.free(output);
+        for (0..4) |kind| {
+            var config: ServerConfig = .{
+                .handler = .{ .appended_payload = .{ .bytecode = "", .dep_bytecodes = &.{} } },
+                .runtime_config = .{ .ledger_path = ledger, .invariant_section = "spec" },
+            };
+            switch (kind) {
+                0 => config.security_log_path = output,
+                1 => config.runtime_config.trace_file_path = output,
+                2 => config.runtime_config.incident_log_path = output,
+                3 => config.runtime_config.sqlite_path = output,
+                else => unreachable,
+            }
+            var server = try Server.init(allocator, config);
+            defer server.deinit();
+            try std.testing.expectError(error.ProtectedLedgerPath, server.start());
+            try std.testing.expect(!server.evented_ready);
+            try std.testing.expect(server.security_logger == null);
+            try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().openFile(std.testing.io, output, .{}));
+        }
+    }
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "ledger.sqlite", .data = "existing store" });
+    var server = try Server.init(allocator, .{
+        .handler = .{ .appended_payload = .{ .bytecode = "", .dep_bytecodes = &.{} } },
+        .runtime_config = .{ .ledger_path = ledger, .invariant_section = "spec" },
+        .security_log_path = ledger,
+    });
+    defer server.deinit();
+    try std.testing.expectError(error.ProtectedLedgerPath, server.start());
+    const unchanged = try engine.readFile(allocator, ledger, 1024);
+    defer allocator.free(unchanged);
+    try std.testing.expectEqualStrings("existing store", unchanged);
+}
+
+test "appended invariant refuses the durable idempotency output directory" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try tmp.dir.realPathFileAlloc(std.testing.io, ".", allocator);
+    defer allocator.free(dir);
+    try tmp.dir.createDir(std.testing.io, "idempotency", .default_dir);
+    const relative = try std.fmt.allocPrint(allocator, "idempotency/idem-{x}.json", .{std.hash.Fnv1a_64.hash("request-key")});
+    defer allocator.free(relative);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = relative, .data = "existing protected store" });
+    const ledger = try std.fs.path.join(allocator, &.{ dir, relative });
+    defer allocator.free(ledger);
+    var server = try Server.init(allocator, .{
+        .handler = .{ .appended_payload = .{ .bytecode = "", .dep_bytecodes = &.{} } },
+        .runtime_config = .{
+            .ledger_path = ledger,
+            .invariant_section = "spec",
+            .durable_oplog_dir = dir,
+        },
+    });
+    defer server.deinit();
+    try std.testing.expectError(error.ProtectedLedgerPath, server.start());
+    try std.testing.expect(!server.evented_ready);
+    const unchanged = try engine.readFile(allocator, ledger, 1024);
+    defer allocator.free(unchanged);
+    try std.testing.expectEqualStrings("existing protected store", unchanged);
 }
 
 fn logContractSummary(contract: *const ValidatedRuntimeContract) void {

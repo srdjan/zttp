@@ -588,6 +588,10 @@ fn parseCommonServeFlag(
         config.runtime_config.queue_actor_enabled = true;
         return true;
     }
+    if (std.mem.eql(u8, arg, "--ledger")) {
+        config.runtime_config.ledger_path = try shared.takeArg(i, argv, error.MissingLedgerPath);
+        return true;
+    }
     if (std.mem.eql(u8, arg, "--outbound-http")) {
         config.runtime_config.outbound_http_enabled = true;
         return true;
@@ -643,6 +647,8 @@ fn parseServeArgs(allocator: std.mem.Allocator, argv: []const []const u8) !Serve
         config.host = cfg.host;
         config.static_dir = cfg.static_dir;
         config.runtime_config.sqlite_path = cfg.sqlite;
+        config.runtime_config.ledger_path = try cfg.resolvedLedgerPath(allocator);
+        config.runtime_config.invariant_section = try cfg.readInvariantSpec(allocator);
         config.runtime_config.durable_oplog_dir = cfg.durable_dir;
         config.runtime_config.system_config_path = cfg.system;
         config.runtime_config.outbound_http_enabled = cfg.outbound_http;
@@ -767,7 +773,10 @@ fn appendedServerConfig(payload: *const self_extract.Payload) ServerConfig {
         // so (like dev/serve) it needs the contract-derived allowlist supplied as
         // `dev_capability_policy`; otherwise applyEmbeddedCapabilityPolicy keeps
         // the allow-all stub and egress/env/cache/sql go unenforced.
-        .runtime_config = .{ .dev_capability_policy = payload.policy },
+        .runtime_config = .{
+            .dev_capability_policy = payload.policy,
+            .invariant_section = payload.invariant_section,
+        },
     };
 }
 
@@ -834,6 +843,7 @@ fn printAppendedHelp() void {
         \\  --durable <DIR>       Enable durable execution with write-ahead oplog
         \\  --workflow-queue      Queue durable workflow dispatch; requires --system and --durable
         \\  --actor-queue         Enable in-memory zttp:queue actor mailboxes
+        \\  --ledger <FILE>       Protected ledger store for the embedded invariant
         \\
     ;
     _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);

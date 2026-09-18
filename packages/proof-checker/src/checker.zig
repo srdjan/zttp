@@ -540,7 +540,8 @@ const Session = struct {
             }
             const emission = try self.certificate.translation.get(supplied.translation_index);
             if (emission.kind != .emission or emission.ir_node != supplied.ir_node or
-                emission.scope_ir_node != supplied.scope_ir_node or emission.code_start != supplied.code_offset)
+                emission.scope_ir_node != supplied.scope_ir_node or supplied.code_offset < emission.code_start or
+                @as(u64, supplied.code_offset) >= @as(u64, emission.code_start) + emission.code_len)
             {
                 return .{ .rejected = reject(.invariant_coverage, .invariant_translation_missing, .{ .ir_node = supplied.ir_node }) };
             }
@@ -1992,6 +1993,23 @@ test "missing and extra invariant witnesses reject" {
     try extra.encodeWith(&witnesses);
     result = check(extra.inputs(), policy_mod.production);
     try testing.expectEqual(verdict.ReasonCode.invariant_member_extra, result.rejection.?.code);
+}
+
+test "invariant call must lie within its full expression emission" {
+    var fixture = try buildInvariantFixture();
+    fixture.translation[1].code_len = 2;
+    fixture.invariant_witnesses[0].code_offset = 3;
+    fixture.observed[0].code_offset = 3;
+    try fixture.encodeWith(&fixture.invariant_witnesses);
+    try testing.expect(check(fixture.inputs(), policy_mod.production).accepted());
+
+    for ([_]u32{ 1, 4 }) |offset| {
+        fixture.invariant_witnesses[0].code_offset = offset;
+        fixture.observed[0].code_offset = offset;
+        try fixture.encodeWith(&fixture.invariant_witnesses);
+        const result = check(fixture.inputs(), policy_mod.production);
+        try testing.expectEqual(verdict.ReasonCode.invariant_translation_missing, result.rejection.?.code);
+    }
 }
 
 test "a forged invariant operation cannot borrow a real call site" {

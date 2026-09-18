@@ -31,6 +31,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    project_config_mod.addImport("zttp_proof_checker", proof_checker_dep.module("zttp_proof_checker"));
     zts_cli_mod.addImport("zts", zts_mod);
     zts_cli_mod.addImport("zttp_proof_checker", proof_checker_dep.module("zttp_proof_checker"));
     zts_cli_mod.addImport("project_config", project_config_mod);

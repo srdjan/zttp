@@ -964,7 +964,8 @@ fn signatureCorpusDigest(allocator: std.mem.Allocator, out_members: *usize) ![32
 /// Then by `zttp:sql`'s `sqlMany` and `sqlExec`, which declared `.object` for
 /// an array of rows and for `{ rowsAffected, lastInsertRowId? }`.
 /// Parameter names are not part of this digest, which covers arity and types.
-const frozen_signature_digest = "07fdba33c857e9cfccba8f9d3c2cedef915232b7cac8501267749eec58caaf7b";
+// Moved 2026-09-18 for the exact protected-ledger post and balance shapes.
+const frozen_signature_digest = "355e23a791742b331e99eeb60f828ad7855c424e71334812f58128b123718c71";
 
 test "frozen signature corpus: the gate has an input before it has a verdict" {
     // The floor. A corpus that is empty, or an emitter that writes nothing,

@@ -42,6 +42,10 @@ pub const RuntimeConfig = struct {
     outbound_max_response_bytes: usize = 1024 * 1024,
     outbound_timeout_ms: u32 = 10_000,
     sqlite_path: ?[]const u8 = null,
+    ledger_path: ?[]const u8 = null,
+    /// Exact consumer-checked bytes, borrowed for the runtime generation.
+    invariant_section: ?[]const u8 = null,
+    invariant_coverage_accepted: bool = false,
     trace_file_path: ?[]const u8 = null,
     /// Opt-in JSONL sink for runtime soundness incidents (`--incident-log`).
     /// `incident_log_path` is the CLI-supplied path; the server opens it once at
@@ -112,6 +116,14 @@ pub const RuntimeConfig = struct {
 
 pub fn openTraceFile(allocator: std.mem.Allocator, path: []const u8) !std.c.fd_t {
     return zq.file_io.openAppend(allocator, path);
+}
+
+pub fn validateLedgerOutputPaths(allocator: std.mem.Allocator, config: RuntimeConfig, security_log_path: ?[]const u8) !void {
+    const ledger = config.ledger_path orelse return;
+    for ([_]?[]const u8{ security_log_path, config.trace_file_path, config.incident_log_path, config.sqlite_path }) |path| {
+        if (path) |output| try zq.module_binding.validateLedgerOutputPath(allocator, ledger, output);
+    }
+    if (config.durable_oplog_dir) |directory| try zq.module_binding.validateLedgerOutputDirectory(allocator, ledger, directory);
 }
 
 fn openOplogWritable(allocator: std.mem.Allocator, path: []const u8, truncate: bool) !std.c.fd_t {

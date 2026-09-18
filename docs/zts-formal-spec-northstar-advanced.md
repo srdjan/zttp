@@ -183,8 +183,8 @@ semantics. Twelve IR nodes and seven opcodes are specified directly, one
 opcode path is translation-validated, and the remaining reachable items are
 explicitly trusted with narrow reasons.
 
-The deployed artifact now carries a schema-3 certificate for
-`zttp_pcc_v2`. The leaf consumer reconstructs the required obligations, binds
+The deployed artifact now carries a schema-4 certificate for
+`zttp_pcc_v3`. The leaf consumer reconstructs the required obligations, binds
 the complete executable graph and authority-bearing certificate sections, and
 checks static proof and residual guard policy before the process serves.
 Assurance is deliberately staged:

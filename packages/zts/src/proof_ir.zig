@@ -46,6 +46,9 @@ pub const Tag = enum(u16) {
     /// resolve. It contributes nothing to totality and exists so the consumer
     /// can count the guarded operations itself.
     capability_call = 7,
+    /// A call to one of the closed protected-ledger operations. `aux` is the
+    /// consumer catalog row: zero for `post`, one for `balance`.
+    ledger_call = 8,
 };
 
 /// Mirrors `proof_system.Rule` in the acceptance kernel, totality half.
@@ -65,9 +68,15 @@ pub const Rule = enum(u16) {
 pub const Resolver = struct {
     context: *const anyopaque,
     resolve: *const fn (*const anyopaque, NodeIndex) ?u32,
+    resolve_ledger: ?*const fn (*const anyopaque, NodeIndex) ?u32 = null,
 
     fn call(self: Resolver, node: NodeIndex) ?u32 {
         return self.resolve(self.context, node);
+    }
+
+    fn ledger(self: Resolver, node: NodeIndex) ?u32 {
+        const resolve_ledger = self.resolve_ledger orelse return null;
+        return resolve_ledger(self.context, node);
     }
 };
 
@@ -81,8 +90,8 @@ pub const Node = struct {
     /// The parser IR node this came from. Translation witnesses are recorded
     /// against parser indices, so this is how they attach.
     source: NodeIndex,
-    /// The consumer catalog row for a `capability_call`. Zero for every other
-    /// tag.
+    /// The consumer catalog row for a `capability_call` or `ledger_call`. Zero
+    /// for every other tag.
     aux: u32 = 0,
 };
 
@@ -148,15 +157,15 @@ const Lowerer = struct {
     /// was, or every literal-only artifact's proof identity would move. So the
     /// descent below expression forms happens only along paths that lead to
     /// one.
-    fn containsGuarded(self: *Lowerer, index: NodeIndex) bool {
+    fn containsRelevantCall(self: *Lowerer, index: NodeIndex) bool {
         if (index == null_node) return false;
         if (self.resolver == null) return false;
-        if (self.guardedIndex(index) != null) return true;
+        if (self.guardedIndex(index) != null or self.ledgerIndex(index) != null) return true;
         var found = false;
         self.forEachSubNode(index, &found, struct {
             fn visit(ctx: *bool, lowerer: *Lowerer, child: NodeIndex) void {
                 if (ctx.*) return;
-                if (lowerer.containsGuarded(child)) ctx.* = true;
+                if (lowerer.containsRelevantCall(child)) ctx.* = true;
             }
         }.visit);
         return found;
@@ -167,6 +176,15 @@ const Lowerer = struct {
         const tag = self.view.getTag(index) orelse return null;
         return switch (tag) {
             .call, .method_call => resolver.call(index),
+            else => null,
+        };
+    }
+
+    fn ledgerIndex(self: *Lowerer, index: NodeIndex) ?u32 {
+        const resolver = self.resolver orelse return null;
+        const tag = self.view.getTag(index) orelse return null;
+        return switch (tag) {
+            .call, .method_call => resolver.ledger(index),
             else => null,
         };
     }
@@ -329,7 +347,7 @@ const Lowerer = struct {
                 if (stmt.else_branch != null_node) {
                     try branch.children.append(self.allocator, try self.build(stmt.else_branch));
                 }
-                if (!self.containsGuarded(stmt.condition)) break :blk branch;
+                if (!self.containsRelevantCall(stmt.condition)) break :blk branch;
 
                 // Keep the branch's two-arm totality shape intact. The outer
                 // sequence carries only the guarded condition path, which adds
@@ -376,7 +394,7 @@ const Lowerer = struct {
     }
 
     fn appendGuarded(self: *Lowerer, parent: *Tree, child: NodeIndex) Error!void {
-        if (child == null_node or !self.containsGuarded(child)) return;
+        if (child == null_node or !self.containsRelevantCall(child)) return;
         try parent.children.append(self.allocator, try self.build(child));
     }
 
@@ -386,6 +404,14 @@ const Lowerer = struct {
     /// just the paths that lead to one. A handler with no guarded call gets the
     /// leaf it got before, so its proof identity does not move.
     fn leaf(self: *Lowerer, tag: Tag, index: NodeIndex, kind: u16) Error!Tree {
+        if (self.ledgerIndex(index)) |catalog_index| {
+            return .{
+                .tag = .ledger_call,
+                .source = index,
+                .leaf_kind = kind,
+                .aux = catalog_index,
+            };
+        }
         if (self.guardedIndex(index)) |catalog_index| {
             return .{
                 .tag = .capability_call,
@@ -394,7 +420,7 @@ const Lowerer = struct {
                 .aux = catalog_index,
             };
         }
-        if (!self.containsGuarded(index)) {
+        if (!self.containsRelevantCall(index)) {
             return .{ .tag = tag, .source = index, .leaf_kind = kind };
         }
 
@@ -408,7 +434,7 @@ const Lowerer = struct {
             fn visit(ctx: *@This(), lowerer: *Lowerer, child: NodeIndex) void {
                 if (ctx.failed != null) return;
                 if (child == null_node) return;
-                if (!lowerer.containsGuarded(child)) return;
+                if (!lowerer.containsRelevantCall(child)) return;
                 const built = lowerer.build(child) catch |err| {
                     ctx.failed = err;
                     return;
@@ -547,7 +573,7 @@ pub fn deriveTotality(
             .function => firstChildTotal(total, node),
             .sequence => anyChildTotal(total, node),
             .branch => node.child_count == 2 and allChildrenTotal(total, node),
-            .loop_node, .plain, .capability_call => false,
+            .loop_node, .plain, .capability_call, .ledger_call => false,
         };
         for (declared) |declared_id| {
             if (declared_id == node.id) total[index] = true;
@@ -589,7 +615,7 @@ pub fn ruleAt(proof: ProofIr, total: []const bool, id: u32) ?Rule {
         else
             null,
         .loop_node => .loop_never_total,
-        .function, .plain, .capability_call => null,
+        .function, .plain, .capability_call, .ledger_call => null,
     };
 }
 
@@ -636,6 +662,9 @@ pub const Evidence = struct {
 /// A translation witness whose subject is a proof-IR node rather than a parser
 /// node.
 pub const Emission = struct {
+    /// Pre-order function position in the serialized bytecode stream. The
+    /// runtime enumerates the same final function buffers independently.
+    function_ordinal: u32,
     /// The function whose code buffer this offset is measured in, as a proof-IR
     /// node id. The module's own function is node 0.
     scope: u32,
@@ -690,7 +719,6 @@ pub fn buildEvidence(
 
     if (recorder) |rec| {
         for (rec.scopes.items, 0..) |scope, scope_index| {
-            _ = scope_index;
             // The module's buffer is the proof IR's root; a nested function's
             // buffer is the node that function lowered to.
             const scope_id: u32 = if (scope.node == translation_witness.module_scope)
@@ -706,6 +734,7 @@ pub fn buildEvidence(
             for (scope.emissions.items) |emission| {
                 const id = proof.nodeFor(emission.node) orelse continue;
                 try emissions.append(allocator, .{
+                    .function_ordinal = @intCast(scope_index),
                     .scope = scope_id,
                     .node = id,
                     .code_start = emission.code_start,
@@ -1143,6 +1172,20 @@ const NeverResolver = struct {
     }
 };
 
+const EveryLedgerCallResolver = struct {
+    fn never(_: *const anyopaque, _: NodeIndex) ?u32 {
+        return null;
+    }
+
+    fn ledger(_: *const anyopaque, _: NodeIndex) ?u32 {
+        return 0;
+    }
+
+    fn resolver(self: *const EveryLedgerCallResolver) Resolver {
+        return .{ .context = self, .resolve = never, .resolve_ledger = ledger };
+    }
+};
+
 test "every tag in the alphabet is reachable from real source" {
     const allocator = testing.allocator;
     var seen = std.EnumSet(Tag).initEmpty();
@@ -1190,6 +1233,19 @@ test "every tag in the alphabet is reachable from real source" {
     , guarded_resolver.resolver());
     defer guarded.deinit();
     for (guarded.proof.nodes) |node| seen.insert(node.tag);
+
+    // Ledger calls use a separate closed catalog and therefore a separate
+    // resolver entry. A real import and call keeps this alphabet reachability
+    // check tied to source that the parser accepts.
+    var ledger_resolver = EveryLedgerCallResolver{};
+    var ledger = try parseAndLowerWith(allocator,
+        \\import { post } from "zttp:ledger";
+        \\function handler(req) {
+        \\  return post(req);
+        \\}
+    , ledger_resolver.resolver());
+    defer ledger.deinit();
+    for (ledger.proof.nodes) |node| seen.insert(node.tag);
 
     // An alphabet member no source reaches is a rule that never runs. If a tag
     // is added here, a source that produces it belongs above.

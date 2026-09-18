@@ -1738,8 +1738,19 @@ const GuardResolver = struct {
         return index;
     }
 
+    fn resolveLedger(context: *const anyopaque, node: zts.parser.ir.NodeIndex) ?u32 {
+        const self: *const GuardResolver = @ptrCast(@alignCast(context));
+        const checker = self.checker orelse return null;
+        const call = self.view.getCall(node) orelse return null;
+        const imported = checker.importedFunctionForCallee(call.callee) orelse return null;
+        if (!std.mem.eql(u8, imported.module, "zttp:ledger")) return null;
+        if (std.mem.eql(u8, imported.name, "post")) return 0;
+        if (std.mem.eql(u8, imported.name, "balance")) return 1;
+        return null;
+    }
+
     fn resolver(self: *const GuardResolver) zts.ProofResolver {
-        return .{ .context = self, .resolve = resolve };
+        return .{ .context = self, .resolve = resolve, .resolve_ledger = resolveLedger };
     }
 };
 

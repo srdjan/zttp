@@ -46,11 +46,12 @@ repository is in scope.
   one directory. What it does not re-derive is published in
   `docs/verification.md` and pinned by `scripts/check-proof-ratchet.sh`.
 - A residual guard is consumer-owned runtime authority, not a static proof.
-  Certificate schema 3 binds the exact serialized runtime policy and residual
-  plan into the executable graph. The kernel reconstructs exact coverage before
-  startup. The authoritative sink then decides the actual resource under the
-  request's pinned policy generation. Producer Properties, guard coverage, and
-  live allow or deny outcomes never substitute for one another.
+  Certificate schema 4 binds the exact serialized runtime policy, residual
+  plan, invariant specification, and protected adapter into the executable
+  graph. The kernel reconstructs exact coverage before startup. The
+  authoritative sink then decides the actual resource under the request's
+  pinned policy generation. Producer Properties, guard coverage, and live
+  allow or deny outcomes never substitute for one another.
 - Developer tools can read and write the local workspace. They are not a
   sandbox boundary; use normal source-control review for generated changes.
 
@@ -97,7 +98,8 @@ repository is in scope.
   then authorizes the resolved address scope before opening a socket. Every
   retry repeats both checks under one pinned generation.
 - Production starts no pool, prewarms no runtime, and serves no request until
-  schema 3 and `zttp_pcc_v2` proof acceptance includes exact guard coverage.
+  schema 4 and `zttp_pcc_v3` proof acceptance includes exact guard and invariant
+  coverage.
   Guarded generations cannot enter the certificate-free live-swap path.
 - A proof bundle is untrusted input. `zttp proofs verify` accepts only the
   `contract`, `binary`, `certificate`, and `replay` components, requires a `contract`, and
@@ -105,7 +107,7 @@ repository is in scope.
   sha256. Every path segment is opened without following symlinks, so a
   component that resolves outside the bundle directory is refused rather than
   hashed.
-- Self-extract format 3, `zttp-attest-v4`, and `zttp-bundle-3` are equality
+- Self-extract format 4, `zttp-attest-v4`, and `zttp-bundle-3` are equality
   checks. Immediate predecessors are refused with rebuild guidance.
 
 ## Known Footguns
