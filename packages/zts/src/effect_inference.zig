@@ -905,6 +905,23 @@ pub const Analyzer = struct {
             }
             if (!changed) return;
         }
+
+        // The loop ran out of iterations with the fixed point still moving, so
+        // every row here is a snapshot of an unfinished propagation: a callee
+        // effect that had not yet reached its caller is absent from the
+        // caller's row, and an absent effect reads as "does not have it". That
+        // is the shape a proof is read off, so it surfaces as a pass rather
+        // than as a failure.
+        //
+        // `lower_bound` is the existing word for "this row under-reports, so
+        // nothing may read it as an over-approximation", which is exactly the
+        // state a non-converged pass leaves behind. Marking every row refuses
+        // each capsule property instead of answering it from a row that never
+        // finished. Reaching this is not expected - convergence is bounded by
+        // the longest acyclic chain plus one - but the bound is an assumption
+        // about input shape, and an assumption that silently degrades a verdict
+        // is the one that has to be made loud.
+        for (self.functions.items) |*fe| fe.row.lower_bound = true;
     }
 
     fn detectRecursion(self: *Analyzer) !void {
@@ -1094,6 +1111,63 @@ test "transitive non-determinism flows through callers" {
     const outer = analyzer.lookup("outer") orelse return error.FunctionNotFound;
     try testing.expect(!outer.deterministic);
     try testing.expect(!outer.pure);
+}
+
+test "a call chain too deep to converge marks every row a lower bound" {
+    // `propagate` is a monotone join run to a fixed point, bounded by
+    // `max_iterations`. It used to fall out of that loop silently, leaving
+    // rows mid-propagation: an effect that had not yet climbed to a caller is
+    // simply absent from the caller's row, and absent reads as "does not have
+    // it". Every capsule property is read off these fields, so the silence
+    // surfaced as a pass rather than as a failure.
+    //
+    // Twenty functions, declared caller-first, so each iteration lifts the
+    // effect exactly one hop and sixteen iterations cannot cross twenty. `f1`
+    // transitively reaches `Date.now`, so answering `deterministic` for it
+    // would be wrong; the row must instead refuse to be read.
+    const allocator = testing.allocator;
+    var atoms = atom_table.AtomTable.init(allocator);
+    defer atoms.deinit();
+    var parser = try JsParser.init(allocator,
+        \\function f1() { return f2(); }
+        \\function f2() { return f3(); }
+        \\function f3() { return f4(); }
+        \\function f4() { return f5(); }
+        \\function f5() { return f6(); }
+        \\function f6() { return f7(); }
+        \\function f7() { return f8(); }
+        \\function f8() { return f9(); }
+        \\function f9() { return f10(); }
+        \\function f10() { return f11(); }
+        \\function f11() { return f12(); }
+        \\function f12() { return f13(); }
+        \\function f13() { return f14(); }
+        \\function f14() { return f15(); }
+        \\function f15() { return f16(); }
+        \\function f16() { return f17(); }
+        \\function f17() { return f18(); }
+        \\function f18() { return f19(); }
+        \\function f19() { return f20(); }
+        \\function f20() { return Date.now(); }
+    );
+    parser.setAtomTable(&atoms);
+    defer parser.deinit();
+    const root = try parser.parse();
+    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    var analyzer = Analyzer.init(allocator, view, &atoms);
+    defer analyzer.deinit();
+    try analyzer.analyze(root);
+
+    const f1 = analyzer.lookup("f1") orelse return error.FunctionNotFound;
+    // The claim is the marker, not "f1 differs from f20": a run in which the
+    // chain converged after all would also show a difference, and would be
+    // fine. What must never happen is an unconverged row answering a property.
+    try testing.expect(f1.lower_bound);
+
+    // And the deepest function, which needed no propagation at all, still
+    // carries the effect it reads directly.
+    const f20 = analyzer.lookup("f20") orelse return error.FunctionNotFound;
+    try testing.expect(!f20.deterministic);
 }
 
 test "self-recursive function is flagged" {
