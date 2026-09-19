@@ -422,13 +422,139 @@ pub fn digest(bytes: []const u8) [32]u8 {
     return hasher.finalResult();
 }
 
+// ---------------------------------------------------------------------------
+// The native adapter the consumer expects to be linked
+// ---------------------------------------------------------------------------
+
 /// The native adapter identity the consumer expects for v1.
 pub const adapter_identity = "zttp:ledger/native-adapter-v1";
 
+/// The store schema the expected adapter writes and validates. This is the
+/// adapter's own persistence version, not an invariant wire schema.
+pub const adapter_store_schema_version: i64 = 1;
+
+/// One predicate a linked adapter must enforce, named by the catalog ordinal
+/// of the kind it discharges.
+pub const AdapterPredicate = struct {
+    kind_ordinal: u16,
+    predicate_version: u16,
+};
+
+/// What the consumer requires a linked native adapter to be.
+///
+/// The producer's runtime fills the same shape from the adapter it actually
+/// linked and hashes it with the encoder below. The two values then meet as
+/// digests in the executable graph. Neither side reads the other, so a
+/// disagreement is visible.
+///
+/// This carries no invariant wire schema. The adapter does not decode a
+/// specification - the consumer does - so a wire schema stated here would be
+/// compared against a copy of itself, and the comparison would mean nothing.
+/// The wire schemas are bound where they belong: in the specification digest,
+/// which carries its own per-schema domain.
+pub const AdapterManifest = struct {
+    identity: []const u8,
+    store_schema_version: i64,
+    /// Ascending by `kind_ordinal`, without repeats. The encoding is
+    /// order-sensitive, so a producer that reorders its rows is a producer
+    /// whose digest does not match.
+    predicates: []const AdapterPredicate,
+    /// The export names the protected module publishes, in binding order.
+    exports: []const []const u8,
+};
+
+/// Every kind the closed catalog names must be enforced by the linked adapter,
+/// at the predicate version the catalog row states. Derived from `kind_table`
+/// rather than retyped, so a kind added there without an adapter row moves
+/// this digest and refuses the artifact instead of passing unnoticed.
+const expected_predicates = blk: {
+    const fields = @typeInfo(Kind).@"enum".fields;
+    var rows: [fields.len]AdapterPredicate = undefined;
+    for (fields, 0..) |field, index| {
+        const row = kind_table.get(@as(Kind, @enumFromInt(field.value)));
+        rows[index] = .{
+            .kind_ordinal = row.wire_ordinal,
+            .predicate_version = row.predicate_version,
+        };
+    }
+    // Declaration order is not canonical order. Sorting here means the encoded
+    // bytes depend on the ordinals, never on where a member sits in the enum.
+    var index: usize = 1;
+    while (index < rows.len) : (index += 1) {
+        var position = index;
+        while (position > 0 and rows[position - 1].kind_ordinal > rows[position].kind_ordinal) : (position -= 1) {
+            const carried = rows[position - 1];
+            rows[position - 1] = rows[position];
+            rows[position] = carried;
+        }
+    }
+    const frozen = rows;
+    break :blk frozen;
+};
+
+/// The exports the protected module must publish, in binding order. Written
+/// out rather than derived: this file is the consumer's independent statement
+/// of what it expects, and a list read from the producer could not disagree.
+const expected_exports = [_][]const u8{ "post", "balance" };
+
+pub const expected_adapter_manifest = AdapterManifest{
+    .identity = adapter_identity,
+    .store_schema_version = adapter_store_schema_version,
+    .predicates = &expected_predicates,
+    .exports = &expected_exports,
+};
+
+/// The adapter manifest's own digest domain.
+///
+/// Separate from `digest_domain`: that one names a specification document, and
+/// this one names an adapter. A shared domain would let a value hashed for one
+/// purpose answer a question asked about the other.
+pub const adapter_digest_domain = "zttp-invariant-adapter-v1";
+
+fn updateInt(comptime T: type, hasher: *std.crypto.hash.sha2.Sha256, value: T) void {
+    var buffer: [@divExact(@typeInfo(T).int.bits, 8)]u8 = undefined;
+    std.mem.writeInt(T, &buffer, value, .little);
+    hasher.update(&buffer);
+}
+
+fn updateLengthPrefixed(hasher: *std.crypto.hash.sha2.Sha256, bytes: []const u8) void {
+    updateInt(u64, hasher, bytes.len);
+    hasher.update(bytes);
+}
+
+/// Hash one adapter manifest canonically.
+///
+/// Every variable-length field is length-delimited and every count precedes
+/// its rows, so two manifests that differ anywhere encode to different bytes:
+/// no concatenation of one field's value can be read as another's.
+///
+/// What a matching digest establishes: the linked adapter names the same
+/// identity, writes the same store schema, publishes the same exports, and
+/// dispatches a predicate for each expected kind at the expected version. What
+/// it does not establish: that any one of those predicates is correct. A row
+/// whose function decides the wrong thing hashes exactly like a row whose
+/// function decides the right thing. That gap is closed by the predicate's own
+/// tests, never here.
+pub fn adapterManifestDigest(manifest: AdapterManifest) [32]u8 {
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    hasher.update(adapter_digest_domain);
+    updateLengthPrefixed(&hasher, manifest.identity);
+    updateInt(u64, &hasher, @bitCast(manifest.store_schema_version));
+    updateInt(u64, &hasher, manifest.predicates.len);
+    for (manifest.predicates) |row| {
+        updateInt(u16, &hasher, row.kind_ordinal);
+        updateInt(u16, &hasher, row.predicate_version);
+    }
+    updateInt(u64, &hasher, manifest.exports.len);
+    for (manifest.exports) |name| updateLengthPrefixed(&hasher, name);
+    return hasher.finalResult();
+}
+
+/// The digest of the adapter this consumer expects. The graph member it is
+/// compared against is computed by the producer from the adapter it linked,
+/// through `adapterManifestDigest` above.
 pub fn adapterDigest() [32]u8 {
-    var out: [32]u8 = undefined;
-    std.crypto.hash.sha2.Sha256.hash(adapter_identity, &out, .{});
-    return out;
+    return adapterManifestDigest(expected_adapter_manifest);
 }
 
 pub const Operation = enum(u8) {
@@ -574,12 +700,134 @@ test "the v1 specification digest of the canonical fixture is pinned" {
 }
 
 test "the native adapter digest is pinned" {
-    // Unlike `digest`, this hash carries no domain prefix. The literal pins that
-    // too, so adding one later is a visible change rather than a silent one.
+    // A literal, not a recomputation. This value is an artifact-visible
+    // commitment: every certificate names it, so a change here refuses every
+    // certificate built before the change. That must be a deliberate edit of
+    // this line rather than a digest that quietly followed the table.
     try std.testing.expectEqualStrings(
-        "38190d83549a2f159b8c917b0a614856915358920ea73e831231a889db512c67",
+        "6f0eeb5513984cda9f4b906ada25a1c3b41bac809fef197ccc1541d37cb04ab8",
         &std.fmt.bytesToHex(adapterDigest(), .lower),
     );
+}
+
+test "the expected adapter manifest names every catalog kind at its stated predicate version" {
+    // The manifest is the consumer's demand on a linked adapter. A kind the
+    // catalog names but the manifest omits is a kind no adapter has to enforce.
+    try std.testing.expectEqual(
+        @typeInfo(Kind).@"enum".fields.len,
+        expected_adapter_manifest.predicates.len,
+    );
+    inline for (@typeInfo(Kind).@"enum".fields) |field| {
+        const kind: Kind = @enumFromInt(field.value);
+        const row = kindInfo(kind);
+        var found = false;
+        for (expected_adapter_manifest.predicates) |entry| {
+            if (entry.kind_ordinal != row.wire_ordinal) continue;
+            found = true;
+            try std.testing.expectEqual(row.predicate_version, entry.predicate_version);
+        }
+        try std.testing.expect(found);
+    }
+    var previous: u16 = 0;
+    for (expected_adapter_manifest.predicates) |entry| {
+        try std.testing.expect(entry.kind_ordinal > previous);
+        previous = entry.kind_ordinal;
+    }
+    try std.testing.expectEqualStrings(adapter_identity, expected_adapter_manifest.identity);
+    try std.testing.expectEqual(adapter_store_schema_version, expected_adapter_manifest.store_schema_version);
+    try std.testing.expect(expected_adapter_manifest.exports.len > 0);
+}
+
+test "the adapter digest hashes under its own domain and not the specification domain" {
+    // Both domains are spelled out here rather than read from the constants,
+    // so a change to either shows up as a disagreement with this test instead
+    // of moving both sides together.
+    var under_adapter_domain = std.crypto.hash.sha2.Sha256.init(.{});
+    under_adapter_domain.update("zttp-invariant-adapter-v1");
+    updateLengthPrefixed(&under_adapter_domain, expected_adapter_manifest.identity);
+    updateInt(u64, &under_adapter_domain, @bitCast(expected_adapter_manifest.store_schema_version));
+    updateInt(u64, &under_adapter_domain, expected_adapter_manifest.predicates.len);
+    for (expected_adapter_manifest.predicates) |row| {
+        updateInt(u16, &under_adapter_domain, row.kind_ordinal);
+        updateInt(u16, &under_adapter_domain, row.predicate_version);
+    }
+    updateInt(u64, &under_adapter_domain, expected_adapter_manifest.exports.len);
+    for (expected_adapter_manifest.exports) |name| updateLengthPrefixed(&under_adapter_domain, name);
+    try std.testing.expectEqualSlices(u8, &under_adapter_domain.finalResult(), &adapterDigest());
+
+    // The bare hash of the identity string was this function's whole body
+    // before the manifest existed. It must no longer be the answer.
+    var bare: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(adapter_identity, &bare, .{});
+    try std.testing.expect(!std.mem.eql(u8, &bare, &adapterDigest()));
+
+    // And the specification domain must not produce it either.
+    var under_spec_domain = std.crypto.hash.sha2.Sha256.init(.{});
+    under_spec_domain.update("zttp-invariant-spec-v1");
+    under_spec_domain.update(adapter_identity);
+    try std.testing.expect(!std.mem.eql(u8, &under_spec_domain.finalResult(), &adapterDigest()));
+}
+
+test "a manifest that drops, reversions, or renames anything digests differently" {
+    // A copy of the expected table, mutated one field at a time. Without this
+    // the encoder could ignore a field and every comparison built on it would
+    // still report agreement.
+    const expected = adapterDigest();
+    try std.testing.expectEqualSlices(u8, &expected, &adapterManifestDigest(expected_adapter_manifest));
+
+    if (expected_adapter_manifest.predicates.len > 0) {
+        const short = AdapterManifest{
+            .identity = expected_adapter_manifest.identity,
+            .store_schema_version = expected_adapter_manifest.store_schema_version,
+            .predicates = expected_adapter_manifest.predicates[0 .. expected_adapter_manifest.predicates.len - 1],
+            .exports = expected_adapter_manifest.exports,
+        };
+        try std.testing.expect(!std.mem.eql(u8, &expected, &adapterManifestDigest(short)));
+
+        var reversioned: [1]AdapterPredicate = .{expected_adapter_manifest.predicates[0]};
+        reversioned[0].predicate_version += 1;
+        const moved = AdapterManifest{
+            .identity = expected_adapter_manifest.identity,
+            .store_schema_version = expected_adapter_manifest.store_schema_version,
+            .predicates = &reversioned,
+            .exports = expected_adapter_manifest.exports,
+        };
+        try std.testing.expect(!std.mem.eql(u8, &expected, &adapterManifestDigest(moved)));
+    }
+
+    const other_schema = AdapterManifest{
+        .identity = expected_adapter_manifest.identity,
+        .store_schema_version = expected_adapter_manifest.store_schema_version + 1,
+        .predicates = expected_adapter_manifest.predicates,
+        .exports = expected_adapter_manifest.exports,
+    };
+    try std.testing.expect(!std.mem.eql(u8, &expected, &adapterManifestDigest(other_schema)));
+
+    const other_identity = AdapterManifest{
+        .identity = "zttp:ledger/some-other-adapter",
+        .store_schema_version = expected_adapter_manifest.store_schema_version,
+        .predicates = expected_adapter_manifest.predicates,
+        .exports = expected_adapter_manifest.exports,
+    };
+    try std.testing.expect(!std.mem.eql(u8, &expected, &adapterManifestDigest(other_identity)));
+
+    const other_exports = AdapterManifest{
+        .identity = expected_adapter_manifest.identity,
+        .store_schema_version = expected_adapter_manifest.store_schema_version,
+        .predicates = expected_adapter_manifest.predicates,
+        .exports = &.{"post"},
+    };
+    try std.testing.expect(!std.mem.eql(u8, &expected, &adapterManifestDigest(other_exports)));
+
+    // Length delimiting, not concatenation: "post" then "balance" must not
+    // hash like the single name "postbalance".
+    const glued = AdapterManifest{
+        .identity = expected_adapter_manifest.identity,
+        .store_schema_version = expected_adapter_manifest.store_schema_version,
+        .predicates = expected_adapter_manifest.predicates,
+        .exports = &.{"postbalance"},
+    };
+    try std.testing.expect(!std.mem.eql(u8, &expected, &adapterManifestDigest(glued)));
 }
 
 // ---------------------------------------------------------------------------

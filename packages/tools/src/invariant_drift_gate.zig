@@ -58,6 +58,9 @@ const Input = enum {
     native_bridge,
     observer,
     producer,
+    activation,
+    adapter_bridge,
+    runtime_install,
     artifact_graph,
     checker_tests,
     config_tests,
@@ -77,6 +80,9 @@ const paths = std.EnumArray(Input, []const u8).init(.{
     .native_bridge = "packages/zts/src/modules/data/ledger.zig",
     .observer = "packages/runtime/src/invariant_observer.zig",
     .producer = "packages/runtime/src/proof_certificate.zig",
+    .activation = "packages/runtime/src/proof_activation.zig",
+    .adapter_bridge = "packages/runtime/src/invariant_adapter.zig",
+    .runtime_install = "packages/runtime/src/handler_instance.zig",
     .artifact_graph = "packages/runtime/src/artifact_graph.zig",
     .checker_tests = "packages/proof-checker/src/checker.zig",
     .config_tests = "packages/tools/src/invariant_config.zig",
@@ -96,6 +102,9 @@ const evidence = [_]Evidence{
     .{ .input = .checker_tests, .marker = "test \"missing and extra invariant witnesses reject\"" },
     .{ .input = .checker_tests, .marker = "test \"a forged invariant operation cannot borrow a real call site\"" },
     .{ .input = .artifact_graph, .marker = "test \"the inventory covers every executable and authority-bearing member\"" },
+    .{ .input = .artifact_graph, .marker = "test \"an invariant specification with no linked adapter digest is refused\"" },
+    .{ .input = .adapter_bridge, .marker = "test \"the linked adapter manifest digests to what the acceptance kernel expects\"" },
+    .{ .input = .adapter_bridge, .marker = "test \"an adapter manifest missing a predicate row is refused\"" },
     .{ .input = .native, .marker = "test \"posting groups require exact zero sum using i128 accumulation\"" },
     .{ .input = .config_tests, .marker = "test \"confirmed invariant JSON canonicalizes currencies and rejects weakened templates\"" },
     .{ .input = .author_src, .marker = "test \"the kind listing names every catalog member with its required status\"" },
@@ -139,6 +148,16 @@ const Check = enum {
     kernel_adapter_digest_empty,
     bridge_not_adapted,
     graph_adapter_member,
+    native_post_dispatch,
+    native_baseline_dispatch,
+    native_manifest_derivation,
+    native_manifest_empty,
+    adapter_manifest_mismatch,
+    graph_adapter_from_kernel,
+    producer_adapter_binding,
+    activation_adapter_binding,
+    bridge_reads_native,
+    install_order,
     docs_block_missing,
     docs_rows_empty,
     docs_catalog_mismatch,
@@ -211,6 +230,18 @@ const KindRow = struct {
 
 const NativeExport = struct { name: []const u8, effect: []const u8 };
 
+/// One predicate row of an adapter manifest, in the gate's own type. The
+/// linked adapter and the acceptance kernel each fill one of these, from
+/// packages that do not import each other.
+const ManifestRow = struct { kind_ordinal: u16, predicate_version: u16 };
+
+const ManifestView = struct {
+    identity: []const u8,
+    store_schema_version: i64,
+    predicates: []ManifestRow,
+    exports: [][]const u8,
+};
+
 /// What the confirmed-template boundary does with one kind name, measured by
 /// running its parser rather than by scanning its source for a string literal.
 /// A text proxy would stop meaning anything the day that file resolves the name
@@ -266,6 +297,13 @@ const Model = struct {
     schema_version_v2: u16,
     digest_domains: DigestDomains,
     adapter_digest: [32]u8,
+    /// The manifest of the ledger adapter this gate binary linked, imported as
+    /// a value through `zts`. It is the producer's side of the adapter member.
+    native_manifest: ManifestView,
+    /// The manifest the acceptance kernel expects, imported as a value. It is
+    /// the consumer's side. The gate hashes both with the kernel's encoder and
+    /// compares, which is the same comparison acceptance makes.
+    expected_manifest: ManifestView,
 };
 
 fn effectFor(writes: bool) []const u8 {
@@ -318,6 +356,59 @@ fn buildNativeExports(arena: std.mem.Allocator, found: *bool) ![]NativeExport {
         return rows;
     }
     return try arena.alloc(NativeExport, 0);
+}
+
+fn buildNativeManifest(arena: std.mem.Allocator) !ManifestView {
+    const source = zts.modules.ledger.adapter_manifest;
+    const rows = try arena.alloc(ManifestRow, source.predicates.len);
+    errdefer arena.free(rows);
+    for (source.predicates, 0..) |row, index| {
+        rows[index] = .{ .kind_ordinal = row.kind_ordinal, .predicate_version = row.predicate_version };
+    }
+    const names = try arena.alloc([]const u8, source.exports.len);
+    errdefer arena.free(names);
+    for (source.exports, 0..) |name, index| names[index] = name;
+    return .{
+        .identity = source.identity,
+        .store_schema_version = source.store_schema_version,
+        .predicates = rows,
+        .exports = names,
+    };
+}
+
+fn buildExpectedManifest(arena: std.mem.Allocator) !ManifestView {
+    const source = invariant.expected_adapter_manifest;
+    const rows = try arena.alloc(ManifestRow, source.predicates.len);
+    errdefer arena.free(rows);
+    for (source.predicates, 0..) |row, index| {
+        rows[index] = .{ .kind_ordinal = row.kind_ordinal, .predicate_version = row.predicate_version };
+    }
+    const names = try arena.alloc([]const u8, source.exports.len);
+    errdefer arena.free(names);
+    for (source.exports, 0..) |name, index| names[index] = name;
+    return .{
+        .identity = source.identity,
+        .store_schema_version = source.store_schema_version,
+        .predicates = rows,
+        .exports = names,
+    };
+}
+
+/// Hash one view with the kernel's encoder. The gate converts back into the
+/// kernel's type here rather than keeping the kernel's value around, so a
+/// mutation applied to the view reaches the digest.
+fn manifestDigest(arena: std.mem.Allocator, view: ManifestView) ![32]u8 {
+    const rows = try arena.alloc(invariant.AdapterPredicate, view.predicates.len);
+    errdefer arena.free(rows);
+    for (view.predicates, 0..) |row, index| {
+        rows[index] = .{ .kind_ordinal = row.kind_ordinal, .predicate_version = row.predicate_version };
+    }
+    return invariant.adapterManifestDigest(.{
+        .identity = view.identity,
+        .store_schema_version = view.store_schema_version,
+        .predicates = rows,
+        .exports = view.exports,
+    });
 }
 
 /// The smallest schema 1 document the confirmed-template boundary can accept,
@@ -510,6 +601,23 @@ fn functionBody(text: []const u8, signature: []const u8) ?[]const u8 {
         }
     }
     return null;
+}
+
+/// The same text with every `//` comment blanked out.
+///
+/// A check of the form "this identifier must not appear" is otherwise tripped
+/// by a comment explaining why it must not appear, which teaches the next
+/// author to delete the explanation. Blanking rather than deleting keeps the
+/// byte length, so a later offset still lines up with the original.
+fn withoutComments(arena: std.mem.Allocator, text: []const u8) ![]u8 {
+    const out = try arena.dupe(u8, text);
+    errdefer arena.free(out);
+    var cursor: usize = 0;
+    while (cursor + 1 < out.len) : (cursor += 1) {
+        if (out[cursor] != '/' or out[cursor + 1] != '/') continue;
+        while (cursor < out.len and out[cursor] != '\n') : (cursor += 1) out[cursor] = ' ';
+    }
+    return out;
 }
 
 /// The top-level arguments of the call whose open parenthesis is at `open`.
@@ -861,6 +969,137 @@ fn validate(arena: std.mem.Allocator, gate: *Gate, model: Model) !void {
         return gate.reject(.graph_adapter_member, "artifact graph binds no digest to the invariant ledger adapter member", .{});
     }
 
+    // --- the linked adapter enforces through the table it publishes ----------
+    //
+    // A manifest row is evidence only when the enforcement paths read it. Both
+    // the write path and the store-validation path must iterate the dispatch
+    // table; a call standing beside the table rather than going through it
+    // would keep working after a row was removed.
+    const adapter_native_text = model.text.get(.native);
+    const post_body = functionBody(adapter_native_text, "fn executePost(") orelse
+        return gate.reject(.native_post_dispatch, "{s} has no executePost body", .{paths.get(.native)});
+    if (std.mem.indexOf(u8, post_body, "for (predicates)") == null) {
+        return gate.reject(.native_post_dispatch, "the native post path does not iterate the predicate dispatch table", .{});
+    }
+    const baseline_body = functionBody(adapter_native_text, "fn validateBaseline(") orelse
+        return gate.reject(.native_baseline_dispatch, "{s} has no validateBaseline body", .{paths.get(.native)});
+    if (std.mem.indexOf(u8, baseline_body, "for (predicates)") == null) {
+        return gate.reject(.native_baseline_dispatch, "the native baseline path does not iterate the predicate dispatch table", .{});
+    }
+
+    // The manifest must be derived from that table, from the store schema
+    // constant, and from the binding's exports. A manifest typed out by hand
+    // beside the table is a second statement that can drift from the first.
+    const manifest_body = functionBody(adapter_native_text, "pub const adapter_manifest") orelse
+        return gate.reject(.native_manifest_derivation, "{s} declares no adapter manifest", .{paths.get(.native)});
+    if (std.mem.indexOf(u8, manifest_body, "SCHEMA_VERSION") == null) {
+        return gate.reject(.native_manifest_derivation, "the native adapter manifest does not carry the store schema constant", .{});
+    }
+    const derived_predicates = functionBody(adapter_native_text, "const manifest_predicates") orelse
+        return gate.reject(.native_manifest_derivation, "{s} derives no manifest predicate rows", .{paths.get(.native)});
+    if (std.mem.indexOf(u8, derived_predicates, "for (predicates") == null) {
+        return gate.reject(.native_manifest_derivation, "the native manifest rows are not derived from the dispatch table", .{});
+    }
+    const derived_exports = functionBody(adapter_native_text, "const manifest_exports") orelse
+        return gate.reject(.native_manifest_derivation, "{s} derives no manifest export names", .{paths.get(.native)});
+    if (std.mem.indexOf(u8, derived_exports, "for (binding.exports") == null) {
+        return gate.reject(.native_manifest_derivation, "the native manifest exports are not derived from the binding", .{});
+    }
+
+    // --- the linked manifest against the kernel's expectation ----------------
+    //
+    // Two values from two packages that do not import each other, compared
+    // field by field and then as digests. This is the comparison acceptance
+    // makes; running it here means a drift is a build failure rather than a
+    // refusal discovered on a deployment.
+    const linked = model.native_manifest;
+    const wanted = model.expected_manifest;
+    if (linked.predicates.len == 0 or linked.exports.len == 0) {
+        return gate.reject(.native_manifest_empty, "the linked ledger adapter declares {d} predicates and {d} exports", .{ linked.predicates.len, linked.exports.len });
+    }
+    if (!std.mem.eql(u8, linked.identity, wanted.identity)) {
+        return gate.reject(.adapter_manifest_mismatch, "the linked adapter calls itself '{s}', the kernel expects '{s}'", .{ linked.identity, wanted.identity });
+    }
+    if (linked.store_schema_version != wanted.store_schema_version) {
+        return gate.reject(.adapter_manifest_mismatch, "the linked adapter keeps store schema {d}, the kernel expects {d}", .{ linked.store_schema_version, wanted.store_schema_version });
+    }
+    if (linked.predicates.len != wanted.predicates.len) {
+        return gate.reject(.adapter_manifest_mismatch, "the linked adapter enforces {d} predicates, the kernel expects {d}", .{ linked.predicates.len, wanted.predicates.len });
+    }
+    for (linked.predicates, wanted.predicates) |have, want| {
+        if (have.kind_ordinal != want.kind_ordinal) {
+            return gate.reject(.adapter_manifest_mismatch, "the linked adapter enforces kind ordinal {d} where the kernel expects {d}", .{ have.kind_ordinal, want.kind_ordinal });
+        }
+        if (have.predicate_version != want.predicate_version) {
+            return gate.reject(.adapter_manifest_mismatch, "the linked adapter enforces kind {d} at predicate version {d}, the kernel expects {d}", .{ have.kind_ordinal, have.predicate_version, want.predicate_version });
+        }
+    }
+    if (linked.exports.len != wanted.exports.len) {
+        return gate.reject(.adapter_manifest_mismatch, "the linked adapter publishes {d} exports, the kernel expects {d}", .{ linked.exports.len, wanted.exports.len });
+    }
+    for (linked.exports, wanted.exports) |have, want| {
+        if (!std.mem.eql(u8, have, want)) {
+            return gate.reject(.adapter_manifest_mismatch, "the linked adapter publishes '{s}' where the kernel expects '{s}'", .{ have, want });
+        }
+    }
+    const linked_digest = try manifestDigest(arena, linked);
+    if (!std.mem.eql(u8, &linked_digest, &model.adapter_digest)) {
+        return gate.reject(.adapter_manifest_mismatch, "the linked adapter manifest digests to {x}, the kernel expects {x}", .{ &linked_digest, &model.adapter_digest });
+    }
+
+    // --- the graph input comes from the linked adapter, not from the kernel --
+    //
+    // This is the hole the adapter manifest exists to close. If the artifact
+    // graph reads the kernel's own expectation, the producer and the consumer
+    // are reading one constant and the comparison holds for every artifact,
+    // including one whose adapter enforces nothing.
+    const graph_code = try withoutComments(arena, graph_text);
+    if (countOccurrences(graph_code, "adapterDigest") != 0) {
+        return gate.reject(.graph_adapter_from_kernel, "{s} reads the acceptance kernel's expected adapter digest", .{paths.get(.artifact_graph)});
+    }
+    const producer_text = try withoutComments(arena, model.text.get(.producer));
+    if (countOccurrences(producer_text, "invariant_adapter.linkedDigest()") != 1) {
+        return gate.reject(.producer_adapter_binding, "{s} does not bind the adapter member from the linked manifest exactly once", .{paths.get(.producer)});
+    }
+    if (std.mem.indexOf(u8, producer_text, "invariant.adapterDigest") != null) {
+        return gate.reject(.producer_adapter_binding, "{s} reads the acceptance kernel's expected adapter digest", .{paths.get(.producer)});
+    }
+    const activation_text = try withoutComments(arena, model.text.get(.activation));
+    if (countOccurrences(activation_text, "invariant_adapter.linkedDigest()") != 1) {
+        return gate.reject(.activation_adapter_binding, "{s} does not bind the adapter member from the linked manifest exactly once", .{paths.get(.activation)});
+    }
+    if (std.mem.indexOf(u8, activation_text, "invariant.adapterDigest") != null) {
+        return gate.reject(.activation_adapter_binding, "{s} reads the acceptance kernel's expected adapter digest", .{paths.get(.activation)});
+    }
+
+    // --- the bridge reads the native module, not the kernel's table ----------
+    const bridge_text = try withoutComments(arena, model.text.get(.adapter_bridge));
+    if (std.mem.indexOf(u8, bridge_text, "expected_adapter_manifest") != null) {
+        return gate.reject(.bridge_reads_native, "{s} fills the linked manifest from the kernel's expected table", .{paths.get(.adapter_bridge)});
+    }
+    const linked_body = functionBody(bridge_text, "pub const linked_manifest") orelse
+        return gate.reject(.bridge_reads_native, "{s} declares no linked adapter manifest", .{paths.get(.adapter_bridge)});
+    if (std.mem.indexOf(u8, linked_body, "native.adapter_manifest") == null) {
+        return gate.reject(.bridge_reads_native, "the linked manifest is not filled from the native module's own manifest", .{});
+    }
+
+    // --- the store is never installed under an unaccepted adapter ------------
+    //
+    // Position, not presence. A refusal that runs after `installStore` has
+    // already opened and validated a database under an adapter the consumer
+    // does not accept is a refusal that came too late, and it would read as a
+    // passing check in any test that only asserts the error is returned.
+    const install_text = try withoutComments(arena, model.text.get(.runtime_install));
+    const install_body = functionBody(install_text, "fn installLedgerModuleState(") orelse
+        return gate.reject(.install_order, "{s} has no installLedgerModuleState body", .{paths.get(.runtime_install)});
+    const refusal_at = std.mem.indexOf(u8, install_body, "invariant_adapter.requireLinked()") orelse
+        return gate.reject(.install_order, "the ledger install path does not refuse an unexpected linked adapter", .{});
+    const install_at = std.mem.indexOf(u8, install_body, "ledger.installStore(") orelse
+        return gate.reject(.install_order, "the ledger install path no longer installs a store", .{});
+    if (refusal_at > install_at) {
+        return gate.reject(.install_order, "the ledger install path refuses an unexpected adapter only after installing the store", .{});
+    }
+
     // --- the published catalog -----------------------------------------------
     const documented = (try docsRows(arena, model.text.get(.docs))) orelse
         return gate.reject(.docs_block_missing, "{s} has no machine-marked invariant catalog block", .{paths.get(.docs)});
@@ -1088,6 +1327,25 @@ fn probeKernel(arena: std.mem.Allocator, model: *Model) !void {
     }
 }
 
+/// The kernel stops deriving its digest from a declared expected value. Task 3
+/// wrote that check; it had no probe until the manifest gave it something to
+/// mutate that is not also the declaration itself.
+fn probeKernelDigestDerivation(arena: std.mem.Allocator, model: *Model) !void {
+    try replaceOnce(
+        arena,
+        model,
+        .kernel,
+        "return adapterManifestDigest(expected_adapter_manifest);",
+        "return adapterManifestDigest(a_value_this_file_does_not_declare);",
+    );
+}
+
+/// The kernel's digest collapses to zero, which is what an encoder that hashed
+/// nothing would return.
+fn probeKernelDigestEmpty(_: std.mem.Allocator, model: *Model) !void {
+    model.adapter_digest = [_]u8{0} ** 32;
+}
+
 fn probeProofSystem(arena: std.mem.Allocator, model: *Model) !void {
     try replaceOnce(arena, model, .proof_system, "ledger_call = 8", "ledger_call = 9");
 }
@@ -1133,6 +1391,113 @@ fn probeProducer(arena: std.mem.Allocator, model: *Model) !void {
 
 fn probeArtifactGraph(arena: std.mem.Allocator, model: *Model) !void {
     try replaceOnce(arena, model, .artifact_graph, "collector.add(.invariant_ledger_adapter", "collector.add(.invariant_spec");
+}
+
+/// The graph reads the kernel's expectation again. This is the regression the
+/// adapter manifest exists to prevent, so it is probed rather than assumed.
+fn probeGraphFromKernel(arena: std.mem.Allocator, model: *Model) !void {
+    try replaceOnce(
+        arena,
+        model,
+        .artifact_graph,
+        "inputs.invariant_adapter_digest orelse",
+        "pcc.invariant.adapterDigest() orelse",
+    );
+}
+
+fn probeProducerAdapter(arena: std.mem.Allocator, model: *Model) !void {
+    try replaceOnce(
+        arena,
+        model,
+        .producer,
+        "artifact.invariant_adapter_digest = invariant_adapter.linkedDigest();",
+        "artifact.invariant_adapter_digest = pcc.invariant.adapterDigest();",
+    );
+}
+
+fn probeActivation(arena: std.mem.Allocator, model: *Model) !void {
+    try replaceOnce(
+        arena,
+        model,
+        .activation,
+        ".invariant_adapter_digest = invariant_adapter.linkedDigest(),",
+        ".invariant_adapter_digest = pcc.invariant.adapterDigest(),",
+    );
+}
+
+fn probeAdapterBridge(arena: std.mem.Allocator, model: *Model) !void {
+    try replaceOnce(
+        arena,
+        model,
+        .adapter_bridge,
+        ".identity = native.adapter_manifest.identity,",
+        ".identity = pcc.invariant.expected_adapter_manifest.identity,",
+    );
+}
+
+/// Move the refusal to after `installStore`, rather than delete it. Deleting
+/// it would be caught by the presence clause, and a probe that trips the
+/// presence clause says nothing about whether the order is checked.
+fn probeRuntimeInstall(arena: std.mem.Allocator, model: *Model) !void {
+    try replaceOnce(
+        arena,
+        model,
+        .runtime_install,
+        "        try invariant_adapter.requireLinked();\n",
+        "",
+    );
+    try replaceOnce(
+        arena,
+        model,
+        .runtime_install,
+        "            .invariant_digest = invariant.digest(bytes),\n        });\n",
+        "            .invariant_digest = invariant.digest(bytes),\n        });\n        try invariant_adapter.requireLinked();\n",
+    );
+}
+
+fn probeNativePostDispatch(arena: std.mem.Allocator, model: *Model) !void {
+    try replaceOnce(
+        arena,
+        model,
+        .native,
+        "for (predicates) |row| try row.group_fn(group);",
+        "try validateGroup(group);",
+    );
+}
+
+fn probeNativeBaselineDispatch(arena: std.mem.Allocator, model: *Model) !void {
+    try replaceOnce(
+        arena,
+        model,
+        .native,
+        "for (predicates) |row| try row.baseline_fn(self.allocator, handle, db, &self.config);",
+        "try validatePostingsAndBalances(self.allocator, handle, db, &self.config);",
+    );
+}
+
+fn probeNativeManifestDerivation(arena: std.mem.Allocator, model: *Model) !void {
+    try replaceOnce(
+        arena,
+        model,
+        .native,
+        "for (binding.exports, 0..) |item, index| names[index] = item.name;",
+        "names[0] = \"post\";",
+    );
+}
+
+/// One row of the linked manifest moves to a predicate version the kernel does
+/// not expect. Nothing in the text changes, so only the value comparison can
+/// catch it.
+fn probeManifestAgreement(arena: std.mem.Allocator, model: *Model) !void {
+    if (model.native_manifest.predicates.len == 0) return error.ProbeAnchorMissing;
+    const rows = try arena.dupe(ManifestRow, model.native_manifest.predicates);
+    errdefer arena.free(rows);
+    rows[0].predicate_version += 1;
+    model.native_manifest.predicates = rows;
+}
+
+fn probeManifestEmpty(arena: std.mem.Allocator, model: *Model) !void {
+    model.native_manifest.predicates = try arena.alloc(ManifestRow, 0);
 }
 
 fn renameEvidence(arena: std.mem.Allocator, model: *Model, input: Input) !void {
@@ -1304,6 +1669,8 @@ fn probeNativeExportsEmpty(arena: std.mem.Allocator, model: *Model) !void {
 
 const probes = [_]Probe{
     .{ .name = "kernel", .expect = .kernel_adapter_declaration, .apply = probeKernel },
+    .{ .name = "kernel-digest-derivation", .expect = .kernel_adapter_digest_derivation, .apply = probeKernelDigestDerivation },
+    .{ .name = "kernel-digest-empty", .expect = .kernel_adapter_digest_empty, .apply = probeKernelDigestEmpty },
     .{ .name = "proof_system", .expect = .proof_system_tag, .apply = probeProofSystem },
     .{ .name = "compiler", .expect = .compiler_index_mismatch, .apply = probeCompiler },
     .{ .name = "compiler_ir", .expect = .compiler_ir_tag, .apply = probeCompilerIr },
@@ -1312,6 +1679,16 @@ const probes = [_]Probe{
     .{ .name = "observer", .expect = .observer_name_mismatch, .apply = probeObserver },
     .{ .name = "producer", .expect = .producer_tag_map, .apply = probeProducer },
     .{ .name = "artifact_graph", .expect = .graph_adapter_member, .apply = probeArtifactGraph },
+    .{ .name = "activation", .expect = .activation_adapter_binding, .apply = probeActivation },
+    .{ .name = "adapter_bridge", .expect = .bridge_reads_native, .apply = probeAdapterBridge },
+    .{ .name = "runtime_install", .expect = .install_order, .apply = probeRuntimeInstall },
+    .{ .name = "graph-from-kernel", .expect = .graph_adapter_from_kernel, .apply = probeGraphFromKernel },
+    .{ .name = "producer-adapter", .expect = .producer_adapter_binding, .apply = probeProducerAdapter },
+    .{ .name = "native-post-dispatch", .expect = .native_post_dispatch, .apply = probeNativePostDispatch },
+    .{ .name = "native-baseline-dispatch", .expect = .native_baseline_dispatch, .apply = probeNativeBaselineDispatch },
+    .{ .name = "native-manifest-derivation", .expect = .native_manifest_derivation, .apply = probeNativeManifestDerivation },
+    .{ .name = "manifest-agreement", .expect = .adapter_manifest_mismatch, .apply = probeManifestAgreement },
+    .{ .name = "manifest-empty", .expect = .native_manifest_empty, .apply = probeManifestEmpty },
     .{ .name = "checker_tests", .expect = .missing_evidence, .apply = probeCheckerTests },
     .{ .name = "config_tests", .expect = .missing_evidence, .apply = probeConfigTests },
     .{ .name = "author_src", .expect = .missing_evidence, .apply = probeAuthorSource },
@@ -1397,6 +1774,8 @@ fn loadModel(arena: std.mem.Allocator, root: []const u8, gate: *Gate) !Model {
         .schema_version_v2 = invariant.schema_version_v2,
         .digest_domains = try measureDigestDomains(arena, kinds),
         .adapter_digest = invariant.adapterDigest(),
+        .native_manifest = try buildNativeManifest(arena),
+        .expected_manifest = try buildExpectedManifest(arena),
     };
 }
 
@@ -1560,13 +1939,15 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
     try stdout.interface.print(
         "application invariants: {d} sources, {d} catalog rows, {d} kinds over {d} wire schemas, " ++
-            "{d} native exports and {d} compiled evidence markers agree; {d} mutation probes reject\n",
+            "{d} native exports, {d} linked adapter predicates and {d} compiled evidence markers agree; " ++
+            "{d} mutation probes reject\n",
         .{
             std.enums.values(Input).len,
             model.catalog.len,
             model.kinds.len,
             measured_schemas.len,
             model.native_exports.len,
+            model.native_manifest.predicates.len,
             evidence.len,
             probes.len,
         },
@@ -1593,6 +1974,36 @@ test "every independent input carries a mutation probe" {
     try testing.expect(probes.len >= std.enums.values(Input).len);
 }
 
+test "every adapter and manifest check is exercised by a probe" {
+    // The coverage test above counts inputs, not checks, so a check added
+    // without a probe would be invisible to it. This family is the one this
+    // gate exists for, and it self-extends: a new check whose name mentions
+    // the adapter, its manifest, or its dispatch must be probed.
+    var covered: usize = 0;
+    inline for (@typeInfo(Check).@"enum".fields) |field| {
+        const names_family =
+            std.mem.indexOf(u8, field.name, "adapter") != null or
+            std.mem.indexOf(u8, field.name, "manifest") != null or
+            std.mem.indexOf(u8, field.name, "dispatch") != null or
+            std.mem.indexOf(u8, field.name, "bridge") != null;
+        if (names_family) {
+            const check: Check = @enumFromInt(field.value);
+            var probed = false;
+            for (probes) |probe| {
+                if (probe.expect == check) probed = true;
+            }
+            testing.expect(probed) catch |err| {
+                std.debug.print("check '{s}' has no mutation probe\n", .{field.name});
+                return err;
+            };
+            covered += 1;
+        }
+    }
+    // A filter that matched nothing would pass the loop above in silence.
+    // Fourteen is the family's size today; shrinking it is a deliberate edit.
+    try testing.expect(covered >= 14);
+}
+
 test "no probe expects the absence of a rejection" {
     for (probes) |probe| {
         try testing.expect(probe.expect != .none);
@@ -1603,6 +2014,18 @@ test "occurrence counting does not overlap a repeated needle" {
     try testing.expectEqual(@as(usize, 2), countOccurrences("abab", "ab"));
     try testing.expectEqual(@as(usize, 1), countOccurrences("aaa", "aa"));
     try testing.expectEqual(@as(usize, 0), countOccurrences("abc", "z"));
+}
+
+test "comment stripping blanks a line comment and keeps the length" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const source = "const a = one(); // never call two()\nconst b = two();\n";
+    const stripped = try withoutComments(arena, source);
+    try testing.expectEqual(source.len, stripped.len);
+    try testing.expectEqual(@as(usize, 1), countOccurrences(stripped, "two()"));
+    try testing.expectEqual(@as(usize, 2), countOccurrences(source, "two()"));
+    try testing.expect(std.mem.indexOf(u8, stripped, "const b = two();") != null);
 }
 
 test "a function body is delimited by brace depth" {

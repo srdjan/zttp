@@ -340,8 +340,8 @@ rather than defaulted.
 
 The consumer checks four related inputs:
 
-- The executable graph binds the invariant section and the protected ledger
-  adapter identity.
+- The executable graph binds the invariant section and the manifest of the
+  protected ledger adapter that the binary linked.
 - The proof IR names each `zttp:ledger` operation from a closed catalog.
 - A translation witness relates each named operation to its final bytecode
   position.
@@ -361,6 +361,49 @@ idempotency record in one SQLite transaction. It rejects a posting group when
 the exact sum is not zero. The runtime also validates an existing ledger before
 it serves requests. These native actions enforce the invariant. The native
 adapter remains a disclosed trusted boundary.
+
+### The linked adapter manifest
+
+The native ledger holds a dispatch table of the predicates it enforces. Each
+row names an invariant kind by its wire ordinal, the version of the predicate
+it implements, the function that admits one posting group, and the function
+that validates an existing store. Both enforcement paths iterate that table,
+so a row that is added starts deciding and a row that is removed stops.
+
+From that table, together with the store schema version and the export names
+the module publishes, the adapter derives an adapter manifest at compile time.
+The runtime hashes the manifest under its own digest domain and binds the
+result as the executable graph's adapter member. The acceptance kernel holds
+its own expected manifest, derived from the closed kind catalog, and compares
+the member against the digest of that. Three parties must agree: the adapter
+the building binary linked, the adapter the serving binary linked, and the
+kernel's table. No party reads another's value.
+
+**What the check detects.** A kind, a predicate version, a store schema
+version, an adapter identity, or an export name that the kernel expects and
+the linked dispatch table does not carry. A serving binary whose linked adapter
+is older than the artifact it is asked to serve: it computes a different
+member, the executable root does not match, and the artifact is refused rather
+than served.
+
+**What the check cannot detect.** A dispatch row whose predicate is wrong. A
+row whose function decides the wrong thing hashes exactly like a row whose
+function decides the right thing, because the manifest records what is
+enforced and not how. Nothing in acceptance examines predicate behaviour. That
+gap is closed only by the predicate's own tests, and the native adapter
+therefore remains a disclosed trusted boundary.
+
+The adapter manifest names no invariant wire schema. The adapter never decodes
+a specification, so a wire schema stated there would be a value copied from
+the consumer and compared against itself. The wire schemas are bound where the
+decoding happens, through the specification digest and its per-schema domain.
+
+Changing the manifest changes the adapter digest, which changes the executable
+root of every artifact that declares an invariant. Certificates built before
+such a change are refused afterwards, first on adapter identity and then on
+artifact binding. Existing protected ledger stores are unaffected:
+`ledger_meta.invariant_digest` binds the specification digest, not the adapter
+digest.
 
 The current certificate format is certificate schema 4 with proof system
 `zttp_pcc_v3`. An older consumer refuses this evidence instead of interpreting

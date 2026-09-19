@@ -17,6 +17,7 @@ const zts = @import("zts");
 
 const artifact_graph = @import("artifact_graph.zig");
 const invariant_observer = @import("invariant_observer.zig");
+const invariant_adapter = @import("invariant_adapter.zig");
 
 const graph = pcc.executable_graph;
 
@@ -116,6 +117,12 @@ fn graphInputs(inputs: Inputs) artifact_graph.Inputs {
             pcc.invariant.digest(bytes)
         else
             null,
+        // The adapter this serving binary linked, read from its own manifest
+        // rather than from the acceptance kernel's expectation. That is what
+        // makes the member a statement about this process: a binary whose
+        // linked adapter no longer matches the artifact's fails to reproduce
+        // the member and the artifact is refused rather than served.
+        .invariant_adapter_digest = invariant_adapter.linkedDigest(),
     });
 }
 

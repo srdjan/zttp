@@ -58,6 +58,7 @@ const bytecode_cache = zq.bytecode_cache;
 // HTTP protocol types (shared with server layer)
 const http_types = @import("http_types.zig");
 const queue_callbacks = @import("queue_runtime_callbacks.zig");
+const invariant_adapter = @import("invariant_adapter.zig");
 const HttpRequestView = http_types.HttpRequestView;
 const HttpResponse = http_types.HttpResponse;
 
@@ -954,8 +955,18 @@ pub const HandlerInstance = struct {
         };
         if (!self.config.invariant_coverage_accepted) return error.InvariantCoverageNotAccepted;
         const path = self.config.ledger_path orelse return error.LedgerNotConfigured;
+        // Before anything is allocated and before `installStore` opens a
+        // database: the adapter this binary linked must be the one the
+        // acceptance kernel expects. An artifact accepted against one adapter
+        // and served by another is the case this refuses, and refusing it
+        // after the store is open would mean a store had already been
+        // validated under an adapter the consumer does not accept.
+        try invariant_adapter.requireLinked();
         const invariant = @import("zttp_proof_checker").invariant;
         const spec = try invariant.decode(bytes);
+        // `defer`, not `errdefer`: the slice is borrowed by `installStore`,
+        // which copies it, so it is freed on the success path and on every
+        // failure path alike. An `errdefer` beside this would free it twice.
         const currencies = try self.allocator.alloc(zq.modules.ledger.Currency, spec.currency_count);
         defer self.allocator.free(currencies);
         for (currencies, 0..) |*currency, i| {

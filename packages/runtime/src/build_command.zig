@@ -16,6 +16,7 @@ const artifact_graph = @import("artifact_graph.zig");
 const pcc = @import("zttp_proof_checker");
 const proof_activation = @import("proof_activation.zig");
 const proof_certificate = @import("proof_certificate.zig");
+const invariant_adapter = @import("invariant_adapter.zig");
 const invariant_observer = @import("invariant_observer.zig");
 const self_extract = @import("self_extract.zig");
 const attest_build_receipt = @import("attest/build_receipt.zig");
@@ -734,6 +735,10 @@ fn writeArtifactTail(
             pcc.invariant.digest(bytes)
         else
             null,
+        // The adapter this build linked. `writeArtifactTail` folds its own
+        // root below, so it must name the adapter itself rather than rely on
+        // the certificate builder having named one.
+        .invariant_adapter_digest = invariant_adapter.linkedDigest(),
     };
 
     // The certificate, when the compile captured the evidence for one. Building

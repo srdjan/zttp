@@ -29,6 +29,11 @@ pub const Error = error{
     TooManyMembers,
     TooManyFunctions,
     MalformedBytecodeStream,
+    /// An artifact commits to an invariant specification without naming the
+    /// adapter that enforces it. Refused rather than defaulted: a default
+    /// would be a value this file chose, and the whole point of the member is
+    /// that the caller states what it linked.
+    MissingInvariantAdapterDigest,
     OutOfMemory,
 };
 
@@ -68,6 +73,12 @@ pub const Inputs = struct {
     /// Digest of the exact canonical invariant specification section. The
     /// protected ledger adapter is committed beside it when present.
     invariant_spec_digest: ?[32]u8 = null,
+    /// Digest of the manifest of the protected-ledger adapter the caller
+    /// linked. Required whenever `invariant_spec_digest` is present, and
+    /// deliberately not defaulted here: this file must not be able to supply
+    /// the value it commits to, or the member would again be one constant
+    /// meeting itself. `invariant_adapter.linkedDigest()` computes it.
+    invariant_adapter_digest: ?[32]u8 = null,
 };
 
 /// The identity half of the commitment: which modules the handler imports, and
@@ -120,6 +131,8 @@ pub const ArtifactInputs = struct {
     proof_certificate_digest: ?[32]u8 = null,
     residual_plan_digest: ?[32]u8 = null,
     invariant_spec_digest: ?[32]u8 = null,
+    /// See `Inputs.invariant_adapter_digest`.
+    invariant_adapter_digest: ?[32]u8 = null,
 };
 
 /// Project the artifact onto the graph inputs.
@@ -140,6 +153,7 @@ pub fn fromArtifact(inputs: ArtifactInputs) Inputs {
         .proof_certificate_digest = inputs.proof_certificate_digest,
         .residual_plan_digest = inputs.residual_plan_digest,
         .invariant_spec_digest = inputs.invariant_spec_digest,
+        .invariant_adapter_digest = inputs.invariant_adapter_digest,
     };
 }
 
@@ -249,7 +263,15 @@ pub fn build(
     }
     if (inputs.invariant_spec_digest) |digest| {
         try collector.add(.invariant_spec, 0, digest);
-        try collector.add(.invariant_ledger_adapter, 0, pcc.invariant.adapterDigest());
+        // The adapter the caller linked, never the one this package's kernel
+        // dependency expects. Both the producer and the serving binary derive
+        // it from their own `zts.modules.ledger` manifest, and the acceptance
+        // kernel compares the member against its own table. Reading
+        // `pcc.invariant.adapterDigest()` here would put the kernel's constant
+        // on both sides of that comparison and it would always hold.
+        const adapter = inputs.invariant_adapter_digest orelse
+            return error.MissingInvariantAdapterDigest;
+        try collector.add(.invariant_ledger_adapter, 0, adapter);
     }
 
     const members = out[0..collector.count];
@@ -363,6 +385,7 @@ fn sampleInputs(main: []const u8, deps: []const []const u8) Inputs {
         .proof_ir_digest = [_]u8{0xD4} ** 32,
         .proof_certificate_digest = [_]u8{0xE5} ** 32,
         .invariant_spec_digest = [_]u8{0xF6} ** 32,
+        .invariant_adapter_digest = [_]u8{0xF8} ** 32,
     };
 }
 
@@ -405,6 +428,27 @@ test "the inventory covers every executable and authority-bearing member" {
     try testing.expectEqual(@as(usize, 4), pools);
 
     _ = try graph.computeRoot(members);
+}
+
+test "an invariant specification with no linked adapter digest is refused" {
+    // The member cannot be defaulted here, so the absence has to be an error
+    // rather than a member this file invents. A caller that commits to an
+    // invariant without saying which adapter enforces it gets no artifact.
+    const allocator = testing.allocator;
+    var main_buf: [4096]u8 = undefined;
+    const main = try test_support.moduleBlob(allocator, 0x10, &main_buf);
+
+    const out = try allocator.alloc(Member, max_members);
+    defer allocator.free(out);
+    var inputs = sampleInputs(main, &.{});
+    inputs.invariant_adapter_digest = null;
+    try testing.expectError(error.MissingInvariantAdapterDigest, build(allocator, inputs, out));
+
+    // And an artifact that commits to no invariant at all still builds: the
+    // requirement is tied to the specification member, not imposed on every
+    // handler.
+    inputs.invariant_spec_digest = null;
+    _ = try build(allocator, inputs, out);
 }
 
 test "the same inputs produce the same inventory and root" {
@@ -491,6 +535,11 @@ test "mutating any member class moves the root" {
         .{ .name = "invariant spec", .apply = struct {
             fn f(i: *Inputs) void {
                 i.invariant_spec_digest = [_]u8{0xF7} ** 32;
+            }
+        }.f },
+        .{ .name = "invariant ledger adapter", .apply = struct {
+            fn f(i: *Inputs) void {
+                i.invariant_adapter_digest = [_]u8{0xF9} ** 32;
             }
         }.f },
     };

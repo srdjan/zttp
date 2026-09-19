@@ -17,6 +17,7 @@ const pcc = @import("zttp_proof_checker");
 
 const artifact_graph = @import("artifact_graph.zig");
 const invariant_observer = @import("invariant_observer.zig");
+const invariant_adapter = @import("invariant_adapter.zig");
 
 const cert = pcc.certificate;
 const graph = pcc.executable_graph;
@@ -44,6 +45,11 @@ pub const Error = error{
     InvariantOperationMismatch,
     MissingInvariantSpec,
     InvariantObservationMismatch,
+    /// The executable graph was asked to commit to an invariant specification
+    /// with no linked adapter named beside it. Reachable only if this file
+    /// stops filling `invariant_adapter_digest`, which is why it is a refusal
+    /// rather than an assertion.
+    MissingInvariantAdapterDigest,
 };
 
 /// What the contract says the compiler discharged. Read once, at the call site
@@ -246,6 +252,11 @@ pub fn build(allocator: std.mem.Allocator, inputs: Inputs) Error!Built {
         break :blk pcc.invariant.digest(bytes);
     } else null;
     artifact.invariant_spec_digest = invariant_spec_digest;
+    // The adapter this binary linked, read from its own manifest. Not
+    // `pcc.invariant.adapterDigest()`: the acceptance kernel compares the
+    // member against that value, and a producer that read it too would be
+    // committing to the consumer's expectation rather than to what it linked.
+    artifact.invariant_adapter_digest = invariant_adapter.linkedDigest();
     const members = try allocator.alloc(graph.Member, artifact_graph.max_members);
     errdefer allocator.free(members);
     const built_members = try artifact_graph.build(allocator, artifact_graph.fromArtifact(artifact), members);

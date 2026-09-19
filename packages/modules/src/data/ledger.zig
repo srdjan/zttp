@@ -78,6 +78,110 @@ pub const binding = sdk.ModuleBinding{
     },
 };
 
+// ---------------------------------------------------------------------------
+// Enforced predicates, and the manifest derived from them
+// ---------------------------------------------------------------------------
+
+/// This adapter's own name for itself. The acceptance kernel states the same
+/// string independently; the two are compared, never shared. Nothing in this
+/// file reads a value from the kernel, which is what makes the comparison a
+/// comparison rather than a constant meeting itself.
+pub const adapter_identity = "zttp:ledger/native-adapter-v1";
+
+/// The wire ordinal the closed invariant catalog gives balance conservation.
+/// Restated here on purpose, for the same reason as the identity above.
+const balance_conservation_ordinal: u16 = 1;
+
+/// One invariant this adapter enforces, and the two places it enforces it.
+///
+/// `group_fn` decides whether one posting group may commit. `baseline_fn`
+/// decides whether an existing store may be served at all. Both are function
+/// pointers, so the dispatch below is a call through the row rather than a
+/// hard-coded call standing beside a row that describes it.
+pub const Predicate = struct {
+    kind_ordinal: u16,
+    predicate_version: u16,
+    group_fn: *const fn (group: Group) anyerror!void,
+    baseline_fn: *const fn (
+        allocator: std.mem.Allocator,
+        handle: *sdk.ModuleHandle,
+        db: *sdk.SqliteDb,
+        config: *const OwnedConfig,
+    ) anyerror!void,
+};
+
+/// The dispatch table. `executePost` and `validateBaseline` iterate it, and
+/// nothing else decides whether a posting group may commit or an existing
+/// store may be served. Rows ascend by wire ordinal, which is the order the
+/// manifest encoder depends on.
+const predicates = [_]Predicate{
+    .{
+        .kind_ordinal = balance_conservation_ordinal,
+        .predicate_version = 1,
+        .group_fn = validateGroup,
+        .baseline_fn = validatePostingsAndBalances,
+    },
+};
+
+// Ascending, without repeats. The encoded manifest is order-sensitive, so two
+// tables holding the same rows in different orders must not be expressible.
+comptime {
+    var previous: u16 = 0;
+    for (predicates) |row| {
+        if (row.kind_ordinal <= previous) {
+            @compileError("the ledger predicate table must ascend by wire ordinal without repeating one");
+        }
+        previous = row.kind_ordinal;
+    }
+}
+
+/// One manifest row per enforced predicate.
+pub const ManifestPredicate = struct {
+    kind_ordinal: u16,
+    predicate_version: u16,
+};
+
+/// What this linked adapter enforces, in a shape a consumer can compare.
+///
+/// It carries the dispatch table, the store schema this adapter writes and
+/// validates, and the export names the binding publishes. It deliberately says
+/// nothing about the invariant wire schemas: this module never decodes a
+/// specification, so a wire schema named here would be a value copied from the
+/// consumer rather than a fact about the adapter, and comparing it would prove
+/// nothing.
+pub const AdapterManifest = struct {
+    identity: []const u8,
+    store_schema_version: i64,
+    predicates: []const ManifestPredicate,
+    exports: []const []const u8,
+};
+
+pub const adapter_manifest = AdapterManifest{
+    .identity = adapter_identity,
+    .store_schema_version = SCHEMA_VERSION,
+    .predicates = &manifest_predicates,
+    .exports = &manifest_exports,
+};
+
+const manifest_predicates = blk: {
+    var rows: [predicates.len]ManifestPredicate = undefined;
+    for (predicates, 0..) |row, index| {
+        rows[index] = .{
+            .kind_ordinal = row.kind_ordinal,
+            .predicate_version = row.predicate_version,
+        };
+    }
+    const frozen = rows;
+    break :blk frozen;
+};
+
+const manifest_exports = blk: {
+    var names: [binding.exports.len][]const u8 = undefined;
+    for (binding.exports, 0..) |item, index| names[index] = item.name;
+    const frozen = names;
+    break :blk frozen;
+};
+
 const OwnedCurrency = struct {
     code: []u8,
     scale: u8,
@@ -215,7 +319,12 @@ pub const LedgerStore = struct {
         try validateIntegrity(db);
         try self.validateMetadata(db);
         try self.validateCurrencies(db);
-        try validatePostingsAndBalances(self.allocator, handle, db, &self.config);
+        // Every enforced predicate runs over the whole store before it is
+        // served. The loop is the enforcement: a row added to the table starts
+        // being checked here without this function being edited, and a row
+        // removed stops being checked, which is what makes the manifest built
+        // from the table describe what actually runs.
+        for (predicates) |row| try row.baseline_fn(self.allocator, handle, db, &self.config);
     }
 
     fn validateMetadata(self: *LedgerStore, db: *sdk.SqliteDb) !void {
@@ -258,7 +367,9 @@ pub const LedgerStore = struct {
     fn executePost(self: *LedgerStore, handle: *sdk.ModuleHandle, group: Group) !bool {
         if (!std.mem.eql(u8, group.ledger, self.config.ledger)) return error.WrongLedger;
         if (!self.config.hasCurrency(group.currency)) return error.UnsupportedCurrency;
-        try validateGroup(group);
+        // The same table, on the write path. A group that any enforced
+        // predicate refuses never reaches a transaction.
+        for (predicates) |row| try row.group_fn(group);
 
         const db = try self.ensureDb(handle);
         var content_hash: [64]u8 = undefined;
@@ -430,7 +541,7 @@ pub fn parseCanonicalAmount(text: []const u8) !i64 {
     return std.fmt.parseInt(i64, text, 10) catch error.AmountOverflow;
 }
 
-fn validateGroup(group: Group) !void {
+fn validateGroup(group: Group) anyerror!void {
     if (group.entries.len == 0) return error.InvalidInput;
     var sum: i128 = 0;
     for (group.entries) |entry| sum = addI128(sum, entry.amount) catch return error.AmountOverflow;
@@ -584,7 +695,7 @@ fn validateIntegrity(db: *sdk.SqliteDb) !void {
     if (sdk.sqliteStep(foreign_keys) != sdk.sqlite_done) return error.CorruptLedger;
 }
 
-fn validatePostingsAndBalances(allocator: std.mem.Allocator, handle: *sdk.ModuleHandle, db: *sdk.SqliteDb, config: *const OwnedConfig) !void {
+fn validatePostingsAndBalances(allocator: std.mem.Allocator, handle: *sdk.ModuleHandle, db: *sdk.SqliteDb, config: *const OwnedConfig) anyerror!void {
     var computed = std.StringHashMap(i128).init(allocator);
     defer {
         var iterator = computed.iterator();
@@ -863,6 +974,54 @@ test "content hash binds ordered accounts and canonical amounts" {
     try contentHash(std.testing.allocator, fake_handle, .{ .ledger = "main", .currency = "USD", .idempotency_key = "same-key", .entries = &reordered }, &three);
     try std.testing.expectEqualSlices(u8, &one, &two);
     try std.testing.expect(!std.mem.eql(u8, &one, &three));
+}
+
+test "the enforced predicate table is non-empty and canonically ordered" {
+    // The manifest below is derived from this table, and the digest a consumer
+    // compares is derived from that manifest. An empty or unordered table would
+    // still produce a digest, so the floor is asserted here rather than left to
+    // the encoder.
+    try std.testing.expect(predicates.len > 0);
+    var previous: ?u16 = null;
+    for (predicates) |row| {
+        if (previous) |prior| try std.testing.expect(row.kind_ordinal > prior);
+        previous = row.kind_ordinal;
+        try std.testing.expect(row.predicate_version >= 1);
+    }
+}
+
+test "the adapter manifest restates the dispatch table, the store schema, and the export names" {
+    try std.testing.expectEqualStrings(adapter_identity, adapter_manifest.identity);
+    try std.testing.expectEqual(SCHEMA_VERSION, adapter_manifest.store_schema_version);
+    try std.testing.expectEqual(predicates.len, adapter_manifest.predicates.len);
+    for (predicates, adapter_manifest.predicates) |row, entry| {
+        try std.testing.expectEqual(row.kind_ordinal, entry.kind_ordinal);
+        try std.testing.expectEqual(row.predicate_version, entry.predicate_version);
+    }
+    try std.testing.expectEqual(binding.exports.len, adapter_manifest.exports.len);
+    for (binding.exports, adapter_manifest.exports) |item, name| {
+        try std.testing.expectEqualStrings(item.name, name);
+    }
+}
+
+test "the balance conservation row names a predicate that refuses an unbalanced group" {
+    // A row is evidence of enforcement only when the function it names is the
+    // one that decides. This calls the row's own pointer rather than the local
+    // name, so a table wired to some other function fails here.
+    const unbalanced = [_]Entry{.{ .account = "a", .amount_text = "1", .amount = 1 }};
+    const group = Group{ .ledger = "main", .currency = "USD", .idempotency_key = "k", .entries = &unbalanced };
+    const balanced = [_]Entry{
+        .{ .account = "a", .amount_text = "-1", .amount = -1 },
+        .{ .account = "b", .amount_text = "1", .amount = 1 },
+    };
+    var found = false;
+    for (predicates) |row| {
+        if (row.kind_ordinal != balance_conservation_ordinal) continue;
+        found = true;
+        try std.testing.expectError(error.Unbalanced, row.group_fn(group));
+        try row.group_fn(.{ .ledger = "main", .currency = "USD", .idempotency_key = "k", .entries = &balanced });
+    }
+    try std.testing.expect(found);
 }
 
 test "configuration requires a sorted unique currency header" {

@@ -10,6 +10,13 @@ pub const MODULE_STATE_SLOT = ledger.MODULE_STATE_SLOT;
 pub const Config = ledger.Config;
 pub const Currency = ledger.Currency;
 
+/// The linked adapter's own statement of what it enforces, re-exported so the
+/// runtime can convert it for the executable graph without reaching past this
+/// bridge. It is the native module's value, not a copy maintained here.
+pub const AdapterManifest = ledger.AdapterManifest;
+pub const ManifestPredicate = ledger.ManifestPredicate;
+pub const adapter_manifest = ledger.adapter_manifest;
+
 pub fn installStore(ctx: *context.Context, path: []const u8, config: Config) !void {
     try mb.installProtectedLedgerPath(ctx, path);
     if (mb.sdk_bridge.getSdkModuleStatePtr(ctx, MODULE_STATE_SLOT) != null)
