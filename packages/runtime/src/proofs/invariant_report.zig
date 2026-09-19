@@ -50,11 +50,14 @@ const deployment_assumption =
 /// an accepted assessment produces. A refused artifact therefore never
 /// arrives here, and this sentence does not hedge about one.
 ///
-/// It could not hedge accurately in any case. A rejection at or before
-/// invariant coverage does leave `InvariantVerdicts` at its defaults, but
-/// `checker.zig`'s `run` assigns the coverage it reached onto a later
-/// evidence-stage or solver-stage rejection, so a refused artifact does not
-/// have one status - it has two, depending on how far it got.
+/// It could not hedge accurately in any case. A rejection raised before
+/// evidence checking - artifact binding, obligation set, translation,
+/// invariant coverage, guard coverage, or a limit - leaves the verdict at its
+/// defaults. A rejection raised inside evidence checking, whatever stage it
+/// names, carries the coverage the consumer had already reached, because
+/// `checker.zig`'s `run` assigns that coverage onto the outcome
+/// `checkEvidence` returns. So a refused artifact does not have one status -
+/// it has two, depending on how far it got.
 const no_invariant_body =
     "not configured; this artifact declares no application invariant, so no kind, " ++
     "no coverage, no write applicability and no baseline apply";

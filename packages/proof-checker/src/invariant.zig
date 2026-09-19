@@ -875,9 +875,11 @@ test "the native adapter digest is pinned" {
     // certificate built before the change. That must be a deliberate edit of
     // this line rather than a digest that quietly followed the table.
     //
-    // Moved once, deliberately, when `declared_accounts_v1` joined the catalog
-    // and the expected manifest grew its row. Recomputed with shasum over the
-    // encoding this file documents, not copied from what the encoder returned.
+    // Moved twice on this branch, deliberately: once when the bare hash became
+    // a manifest digest, and once when `declared_accounts_v1` joined the
+    // catalog and the expected manifest grew its row. Each value was
+    // recomputed with shasum over the encoding this file documents, not copied
+    // from what the encoder returned.
     try std.testing.expectEqualStrings(
         "363a758723fa4825874894ab0cd81487fc923d436e5db41a3a6f240aebfb0f99",
         &std.fmt.bytesToHex(adapterDigest(), .lower),

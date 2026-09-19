@@ -310,7 +310,7 @@ pub fn build(b: *std.Build) void {
 
     // The gate binary on its own, so a single mutation probe can be run
     // directly and read from its exit status. Routing a probe through the
-    // aggregate step above would mix the gate's verdict with five test suites.
+    // aggregate step above would mix the gate's verdict with seven test suites.
     const invariant_gate_install = b.addInstallArtifact(invariant_gate_exe, .{
         .dest_dir = .{ .override = .{ .custom = "tooling" } },
     });

@@ -178,7 +178,7 @@ fn adviseOrUnavailable(
     };
     // Say where the sentence is going before it goes.
     writeStderrFmt(
-        "zttp invariant author: sending the statement, and nothing else, to {s}\n",
+        "zttp invariant author: sending the statement and the catalog's published descriptions to {s}\n",
         .{classifier_url},
     );
 

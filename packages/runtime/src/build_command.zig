@@ -1848,6 +1848,112 @@ test "a balance-only handler is accepted and reports vacuous write applicability
     );
 }
 
+test "a two-kind schema 2 specification is accepted end to end and reports per-kind write applicability" {
+    // Every other end-to-end case on this path declares one kind under schema
+    // 1, and every `zruntime_tests` case bypasses acceptance outright with
+    // `invariant_coverage_accepted = true`. The checker's two-kind cases use a
+    // synthetic fixture rather than a compiled handler. Nothing therefore drove
+    // a `declared_accounts_v1` document through the real producer and the real
+    // consumer, and "each piece is tested with the same decoder" is an
+    // estimate. This measures it.
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { post, balance } from "zttp:ledger";
+        \\export function handler(req: Request): Proof<Response, "state_isolated"> {
+        \\  const current = balance("main", "USD", "cash");
+        \\  if (!current.ok) return Response.text(current.error, { status: 500 });
+        \\  const result = post({ ledger: "main", currency: "USD", idempotencyKey: req.url, entries: [
+        \\    { account: "cash", amount: "100" },
+        \\    { account: "clearing", amount: "-100" }
+        \\  ] });
+        \\  if (!result.ok) return Response.text(result.error, { status: 400 });
+        \\  return Response.text(current.value);
+        \\}
+    ;
+    const invariant_spec = try project_config_mod.invariant_config.parse(allocator,
+        \\{"version":2,"ledger":"main","currencies":[{"code":"USD","scale":2}],"kinds":[{"kind":"balance_conservation_v1"},{"kind":"declared_accounts_v1","accounts":[{"prefix":"cash"},{"prefix":"clearing"}]}]}
+    );
+    defer allocator.free(invariant_spec);
+
+    var compiled = try precompile.compileHandler(allocator, source, "handler.ts", .{
+        .emit_verify = true,
+        .emit_contract = true,
+        .emit_proof_evidence = true,
+    });
+    defer compiled.deinit(allocator);
+    const evidence = compiled.proof_evidence orelse return error.TestUnexpectedResult;
+    const contract = compiled.contract orelse return error.TestUnexpectedResult;
+    const contract_json = try serializeContractJson(allocator, &contract);
+    defer allocator.free(contract_json);
+    const policy = zts.handler_policy.contractToRuntimePolicy(&contract, null);
+    const policy_section = try self_extract.serializePolicy(allocator, &policy);
+    defer allocator.free(policy_section);
+
+    var built = try proof_certificate.build(allocator, .{
+        .evidence = &evidence,
+        .properties = dischargedProperties(&contract),
+        .artifact = .{
+            .bytecode = compiled.bytecode,
+            .dep_bytecodes = compiled.dep_bytecodes orelse &.{},
+            .contract_section = contract_json,
+            .policy_section_digest = artifact_graph.digestOf(policy_section),
+            .identity = artifact_graph.identityFromContract(&contract),
+            .invariant_spec_digest = pcc.invariant.digest(invariant_spec),
+        },
+        .contract_digest = artifact_graph.digestOf(contract_json),
+        .runtime_policy_digest = artifact_graph.digestOf(policy_section),
+        .invariant_spec = invariant_spec,
+    });
+    defer built.deinit();
+
+    const assessment = try proof_activation.accept(allocator, .{
+        .certificate = built.bytes,
+        .bytecode = compiled.bytecode,
+        .dep_bytecodes = compiled.dep_bytecodes orelse &.{},
+        .contract_section = contract_json,
+        .policy_section_digest = artifact_graph.digestOf(policy_section),
+        .policy_section = policy_section,
+        .identity = artifact_graph.identityFromContract(&contract),
+        .invariant_spec = invariant_spec,
+    }, pcc.policy.development);
+    try std.testing.expect(assessment.accepted());
+    try std.testing.expect(assessment.invariants.ready());
+    try std.testing.expectEqual(@as(u32, 2), assessment.invariants.required);
+    try std.testing.expectEqual(@as(u32, 2), assessment.invariants.covered);
+    try std.testing.expectEqual(@as(u32, 1), assessment.invariants.writes);
+
+    // Both catalog kinds, at wire ordinal less one. A schema 1 document, or a
+    // schema 2 document naming one kind, leaves the second bit clear, so this
+    // is the assertion that says the second kind survived the producer and the
+    // consumer rather than being dropped on either side.
+    try std.testing.expectEqual(@as(u32, 0b11), assessment.invariants.kind_bits);
+    try std.testing.expectEqual(
+        pcc.verdict.WriteApplicability.covered,
+        assessment.invariants.writeApplicabilityFor(.declared_accounts_v1),
+    );
+    try std.testing.expectEqual(
+        pcc.verdict.WriteApplicability.covered,
+        assessment.invariants.writeApplicabilityFor(.balance_conservation_v1),
+    );
+
+    // The specification is a graph member under schema 2 exactly as it is
+    // under schema 1: one canonical byte changed must refuse the artifact.
+    const changed_spec = try allocator.dupe(u8, invariant_spec);
+    defer allocator.free(changed_spec);
+    changed_spec[changed_spec.len - 1] = changed_spec[changed_spec.len - 1] +% 1;
+    const tampered = try proof_activation.accept(allocator, .{
+        .certificate = built.bytes,
+        .bytecode = compiled.bytecode,
+        .dep_bytecodes = compiled.dep_bytecodes orelse &.{},
+        .contract_section = contract_json,
+        .policy_section_digest = artifact_graph.digestOf(policy_section),
+        .policy_section = policy_section,
+        .identity = artifact_graph.identityFromContract(&contract),
+        .invariant_spec = changed_spec,
+    }, pcc.policy.development);
+    try std.testing.expect(!tampered.accepted());
+}
+
 test "ledger function escapes are refused even beside a directly observed call" {
     const allocator = std.testing.allocator;
     const sources = [_][]const u8{

@@ -269,6 +269,12 @@ conservation alone. Declare `declared_accounts_v1` against a fresh store. A
 specification that names balance conservation alone is unaffected: it encodes
 the bytes it always did and reopens the store it has been using.
 
+Upgrading zttp can change the adapter manifest by itself, without any edit to
+your specification. An artifact built by an older zttp is then refused at
+startup on adapter identity and must be rebuilt with the new zttp. The store
+is unaffected, because `ledger_meta.invariant_digest` binds the specification
+digest and not the adapter digest.
+
 `zttp proofs verify` prints one invariant status line for an accepted
 artifact, and startup prints the same line, from the same renderer, once a
 configured invariant is installed. It reads write applicability first, then

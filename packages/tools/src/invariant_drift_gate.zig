@@ -1310,9 +1310,13 @@ fn validate(arena: std.mem.Allocator, gate: *Gate, model: Model) !void {
     // already makes, rather than opening a second pass over the same rows.
     // That only holds if the hook is dispatched through the table like the
     // other two, and if the walk hands it both the accounts it reads: the
-    // historical entry accounts and the materialized balance accounts. A walk
-    // that fed it one of the two would still refuse most stores and would pass
-    // any test that only posts and reopens.
+    // historical entry accounts and the materialized balance accounts. Either
+    // column alone is complete, because the cross-check pairs every entry
+    // account with a balance row - an orphan balance row fails `fetchRemove`
+    // and an entry account with no balance row leaves `computed.count() != 0`.
+    // Both are fed so an undeclared account is reported from the row that
+    // introduced it and under its own error name; the check below is defence
+    // in depth over that property, not the only thing holding it.
     const account_body = functionBody(adapter_native_text, "fn checkStoredAccount(") orelse
         return gate.reject(.native_account_dispatch, "{s} has no stored-account hook", .{paths.get(.native)});
     if (std.mem.indexOf(u8, account_body, "for (predicates)") == null or
@@ -2240,8 +2244,11 @@ fn probeNativeAccountDispatch(arena: std.mem.Allocator, model: *Model) !void {
 
 /// The walk feeds the hook one of the two account columns it reads. Deleting
 /// the hook outright would be caught by the clause above; this is the shape
-/// that keeps the dispatch and loses half the rows, which every posting test
-/// would still pass.
+/// that keeps the dispatch and loses half the rows. Either column alone is
+/// complete, because the cross-check pairs every entry account with a balance
+/// row, so this shape does not let an undeclared account through - it changes
+/// which row reports it and under which error name. The probe holds the
+/// two-column feed so that reporting stays where the store puts it.
 fn probeNativeAccountCoverage(arena: std.mem.Allocator, model: *Model) !void {
     try replaceOnce(
         arena,
@@ -2540,6 +2547,141 @@ fn probeNativeExportsEmpty(arena: std.mem.Allocator, model: *Model) !void {
     model.native_exports = try arena.alloc(NativeExport, 0);
 }
 
+// The kind table is an imported value, so every field the kind walk reads is
+// one assignment away from the shape that walk refuses. Five checks read five
+// fields, and each probe below moves exactly one of them. A check that had
+// never been observed rejecting anything shipped on this branch and only
+// review caught it, so the per-field cost is paid rather than assumed.
+
+fn probeKindDescriptionEmpty(arena: std.mem.Allocator, model: *Model) !void {
+    if (model.kinds.len == 0) return error.ProbeAnchorMissing;
+    const rows = try arena.dupe(KindRow, model.kinds);
+    errdefer arena.free(rows);
+    rows[0].description = "";
+    model.kinds = rows;
+}
+
+fn probeKindPredicateVersion(arena: std.mem.Allocator, model: *Model) !void {
+    if (model.kinds.len == 0) return error.ProbeAnchorMissing;
+    const rows = try arena.dupe(KindRow, model.kinds);
+    errdefer arena.free(rows);
+    rows[0].predicate_version = 0;
+    model.kinds = rows;
+}
+
+fn probeKindOrdinalRange(arena: std.mem.Allocator, model: *Model) !void {
+    if (model.kinds.len == 0) return error.ProbeAnchorMissing;
+    const rows = try arena.dupe(KindRow, model.kinds);
+    errdefer arena.free(rows);
+    rows[0].wire_ordinal = 32;
+    model.kinds = rows;
+}
+
+/// Two kinds claiming one wire ordinal. The kind bits are a bitmask, so the
+/// second would be indistinguishable from the first in every coverage report.
+fn probeKindOrdinalDuplicate(arena: std.mem.Allocator, model: *Model) !void {
+    if (model.kinds.len < 2) return error.ProbeAnchorMissing;
+    const rows = try arena.dupe(KindRow, model.kinds);
+    errdefer arena.free(rows);
+    rows[1].wire_ordinal = rows[0].wire_ordinal;
+    model.kinds = rows;
+}
+
+/// The row keeps its name and takes a wire ordinal the kernel decoder maps to
+/// no kind, so the table and the decoder disagree about what that ordinal
+/// names. The ordinal moves rather than the name: the docs and authoring
+/// comparisons key on the name and would reject a rename first, under a check
+/// that says nothing about wire identity.
+fn probeKindOrdinalMismatch(arena: std.mem.Allocator, model: *Model) !void {
+    if (model.kinds.len == 0) return error.ProbeAnchorMissing;
+    const rows = try arena.dupe(KindRow, model.kinds);
+    errdefer arena.free(rows);
+    var candidate: u16 = 1;
+    const undecodable = while (candidate < 32) : (candidate += 1) {
+        if (invariant.Kind.fromWire(candidate) != null) continue;
+        var claimed = false;
+        for (rows) |row| {
+            if (row.wire_ordinal == candidate) claimed = true;
+        }
+        if (!claimed) break candidate;
+    } else return error.ProbeAnchorMissing;
+    rows[0].wire_ordinal = undecodable;
+    model.kinds = rows;
+}
+
+/// Two catalog rows answering to one operation name. Every consumer resolves
+/// an operation by name, so the second row would never be reachable.
+fn probeCatalogDuplicateOperation(arena: std.mem.Allocator, model: *Model) !void {
+    if (model.catalog.len < 2) return error.ProbeAnchorMissing;
+    const rows = try arena.dupe(CatalogRow, model.catalog);
+    errdefer arena.free(rows);
+    rows[1].operation = rows[0].operation;
+    model.catalog = rows;
+}
+
+/// The producer restates sink and implementation identity instead of reading
+/// them out of the kernel catalog. A second statement of the same fact is
+/// exactly what this gate exists to stop.
+fn probeProducerCatalogDerivation(arena: std.mem.Allocator, model: *Model) !void {
+    try replaceEvery(arena, model, .producer, "pcc.invariant.catalog[", "local_catalog[");
+}
+
+fn probeDocsSchemaStatement(arena: std.mem.Allocator, model: *Model) !void {
+    try replaceOnce(arena, model, .docs, "certificate schema 4", "certificate schema probe");
+}
+
+/// The compiler resolves ledger calls from a module that is not the one the
+/// native adapter implements, so a same-named import from anywhere would map
+/// onto a catalog row.
+fn probeCompilerModule(arena: std.mem.Allocator, model: *Model) !void {
+    const needle = try std.fmt.allocPrint(arena, "imported.module, \"{s}\"", .{ledger_specifier});
+    errdefer arena.free(needle);
+    const replacement = try std.fmt.allocPrint(arena, "imported.module, \"{s}_probe\"", .{ledger_specifier});
+    errdefer arena.free(replacement);
+    try replaceOnce(arena, model, .compiler, needle, replacement);
+}
+
+/// One resolver row renamed onto another's name. Two rows answering to one
+/// operation means one catalog index is never reachable from source.
+fn probeCompilerDuplicateName(arena: std.mem.Allocator, model: *Model) !void {
+    if (model.catalog.len < 2) return error.ProbeAnchorMissing;
+    const needle = try std.fmt.allocPrint(arena, "imported.name, \"{s}\")", .{model.catalog[1].operation});
+    errdefer arena.free(needle);
+    const replacement = try std.fmt.allocPrint(arena, "imported.name, \"{s}\")", .{model.catalog[0].operation});
+    errdefer arena.free(replacement);
+    try replaceOnce(arena, model, .compiler, needle, replacement);
+}
+
+fn probeNativeDuplicateExport(arena: std.mem.Allocator, model: *Model) !void {
+    if (model.native_exports.len < 2) return error.ProbeAnchorMissing;
+    const rows = try arena.dupe(NativeExport, model.native_exports);
+    errdefer arena.free(rows);
+    rows[1].name = rows[0].name;
+    model.native_exports = rows;
+}
+
+/// The observer stops decoding one catalog operation. Every atom it still
+/// knows is well formed, so `observer_name_mismatch` has nothing to object to
+/// and only the count comparison sees the loss.
+fn probeObserverOperationMismatch(arena: std.mem.Allocator, model: *Model) !void {
+    if (model.catalog.len < 2) return error.ProbeAnchorMissing;
+    const needle = try std.fmt.allocPrint(arena, "\"{s}#{s}\"", .{ ledger_specifier, model.catalog[1].operation });
+    errdefer arena.free(needle);
+    try replaceOnce(arena, model, .observer, needle, "\"probe:absent\"");
+}
+
+/// The replaced shell gate wired back in beside this one. Both would run, and
+/// the weaker one's pass would read as this gate's verdict.
+fn probeBuildReplacedGate(arena: std.mem.Allocator, model: *Model) !void {
+    try replaceOnce(
+        arena,
+        model,
+        .build,
+        "const invariant_drift_step = b.step(",
+        "_ = b.addSystemCommand(&.{ \"bash\", \"scripts/check-invariants.sh\" });\n    const invariant_drift_step = b.step(",
+    );
+}
+
 const probes = [_]Probe{
     .{ .name = "kernel", .expect = .kernel_adapter_declaration, .apply = probeKernel },
     .{ .name = "kernel-digest-derivation", .expect = .kernel_adapter_digest_derivation, .apply = probeKernelDigestDerivation },
@@ -2609,6 +2751,77 @@ const probes = [_]Probe{
     .{ .name = "verdict", .expect = .write_applicability_derivation, .apply = probeVerdict },
     .{ .name = "verdict-ready", .expect = .invariant_ready_relabelled, .apply = probeVerdictReady },
     .{ .name = "docs-write-applicability", .expect = .docs_write_applicability_statement, .apply = probeDocsWriteApplicability },
+    .{ .name = "kind-description-empty", .expect = .kind_description_empty, .apply = probeKindDescriptionEmpty },
+    .{ .name = "kind-predicate-version", .expect = .kind_predicate_version, .apply = probeKindPredicateVersion },
+    .{ .name = "kind-ordinal-range", .expect = .kind_ordinal_range, .apply = probeKindOrdinalRange },
+    .{ .name = "kind-ordinal-duplicate", .expect = .kind_ordinal_duplicate, .apply = probeKindOrdinalDuplicate },
+    .{ .name = "kind-ordinal-mismatch", .expect = .kind_ordinal_mismatch, .apply = probeKindOrdinalMismatch },
+    .{ .name = "catalog-duplicate", .expect = .catalog_duplicate_operation, .apply = probeCatalogDuplicateOperation },
+    .{ .name = "producer-catalog-derivation", .expect = .producer_catalog_derivation, .apply = probeProducerCatalogDerivation },
+    .{ .name = "docs-schema-statement", .expect = .docs_schema_statement, .apply = probeDocsSchemaStatement },
+    .{ .name = "compiler-module", .expect = .compiler_module, .apply = probeCompilerModule },
+    .{ .name = "compiler-duplicate-name", .expect = .compiler_duplicate_name, .apply = probeCompilerDuplicateName },
+    .{ .name = "native-duplicate-export", .expect = .native_duplicate_export, .apply = probeNativeDuplicateExport },
+    .{ .name = "observer-operation-mismatch", .expect = .observer_operation_mismatch, .apply = probeObserverOperationMismatch },
+    .{ .name = "build-replaced-gate", .expect = .build_replaced_gate, .apply = probeBuildReplacedGate },
+};
+
+/// A `Check` no mutation probe expects, and the reason it has none.
+///
+/// A probe proves that a changed input is rejected by the check that names it.
+/// Every row below is instead an absence floor: it fires when its input is
+/// gone or empty, which is the state in which there is nothing left to
+/// compare. A probe of one would assert the deletion rather than the
+/// comparison this gate exists for, so the row states what is probed over the
+/// same surface instead. "Deliberately unprobed" is a scope decision with its
+/// argument beside it, not a claim that the check is unreachable.
+const UnprobedCheck = struct { check: Check, reason: []const u8 };
+
+const deliberately_unprobed = [_]UnprobedCheck{
+    .{
+        .check = .none,
+        .reason = "not a rejection: it is a fresh Gate's value, and 'no probe expects the absence of a rejection' asserts that no probe may name it",
+    },
+    .{
+        .check = .missing_source,
+        .reason = "raised in loadModel, before any probe applies, so no in-memory mutation can reach it; a real deletion fails the compiled suites test-invariant-drift depends on and the nonzero exit comes from the Zig compiler",
+    },
+    .{
+        .check = .empty_source,
+        .reason = "the same floor one step later, over an input already read; every comparison downstream of it has nothing to compare, and the probes for those comparisons fail on their own anchors first",
+    },
+    .{
+        .check = .compiler_resolver_missing,
+        .reason = "an anchor floor on 'fn resolveLedger(', which every compiler probe is written against, so removing it surfaces as ProbeAnchorMissing from those probes and is reported as a broken probe, never as agreement",
+    },
+    .{
+        .check = .compiler_rows_empty,
+        .reason = "a vacuity floor under the resolver row comparison; compiler_index_mismatch and compiler_duplicate_name are probed over those same parsed rows, so the parser itself is exercised",
+    },
+    .{
+        .check = .native_specifier_missing,
+        .reason = "an anchor floor on the single '.specifier = \"' declaration; native_specifier is probed over the value that anchor yields, so the read is exercised and this row states only that the anchor is gone",
+    },
+    .{
+        .check = .native_binding_missing,
+        .reason = "a link floor: the linked module set is imported through the build graph rather than parsed, so this fires only when nothing declares the ledger specifier at all, which a text mutation cannot model",
+    },
+    .{
+        .check = .observer_rows_empty,
+        .reason = "a vacuity floor under the two observer comparisons; observer_name_mismatch and observer_operation_mismatch are both probed over those same parsed rows",
+    },
+    .{
+        .check = .docs_block_missing,
+        .reason = "an anchor floor on the machine-marked catalog block; the docs probe is anchored inside that block, so a removed marker makes that probe fail to mutate rather than pass",
+    },
+    .{
+        .check = .docs_rows_empty,
+        .reason = "a vacuity floor under the documented row comparison; docs_catalog_mismatch is probed over those rows, so an empty block is the one state left for this row to name",
+    },
+    .{
+        .check = .build_step_missing,
+        .reason = "an anchor floor on the step declaration this gate runs from; build_side_effects, build_evidence_dependencies and build_replaced_gate are all probed inside that step's wiring",
+    },
 };
 
 // ---------------------------------------------------------------------------
@@ -2899,6 +3112,55 @@ test "every adapter and manifest check is exercised by a probe" {
     // Nineteen is the family's size today, one more than before
     // `native_account_dispatch` joined it; shrinking it is a deliberate edit.
     try testing.expect(covered >= 19);
+}
+
+test "every check is either probed or allowlisted with a stated reason" {
+    // The two tests above count inputs and one name family. Neither counts
+    // checks, so a check added with no probe was invisible to both: 23 of them
+    // had never been observed rejecting anything, and one such check shipped
+    // on this branch with review as the only thing that caught it.
+    var probed: usize = 0;
+    var allowlisted: usize = 0;
+    inline for (@typeInfo(Check).@"enum".fields) |field| {
+        const check: Check = @enumFromInt(field.value);
+        var has_probe = false;
+        for (probes) |probe| {
+            if (probe.expect == check) has_probe = true;
+        }
+        var allowed: ?[]const u8 = null;
+        for (deliberately_unprobed) |row| {
+            if (row.check == check) allowed = row.reason;
+        }
+        if (has_probe) {
+            if (allowed != null) {
+                std.debug.print("check '{s}' is probed and still allowlisted; the row is stale\n", .{field.name});
+                return error.StaleUnprobedRow;
+            }
+            probed += 1;
+        } else {
+            const reason = allowed orelse {
+                std.debug.print("check '{s}' has no mutation probe and no allowlist row\n", .{field.name});
+                return error.UnprobedCheck;
+            };
+            // A word or two is a placeholder. Every row above argues from what
+            // the floor guards and names what is probed over the same surface.
+            if (reason.len < 80) {
+                std.debug.print("check '{s}' is allowlisted without a stated reason\n", .{field.name});
+                return error.UnprobedCheckWithoutReason;
+            }
+            allowlisted += 1;
+        }
+    }
+    // The values expected, not a remainder of one side taken from the other.
+    // Every member is accounted for exactly once, every allowlist row is
+    // matched by a member that has no probe, and the probed count is asserted
+    // rather than inferred, so deleting probes fails here and not silently.
+    try testing.expectEqual(@typeInfo(Check).@"enum".fields.len, probed + allowlisted);
+    try testing.expectEqual(deliberately_unprobed.len, allowlisted);
+    try testing.expect(probed >= 65);
+    // The allowlist cannot be emptied to make the loop above vacuous.
+    // Shrinking it is a deliberate edit, like the family floor above.
+    try testing.expect(deliberately_unprobed.len >= 11);
 }
 
 test "no probe expects the absence of a rejection" {

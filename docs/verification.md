@@ -452,12 +452,14 @@ invariant is declared says exactly that, and does not hedge about a refusal
 that cannot reach it.
 
 A refused artifact has no single invariant status to report in any case. A
-rejection at or before invariant coverage leaves the verdict at its defaults.
-A later evidence-stage or solver-stage rejection carries the coverage the
-consumer had already reached, because that coverage is assigned onto the
-outcome after the stage that refused it. Read a refused artifact's invariant
-numbers, where a consumer of the assessment exposes them, as "what was
-established before the refusal", never as a status of the artifact.
+rejection raised before evidence checking - artifact binding, obligation set,
+translation, invariant coverage, guard coverage, or a limit - leaves the
+verdict at its defaults. A rejection raised inside evidence checking, whatever
+stage it names, carries the coverage the consumer had already reached, because
+`run` assigns that coverage onto the outcome `checkEvidence` returns. Read a
+refused artifact's invariant numbers, where a consumer of the assessment
+exposes them, as "what was established before the refusal", never as a status
+of the artifact.
 
 No author-supplied sentence is rendered, and no rendering calls a predicate
 proven, verified or guaranteed. What acceptance establishes is that the linked
@@ -558,9 +560,9 @@ such guarantee. It lives in the runtime package, which imports both the kernel
 and the native module by design, so nothing in the build constrains where it
 reads a value from. The gate is the only automated check that watches, and
 being a source scan it is aimed at an accidental regression. A deliberate
-change to the bridge is caught by nothing else: the floor test, the three
-refusal tests and the gate's own value comparison all compare manifests, and
-none of them watches how the bridge obtained the values it compares. On that
+change to the bridge is caught by nothing else: every test in the bridge and
+the gate's own value comparison all compare manifests, and none of them
+watches how the bridge obtained the values it compares. On that
 side the last line of defence is human review.
 
 The adapter manifest names no invariant wire schema. The adapter never decodes

@@ -266,10 +266,14 @@ exact proven Property set.
 
 `zig build test-invariant-drift` runs the Zig gate at
 `packages/tools/src/invariant_drift_gate.zig`. The build target also requires
-the proof-checker, ZTS, native module, runtime activation, and
-project-configuration test roots to pass, plus the gate's own tests under `zig
-build test-invariant-gate`. `scripts/check-invariants.sh` is now only a wrapper
-that invokes the build step.
+the proof-checker, ZTS, native module, runtime activation,
+project-configuration, and developer CLI test roots to pass, plus the gate's
+own tests under `zig build test-invariant-gate`.
+`scripts/check-invariants.sh` is now only a wrapper that invokes the build
+step. The developer CLI root is `cli_main.zig`, and `build.zig` names it
+because it is the only root that compiles and runs the tests in
+`packages/runtime/src/proofs/invariant_report.zig`; without it the gate's
+evidence table would name a test nothing made run.
 
 The gate imports the surfaces that are data - the kernel operation catalog, the
 kind table, the linked native binding, and the authoring renderer - and
@@ -285,11 +289,25 @@ compiled evidence for acceptance and for missing, extra, and forged evidence.
 Every invocation runs one in-memory mutation probe per independent input, and
 each probe names the check that must reject it, so a mutation caught by an
 unrelated comparison is reported as a probe failure rather than as agreement.
-The probes never touch the working tree: the step depends on five compiled
+The probes never touch the working tree: the step depends on six compiled
 suites, so a deleted input would fail their compile and the nonzero exit would
-come from the Zig compiler rather than from any comparison the gate makes. `zig
-build invariant-gate` builds the binary alone into `zig-out/tooling`, where
-`--mutate <input>` runs one probe and `--list-probes` names them all.
+come from the Zig compiler rather than from any comparison the gate makes. The
+developer CLI root is the sixth. It costs about 8 s on its own from a warm
+cache, and the drift step still measures about 11 s with it, because the roots
+build and run in parallel; both figures are measured on the developer machine
+and will differ on another. `zig build invariant-gate` builds the binary alone
+into `zig-out/tooling`, where `--mutate <input>` runs one probe and
+`--list-probes` names them all.
+
+Coverage over the probe table is asserted two ways. One test requires a probe
+per independent input, and one requires every `Check` the gate can return to be
+named by a probe or to carry a row in `deliberately_unprobed` with the reason
+it has none. The second exists because the first counts inputs, not checks: 23
+checks had never been observed rejecting anything, and one of them shipped on
+this branch with review as the only thing that caught it. The allowlist holds
+eleven rows today, all of them absence floors that fire when an input is gone
+or empty; it cannot be emptied, and a row for a check a probe now covers fails
+the same test.
 
 The gate's run step sets `has_side_effects`. A Run step is cached on its
 executable and its arguments, never on the files the program reads, so without
