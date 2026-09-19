@@ -16,7 +16,7 @@
 //! Every invocation also runs one in-memory mutation probe per independent
 //! input. The probes mutate a copy held in this process and re-validate. They
 //! never touch the working tree: the build step that runs this gate also
-//! depends on five compiled test suites, so deleting an input on disk would
+//! depends on six compiled test suites, so deleting an input on disk would
 //! fail their compile and the nonzero exit would come from the Zig compiler
 //! rather than from any comparison made here.
 //!
@@ -117,6 +117,7 @@ const evidence = [_]Evidence{
     .{ .input = .author_src, .marker = "test \"the kind listing names every catalog member with its required status\"" },
     .{ .input = .author_src, .marker = "test \"a sentence with no kind selection produces no candidate\"" },
     .{ .input = .author_src, .marker = "test \"an advisory naming a different template conflicts and blocks the candidate\"" },
+    .{ .input = .report, .marker = "test \"the deployment assumption closes every rendering, including the empty one\"" },
 };
 
 // ---------------------------------------------------------------------------
@@ -1809,6 +1810,18 @@ fn validate(arena: std.mem.Allocator, gate: *Gate, model: Model) !void {
     if (countOccurrences(build_text, "invariant_drift_step.dependOn(") < 5) {
         return gate.reject(.build_evidence_dependencies, "test-invariant-drift depends on {d} steps, expected the gate plus at least four compiled evidence roots", .{countOccurrences(build_text, "invariant_drift_step.dependOn(")});
     }
+    // A count cannot say which roots. The status renderer's evidence row rests
+    // on one specific root: the file is anchored from `cli_main.zig`, so
+    // `test-cli` is the only step that compiles and runs its tests. Without
+    // this line the row names a test nothing made run, and the count above
+    // would still be satisfied by the four roots that were already there.
+    if (std.mem.indexOf(u8, build_text, "invariant_drift_step.dependOn(&run_cli_tests.step)") == null) {
+        return gate.reject(
+            .build_evidence_dependencies,
+            "test-invariant-drift does not depend on the developer CLI test root, the only step that compiles {s}",
+            .{paths.get(.report)},
+        );
+    }
     if (std.mem.indexOf(u8, build_text, "scripts/check-invariants.sh") != null) {
         return gate.reject(.build_replaced_gate, "build.zig still runs the replaced invariant shell gate", .{});
     }
@@ -2465,6 +2478,20 @@ fn probeConcepts(arena: std.mem.Allocator, model: *Model) !void {
     try replaceOnce(arena, model, .concepts, "### Application invariant", "### Probe entry");
 }
 
+/// Take the renderer's evidence root away while leaving four roots and the
+/// gate behind, which is what an edit that tidied this dependency away would
+/// look like. The count check still passes on five; only the named root does
+/// not.
+fn probeBuildEvidenceRoot(arena: std.mem.Allocator, model: *Model) !void {
+    try replaceOnce(
+        arena,
+        model,
+        .build,
+        "invariant_drift_step.dependOn(&run_cli_tests.step);",
+        "cli_test_step.dependOn(&run_cli_tests.step);",
+    );
+}
+
 fn probeBuild(arena: std.mem.Allocator, model: *Model) !void {
     const text = model.text.get(.build);
     const at = std.mem.indexOf(u8, text, "b.addRunArtifact(invariant_gate_exe)") orelse return error.ProbeAnchorMissing;
@@ -2559,6 +2586,7 @@ const probes = [_]Probe{
     .{ .name = "docs", .expect = .docs_catalog_mismatch, .apply = probeDocs },
     .{ .name = "concepts", .expect = .concepts_entry, .apply = probeConcepts },
     .{ .name = "build", .expect = .build_side_effects, .apply = probeBuild },
+    .{ .name = "build-evidence-root", .expect = .build_evidence_dependencies, .apply = probeBuildEvidenceRoot },
     .{ .name = "catalog", .expect = .compiler_index_mismatch, .apply = probeCatalogRow },
     .{ .name = "catalog-empty", .expect = .catalog_floor, .apply = probeCatalogEmpty },
     .{ .name = "kinds", .expect = .authoring_output_mismatch, .apply = probeKindRow },

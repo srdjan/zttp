@@ -445,11 +445,19 @@ report did not open a store. Only an instance that opened one and validated
 its baseline reports the validated form. Acceptance never opens a store, so a
 bundle report can never state readiness.
 
-An artifact that declares no invariant and an artifact acceptance refused
-render the same sentence, and that sentence says so. Every rejection path
-leaves the invariant verdict at its defaults, so the verdict carries no
-distinction between the two cases. The renderer states the ambiguity rather
-than picking one reading and presenting it as established.
+Only an accepted artifact is rendered at all. `zttp proofs verify` reports a
+rejection and stops before the invariant line, and a serving instance renders
+a promoted contract, which only acceptance produces. So the line that says no
+invariant is declared says exactly that, and does not hedge about a refusal
+that cannot reach it.
+
+A refused artifact has no single invariant status to report in any case. A
+rejection at or before invariant coverage leaves the verdict at its defaults.
+A later evidence-stage or solver-stage rejection carries the coverage the
+consumer had already reached, because that coverage is assigned onto the
+outcome after the stage that refused it. Read a refused artifact's invariant
+numbers, where a consumer of the assessment exposes them, as "what was
+established before the refusal", never as a status of the artifact.
 
 No author-supplied sentence is rendered, and no rendering calls a predicate
 proven, verified or guaranteed. What acceptance establishes is that the linked

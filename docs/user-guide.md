@@ -269,14 +269,16 @@ conservation alone. Declare `declared_accounts_v1` against a fresh store. A
 specification that names balance conservation alone is unaffected: it encodes
 the bytes it always did and reopens the store it has been using.
 
-Startup and `zttp proofs verify` print one invariant status line from the same
-renderer. It reads write applicability first, then the declared kinds by name,
-then coverage over protected call sites with its write and read split, then
-that native enforcement is a trusted assumption, then the ledger baseline.
-`covered` write applicability means a covered call site can modify ledger
-state; `vacuous` means none can, which is a missing report and not a failure.
-Baseline reads `not checked` in a bundle report, because that report opens no
-store, and reports validation only from an instance that opened one. Every
+`zttp proofs verify` prints one invariant status line for an accepted
+artifact, and startup prints the same line, from the same renderer, once a
+configured invariant is installed. It reads write applicability first, then
+the declared kinds by name, then coverage over protected call sites with its
+write and read split, then that native enforcement is a trusted assumption,
+then the ledger baseline. `covered` write applicability means a covered call
+site can modify ledger state; `vacuous` means none can, which reports an
+absence rather than a failure. Baseline reads `not checked` in a bundle
+report, because that report opens no store, and reports validation only from
+an instance that opened one. Every
 line ends by saying that keeping other writers off the store is a deployment
 assumption the checker does not verify. None of it says a predicate was
 proven, because acceptance never examines one.

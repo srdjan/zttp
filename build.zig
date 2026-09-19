@@ -1225,6 +1225,17 @@ pub fn build(b: *std.Build) void {
     const cli_test_step = b.step("test-cli", "Run developer CLI unit tests");
     cli_test_step.dependOn(&run_cli_tests.step);
 
+    // The invariant status renderer is anchored from `cli_main.zig`, so this
+    // root is the only one that compiles and runs its tests. The drift gate
+    // asserts that the renderer's source states write applicability before
+    // its counts and keeps the deployment assumption outside every branch;
+    // both are source scans, and a source scan proves nothing about what the
+    // renderer produced. Naming a test in the gate's evidence table without
+    // this dependency would be the gate claiming a test ran when nothing made
+    // it compile. Declared here rather than beside the step because
+    // `run_cli_tests` does not exist yet where that step is built.
+    invariant_drift_step.dependOn(&run_cli_tests.step);
+
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_unit_tests.step);
     test_step.dependOn(&run_cli_tests.step);

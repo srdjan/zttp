@@ -42,17 +42,22 @@ const deployment_assumption =
     "; keeping other writers off a protected ledger store is always a deployment " ++
     "assumption, which this checker does not verify";
 
-/// What a status with nothing established renders.
+/// What an accepted artifact with no declared invariant renders.
 ///
-/// A refused artifact and an artifact that declares no invariant leave the
-/// same verdict behind: `InvariantVerdicts` stays at its defaults on every
-/// rejection path, whatever the specification said. The renderer is handed
-/// that verdict and nothing else, so it states the ambiguity instead of
-/// picking one of the two readings and presenting it as fact.
-const no_status_body =
-    "no invariant status was established; the verdict records none for an artifact " ++
-    "that declares no invariant and none for one acceptance refused, and it does " ++
-    "not distinguish them";
+/// This is the only artifact that reaches it. Both callers render an
+/// acceptance: `proofs/bundle.zig` returns `error.ProofRejected` before the
+/// invariant line, and `server.zig` renders a promoted contract, which only
+/// an accepted assessment produces. A refused artifact therefore never
+/// arrives here, and this sentence does not hedge about one.
+///
+/// It could not hedge accurately in any case. A rejection at or before
+/// invariant coverage does leave `InvariantVerdicts` at its defaults, but
+/// `checker.zig`'s `run` assigns the coverage it reached onto a later
+/// evidence-stage or solver-stage rejection, so a refused artifact does not
+/// have one status - it has two, depending on how far it got.
+const no_invariant_body =
+    "not configured; this artifact declares no application invariant, so no kind, " ++
+    "no coverage, no write applicability and no baseline apply";
 
 /// A buffer size every rendering fits in. Callers render into a fixed buffer,
 /// and a fixed writer that runs out truncates mid-sentence - which is one way
@@ -74,7 +79,7 @@ pub fn writeSummary(writer: *std.Io.Writer, status: InvariantStatus) std.Io.Writ
 
 fn writeStatus(writer: *std.Io.Writer, status: InvariantStatus) std.Io.Writer.Error!void {
     if (!status.configured) {
-        try writer.writeAll(no_status_body);
+        try writer.writeAll(no_invariant_body);
         return;
     }
     try writer.print("write applicability {s}; kinds ", .{applicabilityText(status.write_applicability)});
@@ -148,13 +153,16 @@ fn render(buffer: []u8, status: InvariantStatus) ![]const u8 {
     return writer.buffered();
 }
 
-/// The five statuses the five reported cases produce, in one place so every
-/// test below names the same artifact when it names a case.
+/// The four statuses this renderer can be handed, in one place so every test
+/// below names the same artifact when it names a case.
+///
+/// There is no fixture for a refused artifact, because no refused artifact
+/// reaches this file: both callers render an acceptance. A literal
+/// `InvariantStatus{}` standing in for one would not be a fifth case either -
+/// it is this same value, so a test over it could not fail independently of
+/// the one below, and it would not even be the right value for a rejection
+/// after invariant coverage, which carries the coverage it reached.
 const unconfigured_status = InvariantStatus{};
-
-/// A refused artifact. Every rejection path leaves `InvariantVerdicts` at its
-/// defaults, so this is what `fromVerdicts` returns for one.
-const refused_status = InvariantStatus{};
 
 const offline_status = InvariantStatus{
     .configured = true,
@@ -192,32 +200,22 @@ const ready_write_capable_status = InvariantStatus{
     .runtime_readiness = .ready,
 };
 
-test "an unconfigured artifact reports that no invariant status was established" {
+/// The four above, for the checks that must hold of every rendering.
+const every_case = [_]InvariantStatus{
+    unconfigured_status,
+    offline_status,
+    read_only_status,
+    ready_write_capable_status,
+};
+
+test "an accepted artifact with no declared invariant reports nothing applicable" {
     var buffer: [max_summary_bytes]u8 = undefined;
     try testing.expectEqualStrings(
-        "no invariant status was established; the verdict records none for an artifact " ++
-            "that declares no invariant and none for one acceptance refused, and it does " ++
-            "not distinguish them; " ++
+        "not configured; this artifact declares no application invariant, so no kind, " ++
+            "no coverage, no write applicability and no baseline apply; " ++
             "keeping other writers off a protected ledger store is always a deployment " ++
             "assumption, which this checker does not verify",
         try render(&buffer, unconfigured_status),
-    );
-}
-
-test "a refused artifact reports the same absence, because the verdict carries no more" {
-    // Not a weaker assertion than the one above: it is the same expected value,
-    // and it is expected because `checker.zig` returns a default
-    // `InvariantVerdicts` on every rejection path. A renderer that printed
-    // "not configured" here would be reporting a fact acceptance never
-    // established about an artifact that may well have declared an invariant.
-    var buffer: [max_summary_bytes]u8 = undefined;
-    try testing.expectEqualStrings(
-        "no invariant status was established; the verdict records none for an artifact " ++
-            "that declares no invariant and none for one acceptance refused, and it does " ++
-            "not distinguish them; " ++
-            "keeping other writers off a protected ledger store is always a deployment " ++
-            "assumption, which this checker does not verify",
-        try render(&buffer, refused_status),
     );
 }
 
@@ -286,13 +284,12 @@ test "write applicability precedes the coverage counts in every configured rende
 }
 
 test "the deployment assumption closes every rendering, including the empty one" {
-    for ([_]InvariantStatus{
-        unconfigured_status,
-        refused_status,
-        offline_status,
-        read_only_status,
-        ready_write_capable_status,
-    }) |status| {
+    // The clause is what a reader needs whatever the numbers above say, so the
+    // check is over every case rather than over the one that motivated it.
+    // Four is the set's size; shrinking it is a deliberate edit, and without
+    // this the loop below would still pass over a set somebody emptied.
+    try testing.expectEqual(@as(usize, 4), every_case.len);
+    for (every_case) |status| {
         var buffer: [max_summary_bytes]u8 = undefined;
         const rendered = try render(&buffer, status);
         try testing.expectEqualStrings(
@@ -308,13 +305,7 @@ test "no rendering claims an application predicate was proven" {
     // this line and conclude the system checked a predicate. Every word that
     // would carry that reading is refused here, over the bytes that ship.
     const forbidden = [_][]const u8{ "proven", "proved", "verified", "guaranteed", "enforced and checked" };
-    for ([_]InvariantStatus{
-        unconfigured_status,
-        refused_status,
-        offline_status,
-        read_only_status,
-        ready_write_capable_status,
-    }) |status| {
+    for (every_case) |status| {
         var buffer: [max_summary_bytes]u8 = undefined;
         const rendered = try render(&buffer, status);
         for (forbidden) |word| {
