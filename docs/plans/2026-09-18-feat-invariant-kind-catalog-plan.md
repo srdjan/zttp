@@ -1,200 +1,323 @@
 # ZTTP Invariant Kind Catalog
 
-## Purpose
+## Purpose and current baseline
 
-Grow the accepted invariant catalog from one closed template to a closed, gated
-set of kinds over the existing protected ledger. The developer selects a kind
-from a list the build generates. Deterministic builds consume the canonical
-specification. Model output never authorizes an artifact.
+Extend the implemented balance invariant with a closed catalog over the protected
+ledger. Developers select a supported kind and review its canonical description.
+Deterministic builds consume the confirmed specification. Jev can suggest a kind;
+it cannot verify an arbitrary sentence or authorize an artifact.
 
-This plan continues `2026-09-18-feat-application-invariants-plan.md`, whose
-Boundaries section defers general predicates. It does not lift that deferral. It
-replaces one closed template with a closed catalog, which is a different thing.
+Refreshed against `6ad648ae` on 2026-09-19. The changes since the foundation commit
+`f0d8c5e8` are this catalog plan and the No Python rule in `AGENTS.md`. The catalog
+is not implemented. This plan continues
+[ZTTP Application Invariants](2026-09-18-feat-application-invariants-plan.md).
+It preserves that plan's exclusion of general predicates and automatic migration.
+This refresh used source inspection, not new test results.
 
-The claim this design makes, and the only one it makes:
+The current implementation has one kind, `balance_conservation_v1`, and two
+operations, `post` and `balance`. These are separate catalogs. The kernel owns
+specification schema 1 and a fixed adapter identity in
+`packages/proof-checker/src/invariant.zig`. The native module enforces conservation
+without a kind selector. Its configuration receives ledger, currencies and the
+specification digest from `HandlerInstance.installLedgerModuleState` in
+`packages/runtime/src/handler_instance.zig`.
 
-> Every predicate the protected ledger enforces is offered for selection, and a
-> gate proves that the enforced set, the `Kind` enum, the offered list, and the
-> adapter identity agree.
-
-The word "conclusive" is not used, because no gate can establish it. "Closed,
-with a stated admission criterion and a gate" is testable and is what the
-product needs.
+The proof checker already compares declared operations with independent bytecode
+observations. `packages/runtime/src/proofs/invariant_report.zig` already separates
+coverage, native trust and runtime readiness. Extend these paths. Do not replace
+them with a new generic verification system.
 
 ## Admission criterion
 
-A protected store is a module that owns, for its own data, atomic commit,
-writer isolation, replay idempotence, and a baseline it validates when it opens.
-`zttp:ledger` owns all four: `BEGIN IMMEDIATE` in `executePost`
-(`packages/modules/src/data/ledger.zig:267`), an idempotency row plus content
-hash making a retry a no-op (`:271`), entries and balances committed in one
-transaction (`:311`), and `bootstrapOrValidate` under `BEGIN EXCLUSIVE` (`:181`).
+A protected store must own atomic commit, writer isolation, replay idempotence,
+and baseline validation. `packages/modules/src/data/ledger.zig` supplies these
+through `executePost`, `checkIdempotency` and `bootstrapOrValidate`. This argument
+depends on the existing native adapter, SQLite and deployment trust assumptions.
+It does not prove arbitrary handler logic.
 
-An invariant kind is a developer-selected predicate that such a store evaluates
-on every write and on the baseline. Because the store owns the four properties,
-no induction is required and none is claimed: the per-write evaluation is the
-inductive step with its preconditions discharged by construction, and baseline
-validation is the base case.
+A kind must specify both its write check and its baseline check. A group predicate
+runs before the transaction from the posting group alone. A state predicate runs
+inside the transaction against the final per-account balances before commit.
+Conservation is the existing group predicate. This release adds only
+`declared_accounts_v1`, also a group predicate. It does not add a state-predicate
+framework before a supported kind needs one.
 
-Two hook points exist, and every admissible kind names one:
+The catalog gate must establish agreement between supported kinds, descriptions,
+native dispatch and adapter identities. Predicate correctness still needs
+behavior tests. A hash of a descriptor does not prove that its implementation
+checks the predicate.
 
-1. **Group predicates**, decidable from the posting group alone, evaluated in
-   `validateGroup` (`:433`) before the transaction opens. Conservation is one
-   today: `if (sum != 0) return error.Unbalanced` (`:437`).
-2. **State predicates**, needing current balances, evaluated inside the
-   transaction after the per-account `next` is computed and before the balance
-   upsert (`:303`).
+## Technical decisions
 
-A proposed kind that fits neither hook is refused. In particular, program-shape
-properties ("the idempotency key derives from the business id", "no balance
-value reaches a response") need operand-level bytecode observation, which
-`invariant_observer.zig` already carries as its most fragile part. Those belong
-to the flow checker, which has the label machinery, and are not kinds.
+### Supported kinds and configured kinds
 
-## The change that kind 2 forces
+The adapter's supported set and an application's configured set are different.
+Conservation remains mandatory. Both v1 and v2 specifications must include it;
+a v2 specification can add declared accounts. The CLI lists conservation as
+required and declared accounts as optional. Idempotence and atomicity remain
+module guarantees, not selectable kinds.
 
-Today `validateGroup` enforces conservation unconditionally, for every caller,
-whatever the configured specification says. The configured kind is therefore not
-a selector. It is an identity binding: it fixes what the certificate and the
-checker agree the artifact claims.
+The kernel retains its import-free boundary. Keep its accepted kind descriptions
+and versions beside `Kind`. Keep the native dispatch table in the modules package,
+which currently depends only on the SDK. Compare the independent definitions in
+a host Zig gate. Do not make the checker import the native module or the SDK.
 
-A second kind changes that. The module must then enforce exactly the configured
-set, which creates a failure mode that cannot occur today: an artifact whose
-specification names a kind that the linked adapter does not enforce. Acceptance
-would pass, because the checker verifies call-site honesty and spec identity,
-not predicate behaviour.
+The adapter digest binds the native supported-kind manifest, predicate semantic
+versions, mandatory kinds, ledger schema and operation identities. The runtime
+must obtain that manifest from the linked native adapter. It must compare it with
+the consumer's expected manifest before opening the store. The artifact graph
+binds this checked identity. Deriving both sides only from the specification or
+from the checker's own table would not detect a missing native implementation.
+The separate specification digest binds the exact selected kinds and parameters.
 
-`invariant.adapter_identity` (`packages/proof-checker/src/invariant.zig:137`,
-today the fixed string `"zttp:ledger/native-adapter-v1"`) is what closes this,
-and it must stop being a hand-written constant. It becomes a function of the
-enforced predicate set, so an adapter that enforces a different set cannot
-present the same identity. This is the load-bearing safety change in the plan,
-and it is why item 4 precedes item 5.
+The native dispatch table must drive the checks used by posting and baseline
+validation. Adding a name to an unused table is not evidence of enforcement.
+Unknown or unsupported configured kinds fail closed. A predicate implementation
+change requires a semantic version or implementation identity change.
 
-## Implementation
+### Specification and storage compatibility
 
-1. **Replace the Python authoring tool with a Zig command.** `zttp invariant
-   list` prints the offered kinds with their canonical descriptions. `zttp
-   invariant author` prints a reviewable candidate and never writes an accepted
-   specification. Delete `scripts/invariant-author.py`. The optional advisory
-   classifier keeps its existing boundary, which is that only the developer's
-   sentence leaves the machine, never code, ledger contents, or credentials.
-   Inject the HTTP transport the way `smt_solver.zig` is injected, so no network
-   client enters the `zts` analyzer or the wasm build.
+Keep the v1 decoder and its exact canonical bytes and digest. Existing v1 JSON
+must still build a conservation-only artifact that can open its existing ledger.
+Add specification schema 2 with common ledger and currency fields plus a sorted,
+length-delimited list of kind payloads. Conservation has no extra payload;
+declared accounts carries its matchers. Keep one specification graph member.
 
-2. **Move the per-kind canonical description into Zig beside `Kind`** and derive
-   the offered list from it at comptime, the way `property_goals.zig` derives
-   `supported_goal_list` from `supported_goals`. The description is the sentence
-   the developer confirms, so it is authored once and read everywhere.
+Reject duplicate or unknown kinds, missing conservation, malformed lengths,
+trailing data, non-canonical record order and oversize specifications. Retain the
+current bounded specification size and zero-copy checker decoding. Use a distinct
+v2 digest domain. Expand `InvariantVerdicts.kind_bits` to `u32` and check supported
+ordinals before shifting. Carry those bits through runtime and proof reports.
 
-3. **Make the canonical bytes a tagged payload set.** Today the layout after the
-   header is the conservation payload, hardcoded in `invariant.decode` (`:75`)
-   and again in `invariant_config.parse`. Replace it with a sorted list of
-   (kind, payload) records under one digest. Keep exactly one specification
-   member per artifact, so the checker's `spec_members != 1` identity binding
-   (`packages/proof-checker/src/checker.zig:464`) is unchanged. Replace
-   `verdict.kind_bits`, today a `u8` (`verdict.zig:323`) set by a shift
-   (`checker.zig:479`) and so capped at eight kinds, with a `u32` mask. A mask
-   keeps the verdict's per-kind reporting; a plain count would lose which kinds
-   were accepted.
+The artifact envelope and certificate are currently version 4. The new spec uses
+the existing bounded section and digest fields; do not change those outer formats
+unless their wire layout changes. A changed adapter identity invalidates evidence
+bound to the old adapter when assessed by the new consumer. Require a rebuild;
+do not silently substitute a new identity for an old certificate.
 
-4. **Make enforcement read the configured set, and derive the adapter identity
-   from it.** The module gains a table of enforced predicates keyed by kind, and
-   the identity string is computed from that table rather than written by hand.
-   Conservation stays unconditional in the shipped adapter so no existing
-   artifact changes meaning; it is simply also a member of the enforced set.
+`ledger_meta.invariant_digest` binds a store to its exact specification.
+Changing kinds, matchers, currencies or encoding from v1 to v2 must refuse an
+existing mismatched store without changing it. A new v2 specification can create
+a fresh store. Reopening a store with that same v2 specification must validate
+its baseline. Adding a kind to an existing store requires a separate migration
+plan. Startup must never rewrite metadata to make a mismatch pass.
 
-5. **Add `declared_accounts_v1` as kind 2.** Every entry's account matches a
-   declared class pattern. It is a group predicate, decidable in
-   `validateGroup`, needing no state read and no observer change. It is chosen
-   first because it is the cheapest predicate in the catalog, so items 2, 3 and
-   4 get designed against the easy case rather than under pressure from a hard
-   one. Baseline extension: scan `ledger_balances` accounts against the patterns.
+### Declared accounts
 
-6. **Fix two defects in the shipped tool and checker.**
-   - The authoring tool emits `balance_conservation_v1` for any sentence when
-     the advisory is not requested, because `render` treats `not_requested` as
-     permission and no `--kind` flag exists. The Zig replacement requires an
-     explicit kind selection, prints the kind's canonical description directly
-     under the developer's sentence, and records `reviewed_against` rather than
-     a free-text `statement` that nothing relates to the kind.
-   - A zero-write artifact reaches ready. `invariant_operation_required`
-     (`checker.zig:470`) refuses only when the certificate list and the observed
-     list are both empty, so an artifact with one `balance` read and no `post`
-     passes coverage while the invariant holds vacuously. Add a per-kind write
-     floor: a kind that constrains writes requires at least one observed write
-     site, or the verdict states the result is vacuous.
+Define account patterns as a closed union of exact matches and prefix matches.
+An exact matcher accepts only the same account bytes. A prefix matcher accepts
+an account that starts with its non-empty prefix, including the prefix itself.
+Matching is case-sensitive over valid UTF-8 bytes, with no normalization, regex,
+wildcards or locale rules. For example, prefix `asset:` accepts `asset:cash` and
+refuses `assets:cash`. An empty prefix is invalid.
 
-7. **Extend the drift gate and retire its Python.** `scripts/check-invariants.sh`
-   compares fifteen paths and does not include the authoring tool, so the
-   offered list and the `Kind` enum can disagree with nothing failing. Rewrite
-   the gate as a Zig build step that compares four surfaces: the `Kind` enum,
-   the per-kind descriptions, the enforced predicate table in `ledger.zig`, and
-   the adapter identity. Keep the existing non-empty-input assertion on every
-   compared source, which is the floor that makes the count mean something.
+The payload requires a non-empty matcher list. Canonicalize by matcher tag and
+then byte value; reject duplicates. Validate matcher text with the existing
+non-empty, NUL-free UTF-8 boundary. The bounded spec size limits the payload.
+Require every entry to match at least one rule, including zero amounts and
+entries that cancel on the same account. Refuse the whole posting before any
+write if one entry fails. Return a stable domain error through the existing
+Result API.
 
-8. **Rename the verdict summary.** The current line reads as "invariant
-   verified" to a reader who has not read `docs/verification.md`. State the
-   facts separately and in the order a reader needs them: enforced by the native
-   adapter at each post (trusted); N of N declared ledger call sites
-   independently observed; baseline validated at instance open; external writers
-   excluded by deployment (not checked). The last clause is not suppressible.
+Baseline validation checks historical entry accounts and materialized balance
+accounts under the existing exclusive transaction. Checking non-zero balances
+alone would miss a forbidden account whose net balance is zero. Retain posting
+hash, conservation, schema, currency and materialized-balance checks. `balance`
+remains a read API and does not become an account authorization check.
 
-## Validation
+### Authoring and evidence claims
 
-Start with a candidate for a sentence that does not describe conservation, and
-confirm the tool refuses rather than emitting conservation. Then a two-kind
-specification that round-trips through encode, decode and the checker. Then an
-artifact whose specification names kind 2 against an adapter that does not
-enforce it, which must be refused by identity. Then a read-only artifact, which
-must report vacuous rather than ready.
+`zttp invariant list` prints the supported kinds, required status and canonical
+descriptions. `zttp invariant author` requires explicit kind selection. A sentence
+alone cannot produce a candidate. Emit the original sentence, canonical meanings,
+`requiresReview`, advisory status and the structured candidate. Never save an
+accepted specification or claim that the sentence has been proved.
 
-Extend to declared and undeclared accounts, baseline stores that violate a newly
-configured kind, kind ordering in the canonical bytes, duplicate kinds, an
-unknown kind ordinal, and a specification whose digest does not match the
-certificate. Retain every existing invariant test, including retries, restart,
-interrupted commits, concurrent writers, and tampered specifications.
+`reviewed_against` belongs in the review output, outside the accepted candidate.
+It identifies the canonical kind descriptions and versions shown for human review.
+It does not prove that a person reviewed them. Keep legacy v1 `statement` input
+readable as an annotation. All executable constraints belong in canonical
+structured fields.
 
-Run the affected module, SDK, compiler, checker, artifact and runtime suites,
-plus proof-checker purity, capability, module governance, boundary,
-proof-swallow and stand-in gates. Run `test-zruntime` separately.
+Keep Jev opt-in and outside build, check, acceptance and serving. Inject the
+advisory transport at the host tooling boundary, following the pure/host split
+used by `packages/tools/src/smt_solver.zig`. Send only the supplied sentence and
+public catalog criteria in the request body. The API key is used only for
+transport authentication. No source, ledger data or credential value enters model
+state or logs. Unsupported, malformed, unavailable or conflicting advice produces
+no advisory candidate. An explicit selection without Jev can produce a candidate,
+but cannot establish that the sentence means the same thing. Verify the provider
+protocol against its official documentation when implementing the transport.
 
-## Boundaries
+Coverage counts call sites, not calls that executed. The current checker refuses
+an empty operation set but accepts a balance-only artifact. This is a missing
+write-applicability report, not a demonstrated conservation failure. Retain
+read-only serving after successful baseline validation. Report each configured
+kind as `vacuous` when it has no observed write site; otherwise report write-site
+coverage. Neither state claims that a posting occurred. Keep store readiness in a
+separate field. Continue to refuse a configured artifact with no ledger operation.
 
-Kinds are added over the existing protected ledger. New protected stores are a
-separate program and are not in scope; the tagged payload, the generated offered
-list and the gate all generalize to one when it is built, which is the reason to
-do this first.
+```text
+Explicit selection -> candidate -> human review -> confirmed specification
+                                                   |
+                        deterministic build -------+
+                                  |
+                 artifact + certificate + spec
+                                  |
+          independent call observation + consumer identity checks
+                                  |
+             linked native manifest check -> baseline validation
+                                  |
+               installed store -> checked atomic postings
+```
 
-`account_floor_v1` and `transfer_topology_v1` are the next two candidates and
-are not in this plan. Cross-currency and cross-ledger conservation stay deferred
-for the reason the previous plan gives, that no single lock covers them.
-Temporal predicates need a sweeper and a clock and are not per-post decidable.
-Unconditional module guarantees such as idempotent posting are documentation,
-not selectable kinds, and must stay out of the offered list so they do not
-dilute a selection question.
+## Implementation units
 
-Existing algebraic law metadata in `semantics.zig` keeps its name and is
-unrelated to this catalog.
+Retain these IDs when refining the plan. Execute U2, U1, U7, U3, U4, U5, U6 and U8
+in that order. U7 replaces the gate before adapter changes invalidate its current
+fixed-string checks. Extend that gate with each later unit. Keep affected tests
+and documentation current in each commit; U8 completes the user-facing reports.
+Each unit must leave the conservation path usable. Do not advertise kind 2 until
+its codec, native enforcement and consumer checks are wired.
 
-Work on local main and commit complete isolated units. Do not push.
+### U2: Define kind metadata
 
-## Open measurements
+Add canonical descriptions, semantic versions, required status and write
+applicability beside `Kind` in `packages/proof-checker/src/invariant.zig`.
+Derive the offered list from these rows. Keep the operation catalog separate.
+Test non-empty metadata, unique wire identities and exhaustive enum coverage.
 
-Baseline validation runs per handler instance under an exclusive lock, and every
-kind adds a baseline check. The previous plan already records that its cost on a
-large ledger needs measurement and that a new instance's validation lock can
-conflict with active posting. That measurement gates how far the catalog grows
-and must be taken before kind 3, not estimated.
+### U1: Replace Python authoring
 
-The four surfaces the new gate compares must be checked by deleting each input
-in turn and confirming the gate fails, because a gate whose input is empty
-reports a pass while checking nothing.
+Add the developer CLI command through `packages/runtime/src/dev_cli.zig`, its help
+through `cli_help.zig`, and a host authoring module in `packages/tools/src/`.
+Expose the command tests through the developer CLI test root in `cli_main.zig`.
+Replace the Python self-test dependency in `build.zig`, then delete
+`scripts/invariant-author.py`. Do not add HTTP dependencies to the pure checker,
+ZTS analyzer or runtime-only binary.
 
-## Out of scope, recorded
+Test list output, missing selection, unknown kind, invalid parameters, stable
+candidate output and the distinction between a candidate and an accepted spec.
+Use an injected transport to test Jev failures and request data boundaries without
+network calls. A sentence such as "accounts cannot be overdrawn" without explicit
+selection must not become a conservation candidate.
 
-The repository contains four tracked Python scripts and fifteen shell scripts
-that invoke `python3`. This plan removes the two that belong to the invariant
-feature, `scripts/invariant-author.py` and the Python body of
-`scripts/check-invariants.sh`. The rest is legacy to remove as each area is
-touched, per the rule now recorded in `AGENTS.md`.
+### U3: Add the versioned payload set
+
+Extend the kernel codec and `packages/tools/src/invariant_config.zig` together.
+Normalize both schemas to one internal view while preserving v1 bytes. Cover JSON
+unknown fields, canonical sort order, bounds, duplicate records and digest
+separation. Check artifact section handling, graph membership, checker verdicts
+and report fields. Test v1 compatibility and malformed v2 bytes through public
+parsing and acceptance APIs. Keep unsupported kinds rejected until U5.
+
+### U4: Bind the linked adapter
+
+Add native manifest and dispatch metadata in `packages/modules/src/data/ledger.zig`
+and expose it through `packages/zts/src/modules/data/ledger.zig`. Pass selected
+payloads through `HandlerInstance.installLedgerModuleState` into owned native
+configuration; retain allocator cleanup on every failure. Update
+`packages/runtime/src/artifact_graph.zig` and the producer/consumer integration to
+bind the linked adapter as specified above. The graph currently receives only the
+specification digest. Add an explicit adapter digest input, computed and checked
+independently by the build and activation paths.
+
+Test a mismatched native manifest, missing kind support, changed predicate version,
+old adapter certificate and incomplete configuration. All must fail before store
+creation or mutation. Rebuild a v1 fixture and confirm its unchanged store digest
+is accepted. Preserve the checker's import-free build.
+
+### U5: Add declared accounts end to end
+
+Add the second enum/metadata row, tagged payload, CLI parameters, native dispatch
+entry and baseline check as one complete unit. Keep conservation mandatory.
+Update module descriptions, generated specifications and their governed hashes
+when the public module contract changes.
+
+Test exact and prefix matching, case differences, UTF-8, invalid matcher text,
+duplicates, forbidden zero-value entries and cancelling entries. A refused group
+must leave entries, balances and the idempotency record unchanged. Reopen a valid
+v2 store, refuse a same-spec store with a forbidden historical or balance account,
+and refuse a changed spec without rewriting ledger metadata. Use valid fixtures
+that reach the account check, not an earlier hash or metadata failure.
+
+### U6: Report write applicability
+
+Extend `checkInvariantCoverage`, `InvariantVerdicts` and `InvariantStatus` with
+per-kind write applicability. Keep exact operation/witness/observation comparison.
+Test read-only coverage with `vacuous` write status, write-site coverage, empty
+operations and forged or omitted witnesses. A declared write that is absent from
+independent observation must reject, not remove the vacuous status.
+
+### U7: Replace and extend the drift gate
+
+Replace the Python body of `scripts/check-invariants.sh` with a host Zig command
+wired to `zig build test-invariant-drift`. A shell wrapper may only invoke that
+command. Preserve the existing compiler, operation catalog, native export/effect,
+observer, proof IR tag, adapter graph, documentation and compiled-test checks.
+Add checks for current kind metadata and authoring output. U3, U4 and U5 extend
+this gate with versioned payload, native dispatch and manifest checks as those
+surfaces appear. Comparing only the new four surfaces would lose current
+operation-coverage protection.
+
+The current gate reads fourteen named inputs. Make missing, empty or unparsed
+inputs fail explicitly. Test deletion and mutation of each independent input,
+including authoring and build wiring. Keep compiled suite dependencies in
+`build.zig`; finding a test name in a source file does not prove the test ran.
+Remove invariant-related Python invocations from the build. Repository-wide
+Python removal remains outside this feature.
+
+### U8: Complete reports and documentation
+
+Extend the existing summary with configured kind names, write applicability,
+trusted native enforcement, independent call-site coverage and baseline status.
+Always state that external writer exclusion is a deployment assumption that the
+checker does not verify. Offline proof reports must keep baseline status as
+`not checked`; only live validated instances can report readiness.
+
+Update `docs/verification.md`, `docs/user-guide.md` and `CONCEPTS.md`, including
+v1 compatibility, v2 fresh-store requirements and the Jev boundary. Test exact
+status values for unconfigured, rejected, offline, read-only and ready write-capable
+artifacts. No output may label arbitrary prose as verified.
+
+## Validation and completion
+
+During implementation, start with a small end-to-end case: author an explicit
+candidate, build it, start a fresh store, accept a balanced declared posting and
+refuse an undeclared one without state change. Then cover restart, read-only
+status, changed adapter identity and invalid baseline. Preserve existing retry,
+conflicting-key, overflow, currency separation, concurrent-write, interrupted-commit,
+storage-bypass, output-path and secret-label regressions.
+
+Run the affected module, SDK, compiler, checker, artifact, developer CLI and runtime
+suites. Retain proof-checker purity, capability, module governance, module boundary,
+proof-swallow, proof ratchet, stand-in and invariant drift gates. Run
+`zig build test-zruntime` separately. Build the browser analyzer to check the pure
+boundary. Every new gate must have a non-empty input floor and a failure probe.
+Use behavior through public APIs rather than tests of private helpers alone.
+
+The predecessor records incomplete full-repository validation: model replay
+fixtures need a fresh provider capture after module tool changes, and the release
+build hit the execution limit. Historical model responses must not be rewritten
+as if newly captured. These remain pending until rerun; this refresh grants no
+permission for long scripts or live provider captures. The unrelated deleted
+`docs/zts-advanced-v2.1.md` remains outside this work.
+
+Completion requires the full candidate-to-runtime path, enforced account rules,
+unchanged v1 store compatibility, truthful status output, no invariant Python
+tooling, and recorded verification results. Work on local main. Commit complete
+isolated units, leave pre-existing user changes alone and do not push.
+
+## Boundaries and measurements
+
+New protected stores, general predicates, distributed transactions, currency
+conversion, temporal rules, migration tooling, account floors and transfer topology
+remain deferred. Program-shape constraints need flow or operand analysis and do
+not become ledger kinds. Existing algebraic law metadata keeps its name.
+
+Baseline validation still runs per handler instance under an exclusive lock.
+Posting prepares statements repeatedly, and baseline validation scans stored
+postings. Measure startup, pool expansion and posting cost on a small workload
+before scaling. Change only the scale parameter between comparable runs. Measure
+the added account-check cost before adding a third kind. Do not assume a generated
+catalog resolves lock contention or permits validation once per generation.

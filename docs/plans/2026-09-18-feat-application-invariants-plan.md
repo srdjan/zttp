@@ -1,5 +1,10 @@
 # ZTTP Application Invariants
 
+This is the implemented foundation, through commit `f0d8c5e8`. The next work is
+defined in [ZTTP Invariant Kind Catalog](2026-09-18-feat-invariant-kind-catalog-plan.md).
+That plan adds a closed catalog and replaces the invariant feature's Python
+tooling under the current `AGENTS.md` rule. General predicates remain deferred.
+
 ## Purpose
 
 Implement the approved balance-conservation invariant on the existing consumer
@@ -75,12 +80,14 @@ The independent observer also has operand-dependent stack rules. Changes to
 the bytecode instruction set must keep those rules and their regressions in
 step with the verifier.
 
-The affected acceptance, CLI, server, compiler, module, and runtime tests pass.
-The browser analyzer builds. A built artifact passes posting, retry, restart,
+The implementation run for `f0d8c5e8` passed the affected acceptance, CLI, server,
+compiler, module, and runtime tests and built the browser analyzer. A built
+artifact passed posting, retry, restart,
 interrupted-write recovery, invalid-baseline, changed-evidence, and output-path
-collision checks. Review regressions cover fused calls, branches before ledger
+collision checks. Review regressions covered fused calls, branches before ledger
 calls, duplicate accounts at the amount limit, posting-hash tampering, sidecar
-access, and refused reloads.
+access, and refused reloads. These are historical results. The plan refresh at
+`6ad648ae` inspected source and did not run tests.
 
 Full repository validation remains pending. The new module changes the tool
 request bytes, so the committed model replay corpus requires a fresh provider
