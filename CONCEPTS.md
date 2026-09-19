@@ -244,6 +244,8 @@ The floor is necessary and not sufficient. A Gate holding a full input can still
 
 The probe that tests a Gate is itself code, and a probe that does not compile runs no check. Since a build that failed to compile and a Gate that passed both produce no failure message, a probe's verdict is read from the build's exit status rather than from its output.
 
+A Gate can satisfy every rule above and still be porous. Passing probes show that the cases they name are caught; they say nothing about the cases nobody named, and counting them by input or by file rather than by verdict hides which verdicts have no probe at all. Reading such a Gate does not expose the gap, because the holes are in what it never looks at. Applying a one-line change to a copy of its inputs and running the built Gate against them does. A prohibition stated over an open vocabulary has no terminating condition, since another spelling always exists. Requiring what the code must do is the cheaper half of the pair, because it spares the author enumerating a vocabulary that cannot be closed, but it is still a rule about the shape of the text and dead code satisfies it, so it belongs beside the prohibition rather than in place of it. A Gate whose subject stays open must declare which threat it bounds, rather than leaving a reader to assume it bounds every one.
+
 ### Frozen signature corpus
 The generated type surface of every virtual-module export, used as a Gate's input so that adding an export adds a case by construction and the corpus cannot drift from what it describes.
 
