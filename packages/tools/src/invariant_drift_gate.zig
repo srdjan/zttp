@@ -29,6 +29,7 @@ const std = @import("std");
 const zts = @import("zts");
 const pcc = @import("zttp_proof_checker");
 const author = @import("invariant_author.zig");
+const invariant_config = @import("invariant_config.zig");
 
 const invariant = pcc.invariant;
 
@@ -151,6 +152,7 @@ const Check = enum {
     kind_ordinal_duplicate,
     kind_ordinal_mismatch,
     config_kind_missing,
+    config_accepts_unknown_kind,
     authoring_output_mismatch,
     cli_delegates_listing,
     build_step_missing,
@@ -202,6 +204,21 @@ const KindRow = struct {
 
 const NativeExport = struct { name: []const u8, effect: []const u8 };
 
+/// What the confirmed-template boundary does with one kind name, measured by
+/// running its parser rather than by scanning its source for a string literal.
+/// A text proxy would stop meaning anything the day that file resolves the name
+/// through the enum instead of comparing a literal, and it would stop meaning
+/// anything quietly.
+const ConfigAcceptance = struct {
+    name: []const u8,
+    accepted: bool,
+    /// The error name when the boundary refused, otherwise empty.
+    failure: []const u8,
+};
+
+/// A name the closed catalog must never grow.
+const unknown_kind_name = "gate_probe_kind_the_catalog_does_not_name";
+
 const Model = struct {
     text: std.EnumArray(Input, []const u8),
     catalog: []CatalogRow,
@@ -211,6 +228,10 @@ const Model = struct {
     /// What `zttp invariant list` prints, rendered through the same function
     /// the CLI calls. Compared against `kinds`, never derived from it.
     authoring: []const u8,
+    /// One measured verdict per catalog kind from the confirmed-template
+    /// parser, and whether that parser refuses a kind the catalog omits.
+    config_acceptance: []ConfigAcceptance,
+    config_rejects_unknown: bool,
     adapter_digest: [32]u8,
 };
 
@@ -264,6 +285,43 @@ fn buildNativeExports(arena: std.mem.Allocator, found: *bool) ![]NativeExport {
         return rows;
     }
     return try arena.alloc(NativeExport, 0);
+}
+
+/// The smallest document the confirmed-template boundary can accept, naming
+/// one kind. Every other field is held constant so the kind is the variable.
+fn confirmedTemplate(arena: std.mem.Allocator, kind_name: []const u8) ![]u8 {
+    return std.fmt.allocPrint(
+        arena,
+        "{{\"version\":{d},\"kind\":\"{s}\",\"ledger\":\"gate\",\"currencies\":[{{\"code\":\"USD\",\"scale\":2}}]}}",
+        .{ invariant.schema_version, kind_name },
+    );
+}
+
+fn measureConfigAcceptance(arena: std.mem.Allocator, kinds: []const KindRow) ![]ConfigAcceptance {
+    const rows = try arena.alloc(ConfigAcceptance, kinds.len);
+    errdefer arena.free(rows);
+    for (kinds, 0..) |kind, index| {
+        const document = try confirmedTemplate(arena, kind.name);
+        defer arena.free(document);
+        if (invariant_config.parse(arena, document)) |bytes| {
+            arena.free(bytes);
+            rows[index] = .{ .name = kind.name, .accepted = true, .failure = "" };
+        } else |err| {
+            rows[index] = .{ .name = kind.name, .accepted = false, .failure = @errorName(err) };
+        }
+    }
+    return rows;
+}
+
+fn measureConfigRejectsUnknown(arena: std.mem.Allocator) !bool {
+    const document = try confirmedTemplate(arena, unknown_kind_name);
+    defer arena.free(document);
+    if (invariant_config.parse(arena, document)) |bytes| {
+        arena.free(bytes);
+        return false;
+    } else |err| {
+        return err == error.UnsupportedInvariantKind;
+    }
 }
 
 fn renderAuthoring(arena: std.mem.Allocator) ![]const u8 {
@@ -415,6 +473,32 @@ fn docsRows(arena: std.mem.Allocator, text: []const u8) !?[][]const u8 {
         try list.append(arena, line[3 .. line.len - 1]);
     }
     return try list.toOwnedSlice(arena);
+}
+
+/// The single value assigned to a `ledger_call` tag, or null when the text
+/// holds no numeric assignment or more than one. Two assignments are ambiguous,
+/// not a pass on whichever comes first.
+fn ledgerCallTag(text: []const u8) ?u32 {
+    const marker = "ledger_call";
+    var found: ?u32 = null;
+    var cursor: usize = 0;
+    while (std.mem.indexOfPos(u8, text, cursor, marker)) |at| {
+        cursor = at + marker.len;
+        var scan = cursor;
+        while (scan < text.len and text[scan] == ' ') scan += 1;
+        if (scan >= text.len or text[scan] != '=') continue;
+        scan += 1;
+        // `.ledger_call => ...` is a switch prong, not an assignment.
+        if (scan < text.len and text[scan] == '>') continue;
+        while (scan < text.len and text[scan] == ' ') scan += 1;
+        const begin = scan;
+        while (scan < text.len and std.ascii.isDigit(text[scan])) scan += 1;
+        if (scan == begin) continue;
+        const value = std.fmt.parseInt(u32, text[begin..scan], 10) catch continue;
+        if (found != null) return null;
+        found = value;
+    }
+    return found;
 }
 
 /// Every `pub const` in the kernel whose name reads as the expected native
@@ -582,13 +666,19 @@ fn validate(arena: std.mem.Allocator, gate: *Gate, model: Model) !void {
     }
 
     // --- the proof-IR tag, pinned on both sides ------------------------------
-    var tag_text: [32]u8 = undefined;
-    const tag_needle = try std.fmt.bufPrint(&tag_text, "ledger_call = {d}", .{ledger_call_tag});
-    if (countOccurrences(model.text.get(.proof_system), tag_needle) != 1) {
-        return gate.reject(.proof_system_tag, "kernel ledger_call tag is not {d}", .{ledger_call_tag});
+    //
+    // Find the tag first, then read its value. Counting the literal
+    // `ledger_call = 8` instead would accept a file holding both an 8 and a 9 -
+    // a second tag enum mid-migration - while still reporting "the tag is 8".
+    const kernel_tag = ledgerCallTag(model.text.get(.proof_system)) orelse
+        return gate.reject(.proof_system_tag, "{s} has no single numeric ledger_call tag", .{paths.get(.proof_system)});
+    if (kernel_tag != ledger_call_tag) {
+        return gate.reject(.proof_system_tag, "kernel ledger_call tag is {d}, expected {d}", .{ kernel_tag, ledger_call_tag });
     }
-    if (countOccurrences(model.text.get(.compiler_ir), tag_needle) != 1) {
-        return gate.reject(.compiler_ir_tag, "compiler ledger_call tag is not {d}", .{ledger_call_tag});
+    const compiler_tag = ledgerCallTag(model.text.get(.compiler_ir)) orelse
+        return gate.reject(.compiler_ir_tag, "{s} has no single numeric ledger_call tag", .{paths.get(.compiler_ir)});
+    if (compiler_tag != ledger_call_tag) {
+        return gate.reject(.compiler_ir_tag, "compiler ledger_call tag is {d}, expected {d}", .{ compiler_tag, ledger_call_tag });
     }
 
     // --- the producer's exhaustive mapping and catalog derivation ------------
@@ -717,13 +807,22 @@ fn validate(arena: std.mem.Allocator, gate: *Gate, model: Model) !void {
         }
     }
 
-    // --- the authoring boundary accepts exactly the catalog kinds ------------
+    // --- the confirmed-template boundary, measured rather than text-scanned --
     for (model.kinds) |row| {
-        var needle_buffer: [160]u8 = undefined;
-        const needle = try std.fmt.bufPrint(&needle_buffer, "doc.kind, \"{s}\"", .{row.name});
-        if (std.mem.indexOf(u8, model.text.get(.config_tests), needle) == null) {
-            return gate.reject(.config_kind_missing, "{s} does not accept catalog kind '{s}'", .{ paths.get(.config_tests), row.name });
+        var measured = false;
+        for (model.config_acceptance) |acceptance| {
+            if (!std.mem.eql(u8, acceptance.name, row.name)) continue;
+            measured = true;
+            if (!acceptance.accepted) {
+                return gate.reject(.config_kind_missing, "{s} refuses catalog kind '{s}' with {s}", .{ paths.get(.config_tests), row.name, acceptance.failure });
+            }
         }
+        if (!measured) {
+            return gate.reject(.config_kind_missing, "catalog kind '{s}' was never offered to {s}", .{ row.name, paths.get(.config_tests) });
+        }
+    }
+    if (!model.config_rejects_unknown) {
+        return gate.reject(.config_accepts_unknown_kind, "{s} does not refuse a kind the catalog does not name", .{paths.get(.config_tests)});
     }
 
     // --- what `zttp invariant list` prints -----------------------------------
@@ -814,12 +913,21 @@ fn replaceOnce(
     model.text.set(input, mutated);
 }
 
+/// Rename every declaration the check accepts, not just the first. The check
+/// is "at least one", so a probe that renames one of two leaves it satisfied
+/// and reports itself as a probe failure. That is what would happen the day a
+/// second expected-adapter declaration appears beside the first, and it would
+/// read as a regression in whichever task added it.
 fn probeKernel(arena: std.mem.Allocator, model: *Model) !void {
     const declarations = try adapterDeclarations(arena, model.text.get(.kernel));
     if (declarations.len == 0) return error.ProbeAnchorMissing;
-    const needle = try std.fmt.allocPrint(arena, "pub const {s}", .{declarations[0]});
-    errdefer arena.free(needle);
-    try replaceOnce(arena, model, .kernel, needle, "pub const probe_value");
+    for (declarations, 0..) |name, index| {
+        const needle = try std.fmt.allocPrint(arena, "pub const {s}", .{name});
+        errdefer arena.free(needle);
+        const replacement = try std.fmt.allocPrint(arena, "pub const probe_{d}_value", .{index});
+        errdefer arena.free(replacement);
+        try replaceOnce(arena, model, .kernel, needle, replacement);
+    }
 }
 
 fn probeProofSystem(arena: std.mem.Allocator, model: *Model) !void {
@@ -888,10 +996,21 @@ fn probeAuthorSource(arena: std.mem.Allocator, model: *Model) !void {
 }
 
 fn probeConfigTests(arena: std.mem.Allocator, model: *Model) !void {
-    if (model.kinds.len == 0) return error.ProbeAnchorMissing;
-    const needle = try std.fmt.allocPrint(arena, "doc.kind, \"{s}\"", .{model.kinds[0].name});
-    errdefer arena.free(needle);
-    try replaceOnce(arena, model, .config_tests, needle, "doc.kind, \"probe_kind\"");
+    try renameEvidence(arena, model, .config_tests);
+}
+
+fn probeConfigAcceptance(arena: std.mem.Allocator, model: *Model) !void {
+    if (model.config_acceptance.len == 0) return error.ProbeAnchorMissing;
+    const rows = try arena.dupe(ConfigAcceptance, model.config_acceptance);
+    errdefer arena.free(rows);
+    const last = &rows[rows.len - 1];
+    last.accepted = false;
+    last.failure = "a probe, not a measurement";
+    model.config_acceptance = rows;
+}
+
+fn probeConfigUnknown(_: std.mem.Allocator, model: *Model) !void {
+    model.config_rejects_unknown = false;
 }
 
 fn probeCliSource(arena: std.mem.Allocator, model: *Model) !void {
@@ -981,7 +1100,7 @@ const probes = [_]Probe{
     .{ .name = "producer", .expect = .producer_tag_map, .apply = probeProducer },
     .{ .name = "artifact_graph", .expect = .graph_adapter_member, .apply = probeArtifactGraph },
     .{ .name = "checker_tests", .expect = .missing_evidence, .apply = probeCheckerTests },
-    .{ .name = "config_tests", .expect = .config_kind_missing, .apply = probeConfigTests },
+    .{ .name = "config_tests", .expect = .missing_evidence, .apply = probeConfigTests },
     .{ .name = "author_src", .expect = .missing_evidence, .apply = probeAuthorSource },
     .{ .name = "cli_src", .expect = .cli_delegates_listing, .apply = probeCliSource },
     .{ .name = "docs", .expect = .docs_catalog_mismatch, .apply = probeDocs },
@@ -993,6 +1112,8 @@ const probes = [_]Probe{
     .{ .name = "kinds-empty", .expect = .kind_table_floor, .apply = probeKindsEmpty },
     .{ .name = "native-exports", .expect = .native_effect_mismatch, .apply = probeNativeExportDrop },
     .{ .name = "native-exports-empty", .expect = .native_exports_empty, .apply = probeNativeExportsEmpty },
+    .{ .name = "config-acceptance", .expect = .config_kind_missing, .apply = probeConfigAcceptance },
+    .{ .name = "config-unknown", .expect = .config_accepts_unknown_kind, .apply = probeConfigUnknown },
 };
 
 // ---------------------------------------------------------------------------
@@ -1040,13 +1161,16 @@ fn loadModel(arena: std.mem.Allocator, root: []const u8, gate: *Gate) !Model {
 
     var found = false;
     const native_exports = try buildNativeExports(arena, &found);
+    const kinds = try buildKinds(arena);
     return .{
         .text = text,
         .catalog = try buildCatalog(arena),
-        .kinds = try buildKinds(arena),
+        .kinds = kinds,
         .native_exports = native_exports,
         .native_binding_found = found,
         .authoring = try renderAuthoring(arena),
+        .config_acceptance = try measureConfigAcceptance(arena, kinds),
+        .config_rejects_unknown = try measureConfigRejectsUnknown(arena),
         .adapter_digest = invariant.adapterDigest(),
     };
 }
@@ -1327,6 +1451,38 @@ test "documented rows are read only from inside the machine-marked block" {
     try testing.expect((try docsRows(arena_state.allocator(), "no markers here")) == null);
 }
 
+test "a second ledger_call tag is ambiguous rather than a pass on the first" {
+    // The predecessor matched every `ledger_call = N`, required exactly one,
+    // and only then compared N to 8. Counting the literal `ledger_call = 8`
+    // instead would call a file holding both an 8 and a 9 clean.
+    try testing.expectEqual(@as(?u32, 8), ledgerCallTag("    ledger_call = 8,\n"));
+    try testing.expectEqual(@as(?u32, 9), ledgerCallTag("    ledger_call = 9,\n"));
+    try testing.expectEqual(@as(?u32, null), ledgerCallTag("    ledger_call = 8,\n    ledger_call = 9,\n"));
+    try testing.expectEqual(@as(?u32, null), ledgerCallTag("    capability_call = 7,\n"));
+    try testing.expectEqual(@as(?u32, null), ledgerCallTag("    ledger_call = ,\n"));
+    // A switch prong is not an assignment: `=>` contains `=`, and the real
+    // proof IR holds two prongs beside its one tag.
+    try testing.expectEqual(
+        @as(?u32, 8),
+        ledgerCallTag("    ledger_call = 8,\n    .plain, .ledger_call => false,\n    .plain, .ledger_call => null,\n"),
+    );
+}
+
+test "the confirmed template accepts every catalog kind and refuses one it does not name" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const kinds = try buildKinds(arena);
+    const rows = try measureConfigAcceptance(arena, kinds);
+    try testing.expect(rows.len > 0);
+    try testing.expectEqual(kinds.len, rows.len);
+    for (rows, kinds) |row, kind| {
+        try testing.expectEqualStrings(kind.name, row.name);
+        try testing.expect(row.accepted);
+    }
+    try testing.expect(try measureConfigRejectsUnknown(arena));
+}
+
 test "the expected adapter declaration is found by meaning, not by its name" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
@@ -1340,6 +1496,10 @@ test "the expected adapter declaration is found by meaning, not by its name" {
     try testing.expectEqual(@as(usize, 1), second.len);
     try testing.expectEqualStrings("expected_manifest", second[0]);
     try testing.expectEqual(@as(usize, 0), (try adapterDeclarations(arena, "pub const other = 1;\n")).len);
+    // Two of them is the shape task 5 may bring. The check accepts it, so the
+    // probe must rename both rather than assume there is one.
+    const both = try adapterDeclarations(arena, identity ++ renamed);
+    try testing.expectEqual(@as(usize, 2), both.len);
 }
 
 test "the authoring listing states every row of the kernel kind table" {
