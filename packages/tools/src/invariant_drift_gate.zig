@@ -604,57 +604,129 @@ fn functionBody(text: []const u8, signature: []const u8) ?[]const u8 {
     return null;
 }
 
-/// True for a kernel declaration a producer must never copy.
+/// The kernel members a producer surface may name, region by region.
 ///
-/// An adapter *value* is one: identity, store schema, the expected manifest,
-/// the expected digest, the kind table the manifest is derived from. Copying
-/// one puts the consumer's own constant on both sides of the comparison, which
-/// is the failure this whole surface exists to prevent.
+/// Deny by default. Everything under the acceptance kernel's invariant
+/// namespace is a value the consumer owns, and a producer that reads one puts
+/// the consumer's own constant on both sides of the comparison. The rule is
+/// therefore "nothing, except these, and here is why each one is not a value",
+/// rather than "anything, except these", which only ever catches the spelling
+/// it was written against.
 ///
-/// A type and the encoder are not values. Both sides must name one type and
-/// one encoding, or two digests are not comparable at all, so `AdapterManifest`,
-/// `AdapterPredicate` and `adapterManifestDigest` are excluded. So is the
-/// specification surface (`decode`, `digest`), which is a function of artifact
-/// bytes rather than a constant.
-fn isForbiddenKernelRead(name: []const u8) bool {
-    if (name.len == 0) return false;
-    if (std.ascii.isUpper(name[0])) return false;
-    if (std.mem.eql(u8, name, "adapterManifestDigest")) return false;
-    if (std.mem.indexOf(u8, name, "adapter") != null) return true;
-    return std.mem.eql(u8, name, "kind_table") or std.mem.eql(u8, name, "kindInfo");
+/// One type and one encoding, or two digests are not comparable at all. These
+/// three carry no value a producer could copy.
+const shared_kernel_surface = [_][]const u8{
+    "AdapterManifest",
+    "AdapterPredicate",
+    "adapterManifestDigest",
+};
+
+/// `adapterDigest` names the consumer's expectation. That is the value the
+/// comparison is *against*, so exactly one function may read it: the one whose
+/// job is to perform the comparison.
+const comparison_kernel_surface = shared_kernel_surface ++ [_][]const u8{"adapterDigest"};
+
+/// The certificate producer also handles the specification section and the
+/// closed operation catalog. `decode` and `digest` take artifact bytes and
+/// return a function of them; neither is a constant. `catalog` is the closed
+/// operation identity table, and `producer_catalog_derivation` above requires
+/// this file to derive sink and implementation identity from it, so admitting
+/// it here is not a loosening but the other half of a rule already enforced.
+const producer_kernel_surface = shared_kernel_surface ++ [_][]const u8{ "decode", "digest", "catalog" };
+
+/// The activation path digests the specification section and hands the kernel
+/// the observer's rows. `ObservedOperation` is the shape of those rows.
+const activation_kernel_surface = shared_kernel_surface ++ [_][]const u8{ "digest", "ObservedOperation" };
+
+fn admits(allowed: []const []const u8, name: []const u8) bool {
+    for (allowed) |candidate| {
+        if (std.mem.eql(u8, candidate, name)) return true;
+    }
+    return false;
 }
 
-const invariant_decls = @typeInfo(invariant).@"struct".decls;
+fn isIdentifierByte(byte: u8) bool {
+    return std.ascii.isAlphanumeric(byte) or byte == '_';
+}
 
-const forbidden_kernel_read_count = blk: {
-    var found: usize = 0;
-    for (invariant_decls) |decl| {
-        if (isForbiddenKernelRead(decl.name)) found += 1;
+/// Every spelling that reaches the kernel's invariant namespace in `text`.
+///
+/// The canonical `pcc.invariant` is always one. A file may also bind the
+/// namespace, or the package, to a local name, and a scan that knew only the
+/// canonical spelling would read a renamed import as clean.
+fn kernelAliases(arena: std.mem.Allocator, text: []const u8) ![][]const u8 {
+    var list: std.ArrayList([]const u8) = .empty;
+    errdefer list.deinit(arena);
+    try list.append(arena, "pcc.invariant");
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |raw| {
+        const line = std.mem.trim(u8, raw, " \t\r");
+        if (!std.mem.startsWith(u8, line, "const ")) continue;
+        const name = identifierAt(line, "const ".len);
+        if (name.len == 0) continue;
+        const eq = std.mem.indexOfScalar(u8, line, '=') orelse continue;
+        const rhs = std.mem.trim(u8, std.mem.trim(u8, line[eq + 1 ..], " \t\r"), ";");
+        // `const invariant = pcc.invariant;` and the direct-import spelling.
+        if (std.mem.endsWith(u8, rhs, ".invariant")) {
+            try list.append(arena, name);
+            continue;
+        }
+        // `const k = @import("zttp_proof_checker");` makes `k.invariant` reach it.
+        if (std.mem.eql(u8, rhs, "@import(\"zttp_proof_checker\")")) {
+            try list.append(arena, try std.fmt.allocPrint(arena, "{s}.invariant", .{name}));
+        }
     }
-    break :blk found;
-};
+    return try list.toOwnedSlice(arena);
+}
 
-/// The names a producer surface may not mention, read out of the kernel's own
-/// namespace rather than listed here. A constant added to the kernel joins
-/// this set without anybody remembering to add it, which is the difference
-/// between a check that catches the next spelling and one that catches only
-/// the spelling it was written against.
-const forbidden_kernel_reads: [forbidden_kernel_read_count][]const u8 = blk: {
-    var names: [forbidden_kernel_read_count][]const u8 = undefined;
-    var found: usize = 0;
-    for (invariant_decls) |decl| {
-        if (!isForbiddenKernelRead(decl.name)) continue;
-        names[found] = decl.name;
-        found += 1;
+/// The first kernel member `text` names that `allowed` does not admit.
+///
+/// Only namespace-qualified reads count. A native constant that happens to
+/// share a kernel name is the value this whole surface wants a producer to
+/// read, and rejecting it would teach the next author to avoid the right
+/// constant instead of the wrong one.
+fn disallowedKernelRead(
+    arena: std.mem.Allocator,
+    aliases: []const []const u8,
+    text: []const u8,
+    allowed: []const []const u8,
+) !?[]const u8 {
+    for (aliases) |alias| {
+        const needle = try std.fmt.allocPrint(arena, "{s}.", .{alias});
+        defer arena.free(needle);
+        var cursor: usize = 0;
+        while (std.mem.indexOfPos(u8, text, cursor, needle)) |at| {
+            cursor = at + needle.len;
+            // `some_invariant.x` is a different identifier that ends in the
+            // alias, not a read through it.
+            if (at > 0 and isIdentifierByte(text[at - 1])) continue;
+            const name = identifierAt(text, cursor);
+            if (name.len == 0) continue;
+            if (!admits(allowed, name)) return name;
+        }
     }
-    const frozen = names;
-    break :blk frozen;
-};
+    return null;
+}
 
-/// The first forbidden kernel name `text` mentions, or null.
-fn copiedKernelValue(text: []const u8) ?[]const u8 {
-    for (forbidden_kernel_reads) |name| {
-        if (std.mem.indexOf(u8, text, name) != null) return name;
+/// The half-open byte range of the first body whose signature contains
+/// `signature`, so a caller can scan a file with one function carved out.
+const BodySpan = struct { start: usize, end: usize };
+
+fn bodySpan(text: []const u8, signature: []const u8) ?BodySpan {
+    const at = std.mem.indexOf(u8, text, signature) orelse return null;
+    const open = std.mem.indexOfScalarPos(u8, text, at, '{') orelse return null;
+    var depth: usize = 0;
+    var cursor = open;
+    while (cursor < text.len) : (cursor += 1) {
+        switch (text[cursor]) {
+            '{' => depth += 1,
+            '}' => {
+                if (depth == 0) return null;
+                depth -= 1;
+                if (depth == 0) return .{ .start = open + 1, .end = cursor };
+            },
+            else => {},
+        }
     }
     return null;
 }
@@ -1144,28 +1216,52 @@ fn validate(arena: std.mem.Allocator, gate: *Gate, model: Model) !void {
         return gate.reject(.bridge_reads_native, "the linked predicate rows are not filled from the native module's own manifest", .{});
     }
 
-    // --- no producer surface copies a kernel adapter value -------------------
+    // --- no producer surface reads a kernel value ----------------------------
     //
-    // The three checks above forbid one spelling each, and a regression that
-    // reached for the next-nearest one would pass all three: a bridge that
-    // filled `.identity` and `.store_schema_version` from the kernel while
-    // leaving `.exports` native still names `native.adapter_manifest`, still
-    // digests equal, and still compares equal field by field against a kernel
-    // it copied. This is the general net, and its set is read out of the
-    // kernel's namespace rather than written down.
-    const copy_sites = [_]struct { input: Input, text: []const u8 }{
-        .{ .input = .artifact_graph, .text = graph_code },
-        .{ .input = .producer, .text = producer_text },
-        .{ .input = .activation, .text = activation_text },
-        // Only the two declarations that build the manifest. `require` in the
-        // same file reads `adapterDigest` on purpose: that is the comparison,
-        // not the value being compared.
-        .{ .input = .adapter_bridge, .text = linked_body },
-        .{ .input = .adapter_bridge, .text = linked_predicates_body },
+    // The three checks above forbid one spelling each, and each of them was
+    // written against a regression that had already been imagined. This is the
+    // general net: deny by default over every namespace-qualified read of the
+    // acceptance kernel, with a per-region allowlist whose every member is
+    // argued above as not being a value.
+    //
+    // The bridge is scanned up to its tests, with `require` carved out rather
+    // than the whole rest of the file. The earlier version scanned only the two
+    // manifest declarations, which left `linkedDigest` unscanned - and
+    // `linkedDigest` returning the kernel's own expected digest is the entire
+    // hole restored in one line.
+    const bridge_all = try withoutComments(arena, model.text.get(.adapter_bridge));
+    const bridge_head = bridge_all[0 .. std.mem.indexOf(u8, bridge_all, "\ntest \"") orelse bridge_all.len];
+    const require_span = bodySpan(bridge_head, "pub fn require(") orelse
+        return gate.reject(.bridge_reads_native, "{s} has no require body to carve out of the scan", .{paths.get(.adapter_bridge)});
+    // Aliases are collected over the whole file, so a namespace bound at the
+    // top is still recognised in a region that does not contain its binding.
+    const graph_aliases = try kernelAliases(arena, graph_code);
+    const producer_aliases = try kernelAliases(arena, producer_text);
+    const activation_aliases = try kernelAliases(arena, activation_text);
+    const bridge_aliases = try kernelAliases(arena, bridge_all);
+
+    const Region = struct {
+        input: Input,
+        what: []const u8,
+        aliases: []const []const u8,
+        text: []const u8,
+        allowed: []const []const u8,
     };
-    for (copy_sites) |site| {
-        if (copiedKernelValue(site.text)) |name| {
-            return gate.reject(.adapter_value_copied, "{s} reads the kernel's '{s}' instead of deriving it from the linked adapter", .{ paths.get(site.input), name });
+    const regions = [_]Region{
+        .{ .input = .artifact_graph, .what = "the executable graph", .aliases = graph_aliases, .text = graph_code, .allowed = &shared_kernel_surface },
+        .{ .input = .producer, .what = "the certificate producer", .aliases = producer_aliases, .text = producer_text, .allowed = &producer_kernel_surface },
+        .{ .input = .activation, .what = "the activation path", .aliases = activation_aliases, .text = activation_text, .allowed = &activation_kernel_surface },
+        .{ .input = .adapter_bridge, .what = "the bridge ahead of require", .aliases = bridge_aliases, .text = bridge_head[0..require_span.start], .allowed = &shared_kernel_surface },
+        .{ .input = .adapter_bridge, .what = "the bridge after require", .aliases = bridge_aliases, .text = bridge_head[require_span.end..], .allowed = &shared_kernel_surface },
+        .{ .input = .adapter_bridge, .what = "the bridge comparison", .aliases = bridge_aliases, .text = bridge_head[require_span.start..require_span.end], .allowed = &comparison_kernel_surface },
+    };
+    for (regions) |region| {
+        if (try disallowedKernelRead(arena, region.aliases, region.text, region.allowed)) |name| {
+            return gate.reject(
+                .adapter_value_copied,
+                "{s}: {s} reads the kernel's '{s}' instead of deriving it from the linked adapter",
+                .{ paths.get(region.input), region.what, name },
+            );
         }
     }
 
@@ -1521,9 +1617,6 @@ fn probeAdapterBridge(arena: std.mem.Allocator, model: *Model) !void {
     );
 }
 
-/// Move the refusal to after `installStore`, rather than delete it. Deleting
-/// it would be caught by the presence clause, and a probe that trips the
-/// presence clause says nothing about whether the order is checked.
 /// The graph computes the member inline from the kernel's expected manifest.
 /// It contains no `adapterDigest` token, so the single-spelling check ahead of
 /// the scan does not see it.
@@ -1540,6 +1633,73 @@ fn probeGraphKernelValue(arena: std.mem.Allocator, model: *Model) !void {
 /// The bridge fills one manifest field from the kernel and leaves the rest
 /// native. Every earlier clause still holds, and so does the floor test, since
 /// the two strings are equal.
+/// The whole feature, undone in one line: the bridge returns the consumer's
+/// own expectation, so the producer, the serving binary and the checker all
+/// read one constant again. Every other clause survives it, and the floor test
+/// passes trivially because both sides become literally the same value. It
+/// gets its own named probe because it is the regression, not a variant of one.
+fn probeBridgeKernelDigest(arena: std.mem.Allocator, model: *Model) !void {
+    try replaceOnce(
+        arena,
+        model,
+        .adapter_bridge,
+        "return pcc.invariant.adapterManifestDigest(linked_manifest);",
+        "return pcc.invariant.adapterDigest();",
+    );
+}
+
+/// The row ordinal comes from the kernel's enum instead of the native table.
+/// The name carries no "adapter", so a rule keyed on name shape admits it.
+fn probeBridgeKernelKind(arena: std.mem.Allocator, model: *Model) !void {
+    try replaceOnce(
+        arena,
+        model,
+        .adapter_bridge,
+        ".kind_ordinal = row.kind_ordinal,",
+        ".kind_ordinal = @intFromEnum(pcc.invariant.Kind.balance_conservation_v1),",
+    );
+}
+
+/// The export names come from the kernel's operation enum instead of the
+/// native binding. Same shape as the kind above, different kernel member.
+fn probeBridgeKernelExports(arena: std.mem.Allocator, model: *Model) !void {
+    try replaceOnce(
+        arena,
+        model,
+        .adapter_bridge,
+        ".exports = native.adapter_manifest.exports,",
+        ".exports = &.{ @tagName(pcc.invariant.Operation.post), @tagName(pcc.invariant.Operation.balance) },",
+    );
+}
+
+/// A disallowed read inside `require`, the one region the scan carves out. A
+/// carve-out is a hole by construction, so it gets its own probe: without
+/// this, a carve-out widened to the whole file would show no symptom here.
+/// The name is `kind_table` rather than the expected manifest, because
+/// `bridge_reads_native` forbids that one by name and would answer first,
+/// which would test that check a second time instead of this one.
+fn probeBridgeKernelComparison(arena: std.mem.Allocator, model: *Model) !void {
+    try replaceOnce(
+        arena,
+        model,
+        .adapter_bridge,
+        "const expected = pcc.invariant.adapterDigest();",
+        "const expected = pcc.invariant.kind_table;",
+    );
+}
+
+/// A disallowed read after `require`. The carve-out is a half-open range, and
+/// an off-by-one at its end would leave everything below it unscanned.
+fn probeBridgeKernelAfterRequire(arena: std.mem.Allocator, model: *Model) !void {
+    try replaceOnce(
+        arena,
+        model,
+        .adapter_bridge,
+        "    return require(linked_manifest);",
+        "    return require(pcc.invariant.Kind);",
+    );
+}
+
 fn probeBridgeKernelIdentity(arena: std.mem.Allocator, model: *Model) !void {
     try replaceOnce(
         arena,
@@ -1572,6 +1732,9 @@ fn probeProducerKernelValue(arena: std.mem.Allocator, model: *Model) !void {
     );
 }
 
+/// Move the refusal to after `installStore`, rather than delete it. Deleting
+/// it would be caught by the presence clause, and a probe that trips the
+/// presence clause says nothing about whether the order is checked.
 fn probeRuntimeInstall(arena: std.mem.Allocator, model: *Model) !void {
     try replaceOnce(
         arena,
@@ -1817,6 +1980,11 @@ const probes = [_]Probe{
     .{ .name = "adapter_bridge", .expect = .bridge_reads_native, .apply = probeAdapterBridge },
     .{ .name = "runtime_install", .expect = .install_order, .apply = probeRuntimeInstall },
     .{ .name = "graph-kernel-value", .expect = .adapter_value_copied, .apply = probeGraphKernelValue },
+    .{ .name = "bridge-kernel-digest", .expect = .adapter_value_copied, .apply = probeBridgeKernelDigest },
+    .{ .name = "bridge-kernel-kind", .expect = .adapter_value_copied, .apply = probeBridgeKernelKind },
+    .{ .name = "bridge-kernel-exports", .expect = .adapter_value_copied, .apply = probeBridgeKernelExports },
+    .{ .name = "bridge-kernel-comparison", .expect = .adapter_value_copied, .apply = probeBridgeKernelComparison },
+    .{ .name = "bridge-kernel-after-require", .expect = .adapter_value_copied, .apply = probeBridgeKernelAfterRequire },
     .{ .name = "bridge-kernel-identity", .expect = .adapter_value_copied, .apply = probeBridgeKernelIdentity },
     .{ .name = "bridge-kernel-schema", .expect = .adapter_value_copied, .apply = probeBridgeKernelSchema },
     .{ .name = "producer-kernel-value", .expect = .adapter_value_copied, .apply = probeProducerKernelValue },
@@ -2154,31 +2322,98 @@ test "occurrence counting does not overlap a repeated needle" {
     try testing.expectEqual(@as(usize, 0), countOccurrences("abc", "z"));
 }
 
-test "the forbidden kernel read set is non-empty and spares the shared type and encoder" {
-    // A scan whose set is empty finds nothing in any text and reports a pass
-    // over every producer surface. The set is derived from the kernel's
-    // namespace, so this is the floor that makes the derivation mean something.
-    try testing.expect(forbidden_kernel_reads.len >= 5);
-    var saw_identity = false;
-    var saw_expected_manifest = false;
-    for (forbidden_kernel_reads) |name| {
-        if (std.mem.eql(u8, name, "adapter_identity")) saw_identity = true;
-        if (std.mem.eql(u8, name, "expected_adapter_manifest")) saw_expected_manifest = true;
-    }
-    try testing.expect(saw_identity);
-    try testing.expect(saw_expected_manifest);
+test "only the argued shared kernel surface is admitted, and only through the kernel namespace" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const aliases = try kernelAliases(arena, "");
+    try testing.expectEqual(@as(usize, 1), aliases.len);
+    try testing.expectEqualStrings("pcc.invariant", aliases[0]);
 
-    // Values are forbidden; the type and the encoder both sides must name are
-    // not, and neither is the specification surface, which is a function of
-    // artifact bytes rather than a constant.
-    try testing.expect(copiedKernelValue("pcc.invariant.adapter_identity") != null);
-    try testing.expect(copiedKernelValue("pcc.invariant.expected_adapter_manifest") != null);
-    try testing.expect(copiedKernelValue("pcc.invariant.kind_table") != null);
-    try testing.expect(copiedKernelValue("pcc.invariant.adapterManifestDigest(m)") == null);
-    try testing.expect(copiedKernelValue("pcc.invariant.AdapterManifest") == null);
-    try testing.expect(copiedKernelValue("pcc.invariant.AdapterPredicate") == null);
-    try testing.expect(copiedKernelValue("pcc.invariant.digest(bytes)") == null);
-    try testing.expect(copiedKernelValue("pcc.invariant.decode(bytes)") == null);
+    // Deny by default. Each of these is a value the consumer owns, and none of
+    // them was reachable by the name-shape rule this replaced.
+    const denied = [_][]const u8{
+        "pcc.invariant.adapterDigest()",
+        "pcc.invariant.expected_adapter_manifest",
+        "pcc.invariant.adapter_identity",
+        "pcc.invariant.adapter_store_schema_version",
+        "pcc.invariant.adapter_digest_domain",
+        "pcc.invariant.kind_table",
+        "pcc.invariant.kindInfo(k)",
+        "pcc.invariant.Kind.balance_conservation_v1",
+        "pcc.invariant.Operation.post",
+        "pcc.invariant.SinkId.ledger_post",
+        "pcc.invariant.schema_version",
+        "pcc.invariant.schema_version_v2",
+        "pcc.invariant.catalog",
+        "pcc.invariant.digest_domain",
+        "pcc.invariant.magic",
+    };
+    for (denied) |text| {
+        const found = try disallowedKernelRead(arena, aliases, text, &shared_kernel_surface);
+        testing.expect(found != null) catch |err| {
+            std.debug.print("'{s}' was admitted by the shared surface\n", .{text});
+            return err;
+        };
+    }
+
+    // The three shared names, and nothing else, pass the strictest region.
+    for (shared_kernel_surface) |name| {
+        const text = try std.fmt.allocPrint(arena, "pcc.invariant.{s}", .{name});
+        try testing.expect(try disallowedKernelRead(arena, aliases, text, &shared_kernel_surface) == null);
+    }
+    // `adapterDigest` is the consumer's expectation, admitted only where the
+    // comparison happens.
+    try testing.expect(try disallowedKernelRead(arena, aliases, "pcc.invariant.adapterDigest()", &comparison_kernel_surface) == null);
+
+    // Namespace-qualified only. A native constant that shares a kernel name is
+    // exactly the value a producer is supposed to read.
+    const native_reads = [_][]const u8{
+        "native.adapter_identity",
+        "native.adapter_manifest.identity",
+        ".kind_ordinal = row.kind_ordinal,",
+        "zq.modules.ledger.adapter_manifest",
+        "some_invariant.kind_table",
+    };
+    for (native_reads) |text| {
+        const found = try disallowedKernelRead(arena, aliases, text, &shared_kernel_surface);
+        testing.expect(found == null) catch |err| {
+            std.debug.print("native read '{s}' was rejected as '{s}'\n", .{ text, found orelse "" });
+            return err;
+        };
+    }
+}
+
+test "a renamed kernel import is still recognised as the kernel" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    // A scan that knew only the canonical spelling would read each of these as
+    // clean, and the rename is a one-line way around the whole check.
+    const sources = [_][]const u8{
+        "const inv = pcc.invariant;\nconst x = inv.adapter_identity;\n",
+        "const inv = @import(\"zttp_proof_checker\").invariant;\nconst x = inv.kind_table;\n",
+        "const k = @import(\"zttp_proof_checker\");\nconst x = k.invariant.adapterDigest();\n",
+    };
+    for (sources) |source| {
+        const aliases = try kernelAliases(arena, source);
+        try testing.expect(aliases.len >= 2);
+        const found = try disallowedKernelRead(arena, aliases, source, &shared_kernel_surface);
+        testing.expect(found != null) catch |err| {
+            std.debug.print("renamed kernel read went unnoticed in:\n{s}\n", .{source});
+            return err;
+        };
+    }
+}
+
+test "a carved-out body is a half-open range over the same buffer" {
+    const source = "fn head() void {}\npub fn require(a: u8) void {\n    const b = .{ .c = a };\n    _ = b;\n}\nfn tail() void {}\n";
+    const span = bodySpan(source, "pub fn require(") orelse return error.TestUnexpectedResult;
+    try testing.expect(std.mem.indexOf(u8, source[span.start..span.end], "const b") != null);
+    try testing.expect(std.mem.indexOf(u8, source[0..span.start], "fn head") != null);
+    try testing.expect(std.mem.indexOf(u8, source[span.end..], "fn tail") != null);
+    try testing.expect(std.mem.indexOf(u8, source[0..span.start], "const b") == null);
+    try testing.expect(std.mem.indexOf(u8, source[span.end..], "const b") == null);
 }
 
 test "comment stripping blanks a line comment and keeps the length" {
