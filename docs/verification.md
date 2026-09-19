@@ -416,6 +416,77 @@ reports what the artifact reports, and only a kind the specification does not
 declare differs. That is what the catalog says, not a separate measurement of
 the artifact.
 
+### What a status report states
+
+One renderer produces every invariant status line,
+`packages/runtime/src/proofs/invariant_report.zig`. `zttp proofs verify`
+prints it for a bundle and a serving instance logs it once its pool is warm,
+so both read the same sentences and a sentence that stops being true stops
+being printed in both places at once.
+
+A line for an accepted configured artifact states, in this order: write
+applicability, the kinds the accepted specification declared, by name; the
+coverage counts over protected call sites with their write and read split;
+that native enforcement is a trusted assumption rather than a checked one;
+and the ledger baseline status. Every line then ends with the statement that
+keeping other writers off a protected ledger store is a deployment assumption
+which this checker does not verify. That clause is written from outside every
+branch of the renderer. No status value, argument or build option drops it,
+and `zig build test-invariant-drift` pins the two statements that make that
+true.
+
+Write applicability comes first because coverage counts call sites. A reader
+who meets `coverage 1 of 1` first reads it as "the conservation predicate
+ran", and the value that says whether any covered call site can write at all
+is what corrects that reading before it forms.
+
+Baseline status reads `not checked` in an offline report, and says why: the
+report did not open a store. Only an instance that opened one and validated
+its baseline reports the validated form. Acceptance never opens a store, so a
+bundle report can never state readiness.
+
+An artifact that declares no invariant and an artifact acceptance refused
+render the same sentence, and that sentence says so. Every rejection path
+leaves the invariant verdict at its defaults, so the verdict carries no
+distinction between the two cases. The renderer states the ambiguity rather
+than picking one reading and presenting it as established.
+
+No author-supplied sentence is rendered, and no rendering calls a predicate
+proven, verified or guaranteed. What acceptance establishes is that the linked
+adapter carries a row per expected kind at the expected predicate version,
+that the declared call sites match the ones the loader found on its own in
+final bytecode, and, at instance open, that a store validated its baseline.
+Whether a predicate decides the right thing is not among them, and neither is
+the exclusion of a writer the runtime cannot see.
+
+### Changing a specification under an existing store
+
+`ledger_meta.invariant_digest` binds the specification digest. A store opened
+under one specification refuses an artifact carrying another, and startup
+never rewrites that metadata to make a mismatch pass.
+
+Adding a kind is such a change. A selection beyond balance conservation moves
+the section to the second wire schema, which hashes under its own digest
+domain, so the digest differs from the schema 1 digest of the same ledger and
+currencies. Declaring `declared_accounts_v1` on a deployment that has been
+running under balance conservation alone therefore needs a fresh store. There
+is no migration, and the old store is left as it was rather than upgraded in
+place.
+
+Schema 1 stays compatible in the other direction. A specification that names
+balance conservation alone encodes exactly the bytes it always did and hashes
+under the schema 1 domain, so an artifact built before the catalog grew still
+opens the store it has been using.
+
+### The advisory boundary
+
+`zttp invariant author --advise` sends the author's sentence and the catalog's
+published descriptions to TypeSafe Jev, which may suggest a template selection
+or withhold one. That answer is authoring input. It cannot approve an
+artifact, discharge an obligation or relax a decoder, and no output labels an
+advisory sentence, or any other prose, as verified. A build, a certificate
+check and a posting admission call no model at all.
+
 The native ledger uses canonical signed decimal strings at the handler
 boundary. It converts them to checked integers. It commits all entries and the
 idempotency record in one SQLite transaction. It rejects a posting group when

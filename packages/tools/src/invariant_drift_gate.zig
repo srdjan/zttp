@@ -67,6 +67,7 @@ const Input = enum {
     config_tests,
     author_src,
     cli_src,
+    report,
     docs,
     concepts,
     build,
@@ -90,6 +91,7 @@ const paths = std.EnumArray(Input, []const u8).init(.{
     .config_tests = "packages/tools/src/invariant_config.zig",
     .author_src = "packages/tools/src/invariant_author.zig",
     .cli_src = "packages/runtime/src/invariant_cli.zig",
+    .report = "packages/runtime/src/proofs/invariant_report.zig",
     .docs = "docs/verification.md",
     .concepts = "CONCEPTS.md",
     .build = "build.zig",
@@ -195,6 +197,8 @@ const Check = enum {
     invariant_ready_relabelled,
     authoring_output_mismatch,
     cli_delegates_listing,
+    report_applicability_leads,
+    report_assumption_unconditional,
     build_step_missing,
     build_side_effects,
     build_evidence_dependencies,
@@ -924,6 +928,16 @@ const expected_write_applicability_body =
 const expected_invariant_ready_body =
     "return self.configured and self.required > 0 and self.required == self.covered;";
 
+/// What `invariant_report.writeSummary` must stay.
+///
+/// Two statements. Everything conditional happens inside `writeStatus`, and
+/// the deployment assumption is appended after it, from outside every branch.
+/// Moving that clause into a branch, behind a parameter, or after an early
+/// return makes it suppressible, and nothing else here would notice: the
+/// renderer's own tests would still pass for whichever cases the branch kept.
+const expected_report_summary_body =
+    "try writeStatus(writer, status); try writer.writeAll(deployment_assumption);";
+
 /// The top-level arguments of the call whose open parenthesis is at `open`.
 fn splitArguments(arena: std.mem.Allocator, text: []const u8, open: usize) !?[][]const u8 {
     var list: std.ArrayList([]const u8) = .empty;
@@ -1615,6 +1629,53 @@ fn validate(arena: std.mem.Allocator, gate: *Gate, model: Model) !void {
             .invariant_ready_relabelled,
             "{s}: InvariantVerdicts.ready is '{s}', expected '{s}'; write applicability is a report, never a readiness condition",
             .{ paths.get(.verdict), ready_body, expected_invariant_ready_body },
+        );
+    }
+
+    // --- the rendering reads applicability first and always says what it did
+    //     not check --------------------------------------------------------
+    //
+    // `docs/verification.md` states that a report reads write applicability
+    // first. A coverage count read first is read as "the predicate ran", which
+    // is the reading the whole report exists to prevent, so the order is
+    // checked rather than trusted.
+    //
+    // The scan stops at the first test. This file's own tests spell out the
+    // rendered strings for all five cases, so a search over the whole file
+    // would be satisfied by a test even after the renderer stopped producing
+    // either phrase.
+    const report_text = model.text.get(.report);
+    const report_code = report_text[0 .. std.mem.indexOf(u8, report_text, "\ntest \"") orelse report_text.len];
+    const applicability_at = std.mem.indexOf(u8, report_code, "write applicability {s}") orelse
+        return gate.reject(
+            .report_applicability_leads,
+            "{s} renders no write applicability segment",
+            .{paths.get(.report)},
+        );
+    const report_coverage_at = std.mem.indexOf(u8, report_code, "coverage {d} of {d}") orelse
+        return gate.reject(
+            .report_applicability_leads,
+            "{s} renders no coverage counts",
+            .{paths.get(.report)},
+        );
+    if (applicability_at > report_coverage_at) {
+        return gate.reject(
+            .report_applicability_leads,
+            "{s} renders coverage counts before write applicability",
+            .{paths.get(.report)},
+        );
+    }
+    const summary_body = (try normalizedBody(arena, report_code, "pub fn writeSummary(")) orelse
+        return gate.reject(
+            .report_assumption_unconditional,
+            "{s} declares no writeSummary body",
+            .{paths.get(.report)},
+        );
+    if (!std.mem.eql(u8, summary_body, expected_report_summary_body)) {
+        return gate.reject(
+            .report_assumption_unconditional,
+            "{s}: writeSummary is '{s}', expected '{s}'; the deployment assumption is written from outside every branch so that no status value can drop it",
+            .{ paths.get(.report), summary_body, expected_report_summary_body },
         );
     }
 
@@ -2381,6 +2442,25 @@ fn probeDocsKind(arena: std.mem.Allocator, model: *Model) !void {
     try replaceEvery(arena, model, .docs, name, "a-kind-the-docs-do-not-name");
 }
 
+/// Drop the leading applicability segment, which is the regression the order
+/// check exists for: the renderer keeps its counts and loses the value a
+/// reader needs before them.
+fn probeReport(arena: std.mem.Allocator, model: *Model) !void {
+    try replaceOnce(arena, model, .report, "write applicability {s}; kinds ", "kinds ");
+}
+
+/// Put the deployment assumption behind a status value. Every rendering the
+/// branch keeps still reads correctly, so nothing but the pinned body notices.
+fn probeReportAssumption(arena: std.mem.Allocator, model: *Model) !void {
+    try replaceOnce(
+        arena,
+        model,
+        .report,
+        "try writer.writeAll(deployment_assumption);",
+        "if (status.configured) try writer.writeAll(deployment_assumption);",
+    );
+}
+
 fn probeConcepts(arena: std.mem.Allocator, model: *Model) !void {
     try replaceOnce(arena, model, .concepts, "### Application invariant", "### Probe entry");
 }
@@ -2474,6 +2554,8 @@ const probes = [_]Probe{
     .{ .name = "config_tests", .expect = .missing_evidence, .apply = probeConfigTests },
     .{ .name = "author_src", .expect = .missing_evidence, .apply = probeAuthorSource },
     .{ .name = "cli_src", .expect = .cli_delegates_listing, .apply = probeCliSource },
+    .{ .name = "report", .expect = .report_applicability_leads, .apply = probeReport },
+    .{ .name = "report-assumption", .expect = .report_assumption_unconditional, .apply = probeReportAssumption },
     .{ .name = "docs", .expect = .docs_catalog_mismatch, .apply = probeDocs },
     .{ .name = "concepts", .expect = .concepts_entry, .apply = probeConcepts },
     .{ .name = "build", .expect = .build_side_effects, .apply = probeBuild },

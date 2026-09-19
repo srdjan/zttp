@@ -35,6 +35,7 @@ const proof_adapter = @import("proof_adapter.zig");
 const proof_audit_ring = @import("proof_audit_ring.zig");
 const attest_header_strings = @import("attest/header_strings.zig");
 const artifact_graph = @import("artifact_graph.zig");
+const invariant_report = @import("proofs/invariant_report.zig");
 const pcc = @import("zttp_proof_checker");
 const proof_activation = @import("proof_activation.zig");
 const attest_envelope = @import("attest/envelope.zig");
@@ -2218,15 +2219,19 @@ pub const Server = struct {
             if (contract.invariants.configured) {
                 contract.invariants.runtime_readiness = .ready;
                 if (!builtin.is_test) {
-                    std.log.info(
-                        "Invariant ready: coverage {d} of {d} ({d} write, {d} read); native adapter is a trusted assumption; baseline validated and generation installed",
-                        .{
-                            contract.invariants.covered,
-                            contract.invariants.required,
-                            contract.invariants.writes,
-                            contract.invariants.reads,
-                        },
-                    );
+                    // The same renderer the offline proof report uses. This
+                    // line printed its own counts before, so a vacuous
+                    // artifact logged "(0 write, 1 read)" and left the reader
+                    // to notice: the fact was there, the word was not. Going
+                    // through `invariant_report` means write applicability
+                    // leads here too, and a sentence that changes there
+                    // changes in both places at once. It sits behind
+                    // `!builtin.is_test` and carries no assertion; what the
+                    // renderer produces is asserted beside the renderer.
+                    var summary_buffer: [invariant_report.max_summary_bytes]u8 = undefined;
+                    var summary_writer = std.Io.Writer.fixed(&summary_buffer);
+                    invariant_report.writeSummary(&summary_writer, contract.invariants) catch {};
+                    std.log.info("Invariant: {s}", .{summary_writer.buffered()});
                 }
             }
         }

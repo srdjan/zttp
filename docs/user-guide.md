@@ -262,6 +262,25 @@ the runtime serve requests. A new empty store starts with zero balances.
 An unreadable or invalid existing store is refused. A changed specification
 cannot reopen the old store. Automatic migration is not supported.
 
+Adding a kind is a changed specification. A selection beyond balance
+conservation is written under invariant wire schema 2, which hashes under its
+own domain, so it never matches the digest a store recorded under balance
+conservation alone. Declare `declared_accounts_v1` against a fresh store. A
+specification that names balance conservation alone is unaffected: it encodes
+the bytes it always did and reopens the store it has been using.
+
+Startup and `zttp proofs verify` print one invariant status line from the same
+renderer. It reads write applicability first, then the declared kinds by name,
+then coverage over protected call sites with its write and read split, then
+that native enforcement is a trusted assumption, then the ledger baseline.
+`covered` write applicability means a covered call site can modify ledger
+state; `vacuous` means none can, which is a missing report and not a failure.
+Baseline reads `not checked` in a bundle report, because that report opens no
+store, and reports validation only from an instance that opened one. Every
+line ends by saying that keeping other writers off the store is a deployment
+assumption the checker does not verify. None of it says a predicate was
+proven, because acceptance never examines one.
+
 This release requires a built artifact for an invariant project. Source
 `serve`, `dev`, and certificate-free live replacement are refused. Rebuild and
 restart after a change. Analyzer success alone does not establish invariant

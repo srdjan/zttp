@@ -388,7 +388,10 @@ fn verifySemantics(
     var guard_writer = std.Io.Writer.fixed(&guard_buf);
     guard_report.writeSummary(&guard_writer, assessment.guards) catch {};
     try stdout.print("Guards:    {s}\n", .{guard_writer.buffered()});
-    var invariant_buf: [256]u8 = undefined;
+    // Sized from the renderer's own bound. A fixed writer that runs out stops
+    // mid-sentence, and the sentence it would stop before is the one that says
+    // what this report did not check.
+    var invariant_buf: [invariant_report.max_summary_bytes]u8 = undefined;
     var invariant_writer = std.Io.Writer.fixed(&invariant_buf);
     invariant_report.writeSummary(
         &invariant_writer,

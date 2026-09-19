@@ -113,6 +113,14 @@ naming an account the specification does not declare. Coverage does
 not convert the native boundary into a static proof. The accepted artifact
 therefore records the native adapter as a trusted dependency.
 
+A status report over an Application invariant reads write applicability first,
+because coverage counts call sites and not calls that ran. It names the
+declared kinds, keeps coverage separate from the ledger baseline that only a
+live instance can validate, and always states that excluding other writers
+from the store is a deployment assumption nothing here verifies. It never
+calls a predicate proven, and it never renders the author's plain-language
+sentence as a checked claim.
+
 ### Guarded generation
 One immutable runtime tuple containing the executable root, proof-checked
 contract, residual plan, decoded policy index, and policy generation. Startup
