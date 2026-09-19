@@ -13,12 +13,17 @@
 const std = @import("std");
 const project_config = @import("project_config");
 const author = project_config.invariant_author;
+const FetchDeadline = @import("fetch_deadline.zig").FetchDeadline;
 
 /// Where an advisory classification is sent, and the variable that authorizes
 /// it. Absent the key, no request is made at all.
 const classifier_url = "https://api.typesafe.ai/v1/systemone";
 const api_key_env = "TYPESAFE_API_KEY";
-const request_timeout_ms: u64 = 30_000;
+/// Bound on the request/response exchange, carried over from the 30 second
+/// timeout the tool this replaced passed to urllib. It is enforced by the
+/// watchdog in `fetch_deadline.zig`, because `ConnectTcpOptions.timeout` is
+/// declared but never read by `std.http.Client`: passing it bounds nothing.
+const exchange_timeout_ms: u32 = 30_000;
 const max_response_bytes: usize = 64 * 1024;
 
 pub const Subcommand = enum { list, author };
@@ -184,9 +189,9 @@ const HostTransport = struct {
         var client: std.http.Client = .{ .allocator = allocator, .io = self.io };
         defer client.deinit();
 
-        // Pre-connecting is what gives the call a deadline, and it performs the
-        // TLS handshake before `request()` runs, so the trust store and clock
-        // have to be stamped here rather than left to `request()`.
+        // Connect explicitly so the exchange has a stream to arm the watchdog
+        // on. That also performs the TLS handshake before `request()` runs, so
+        // the trust store and clock are stamped here rather than left to it.
         const now = std.Io.Clock.real.now(self.io);
         try client.ca_bundle.rescan(allocator, self.io, now);
         client.now = now;
@@ -201,10 +206,6 @@ const HostTransport = struct {
                 .tls => 443,
             },
             .protocol = protocol,
-            .timeout = .{ .duration = .{
-                .raw = std.Io.Duration.fromMilliseconds(request_timeout_ms),
-                .clock = .awake,
-            } },
         });
 
         var authorization_buf: [512]u8 = undefined;
@@ -226,11 +227,37 @@ const HostTransport = struct {
         });
         defer req.deinit();
 
+        // Declared after req's deinit defer so LIFO runs `disarm` first: the
+        // watchdog must be joined before the connection is released, or it
+        // could shut down an fd that has since been recycled.
+        var deadline: FetchDeadline = .{
+            .stream = connection.stream_reader.stream,
+            .timeout_ms = exchange_timeout_ms,
+            .io = self.io,
+        };
+        deadline.arm();
+        defer deadline.disarm();
+
+        return exchange(allocator, &req, body) catch |err| {
+            // After a shutdown the blocked call surfaces EndOfStream or
+            // SocketUnconnected; report why it really ended.
+            if (deadline.expired()) return error.TimedOut;
+            return err;
+        };
+    }
+
+    /// One request/response, with no knowledge of the deadline watching it.
+    fn exchange(
+        allocator: std.mem.Allocator,
+        req: *std.http.Client.Request,
+        body: []const u8,
+    ) ![]u8 {
         req.transfer_encoding = .{ .content_length = body.len };
         var req_body = try req.sendBodyUnflushed(&.{});
         try req_body.writer.writeAll(body);
         try req_body.end();
-        try req.connection.?.flush();
+        const connection = req.connection orelse return error.ConnectionMissing;
+        try connection.flush();
 
         var response = try req.receiveHead(&.{});
         var read_buf: [4096]u8 = undefined;

@@ -928,64 +928,10 @@ fn readResponseBody(response: *std.http.Client.Response, allocator: std.mem.Allo
     return body;
 }
 
-/// Wall-clock deadline for one outbound exchange, enforced by a watchdog
-/// thread that full-shutdowns the socket once the deadline passes. The std
-/// paths cannot bound this themselves: ConnectTcpOptions.timeout is declared
-/// but never read by std.http.Client, and SO_RCVTIMEO is unusable because the
-/// Threaded backend treats a socket EAGAIN as a programmer bug (panics in
-/// Debug). After shutdown, blocked reads surface EndOfStream and blocked
-/// writes SocketUnconnected, which the call sites map to a clean fetch error.
-/// `disarm` must run before the connection is released so the watchdog can
-/// never shut down a recycled fd.
-const FetchDeadline = struct {
-    stream: std.Io.net.Stream,
-    timeout_ms: u32,
-    io: std.Io,
-    event: std.Io.Event = .unset,
-    fired: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
-    thread: ?std.Thread = null,
-
-    fn arm(self: *FetchDeadline) void {
-        if (self.timeout_ms == 0) return;
-        self.thread = std.Thread.spawn(.{}, watch, .{self}) catch null;
-    }
-
-    fn watch(self: *FetchDeadline) void {
-        const duration: std.Io.Clock.Duration = .{
-            .raw = std.Io.Duration.fromMilliseconds(@intCast(self.timeout_ms)),
-            .clock = .awake,
-        };
-        const deadline = std.Io.Clock.Timestamp.fromNow(self.io, duration);
-        while (true) {
-            if (self.event.waitTimeout(self.io, .{ .deadline = deadline })) |_| {
-                return;
-            } else |err| switch (err) {
-                error.Canceled => return,
-                // waitTimeout reports spurious wakeups as Timeout; trust
-                // only the clock.
-                error.Timeout => if (deadline.durationFromNow(self.io).raw.nanoseconds <= 0) break,
-            }
-        }
-        if (self.event.isSet()) return;
-        self.fired.store(true, .seq_cst);
-        self.stream.shutdown(self.io, .both) catch {};
-    }
-
-    fn disarm(self: *FetchDeadline) void {
-        const thread = self.thread orelse return;
-        self.event.set(self.io);
-        thread.join();
-        self.thread = null;
-    }
-
-    fn expired(self: *const FetchDeadline) bool {
-        return self.fired.load(.seq_cst);
-    }
-
-    fn failCode(self: *const FetchDeadline, fallback: []const u8) []const u8 {
-        return if (self.expired()) "TimedOut" else fallback;
-    }
-};
+/// The outbound-exchange watchdog. Defined in its own file so the developer
+/// CLI can arm the same one without importing this module; see that file for
+/// why std cannot bound the exchange itself.
+const FetchDeadline = @import("fetch_deadline.zig").FetchDeadline;
 
 fn fetchSyncResult(rt: *HandlerInstance, args: []const zq.JSValue) !zq.JSValue {
     if (!rt.config.outbound_http_enabled) {
