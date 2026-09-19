@@ -474,9 +474,28 @@ const Session = struct {
             return .{ .rejected = reject(.limits, .work_budget_exhausted, .none) };
         }
 
+        // One bit per declared kind, read through the schema-neutral kind view
+        // so a schema 1 and a schema 2 document that name the same kinds
+        // produce the same mask. The ordinal is bounded before it reaches the
+        // shift: the catalog asserts the bound at compile time, and a mask
+        // built from an out-of-range ordinal would name a kind that is not the
+        // one declared.
+        var kind_bits: u32 = 0;
+        var kind_index: u16 = 0;
+        while (kind_index < spec.kind_count) : (kind_index += 1) {
+            try self.budget.spend(1);
+            const declared_kind = spec.kindAt(kind_index) catch
+                return .{ .rejected = reject(.invariant_coverage, .invariant_spec_undecodable, .none) };
+            const ordinal = invariant.kindInfo(declared_kind).wire_ordinal;
+            if (ordinal == 0 or ordinal > @bitSizeOf(u32)) {
+                return .{ .rejected = reject(.invariant_coverage, .invariant_spec_undecodable, .none) };
+            }
+            kind_bits |= @as(u32, 1) << @intCast(ordinal - 1);
+        }
+
         var result = verdict.InvariantVerdicts{
             .configured = true,
-            .kind_bits = @as(u8, 1) << @intCast(@intFromEnum(spec.kind) - 1),
+            .kind_bits = kind_bits,
         };
         var previous_witness: ?cert_mod.InvariantWitness = null;
         var previous_observed: ?invariant.ObservedOperation = null;
@@ -1811,6 +1830,18 @@ const test_invariant_spec = invariant.magic.* ++ [_]u8{
     1, 0, // currency count
 } ++ "ledger" ++ "USD" ++ [_]u8{2};
 
+/// The same ledger and currencies under wire schema 2, which names its kinds
+/// in a sorted record list instead of in the header.
+const test_invariant_spec_v2 = invariant.magic.* ++ [_]u8{
+    2, 0, // schema
+    1, 0, // declared kind count
+    6, 0, // ledger id length
+    1, 0, // currency count
+} ++ "ledger" ++ "USD" ++ [_]u8{2} ++ [_]u8{
+    1, 0, // balance_conservation_v1
+    0, 0, // payload length
+};
+
 const InvariantTestFixture = struct {
     members: [11]graph.Member,
     ir: [4]cert_mod.IrNode,
@@ -1820,6 +1851,9 @@ const InvariantTestFixture = struct {
     trusted: [1]cert_mod.TrustedEdge,
     invariant_witnesses: [1]cert_mod.InvariantWitness,
     observed: [1]invariant.ObservedOperation,
+    /// The specification bytes the certificate is built over and the consumer
+    /// is handed. Both wire schemas run the same acceptance path.
+    spec: []const u8,
     buffer: [8192]u8 = undefined,
     len: usize = 0,
     scratch: [scratchBytes(.{})]u8 = undefined,
@@ -1830,7 +1864,7 @@ const InvariantTestFixture = struct {
                 .executable_root = graph.computeRoot(&self.members) catch unreachable,
                 .ir_root = cert_mod.irRootFromNodes(&self.ir),
                 .contract_digest = test_support.digest(2),
-                .invariant_spec_digest = invariant.digest(test_invariant_spec),
+                .invariant_spec_digest = invariant.digest(self.spec),
                 .development = false,
             },
             .graph = &self.members,
@@ -1873,14 +1907,19 @@ const InvariantTestFixture = struct {
             .certificate = self.buffer[0..self.len],
             .observed_graph = &self.members,
             .scratch = &self.scratch,
-            .invariant_spec = test_invariant_spec,
+            .invariant_spec = self.spec,
             .observed_invariant_operations = &self.observed,
         };
     }
 };
 
 fn buildInvariantFixture() !InvariantTestFixture {
+    return buildInvariantFixtureFor(test_invariant_spec);
+}
+
+fn buildInvariantFixtureFor(spec: []const u8) !InvariantTestFixture {
     var fixture = InvariantTestFixture{
+        .spec = spec,
         .members = .{
             .{ .kind = .main_bytecode, .ordinal = 0, .digest = test_support.digest(1) },
             .{ .kind = .contract_bytes, .ordinal = 0, .digest = test_support.digest(2) },
@@ -1891,7 +1930,7 @@ fn buildInvariantFixture() !InvariantTestFixture {
             .{ .kind = .capability_matrix, .ordinal = 0, .digest = test_support.digest(7) },
             .{ .kind = .proof_ir, .ordinal = 0, .digest = test_support.digest(8) },
             .{ .kind = .proof_certificate, .ordinal = 0, .digest = test_support.digest(9) },
-            .{ .kind = .invariant_spec, .ordinal = 0, .digest = invariant.digest(test_invariant_spec) },
+            .{ .kind = .invariant_spec, .ordinal = 0, .digest = invariant.digest(spec) },
             .{ .kind = .invariant_ledger_adapter, .ordinal = 0, .digest = invariant.adapterDigest() },
         },
         .ir = .{
@@ -1966,7 +2005,52 @@ test "a configured invariant is checked independently from property and guard ve
     try testing.expectEqual(@as(u32, 1), result.invariants.covered);
     try testing.expectEqual(@as(u32, 1), result.invariants.writes);
     try testing.expect(result.invariants.ready());
+    try testing.expectEqual(@as(u32, 1), result.invariants.kind_bits);
     try testing.expectEqual(@as(u32, 0), result.guards.required);
+}
+
+test "a schema 2 invariant specification is accepted and reports the same kind bits" {
+    // The schema 2 document declares the same ledger, currencies and kinds as
+    // the schema 1 one above. Acceptance and the reported mask must not depend
+    // on which schema carried them, and the digest the certificate binds must
+    // be the one this document hashes to under its own domain.
+    var fixture = try buildInvariantFixtureFor(test_invariant_spec_v2);
+    const result = check(fixture.inputs(), policy_mod.production);
+    if (result.rejection) |rejection| {
+        std.debug.print("unexpected schema 2 invariant rejection: {s} / {s}\n", .{
+            rejection.stage.name(),
+            rejection.code.text(),
+        });
+        return error.TestUnexpectedResult;
+    }
+    try testing.expect(result.accepted());
+    try testing.expect(result.invariants.configured);
+    try testing.expectEqual(@as(u32, 1), result.invariants.required);
+    try testing.expectEqual(@as(u32, 1), result.invariants.covered);
+    try testing.expectEqual(@as(u32, 1), result.invariants.writes);
+    try testing.expect(result.invariants.ready());
+    try testing.expectEqual(@as(u32, 1), result.invariants.kind_bits);
+}
+
+test "a schema 2 certificate bound to the schema 1 digest of the same ledger is refused" {
+    // The two schemas hash under different domains, so a certificate that
+    // carries the schema 1 digest cannot stand for schema 2 bytes even when
+    // both declare the same ledger, currencies and kinds.
+    var fixture = try buildInvariantFixtureFor(test_invariant_spec_v2);
+    var under_v1_domain = std.crypto.hash.sha2.Sha256.init(.{});
+    under_v1_domain.update(invariant.digest_domain);
+    under_v1_domain.update(test_invariant_spec_v2);
+    const borrowed = under_v1_domain.finalResult();
+    for (&fixture.members) |*member| {
+        if (member.kind == .invariant_spec) member.digest = borrowed;
+    }
+    try fixture.encodeWith(&fixture.invariant_witnesses);
+    const result = check(fixture.inputs(), policy_mod.production);
+    try testing.expectEqual(verdict.Stage.invariant_coverage, result.rejection.?.stage);
+    try testing.expectEqual(
+        verdict.ReasonCode.invariant_spec_digest_mismatch,
+        result.rejection.?.code,
+    );
 }
 
 test "missing and extra invariant witnesses reject" {

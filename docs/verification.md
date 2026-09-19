@@ -311,6 +311,29 @@ binary section. The plain-language sentence helps the author select the
 template. It is not proof input. Jev can help classify the sentence, but its
 answer cannot approve an artifact or remove an obligation.
 
+### Invariant wire schemas
+
+The canonical binary section has two wire schemas.
+
+An invariant wire schema 1 section names one kind in its header and ends after
+the currency records. An invariant wire schema 2 section keeps the same ledger
+and currency region byte for byte, spends the header field that schema 1 gives
+its kind on a declared kind count, and appends that many records of wire
+ordinal, payload length, and payload, sorted by ordinal with each ordinal
+appearing once. Balance conservation is mandatory under both, and a schema 2
+document that omits it is refused.
+
+The two hash under different digest domains, so the same ledger declared under
+both produces two different digests and a schema 2 document cannot answer a
+commitment made over schema 1 bytes. Schema 1 documents encode exactly as they
+always have, because every deployed artifact and every existing protected
+ledger store is bound to the digest of those exact bytes.
+
+A JSON document selects the schema with its `version` field. Schema 1 names
+its kind in `kind`; schema 2 lists its kinds in `kinds`. A document that omits
+the field its schema owns, or carries the other schema's field, is refused
+rather than defaulted.
+
 The consumer checks four related inputs:
 
 - The executable graph binds the invariant section and the protected ledger

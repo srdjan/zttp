@@ -153,6 +153,12 @@ const Check = enum {
     kind_ordinal_mismatch,
     config_kind_missing,
     config_accepts_unknown_kind,
+    config_schema_coverage,
+    schema_v1_moved,
+    schema_versions_not_distinct,
+    v1_digest_domain_changed,
+    v2_digest_domain_shared,
+    docs_invariant_schema_statement,
     authoring_output_mismatch,
     cli_delegates_listing,
     build_step_missing,
@@ -211,13 +217,34 @@ const NativeExport = struct { name: []const u8, effect: []const u8 };
 /// anything quietly.
 const ConfigAcceptance = struct {
     name: []const u8,
+    /// The wire schema the offered document declared.
+    schema: u16,
     accepted: bool,
     /// The error name when the boundary refused, otherwise empty.
     failure: []const u8,
 };
 
+/// Whether the boundary refused a kind the catalog does not name, per schema.
+const UnknownRefusal = struct { schema: u16, refused: bool };
+
+/// Whether each wire schema's digest lands where it must, measured against the
+/// gate's own copy of the schema 1 domain below.
+const DigestDomains = struct {
+    /// Schema 1 bytes still hash under the schema 1 domain. Deployed artifacts
+    /// and existing ledger stores are bound to exactly those digests.
+    v1_preserved: bool = false,
+    /// Schema 2 bytes do not. A shared domain would let a schema 2 document
+    /// answer to a commitment made over schema 1 bytes.
+    v2_separated: bool = false,
+};
+
 /// A name the closed catalog must never grow.
 const unknown_kind_name = "gate_probe_kind_the_catalog_does_not_name";
+
+/// The gate's own copy of the schema 1 digest domain. The kernel's constant is
+/// deliberately not read here: a change to it must surface as a disagreement
+/// between two independent statements rather than as both moving together.
+const v1_digest_domain_literal = "zttp-invariant-spec-v1";
 
 const Model = struct {
     text: std.EnumArray(Input, []const u8),
@@ -228,10 +255,15 @@ const Model = struct {
     /// What `zttp invariant list` prints, rendered through the same function
     /// the CLI calls. Compared against `kinds`, never derived from it.
     authoring: []const u8,
-    /// One measured verdict per catalog kind from the confirmed-template
-    /// parser, and whether that parser refuses a kind the catalog omits.
+    /// One measured verdict per catalog kind per wire schema from the
+    /// confirmed-template parser, and one per schema for a kind the catalog
+    /// omits.
     config_acceptance: []ConfigAcceptance,
-    config_rejects_unknown: bool,
+    config_unknown_refusals: []UnknownRefusal,
+    /// The two wire schemas, imported as values.
+    schema_version: u16,
+    schema_version_v2: u16,
+    digest_domains: DigestDomains,
     adapter_digest: [32]u8,
 };
 
@@ -287,8 +319,9 @@ fn buildNativeExports(arena: std.mem.Allocator, found: *bool) ![]NativeExport {
     return try arena.alloc(NativeExport, 0);
 }
 
-/// The smallest document the confirmed-template boundary can accept, naming
-/// one kind. Every other field is held constant so the kind is the variable.
+/// The smallest schema 1 document the confirmed-template boundary can accept,
+/// naming one kind in the header field that schema owns. Every other field is
+/// held constant so the kind is the variable.
 fn confirmedTemplate(arena: std.mem.Allocator, kind_name: []const u8) ![]u8 {
     return std.fmt.allocPrint(
         arena,
@@ -297,31 +330,99 @@ fn confirmedTemplate(arena: std.mem.Allocator, kind_name: []const u8) ![]u8 {
     );
 }
 
+/// The same document under schema 2, which names its kinds in a record list.
+/// Every kind the catalog marks required joins the named one, because a set
+/// missing one of those is refused whatever else it names, and the measurement
+/// here is about the named kind rather than about the required set.
+fn confirmedTemplateV2(arena: std.mem.Allocator, kind_name: []const u8) ![]u8 {
+    var writer: std.Io.Writer.Allocating = .init(arena);
+    errdefer writer.deinit();
+    const out = &writer.writer;
+    try out.print(
+        "{{\"version\":{d},\"ledger\":\"gate\",\"currencies\":[{{\"code\":\"USD\",\"scale\":2}}],\"kinds\":[{{\"kind\":\"{s}\"}}",
+        .{ invariant.schema_version_v2, kind_name },
+    );
+    for (std.enums.values(invariant.Kind)) |kind| {
+        if (!invariant.kindInfo(kind).required) continue;
+        if (std.mem.eql(u8, @tagName(kind), kind_name)) continue;
+        try out.print(",{{\"kind\":\"{s}\"}}", .{@tagName(kind)});
+    }
+    try out.writeAll("]}");
+    return writer.written();
+}
+
+fn templateFor(arena: std.mem.Allocator, schema: u16, kind_name: []const u8) ![]u8 {
+    if (schema == invariant.schema_version_v2) return confirmedTemplateV2(arena, kind_name);
+    return confirmedTemplate(arena, kind_name);
+}
+
+const measured_schemas = [_]u16{ invariant.schema_version, invariant.schema_version_v2 };
+
 fn measureConfigAcceptance(arena: std.mem.Allocator, kinds: []const KindRow) ![]ConfigAcceptance {
-    const rows = try arena.alloc(ConfigAcceptance, kinds.len);
+    const rows = try arena.alloc(ConfigAcceptance, kinds.len * measured_schemas.len);
     errdefer arena.free(rows);
-    for (kinds, 0..) |kind, index| {
-        const document = try confirmedTemplate(arena, kind.name);
-        defer arena.free(document);
-        if (invariant_config.parse(arena, document)) |bytes| {
-            arena.free(bytes);
-            rows[index] = .{ .name = kind.name, .accepted = true, .failure = "" };
-        } else |err| {
-            rows[index] = .{ .name = kind.name, .accepted = false, .failure = @errorName(err) };
+    var index: usize = 0;
+    for (kinds) |kind| {
+        for (measured_schemas) |schema| {
+            const document = try templateFor(arena, schema, kind.name);
+            defer arena.free(document);
+            if (invariant_config.parse(arena, document)) |bytes| {
+                arena.free(bytes);
+                rows[index] = .{ .name = kind.name, .schema = schema, .accepted = true, .failure = "" };
+            } else |err| {
+                rows[index] = .{ .name = kind.name, .schema = schema, .accepted = false, .failure = @errorName(err) };
+            }
+            index += 1;
         }
     }
     return rows;
 }
 
-fn measureConfigRejectsUnknown(arena: std.mem.Allocator) !bool {
-    const document = try confirmedTemplate(arena, unknown_kind_name);
-    defer arena.free(document);
-    if (invariant_config.parse(arena, document)) |bytes| {
-        arena.free(bytes);
-        return false;
-    } else |err| {
-        return err == error.UnsupportedInvariantKind;
+fn measureConfigRejectsUnknown(arena: std.mem.Allocator) ![]UnknownRefusal {
+    const rows = try arena.alloc(UnknownRefusal, measured_schemas.len);
+    errdefer arena.free(rows);
+    for (measured_schemas, 0..) |schema, index| {
+        const document = try templateFor(arena, schema, unknown_kind_name);
+        defer arena.free(document);
+        if (invariant_config.parse(arena, document)) |bytes| {
+            arena.free(bytes);
+            rows[index] = .{ .schema = schema, .refused = false };
+        } else |err| {
+            rows[index] = .{ .schema = schema, .refused = err == error.UnsupportedInvariantKind };
+        }
     }
+    return rows;
+}
+
+fn hashUnderV1Domain(bytes: []const u8) [32]u8 {
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    hasher.update(v1_digest_domain_literal);
+    hasher.update(bytes);
+    return hasher.finalResult();
+}
+
+/// Hash one document per schema, produced by the authoring boundary, and ask
+/// where each digest lands relative to the schema 1 domain stated above.
+fn measureDigestDomains(arena: std.mem.Allocator, kinds: []const KindRow) !DigestDomains {
+    var measured: DigestDomains = .{};
+    if (kinds.len == 0) return measured;
+    const name = kinds[0].name;
+
+    const v1_document = try confirmedTemplate(arena, name);
+    defer arena.free(v1_document);
+    if (invariant_config.parse(arena, v1_document)) |bytes| {
+        defer arena.free(bytes);
+        measured.v1_preserved = std.mem.eql(u8, &invariant.digest(bytes), &hashUnderV1Domain(bytes));
+    } else |_| {}
+
+    const v2_document = try confirmedTemplateV2(arena, name);
+    defer arena.free(v2_document);
+    if (invariant_config.parse(arena, v2_document)) |bytes| {
+        defer arena.free(bytes);
+        measured.v2_separated = !std.mem.eql(u8, &invariant.digest(bytes), &hashUnderV1Domain(bytes));
+    } else |_| {}
+
+    return measured;
 }
 
 fn renderAuthoring(arena: std.mem.Allocator) ![]const u8 {
@@ -769,6 +870,11 @@ fn validate(arena: std.mem.Allocator, gate: *Gate, model: Model) !void {
     {
         return gate.reject(.docs_schema_statement, "verification docs do not state the current certificate schema and proof system", .{});
     }
+    if (std.mem.indexOf(u8, model.text.get(.docs), "invariant wire schema 1") == null or
+        std.mem.indexOf(u8, model.text.get(.docs), "invariant wire schema 2") == null)
+    {
+        return gate.reject(.docs_invariant_schema_statement, "{s} does not state both invariant wire schemas", .{paths.get(.docs)});
+    }
     if (std.mem.indexOf(u8, model.text.get(.concepts), "### Application invariant") == null) {
         return gate.reject(.concepts_entry, "{s} has no Application invariant entry", .{paths.get(.concepts)});
     }
@@ -807,22 +913,47 @@ fn validate(arena: std.mem.Allocator, gate: *Gate, model: Model) !void {
         }
     }
 
+    // --- the two wire schemas, imported as values ----------------------------
+    if (model.schema_version != 1) {
+        return gate.reject(.schema_v1_moved, "the first invariant wire schema is {d}; deployed artifacts and existing ledger stores are bound to 1", .{model.schema_version});
+    }
+    if (model.schema_version_v2 == model.schema_version) {
+        return gate.reject(.schema_versions_not_distinct, "both invariant wire schemas carry version {d}", .{model.schema_version});
+    }
+    if (!model.digest_domains.v1_preserved) {
+        return gate.reject(.v1_digest_domain_changed, "schema 1 bytes no longer hash under '{s}'; every deployed artifact and ledger store is bound to those digests", .{v1_digest_domain_literal});
+    }
+    if (!model.digest_domains.v2_separated) {
+        return gate.reject(.v2_digest_domain_shared, "schema 2 bytes hash under '{s}', so a schema 2 document can answer a schema 1 commitment", .{v1_digest_domain_literal});
+    }
+
     // --- the confirmed-template boundary, measured rather than text-scanned --
+    const expected_measurements = model.kinds.len * measured_schemas.len;
+    if (model.config_acceptance.len != expected_measurements) {
+        return gate.reject(.config_schema_coverage, "the confirmed-template boundary produced {d} measurements, expected {d}: one per catalog kind per wire schema", .{ model.config_acceptance.len, expected_measurements });
+    }
     for (model.kinds) |row| {
-        var measured = false;
-        for (model.config_acceptance) |acceptance| {
-            if (!std.mem.eql(u8, acceptance.name, row.name)) continue;
-            measured = true;
-            if (!acceptance.accepted) {
-                return gate.reject(.config_kind_missing, "{s} refuses catalog kind '{s}' with {s}", .{ paths.get(.config_tests), row.name, acceptance.failure });
+        for (measured_schemas) |schema| {
+            var measured = false;
+            for (model.config_acceptance) |acceptance| {
+                if (!std.mem.eql(u8, acceptance.name, row.name) or acceptance.schema != schema) continue;
+                measured = true;
+                if (!acceptance.accepted) {
+                    return gate.reject(.config_kind_missing, "{s} refuses catalog kind '{s}' under wire schema {d} with {s}", .{ paths.get(.config_tests), row.name, schema, acceptance.failure });
+                }
+            }
+            if (!measured) {
+                return gate.reject(.config_kind_missing, "catalog kind '{s}' was never offered to {s} under wire schema {d}", .{ row.name, paths.get(.config_tests), schema });
             }
         }
-        if (!measured) {
-            return gate.reject(.config_kind_missing, "catalog kind '{s}' was never offered to {s}", .{ row.name, paths.get(.config_tests) });
-        }
     }
-    if (!model.config_rejects_unknown) {
-        return gate.reject(.config_accepts_unknown_kind, "{s} does not refuse a kind the catalog does not name", .{paths.get(.config_tests)});
+    if (model.config_unknown_refusals.len != measured_schemas.len) {
+        return gate.reject(.config_schema_coverage, "a kind the catalog does not name was offered under {d} wire schemas, expected {d}", .{ model.config_unknown_refusals.len, measured_schemas.len });
+    }
+    for (model.config_unknown_refusals) |refusal| {
+        if (!refusal.refused) {
+            return gate.reject(.config_accepts_unknown_kind, "{s} does not refuse a kind the catalog does not name under wire schema {d}", .{ paths.get(.config_tests), refusal.schema });
+        }
     }
 
     // --- what `zttp invariant list` prints -----------------------------------
@@ -1009,8 +1140,36 @@ fn probeConfigAcceptance(arena: std.mem.Allocator, model: *Model) !void {
     model.config_acceptance = rows;
 }
 
-fn probeConfigUnknown(_: std.mem.Allocator, model: *Model) !void {
-    model.config_rejects_unknown = false;
+fn probeConfigUnknown(arena: std.mem.Allocator, model: *Model) !void {
+    if (model.config_unknown_refusals.len == 0) return error.ProbeAnchorMissing;
+    const rows = try arena.dupe(UnknownRefusal, model.config_unknown_refusals);
+    errdefer arena.free(rows);
+    rows[0].refused = false;
+    model.config_unknown_refusals = rows;
+}
+
+fn probeConfigUnknownV2(arena: std.mem.Allocator, model: *Model) !void {
+    if (model.config_unknown_refusals.len < 2) return error.ProbeAnchorMissing;
+    const rows = try arena.dupe(UnknownRefusal, model.config_unknown_refusals);
+    errdefer arena.free(rows);
+    rows[rows.len - 1].refused = false;
+    model.config_unknown_refusals = rows;
+}
+
+fn probeSchemaVersion(_: std.mem.Allocator, model: *Model) !void {
+    model.schema_version = model.schema_version + 1;
+}
+
+fn probeDigestDomainV1(_: std.mem.Allocator, model: *Model) !void {
+    model.digest_domains.v1_preserved = false;
+}
+
+fn probeDigestDomainV2(_: std.mem.Allocator, model: *Model) !void {
+    model.digest_domains.v2_separated = false;
+}
+
+fn probeDocsInvariantSchema(arena: std.mem.Allocator, model: *Model) !void {
+    try replaceOnce(arena, model, .docs, "invariant wire schema 2", "invariant wire schema probe");
 }
 
 fn probeCliSource(arena: std.mem.Allocator, model: *Model) !void {
@@ -1114,6 +1273,11 @@ const probes = [_]Probe{
     .{ .name = "native-exports-empty", .expect = .native_exports_empty, .apply = probeNativeExportsEmpty },
     .{ .name = "config-acceptance", .expect = .config_kind_missing, .apply = probeConfigAcceptance },
     .{ .name = "config-unknown", .expect = .config_accepts_unknown_kind, .apply = probeConfigUnknown },
+    .{ .name = "config-unknown-v2", .expect = .config_accepts_unknown_kind, .apply = probeConfigUnknownV2 },
+    .{ .name = "schema-version", .expect = .schema_v1_moved, .apply = probeSchemaVersion },
+    .{ .name = "digest-domain-v1", .expect = .v1_digest_domain_changed, .apply = probeDigestDomainV1 },
+    .{ .name = "digest-domain-v2", .expect = .v2_digest_domain_shared, .apply = probeDigestDomainV2 },
+    .{ .name = "docs-invariant-schema", .expect = .docs_invariant_schema_statement, .apply = probeDocsInvariantSchema },
 };
 
 // ---------------------------------------------------------------------------
@@ -1170,7 +1334,10 @@ fn loadModel(arena: std.mem.Allocator, root: []const u8, gate: *Gate) !Model {
         .native_binding_found = found,
         .authoring = try renderAuthoring(arena),
         .config_acceptance = try measureConfigAcceptance(arena, kinds),
-        .config_rejects_unknown = try measureConfigRejectsUnknown(arena),
+        .config_unknown_refusals = try measureConfigRejectsUnknown(arena),
+        .schema_version = invariant.schema_version,
+        .schema_version_v2 = invariant.schema_version_v2,
+        .digest_domains = try measureDigestDomains(arena, kinds),
         .adapter_digest = invariant.adapterDigest(),
     };
 }
@@ -1334,12 +1501,13 @@ pub fn main(init: std.process.Init.Minimal) !void {
     }
 
     try stdout.interface.print(
-        "application invariants: {d} sources, {d} catalog rows, {d} kinds, {d} native exports and " ++
-            "{d} compiled evidence markers agree; {d} mutation probes reject\n",
+        "application invariants: {d} sources, {d} catalog rows, {d} kinds over {d} wire schemas, " ++
+            "{d} native exports and {d} compiled evidence markers agree; {d} mutation probes reject\n",
         .{
             std.enums.values(Input).len,
             model.catalog.len,
             model.kinds.len,
+            measured_schemas.len,
             model.native_exports.len,
             evidence.len,
             probes.len,
@@ -1468,19 +1636,66 @@ test "a second ledger_call tag is ambiguous rather than a pass on the first" {
     );
 }
 
-test "the confirmed template accepts every catalog kind and refuses one it does not name" {
+test "the confirmed template accepts every catalog kind under both wire schemas" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
     const kinds = try buildKinds(arena);
     const rows = try measureConfigAcceptance(arena, kinds);
-    try testing.expect(rows.len > 0);
-    try testing.expectEqual(kinds.len, rows.len);
-    for (rows, kinds) |row, kind| {
-        try testing.expectEqualStrings(kind.name, row.name);
-        try testing.expect(row.accepted);
+    try testing.expect(kinds.len > 0);
+    try testing.expectEqual(kinds.len * measured_schemas.len, rows.len);
+    for (kinds) |kind| {
+        for (measured_schemas) |schema| {
+            var seen = false;
+            for (rows) |row| {
+                if (!std.mem.eql(u8, row.name, kind.name) or row.schema != schema) continue;
+                seen = true;
+                try testing.expect(row.accepted);
+            }
+            try testing.expect(seen);
+        }
     }
-    try testing.expect(try measureConfigRejectsUnknown(arena));
+
+    const refusals = try measureConfigRejectsUnknown(arena);
+    try testing.expectEqual(measured_schemas.len, refusals.len);
+    for (refusals, measured_schemas) |refusal, schema| {
+        try testing.expectEqual(schema, refusal.schema);
+        try testing.expect(refusal.refused);
+    }
+}
+
+test "the two wire schemas hash under different digest domains" {
+    // The gate states the schema 1 domain itself rather than reading the
+    // kernel's constant, so this measurement disagrees when either side moves.
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const kinds = try buildKinds(arena);
+    try testing.expect(kinds.len > 0);
+    const measured = try measureDigestDomains(arena, kinds);
+    try testing.expect(measured.v1_preserved);
+    try testing.expect(measured.v2_separated);
+
+    // With no kinds there is nothing to author, so nothing is measured, and
+    // the gate must not read that as a pass.
+    const none = try measureDigestDomains(arena, &.{});
+    try testing.expect(!none.v1_preserved);
+    try testing.expect(!none.v2_separated);
+}
+
+test "the schema 2 template names the required kinds beside the one under test" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const document = try confirmedTemplateV2(arena, unknown_kind_name);
+    try testing.expect(std.mem.indexOf(u8, document, unknown_kind_name) != null);
+    for (std.enums.values(invariant.Kind)) |kind| {
+        if (!invariant.kindInfo(kind).required) continue;
+        try testing.expect(std.mem.indexOf(u8, document, @tagName(kind)) != null);
+    }
+    // The document must still parse as JSON of the shape the boundary expects,
+    // which its refusal proves: an unparsable document fails before the kind.
+    try testing.expectError(error.UnsupportedInvariantKind, invariant_config.parse(arena, document));
 }
 
 test "the expected adapter declaration is found by meaning, not by its name" {

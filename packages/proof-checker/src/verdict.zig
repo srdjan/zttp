@@ -319,8 +319,10 @@ pub const InvariantVerdicts = struct {
     covered: u32 = 0,
     /// Covered operations that can modify protected ledger state.
     writes: u32 = 0,
-    /// One bit per configured invariant kind.
-    kind_bits: u8 = 0,
+    /// One bit per configured invariant kind, at the kind's wire ordinal less
+    /// one. In-memory only: no certificate or artifact section carries it, so
+    /// the width here is bounded by the catalog rather than by a wire format.
+    kind_bits: u32 = 0,
 
     pub fn ready(self: InvariantVerdicts) bool {
         return self.configured and self.required > 0 and self.required == self.covered;
