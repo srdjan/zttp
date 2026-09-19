@@ -153,6 +153,7 @@ const Check = enum {
     kind_ordinal_mismatch,
     config_kind_missing,
     config_accepts_unknown_kind,
+    config_schema_closure,
     config_schema_coverage,
     schema_v1_moved,
     schema_versions_not_distinct,
@@ -357,6 +358,23 @@ fn templateFor(arena: std.mem.Allocator, schema: u16, kind_name: []const u8) ![]
 }
 
 const measured_schemas = [_]u16{ invariant.schema_version, invariant.schema_version_v2 };
+
+/// Whether the authoring boundary must author `required` under `schema`.
+///
+/// Schema 2 carries a record list, so it authors every catalog kind. Schema 1
+/// has room for one kind in its header and its decoder admits only the required
+/// one, so the boundary must refuse the rest there rather than emit bytes a
+/// consumer would reject. The two statements are settled here, in one place,
+/// because a gate that only demanded acceptance would turn red the day the
+/// catalog grows and offer no way to tell a closed schema from a broken one.
+fn mustAuthor(schema: u16, required: bool) bool {
+    if (schema == invariant.schema_version) return required;
+    return true;
+}
+
+/// The refusal a closed schema must give. Any other error means the boundary
+/// refused for a reason the gate did not ask about.
+const closed_schema_failure = "UnsupportedInvariantKind";
 
 fn measureConfigAcceptance(arena: std.mem.Allocator, kinds: []const KindRow) ![]ConfigAcceptance {
     const rows = try arena.alloc(ConfigAcceptance, kinds.len * measured_schemas.len);
@@ -938,8 +956,17 @@ fn validate(arena: std.mem.Allocator, gate: *Gate, model: Model) !void {
             for (model.config_acceptance) |acceptance| {
                 if (!std.mem.eql(u8, acceptance.name, row.name) or acceptance.schema != schema) continue;
                 measured = true;
-                if (!acceptance.accepted) {
-                    return gate.reject(.config_kind_missing, "{s} refuses catalog kind '{s}' under wire schema {d} with {s}", .{ paths.get(.config_tests), row.name, schema, acceptance.failure });
+                if (mustAuthor(schema, row.required)) {
+                    if (!acceptance.accepted) {
+                        return gate.reject(.config_kind_missing, "{s} refuses catalog kind '{s}' under wire schema {d} with {s}", .{ paths.get(.config_tests), row.name, schema, acceptance.failure });
+                    }
+                    continue;
+                }
+                if (acceptance.accepted) {
+                    return gate.reject(.config_schema_closure, "{s} authors kind '{s}' under wire schema {d}, whose decoder admits only the required kind", .{ paths.get(.config_tests), row.name, schema });
+                }
+                if (!std.mem.eql(u8, acceptance.failure, closed_schema_failure)) {
+                    return gate.reject(.config_schema_closure, "{s} refuses kind '{s}' under wire schema {d} with {s}, expected {s}", .{ paths.get(.config_tests), row.name, schema, acceptance.failure, closed_schema_failure });
                 }
             }
             if (!measured) {
@@ -1160,6 +1187,33 @@ fn probeSchemaVersion(_: std.mem.Allocator, model: *Model) !void {
     model.schema_version = model.schema_version + 1;
 }
 
+fn probeSchemaVersionV2(_: std.mem.Allocator, model: *Model) !void {
+    model.schema_version_v2 = model.schema_version;
+}
+
+/// A kind that is no longer required must stop being authorable under schema 1.
+/// This is the one mutation that reaches the closed-schema branch while the
+/// catalog holds a single required kind.
+fn probeKindNotRequired(arena: std.mem.Allocator, model: *Model) !void {
+    if (model.kinds.len == 0) return error.ProbeAnchorMissing;
+    const rows = try arena.dupe(KindRow, model.kinds);
+    errdefer arena.free(rows);
+    rows[0].required = false;
+    model.kinds = rows;
+}
+
+/// Drop one measurement. The floor ahead of the per-kind loop must see the
+/// short table, rather than the loop reporting every kind it can still find.
+fn probeConfigAcceptanceShort(_: std.mem.Allocator, model: *Model) !void {
+    if (model.config_acceptance.len == 0) return error.ProbeAnchorMissing;
+    model.config_acceptance = model.config_acceptance[0 .. model.config_acceptance.len - 1];
+}
+
+fn probeConfigUnknownShort(_: std.mem.Allocator, model: *Model) !void {
+    if (model.config_unknown_refusals.len < 2) return error.ProbeAnchorMissing;
+    model.config_unknown_refusals = model.config_unknown_refusals[0..1];
+}
+
 fn probeDigestDomainV1(_: std.mem.Allocator, model: *Model) !void {
     model.digest_domains.v1_preserved = false;
 }
@@ -1274,7 +1328,11 @@ const probes = [_]Probe{
     .{ .name = "config-acceptance", .expect = .config_kind_missing, .apply = probeConfigAcceptance },
     .{ .name = "config-unknown", .expect = .config_accepts_unknown_kind, .apply = probeConfigUnknown },
     .{ .name = "config-unknown-v2", .expect = .config_accepts_unknown_kind, .apply = probeConfigUnknownV2 },
+    .{ .name = "config-acceptance-short", .expect = .config_schema_coverage, .apply = probeConfigAcceptanceShort },
+    .{ .name = "config-unknown-short", .expect = .config_schema_coverage, .apply = probeConfigUnknownShort },
+    .{ .name = "kind-not-required", .expect = .config_schema_closure, .apply = probeKindNotRequired },
     .{ .name = "schema-version", .expect = .schema_v1_moved, .apply = probeSchemaVersion },
+    .{ .name = "schema-version-v2", .expect = .schema_versions_not_distinct, .apply = probeSchemaVersionV2 },
     .{ .name = "digest-domain-v1", .expect = .v1_digest_domain_changed, .apply = probeDigestDomainV1 },
     .{ .name = "digest-domain-v2", .expect = .v2_digest_domain_shared, .apply = probeDigestDomainV2 },
     .{ .name = "docs-invariant-schema", .expect = .docs_invariant_schema_statement, .apply = probeDocsInvariantSchema },
@@ -1636,7 +1694,7 @@ test "a second ledger_call tag is ambiguous rather than a pass on the first" {
     );
 }
 
-test "the confirmed template accepts every catalog kind under both wire schemas" {
+test "the confirmed template authors every catalog kind under the schema that can carry it" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -1650,11 +1708,22 @@ test "the confirmed template accepts every catalog kind under both wire schemas"
             for (rows) |row| {
                 if (!std.mem.eql(u8, row.name, kind.name) or row.schema != schema) continue;
                 seen = true;
-                try testing.expect(row.accepted);
+                // The expected verdict per schema, not "accepted everywhere":
+                // schema 1 carries one kind in its header and admits only the
+                // required one, so a kind it must not carry has to be refused
+                // by name rather than by any error that happens to arrive.
+                try testing.expectEqual(mustAuthor(schema, kind.required), row.accepted);
+                if (!row.accepted) try testing.expectEqualStrings(closed_schema_failure, row.failure);
             }
             try testing.expect(seen);
         }
     }
+    // Schema 1 is the closed one, schema 2 the open one. With one required
+    // kind both rules agree on every row, so state the rule itself as well.
+    try testing.expect(mustAuthor(invariant.schema_version, true));
+    try testing.expect(!mustAuthor(invariant.schema_version, false));
+    try testing.expect(mustAuthor(invariant.schema_version_v2, true));
+    try testing.expect(mustAuthor(invariant.schema_version_v2, false));
 
     const refusals = try measureConfigRejectsUnknown(arena);
     try testing.expectEqual(measured_schemas.len, refusals.len);

@@ -320,8 +320,12 @@ the currency records. An invariant wire schema 2 section keeps the same ledger
 and currency region byte for byte, spends the header field that schema 1 gives
 its kind on a declared kind count, and appends that many records of wire
 ordinal, payload length, and payload, sorted by ordinal with each ordinal
-appearing once. Balance conservation is mandatory under both, and a schema 2
-document that omits it is refused.
+appearing once. Balance conservation is mandatory under both. A schema 2
+document that omits it is refused, and because a schema 1 header has room for
+exactly one kind, a schema 1 section that names any other kind is refused as
+well. The authoring boundary refuses the same documents, but the decoder is
+where the rule is enforced: a consumer reads artifact bytes, not the JSON that
+produced them.
 
 The two hash under different digest domains, so the same ledger declared under
 both produces two different digests and a schema 2 document cannot answer a

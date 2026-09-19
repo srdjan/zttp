@@ -116,6 +116,21 @@ comptime {
     }
 }
 
+// Exactly one kind is required. Two places lean on that and would stay quietly
+// true rather than becoming false if the required set widened: `Spec.kind`,
+// which a schema 2 decode fills with the conservation literal, and `decodeV1`,
+// which admits the one kind schema 1's header has room for. Neither is wrong
+// today, and neither would announce itself. This fires instead.
+comptime {
+    var required_kinds: usize = 0;
+    for (@typeInfo(Kind).@"enum".fields) |field| {
+        if (kind_table.get(@as(Kind, @enumFromInt(field.value))).required) required_kinds += 1;
+    }
+    if (required_kinds != 1) {
+        @compileError("the invariant catalog must name exactly one required kind; Spec.kind and decodeV1 both read it as the only one");
+    }
+}
+
 /// The bit a kind occupies in a per-kind mask.
 fn kindBit(kind: Kind) u32 {
     return @as(u32, 1) << @intCast(kindInfo(kind).wire_ordinal - 1);
@@ -301,6 +316,14 @@ pub fn decode(bytes: []const u8) DecodeError!Spec {
 fn decodeV1(bytes: []const u8) DecodeError!Spec {
     const kind = Kind.fromWire(std.mem.readInt(u16, bytes[10..12], .little)) orelse
         return error.UnknownInvariantKind;
+    // The required kind is mandatory under both schemas, and schema 1's header
+    // has room for exactly one, so the one it names must be that kind. Without
+    // this the rule rests on `fromWire` knowing a single ordinal: the day the
+    // catalog grows, schema 1 bytes naming the new kind would decode to a
+    // specification with no conservation, and the consumer would accept them.
+    // No test reaches this while the catalog holds one kind, which is why it is
+    // written here rather than left to the encoder that a consumer never runs.
+    if (!kindInfo(kind).required) return error.RequiredKindMissing;
     const counts = try decodeCounts(bytes);
     if (bytes.len < counts.common_end) return error.Truncated;
     if (bytes.len > counts.common_end) return error.TrailingData;
