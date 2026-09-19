@@ -13,7 +13,7 @@
 //! following the pure/host split in `smt_solver.zig`: this file builds a request
 //! body and decodes an answer, and the process that owns `std.http` supplies the
 //! transport. Builds, acceptance, and request serving never reach any of it.
-//! Only the sentence and the catalog's own public descriptions are sent.
+//! Only the sentence and the catalog's own published descriptions are sent.
 
 const std = @import("std");
 const invariant = @import("zttp_proof_checker").invariant;

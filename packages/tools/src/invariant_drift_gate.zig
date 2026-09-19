@@ -2670,6 +2670,22 @@ fn probeObserverOperationMismatch(arena: std.mem.Allocator, model: *Model) !void
     try replaceOnce(arena, model, .observer, needle, "\"probe:absent\"");
 }
 
+/// One input arrives with no bytes at all. `loadModel` refuses an empty file
+/// on disk, but the floor inside `validate` is the one a model assembled any
+/// other way would meet, and it is one assignment away on the precedent of
+/// `probeKernelDigestEmpty`. It is the first thing `validate` does, so this
+/// also pins that no comparison runs ahead of the emptiness check.
+fn probeEmptySource(_: std.mem.Allocator, model: *Model) !void {
+    model.text.set(.kernel, "");
+}
+
+/// No linked virtual module declares the ledger specifier. The linked module
+/// set is imported through the build graph rather than parsed, so no text
+/// mutation models this - but the model field it lands in is one assignment.
+fn probeNativeBindingMissing(_: std.mem.Allocator, model: *Model) !void {
+    model.native_binding_found = false;
+}
+
 /// The replaced shell gate wired back in beside this one. Both would run, and
 /// the weaker one's pass would read as this gate's verdict.
 fn probeBuildReplacedGate(arena: std.mem.Allocator, model: *Model) !void {
@@ -2764,17 +2780,26 @@ const probes = [_]Probe{
     .{ .name = "native-duplicate-export", .expect = .native_duplicate_export, .apply = probeNativeDuplicateExport },
     .{ .name = "observer-operation-mismatch", .expect = .observer_operation_mismatch, .apply = probeObserverOperationMismatch },
     .{ .name = "build-replaced-gate", .expect = .build_replaced_gate, .apply = probeBuildReplacedGate },
+    .{ .name = "empty-source", .expect = .empty_source, .apply = probeEmptySource },
+    .{ .name = "native-binding-missing", .expect = .native_binding_missing, .apply = probeNativeBindingMissing },
 };
 
 /// A `Check` no mutation probe expects, and the reason it has none.
 ///
 /// A probe proves that a changed input is rejected by the check that names it.
-/// Every row below is instead an absence floor: it fires when its input is
-/// gone or empty, which is the state in which there is nothing left to
-/// compare. A probe of one would assert the deletion rather than the
-/// comparison this gate exists for, so the row states what is probed over the
-/// same surface instead. "Deliberately unprobed" is a scope decision with its
-/// argument beside it, not a claim that the check is unreachable.
+/// Every row below is instead a structural floor under a comparison: it fires
+/// when the comparison's input is gone, duplicated, or empty, which is the
+/// state in which there is nothing left to compare. A probe of one would
+/// assert that deletion rather than the comparison this gate exists for, so
+/// the row states what is probed over the same surface instead.
+///
+/// "Deliberately unprobed" is a scope decision with its argument beside it,
+/// not a claim that the check is unreachable. Two rows that said as much and
+/// were nonetheless one assignment from a real probe are now probed instead,
+/// and the ceiling on this table's size is what keeps a third from being
+/// written here without that being noticed. Each reason must state the
+/// mechanism it claims, not only the conclusion: three of these once named a
+/// mechanism that did not hold while reaching a conclusion that did.
 const UnprobedCheck = struct { check: Check, reason: []const u8 };
 
 const deliberately_unprobed = [_]UnprobedCheck{
@@ -2787,12 +2812,8 @@ const deliberately_unprobed = [_]UnprobedCheck{
         .reason = "raised in loadModel, before any probe applies, so no in-memory mutation can reach it; a real deletion fails the compiled suites test-invariant-drift depends on and the nonzero exit comes from the Zig compiler",
     },
     .{
-        .check = .empty_source,
-        .reason = "the same floor one step later, over an input already read; every comparison downstream of it has nothing to compare, and the probes for those comparisons fail on their own anchors first",
-    },
-    .{
         .check = .compiler_resolver_missing,
-        .reason = "an anchor floor on 'fn resolveLedger(', which every compiler probe is written against, so removing it surfaces as ProbeAnchorMissing from those probes and is reported as a broken probe, never as agreement",
+        .reason = "a two-armed floor: the gate requires exactly one 'fn resolveLedger(', so a second definition trips it as surely as none. probeCompiler locates its rows through that signature and yields ProbeAnchorMissing without it; probeCompilerModule and probeCompilerDuplicateName anchor on body text, mutate successfully, and are then rejected by this check instead of the one they name. Both paths are reported as a probe failure, never as agreement",
     },
     .{
         .check = .compiler_rows_empty,
@@ -2800,11 +2821,7 @@ const deliberately_unprobed = [_]UnprobedCheck{
     },
     .{
         .check = .native_specifier_missing,
-        .reason = "an anchor floor on the single '.specifier = \"' declaration; native_specifier is probed over the value that anchor yields, so the read is exercised and this row states only that the anchor is gone",
-    },
-    .{
-        .check = .native_binding_missing,
-        .reason = "a link floor: the linked module set is imported through the build graph rather than parsed, so this fires only when nothing declares the ledger specifier at all, which a text mutation cannot model",
+        .reason = "a two-armed floor: the gate requires exactly one '.specifier = \"' declaration, so a second one trips it as surely as none. probeNative anchors on that declaration's full text, so removing it yields ProbeAnchorMissing and a duplicate yields either ProbeAnchorAmbiguous or a rejection by this check rather than the native_specifier it names. Every path is a reported probe failure",
     },
     .{
         .check = .observer_rows_empty,
@@ -2812,7 +2829,7 @@ const deliberately_unprobed = [_]UnprobedCheck{
     },
     .{
         .check = .docs_block_missing,
-        .reason = "an anchor floor on the machine-marked catalog block; the docs probe is anchored inside that block, so a removed marker makes that probe fail to mutate rather than pass",
+        .reason = "a two-armed floor over the machine-marked block: docsRows returns null when either marker is absent or appears twice. Removing a marker does not stop probeDocs mutating, because it anchors on a catalog row line inside the block rather than on the marker; the edit instead has that probe rejected by this check rather than by the docs_catalog_mismatch it names, which the runner reports as a probe failure",
     },
     .{
         .check = .docs_rows_empty,
@@ -3157,10 +3174,21 @@ test "every check is either probed or allowlisted with a stated reason" {
     // rather than inferred, so deleting probes fails here and not silently.
     try testing.expectEqual(@typeInfo(Check).@"enum".fields.len, probed + allowlisted);
     try testing.expectEqual(deliberately_unprobed.len, allowlisted);
-    try testing.expect(probed >= 65);
-    // The allowlist cannot be emptied to make the loop above vacuous.
-    // Shrinking it is a deliberate edit, like the family floor above.
-    try testing.expect(deliberately_unprobed.len >= 11);
+    // Two ratchets, each pointing the way progress goes: a probe may be added
+    // and never removed, and an allowlist row may be removed and never added.
+    //
+    // The ceiling replaces a minimum on the table's size, which was the wrong
+    // shape. Nothing should guarantee that some number of checks stays
+    // unprobed, and that assertion duly failed the day two of its rows became
+    // probes. What it was reaching for - that the table cannot be silently
+    // emptied - is already carried by the two equalities above, because a
+    // check with neither a probe nor a row returns a named error before any
+    // count is compared. The ceiling is not redundant with the probe floor:
+    // once the enum grows, a new check could be allowlisted with `probed`
+    // unchanged, and this line is the only one that refuses that without a
+    // deliberate edit and an argument beside it.
+    try testing.expect(probed >= 67);
+    try testing.expect(deliberately_unprobed.len <= 9);
 }
 
 test "no probe expects the absence of a rejection" {
