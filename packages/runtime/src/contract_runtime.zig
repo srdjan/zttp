@@ -193,6 +193,16 @@ pub const InvariantStatus = struct {
     covered: u32 = 0,
     writes: u32 = 0,
     reads: u32 = 0,
+    /// Whether a covered call site can modify protected ledger state. A report,
+    /// and the one a rendered summary must state before its coverage counts: a
+    /// reader who does not see it reads "coverage 1 of 1" as "the conservation
+    /// predicate ran". It never enters `coverageReady`, and the activation
+    /// condition in `server.zig` does not consult it.
+    write_applicability: pcc.verdict.WriteApplicability = .not_applicable,
+    /// Which kinds the accepted specification declared, one bit per kind at its
+    /// wire ordinal less one. Carried so a report can answer per kind without
+    /// re-reading the specification document.
+    kind_bits: u32 = 0,
     native_adapter_assumption: NativeAdapterAssumption = .not_applicable,
     runtime_readiness: InvariantRuntimeReadiness = .not_applicable,
 
@@ -203,9 +213,24 @@ pub const InvariantStatus = struct {
             .covered = verdicts.covered,
             .writes = verdicts.writes,
             .reads = verdicts.required -| verdicts.writes,
+            .write_applicability = verdicts.writeApplicability(),
+            .kind_bits = verdicts.kind_bits,
             .native_adapter_assumption = if (verdicts.configured) .trusted else .not_applicable,
             .runtime_readiness = if (verdicts.configured) .not_checked else .not_applicable,
         };
+    }
+
+    /// Write applicability for one declared kind, answered through the kernel's
+    /// own helper so this file holds no second opinion about it.
+    pub fn writeApplicabilityFor(
+        self: InvariantStatus,
+        kind: pcc.invariant.Kind,
+    ) pcc.verdict.WriteApplicability {
+        return pcc.verdict.writeApplicabilityForKind(
+            self.kind_bits,
+            self.write_applicability,
+            kind,
+        );
     }
 
     pub fn coverageReady(self: InvariantStatus) bool {
@@ -1572,6 +1597,70 @@ test "promotion exposes only properties that cleared the policy" {
     try std.testing.expectEqual(@as(u32, 1), invariant_contract.invariants.reads);
     try std.testing.expectEqual(NativeAdapterAssumption.trusted, invariant_contract.invariants.native_adapter_assumption);
     try std.testing.expectEqual(InvariantRuntimeReadiness.not_checked, invariant_contract.invariants.runtime_readiness);
+    try std.testing.expectEqual(
+        pcc.verdict.WriteApplicability.covered,
+        invariant_contract.invariants.write_applicability,
+    );
+}
+
+test "a read-only generation is coverage ready and reports vacuous write applicability" {
+    const contract = RuntimeContract{
+        .env_vars = &.{},
+        .env_dynamic = false,
+        .routes = &.{},
+        .routes_dynamic = false,
+        .properties = .{},
+        .allocator = std.testing.allocator,
+    };
+    var validated = validatedFromInner(contract);
+    var assessment = pcc.Assessment{
+        .semantic = .policy_accepted,
+        .provenance = .absent,
+        .grade = .trusted,
+        .development_only = false,
+        .rejection = null,
+        .work_spent = 1,
+    };
+    assessment.invariants = .{
+        .configured = true,
+        .required = 1,
+        .covered = 1,
+        .writes = 0,
+        .kind_bits = 0b11,
+    };
+    const promoted = promote(&validated, assessment, [_]u8{0xcd} ** 32) orelse
+        return error.TestUnexpectedResult;
+
+    // Vacuity is a report, never a relabelling. Coverage readiness reads
+    // exactly as it did before the field existed.
+    try std.testing.expect(promoted.invariants.coverageReady());
+    try std.testing.expectEqual(@as(u32, 1), promoted.invariants.reads);
+    try std.testing.expectEqual(@as(u32, 0), promoted.invariants.writes);
+    try std.testing.expectEqual(
+        pcc.verdict.WriteApplicability.vacuous,
+        promoted.invariants.write_applicability,
+    );
+    try std.testing.expectEqual(@as(u32, 0b11), promoted.invariants.kind_bits);
+    // Both catalog kinds gate `post`, so both declared kinds answer the same.
+    try std.testing.expectEqual(
+        pcc.verdict.WriteApplicability.vacuous,
+        promoted.invariants.writeApplicabilityFor(.balance_conservation_v1),
+    );
+    try std.testing.expectEqual(
+        pcc.verdict.WriteApplicability.vacuous,
+        promoted.invariants.writeApplicabilityFor(.declared_accounts_v1),
+    );
+
+    // An unconfigured generation answers "not applicable" for every kind.
+    const unconfigured = InvariantStatus{};
+    try std.testing.expectEqual(
+        pcc.verdict.WriteApplicability.not_applicable,
+        unconfigured.write_applicability,
+    );
+    try std.testing.expectEqual(
+        pcc.verdict.WriteApplicability.not_applicable,
+        unconfigured.writeApplicabilityFor(.balance_conservation_v1),
+    );
 }
 
 test "ValidationProof argument type is a file-private opaque" {

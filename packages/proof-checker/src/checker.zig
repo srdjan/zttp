@@ -1842,6 +1842,29 @@ const test_invariant_spec_v2 = invariant.magic.* ++ [_]u8{
     0, 0, // payload length
 };
 
+const test_invariant_account_payload = [_]u8{
+    2, 0, // matcher count
+    1, // exact
+    13, 0, // length
+} ++ "clearing:main" ++ [_]u8{
+    2, // prefix
+    6, 0, // length
+} ++ "asset:";
+
+/// The same ledger again, declaring both catalog kinds. Per-kind reporting has
+/// nothing to say until a document declares more than one kind.
+const test_invariant_spec_two_kinds = invariant.magic.* ++ [_]u8{
+    2, 0, // schema
+    2, 0, // declared kind count
+    6, 0, // ledger id length
+    1, 0, // currency count
+} ++ "ledger" ++ "USD" ++ [_]u8{2} ++ [_]u8{
+    1, 0, // balance_conservation_v1
+    0, 0, // payload length
+    2,                                  0, // declared_accounts_v1
+    test_invariant_account_payload.len, 0,
+} ++ test_invariant_account_payload;
+
 const InvariantTestFixture = struct {
     members: [11]graph.Member,
     ir: [4]cert_mod.IrNode,
@@ -1989,6 +2012,20 @@ fn buildInvariantFixtureFor(spec: []const u8) !InvariantTestFixture {
     return fixture;
 }
 
+/// The same artifact with its one ledger call site reading a balance instead of
+/// writing a posting group. Nothing else moves: the call site is still named by
+/// the proof IR, still witnessed, and still independently observed.
+fn buildBalanceOnlyInvariantFixtureFor(spec: []const u8) !InvariantTestFixture {
+    var fixture = try buildInvariantFixtureFor(spec);
+    fixture.ir[2].aux = 1;
+    fixture.invariant_witnesses[0].operation = .balance;
+    fixture.invariant_witnesses[0].sink = .ledger_balance;
+    fixture.invariant_witnesses[0].impl_id = invariant.catalog[1].impl_id;
+    fixture.observed[0].operation = .balance;
+    try fixture.encodeWith(&fixture.invariant_witnesses);
+    return fixture;
+}
+
 test "a configured invariant is checked independently from property and guard verdicts" {
     var fixture = try buildInvariantFixture();
     const result = check(fixture.inputs(), policy_mod.production);
@@ -2108,6 +2145,139 @@ test "a forged invariant operation cannot borrow a real call site" {
     const result = check(fixture.inputs(), policy_mod.production);
     try testing.expectEqual(verdict.Stage.invariant_coverage, result.rejection.?.stage);
     try testing.expectEqual(verdict.ReasonCode.invariant_operation_mismatch, result.rejection.?.code);
+}
+
+test "a balance-only artifact is covered and reports vacuous write applicability" {
+    var fixture = try buildBalanceOnlyInvariantFixtureFor(test_invariant_spec);
+    const result = check(fixture.inputs(), policy_mod.production);
+    if (result.rejection) |rejection| {
+        std.debug.print("unexpected balance-only rejection: {s} / {s}\n", .{
+            rejection.stage.name(),
+            rejection.code.text(),
+        });
+        return error.TestUnexpectedResult;
+    }
+    try testing.expect(result.accepted());
+    try testing.expect(result.invariants.configured);
+    try testing.expectEqual(@as(u32, 1), result.invariants.required);
+    try testing.expectEqual(@as(u32, 1), result.invariants.covered);
+    try testing.expectEqual(@as(u32, 0), result.invariants.writes);
+    // The read call site is genuinely covered, so the artifact is ready. The
+    // report says what is missing; it does not relabel readiness.
+    try testing.expect(result.invariants.ready());
+    try testing.expectEqual(
+        verdict.WriteApplicability.vacuous,
+        result.invariants.writeApplicability(),
+    );
+    try testing.expectEqual(
+        verdict.WriteApplicability.vacuous,
+        result.invariants.writeApplicabilityFor(.balance_conservation_v1),
+    );
+    // A kind this document does not declare is not vacuous, it is absent.
+    try testing.expectEqual(
+        verdict.WriteApplicability.not_applicable,
+        result.invariants.writeApplicabilityFor(.declared_accounts_v1),
+    );
+}
+
+test "a post-bearing artifact reports covered write applicability for every declared kind" {
+    var fixture = try buildInvariantFixtureFor(test_invariant_spec_two_kinds);
+    const result = check(fixture.inputs(), policy_mod.production);
+    if (result.rejection) |rejection| {
+        std.debug.print("unexpected two-kind rejection: {s} / {s}\n", .{
+            rejection.stage.name(),
+            rejection.code.text(),
+        });
+        return error.TestUnexpectedResult;
+    }
+    try testing.expect(result.accepted());
+    try testing.expectEqual(@as(u32, 1), result.invariants.writes);
+    try testing.expectEqual(@as(u32, 0b11), result.invariants.kind_bits);
+    try testing.expectEqual(
+        verdict.WriteApplicability.covered,
+        result.invariants.writeApplicability(),
+    );
+    try testing.expectEqual(
+        verdict.WriteApplicability.covered,
+        result.invariants.writeApplicabilityFor(.balance_conservation_v1),
+    );
+    try testing.expectEqual(
+        verdict.WriteApplicability.covered,
+        result.invariants.writeApplicabilityFor(.declared_accounts_v1),
+    );
+
+    // Both catalog kinds gate `post`, so per-kind applicability is degenerate:
+    // the same artifact read-only reports vacuous for both, not for one.
+    var read_only = try buildBalanceOnlyInvariantFixtureFor(test_invariant_spec_two_kinds);
+    const read_only_result = check(read_only.inputs(), policy_mod.production);
+    try testing.expect(read_only_result.accepted());
+    try testing.expectEqual(
+        verdict.WriteApplicability.vacuous,
+        read_only_result.invariants.writeApplicabilityFor(.balance_conservation_v1),
+    );
+    try testing.expectEqual(
+        verdict.WriteApplicability.vacuous,
+        read_only_result.invariants.writeApplicabilityFor(.declared_accounts_v1),
+    );
+}
+
+test "a configured artifact exhibiting no ledger operation rejects with invariant_operation_required" {
+    var fixture = try buildInvariantFixture();
+    try fixture.encodeWith(&.{});
+    var inputs = fixture.inputs();
+    inputs.observed_invariant_operations = &.{};
+    const result = check(inputs, policy_mod.production);
+    try testing.expectEqual(verdict.Stage.invariant_coverage, result.rejection.?.stage);
+    try testing.expectEqual(
+        verdict.ReasonCode.invariant_operation_required,
+        result.rejection.?.code,
+    );
+    // A rejected artifact reports no applicability at all. Vacuity is a report
+    // about an accepted artifact, never a softer landing for a refused one.
+    try testing.expectEqual(
+        verdict.WriteApplicability.not_applicable,
+        result.invariants.writeApplicability(),
+    );
+}
+
+test "a declared write absent from independent observation rejects rather than reporting vacuous" {
+    // The witness list names a posting group the loader never found. The exact
+    // count comparison refuses it; write applicability is never reached.
+    var unobserved = try buildInvariantFixture();
+    var unobserved_inputs = unobserved.inputs();
+    unobserved_inputs.observed_invariant_operations = &.{};
+    var result = check(unobserved_inputs, policy_mod.production);
+    try testing.expectEqual(verdict.Stage.invariant_coverage, result.rejection.?.stage);
+    try testing.expectEqual(verdict.ReasonCode.invariant_member_extra, result.rejection.?.code);
+    try testing.expectEqual(
+        verdict.WriteApplicability.not_applicable,
+        result.invariants.writeApplicability(),
+    );
+
+    // The other direction: the loader found a posting group the certificate
+    // does not witness. Reporting that as vacuous would hide a real write.
+    var unwitnessed = try buildInvariantFixture();
+    try unwitnessed.encodeWith(&.{});
+    result = check(unwitnessed.inputs(), policy_mod.production);
+    try testing.expectEqual(verdict.ReasonCode.invariant_member_missing, result.rejection.?.code);
+    try testing.expectEqual(
+        verdict.WriteApplicability.not_applicable,
+        result.invariants.writeApplicability(),
+    );
+
+    // A witness that renames the observed write as a read is a forgery, not a
+    // read-only topology.
+    var forged = try buildInvariantFixture();
+    forged.invariant_witnesses[0].operation = .balance;
+    forged.invariant_witnesses[0].sink = .ledger_balance;
+    forged.invariant_witnesses[0].impl_id = invariant.catalog[1].impl_id;
+    try forged.encodeWith(&forged.invariant_witnesses);
+    result = check(forged.inputs(), policy_mod.production);
+    try testing.expectEqual(verdict.ReasonCode.invariant_observed_mismatch, result.rejection.?.code);
+    try testing.expectEqual(
+        verdict.WriteApplicability.not_applicable,
+        result.invariants.writeApplicability(),
+    );
 }
 
 test "tampered invariant specification bytes reject before coverage" {

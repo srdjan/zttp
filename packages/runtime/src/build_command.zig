@@ -1765,6 +1765,89 @@ test "ledger calls including a fused literal call are independently observed and
     try std.testing.expect(!tampered_spec.accepted());
 }
 
+test "a balance-only handler is accepted and reports vacuous write applicability" {
+    // The decision this test pins: a handler that reads balances and never
+    // posts has a genuinely covered call site and nothing for a write-gating
+    // kind to constrain. That is a missing write-applicability report, not a
+    // demonstrated conservation failure, so it is reported and accepted rather
+    // than refused. Refusing it would push an author to add a posting group
+    // nobody wants.
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { balance } from "zttp:ledger";
+        \\export function handler(req: Request): Proof<Response, "state_isolated"> {
+        \\  const current = balance("main", "USD", "cash");
+        \\  if (!current.ok) return Response.text(current.error, { status: 500 });
+        \\  return Response.text(current.value);
+        \\}
+    ;
+    const invariant_spec = try project_config_mod.invariant_config.parse(allocator,
+        \\{"version":1,"kind":"balance_conservation_v1","ledger":"main","currencies":[{"code":"USD","scale":2}]}
+    );
+    defer allocator.free(invariant_spec);
+
+    var compiled = try precompile.compileHandler(allocator, source, "handler.ts", .{
+        .emit_verify = true,
+        .emit_contract = true,
+        .emit_proof_evidence = true,
+    });
+    defer compiled.deinit(allocator);
+    const evidence = compiled.proof_evidence orelse return error.TestUnexpectedResult;
+    const contract = compiled.contract orelse return error.TestUnexpectedResult;
+    const contract_json = try serializeContractJson(allocator, &contract);
+    defer allocator.free(contract_json);
+    const policy = zts.handler_policy.contractToRuntimePolicy(&contract, null);
+    const policy_section = try self_extract.serializePolicy(allocator, &policy);
+    defer allocator.free(policy_section);
+
+    var built = try proof_certificate.build(allocator, .{
+        .evidence = &evidence,
+        .properties = dischargedProperties(&contract),
+        .artifact = .{
+            .bytecode = compiled.bytecode,
+            .dep_bytecodes = compiled.dep_bytecodes orelse &.{},
+            .contract_section = contract_json,
+            .policy_section_digest = artifact_graph.digestOf(policy_section),
+            .identity = artifact_graph.identityFromContract(&contract),
+            .invariant_spec_digest = pcc.invariant.digest(invariant_spec),
+        },
+        .contract_digest = artifact_graph.digestOf(contract_json),
+        .runtime_policy_digest = artifact_graph.digestOf(policy_section),
+        .invariant_spec = invariant_spec,
+    });
+    defer built.deinit();
+
+    const assessment = try proof_activation.accept(allocator, .{
+        .certificate = built.bytes,
+        .bytecode = compiled.bytecode,
+        .dep_bytecodes = compiled.dep_bytecodes orelse &.{},
+        .contract_section = contract_json,
+        .policy_section_digest = artifact_graph.digestOf(policy_section),
+        .policy_section = policy_section,
+        .identity = artifact_graph.identityFromContract(&contract),
+        .invariant_spec = invariant_spec,
+    }, pcc.policy.development);
+    try std.testing.expect(assessment.accepted());
+    try std.testing.expect(assessment.invariants.ready());
+    try std.testing.expectEqual(@as(u32, 1), assessment.invariants.required);
+    try std.testing.expectEqual(@as(u32, 1), assessment.invariants.covered);
+    try std.testing.expectEqual(@as(u32, 0), assessment.invariants.writes);
+    try std.testing.expectEqual(
+        pcc.verdict.WriteApplicability.vacuous,
+        assessment.invariants.writeApplicability(),
+    );
+
+    // The promoted generation carries the same answer, and coverage readiness
+    // is untouched by it.
+    const contract_runtime = @import("contract_runtime.zig");
+    const status = contract_runtime.InvariantStatus.fromVerdicts(assessment.invariants);
+    try std.testing.expect(status.coverageReady());
+    try std.testing.expectEqual(
+        pcc.verdict.WriteApplicability.vacuous,
+        status.write_applicability,
+    );
+}
+
 test "ledger function escapes are refused even beside a directly observed call" {
     const allocator = std.testing.allocator;
     const sources = [_][]const u8{

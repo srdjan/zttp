@@ -51,6 +51,7 @@ const ledger_call_tag = 8;
 /// here without a path fails to compile rather than being skipped at run time.
 const Input = enum {
     kernel,
+    verdict,
     proof_system,
     compiler,
     compiler_ir,
@@ -73,6 +74,7 @@ const Input = enum {
 
 const paths = std.EnumArray(Input, []const u8).init(.{
     .kernel = "packages/proof-checker/src/invariant.zig",
+    .verdict = "packages/proof-checker/src/verdict.zig",
     .proof_system = "packages/proof-checker/src/proof_system.zig",
     .compiler = "packages/tools/src/precompile.zig",
     .compiler_ir = "packages/zts/src/proof_ir.zig",
@@ -101,6 +103,9 @@ const evidence = [_]Evidence{
     .{ .input = .checker_tests, .marker = "test \"a configured invariant is checked independently from property and guard verdicts\"" },
     .{ .input = .checker_tests, .marker = "test \"missing and extra invariant witnesses reject\"" },
     .{ .input = .checker_tests, .marker = "test \"a forged invariant operation cannot borrow a real call site\"" },
+    .{ .input = .checker_tests, .marker = "test \"a balance-only artifact is covered and reports vacuous write applicability\"" },
+    .{ .input = .checker_tests, .marker = "test \"a declared write absent from independent observation rejects rather than reporting vacuous\"" },
+    .{ .input = .checker_tests, .marker = "test \"a configured artifact exhibiting no ledger operation rejects with invariant_operation_required\"" },
     .{ .input = .artifact_graph, .marker = "test \"the inventory covers every executable and authority-bearing member\"" },
     .{ .input = .artifact_graph, .marker = "test \"an invariant specification with no linked adapter digest is refused\"" },
     .{ .input = .adapter_bridge, .marker = "test \"the linked adapter manifest digests to what the acceptance kernel expects\"" },
@@ -185,6 +190,9 @@ const Check = enum {
     v1_digest_domain_changed,
     v2_digest_domain_shared,
     docs_invariant_schema_statement,
+    docs_write_applicability_statement,
+    write_applicability_derivation,
+    invariant_ready_relabelled,
     authoring_output_mismatch,
     cli_delegates_listing,
     build_step_missing,
@@ -868,6 +876,54 @@ fn withoutComments(arena: std.mem.Allocator, text: []const u8) ![]u8 {
     return out;
 }
 
+/// The body of the named function with every comment blanked and every run of
+/// whitespace collapsed to one space.
+///
+/// Pinning a body this way compares the statements rather than the layout, so
+/// `zig fmt` and an explanatory comment are both free, and any change to what
+/// the function decides from has to be made deliberately here as well.
+fn normalizedBody(arena: std.mem.Allocator, text: []const u8, signature: []const u8) !?[]const u8 {
+    const stripped = try withoutComments(arena, text);
+    const body = functionBody(stripped, signature) orelse return null;
+    const out = try arena.alloc(u8, body.len);
+    errdefer arena.free(out);
+    var length: usize = 0;
+    var after_space = true;
+    for (body) |byte| {
+        if (byte == ' ' or byte == '\t' or byte == '\r' or byte == '\n') {
+            if (!after_space and length > 0) {
+                out[length] = ' ';
+                length += 1;
+            }
+            after_space = true;
+            continue;
+        }
+        out[length] = byte;
+        length += 1;
+        after_space = false;
+    }
+    return std.mem.trim(u8, out[0..length], " ");
+}
+
+/// What `InvariantVerdicts.writeApplicability` must decide from.
+///
+/// The count it reads is incremented in exactly one place, as the exact
+/// operation, witness and observation comparison accepts each call site. A
+/// body that reached for `covered`, `required`, or the specification document
+/// would be a second answer to a question that comparison already settles, and
+/// a read-only artifact is the one case where the two answers differ.
+const expected_write_applicability_body =
+    "if (!self.configured) return .not_applicable; " ++
+    "return if (self.writes == 0) .vacuous else .covered;";
+
+/// What `InvariantVerdicts.ready` must stay.
+///
+/// Write applicability is a report. The day it appears in this body, a
+/// read-only artifact stops activating and every author with one is told to
+/// add a posting group nobody wants.
+const expected_invariant_ready_body =
+    "return self.configured and self.required > 0 and self.required == self.covered;";
+
 /// The top-level arguments of the call whose open parenthesis is at `open`.
 fn splitArguments(arena: std.mem.Allocator, text: []const u8, open: usize) !?[][]const u8 {
     var list: std.ArrayList([]const u8) = .empty;
@@ -1512,8 +1568,54 @@ fn validate(arena: std.mem.Allocator, gate: *Gate, model: Model) !void {
             return gate.reject(.docs_kind_statement, "{s} does not name the catalog kind '{s}'", .{ paths.get(.docs), row.name });
         }
     }
+    // Write applicability is published, with both of the values an accepted
+    // artifact can report. A coverage count on its own reads as "the predicate
+    // ran", which is the reading this report exists to prevent.
+    for ([_][]const u8{ "write applicability", "`vacuous`", "`covered`" }) |needle| {
+        if (std.mem.indexOf(u8, model.text.get(.docs), needle) == null) {
+            return gate.reject(
+                .docs_write_applicability_statement,
+                "{s} does not state {s}",
+                .{ paths.get(.docs), needle },
+            );
+        }
+    }
     if (std.mem.indexOf(u8, model.text.get(.concepts), "### Application invariant") == null) {
         return gate.reject(.concepts_entry, "{s} has no Application invariant entry", .{paths.get(.concepts)});
+    }
+
+    // --- write applicability is derived, and readiness is not relabelled -----
+    //
+    // Two bodies, pinned statement for statement. The first must decide from
+    // the observed write count and nothing else; the second must not consult
+    // it at all. Both are one-line edits away from turning a report into a
+    // verdict, and neither edit would fail any other check here.
+    const verdict_text = model.text.get(.verdict);
+    const applicability_body = (try normalizedBody(arena, verdict_text, "pub fn writeApplicability(")) orelse
+        return gate.reject(
+            .write_applicability_derivation,
+            "{s} declares no InvariantVerdicts.writeApplicability body",
+            .{paths.get(.verdict)},
+        );
+    if (!std.mem.eql(u8, applicability_body, expected_write_applicability_body)) {
+        return gate.reject(
+            .write_applicability_derivation,
+            "{s}: writeApplicability is '{s}', expected '{s}'",
+            .{ paths.get(.verdict), applicability_body, expected_write_applicability_body },
+        );
+    }
+    const ready_body = (try normalizedBody(arena, verdict_text, "pub fn ready(self: InvariantVerdicts)")) orelse
+        return gate.reject(
+            .invariant_ready_relabelled,
+            "{s} declares no InvariantVerdicts.ready body",
+            .{paths.get(.verdict)},
+        );
+    if (!std.mem.eql(u8, ready_body, expected_invariant_ready_body)) {
+        return gate.reject(
+            .invariant_ready_relabelled,
+            "{s}: InvariantVerdicts.ready is '{s}', expected '{s}'; write applicability is a report, never a readiness condition",
+            .{ paths.get(.verdict), ready_body, expected_invariant_ready_body },
+        );
     }
 
     // --- compiled behavioral evidence ----------------------------------------
@@ -2211,6 +2313,36 @@ fn probeDigestDomainV2(_: std.mem.Allocator, model: *Model) !void {
     model.digest_domains.v2_separated = false;
 }
 
+/// Write applicability starts deciding from the covered count rather than the
+/// observed write count. Every artifact with a covered call site then reports
+/// `covered`, and a read-only one is described as carrying a write.
+fn probeVerdict(arena: std.mem.Allocator, model: *Model) !void {
+    try replaceOnce(
+        arena,
+        model,
+        .verdict,
+        "return if (self.writes == 0) .vacuous else .covered;",
+        "return if (self.covered == 0) .vacuous else .covered;",
+    );
+}
+
+/// Readiness starts consulting write applicability. This is the edit the
+/// decision taken for this report rules out: it refuses a legitimate read-only
+/// topology, and it would pass every other check in this gate.
+fn probeVerdictReady(arena: std.mem.Allocator, model: *Model) !void {
+    try replaceOnce(
+        arena,
+        model,
+        .verdict,
+        "return self.configured and self.required > 0 and self.required == self.covered;",
+        "return self.configured and self.required > 0 and self.required == self.covered and self.writes > 0;",
+    );
+}
+
+fn probeDocsWriteApplicability(arena: std.mem.Allocator, model: *Model) !void {
+    try replaceEvery(arena, model, .docs, "write applicability", "a phrase the docs do not publish");
+}
+
 fn probeDocsInvariantSchema(arena: std.mem.Allocator, model: *Model) !void {
     try replaceOnce(arena, model, .docs, "invariant wire schema 2", "invariant wire schema probe");
 }
@@ -2364,6 +2496,9 @@ const probes = [_]Probe{
     .{ .name = "digest-domain-v2", .expect = .v2_digest_domain_shared, .apply = probeDigestDomainV2 },
     .{ .name = "docs-invariant-schema", .expect = .docs_invariant_schema_statement, .apply = probeDocsInvariantSchema },
     .{ .name = "docs-kind-statement", .expect = .docs_kind_statement, .apply = probeDocsKind },
+    .{ .name = "verdict", .expect = .write_applicability_derivation, .apply = probeVerdict },
+    .{ .name = "verdict-ready", .expect = .invariant_ready_relabelled, .apply = probeVerdictReady },
+    .{ .name = "docs-write-applicability", .expect = .docs_write_applicability_statement, .apply = probeDocsWriteApplicability },
 };
 
 // ---------------------------------------------------------------------------

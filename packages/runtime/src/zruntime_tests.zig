@@ -5314,6 +5314,47 @@ test "protected ledger rejects a changed posting hash with balanced rows" {
     ));
 }
 
+test "a balance-only generation activates on a fresh store and serves a balance read" {
+    // The read-only topology the write-applicability report exists for. It has
+    // no posting group anywhere, so nothing a write-gating kind constrains ever
+    // runs; the store is still opened, its baseline still validated, and the
+    // read still served.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try durableTestDirPath(allocator, &tmp);
+    const ledger_path = try std.fs.path.join(allocator, &.{ dir, "ledger.sqlite" });
+    var invariant_buffer: [64]u8 = undefined;
+    const invariant_bytes = try ledgerInvariantBytes(&invariant_buffer, 2);
+    const config = RuntimeConfig{
+        .ledger_path = ledger_path,
+        .invariant_section = invariant_bytes,
+        .invariant_coverage_accepted = true,
+    };
+
+    const rt = try HandlerInstance.init(allocator, config);
+    defer rt.deinit();
+    try rt.loadHandler(
+        \\import { balance } from "zttp:ledger";
+        \\function handler(req) {
+        \\  const cash = balance("main", "USD", "cash");
+        \\  return Response.json({ ok: cash.ok, cash: cash.value });
+        \\}
+    , "<balance-only>");
+
+    var request = try makeTestRequest(allocator, "GET", "/", null);
+    defer request.deinit(allocator);
+    var response = try rt.executeHandler(request.asView());
+    defer response.deinit();
+    try std.testing.expectEqual(@as(u16, 200), response.status);
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, response.body, .{});
+    defer parsed.deinit();
+    try std.testing.expect(parsed.value.object.get("ok").?.bool);
+    try std.testing.expectEqualStrings("0", parsed.value.object.get("cash").?.string);
+}
+
 test "an invariant pool refuses reload and keeps serving its accepted generation" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

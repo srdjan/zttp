@@ -6,6 +6,7 @@
 //! a valid signature is none of those.
 
 const std = @import("std");
+const invariant = @import("invariant.zig");
 const proof_system = @import("proof_system.zig");
 
 /// How far semantic acceptance got. Ordered: each state implies the ones before
@@ -309,6 +310,55 @@ pub const GuardVerdicts = struct {
     }
 };
 
+/// Whether a covered call site can modify protected ledger state.
+///
+/// Coverage counts call sites, not calls that executed. An artifact that reads
+/// balances and never posts therefore carries nothing for a write-gating kind
+/// to constrain. That is a missing write-applicability report, not a
+/// demonstrated conservation failure: the operation floor still ran, the read
+/// call site is genuinely covered, and the store still validates its baseline
+/// on real input at startup. It is reported rather than refused, because
+/// refusing a legitimate read-only topology would push an author to add a
+/// posting group nobody wants.
+///
+/// This is a report and never a verdict. It does not appear in `ready()`, in
+/// the runtime's `coverageReady()`, or in the activation condition either of
+/// those feeds.
+pub const WriteApplicability = enum {
+    /// No invariant is configured, or the kind asked about is not declared, so
+    /// the question does not arise.
+    not_applicable,
+    /// Configured and covered, with no covered call site that writes. Nothing
+    /// was weakened; there was nothing for a write-gating kind to apply to.
+    vacuous,
+    /// At least one covered call site can modify protected ledger state.
+    covered,
+};
+
+/// Write applicability for one declared kind, given what the artifact as a
+/// whole reports.
+///
+/// Per-kind applicability is degenerate today, and deliberately so: both
+/// members of the closed catalog gate `post`, so every declared kind answers
+/// what the artifact answers, and only a kind the document does not declare
+/// differs. Do not add a per-kind observation pass to make it less degenerate.
+/// Whether a write was observed is settled once, by the exact operation,
+/// witness and observation comparison in `checkInvariantCoverage`, and a
+/// second place that decides it is a second answer to a settled question. The
+/// day the catalog holds a kind whose `applies_to_writes` is false, that
+/// catalog row - not a new pass over the artifact - is what changes the answer
+/// here.
+pub fn writeApplicabilityForKind(
+    declared_kind_bits: u32,
+    artifact: WriteApplicability,
+    kind: invariant.Kind,
+) WriteApplicability {
+    if (artifact == .not_applicable) return .not_applicable;
+    if (declared_kind_bits & invariant.kindBit(kind) == 0) return .not_applicable;
+    if (!invariant.kindInfo(kind).applies_to_writes) return .not_applicable;
+    return artifact;
+}
+
 /// What the consumer established about a configured application invariant.
 /// This remains separate from static property grades and residual guards.
 pub const InvariantVerdicts = struct {
@@ -326,6 +376,26 @@ pub const InvariantVerdicts = struct {
 
     pub fn ready(self: InvariantVerdicts) bool {
         return self.configured and self.required > 0 and self.required == self.covered;
+    }
+
+    /// Write applicability for the artifact as a whole.
+    ///
+    /// Derived, never recorded. `writes` is incremented in exactly one place,
+    /// as the exact operation, witness and observation comparison accepts each
+    /// call site, and a declared write the loader did not independently
+    /// observe - or an observed write the certificate does not witness -
+    /// rejects before this is ever reached. Deciding here from anything but
+    /// that count would answer a question already answered.
+    pub fn writeApplicability(self: InvariantVerdicts) WriteApplicability {
+        if (!self.configured) return .not_applicable;
+        return if (self.writes == 0) .vacuous else .covered;
+    }
+
+    /// Write applicability for one declared kind. `kind_bits` says which kinds
+    /// the accepted specification declared; nothing is recomputed from the
+    /// document. See `writeApplicabilityForKind` for why this is degenerate.
+    pub fn writeApplicabilityFor(self: InvariantVerdicts, kind: invariant.Kind) WriteApplicability {
+        return writeApplicabilityForKind(self.kind_bits, self.writeApplicability(), kind);
     }
 };
 

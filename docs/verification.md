@@ -387,6 +387,35 @@ is separate from Property verdicts and residual guard verdicts. A ready
 invariant verdict states that the consumer covered all protected operations. It
 does not turn a runtime check into a static proof.
 
+### Write applicability
+
+Coverage counts call sites. It does not count calls that executed. The verdict
+therefore reports write applicability beside the coverage counts, and a report
+reads that value first. An accepted artifact reports `covered` when at least
+one covered call site can modify protected ledger state, and `vacuous` when no
+covered call site can. An artifact with no configured invariant reports
+`not_applicable`.
+
+A `vacuous` report is a missing write-applicability report. It is not a
+demonstrated conservation failure. A handler that reads balances and never
+posts still has a genuinely covered call site, still validates the ledger
+baseline on real stored input at startup, and still serves. ZTTP reports the
+gap rather than refusing the artifact, because refusing it would break a
+legitimate read-only topology and would push an author to add a posting group
+the application does not want.
+
+Write applicability never changes a verdict. It is absent from invariant
+readiness, from the runtime coverage-readiness test, and from the activation
+condition those feed. A declared write that independent observation did not
+find is a different case entirely: the acceptance kernel refuses that artifact,
+and a refused artifact reports no applicability at all.
+
+Each declared kind reports its own write applicability. Both kinds in the
+current catalog constrain operations that write, so today every declared kind
+reports what the artifact reports, and only a kind the specification does not
+declare differs. That is what the catalog says, not a separate measurement of
+the artifact.
+
 The native ledger uses canonical signed decimal strings at the handler
 boundary. It converts them to checked integers. It commits all entries and the
 idempotency record in one SQLite transaction. It rejects a posting group when

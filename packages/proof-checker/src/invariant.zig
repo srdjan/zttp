@@ -163,8 +163,11 @@ comptime {
     }
 }
 
-/// The bit a kind occupies in a per-kind mask.
-fn kindBit(kind: Kind) u32 {
+/// The bit a kind occupies in a per-kind mask. The decoder builds one to find
+/// a required kind that was not declared, and `InvariantVerdicts.kind_bits`
+/// carries the same layout out of acceptance, so a reader that asks about one
+/// kind asks through this rather than restating the shift.
+pub fn kindBit(kind: Kind) u32 {
     return @as(u32, 1) << @intCast(kindInfo(kind).wire_ordinal - 1);
 }
 
