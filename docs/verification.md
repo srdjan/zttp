@@ -393,6 +393,18 @@ enforced and not how. Nothing in acceptance examines predicate behaviour. That
 gap is closed only by the predicate's own tests, and the native adapter
 therefore remains a disclosed trusted boundary.
 
+**What the drift gate claims about all this.** `zig build test-invariant-drift`
+checks that the runtime-side bridge derives the adapter member from the linked
+native module rather than from the acceptance kernel, by denying every
+namespace-qualified read of the kernel outside an argued per-region allowlist,
+following renamed imports to a fixed point. It is a text scan over source, so it
+is scoped to an accidental regression by a developer and does not claim to stop
+deliberate evasion such as `@field(pcc.invariant, "...")` or a re-export of the
+kernel through a third module. What guarantees the native module cannot read the
+kernel is not the gate but the package graph: `packages/modules/build.zig` gives
+`zttp-modules` one import, `zttp-sdk`, which declares none, so that import does
+not compile.
+
 The adapter manifest names no invariant wire schema. The adapter never decodes
 a specification, so a wire schema stated there would be a value copied from
 the consumer and compared against itself. The wire schemas are bound where the

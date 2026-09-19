@@ -158,6 +158,9 @@ const Check = enum {
     activation_adapter_binding,
     bridge_reads_native,
     adapter_value_copied,
+    bridge_digest_derivation,
+    bridge_comparison_signature,
+    adapter_scan_blind,
     install_order,
     docs_block_missing,
     docs_rows_empty,
@@ -649,34 +652,113 @@ fn isIdentifierByte(byte: u8) bool {
     return std.ascii.isAlphanumeric(byte) or byte == '_';
 }
 
-/// Every spelling that reaches the kernel's invariant namespace in `text`.
+/// The spellings in one file that reach the kernel package and the kernel's
+/// invariant namespace.
 ///
-/// The canonical `pcc.invariant` is always one. A file may also bind the
-/// namespace, or the package, to a local name, and a scan that knew only the
-/// canonical spelling would read a renamed import as clean.
-fn kernelAliases(arena: std.mem.Allocator, text: []const u8) ![][]const u8 {
-    var list: std.ArrayList([]const u8) = .empty;
-    errdefer list.deinit(arena);
-    try list.append(arena, "pcc.invariant");
-    var lines = std.mem.splitScalar(u8, text, '\n');
-    while (lines.next()) |raw| {
-        const line = std.mem.trim(u8, raw, " \t\r");
-        if (!std.mem.startsWith(u8, line, "const ")) continue;
-        const name = identifierAt(line, "const ".len);
-        if (name.len == 0) continue;
-        const eq = std.mem.indexOfScalar(u8, line, '=') orelse continue;
-        const rhs = std.mem.trim(u8, std.mem.trim(u8, line[eq + 1 ..], " \t\r"), ";");
-        // `const invariant = pcc.invariant;` and the direct-import spelling.
-        if (std.mem.endsWith(u8, rhs, ".invariant")) {
-            try list.append(arena, name);
-            continue;
+/// A renamed import is a one-line way around a check keyed on one spelling, so
+/// the namespace is followed through bindings rather than assumed to be spelled
+/// `pcc.invariant`. Resolution runs to a fixed point, because a binding can
+/// name another binding.
+///
+/// Threat model: an accidental regression by a developer. Deliberate evasion -
+/// `@field(pcc.invariant, "kindInfo")`, `usingnamespace`, a re-export of the
+/// package through a third module - is not closed here and is not meant to be.
+/// What guarantees the property is the package boundary: `packages/modules/`
+/// gives `zttp-modules` one import, `zttp-sdk`, which declares none, so the
+/// native module cannot import the kernel at all. This gate is defence in depth
+/// over the runtime-side bridge.
+const KernelAliases = struct {
+    /// Spellings of the kernel package.
+    packages: [][]const u8,
+    /// Spellings of the kernel's invariant namespace.
+    namespaces: [][]const u8,
+};
+
+const kernel_package_import = "@import(\"zttp_proof_checker\")";
+
+fn holds(list: []const []const u8, value: []const u8) bool {
+    for (list) |item| {
+        if (std.mem.eql(u8, item, value)) return true;
+    }
+    return false;
+}
+
+/// The declaration a line binds, as `{ name, right-hand side }`, for a
+/// top-level `const` or `pub const`.
+fn boundDeclaration(line: []const u8) ?struct { name: []const u8, rhs: []const u8 } {
+    const body = if (std.mem.startsWith(u8, line, "pub const "))
+        line["pub const ".len..]
+    else if (std.mem.startsWith(u8, line, "const "))
+        line["const ".len..]
+    else
+        return null;
+    const name = identifierAt(body, 0);
+    if (name.len == 0) return null;
+    const eq = std.mem.indexOfScalar(u8, body, '=') orelse return null;
+    const rhs = std.mem.trim(u8, std.mem.trim(u8, body[eq + 1 ..], " \t\r"), ";");
+    if (rhs.len == 0) return null;
+    return .{ .name = name, .rhs = rhs };
+}
+
+fn kernelAliases(arena: std.mem.Allocator, text: []const u8) !KernelAliases {
+    var packages: std.ArrayList([]const u8) = .empty;
+    errdefer packages.deinit(arena);
+    var namespaces: std.ArrayList([]const u8) = .empty;
+    errdefer namespaces.deinit(arena);
+
+    // Seeded with the inline spellings, which bind no name at all.
+    try packages.append(arena, kernel_package_import);
+    try namespaces.append(arena, kernel_package_import ++ ".invariant");
+    try namespaces.append(arena, "pcc.invariant");
+
+    // A binding can name another binding, so this runs until nothing new
+    // appears rather than once over the file.
+    var pass: usize = 0;
+    while (pass < 8) : (pass += 1) {
+        var added = false;
+        var lines = std.mem.splitScalar(u8, text, '\n');
+        while (lines.next()) |raw| {
+            const line = std.mem.trim(u8, raw, " \t\r");
+            const bound = boundDeclaration(line) orelse continue;
+            if (std.mem.endsWith(u8, bound.rhs, ".invariant") or holds(namespaces.items, bound.rhs)) {
+                if (holds(namespaces.items, bound.name)) continue;
+                try namespaces.append(arena, bound.name);
+                added = true;
+                continue;
+            }
+            if (holds(packages.items, bound.rhs)) {
+                if (holds(packages.items, bound.name)) continue;
+                try packages.append(arena, bound.name);
+                try namespaces.append(arena, try std.fmt.allocPrint(arena, "{s}.invariant", .{bound.name}));
+                added = true;
+            }
         }
-        // `const k = @import("zttp_proof_checker");` makes `k.invariant` reach it.
-        if (std.mem.eql(u8, rhs, "@import(\"zttp_proof_checker\")")) {
-            try list.append(arena, try std.fmt.allocPrint(arena, "{s}.invariant", .{name}));
+        if (!added) break;
+    }
+    return .{
+        .packages = try packages.toOwnedSlice(arena),
+        .namespaces = try namespaces.toOwnedSlice(arena),
+    };
+}
+
+/// How many namespace-qualified kernel reads `text` contains, admitted or not.
+///
+/// A scan that recognises no spelling in a file that certainly reads the kernel
+/// is not a clean file, it is a blind scan, and it reports the same pass.
+fn countKernelReads(arena: std.mem.Allocator, aliases: KernelAliases, text: []const u8) !usize {
+    var total: usize = 0;
+    for (aliases.namespaces) |alias| {
+        const needle = try std.fmt.allocPrint(arena, "{s}.", .{alias});
+        defer arena.free(needle);
+        var cursor: usize = 0;
+        while (std.mem.indexOfPos(u8, text, cursor, needle)) |at| {
+            cursor = at + needle.len;
+            if (at > 0 and isIdentifierByte(text[at - 1])) continue;
+            if (identifierAt(text, cursor).len == 0) continue;
+            total += 1;
         }
     }
-    return try list.toOwnedSlice(arena);
+    return total;
 }
 
 /// The first kernel member `text` names that `allowed` does not admit.
@@ -687,11 +769,11 @@ fn kernelAliases(arena: std.mem.Allocator, text: []const u8) ![][]const u8 {
 /// constant instead of the wrong one.
 fn disallowedKernelRead(
     arena: std.mem.Allocator,
-    aliases: []const []const u8,
+    aliases: KernelAliases,
     text: []const u8,
     allowed: []const []const u8,
 ) !?[]const u8 {
-    for (aliases) |alias| {
+    for (aliases.namespaces) |alias| {
         const needle = try std.fmt.allocPrint(arena, "{s}.", .{alias});
         defer arena.free(needle);
         var cursor: usize = 0;
@@ -1218,23 +1300,24 @@ fn validate(arena: std.mem.Allocator, gate: *Gate, model: Model) !void {
 
     // --- no producer surface reads a kernel value ----------------------------
     //
-    // The three checks above forbid one spelling each, and each of them was
-    // written against a regression that had already been imagined. This is the
-    // general net: deny by default over every namespace-qualified read of the
-    // acceptance kernel, with a per-region allowlist whose every member is
-    // argued above as not being a value.
+    // Deny by default over every namespace-qualified read of the acceptance
+    // kernel, with a per-region allowlist whose every member is argued above as
+    // not being a value.
     //
-    // The bridge is scanned up to its tests, with `require` carved out rather
-    // than the whole rest of the file. The earlier version scanned only the two
-    // manifest declarations, which left `linkedDigest` unscanned - and
-    // `linkedDigest` returning the kernel's own expected digest is the entire
-    // hole restored in one line.
+    // The whole bridge file is scanned. An earlier version stopped at the first
+    // test, which was a second carve-out, unargued and unprobed: a `pub const`
+    // declared after the tests and used above them, or `linkedDigest` deleted
+    // and re-declared below them, both sat outside the scan. The tail from the
+    // first test onward takes the comparison surface, because a test that reads
+    // the consumer's expectation produces nothing the runtime uses.
     const bridge_all = try withoutComments(arena, model.text.get(.adapter_bridge));
-    const bridge_head = bridge_all[0 .. std.mem.indexOf(u8, bridge_all, "\ntest \"") orelse bridge_all.len];
-    const require_span = bodySpan(bridge_head, "pub fn require(") orelse
+    const require_span = bodySpan(bridge_all, "pub fn require(") orelse
         return gate.reject(.bridge_reads_native, "{s} has no require body to carve out of the scan", .{paths.get(.adapter_bridge)});
-    // Aliases are collected over the whole file, so a namespace bound at the
-    // top is still recognised in a region that does not contain its binding.
+    const first_test = std.mem.indexOf(u8, bridge_all, "\ntest \"") orelse bridge_all.len;
+    // `require` above its own tests is the only layout this splits correctly;
+    // clamping keeps the three ranges well ordered if that ever stops holding.
+    const tail_start = @max(first_test, require_span.end);
+
     const graph_aliases = try kernelAliases(arena, graph_code);
     const producer_aliases = try kernelAliases(arena, producer_text);
     const activation_aliases = try kernelAliases(arena, activation_text);
@@ -1243,7 +1326,7 @@ fn validate(arena: std.mem.Allocator, gate: *Gate, model: Model) !void {
     const Region = struct {
         input: Input,
         what: []const u8,
-        aliases: []const []const u8,
+        aliases: KernelAliases,
         text: []const u8,
         allowed: []const []const u8,
     };
@@ -1251,9 +1334,10 @@ fn validate(arena: std.mem.Allocator, gate: *Gate, model: Model) !void {
         .{ .input = .artifact_graph, .what = "the executable graph", .aliases = graph_aliases, .text = graph_code, .allowed = &shared_kernel_surface },
         .{ .input = .producer, .what = "the certificate producer", .aliases = producer_aliases, .text = producer_text, .allowed = &producer_kernel_surface },
         .{ .input = .activation, .what = "the activation path", .aliases = activation_aliases, .text = activation_text, .allowed = &activation_kernel_surface },
-        .{ .input = .adapter_bridge, .what = "the bridge ahead of require", .aliases = bridge_aliases, .text = bridge_head[0..require_span.start], .allowed = &shared_kernel_surface },
-        .{ .input = .adapter_bridge, .what = "the bridge after require", .aliases = bridge_aliases, .text = bridge_head[require_span.end..], .allowed = &shared_kernel_surface },
-        .{ .input = .adapter_bridge, .what = "the bridge comparison", .aliases = bridge_aliases, .text = bridge_head[require_span.start..require_span.end], .allowed = &comparison_kernel_surface },
+        .{ .input = .adapter_bridge, .what = "the bridge ahead of require", .aliases = bridge_aliases, .text = bridge_all[0..require_span.start], .allowed = &shared_kernel_surface },
+        .{ .input = .adapter_bridge, .what = "the bridge comparison", .aliases = bridge_aliases, .text = bridge_all[require_span.start..require_span.end], .allowed = &comparison_kernel_surface },
+        .{ .input = .adapter_bridge, .what = "the bridge between require and its tests", .aliases = bridge_aliases, .text = bridge_all[require_span.end..tail_start], .allowed = &shared_kernel_surface },
+        .{ .input = .adapter_bridge, .what = "the bridge tests", .aliases = bridge_aliases, .text = bridge_all[tail_start..], .allowed = &comparison_kernel_surface },
     };
     for (regions) |region| {
         if (try disallowedKernelRead(arena, region.aliases, region.text, region.allowed)) |name| {
@@ -1263,6 +1347,53 @@ fn validate(arena: std.mem.Allocator, gate: *Gate, model: Model) !void {
                 .{ paths.get(region.input), region.what, name },
             );
         }
+    }
+
+    // A scan that recognised no spelling reports the same pass as a clean file.
+    // These three certainly read the kernel: the bridge names the encoder in
+    // `linkedDigest` and again in `require`, the producer decodes and digests
+    // the specification and indexes the operation catalog, and the activation
+    // path digests the specification and names the observer's row type. The
+    // graph deliberately names nothing, so it has no floor.
+    const read_floors = [_]struct { input: Input, aliases: KernelAliases, text: []const u8, least: usize }{
+        .{ .input = .adapter_bridge, .aliases = bridge_aliases, .text = bridge_all, .least = 2 },
+        .{ .input = .producer, .aliases = producer_aliases, .text = producer_text, .least = 2 },
+        .{ .input = .activation, .aliases = activation_aliases, .text = activation_text, .least = 1 },
+    };
+    for (read_floors) |floor| {
+        const seen = try countKernelReads(arena, floor.aliases, floor.text);
+        if (seen < floor.least) {
+            return gate.reject(
+                .adapter_scan_blind,
+                "{s}: the kernel scan recognised {d} reads, expected at least {d}; a spelling it cannot follow reads as a clean file",
+                .{ paths.get(floor.input), seen, floor.least },
+            );
+        }
+    }
+
+    // `linkedDigest` is pinned by name rather than by where it sits, because
+    // the region split above is positional and a declaration can move. This is
+    // the one line that, changed, restores the original hole whole: the
+    // producer and the serving binary both call it, and the checker compares
+    // what it returns against the kernel's own constant.
+    if (countOccurrences(bridge_all, "pub fn linkedDigest(") != 1) {
+        return gate.reject(.bridge_digest_derivation, "{s} has no single linkedDigest definition", .{paths.get(.adapter_bridge)});
+    }
+    const linked_digest_body = functionBody(bridge_all, "pub fn linkedDigest(") orelse
+        return gate.reject(.bridge_digest_derivation, "{s} has no linkedDigest body", .{paths.get(.adapter_bridge)});
+    if (std.mem.indexOf(u8, linked_digest_body, "adapterManifestDigest(linked_manifest)") == null) {
+        return gate.reject(.bridge_digest_derivation, "linkedDigest does not hash the linked manifest", .{});
+    }
+    if (std.mem.indexOf(u8, linked_digest_body, "adapterDigest") != null) {
+        return gate.reject(.bridge_digest_derivation, "linkedDigest returns the kernel's own expected digest", .{});
+    }
+
+    // A carve-out is a sink and a source. `require` may read the consumer's
+    // expectation; if it could also hand that value back, the allowlist would
+    // confine the read and not the value.
+    const require_at = std.mem.indexOf(u8, bridge_all, "pub fn require(") orelse unreachable;
+    if (std.mem.indexOf(u8, bridge_all[require_at..require_span.start], "Error!void") == null) {
+        return gate.reject(.bridge_comparison_signature, "require no longer returns Error!void, so the expected digest can leave the one region allowed to read it", .{});
     }
 
     // --- the store is never installed under an unaccepted adapter ------------
@@ -1470,6 +1601,34 @@ const Probe = struct {
     apply: *const fn (arena: std.mem.Allocator, model: *Model) anyerror!void,
 };
 
+/// Replace every occurrence. `replaceOnce` models an edit; this models a
+/// rename, which is not one edit and cannot be probed as one.
+fn replaceEvery(
+    arena: std.mem.Allocator,
+    model: *Model,
+    input: Input,
+    needle: []const u8,
+    replacement: []const u8,
+) !void {
+    const text = model.text.get(input);
+    const count = countOccurrences(text, needle);
+    if (count == 0) return error.ProbeAnchorMissing;
+    const size = text.len - count * needle.len + count * replacement.len;
+    const mutated = try arena.alloc(u8, size);
+    errdefer arena.free(mutated);
+    var read: usize = 0;
+    var write: usize = 0;
+    while (std.mem.indexOfPos(u8, text, read, needle)) |at| {
+        @memcpy(mutated[write..][0 .. at - read], text[read..at]);
+        write += at - read;
+        @memcpy(mutated[write..][0..replacement.len], replacement);
+        write += replacement.len;
+        read = at + needle.len;
+    }
+    @memcpy(mutated[write..], text[read..]);
+    model.text.set(input, mutated);
+}
+
 fn replaceOnce(
     arena: std.mem.Allocator,
     model: *Model,
@@ -1630,9 +1789,6 @@ fn probeGraphKernelValue(arena: std.mem.Allocator, model: *Model) !void {
     );
 }
 
-/// The bridge fills one manifest field from the kernel and leaves the rest
-/// native. Every earlier clause still holds, and so does the floor test, since
-/// the two strings are equal.
 /// The whole feature, undone in one line: the bridge returns the consumer's
 /// own expectation, so the producer, the serving binary and the checker all
 /// read one constant again. Every other clause survives it, and the floor test
@@ -1672,6 +1828,57 @@ fn probeBridgeKernelExports(arena: std.mem.Allocator, model: *Model) !void {
     );
 }
 
+/// A `pub const` declared after the tests and read by the runtime region above
+/// them. The earlier scan stopped at the first test, so this sat outside it.
+fn probeBridgeTailDeclaration(arena: std.mem.Allocator, model: *Model) !void {
+    try replaceOnce(
+        arena,
+        model,
+        .adapter_bridge,
+        "    try requireLinked();",
+        "    try requireLinked();\n}\npub const kernel_pv = pcc.invariant.kindInfo(.balance_conservation_v1).predicate_version;\ntest \"probe tail\" {",
+    );
+}
+
+/// `linkedDigest` deleted and re-declared below the tests, returning the
+/// kernel's expectation. The region split is positional, so the pin that
+/// catches this is by name.
+fn probeBridgeDigestRelocated(arena: std.mem.Allocator, model: *Model) !void {
+    try replaceOnce(
+        arena,
+        model,
+        .adapter_bridge,
+        "pub fn linkedDigest() [32]u8 {\n    return pcc.invariant.adapterManifestDigest(linked_manifest);\n}",
+        "",
+    );
+    try replaceOnce(
+        arena,
+        model,
+        .adapter_bridge,
+        "    try requireLinked();",
+        "    try requireLinked();\n}\npub fn linkedDigest() [32]u8 {\n    return pcc.invariant.adapterDigest();\n}\ntest \"probe relocated\" {",
+    );
+}
+
+/// `require` can hand the consumer's expectation back to a caller. The
+/// allowlist would then confine the read and not the value.
+fn probeBridgeComparisonSignature(arena: std.mem.Allocator, model: *Model) !void {
+    try replaceOnce(
+        arena,
+        model,
+        .adapter_bridge,
+        "pub fn require(manifest: pcc.invariant.AdapterManifest) Error!void {",
+        "pub fn require(manifest: pcc.invariant.AdapterManifest) Error![32]u8 {",
+    );
+}
+
+/// Every kernel read in the bridge respelled, with the binding left alone, so
+/// no alias resolves and the scan recognises nothing. A blind scan reports the
+/// same pass as a clean file, which is what the read floor exists to catch.
+fn probeBridgeScanBlind(arena: std.mem.Allocator, model: *Model) !void {
+    try replaceEvery(arena, model, .adapter_bridge, "pcc.invariant.", "kern.invariant.");
+}
+
 /// A disallowed read inside `require`, the one region the scan carves out. A
 /// carve-out is a hole by construction, so it gets its own probe: without
 /// this, a carve-out widened to the whole file would show no symptom here.
@@ -1700,6 +1907,9 @@ fn probeBridgeKernelAfterRequire(arena: std.mem.Allocator, model: *Model) !void 
     );
 }
 
+/// The bridge fills one manifest field from the kernel and leaves the rest
+/// native. Every earlier clause still holds, and so does the floor test, since
+/// the two strings are equal.
 fn probeBridgeKernelIdentity(arena: std.mem.Allocator, model: *Model) !void {
     try replaceOnce(
         arena,
@@ -1983,6 +2193,10 @@ const probes = [_]Probe{
     .{ .name = "bridge-kernel-digest", .expect = .adapter_value_copied, .apply = probeBridgeKernelDigest },
     .{ .name = "bridge-kernel-kind", .expect = .adapter_value_copied, .apply = probeBridgeKernelKind },
     .{ .name = "bridge-kernel-exports", .expect = .adapter_value_copied, .apply = probeBridgeKernelExports },
+    .{ .name = "bridge-tail-declaration", .expect = .adapter_value_copied, .apply = probeBridgeTailDeclaration },
+    .{ .name = "bridge-digest-relocated", .expect = .bridge_digest_derivation, .apply = probeBridgeDigestRelocated },
+    .{ .name = "bridge-comparison-signature", .expect = .bridge_comparison_signature, .apply = probeBridgeComparisonSignature },
+    .{ .name = "bridge-scan-blind", .expect = .adapter_scan_blind, .apply = probeBridgeScanBlind },
     .{ .name = "bridge-kernel-comparison", .expect = .adapter_value_copied, .apply = probeBridgeKernelComparison },
     .{ .name = "bridge-kernel-after-require", .expect = .adapter_value_copied, .apply = probeBridgeKernelAfterRequire },
     .{ .name = "bridge-kernel-identity", .expect = .adapter_value_copied, .apply = probeBridgeKernelIdentity },
@@ -2306,8 +2520,8 @@ test "every adapter and manifest check is exercised by a probe" {
         }
     }
     // A filter that matched nothing would pass the loop above in silence.
-    // Fifteen is the family's size today; shrinking it is a deliberate edit.
-    try testing.expect(covered >= 15);
+    // Eighteen is the family's size today; shrinking it is a deliberate edit.
+    try testing.expect(covered >= 18);
 }
 
 test "no probe expects the absence of a rejection" {
@@ -2327,8 +2541,9 @@ test "only the argued shared kernel surface is admitted, and only through the ke
     defer arena_state.deinit();
     const arena = arena_state.allocator();
     const aliases = try kernelAliases(arena, "");
-    try testing.expectEqual(@as(usize, 1), aliases.len);
-    try testing.expectEqualStrings("pcc.invariant", aliases[0]);
+    try testing.expect(holds(aliases.namespaces, "pcc.invariant"));
+    try testing.expect(holds(aliases.namespaces, kernel_package_import ++ ".invariant"));
+    try testing.expect(holds(aliases.packages, kernel_package_import));
 
     // Deny by default. Each of these is a value the consumer owns, and none of
     // them was reachable by the name-shape rule this replaced.
@@ -2389,21 +2604,52 @@ test "a renamed kernel import is still recognised as the kernel" {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
     // A scan that knew only the canonical spelling would read each of these as
-    // clean, and the rename is a one-line way around the whole check.
+    // clean, and a rename is a one-line way around the whole check. These are
+    // the accidental forms; deliberate evasion is out of scope and named as
+    // such on `KernelAliases`.
     const sources = [_][]const u8{
+        // A local binding of the namespace.
         "const inv = pcc.invariant;\nconst x = inv.adapter_identity;\n",
+        // The same, exported.
+        "pub const inv = pcc.invariant;\nconst x = inv.adapter_identity;\n",
+        // Bound straight from the import.
         "const inv = @import(\"zttp_proof_checker\").invariant;\nconst x = inv.kind_table;\n",
+        // A binding of the package, not the namespace.
         "const k = @import(\"zttp_proof_checker\");\nconst x = k.invariant.adapterDigest();\n",
+        // Exported package binding.
+        "pub const k = @import(\"zttp_proof_checker\");\nconst x = k.invariant.Kind;\n",
+        // No binding at all.
+        "const x = @import(\"zttp_proof_checker\").invariant.kindInfo(k);\n",
+        // A binding of a binding, which needs the fixed point rather than one
+        // pass over the file.
+        "const pcc = @import(\"zttp_proof_checker\");\nconst k2 = pcc;\nconst x = k2.invariant.expected_adapter_manifest;\n",
+        // And one more link in the chain, declared out of order.
+        "const k3 = k2;\nconst k2 = pcc;\nconst pcc = @import(\"zttp_proof_checker\");\nconst x = k3.invariant.kind_table;\n",
     };
     for (sources) |source| {
         const aliases = try kernelAliases(arena, source);
-        try testing.expect(aliases.len >= 2);
         const found = try disallowedKernelRead(arena, aliases, source, &shared_kernel_surface);
         testing.expect(found != null) catch |err| {
             std.debug.print("renamed kernel read went unnoticed in:\n{s}\n", .{source});
             return err;
         };
+        try testing.expect(try countKernelReads(arena, aliases, source) >= 1);
     }
+}
+
+test "a scan that recognises no kernel read is reported as blind, not as clean" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    // The floor in `validate` rests on this: zero recognised reads in a file
+    // that certainly reads the kernel is a scan that followed no spelling, and
+    // it produces exactly the same silence as a clean file.
+    const aliases = try kernelAliases(arena, "const x = 1;\n");
+    try testing.expectEqual(@as(usize, 0), try countKernelReads(arena, aliases, "const x = kern.invariant.adapterDigest();\n"));
+    try testing.expectEqual(@as(usize, 2), try countKernelReads(arena, aliases, "pcc.invariant.digest(a) pcc.invariant.decode(b)"));
+    // A trailing name is required: `pcc.invariant` with nothing after it is not
+    // a read of a member.
+    try testing.expectEqual(@as(usize, 0), try countKernelReads(arena, aliases, "const n = pcc.invariant;\n"));
 }
 
 test "a carved-out body is a half-open range over the same buffer" {
