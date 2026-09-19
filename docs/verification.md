@@ -301,9 +301,29 @@ from real function bodies, never an assumed claim. The opt-in
 ## Application Invariants
 
 An application invariant is a condition that must hold after each committed
-change to protected state. The first supported kind is
-`balance_conservation_v1`. It requires the signed entries in each posting group
-to sum to zero for one declared ledger and currency.
+change to protected state. The catalog is closed and holds two kinds.
+
+`balance_conservation_v1` requires the signed entries in each posting group to
+sum to zero for one declared ledger and currency. Acceptance requires it of
+every specification: a document that omits it is refused.
+
+`declared_accounts_v1` requires every entry account in every committed posting
+group to match at least one declared rule. It is optional, so a specification
+declares it only when it wants it, and it carries a payload: a non-empty set of
+rules, each either an exact account or a non-empty prefix. Matching is over
+bytes and is case-sensitive. There is no wildcard, no regular expression, no
+locale rule and no normalization: the prefix `asset:` accepts `asset:cash` and
+`asset:` itself, and refuses `assets:cash` and `Asset:cash`. The set is
+canonicalized by matcher tag and then by byte value, and a repeated rule is
+refused.
+
+Every entry is checked, including one whose amount is zero and a pair that
+cancels on one account: the rule is over the account a posting names, not over
+the balance it leaves behind. One failing entry refuses the whole group before
+any write. An existing store is checked the same way before it is served, over
+every historical entry account and every materialized balance account, so a
+specification that stops declaring an account already in the store refuses the
+store rather than serving it.
 
 The author confirms a structured invariant in project configuration. ZTTP
 stores the ledger identifier and the sorted currency scales in a canonical
@@ -336,7 +356,19 @@ ledger store is bound to the digest of those exact bytes.
 A JSON document selects the schema with its `version` field. Schema 1 names
 its kind in `kind`; schema 2 lists its kinds in `kinds`. A document that omits
 the field its schema owns, or carries the other schema's field, is refused
-rather than defaulted.
+rather than defaulted. A kind that carries a payload names its own fields in
+its `kinds` entry:
+
+```json
+{"version":2,"ledger":"main","currencies":[{"code":"USD","scale":2}],
+ "kinds":[{"kind":"balance_conservation_v1"},
+          {"kind":"declared_accounts_v1","accounts":[{"exact":"clearing:main"},{"prefix":"asset:"}]}]}
+```
+
+`zttp invariant author` drafts such a document. `--kind` is repeatable and
+`--account-exact` and `--account-prefix` fill the declared account set; the
+candidate is emitted under schema 2 as soon as the selection names anything
+beyond balance conservation.
 
 The consumer checks four related inputs:
 
@@ -366,9 +398,16 @@ adapter remains a disclosed trusted boundary.
 
 The native ledger holds a dispatch table of the predicates it enforces. Each
 row names an invariant kind by its wire ordinal, the version of the predicate
-it implements, the function that admits one posting group, and the function
-that validates an existing store. Both enforcement paths iterate that table,
-so a row that is added starts deciding and a row that is removed stops.
+it implements, the function that admits one posting group, and one or both of
+the function that validates an existing store and the function that admits one
+account name that store already holds. Every enforcement path iterates that
+table, so a row that is added starts deciding and a row that is removed stops.
+
+A per-account predicate runs from inside the single exclusive walk the store
+validation already makes, at each of the two places that walk already reads an
+account. It therefore costs processing over the rows the walk reads and no
+additional query: the baseline of a store with no declared account set runs
+exactly the statements it ran before this kind existed.
 
 From that table, together with the store schema version and the export names
 the module publishes, the adapter derives an adapter manifest at compile time.

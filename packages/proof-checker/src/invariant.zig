@@ -12,7 +12,12 @@ pub const magic = "ZTINV1\x00\x00";
 /// the currency records. Deployed artifacts and existing ledger stores are
 /// bound to the digest of bytes carrying this value, so neither its layout nor
 /// its digest domain may move.
-pub const schema_version: u16 = 1;
+///
+/// The `_v1` suffix is the point: this constant is read as "the closed schema"
+/// rather than as "the lower of two numbers", and a reader who meets it beside
+/// `schema_version_v2` should see two named schemas rather than a version
+/// comparison. Nothing outside this file spells it any other way.
+pub const schema_version_v1: u16 = 1;
 
 /// The versioned payload set: the same ledger and currency region, followed by
 /// a sorted, length-delimited record per declared kind. The header field that
@@ -29,6 +34,10 @@ pub const max_currencies: u16 = 64;
 pub const max_scale: u8 = 18;
 /// A wire ordinal is a bit position below 32, so no canonical set holds more.
 pub const max_kinds: u16 = 32;
+/// Matcher tag u8 plus value length u16, ahead of each declared account rule.
+pub const account_matcher_header_size: usize = 3;
+pub const max_account_matchers: u16 = 64;
+pub const max_account_bytes: u16 = 128;
 
 pub const DecodeError = error{
     SpecTooLarge,
@@ -49,14 +58,30 @@ pub const DecodeError = error{
     KindsNotOrdered,
     RequiredKindMissing,
     UnexpectedKindPayload,
+    EmptyAccountMatcherSet,
+    TooManyAccountMatchers,
+    UnknownAccountMatcher,
+    EmptyAccountMatcher,
+    AccountMatcherTooLong,
+    InvalidAccountMatcher,
+    DuplicateAccountMatcher,
+    AccountMatchersNotOrdered,
 };
 
+/// The closed invariant catalog.
+///
+/// Balance conservation is declared first on purpose. The declaration order is
+/// what `std.enums.values` and every `@typeInfo` walk report, and more than one
+/// consumer reads the first row as "the required one". Keeping the required
+/// kind first means those readings stay true as the catalog grows.
 pub const Kind = enum(u16) {
     balance_conservation_v1 = 1,
+    declared_accounts_v1 = 2,
 
     pub fn fromWire(value: u16) ?Kind {
         return switch (value) {
             1 => .balance_conservation_v1,
+            2 => .declared_accounts_v1,
             else => null,
         };
     }
@@ -91,6 +116,13 @@ pub const kind_table = std.EnumArray(Kind, KindInfo).init(.{
         .description = "the sum of signed balances is zero within each ledger and currency after every committed posting group",
         .predicate_version = 1,
         .required = true,
+        .applies_to_writes = true,
+    },
+    .declared_accounts_v1 = .{
+        .wire_ordinal = 2,
+        .description = "every entry account in every committed posting group matches at least one declared account matcher",
+        .predicate_version = 1,
+        .required = false,
         .applies_to_writes = true,
     },
 });
@@ -220,15 +252,149 @@ pub const Spec = struct {
     }
 };
 
-fn validLedgerByte(byte: u8) bool {
+/// Public so the authoring boundary checks a ledger identifier against the same
+/// predicate the decoder does. A candidate that names bytes this refuses would
+/// otherwise be drafted, pasted, and refused again at load time.
+pub fn validLedgerByte(byte: u8) bool {
     return std.ascii.isAlphanumeric(byte) or byte == '-' or byte == '_' or byte == '.';
 }
 
-fn validCurrencyCode(code: [3]u8) bool {
+/// Public for the same reason as `validLedgerByte` above.
+pub fn validCurrencyCode(code: [3]u8) bool {
     for (code) |byte| {
         if (byte < 'A' or byte > 'Z') return false;
     }
     return true;
+}
+
+// ---------------------------------------------------------------------------
+// The declared account set
+// ---------------------------------------------------------------------------
+
+/// The closed union of account rules. Nothing else is expressible: there is no
+/// wildcard, no regular expression, and no locale rule.
+pub const AccountMatcherTag = enum(u8) {
+    /// Accepts an account whose bytes are exactly the matcher's bytes.
+    exact = 1,
+    /// Accepts an account whose bytes begin with the matcher's bytes, the
+    /// matcher's own bytes included.
+    prefix = 2,
+
+    pub fn fromWire(value: u8) ?AccountMatcherTag {
+        return switch (value) {
+            1 => .exact,
+            2 => .prefix,
+            else => null,
+        };
+    }
+};
+
+/// One declared account rule, borrowed from the caller's bytes.
+///
+/// Matching is over bytes and is case-sensitive. No normalization happens here
+/// and none happens anywhere else: `asset:` accepts `asset:cash` and refuses
+/// `assets:cash`, and `Asset:` matches neither.
+pub const AccountMatcher = struct {
+    tag: AccountMatcherTag,
+    value: []const u8,
+
+    pub fn matches(self: AccountMatcher, account: []const u8) bool {
+        return switch (self.tag) {
+            .exact => std.mem.eql(u8, self.value, account),
+            .prefix => std.mem.startsWith(u8, account, self.value),
+        };
+    }
+
+    /// Canonical order: by tag, then by byte value. The order is a property of
+    /// the bytes, so two documents declaring the same set encode identically.
+    pub fn order(a: AccountMatcher, b: AccountMatcher) std.math.Order {
+        const tags = std.math.order(@intFromEnum(a.tag), @intFromEnum(b.tag));
+        if (tags != .eq) return tags;
+        return std.mem.order(u8, a.value, b.value);
+    }
+};
+
+/// The decoded payload of `declared_accounts_v1`: a non-empty, canonically
+/// ordered, duplicate-free set of matchers, borrowed from the caller's bytes.
+pub const AccountMatchers = struct {
+    /// The record region, after the count.
+    bytes: []const u8,
+    count: u16,
+
+    pub fn at(self: AccountMatchers, index: u16) DecodeError!AccountMatcher {
+        if (index >= self.count) return error.Truncated;
+        var cursor: usize = 0;
+        var position: u16 = 0;
+        while (position <= index) : (position += 1) {
+            if (cursor + account_matcher_header_size > self.bytes.len) return error.Truncated;
+            const tag = AccountMatcherTag.fromWire(self.bytes[cursor]) orelse
+                return error.UnknownAccountMatcher;
+            const length = std.mem.readInt(u16, self.bytes[cursor + 1 ..][0..2], .little);
+            const body = cursor + account_matcher_header_size;
+            if (body + length > self.bytes.len) return error.Truncated;
+            if (position == index) return .{ .tag = tag, .value = self.bytes[body..][0..length] };
+            cursor = body + length;
+        }
+        return error.Truncated;
+    }
+
+    /// Whether `account` satisfies at least one declared rule.
+    ///
+    /// An error rather than a bool when the walk cannot proceed: "these bytes
+    /// could not be read" and "this account matches nothing" lead a caller to
+    /// opposite conclusions, and collapsing them into `false` would be the
+    /// safe direction here but the wrong habit everywhere else.
+    pub fn matches(self: AccountMatchers, account: []const u8) DecodeError!bool {
+        var index: u16 = 0;
+        while (index < self.count) : (index += 1) {
+            if ((try self.at(index)).matches(account)) return true;
+        }
+        return false;
+    }
+};
+
+/// Decode a `declared_accounts_v1` payload: count u16, then that many records
+/// of tag u8, value length u16, and value bytes.
+///
+/// Every rule the payload must satisfy is checked here rather than assumed by
+/// a later reader: a non-empty set, a bounded count, a known tag, a non-empty
+/// and bounded value, valid UTF-8 without an interior NUL, canonical order,
+/// and no repeats. An empty prefix would accept every account, which is the
+/// one matcher that silently turns the whole invariant off.
+pub fn decodeAccountMatchers(payload: []const u8) DecodeError!AccountMatchers {
+    if (payload.len < 2) return error.Truncated;
+    const count = std.mem.readInt(u16, payload[0..2], .little);
+    if (count == 0) return error.EmptyAccountMatcherSet;
+    if (count > max_account_matchers) return error.TooManyAccountMatchers;
+    const bytes = payload[2..];
+
+    var cursor: usize = 0;
+    var previous: ?AccountMatcher = null;
+    var index: u16 = 0;
+    while (index < count) : (index += 1) {
+        if (cursor + account_matcher_header_size > bytes.len) return error.Truncated;
+        const tag = AccountMatcherTag.fromWire(bytes[cursor]) orelse
+            return error.UnknownAccountMatcher;
+        const length = std.mem.readInt(u16, bytes[cursor + 1 ..][0..2], .little);
+        if (length == 0) return error.EmptyAccountMatcher;
+        if (length > max_account_bytes) return error.AccountMatcherTooLong;
+        const body = cursor + account_matcher_header_size;
+        if (body + length > bytes.len) return error.Truncated;
+        const matcher = AccountMatcher{ .tag = tag, .value = bytes[body..][0..length] };
+        if (std.mem.indexOfScalar(u8, matcher.value, 0) != null) return error.InvalidAccountMatcher;
+        if (!std.unicode.utf8ValidateSlice(matcher.value)) return error.InvalidAccountMatcher;
+        if (previous) |prior| {
+            switch (AccountMatcher.order(prior, matcher)) {
+                .eq => return error.DuplicateAccountMatcher,
+                .gt => return error.AccountMatchersNotOrdered,
+                .lt => {},
+            }
+        }
+        previous = matcher;
+        cursor = body + length;
+    }
+    if (cursor != bytes.len) return error.TrailingData;
+    return .{ .bytes = bytes, .count = count };
 }
 
 /// The payload shape each kind carries under schema 2. The switch is
@@ -237,6 +403,7 @@ fn validCurrencyCode(code: [3]u8) bool {
 fn validateKindPayload(kind: Kind, payload: []const u8) DecodeError!void {
     switch (kind) {
         .balance_conservation_v1 => if (payload.len != 0) return error.UnexpectedKindPayload,
+        .declared_accounts_v1 => _ = try decodeAccountMatchers(payload),
     }
 }
 
@@ -307,7 +474,7 @@ pub fn decode(bytes: []const u8) DecodeError!Spec {
     if (bytes.len < header_size) return error.Truncated;
     if (!std.mem.eql(u8, bytes[0..8], magic)) return error.BadMagic;
     return switch (std.mem.readInt(u16, bytes[8..10], .little)) {
-        schema_version => decodeV1(bytes),
+        schema_version_v1 => decodeV1(bytes),
         schema_version_v2 => decodeV2(bytes),
         else => error.UnsupportedSchemaVersion,
     };
@@ -329,7 +496,7 @@ fn decodeV1(bytes: []const u8) DecodeError!Spec {
     if (bytes.len > counts.common_end) return error.TrailingData;
     const common = try decodeCommon(bytes, counts);
     return .{
-        .schema = schema_version,
+        .schema = schema_version_v1,
         .kind = kind,
         .ledger_id = common.ledger_id,
         .currency_bytes = common.currency_bytes,
@@ -704,8 +871,12 @@ test "the native adapter digest is pinned" {
     // commitment: every certificate names it, so a change here refuses every
     // certificate built before the change. That must be a deliberate edit of
     // this line rather than a digest that quietly followed the table.
+    //
+    // Moved once, deliberately, when `declared_accounts_v1` joined the catalog
+    // and the expected manifest grew its row. Recomputed with shasum over the
+    // encoding this file documents, not copied from what the encoder returned.
     try std.testing.expectEqualStrings(
-        "6f0eeb5513984cda9f4b906ada25a1c3b41bac809fef197ccc1541d37cb04ab8",
+        "363a758723fa4825874894ab0cd81487fc923d436e5db41a3a6f240aebfb0f99",
         &std.fmt.bytesToHex(adapterDigest(), .lower),
     );
 }
@@ -931,15 +1102,15 @@ test "a schema 2 specification refuses a repeated kind record" {
 test "a schema 2 specification refuses kind records out of canonical order" {
     // The ordering check reads the raw ordinal before the catalog lookup, so a
     // descending pair is refused as non-canonical rather than as an unknown
-    // kind. Ordinal 2 names no catalog member yet, which is what makes the
-    // descending pair expressible while the catalog holds one kind.
+    // kind or a bad payload. Ordinal 3 names no catalog member, which keeps the
+    // first record from being decoded at all.
     const descending = magic.* ++ [_]u8{
         2, 0, // schema
         2, 0, // declared kind count
         6, 0, // ledger id length
         1, 0, // currency count
     } ++ "ledger" ++ "USD" ++ [_]u8{2} ++ [_]u8{
-        2, 0, 0, 0, // ordinal 2 first
+        3, 0, 0, 0, // ordinal 3 first
         1, 0, 0, 0, // then ordinal 1
     };
     try std.testing.expectError(error.KindsNotOrdered, decode(descending));
@@ -947,7 +1118,7 @@ test "a schema 2 specification refuses kind records out of canonical order" {
 
 test "a schema 2 specification refuses a kind the catalog does not name" {
     const unknown = v2_header_and_common ++ [_]u8{
-        2, 0, 0, 0, // an ordinal the closed catalog does not name
+        3, 0, 0, 0, // an ordinal the closed catalog does not name
     };
     try std.testing.expectError(error.UnknownInvariantKind, decode(unknown));
 }
@@ -987,6 +1158,203 @@ test "a schema 2 specification refuses a payload on a kind that carries none" {
     try std.testing.expectError(error.UnexpectedKindPayload, decode(payloaded));
 }
 
+// ---------------------------------------------------------------------------
+// The declared account set, and the matchers its payload carries
+// ---------------------------------------------------------------------------
+
+/// The ledger and currency region under a schema 2 header declaring two kinds.
+const v2_two_kind_common = magic.* ++ [_]u8{
+    2, 0, // schema
+    2, 0, // declared kind count
+    6, 0, // ledger id length
+    1, 0, // currency count
+} ++ "ledger" ++ "USD" ++ [_]u8{2};
+
+/// One declared account payload: an exact matcher and a prefix matcher, in the
+/// canonical order the decoder requires.
+const account_payload = [_]u8{
+    2, 0, // matcher count
+    1, // exact
+    13, 0, // length
+} ++ "clearing:main" ++ [_]u8{
+    2, // prefix
+    6, 0, // length
+} ++ "asset:";
+
+const v2_with_accounts = v2_two_kind_common ++ [_]u8{
+    1, 0, // balance_conservation_v1
+    0, 0, // payload length
+    2,                   0, // declared_accounts_v1
+    account_payload.len, 0,
+} ++ account_payload;
+
+test "declared accounts v1 is optional, constrains writes, and states the confirmed sentence" {
+    const row = kindInfo(.declared_accounts_v1);
+    try std.testing.expectEqual(@as(u16, 2), row.wire_ordinal);
+    try std.testing.expectEqual(@as(u16, 1), row.predicate_version);
+    try std.testing.expect(!row.required);
+    try std.testing.expect(row.applies_to_writes);
+    try std.testing.expect(row.description.len > 0);
+}
+
+test "a declared account payload decodes and presents its matchers in canonical order" {
+    const spec = try decode(v2_with_accounts);
+    try std.testing.expectEqual(@as(u16, 2), spec.kind_count);
+    try std.testing.expect(try spec.declares(.declared_accounts_v1));
+    const payload = (try spec.payloadFor(.declared_accounts_v1)) orelse
+        return error.TestUnexpectedResult;
+    const matchers = try decodeAccountMatchers(payload);
+    try std.testing.expectEqual(@as(u16, 2), matchers.count);
+    const first = try matchers.at(0);
+    try std.testing.expectEqual(AccountMatcherTag.exact, first.tag);
+    try std.testing.expectEqualStrings("clearing:main", first.value);
+    const second = try matchers.at(1);
+    try std.testing.expectEqual(AccountMatcherTag.prefix, second.tag);
+    try std.testing.expectEqualStrings("asset:", second.value);
+    try std.testing.expectError(error.Truncated, matchers.at(2));
+}
+
+test "an exact matcher accepts only the same bytes and a prefix accepts what starts with it" {
+    const exact = AccountMatcher{ .tag = .exact, .value = "clearing:main" };
+    try std.testing.expect(exact.matches("clearing:main"));
+    try std.testing.expect(!exact.matches("clearing:mai"));
+    try std.testing.expect(!exact.matches("clearing:main2"));
+    // Case-sensitive, with no normalization and no locale rule.
+    try std.testing.expect(!exact.matches("Clearing:main"));
+    try std.testing.expect(!exact.matches("CLEARING:MAIN"));
+
+    const prefix = AccountMatcher{ .tag = .prefix, .value = "asset:" };
+    try std.testing.expect(prefix.matches("asset:cash"));
+    // The prefix itself is accepted.
+    try std.testing.expect(prefix.matches("asset:"));
+    try std.testing.expect(!prefix.matches("assets:cash"));
+    try std.testing.expect(!prefix.matches("asset"));
+    try std.testing.expect(!prefix.matches("Asset:cash"));
+
+    // Bytes, not codepoints: a multi-byte prefix matches the same bytes.
+    const unicode = AccountMatcher{ .tag = .prefix, .value = "über:" };
+    try std.testing.expect(unicode.matches("über:cash"));
+    try std.testing.expect(!unicode.matches("uber:cash"));
+}
+
+test "a declared account payload refuses an empty set, an empty matcher, and an unknown tag" {
+    try std.testing.expectError(error.EmptyAccountMatcherSet, decodeAccountMatchers(&[_]u8{ 0, 0 }));
+    try std.testing.expectError(error.Truncated, decodeAccountMatchers(&[_]u8{0}));
+    try std.testing.expectError(error.EmptyAccountMatcher, decodeAccountMatchers(&[_]u8{
+        1, 0, // one matcher
+        2, // prefix
+        0, 0, // an empty prefix, which would accept every account
+    }));
+    // A tag the closed union does not name.
+    try std.testing.expectError(error.UnknownAccountMatcher, decodeAccountMatchers(&[_]u8{
+        1, 0,
+        3, 1,
+        0, 'a',
+    }));
+    try std.testing.expectError(error.Truncated, decodeAccountMatchers(&[_]u8{
+        1, 0,
+        1, 4, 0, // a length with no bytes behind it
+    }));
+    try std.testing.expectError(error.TrailingData, decodeAccountMatchers(&[_]u8{
+        1, 0,
+        1, 1,
+        0, 'a',
+        0xff, // a byte after the last record
+    }));
+}
+
+test "a declared account matcher must be valid UTF-8 without an interior NUL" {
+    // A truncated two-byte sequence: the boundary is the codepoint, not the byte.
+    try std.testing.expectError(error.InvalidAccountMatcher, decodeAccountMatchers(&[_]u8{
+        1,    0,
+        2,    2,
+        0,    0xc3,
+        0x28,
+    }));
+    try std.testing.expectError(error.InvalidAccountMatcher, decodeAccountMatchers(&[_]u8{
+        1, 0,
+        2, 2,
+        0, 'a',
+        0,
+    }));
+    // A whole codepoint is admitted.
+    const whole = try decodeAccountMatchers(&[_]u8{
+        1,    0,
+        2,    2,
+        0,    0xc3,
+        0xbc,
+    });
+    try std.testing.expectEqualStrings("ü", (try whole.at(0)).value);
+}
+
+test "a declared account payload refuses duplicates and a non-canonical order" {
+    try std.testing.expectError(error.DuplicateAccountMatcher, decodeAccountMatchers(&[_]u8{
+        2, 0,
+        1, 1,
+        0, 'a',
+        1, 1,
+        0, 'a',
+    }));
+    // Ordered by tag first, then by byte value.
+    try std.testing.expectError(error.AccountMatchersNotOrdered, decodeAccountMatchers(&[_]u8{
+        2, 0,
+        2, 1,
+        0, 'a',
+        1, 1,
+        0, 'a',
+    }));
+    try std.testing.expectError(error.AccountMatchersNotOrdered, decodeAccountMatchers(&[_]u8{
+        2, 0,
+        1, 1,
+        0, 'b',
+        1, 1,
+        0, 'a',
+    }));
+    // A shorter value sorts ahead of a longer one that extends it.
+    try std.testing.expectError(error.AccountMatchersNotOrdered, decodeAccountMatchers(&[_]u8{
+        2,   0,
+        1,   2,
+        0,   'a',
+        'b', 1,
+        1,   0,
+        'a',
+    }));
+}
+
+test "a declared account set answers whether an account matches any of its rules" {
+    const payload = (try (try decode(v2_with_accounts)).payloadFor(.declared_accounts_v1)) orelse
+        return error.TestUnexpectedResult;
+    const matchers = try decodeAccountMatchers(payload);
+    try std.testing.expect(try matchers.matches("clearing:main"));
+    try std.testing.expect(try matchers.matches("asset:cash"));
+    try std.testing.expect(try matchers.matches("asset:"));
+    try std.testing.expect(!(try matchers.matches("assets:cash")));
+    try std.testing.expect(!(try matchers.matches("liability:ap")));
+    try std.testing.expect(!(try matchers.matches("clearing:mainx")));
+}
+
+test "schema 1 bytes naming a kind the consumer does not require are refused" {
+    // Unreachable while the catalog held one kind: `fromWire` refused every
+    // ordinal but the required one. With a second optional kind the header can
+    // name it, and the bytes would decode to a specification with no balance
+    // conservation at all.
+    const optional_only = magic.* ++ [_]u8{
+        1, 0, // schema
+        2, 0, // declared_accounts_v1 in the header field schema 1 owns
+        6, 0, // ledger id length
+        1, 0, // currency count
+    } ++ "ledger" ++ "USD" ++ [_]u8{2};
+    try std.testing.expectError(error.RequiredKindMissing, decode(optional_only));
+}
+
+test "a schema 2 specification refuses a declared account kind carrying no payload" {
+    const empty_payload = v2_two_kind_common ++ [_]u8{
+        1, 0, 0, 0, // balance_conservation_v1
+        2, 0, 0, 0, // declared_accounts_v1 with an empty payload
+    };
+    try std.testing.expectError(error.Truncated, decode(empty_payload));
+}
+
 test "a specification past the size bound is refused before it is parsed" {
     var oversize: [max_spec_bytes + 1]u8 = undefined;
     @memset(&oversize, 0);
@@ -998,7 +1366,7 @@ test "a specification past the size bound is refused before it is parsed" {
 test "the two wire schemas are distinct and schema 1 stays pinned at one" {
     // Deployed artifacts and existing ledger stores are bound to the digest of
     // schema 1 bytes. Moving this constant would change every one of them.
-    try std.testing.expectEqual(@as(u16, 1), schema_version);
+    try std.testing.expectEqual(@as(u16, 1), schema_version_v1);
     try std.testing.expectEqual(@as(u16, 2), schema_version_v2);
     const future = magic.* ++ [_]u8{
         3, 0, // a schema neither decoder owns

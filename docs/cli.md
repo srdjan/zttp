@@ -265,19 +265,34 @@ predicate version, whether acceptance requires it, and whether it constrains
 operations that write. The rows come from the acceptance kernel's own metadata
 table, so the listing cannot drift from what the kernel accepts.
 
-`zttp invariant author` turns one explicit selection into a reviewable
+`zttp invariant author` turns an explicit selection into a reviewable
 candidate:
 
 ```bash
 zttp invariant list
 zttp invariant author --kind balance_conservation_v1 --ledger main --currency USD:2
+zttp invariant author --kind balance_conservation_v1 --kind declared_accounts_v1 \
+  --ledger main --currency USD:2 \
+  --account-exact clearing:main --account-prefix asset:
 ```
 
-`--kind` is required. A plain-language sentence names no predicate, so there is
-no path from a sentence alone to a candidate. Pass the sentence with
-`--statement` if you want it recorded: it appears beside the candidate as an
-annotation, never inside it. Repeat `--currency CODE:SCALE` once per declared
-currency.
+`--kind` is required and repeatable. A plain-language sentence names no
+predicate, so there is no path from a sentence alone to a candidate. The
+selection must name `balance_conservation_v1`, which acceptance requires of
+every specification. Pass the sentence with `--statement` if you want it
+recorded: it appears beside the candidate as an annotation, never inside it.
+Repeat `--currency CODE:SCALE` once per declared currency.
+
+`--account-exact` and `--account-prefix` are repeatable and fill the payload of
+`declared_accounts_v1`. Each is refused without that kind, and that kind is
+refused without at least one of them. An exact rule admits the same account
+bytes; a prefix rule admits every account whose bytes begin with a non-empty
+prefix, the prefix itself included. Matching is case-sensitive over bytes, with
+no wildcard, no regular expression, no locale rule and no normalization.
+
+The candidate is emitted under invariant wire schema 1 when the selection names
+balance conservation alone, and under wire schema 2 as soon as it names
+anything more.
 
 The output carries `requiresReview: true`, the descriptions that were displayed
 under `reviewed_against`, and the structured `candidate`. Save only `candidate`

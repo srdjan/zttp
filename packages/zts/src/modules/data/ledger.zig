@@ -9,6 +9,8 @@ pub const exports = binding.toModuleExports();
 pub const MODULE_STATE_SLOT = ledger.MODULE_STATE_SLOT;
 pub const Config = ledger.Config;
 pub const Currency = ledger.Currency;
+pub const AccountMatcher = ledger.AccountMatcher;
+pub const AccountMatcherTag = ledger.AccountMatcherTag;
 
 /// The linked adapter's own statement of what it enforces, re-exported so the
 /// runtime can convert it for the executable graph without reaching past this

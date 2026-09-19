@@ -973,9 +973,33 @@ pub const HandlerInstance = struct {
             const start = i * invariant.currency_record_size;
             currency.* = .{ .code = spec.currency_bytes[start..][0..3], .scale = spec.currency_bytes[start + 3] };
         }
+        // The declared account set, when the specification carries one. Null
+        // and empty are different here, as they are in the module's own
+        // `Config`: a document that declares the kind always carries at least
+        // one matcher, because the decoder refuses an empty set, so a null
+        // here can only mean the document declared no such kind.
+        var accounts: ?[]zq.modules.ledger.AccountMatcher = null;
+        defer if (accounts) |owned| self.allocator.free(owned);
+        if (try spec.payloadFor(.declared_accounts_v1)) |payload| {
+            const declared = try invariant.decodeAccountMatchers(payload);
+            const rows = try self.allocator.alloc(zq.modules.ledger.AccountMatcher, declared.count);
+            errdefer self.allocator.free(rows);
+            for (rows, 0..) |*row, i| {
+                const matcher = try declared.at(@intCast(i));
+                row.* = .{
+                    .tag = switch (matcher.tag) {
+                        .exact => .exact,
+                        .prefix => .prefix,
+                    },
+                    .value = matcher.value,
+                };
+            }
+            accounts = rows;
+        }
         try zq.modules.ledger.installStore(self.ctx, path, .{
             .ledger = spec.ledger_id,
             .currencies = currencies,
+            .accounts = accounts,
             .invariant_digest = invariant.digest(bytes),
         });
     }

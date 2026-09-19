@@ -148,10 +148,13 @@ patterns.
 ## Application Invariants
 
 An application invariant states what must remain true after a committed state
-change. The first supported template is `balance_conservation_v1`: for each
-declared currency in one ledger, all signed account balances sum to zero.
-This does not prove correct recipients, authorization, sufficient funds, or
-correct business amounts.
+change. Two templates are supported. `balance_conservation_v1`: for each
+declared currency in one ledger, all signed account balances sum to zero. Every
+specification must declare it. `declared_accounts_v1`: every entry account in
+every committed posting group matches at least one rule you declare, each rule
+either an exact account or a non-empty prefix. It is optional. Neither proves
+correct recipients, authorization, sufficient funds, or correct business
+amounts.
 
 Add both paths to `zttp.json`. Paths are relative to that file:
 
@@ -179,6 +182,30 @@ The structured fields define the claim. `statement` is a human annotation.
 Currency codes must contain three uppercase ASCII letters. Scale is between
 0 and 18. Scale 2 means that `"100"` represents one major unit. Currencies are
 checked separately. There is no conversion between currencies.
+
+To declare more than balance conservation, use `"version": 2`, which lists the
+templates in `kinds` and lets each carry its own fields:
+
+```json
+{
+  "version": 2,
+  "ledger": "main",
+  "currencies": [{ "code": "USD", "scale": 2 }],
+  "kinds": [
+    { "kind": "balance_conservation_v1" },
+    { "kind": "declared_accounts_v1",
+      "accounts": [{ "exact": "clearing:main" }, { "prefix": "asset:" }] }
+  ]
+}
+```
+
+Account matching is case-sensitive over bytes, with no wildcard, no regular
+expression and no normalization: the prefix `asset:` admits `asset:cash` and
+`asset:` itself, and refuses `assets:cash`. A posting naming an undeclared
+account is refused whole, with the tag `undeclared_account`, before anything is
+written, and a zero-amount entry or a pair that cancels on one account is
+checked like any other. An existing store that already holds an undeclared
+account does not open.
 
 Use the protected module for every posting:
 
@@ -259,12 +286,19 @@ To see which invariant kinds exist and draft a candidate:
 ```bash
 zttp invariant list
 zttp invariant author --kind balance_conservation_v1 --ledger main --currency USD:2
+zttp invariant author --kind balance_conservation_v1 --kind declared_accounts_v1 \
+  --ledger main --currency USD:2 \
+  --account-exact clearing:main --account-prefix asset:
 ```
 
-`--kind` is required. A plain-language sentence names no predicate, so there is
-no path from a sentence alone to a candidate. Pass the sentence with
-`--statement` to record it beside the candidate as an annotation. Review the
-result and save only its `candidate` object as the configured invariant JSON.
+`--kind` is required and repeatable, and the selection must name
+`balance_conservation_v1`. A plain-language sentence names no predicate, so
+there is no path from a sentence alone to a candidate. Pass the sentence with
+`--statement` to record it beside the candidate as an annotation. Repeat
+`--account-exact` and `--account-prefix` to fill the declared account set;
+either flag needs `--kind declared_accounts_v1`, and that kind needs at least
+one of them. Review the result and save only its `candidate` object as the
+configured invariant JSON.
 
 Add `--advise` to send only the sentence, and the catalog's published
 descriptions, to TypeSafe Jev for advisory template selection. This requires

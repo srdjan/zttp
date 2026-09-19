@@ -47,12 +47,20 @@ pub fn isExpectedUserError(err: anyerror) bool {
         error.UnknownSubcommand,
         error.MissingKind,
         error.UnknownKind,
+        error.DuplicateKind,
+        error.TooManyKinds,
+        error.MissingRequiredKind,
         error.MissingLedger,
         error.InvalidLedger,
         error.MissingCurrency,
         error.InvalidCurrency,
         error.DuplicateCurrency,
         error.TooManyCurrencies,
+        error.MissingAccount,
+        error.InvalidAccount,
+        error.DuplicateAccount,
+        error.TooManyAccounts,
+        error.AccountsNeedDeclaredKind,
         error.MissingArgument,
         error.UnknownArgument,
         error.AdviceNeedsStatement,
@@ -66,20 +74,30 @@ const help_text =
     \\
     \\Usage:
     \\  zttp invariant list
-    \\  zttp invariant author --kind <name> --ledger <id> --currency CODE:SCALE
-    \\                        [--currency CODE:SCALE ...] [--statement <sentence>]
-    \\                        [--advise] [--model <id>]
+    \\  zttp invariant author --kind <name> [--kind <name> ...] --ledger <id>
+    \\                        --currency CODE:SCALE [--currency CODE:SCALE ...]
+    \\                        [--account-exact <account>] [--account-prefix <prefix>]
+    \\                        [--statement <sentence>] [--advise] [--model <id>]
     \\
     \\Commands:
     \\  list      Print every supported kind, its confirmed description, its
     \\            predicate version, and whether acceptance requires it.
-    \\  author    Print a reviewable candidate for one selected kind.
+    \\  author    Print a reviewable candidate for the selected kinds.
     \\
     \\Options:
-    \\  --kind <name>            Required. The catalog kind being declared; run
-    \\                           `zttp invariant list` for the supported names.
+    \\  --kind <name>            Required, repeatable. The catalog kinds being
+    \\                           declared; run `zttp invariant list` for the
+    \\                           supported names. The selection must name the
+    \\                           kind acceptance requires of every
+    \\                           specification.
     \\  --ledger <id>            Required. The ledger the invariant holds over.
     \\  --currency CODE:SCALE    Required at least once, for example USD:2.
+    \\  --account-exact <acct>   Repeatable. Admit exactly this account. Needs
+    \\                           --kind declared_accounts_v1.
+    \\  --account-prefix <pfx>   Repeatable. Admit every account whose bytes
+    \\                           begin with this non-empty prefix, the prefix
+    \\                           itself included. Matching is case-sensitive
+    \\                           over bytes, with no wildcard and no normalizing.
     \\  --statement <sentence>   Plain-language annotation for the review output.
     \\  --advise                 Ask an advisory classifier whether the sentence
     \\                           matches the selected kind. Needs --statement and
@@ -172,7 +190,7 @@ fn adviseOrUnavailable(
         .{ .context = &host, .post = HostTransport.post },
         statement,
         request.model,
-        request.kind,
+        request.kinds(),
     );
 }
 

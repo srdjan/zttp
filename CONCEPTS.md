@@ -95,8 +95,10 @@ or deny decision for one resource under one policy generation.
 
 ### Application invariant
 A versioned condition that every committed change to protected application
-state must preserve. The first supported invariant is balance conservation for
-one declared ledger and its currencies.
+state must preserve. The catalog is closed and holds two: balance conservation
+for one declared ledger and its currencies, which acceptance requires of every
+specification, and a declared account set, which is optional and admits only
+the accounts a specification names by exact bytes or by prefix.
 
 The author confirms a structured specification. The executable graph binds
 that specification and the protected adapter. The acceptance kernel then
@@ -105,8 +107,9 @@ finds independently in final bytecode. This produces an Invariant verdict. The
 verdict stays separate from Property and Residual guard verdicts.
 
 The invariant has two parts. Consumer coverage shows that all protected calls
-use the named native boundary. Runtime enforcement makes each posting atomic
-and rejects a posting whose signed entries do not sum to zero. Coverage does
+use the named native boundary. Runtime enforcement makes each posting atomic,
+rejects a posting whose signed entries do not sum to zero, and rejects one
+naming an account the specification does not declare. Coverage does
 not convert the native boundary into a static proof. The accepted artifact
 therefore records the native adapter as a trusted dependency.
 

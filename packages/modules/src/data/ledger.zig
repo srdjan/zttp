@@ -25,12 +25,58 @@ pub const Currency = struct {
     scale: u8,
 };
 
+/// The closed union of declared account rules.
+///
+/// Restated here rather than imported: `packages/modules` reaches `zttp-sdk`
+/// and nothing else, so the acceptance kernel's own statement of the same union
+/// is a separate value that meets this one only through the adapter manifest.
+/// Nothing else is expressible - no wildcard, no regular expression, no locale
+/// rule, and no normalization.
+pub const AccountMatcherTag = enum { exact, prefix };
+
+pub const AccountMatcher = struct {
+    tag: AccountMatcherTag,
+    value: []const u8,
+
+    /// Case-sensitive over bytes. `asset:` accepts `asset:cash` and `asset:`
+    /// itself, and refuses `assets:cash`.
+    pub fn matches(self: AccountMatcher, account: []const u8) bool {
+        return switch (self.tag) {
+            .exact => std.mem.eql(u8, self.value, account),
+            .prefix => std.mem.startsWith(u8, account, self.value),
+        };
+    }
+
+    /// By tag, then by byte value. The configuration is required to arrive in
+    /// this order for the same reason the currency header is: two declarations
+    /// of one set must not be two different configurations.
+    fn order(a: AccountMatcher, b: AccountMatcher) std.math.Order {
+        const tags = std.math.order(@intFromEnum(a.tag), @intFromEnum(b.tag));
+        if (tags != .eq) return tags;
+        return std.mem.order(u8, a.value, b.value);
+    }
+};
+
+/// A declared matcher is bounded here as well as at the wire boundary, so a
+/// configuration built directly rather than decoded is bounded too.
+pub const MAX_ACCOUNT_MATCHER_BYTES: usize = 128;
+
 /// Trusted configuration installed by the runtime before handler code runs.
 /// Currencies must be sorted by code so every consumer hashes the same header.
 pub const Config = struct {
     ledger: []const u8,
     currencies: []const Currency,
     invariant_digest: [32]u8,
+    /// The declared account set, or null when the specification declares no
+    /// such invariant.
+    ///
+    /// Null and empty are deliberately different. Null is "this invariant was
+    /// not declared"; an empty list would be "declared, and it admits nothing",
+    /// which no specification can express and which `validateConfig` refuses.
+    /// Collapsing them into one empty slice is how a declared invariant that
+    /// lost its matchers on the way here would read as one that was never
+    /// declared, and pass.
+    accounts: ?[]const AccountMatcher = null,
 };
 
 pub const binding = sdk.ModuleBinding{
@@ -88,38 +134,55 @@ pub const binding = sdk.ModuleBinding{
 /// comparison rather than a constant meeting itself.
 pub const adapter_identity = "zttp:ledger/native-adapter-v1";
 
-/// The wire ordinal the closed invariant catalog gives balance conservation.
-/// Restated here on purpose, for the same reason as the identity above.
+/// The wire ordinals the closed invariant catalog gives the kinds this adapter
+/// enforces. Restated here on purpose, for the same reason as the identity
+/// above.
 const balance_conservation_ordinal: u16 = 1;
+const declared_accounts_ordinal: u16 = 2;
 
-/// One invariant this adapter enforces, and the two places it enforces it.
+/// One invariant this adapter enforces, and the places it enforces it.
 ///
 /// `group_fn` decides whether one posting group may commit. `baseline_fn`
-/// decides whether an existing store may be served at all. Both are function
-/// pointers, so the dispatch below is a call through the row rather than a
-/// hard-coded call standing beside a row that describes it.
+/// decides whether an existing store may be served at all, and `account_fn`
+/// decides whether one account name that store already holds is admissible.
+/// All three are function pointers, so the dispatch below is a call through
+/// the row rather than a hard-coded call standing beside a row that describes
+/// it.
+///
+/// `account_fn` exists so a predicate over account names does not open a
+/// second pass over the same rows. It is called from inside the single
+/// exclusive walk that `baseline_fn` makes, at each of the two places that walk
+/// already reads an account, which costs O(rows x matchers) CPU and no extra
+/// statement.
 pub const Predicate = struct {
     kind_ordinal: u16,
     predicate_version: u16,
-    group_fn: *const fn (group: Group) anyerror!void,
-    baseline_fn: *const fn (
+    group_fn: *const fn (config: *const OwnedConfig, group: Group) anyerror!void,
+    account_fn: ?*const fn (config: *const OwnedConfig, account: []const u8) anyerror!void = null,
+    baseline_fn: ?*const fn (
         allocator: std.mem.Allocator,
         handle: *sdk.ModuleHandle,
         db: *sdk.SqliteDb,
         config: *const OwnedConfig,
-    ) anyerror!void,
+    ) anyerror!void = null,
 };
 
-/// The dispatch table. `executePost` and `validateBaseline` iterate it, and
-/// nothing else decides whether a posting group may commit or an existing
-/// store may be served. Rows ascend by wire ordinal, which is the order the
-/// manifest encoder depends on.
+/// The dispatch table. `executePost`, `validateBaseline` and the stored-account
+/// hook all iterate it, and nothing else decides whether a posting group may
+/// commit or an existing store may be served. Rows ascend by wire ordinal,
+/// which is the order the manifest encoder depends on.
 const predicates = [_]Predicate{
     .{
         .kind_ordinal = balance_conservation_ordinal,
         .predicate_version = 1,
         .group_fn = validateGroup,
         .baseline_fn = validatePostingsAndBalances,
+    },
+    .{
+        .kind_ordinal = declared_accounts_ordinal,
+        .predicate_version = 1,
+        .group_fn = validateDeclaredAccounts,
+        .account_fn = requireDeclaredAccount,
     },
 };
 
@@ -132,6 +195,23 @@ comptime {
             @compileError("the ledger predicate table must ascend by wire ordinal without repeating one");
         }
         previous = row.kind_ordinal;
+    }
+}
+
+// A manifest row claims a predicate is enforced. A row with neither baseline
+// hook enforces nothing over an existing store while still claiming a version,
+// and a table with no `baseline_fn` at all would make no walk, so every
+// `account_fn` would be called zero times and the baseline would report a pass.
+comptime {
+    var walkers: usize = 0;
+    for (predicates) |row| {
+        if (row.account_fn == null and row.baseline_fn == null) {
+            @compileError("every ledger predicate row must decide something about an existing store");
+        }
+        if (row.baseline_fn != null) walkers += 1;
+    }
+    if (walkers == 0) {
+        @compileError("no ledger predicate owns the store walk that feeds the account hooks");
     }
 }
 
@@ -191,6 +271,8 @@ const OwnedConfig = struct {
     ledger: []u8,
     currencies: []OwnedCurrency,
     invariant_digest: [32]u8,
+    /// Null when the specification declared no account set. See `Config`.
+    accounts: ?[]AccountMatcher,
 
     fn init(allocator: std.mem.Allocator, config: Config) !OwnedConfig {
         try validateConfig(config);
@@ -209,10 +291,29 @@ const OwnedConfig = struct {
             };
             initialized += 1;
         }
+
+        var accounts: ?[]AccountMatcher = null;
+        errdefer if (accounts) |owned| {
+            for (owned) |matcher| allocator.free(matcher.value);
+            allocator.free(owned);
+        };
+        if (config.accounts) |declared| {
+            const rows = try allocator.alloc(AccountMatcher, declared.len);
+            errdefer allocator.free(rows);
+            var copied: usize = 0;
+            errdefer for (rows[0..copied]) |matcher| allocator.free(matcher.value);
+            for (declared, 0..) |matcher, i| {
+                rows[i] = .{ .tag = matcher.tag, .value = try allocator.dupe(u8, matcher.value) };
+                copied += 1;
+            }
+            accounts = rows;
+        }
+
         return .{
             .ledger = ledger,
             .currencies = currencies,
             .invariant_digest = config.invariant_digest,
+            .accounts = accounts,
         };
     }
 
@@ -220,6 +321,10 @@ const OwnedConfig = struct {
         allocator.free(self.ledger);
         for (self.currencies) |currency| allocator.free(currency.code);
         allocator.free(self.currencies);
+        if (self.accounts) |owned| {
+            for (owned) |matcher| allocator.free(matcher.value);
+            allocator.free(owned);
+        }
         self.* = undefined;
     }
 
@@ -323,8 +428,10 @@ pub const LedgerStore = struct {
         // served. The loop is the enforcement: a row added to the table starts
         // being checked here without this function being edited, and a row
         // removed stops being checked, which is what makes the manifest built
-        // from the table describe what actually runs.
-        for (predicates) |row| try row.baseline_fn(self.allocator, handle, db, &self.config);
+        // from the table describe what actually runs. A row whose predicate is
+        // per-account rides inside the walk one of these makes, through
+        // `checkStoredAccount` below, rather than opening a second pass.
+        for (predicates) |row| if (row.baseline_fn) |run| try run(self.allocator, handle, db, &self.config);
     }
 
     fn validateMetadata(self: *LedgerStore, db: *sdk.SqliteDb) !void {
@@ -369,7 +476,7 @@ pub const LedgerStore = struct {
         if (!self.config.hasCurrency(group.currency)) return error.UnsupportedCurrency;
         // The same table, on the write path. A group that any enforced
         // predicate refuses never reaches a transaction.
-        for (predicates) |row| try row.group_fn(group);
+        for (predicates) |row| try row.group_fn(&self.config, group);
 
         const db = try self.ensureDb(handle);
         var content_hash: [64]u8 = undefined;
@@ -519,6 +626,21 @@ fn validateConfig(config: Config) !void {
         }
         previous = currency.code;
     }
+    if (config.accounts) |declared| {
+        // Declared and empty is not expressible: an empty set admits nothing,
+        // and accepting it here would install a store no posting could ever
+        // reach while reading, in every summary, as a declared invariant.
+        if (declared.len == 0) return error.InvalidConfig;
+        var prior: ?AccountMatcher = null;
+        for (declared) |matcher| {
+            try validateText(matcher.value);
+            if (matcher.value.len > MAX_ACCOUNT_MATCHER_BYTES) return error.InvalidConfig;
+            if (prior) |before| {
+                if (AccountMatcher.order(before, matcher) != .lt) return error.InvalidConfig;
+            }
+            prior = matcher;
+        }
+    }
 }
 
 fn validateText(text: []const u8) !void {
@@ -541,11 +663,52 @@ pub fn parseCanonicalAmount(text: []const u8) !i64 {
     return std.fmt.parseInt(i64, text, 10) catch error.AmountOverflow;
 }
 
-fn validateGroup(group: Group) anyerror!void {
+fn validateGroup(_: *const OwnedConfig, group: Group) anyerror!void {
     if (group.entries.len == 0) return error.InvalidInput;
     var sum: i128 = 0;
     for (group.entries) |entry| sum = addI128(sum, entry.amount) catch return error.AmountOverflow;
     if (sum != 0) return error.Unbalanced;
+}
+
+/// Whether `account` satisfies at least one declared rule.
+fn matchesDeclared(declared: []const AccountMatcher, account: []const u8) bool {
+    for (declared) |matcher| {
+        if (matcher.matches(account)) return true;
+    }
+    return false;
+}
+
+/// The write-path half of `declared_accounts_v1`.
+///
+/// Every entry is checked, so a zero-amount entry and a pair that cancels on
+/// one account are checked like any other: the invariant is over the account
+/// a posting names, not over the balance it leaves behind. One failing entry
+/// refuses the whole group, before `executePost` opens a transaction.
+fn validateDeclaredAccounts(config: *const OwnedConfig, group: Group) anyerror!void {
+    const declared = config.accounts orelse return;
+    for (group.entries) |entry| {
+        if (!matchesDeclared(declared, entry.account)) return error.UndeclaredAccount;
+    }
+}
+
+/// The stored-account half of `declared_accounts_v1`.
+///
+/// A distinct error from the write path on purpose: "the group you posted
+/// names an undeclared account" and "the store you configured already holds
+/// one" are different facts, and a test that could not tell them apart would
+/// pass on either.
+fn requireDeclaredAccount(config: *const OwnedConfig, account: []const u8) anyerror!void {
+    const declared = config.accounts orelse return;
+    if (!matchesDeclared(declared, account)) return error.UndeclaredStoredAccount;
+}
+
+/// Every enforced predicate's rule over one account name the store holds.
+///
+/// Called from inside the single exclusive walk below, at each of the two
+/// places that walk already reads an account. The loop is the enforcement, for
+/// the same reason the two loops above are.
+fn checkStoredAccount(config: *const OwnedConfig, account: []const u8) !void {
+    for (predicates) |row| if (row.account_fn) |check| try check(config, account);
 }
 
 fn addI128(left: i128, right: i128) !i128 {
@@ -738,6 +901,10 @@ fn validatePostingsAndBalances(allocator: std.mem.Allocator, handle: *sdk.Module
         {
             return error.CorruptLedger;
         }
+        // The account this row already produced, handed to every per-account
+        // predicate before it is accumulated. No statement is added: this is
+        // the same column the balance arithmetic below reads.
+        try checkStoredAccount(config, sdk.sqliteColumnText(entries, 3));
         posting_has_entry = true;
         const amount = sdk.sqliteColumnInt64(entries, 4);
         posting_sum = addI128(posting_sum, amount) catch return error.ArithmeticOverflow;
@@ -779,6 +946,13 @@ fn validatePostingsAndBalances(allocator: std.mem.Allocator, handle: *sdk.Module
         {
             return error.CorruptLedger;
         }
+        // Every materialized balance row, including one whose balance is zero.
+        // The cross-check below already pairs each historical entry account
+        // with a balances row, so this walk alone covers the set; the entry
+        // side above is checked as well because that pairing is a conclusion
+        // of this same pass rather than a precondition of it, and because an
+        // undeclared account is then reported from the row that introduced it.
+        try checkStoredAccount(config, sdk.sqliteColumnText(balances, 2));
         const row_currency = sdk.sqliteColumnText(balances, 1);
         const stable_currency = config.currencyCode(row_currency) orelse return error.CorruptLedger;
         if (currency == null or !std.mem.eql(u8, currency.?, row_currency)) {
@@ -916,6 +1090,7 @@ fn errorTag(err: anyerror) []const u8 {
         error.WrongLedger => "wrong_ledger",
         error.UnsupportedCurrency => "unsupported_currency",
         error.Unbalanced => "unbalanced",
+        error.UndeclaredAccount => "undeclared_account",
         error.BalanceOverflow => "balance_overflow",
         error.IdempotencyConflict => "idempotency_conflict",
         error.SqliteBusy => "storage_busy",
@@ -925,6 +1100,11 @@ fn errorTag(err: anyerror) []const u8 {
         error.LedgerConfigMismatch,
         error.CorruptLedger,
         error.InvariantViolated,
+        // A store holding an account the configured specification does not
+        // declare is the same class as a store whose metadata disagrees with
+        // it: the store cannot be served under this configuration. It is not
+        // the caller's posting, so it does not carry the caller's tag.
+        error.UndeclaredStoredAccount,
         error.ArithmeticOverflow,
         => "ledger_corrupt",
         error.MissingModuleCapability, error.LedgerNotConfigured => "ledger_unavailable",
@@ -951,9 +1131,11 @@ test "posting groups require exact zero sum using i128 accumulation" {
         .{ .account = "target-a", .amount_text = "9223372036854775807", .amount = std.math.maxInt(i64) },
         .{ .account = "target-b", .amount_text = "1", .amount = 1 },
     };
-    try validateGroup(.{ .ledger = "main", .currency = "USD", .idempotency_key = "k", .entries = &balanced });
+    var config = try ownedFor(null);
+    defer config.deinit(std.testing.allocator);
+    try validateGroup(&config, .{ .ledger = "main", .currency = "USD", .idempotency_key = "k", .entries = &balanced });
     const unbalanced = [_]Entry{.{ .account = "source", .amount_text = "1", .amount = 1 }};
-    try std.testing.expectError(error.Unbalanced, validateGroup(.{ .ledger = "main", .currency = "USD", .idempotency_key = "k", .entries = &unbalanced }));
+    try std.testing.expectError(error.Unbalanced, validateGroup(&config, .{ .ledger = "main", .currency = "USD", .idempotency_key = "k", .entries = &unbalanced }));
     try std.testing.expectError(error.ArithmeticOverflow, addI128(std.math.maxInt(i128), 1));
     try std.testing.expectError(error.ArithmeticOverflow, addI128(std.math.minInt(i128), -1));
 }
@@ -1014,14 +1196,166 @@ test "the balance conservation row names a predicate that refuses an unbalanced 
         .{ .account = "a", .amount_text = "-1", .amount = -1 },
         .{ .account = "b", .amount_text = "1", .amount = 1 },
     };
+    var config = try ownedFor(null);
+    defer config.deinit(std.testing.allocator);
     var found = false;
     for (predicates) |row| {
         if (row.kind_ordinal != balance_conservation_ordinal) continue;
         found = true;
-        try std.testing.expectError(error.Unbalanced, row.group_fn(group));
-        try row.group_fn(.{ .ledger = "main", .currency = "USD", .idempotency_key = "k", .entries = &balanced });
+        try std.testing.expectError(error.Unbalanced, row.group_fn(&config, group));
+        try row.group_fn(&config, .{ .ledger = "main", .currency = "USD", .idempotency_key = "k", .entries = &balanced });
     }
     try std.testing.expect(found);
+}
+
+const testing_digest = [_]u8{0} ** 32;
+
+fn declaredAccountConfig(matchers: []const AccountMatcher) Config {
+    return .{
+        .ledger = "main",
+        .currencies = &.{.{ .code = "USD", .scale = 2 }},
+        .invariant_digest = testing_digest,
+        .accounts = matchers,
+    };
+}
+
+fn ownedFor(matchers: ?[]const AccountMatcher) !OwnedConfig {
+    return OwnedConfig.init(std.testing.allocator, .{
+        .ledger = "main",
+        .currencies = &.{.{ .code = "USD", .scale = 2 }},
+        .invariant_digest = testing_digest,
+        .accounts = matchers,
+    });
+}
+
+test "an exact matcher accepts only the same bytes and a prefix accepts what starts with it" {
+    const exact = AccountMatcher{ .tag = .exact, .value = "clearing:main" };
+    try std.testing.expect(exact.matches("clearing:main"));
+    try std.testing.expect(!exact.matches("clearing:main2"));
+    try std.testing.expect(!exact.matches("clearing:mai"));
+    try std.testing.expect(!exact.matches("Clearing:main"));
+
+    const prefix = AccountMatcher{ .tag = .prefix, .value = "asset:" };
+    try std.testing.expect(prefix.matches("asset:cash"));
+    try std.testing.expect(prefix.matches("asset:"));
+    try std.testing.expect(!prefix.matches("assets:cash"));
+    try std.testing.expect(!prefix.matches("Asset:cash"));
+
+    // Bytes, not codepoints, and no normalization anywhere.
+    const unicode = AccountMatcher{ .tag = .prefix, .value = "über:" };
+    try std.testing.expect(unicode.matches("über:cash"));
+    try std.testing.expect(!unicode.matches("uber:cash"));
+}
+
+test "a posting group is refused whole when any entry names an undeclared account" {
+    var config = try ownedFor(&.{
+        .{ .tag = .exact, .value = "clearing:main" },
+        .{ .tag = .prefix, .value = "asset:" },
+    });
+    defer config.deinit(std.testing.allocator);
+
+    const allowed = [_]Entry{
+        .{ .account = "asset:cash", .amount_text = "-5", .amount = -5 },
+        .{ .account = "clearing:main", .amount_text = "5", .amount = 5 },
+    };
+    try validateDeclaredAccounts(&config, .{ .ledger = "main", .currency = "USD", .idempotency_key = "k", .entries = &allowed });
+
+    // A zero-amount entry is still an entry.
+    const zero_amount = [_]Entry{
+        .{ .account = "asset:cash", .amount_text = "-5", .amount = -5 },
+        .{ .account = "clearing:main", .amount_text = "5", .amount = 5 },
+        .{ .account = "suspense:held", .amount_text = "0", .amount = 0 },
+    };
+    try std.testing.expectError(error.UndeclaredAccount, validateDeclaredAccounts(&config, .{ .ledger = "main", .currency = "USD", .idempotency_key = "k", .entries = &zero_amount }));
+
+    // So is a pair that cancels on one undeclared account.
+    const cancelling = [_]Entry{
+        .{ .account = "suspense:held", .amount_text = "7", .amount = 7 },
+        .{ .account = "suspense:held", .amount_text = "-7", .amount = -7 },
+    };
+    try std.testing.expectError(error.UndeclaredAccount, validateDeclaredAccounts(&config, .{ .ledger = "main", .currency = "USD", .idempotency_key = "k", .entries = &cancelling }));
+
+    // Near misses on both matcher kinds.
+    const near = [_]Entry{
+        .{ .account = "assets:cash", .amount_text = "-1", .amount = -1 },
+        .{ .account = "clearing:main", .amount_text = "1", .amount = 1 },
+    };
+    try std.testing.expectError(error.UndeclaredAccount, validateDeclaredAccounts(&config, .{ .ledger = "main", .currency = "USD", .idempotency_key = "k", .entries = &near }));
+    const case_differs = [_]Entry{
+        .{ .account = "Clearing:main", .amount_text = "-1", .amount = -1 },
+        .{ .account = "asset:cash", .amount_text = "1", .amount = 1 },
+    };
+    try std.testing.expectError(error.UndeclaredAccount, validateDeclaredAccounts(&config, .{ .ledger = "main", .currency = "USD", .idempotency_key = "k", .entries = &case_differs }));
+}
+
+test "a configuration that declares no account set constrains no account" {
+    var config = try ownedFor(null);
+    defer config.deinit(std.testing.allocator);
+    const anything = [_]Entry{
+        .{ .account = "whatever:at:all", .amount_text = "-1", .amount = -1 },
+        .{ .account = "and:this:too", .amount_text = "1", .amount = 1 },
+    };
+    try validateDeclaredAccounts(&config, .{ .ledger = "main", .currency = "USD", .idempotency_key = "k", .entries = &anything });
+    try requireDeclaredAccount(&config, "whatever:at:all");
+}
+
+test "the declared accounts row names a predicate that refuses an undeclared account" {
+    // A row is evidence of enforcement only when the function it names is the
+    // one that decides, on both the write path and the stored-account path.
+    var config = try ownedFor(&.{.{ .tag = .prefix, .value = "asset:" }});
+    defer config.deinit(std.testing.allocator);
+    const refused = [_]Entry{
+        .{ .account = "asset:cash", .amount_text = "-1", .amount = -1 },
+        .{ .account = "equity:opening", .amount_text = "1", .amount = 1 },
+    };
+    const group = Group{ .ledger = "main", .currency = "USD", .idempotency_key = "k", .entries = &refused };
+    var group_checked = false;
+    var account_checked = false;
+    for (predicates) |row| {
+        if (row.kind_ordinal != declared_accounts_ordinal) continue;
+        group_checked = true;
+        try std.testing.expectError(error.UndeclaredAccount, row.group_fn(&config, group));
+        const check = row.account_fn orelse continue;
+        account_checked = true;
+        try check(&config, "asset:cash");
+        try std.testing.expectError(error.UndeclaredStoredAccount, check(&config, "equity:opening"));
+    }
+    try std.testing.expect(group_checked);
+    try std.testing.expect(account_checked);
+}
+
+test "configuration refuses an empty, malformed, duplicate or unordered declared account set" {
+    try std.testing.expectError(error.InvalidConfig, validateConfig(declaredAccountConfig(&.{})));
+    try std.testing.expectError(error.InvalidInput, validateConfig(declaredAccountConfig(&.{
+        .{ .tag = .prefix, .value = "" },
+    })));
+    try std.testing.expectError(error.InvalidInput, validateConfig(declaredAccountConfig(&.{
+        .{ .tag = .exact, .value = &[_]u8{ 0xc3, 0x28 } },
+    })));
+    try std.testing.expectError(error.InvalidConfig, validateConfig(declaredAccountConfig(&.{
+        .{ .tag = .exact, .value = "a" },
+        .{ .tag = .exact, .value = "a" },
+    })));
+    try std.testing.expectError(error.InvalidConfig, validateConfig(declaredAccountConfig(&.{
+        .{ .tag = .prefix, .value = "a" },
+        .{ .tag = .exact, .value = "a" },
+    })));
+    try validateConfig(declaredAccountConfig(&.{
+        .{ .tag = .exact, .value = "clearing:main" },
+        .{ .tag = .prefix, .value = "asset:" },
+    }));
+}
+
+test "every enforced predicate decides something at baseline, and one of them owns the walk" {
+    // The account hooks run from inside the walk one `baseline_fn` makes. A
+    // table with no walk would call every account hook zero times and report a
+    // pass; a row with neither hook would be a manifest row enforcing nothing.
+    var walkers: usize = 0;
+    for (predicates) |row| {
+        try std.testing.expect(row.account_fn != null or row.baseline_fn != null);
+        if (row.baseline_fn != null) walkers += 1;
+    }
+    try std.testing.expect(walkers >= 1);
 }
 
 test "configuration requires a sorted unique currency header" {

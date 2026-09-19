@@ -4766,7 +4766,7 @@ fn ledgerInvariantBytes(buffer: []u8, scale: u8) ![]u8 {
     const size = invariant.header_size + "main".len + invariant.currency_record_size;
     if (buffer.len < size) return error.BufferTooSmall;
     @memcpy(buffer[0..8], invariant.magic);
-    std.mem.writeInt(u16, buffer[8..10], invariant.schema_version, .little);
+    std.mem.writeInt(u16, buffer[8..10], invariant.schema_version_v1, .little);
     std.mem.writeInt(u16, buffer[10..12], @intFromEnum(invariant.Kind.balance_conservation_v1), .little);
     std.mem.writeInt(u16, buffer[12..14], "main".len, .little);
     std.mem.writeInt(u16, buffer[14..16], 1, .little);
@@ -4783,7 +4783,7 @@ fn ledgerTwoCurrencyInvariantBytes(buffer: []u8, usd_scale: u8) ![]u8 {
     const size = invariant.header_size + "main".len + 2 * invariant.currency_record_size;
     if (buffer.len < size) return error.BufferTooSmall;
     @memcpy(buffer[0..8], invariant.magic);
-    std.mem.writeInt(u16, buffer[8..10], invariant.schema_version, .little);
+    std.mem.writeInt(u16, buffer[8..10], invariant.schema_version_v1, .little);
     std.mem.writeInt(u16, buffer[10..12], @intFromEnum(invariant.Kind.balance_conservation_v1), .little);
     std.mem.writeInt(u16, buffer[12..14], "main".len, .little);
     std.mem.writeInt(u16, buffer[14..16], 2, .little);
@@ -4795,6 +4795,260 @@ fn ledgerTwoCurrencyInvariantBytes(buffer: []u8, usd_scale: u8) ![]u8 {
     const encoded = buffer[0..size];
     _ = try invariant.decode(encoded);
     return encoded;
+}
+
+/// One declared account rule, in the order the canonical payload requires:
+/// exact rules before prefix rules, and byte order within each.
+const LedgerMatcher = struct { exact: bool, value: []const u8 };
+
+/// A schema 2 section declaring balance conservation and a set of account
+/// rules over the one ledger `main` and the one currency USD.
+fn ledgerDeclaredAccountsBytes(buffer: []u8, matchers: []const LedgerMatcher) ![]u8 {
+    const invariant = @import("zttp_proof_checker").invariant;
+    var payload_len: usize = 2;
+    for (matchers) |matcher| {
+        payload_len += invariant.account_matcher_header_size + matcher.value.len;
+    }
+    const size = invariant.header_size + "main".len + invariant.currency_record_size +
+        2 * invariant.kind_record_header_size + payload_len;
+    if (buffer.len < size) return error.BufferTooSmall;
+
+    @memcpy(buffer[0..8], invariant.magic);
+    std.mem.writeInt(u16, buffer[8..10], invariant.schema_version_v2, .little);
+    std.mem.writeInt(u16, buffer[10..12], 2, .little);
+    std.mem.writeInt(u16, buffer[12..14], "main".len, .little);
+    std.mem.writeInt(u16, buffer[14..16], 1, .little);
+    @memcpy(buffer[invariant.header_size..][0..4], "main");
+    @memcpy(buffer[invariant.header_size + 4 ..][0..3], "USD");
+    buffer[invariant.header_size + 7] = 2;
+
+    var cursor: usize = invariant.header_size + 4 + invariant.currency_record_size;
+    std.mem.writeInt(u16, buffer[cursor..][0..2], 1, .little);
+    std.mem.writeInt(u16, buffer[cursor + 2 ..][0..2], 0, .little);
+    cursor += invariant.kind_record_header_size;
+    std.mem.writeInt(u16, buffer[cursor..][0..2], 2, .little);
+    std.mem.writeInt(u16, buffer[cursor + 2 ..][0..2], @intCast(payload_len), .little);
+    cursor += invariant.kind_record_header_size;
+    std.mem.writeInt(u16, buffer[cursor..][0..2], @intCast(matchers.len), .little);
+    cursor += 2;
+    for (matchers) |matcher| {
+        buffer[cursor] = if (matcher.exact) 1 else 2;
+        std.mem.writeInt(u16, buffer[cursor + 1 ..][0..2], @intCast(matcher.value.len), .little);
+        @memcpy(buffer[cursor + invariant.account_matcher_header_size ..][0..matcher.value.len], matcher.value);
+        cursor += invariant.account_matcher_header_size + matcher.value.len;
+    }
+
+    const encoded = buffer[0..size];
+    _ = try invariant.decode(encoded);
+    return encoded;
+}
+
+fn ledgerScalar(allocator: std.mem.Allocator, path: []const u8, sql: [:0]const u8) !i64 {
+    var db = try zq.sqlite.Db.openReadOnly(allocator, path);
+    defer db.close();
+    var stmt = try db.prepare(sql);
+    defer stmt.finalize();
+    if (stmt.step() != zq.sqlite.c.SQLITE_ROW) return error.NoRow;
+    return zq.sqlite.c.sqlite3_column_int64(stmt.handle, 0);
+}
+
+fn ledgerStoredDigest(allocator: std.mem.Allocator, path: []const u8, out: *[64]u8) ![]const u8 {
+    var db = try zq.sqlite.Db.openReadOnly(allocator, path);
+    defer db.close();
+    var stmt = try db.prepare("SELECT invariant_digest FROM ledger_meta WHERE singleton = 1");
+    defer stmt.finalize();
+    if (stmt.step() != zq.sqlite.c.SQLITE_ROW) return error.NoRow;
+    const text = zq.sqlite.c.sqlite3_column_text(stmt.handle, 0);
+    const len: usize = @intCast(zq.sqlite.c.sqlite3_column_bytes(stmt.handle, 0));
+    if (len != out.len) return error.UnexpectedDigest;
+    @memcpy(out[0..len], @as([*]const u8, @ptrCast(text))[0..len]);
+    return out[0..len];
+}
+
+test "a declared account set refuses an undeclared posting and leaves the store untouched" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try durableTestDirPath(allocator, &tmp);
+    const ledger_path = try std.fmt.allocPrint(allocator, "{s}/declared.sqlite", .{dir});
+    var invariant_buffer: [128]u8 = undefined;
+    const invariant_bytes = try ledgerDeclaredAccountsBytes(&invariant_buffer, &.{
+        .{ .exact = true, .value = "clearing:main" },
+        .{ .exact = false, .value = "asset:" },
+    });
+    const config = RuntimeConfig{
+        .ledger_path = ledger_path,
+        .invariant_section = invariant_bytes,
+        .invariant_coverage_accepted = true,
+    };
+
+    {
+        const rt = try HandlerInstance.init(allocator, config);
+        defer rt.deinit();
+        try rt.loadHandler(
+            \\import { post, balance } from "zttp:ledger";
+            \\function handler(req) {
+            \\  const declared = post({ ledger: "main", currency: "USD", idempotencyKey: "declared", entries: [
+            \\    { account: "asset:cash", amount: "-5" },
+            \\    { account: "clearing:main", amount: "5" }
+            \\  ] });
+            \\  const prefixItself = post({ ledger: "main", currency: "USD", idempotencyKey: "prefix-itself", entries: [
+            \\    { account: "asset:", amount: "-1" },
+            \\    { account: "clearing:main", amount: "1" }
+            \\  ] });
+            \\  const nearMiss = post({ ledger: "main", currency: "USD", idempotencyKey: "near-miss", entries: [
+            \\    { account: "assets:cash", amount: "-1" },
+            \\    { account: "clearing:main", amount: "1" }
+            \\  ] });
+            \\  const wrongCase = post({ ledger: "main", currency: "USD", idempotencyKey: "wrong-case", entries: [
+            \\    { account: "Clearing:main", amount: "-1" },
+            \\    { account: "asset:cash", amount: "1" }
+            \\  ] });
+            \\  const zeroAmount = post({ ledger: "main", currency: "USD", idempotencyKey: "zero-amount", entries: [
+            \\    { account: "asset:cash", amount: "-1" },
+            \\    { account: "clearing:main", amount: "1" },
+            \\    { account: "suspense:held", amount: "0" }
+            \\  ] });
+            \\  const cancelling = post({ ledger: "main", currency: "USD", idempotencyKey: "cancelling", entries: [
+            \\    { account: "suspense:held", amount: "7" },
+            \\    { account: "suspense:held", amount: "-7" }
+            \\  ] });
+            \\  const cash = balance("main", "USD", "asset:cash");
+            \\  const clearing = balance("main", "USD", "clearing:main");
+            \\  const suspense = balance("main", "USD", "suspense:held");
+            \\  return Response.json({ declaredOk: declared.ok, prefixItselfOk: prefixItself.ok,
+            \\    nearMissTag: nearMiss.error.tag, wrongCaseTag: wrongCase.error.tag,
+            \\    zeroAmountTag: zeroAmount.error.tag, cancellingTag: cancelling.error.tag,
+            \\    cash: cash.value, clearing: clearing.value, suspense: suspense.value });
+            \\}
+        , "<ledger-declared>");
+
+        var request = try makeTestRequest(allocator, "GET", "/", null);
+        defer request.deinit(allocator);
+        var response = try rt.executeHandler(request.asView());
+        defer response.deinit();
+        try std.testing.expectEqual(@as(u16, 200), response.status);
+        var parsed = try std.json.parseFromSlice(std.json.Value, allocator, response.body, .{});
+        defer parsed.deinit();
+        const body = parsed.value.object;
+        try std.testing.expect(body.get("declaredOk").?.bool);
+        // The prefix accepts its own bytes.
+        try std.testing.expect(body.get("prefixItselfOk").?.bool);
+        try std.testing.expectEqualStrings("undeclared_account", body.get("nearMissTag").?.string);
+        try std.testing.expectEqualStrings("undeclared_account", body.get("wrongCaseTag").?.string);
+        // A zero-amount entry is still an entry, and so is a pair that cancels
+        // on one account: neither changes a balance, and both are refused.
+        try std.testing.expectEqualStrings("undeclared_account", body.get("zeroAmountTag").?.string);
+        try std.testing.expectEqualStrings("undeclared_account", body.get("cancellingTag").?.string);
+        // The second group debits the prefix's own bytes, not `asset:cash`.
+        try std.testing.expectEqualStrings("-5", body.get("cash").?.string);
+        try std.testing.expectEqualStrings("6", body.get("clearing").?.string);
+        try std.testing.expectEqualStrings("0", body.get("suspense").?.string);
+    }
+
+    // The refused groups left nothing behind: not an entry, not a balance row
+    // for the undeclared account, and not an idempotency record that a later
+    // retry would replay instead of re-deciding.
+    try std.testing.expectEqual(@as(i64, 2), try ledgerScalar(allocator, ledger_path, "SELECT count(*) FROM ledger_postings"));
+    try std.testing.expectEqual(@as(i64, 4), try ledgerScalar(allocator, ledger_path, "SELECT count(*) FROM ledger_entries"));
+    try std.testing.expectEqual(@as(i64, 3), try ledgerScalar(allocator, ledger_path, "SELECT count(*) FROM ledger_balances"));
+    try std.testing.expectEqual(
+        @as(i64, 0),
+        try ledgerScalar(allocator, ledger_path, "SELECT count(*) FROM ledger_balances WHERE account = 'suspense:held'"),
+    );
+    try std.testing.expectEqual(
+        @as(i64, 0),
+        try ledgerScalar(allocator, ledger_path, "SELECT count(*) FROM ledger_postings WHERE idempotency_key IN ('near-miss', 'wrong-case', 'zero-amount', 'cancelling')"),
+    );
+
+    // The same specification reopens the store it wrote.
+    {
+        const rt = try HandlerInstance.init(allocator, config);
+        defer rt.deinit();
+        try rt.loadHandler(
+            \\import { balance } from "zttp:ledger";
+            \\function handler(req) {
+            \\  const cash = balance("main", "USD", "asset:cash");
+            \\  return Response.json({ cash: cash.value });
+            \\}
+        , "<ledger-declared-reopen>");
+
+        var request = try makeTestRequest(allocator, "GET", "/", null);
+        defer request.deinit(allocator);
+        var response = try rt.executeHandler(request.asView());
+        defer response.deinit();
+        var parsed = try std.json.parseFromSlice(std.json.Value, allocator, response.body, .{});
+        defer parsed.deinit();
+        try std.testing.expectEqualStrings("-5", parsed.value.object.get("cash").?.string);
+    }
+
+    // A narrower specification is a different document with a different
+    // digest, so the store refuses it - and the stored digest is read back
+    // afterwards, because a startup that rewrote metadata to make a mismatch
+    // pass would produce exactly the same refusal on this one attempt and none
+    // on the next.
+    var stored_before: [64]u8 = undefined;
+    const before = try ledgerStoredDigest(allocator, ledger_path, &stored_before);
+    var narrow_buffer: [128]u8 = undefined;
+    const narrowed = try ledgerDeclaredAccountsBytes(&narrow_buffer, &.{
+        .{ .exact = true, .value = "clearing:main" },
+    });
+    try std.testing.expectError(error.LedgerConfigMismatch, HandlerInstance.init(allocator, .{
+        .ledger_path = ledger_path,
+        .invariant_section = narrowed,
+        .invariant_coverage_accepted = true,
+    }));
+    var stored_after: [64]u8 = undefined;
+    const after = try ledgerStoredDigest(allocator, ledger_path, &stored_after);
+    try std.testing.expectEqualStrings(before, after);
+
+    // And a store that already holds an account the same specification does
+    // not declare is refused before it is served. The rename keeps every sum
+    // intact, so nothing else in the baseline has anything to object to.
+    var db = try zq.sqlite.Db.openReadWriteCreate(allocator, ledger_path);
+    try db.exec(allocator, "UPDATE ledger_entries SET account = 'suspense:held' WHERE account = 'asset:cash'");
+    try db.exec(allocator, "UPDATE ledger_balances SET account = 'suspense:held' WHERE account = 'asset:cash'");
+    db.close();
+    try std.testing.expectError(error.UndeclaredStoredAccount, HandlerInstance.init(allocator, config));
+}
+
+test "a store with no declared account set admits every account" {
+    // The floor under the test above: without it, an account check that
+    // refused everything would satisfy every refusal it asserts.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try durableTestDirPath(allocator, &tmp);
+    const ledger_path = try std.fmt.allocPrint(allocator, "{s}/undeclared.sqlite", .{dir});
+    var invariant_buffer: [64]u8 = undefined;
+    const invariant_bytes = try ledgerInvariantBytes(&invariant_buffer, 2);
+    const config = RuntimeConfig{
+        .ledger_path = ledger_path,
+        .invariant_section = invariant_bytes,
+        .invariant_coverage_accepted = true,
+    };
+    const rt = try HandlerInstance.init(allocator, config);
+    defer rt.deinit();
+    try rt.loadHandler(
+        \\import { post } from "zttp:ledger";
+        \\function handler(req) {
+        \\  const result = post({ ledger: "main", currency: "USD", idempotencyKey: "any", entries: [
+        \\    { account: "suspense:held", amount: "3" }, { account: "whatever", amount: "-3" }
+        \\  ] });
+        \\  return Response.text(result.ok ? "ok" : result.error.tag);
+        \\}
+    , "<ledger-undeclared>");
+    var request = try makeTestRequest(allocator, "GET", "/", null);
+    defer request.deinit(allocator);
+    var response = try rt.executeHandler(request.asView());
+    defer response.deinit();
+    try std.testing.expectEqualStrings("ok", response.body);
 }
 
 test "protected ledger posts atomically and validates its baseline on reopen" {

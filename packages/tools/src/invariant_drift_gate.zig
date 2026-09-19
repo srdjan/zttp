@@ -150,6 +150,7 @@ const Check = enum {
     graph_adapter_member,
     native_post_dispatch,
     native_baseline_dispatch,
+    native_account_dispatch,
     native_manifest_derivation,
     native_manifest_empty,
     adapter_manifest_mismatch,
@@ -166,6 +167,7 @@ const Check = enum {
     docs_rows_empty,
     docs_catalog_mismatch,
     docs_schema_statement,
+    docs_kind_statement,
     concepts_entry,
     missing_evidence,
     kind_table_floor,
@@ -297,7 +299,7 @@ const Model = struct {
     config_acceptance: []ConfigAcceptance,
     config_unknown_refusals: []UnknownRefusal,
     /// The two wire schemas, imported as values.
-    schema_version: u16,
+    schema_version_v1: u16,
     schema_version_v2: u16,
     digest_domains: DigestDomains,
     adapter_digest: [32]u8,
@@ -422,8 +424,30 @@ fn confirmedTemplate(arena: std.mem.Allocator, kind_name: []const u8) ![]u8 {
     return std.fmt.allocPrint(
         arena,
         "{{\"version\":{d},\"kind\":\"{s}\",\"ledger\":\"gate\",\"currencies\":[{{\"code\":\"USD\",\"scale\":2}}]}}",
-        .{ invariant.schema_version, kind_name },
+        .{ invariant.schema_version_v1, kind_name },
     );
+}
+
+/// The payload fields one declared kind must carry in a schema 2 document,
+/// smallest form that the decoder accepts.
+///
+/// The switch is exhaustive, so a kind added to the catalog whose payload this
+/// gate does not know fails to compile here. Without it, a kind with a required
+/// payload would be offered to the authoring boundary as a bare name, refused,
+/// and reported as a boundary that cannot author its own catalog.
+fn writeKindFields(out: *std.Io.Writer, kind: invariant.Kind) std.Io.Writer.Error!void {
+    switch (kind) {
+        .balance_conservation_v1 => {},
+        .declared_accounts_v1 => try out.writeAll(",\"accounts\":[{\"prefix\":\"gate:\"}]"),
+    }
+}
+
+/// One entry of the schema 2 kind list, by name. A name the catalog does not
+/// resolve carries no payload fields: the boundary must refuse it on the name.
+fn writeKindEntry(out: *std.Io.Writer, kind_name: []const u8) std.Io.Writer.Error!void {
+    try out.print("{{\"kind\":\"{s}\"", .{kind_name});
+    if (std.meta.stringToEnum(invariant.Kind, kind_name)) |kind| try writeKindFields(out, kind);
+    try out.writeAll("}");
 }
 
 /// The same document under schema 2, which names its kinds in a record list.
@@ -435,13 +459,15 @@ fn confirmedTemplateV2(arena: std.mem.Allocator, kind_name: []const u8) ![]u8 {
     errdefer writer.deinit();
     const out = &writer.writer;
     try out.print(
-        "{{\"version\":{d},\"ledger\":\"gate\",\"currencies\":[{{\"code\":\"USD\",\"scale\":2}}],\"kinds\":[{{\"kind\":\"{s}\"}}",
-        .{ invariant.schema_version_v2, kind_name },
+        "{{\"version\":{d},\"ledger\":\"gate\",\"currencies\":[{{\"code\":\"USD\",\"scale\":2}}],\"kinds\":[",
+        .{invariant.schema_version_v2},
     );
+    try writeKindEntry(out, kind_name);
     for (std.enums.values(invariant.Kind)) |kind| {
         if (!invariant.kindInfo(kind).required) continue;
         if (std.mem.eql(u8, @tagName(kind), kind_name)) continue;
-        try out.print(",{{\"kind\":\"{s}\"}}", .{@tagName(kind)});
+        try out.writeAll(",");
+        try writeKindEntry(out, @tagName(kind));
     }
     try out.writeAll("]}");
     return writer.written();
@@ -452,18 +478,27 @@ fn templateFor(arena: std.mem.Allocator, schema: u16, kind_name: []const u8) ![]
     return confirmedTemplate(arena, kind_name);
 }
 
-const measured_schemas = [_]u16{ invariant.schema_version, invariant.schema_version_v2 };
+const measured_schemas = [_]u16{ invariant.schema_version_v1, invariant.schema_version_v2 };
+
+/// The wire schema whose header has room for one kind, and whose decoder admits
+/// only the required one.
+///
+/// Named as a rule rather than spelled as a version number at the comparison
+/// below: `schema == invariant.schema_version_v1` reads as "is this the lower
+/// of the two versions", which is a fact about numbers, and the rule it stands
+/// for is a fact about what that schema can carry.
+const closed_schema = invariant.schema_version_v1;
 
 /// Whether the authoring boundary must author `required` under `schema`.
 ///
-/// Schema 2 carries a record list, so it authors every catalog kind. Schema 1
-/// has room for one kind in its header and its decoder admits only the required
-/// one, so the boundary must refuse the rest there rather than emit bytes a
-/// consumer would reject. The two statements are settled here, in one place,
-/// because a gate that only demanded acceptance would turn red the day the
-/// catalog grows and offer no way to tell a closed schema from a broken one.
+/// Schema 2 carries a record list, so it authors every catalog kind. The closed
+/// schema has room for one kind in its header and its decoder admits only the
+/// required one, so the boundary must refuse the rest there rather than emit
+/// bytes a consumer would reject. The two statements are settled here, in one
+/// place, because a gate that only demanded acceptance would turn red the day
+/// the catalog grows and offer no way to tell a closed schema from a broken one.
 fn mustAuthor(schema: u16, required: bool) bool {
-    if (schema == invariant.schema_version) return required;
+    if (schema == closed_schema) return required;
     return true;
 }
 
@@ -1200,6 +1235,27 @@ fn validate(arena: std.mem.Allocator, gate: *Gate, model: Model) !void {
         return gate.reject(.native_baseline_dispatch, "the native baseline path does not iterate the predicate dispatch table", .{});
     }
 
+    // A per-account predicate rides inside the single walk the baseline
+    // already makes, rather than opening a second pass over the same rows.
+    // That only holds if the hook is dispatched through the table like the
+    // other two, and if the walk hands it both the accounts it reads: the
+    // historical entry accounts and the materialized balance accounts. A walk
+    // that fed it one of the two would still refuse most stores and would pass
+    // any test that only posts and reopens.
+    const account_body = functionBody(adapter_native_text, "fn checkStoredAccount(") orelse
+        return gate.reject(.native_account_dispatch, "{s} has no stored-account hook", .{paths.get(.native)});
+    if (std.mem.indexOf(u8, account_body, "for (predicates)") == null or
+        std.mem.indexOf(u8, account_body, "row.account_fn") == null)
+    {
+        return gate.reject(.native_account_dispatch, "the stored-account hook does not iterate the predicate dispatch table", .{});
+    }
+    const walk_body = functionBody(adapter_native_text, "fn validatePostingsAndBalances(") orelse
+        return gate.reject(.native_account_dispatch, "{s} has no store walk", .{paths.get(.native)});
+    const account_calls = countOccurrences(walk_body, "checkStoredAccount(");
+    if (account_calls < 2) {
+        return gate.reject(.native_account_dispatch, "the store walk hands the stored-account hook {d} of the two account columns it reads", .{account_calls});
+    }
+
     // The manifest must be derived from that table, from the store schema
     // constant, and from the binding's exports. A manifest typed out by hand
     // beside the table is a second statement that can drift from the first.
@@ -1448,6 +1504,14 @@ fn validate(arena: std.mem.Allocator, gate: *Gate, model: Model) !void {
     {
         return gate.reject(.docs_invariant_schema_statement, "{s} does not state both invariant wire schemas", .{paths.get(.docs)});
     }
+    // Every catalog kind is published by name. A kind that acceptance knows
+    // and the documentation does not mention is a kind a reader cannot find
+    // out about, and the omission grows silently with the catalog.
+    for (model.kinds) |row| {
+        if (std.mem.indexOf(u8, model.text.get(.docs), row.name) == null) {
+            return gate.reject(.docs_kind_statement, "{s} does not name the catalog kind '{s}'", .{ paths.get(.docs), row.name });
+        }
+    }
     if (std.mem.indexOf(u8, model.text.get(.concepts), "### Application invariant") == null) {
         return gate.reject(.concepts_entry, "{s} has no Application invariant entry", .{paths.get(.concepts)});
     }
@@ -1487,11 +1551,11 @@ fn validate(arena: std.mem.Allocator, gate: *Gate, model: Model) !void {
     }
 
     // --- the two wire schemas, imported as values ----------------------------
-    if (model.schema_version != 1) {
-        return gate.reject(.schema_v1_moved, "the first invariant wire schema is {d}; deployed artifacts and existing ledger stores are bound to 1", .{model.schema_version});
+    if (model.schema_version_v1 != 1) {
+        return gate.reject(.schema_v1_moved, "the first invariant wire schema is {d}; deployed artifacts and existing ledger stores are bound to 1", .{model.schema_version_v1});
     }
-    if (model.schema_version_v2 == model.schema_version) {
-        return gate.reject(.schema_versions_not_distinct, "both invariant wire schemas carry version {d}", .{model.schema_version});
+    if (model.schema_version_v2 == model.schema_version_v1) {
+        return gate.reject(.schema_versions_not_distinct, "both invariant wire schemas carry version {d}", .{model.schema_version_v1});
     }
     if (!model.digest_domains.v1_preserved) {
         return gate.reject(.v1_digest_domain_changed, "schema 1 bytes no longer hash under '{s}'; every deployed artifact and ledger store is bound to those digests", .{v1_digest_domain_literal});
@@ -1970,8 +2034,8 @@ fn probeNativePostDispatch(arena: std.mem.Allocator, model: *Model) !void {
         arena,
         model,
         .native,
-        "for (predicates) |row| try row.group_fn(group);",
-        "try validateGroup(group);",
+        "for (predicates) |row| try row.group_fn(&self.config, group);",
+        "try validateGroup(&self.config, group);",
     );
 }
 
@@ -1980,8 +2044,35 @@ fn probeNativeBaselineDispatch(arena: std.mem.Allocator, model: *Model) !void {
         arena,
         model,
         .native,
-        "for (predicates) |row| try row.baseline_fn(self.allocator, handle, db, &self.config);",
+        "for (predicates) |row| if (row.baseline_fn) |run| try run(self.allocator, handle, db, &self.config);",
         "try validatePostingsAndBalances(self.allocator, handle, db, &self.config);",
+    );
+}
+
+/// The stored-account hook stops going through the table and calls one
+/// predicate directly. The row would then still be in the manifest, and a row
+/// removed from the table would still be enforced.
+fn probeNativeAccountDispatch(arena: std.mem.Allocator, model: *Model) !void {
+    try replaceOnce(
+        arena,
+        model,
+        .native,
+        "for (predicates) |row| if (row.account_fn) |check| try check(config, account);",
+        "try requireDeclaredAccount(config, account);",
+    );
+}
+
+/// The walk feeds the hook one of the two account columns it reads. Deleting
+/// the hook outright would be caught by the clause above; this is the shape
+/// that keeps the dispatch and loses half the rows, which every posting test
+/// would still pass.
+fn probeNativeAccountCoverage(arena: std.mem.Allocator, model: *Model) !void {
+    try replaceOnce(
+        arena,
+        model,
+        .native,
+        "try checkStoredAccount(config, sdk.sqliteColumnText(entries, 3));",
+        "",
     );
 }
 
@@ -2059,22 +2150,45 @@ fn probeConfigUnknownV2(arena: std.mem.Allocator, model: *Model) !void {
 }
 
 fn probeSchemaVersion(_: std.mem.Allocator, model: *Model) !void {
-    model.schema_version = model.schema_version + 1;
+    model.schema_version_v1 = model.schema_version_v1 + 1;
 }
 
 fn probeSchemaVersionV2(_: std.mem.Allocator, model: *Model) !void {
-    model.schema_version_v2 = model.schema_version;
+    model.schema_version_v2 = model.schema_version_v1;
 }
 
-/// A kind that is no longer required must stop being authorable under schema 1.
-/// This is the one mutation that reaches the closed-schema branch while the
-/// catalog holds a single required kind.
+/// A kind that is no longer required must stop being authorable under the
+/// closed schema. The required row is selected by its flag rather than by
+/// position, so the probe survives any declaration order: picking `rows[0]`
+/// and finding an optional kind there would flip a false to a false, leave
+/// every clause satisfied, and report the check as one that catches nothing.
 fn probeKindNotRequired(arena: std.mem.Allocator, model: *Model) !void {
-    if (model.kinds.len == 0) return error.ProbeAnchorMissing;
     const rows = try arena.dupe(KindRow, model.kinds);
     errdefer arena.free(rows);
-    rows[0].required = false;
-    model.kinds = rows;
+    for (rows) |*row| {
+        if (!row.required) continue;
+        row.required = false;
+        model.kinds = rows;
+        return;
+    }
+    return error.ProbeAnchorMissing;
+}
+
+/// A kind the closed schema must refuse is refused for some other reason. The
+/// check demands the refusal name the closed schema rather than arrive as any
+/// error at all, and that branch is unreachable until the catalog holds a kind
+/// that schema cannot carry. The measurement rows are mutated rather than the
+/// boundary, because the boundary refusing differently is the thing under test.
+fn probeConfigClosureFailure(arena: std.mem.Allocator, model: *Model) !void {
+    const rows = try arena.dupe(ConfigAcceptance, model.config_acceptance);
+    errdefer arena.free(rows);
+    for (rows) |*row| {
+        if (row.accepted or row.schema != closed_schema) continue;
+        row.failure = "SomeOtherRefusal";
+        model.config_acceptance = rows;
+        return;
+    }
+    return error.ProbeAnchorMissing;
 }
 
 /// Drop one measurement. The floor ahead of the per-kind loop must see the
@@ -2123,6 +2237,16 @@ fn probeDocs(arena: std.mem.Allocator, model: *Model) !void {
     });
     errdefer arena.free(replacement);
     try replaceOnce(arena, model, .docs, needle, replacement);
+}
+
+/// The published documentation stops naming one catalog kind. The replacement
+/// shares no substring with what it replaces: a name the check would still
+/// find inside the mangled one would leave the probe reporting that the check
+/// catches nothing, when what it caught was its own probe.
+fn probeDocsKind(arena: std.mem.Allocator, model: *Model) !void {
+    if (model.kinds.len == 0) return error.ProbeAnchorMissing;
+    const name = model.kinds[model.kinds.len - 1].name;
+    try replaceEvery(arena, model, .docs, name, "a-kind-the-docs-do-not-name");
 }
 
 fn probeConcepts(arena: std.mem.Allocator, model: *Model) !void {
@@ -2209,6 +2333,8 @@ const probes = [_]Probe{
     .{ .name = "producer-adapter", .expect = .producer_adapter_binding, .apply = probeProducerAdapter },
     .{ .name = "native-post-dispatch", .expect = .native_post_dispatch, .apply = probeNativePostDispatch },
     .{ .name = "native-baseline-dispatch", .expect = .native_baseline_dispatch, .apply = probeNativeBaselineDispatch },
+    .{ .name = "native-account-dispatch", .expect = .native_account_dispatch, .apply = probeNativeAccountDispatch },
+    .{ .name = "native-account-coverage", .expect = .native_account_dispatch, .apply = probeNativeAccountCoverage },
     .{ .name = "native-manifest-derivation", .expect = .native_manifest_derivation, .apply = probeNativeManifestDerivation },
     .{ .name = "manifest-agreement", .expect = .adapter_manifest_mismatch, .apply = probeManifestAgreement },
     .{ .name = "manifest-empty", .expect = .native_manifest_empty, .apply = probeManifestEmpty },
@@ -2231,11 +2357,13 @@ const probes = [_]Probe{
     .{ .name = "config-acceptance-short", .expect = .config_schema_coverage, .apply = probeConfigAcceptanceShort },
     .{ .name = "config-unknown-short", .expect = .config_schema_coverage, .apply = probeConfigUnknownShort },
     .{ .name = "kind-not-required", .expect = .config_schema_closure, .apply = probeKindNotRequired },
+    .{ .name = "config-closure-failure", .expect = .config_schema_closure, .apply = probeConfigClosureFailure },
     .{ .name = "schema-version", .expect = .schema_v1_moved, .apply = probeSchemaVersion },
     .{ .name = "schema-version-v2", .expect = .schema_versions_not_distinct, .apply = probeSchemaVersionV2 },
     .{ .name = "digest-domain-v1", .expect = .v1_digest_domain_changed, .apply = probeDigestDomainV1 },
     .{ .name = "digest-domain-v2", .expect = .v2_digest_domain_shared, .apply = probeDigestDomainV2 },
     .{ .name = "docs-invariant-schema", .expect = .docs_invariant_schema_statement, .apply = probeDocsInvariantSchema },
+    .{ .name = "docs-kind-statement", .expect = .docs_kind_statement, .apply = probeDocsKind },
 };
 
 // ---------------------------------------------------------------------------
@@ -2293,7 +2421,7 @@ fn loadModel(arena: std.mem.Allocator, root: []const u8, gate: *Gate) !Model {
         .authoring = try renderAuthoring(arena),
         .config_acceptance = try measureConfigAcceptance(arena, kinds),
         .config_unknown_refusals = try measureConfigRejectsUnknown(arena),
-        .schema_version = invariant.schema_version,
+        .schema_version_v1 = invariant.schema_version_v1,
         .schema_version_v2 = invariant.schema_version_v2,
         .digest_domains = try measureDigestDomains(arena, kinds),
         .adapter_digest = invariant.adapterDigest(),
@@ -2523,8 +2651,9 @@ test "every adapter and manifest check is exercised by a probe" {
         }
     }
     // A filter that matched nothing would pass the loop above in silence.
-    // Eighteen is the family's size today; shrinking it is a deliberate edit.
-    try testing.expect(covered >= 18);
+    // Nineteen is the family's size today, one more than before
+    // `native_account_dispatch` joined it; shrinking it is a deliberate edit.
+    try testing.expect(covered >= 19);
 }
 
 test "no probe expects the absence of a rejection" {
@@ -2561,8 +2690,11 @@ test "only the argued shared kernel surface is admitted, and only through the ke
         "pcc.invariant.Kind.balance_conservation_v1",
         "pcc.invariant.Operation.post",
         "pcc.invariant.SinkId.ledger_post",
-        "pcc.invariant.schema_version",
+        "pcc.invariant.schema_version_v1",
         "pcc.invariant.schema_version_v2",
+        "pcc.invariant.AccountMatcher",
+        "pcc.invariant.decodeAccountMatchers(p)",
+        "pcc.invariant.max_account_matchers",
         "pcc.invariant.catalog",
         "pcc.invariant.digest_domain",
         "pcc.invariant.magic",
@@ -2792,8 +2924,8 @@ test "the confirmed template authors every catalog kind under the schema that ca
     }
     // Schema 1 is the closed one, schema 2 the open one. With one required
     // kind both rules agree on every row, so state the rule itself as well.
-    try testing.expect(mustAuthor(invariant.schema_version, true));
-    try testing.expect(!mustAuthor(invariant.schema_version, false));
+    try testing.expect(mustAuthor(invariant.schema_version_v1, true));
+    try testing.expect(!mustAuthor(invariant.schema_version_v1, false));
     try testing.expect(mustAuthor(invariant.schema_version_v2, true));
     try testing.expect(mustAuthor(invariant.schema_version_v2, false));
 
