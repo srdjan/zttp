@@ -42,6 +42,55 @@ pub const Kind = enum(u16) {
     }
 };
 
+/// Per-kind metadata for the closed invariant catalog.
+///
+/// The row is the one place a kind's wire identity, its confirmed sentence, and
+/// its policy flags are stated. A consumer that needs one of those facts reads
+/// it here instead of restating it locally.
+pub const KindInfo = struct {
+    /// The value this kind carries in the spec header's kind field.
+    wire_ordinal: u16,
+    /// The plain-language sentence a developer confirms when declaring the
+    /// invariant. Authoring input, not acceptance authority.
+    description: []const u8,
+    /// The version of the predicate this kind names. A change of meaning that
+    /// keeps the wire ordinal must raise this.
+    predicate_version: u16,
+    /// True when a consumer must see the kind discharged before acceptance.
+    required: bool,
+    /// True when the kind constrains operations that write.
+    applies_to_writes: bool,
+};
+
+/// The catalog, keyed by `Kind`. `EnumArray.init` takes one field per member
+/// and supplies no default, so a member added without a row fails to compile
+/// here. A runtime check over a partly filled table would report a pass.
+pub const kind_table = std.EnumArray(Kind, KindInfo).init(.{
+    .balance_conservation_v1 = .{
+        .wire_ordinal = 1,
+        .description = "the sum of signed balances is zero within each ledger and currency after every committed posting group",
+        .predicate_version = 1,
+        .required = true,
+        .applies_to_writes = true,
+    },
+});
+
+pub fn kindInfo(kind: Kind) KindInfo {
+    return kind_table.get(kind);
+}
+
+// A wire ordinal names a bit position in a per-kind mask. Distinct ordinals
+// below 32 also bound the catalog at 32 members, so a 32-bit mask can be
+// shifted by either the ordinal or the declaration index of any kind.
+comptime {
+    for (@typeInfo(Kind).@"enum".fields) |field| {
+        const row = kind_table.get(@enumFromInt(field.value));
+        if (row.wire_ordinal >= 32) {
+            @compileError("invariant kind '" ++ field.name ++ "' has a wire ordinal at or above 32");
+        }
+    }
+}
+
 pub const Currency = struct {
     code: [3]u8,
     scale: u8,
@@ -229,4 +278,66 @@ test "catalog is nonempty and wire identities round trip" {
         const sink: SinkId = @enumFromInt(field.value);
         try std.testing.expectEqual(@as(?SinkId, sink), SinkId.fromWire(field.value));
     }
+}
+
+test "every invariant kind carries a metadata row that agrees with its wire ordinal" {
+    inline for (@typeInfo(Kind).@"enum".fields) |field| {
+        const kind: Kind = @enumFromInt(field.value);
+        const row = kindInfo(kind);
+        try std.testing.expect(row.description.len > 0);
+        try std.testing.expectEqual(@as(u16, field.value), row.wire_ordinal);
+        try std.testing.expectEqual(@as(?Kind, kind), Kind.fromWire(row.wire_ordinal));
+        try std.testing.expect(row.predicate_version >= 1);
+    }
+}
+
+test "invariant kind wire ordinals are unique" {
+    // A set bit per ordinal, shifted the way a per-kind mask is built. With one
+    // kind the pairwise form would compare nothing, so the assertion runs once
+    // per member and the floor below fails if the table is ever read as empty.
+    var seen: u32 = 0;
+    inline for (@typeInfo(Kind).@"enum".fields) |field| {
+        const row = kindInfo(@as(Kind, @enumFromInt(field.value)));
+        const bit = @as(u32, 1) << @intCast(row.wire_ordinal);
+        try std.testing.expectEqual(@as(u32, 0), seen & bit);
+        seen |= bit;
+    }
+    try std.testing.expect(seen != 0);
+}
+
+test "balance conservation v1 is required, applies to writes, and states the confirmed sentence" {
+    const row = kindInfo(.balance_conservation_v1);
+    try std.testing.expectEqualStrings(
+        "the sum of signed balances is zero within each ledger and currency after every committed posting group",
+        row.description,
+    );
+    try std.testing.expectEqual(@as(u16, 1), row.wire_ordinal);
+    try std.testing.expectEqual(@as(u16, 1), row.predicate_version);
+    try std.testing.expect(row.required);
+    try std.testing.expect(row.applies_to_writes);
+}
+
+test "the v1 specification digest of the canonical fixture is pinned" {
+    // A literal, not a recomputation. A later wire schema must be shown not to
+    // move this value, and a check that recomputes both sides would agree with
+    // itself whatever the codec does.
+    const bytes = magic.* ++ [_]u8{
+        1, 0, // schema
+        1, 0, // kind
+        6, 0, // ledger id length
+        2, 0, // currency count
+    } ++ "ledger" ++ "EUR" ++ [_]u8{2} ++ "USD" ++ [_]u8{2};
+    try std.testing.expectEqualStrings(
+        "6a13f44159ddc5639abbcb92065b2ef846c9ff569b7fceee73b4d6393f83be74",
+        &std.fmt.bytesToHex(digest(bytes), .lower),
+    );
+}
+
+test "the native adapter digest is pinned" {
+    // Unlike `digest`, this hash carries no domain prefix. The literal pins that
+    // too, so adding one later is a visible change rather than a silent one.
+    try std.testing.expectEqualStrings(
+        "38190d83549a2f159b8c917b0a614856915358920ea73e831231a889db512c67",
+        &std.fmt.bytesToHex(adapterDigest(), .lower),
+    );
 }
