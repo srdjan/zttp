@@ -271,9 +271,10 @@ the bytes it always did and reopens the store it has been using.
 
 Upgrading zttp can change the adapter manifest by itself, without any edit to
 your specification. An artifact built by an older zttp is then refused at
-startup on adapter identity and must be rebuilt with the new zttp. The store
-is unaffected, because `ledger_meta.invariant_digest` binds the specification
-digest and not the adapter digest.
+startup at artifact binding, because the serving binary recomputes the adapter
+member and the executable graph no longer matches, and must be rebuilt with the
+new zttp. The store is unaffected, because `ledger_meta.invariant_digest` binds
+the specification digest and not the adapter digest.
 
 `zttp proofs verify` prints one invariant status line for an accepted
 artifact, and startup prints the same line, from the same renderer, once a

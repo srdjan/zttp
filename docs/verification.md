@@ -572,8 +572,11 @@ decoding happens, through the specification digest and its per-schema domain.
 
 Changing the manifest changes the adapter digest, which changes the executable
 root of every artifact that declares an invariant. Certificates built before
-such a change are refused afterwards, first on adapter identity and then on
-artifact binding. Existing protected ledger stores are unaffected:
+such a change are refused afterwards at artifact binding, because the serving
+binary recomputes the adapter member and the executable graph no longer
+matches. The adapter identity check is reached only when the artifact and the
+serving binary agree on the adapter and the acceptance kernel does not.
+Existing protected ledger stores are unaffected:
 `ledger_meta.invariant_digest` binds the specification digest, not the adapter
 digest.
 
