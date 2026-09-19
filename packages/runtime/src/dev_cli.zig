@@ -7,6 +7,7 @@ const zts_cli = @import("zts_cli");
 const proofs_cli = @import("proofs_cli.zig");
 const proof_cli = @import("proof_cli.zig");
 const witnesses_cli = @import("witnesses_cli.zig");
+const invariant_cli = @import("invariant_cli.zig");
 const shared = @import("cli_shared.zig");
 const runtime_cli = @import("runtime_cli.zig");
 const feature_options = @import("runtime_feature_options");
@@ -486,6 +487,14 @@ fn cmdWitnesses(ctx: cli_help.Ctx) anyerror!void {
     return;
 }
 
+fn cmdInvariant(ctx: cli_help.Ctx) anyerror!void {
+    invariant_cli.run(ctx.allocator, ctx.args) catch |err| {
+        if (invariant_cli.isExpectedUserError(err)) std.process.exit(1);
+        return err;
+    };
+    return;
+}
+
 fn cmdVersion(_: cli_help.Ctx) anyerror!void {
     shared.printVersion();
     return;
@@ -515,6 +524,7 @@ const commands = [_]cli_help.Command{
     .{ .name = "expert", .run = cmdExpert, .section = .core, .blurb = "Interactive compiler-in-the-loop agent", .injects_stored_providers = true },
     .{ .name = "deploy", .run = cmdDeploy, .section = .core, .blurb = "Build, prove, deploy (local default)" },
     .{ .name = "verify", .run = cmdVerify, .section = .proof_ledger, .args = "<url>", .blurb = "Verify a deployed proof receipt" },
+    .{ .name = "invariant", .run = cmdInvariant, .section = .proof_ledger, .args = "[list|author]", .blurb = "List invariant kinds or draft a reviewable candidate" },
     .{ .name = "proofs", .run = cmdProofs, .section = .proof_ledger, .args = "[list|show|diff|watch|export|badge|bundle|verify|gate|replay]" },
     .{ .name = "proof", .run = cmdProof, .section = .unlisted },
     .{ .name = "witnesses", .run = cmdWitnesses, .section = .advanced, .args = "[list|pin|unpin|prune|synthesize]", .blurb = "Falsifying-input corpus" },

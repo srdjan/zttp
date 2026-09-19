@@ -15,6 +15,7 @@ test {
     // `test` blocks are never collected: measured, adding a test to
     // `witnesses_cli.zig` moved the collected count by zero.
     _ = @import("witnesses_cli.zig");
+    _ = @import("invariant_cli.zig");
 
     // Force-link the proof-review submodules used by the developer CLI.
     // Lazy analysis through the package boundary won't reach decls that

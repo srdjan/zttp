@@ -348,11 +348,14 @@ observer, and adapter identity.
 - `1|balance|ledger_balance|0x4c420001|read`
 <!-- application-invariants: evidence -->
 
-`zig build test-invariant-drift` requires the source drift gate, author
-self-test, proof-checker, compiler, native module, runtime activation, and
-project-configuration test roots to pass. The gate requires nonempty evidence
-for accepted coverage, missing and extra evidence, a forged operation,
-executable graph binding, exact zero-sum arithmetic, and canonical
+`zig build test-invariant-drift` requires the source drift gate, proof-checker,
+compiler, native module, runtime activation, and project-configuration test
+roots to pass. The project-configuration root is where the `zttp invariant
+author` tests live: a plain-language sentence with no explicit `--kind`
+selection produces no candidate, and an advisory classifier answer can withhold
+a candidate but never stand in for structured confirmation. The gate requires
+nonempty evidence for accepted coverage, missing and extra evidence, a forged
+operation, executable graph binding, exact zero-sum arithmetic, and canonical
 configuration. It also deletes and changes catalog rows in temporary probes
 and requires each probe to fail. `zig build test-zruntime` separately runs the
 end-to-end protected-store behavior because that suite must remain outside the

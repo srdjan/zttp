@@ -264,11 +264,8 @@ pub fn build(b: *std.Build) void {
     // the kernel, compiler, protected native module, and runtime observer.
     const invariant_drift = b.addSystemCommand(&.{ "bash", "scripts/check-invariants.sh" });
     invariant_drift.has_side_effects = true;
-    const invariant_author_test = b.addSystemCommand(&.{ "python3", "scripts/invariant-author.py", "--self-test" });
-    invariant_author_test.has_side_effects = true;
     const invariant_drift_step = b.step("test-invariant-drift", "Check invariant catalogs, compiled evidence, and docs");
     invariant_drift_step.dependOn(&invariant_drift.step);
-    invariant_drift_step.dependOn(&invariant_author_test.step);
     invariant_drift_step.dependOn(&run_proof_checker_tests.step);
     invariant_drift_step.dependOn(&run_modules_tests.step);
     invariant_drift_step.dependOn(zts_test_step);

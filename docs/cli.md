@@ -257,6 +257,41 @@ zttp ledger stats
 staked metrics: expert success rate, median round-trips to a first green proof,
 and median proven-path ratio.
 
+## Application Invariants
+
+`zttp invariant list` prints the closed catalog of application-invariant kinds.
+Each row is the kind name, the confirmed description of what it means, its
+predicate version, whether acceptance requires it, and whether it constrains
+operations that write. The rows come from the acceptance kernel's own metadata
+table, so the listing cannot drift from what the kernel accepts.
+
+`zttp invariant author` turns one explicit selection into a reviewable
+candidate:
+
+```bash
+zttp invariant list
+zttp invariant author --kind balance_conservation_v1 --ledger main --currency USD:2
+```
+
+`--kind` is required. A plain-language sentence names no predicate, so there is
+no path from a sentence alone to a candidate. Pass the sentence with
+`--statement` if you want it recorded: it appears beside the candidate as an
+annotation, never inside it. Repeat `--currency CODE:SCALE` once per declared
+currency.
+
+The output carries `requiresReview: true`, the descriptions that were displayed
+under `reviewed_against`, and the structured `candidate`. Save only `candidate`
+as the file named by `invariants` in `zttp.json`. zttp validates it
+independently; the command's output is not evidence.
+
+`--advise` additionally asks an advisory classifier whether the sentence matches
+the selected kind. It needs `--statement` and `TYPESAFE_API_KEY`, and it sends
+only the sentence and the catalog's published descriptions: no source, no ledger
+contents, no credential value. A missing, malformed, or disagreeing answer
+withholds the candidate rather than assuming the selection is right. A
+classifier answer is not proof, and builds, certificate checks, and posting
+acceptance never call a model.
+
 ## Tool Contract Gate
 
 `zttp expert --gate-log <path>` appends one JSON line per turn recording how

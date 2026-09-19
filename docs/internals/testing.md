@@ -264,19 +264,22 @@ dependency makes a compile failure fail the named gate and executes the
 positive env, egress, and cache conversions. Each conversion must preserve the
 exact proven Property set.
 
-`zig build test-invariant-drift` runs `scripts/check-invariants.sh` and the
-invariant author self-test. The build target also requires the proof-checker,
-ZTS, native module, runtime activation, and project-configuration test roots to
-pass. The script compares the closed `post` and `balance` catalog with the
-compiler resolver, proof IR tag, native exports, final-bytecode observer,
-producer mapping, adapter identity, and the machine-marked rows in
-`docs/verification.md`. It requires nonempty compiled evidence for acceptance
-and for missing, extra, and forged evidence. Deletion and mutation probes must
-make the comparison fail. The author self-test also proves that an advisory
-response cannot bypass structured confirmation. `zig build test-zruntime`
-separately runs end-to-end protected-store behavior. It is not a dependency of
-the drift target because the ZRuntime suite must not overlap the aggregate on
-macOS.
+`zig build test-invariant-drift` runs `scripts/check-invariants.sh`. The build
+target also requires the proof-checker, ZTS, native module, runtime activation,
+and project-configuration test roots to pass. The script compares the closed
+`post` and `balance` catalog with the compiler resolver, proof IR tag, native
+exports, final-bytecode observer, producer mapping, adapter identity, and the
+machine-marked rows in `docs/verification.md`. It requires nonempty compiled
+evidence for acceptance and for missing, extra, and forged evidence. Deletion
+and mutation probes must make the comparison fail. The project-configuration
+root carries the authoring tests for `zttp invariant list` and `zttp invariant
+author`, which prove that a sentence with no kind selection produces no
+candidate and that an advisory response cannot bypass structured confirmation.
+Those tests live in `packages/tools/src/invariant_author.zig`, which is reached
+only through the `project_config` re-export, so only `zig build
+test-project-config` collects them. `zig build test-zruntime` separately runs
+end-to-end protected-store behavior. It is not a dependency of the drift target
+because the ZRuntime suite must not overlap the aggregate on macOS.
 
 Discarding an error inside the analysis files that decide whether a program is
 proven needs a row in `scripts/proof-swallow.allow` giving the reason it cannot

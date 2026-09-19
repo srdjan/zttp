@@ -127,6 +127,8 @@ const help_all_mid =
     \\  zttp ledger [export|replay]          Export or replay an expert-session verified-patch ledger
     \\  zttp gate-report <gate-log>          Report tool-contract pass rate and turn volume per niche
     \\  zttp verify <url>                    Verify a deployed proof receipt
+    \\  zttp invariant list                  Print the supported application-invariant kinds
+    \\  zttp invariant author --kind <name>  Draft a reviewable invariant candidate
     \\
     \\Credentials:
     \\  zttp auth deepseek                   Store the default DeepSeek API key
@@ -307,6 +309,18 @@ test "help --all advertises every shared analyzer command" {
         const needle = std.fmt.bufPrint(&needle_buf, "zttp {s}", .{c.name}) catch unreachable;
         try std.testing.expect(has(help_all, needle));
     }
+}
+
+test "help --all lists the invariant catalog commands under proof ledger" {
+    var buf: [help_all_capacity]u8 = undefined;
+    const help_all = renderHelpAll(&buf);
+    const ledger_start = std.mem.indexOf(u8, help_all, "\nProof ledger:\n").?;
+    const ledger_end = std.mem.indexOfPos(u8, help_all, ledger_start + 1, "\nCredentials:\n").?;
+    const section = help_all[ledger_start..ledger_end];
+    try std.testing.expect(has(section, "zttp invariant list"));
+    try std.testing.expect(has(section, "zttp invariant author"));
+    // The core screen stays at five verbs.
+    try std.testing.expect(!has(core_help, "zttp invariant"));
 }
 
 test "help --all surfaces the optional browser studio workbench" {

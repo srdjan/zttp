@@ -254,20 +254,24 @@ the native ledger adapter, SQLite transactions, and this deployment isolation.
 It is separate from a static handler property and from resource-policy guards.
 See [Verification](verification.md#application-invariants) for the checked evidence.
 
-To draft a candidate from a sentence in a source checkout:
+To see which invariant kinds exist and draft a candidate:
 
 ```bash
-python3 scripts/invariant-author.py \
-  --statement "The sum of all balances is zero" \
-  --ledger main --currency USD:2
+zttp invariant list
+zttp invariant author --kind balance_conservation_v1 --ledger main --currency USD:2
 ```
 
-Add `--jev` to send only the sentence to TypeSafe Jev for advisory template
-selection. This requires `TYPESAFE_API_KEY`. Review the result and save only
-its `candidate` object. A missing, malformed, or unsupported answer produces
-no candidate. Jev confidence is not proof. Builds, certificate checks, and
-posting acceptance never call a model. Live Jev classification quality and
-latency need to be measured for your statements.
+`--kind` is required. A plain-language sentence names no predicate, so there is
+no path from a sentence alone to a candidate. Pass the sentence with
+`--statement` to record it beside the candidate as an annotation. Review the
+result and save only its `candidate` object as the configured invariant JSON.
+
+Add `--advise` to send only the sentence, and the catalog's published
+descriptions, to TypeSafe Jev for advisory template selection. This requires
+`--statement` and `TYPESAFE_API_KEY`. A missing, malformed, or disagreeing
+answer produces no candidate. Jev confidence is not proof. Builds, certificate
+checks, and posting acceptance never call a model. Live Jev classification
+quality and latency need to be measured for your statements.
 
 ## TypeScript Source Profile
 
