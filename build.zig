@@ -262,13 +262,60 @@ pub fn build(b: *std.Build) void {
 
     // Application-invariant drift is useful only with compiled evidence from
     // the kernel, compiler, protected native module, and runtime observer.
-    const invariant_drift = b.addSystemCommand(&.{ "bash", "scripts/check-invariants.sh" });
-    invariant_drift.has_side_effects = true;
+    //
+    // The gate is a host Zig command. It imports the surfaces that are data -
+    // the kernel operation catalog, the kind table, the linked native binding,
+    // and the authoring renderer - and text-scans only the surfaces that are
+    // code, because there is no regex in Zig and a typed import cannot be
+    // misparsed.
+    //
+    // `has_side_effects` is load-bearing. A Run step is cached on its
+    // executable and its arguments, never on the files the program reads at
+    // run time, so without this the gate reports a cached pass after
+    // docs/verification.md changes and stops noticing drift.
+    const invariant_gate_mod = b.createModule(.{
+        .root_source_file = tools_dep.path("src/invariant_drift_gate.zig"),
+        .target = b.graph.host,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    invariant_gate_mod.addImport("zts", zts_host_mod);
+    invariant_gate_mod.addImport(
+        "zttp_proof_checker",
+        proof_checker_dep.module("zttp_proof_checker"),
+    );
+    const invariant_gate_exe = b.addExecutable(.{
+        .name = "invariant-drift-gate",
+        .root_module = invariant_gate_mod,
+    });
+    const invariant_gate_cmd = b.addRunArtifact(invariant_gate_exe);
+    invariant_gate_cmd.has_side_effects = true;
     const invariant_drift_step = b.step("test-invariant-drift", "Check invariant catalogs, compiled evidence, and docs");
-    invariant_drift_step.dependOn(&invariant_drift.step);
+    invariant_drift_step.dependOn(&invariant_gate_cmd.step);
     invariant_drift_step.dependOn(&run_proof_checker_tests.step);
     invariant_drift_step.dependOn(&run_modules_tests.step);
     invariant_drift_step.dependOn(zts_test_step);
+
+    // A probe is code. One that does not compile runs no check, and a failed
+    // build and a passing gate both emit no failure message, so the gate's own
+    // unit tests hang off the same named step as the gate.
+    const invariant_gate_tests = b.addTest(.{
+        .filters = test_filters,
+        .root_module = invariant_gate_mod,
+    });
+    const run_invariant_gate_tests = b.addRunArtifact(invariant_gate_tests);
+    const invariant_gate_test_step = b.step("test-invariant-gate", "Run the invariant drift gate's own parser and probe-table tests");
+    invariant_gate_test_step.dependOn(&run_invariant_gate_tests.step);
+    invariant_drift_step.dependOn(&run_invariant_gate_tests.step);
+
+    // The gate binary on its own, so a single mutation probe can be run
+    // directly and read from its exit status. Routing a probe through the
+    // aggregate step above would mix the gate's verdict with five test suites.
+    const invariant_gate_install = b.addInstallArtifact(invariant_gate_exe, .{
+        .dest_dir = .{ .override = .{ .custom = "tooling" } },
+    });
+    const invariant_gate_step = b.step("invariant-gate", "Build the invariant drift gate into zig-out/tooling");
+    invariant_gate_step.dependOn(&invariant_gate_install.step);
 
     // The trusted-boundary ratchet. Rooted at its own file because nothing in
     // the product imports it: it is a corpus plus assertions, and a file no

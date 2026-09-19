@@ -264,17 +264,41 @@ dependency makes a compile failure fail the named gate and executes the
 positive env, egress, and cache conversions. Each conversion must preserve the
 exact proven Property set.
 
-`zig build test-invariant-drift` runs `scripts/check-invariants.sh`. The build
-target also requires the proof-checker, ZTS, native module, runtime activation,
-and project-configuration test roots to pass. The script compares the closed
-`post` and `balance` catalog with the compiler resolver, proof IR tag, native
-exports, final-bytecode observer, producer mapping, adapter identity, and the
-machine-marked rows in `docs/verification.md`. It requires nonempty compiled
-evidence for acceptance and for missing, extra, and forged evidence. Deletion
-and mutation probes must make the comparison fail. The project-configuration
-root carries the authoring tests for `zttp invariant list` and `zttp invariant
-author`, which prove that a sentence with no kind selection produces no
-candidate and that an advisory response cannot bypass structured confirmation.
+`zig build test-invariant-drift` runs the Zig gate at
+`packages/tools/src/invariant_drift_gate.zig`. The build target also requires
+the proof-checker, ZTS, native module, runtime activation, and
+project-configuration test roots to pass, plus the gate's own tests under `zig
+build test-invariant-gate`. `scripts/check-invariants.sh` is now only a wrapper
+that invokes the build step.
+
+The gate imports the surfaces that are data - the kernel operation catalog, the
+kind table, the linked native binding, and the authoring renderer - and
+text-scans only the surfaces that are code. It compares the closed `post` and
+`balance` catalog with the compiler resolver, proof IR tag, native exports and
+effects, final-bytecode observer, producer mapping, the kernel's expected
+adapter and the executable-graph member bound from it, and the machine-marked
+rows in `docs/verification.md`. It compares the kind table against the wire
+ordinals, the confirmed template `packages/tools/src/invariant_config.zig`
+accepts, and the listing `zttp invariant list` prints. It requires nonempty
+compiled evidence for acceptance and for missing, extra, and forged evidence.
+
+Every invocation runs one in-memory mutation probe per independent input, and
+each probe names the check that must reject it, so a mutation caught by an
+unrelated comparison is reported as a probe failure rather than as agreement.
+The probes never touch the working tree: the step depends on five compiled
+suites, so a deleted input would fail their compile and the nonzero exit would
+come from the Zig compiler rather than from any comparison the gate makes. `zig
+build invariant-gate` builds the binary alone into `zig-out/tooling`, where
+`--mutate <input>` runs one probe and `--list-probes` names them all.
+
+The gate's run step sets `has_side_effects`. A Run step is cached on its
+executable and its arguments, never on the files the program reads, so without
+it the gate would report a cached pass after `docs/verification.md` changed.
+
+The project-configuration root carries the authoring tests for `zttp invariant
+list` and `zttp invariant author`, which prove that a sentence with no kind
+selection produces no candidate and that an advisory response cannot bypass
+structured confirmation.
 Those tests live in `packages/tools/src/invariant_author.zig`, which is reached
 only through the `project_config` re-export, so only `zig build
 test-project-config` collects them. `zig build test-zruntime` separately runs
