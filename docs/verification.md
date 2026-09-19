@@ -400,10 +400,21 @@ namespace-qualified read of the kernel outside an argued per-region allowlist,
 following renamed imports to a fixed point. It is a text scan over source, so it
 is scoped to an accidental regression by a developer and does not claim to stop
 deliberate evasion such as `@field(pcc.invariant, "...")` or a re-export of the
-kernel through a third module. What guarantees the native module cannot read the
-kernel is not the gate but the package graph: `packages/modules/build.zig` gives
-`zttp-modules` one import, `zttp-sdk`, which declares none, so that import does
-not compile.
+kernel through a third module.
+
+The two sides of the comparison are guarded differently, and only one of them
+is guarded structurally. On the native side the guarantee is the package graph
+rather than the gate: `packages/modules/build.zig` gives `zttp-modules` one
+import, `zttp-sdk`, which declares none, so the native module importing the
+acceptance kernel does not compile, whatever anybody writes. The bridge has no
+such guarantee. It lives in the runtime package, which imports both the kernel
+and the native module by design, so nothing in the build constrains where it
+reads a value from. The gate is the only automated check that watches, and
+being a source scan it is aimed at an accidental regression. A deliberate
+change to the bridge is caught by nothing else: the floor test, the three
+refusal tests and the gate's own value comparison all compare manifests, and
+none of them watches how the bridge obtained the values it compares. On that
+side the last line of defence is human review.
 
 The adapter manifest names no invariant wire schema. The adapter never decodes
 a specification, so a wire schema stated there would be a value copied from

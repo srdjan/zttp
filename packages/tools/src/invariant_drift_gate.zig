@@ -661,12 +661,15 @@ fn isIdentifierByte(byte: u8) bool {
 /// name another binding.
 ///
 /// Threat model: an accidental regression by a developer. Deliberate evasion -
-/// `@field(pcc.invariant, "kindInfo")`, `usingnamespace`, a re-export of the
-/// package through a third module - is not closed here and is not meant to be.
-/// What guarantees the property is the package boundary: `packages/modules/`
-/// gives `zttp-modules` one import, `zttp-sdk`, which declares none, so the
-/// native module cannot import the kernel at all. This gate is defence in depth
-/// over the runtime-side bridge.
+/// `@field(pcc.invariant, "kindInfo")`, a re-export of the package through a
+/// third module - is not closed here and is not meant to be.
+///
+/// The package boundary guarantees the native side: `packages/modules/` gives
+/// `zttp-modules` one import, `zttp-sdk`, which declares none, so the native
+/// module cannot import the kernel at all. It guarantees nothing about this
+/// bridge, which lives in the runtime package and imports both sides by
+/// design. On the bridge the scan below is the only automated check, and a
+/// deliberate change to it is caught by human review or by nothing.
 const KernelAliases = struct {
     /// Spellings of the kernel package.
     packages: [][]const u8,
@@ -1315,7 +1318,7 @@ fn validate(arena: std.mem.Allocator, gate: *Gate, model: Model) !void {
         return gate.reject(.bridge_reads_native, "{s} has no require body to carve out of the scan", .{paths.get(.adapter_bridge)});
     const first_test = std.mem.indexOf(u8, bridge_all, "\ntest \"") orelse bridge_all.len;
     // `require` above its own tests is the only layout this splits correctly;
-    // clamping keeps the three ranges well ordered if that ever stops holding.
+    // clamping keeps the four ranges well ordered if that ever stops holding.
     const tail_start = @max(first_test, require_span.end);
 
     const graph_aliases = try kernelAliases(arena, graph_code);
