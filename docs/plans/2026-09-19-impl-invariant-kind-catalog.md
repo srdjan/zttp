@@ -110,8 +110,11 @@ git commit -m "feat(proof-checker): per-kind metadata beside Kind"
 **Files:**
 - Create: a host authoring module under `packages/tools/src/`
 - Modify: `packages/runtime/src/dev_cli.zig` (command dispatch), `cli_help.zig` (help text), `cli_main.zig` (test root wiring)
+- Modify: `docs/cli.md` (both new commands, under the Proof ledger category)
 - Modify: `build.zig:267` and `:271` (remove the Python self-test dependency)
 - Delete: `scripts/invariant-author.py`
+
+`docs/cli.md` is not optional. `scripts/check-docs-drift.sh:202` gates it precisely so a command cannot ship and be listed by `zttp help --all` without appearing there. Omitting it fails `zig build test-docs-drift`. `zttp --help` advertises only the five core commands, so these two belong under `zttp help --all`, in the Proof ledger category beside the existing `ledger` and proof verbs.
 
 **Interfaces:**
 - Consumes: Task 1's metadata table, for `zttp invariant list` output and for validating a selection.
@@ -134,8 +137,8 @@ Emit the original sentence, the canonical descriptions shown for review, `requir
 
 - [ ] **Step 4: Run to verify they pass**
 
-Run: `zig build test-cli`
-Expected: PASS.
+Run: `zig build test-cli && zig build test-docs-drift`
+Expected: PASS both. `test-docs-drift` is what catches a missing `docs/cli.md` entry.
 
 - [ ] **Step 5: Remove the Python from the build, then delete the script**
 
