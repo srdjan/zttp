@@ -157,6 +157,7 @@ const Check = enum {
     producer_adapter_binding,
     activation_adapter_binding,
     bridge_reads_native,
+    adapter_value_copied,
     install_order,
     docs_block_missing,
     docs_rows_empty,
@@ -599,6 +600,61 @@ fn functionBody(text: []const u8, signature: []const u8) ?[]const u8 {
             },
             else => {},
         }
+    }
+    return null;
+}
+
+/// True for a kernel declaration a producer must never copy.
+///
+/// An adapter *value* is one: identity, store schema, the expected manifest,
+/// the expected digest, the kind table the manifest is derived from. Copying
+/// one puts the consumer's own constant on both sides of the comparison, which
+/// is the failure this whole surface exists to prevent.
+///
+/// A type and the encoder are not values. Both sides must name one type and
+/// one encoding, or two digests are not comparable at all, so `AdapterManifest`,
+/// `AdapterPredicate` and `adapterManifestDigest` are excluded. So is the
+/// specification surface (`decode`, `digest`), which is a function of artifact
+/// bytes rather than a constant.
+fn isForbiddenKernelRead(name: []const u8) bool {
+    if (name.len == 0) return false;
+    if (std.ascii.isUpper(name[0])) return false;
+    if (std.mem.eql(u8, name, "adapterManifestDigest")) return false;
+    if (std.mem.indexOf(u8, name, "adapter") != null) return true;
+    return std.mem.eql(u8, name, "kind_table") or std.mem.eql(u8, name, "kindInfo");
+}
+
+const invariant_decls = @typeInfo(invariant).@"struct".decls;
+
+const forbidden_kernel_read_count = blk: {
+    var found: usize = 0;
+    for (invariant_decls) |decl| {
+        if (isForbiddenKernelRead(decl.name)) found += 1;
+    }
+    break :blk found;
+};
+
+/// The names a producer surface may not mention, read out of the kernel's own
+/// namespace rather than listed here. A constant added to the kernel joins
+/// this set without anybody remembering to add it, which is the difference
+/// between a check that catches the next spelling and one that catches only
+/// the spelling it was written against.
+const forbidden_kernel_reads: [forbidden_kernel_read_count][]const u8 = blk: {
+    var names: [forbidden_kernel_read_count][]const u8 = undefined;
+    var found: usize = 0;
+    for (invariant_decls) |decl| {
+        if (!isForbiddenKernelRead(decl.name)) continue;
+        names[found] = decl.name;
+        found += 1;
+    }
+    const frozen = names;
+    break :blk frozen;
+};
+
+/// The first forbidden kernel name `text` mentions, or null.
+fn copiedKernelValue(text: []const u8) ?[]const u8 {
+    for (forbidden_kernel_reads) |name| {
+        if (std.mem.indexOf(u8, text, name) != null) return name;
     }
     return null;
 }
@@ -1082,6 +1138,36 @@ fn validate(arena: std.mem.Allocator, gate: *Gate, model: Model) !void {
     if (std.mem.indexOf(u8, linked_body, "native.adapter_manifest") == null) {
         return gate.reject(.bridge_reads_native, "the linked manifest is not filled from the native module's own manifest", .{});
     }
+    const linked_predicates_body = functionBody(bridge_text, "const linked_predicates") orelse
+        return gate.reject(.bridge_reads_native, "{s} derives no linked predicate rows", .{paths.get(.adapter_bridge)});
+    if (std.mem.indexOf(u8, linked_predicates_body, "native.adapter_manifest") == null) {
+        return gate.reject(.bridge_reads_native, "the linked predicate rows are not filled from the native module's own manifest", .{});
+    }
+
+    // --- no producer surface copies a kernel adapter value -------------------
+    //
+    // The three checks above forbid one spelling each, and a regression that
+    // reached for the next-nearest one would pass all three: a bridge that
+    // filled `.identity` and `.store_schema_version` from the kernel while
+    // leaving `.exports` native still names `native.adapter_manifest`, still
+    // digests equal, and still compares equal field by field against a kernel
+    // it copied. This is the general net, and its set is read out of the
+    // kernel's namespace rather than written down.
+    const copy_sites = [_]struct { input: Input, text: []const u8 }{
+        .{ .input = .artifact_graph, .text = graph_code },
+        .{ .input = .producer, .text = producer_text },
+        .{ .input = .activation, .text = activation_text },
+        // Only the two declarations that build the manifest. `require` in the
+        // same file reads `adapterDigest` on purpose: that is the comparison,
+        // not the value being compared.
+        .{ .input = .adapter_bridge, .text = linked_body },
+        .{ .input = .adapter_bridge, .text = linked_predicates_body },
+    };
+    for (copy_sites) |site| {
+        if (copiedKernelValue(site.text)) |name| {
+            return gate.reject(.adapter_value_copied, "{s} reads the kernel's '{s}' instead of deriving it from the linked adapter", .{ paths.get(site.input), name });
+        }
+    }
 
     // --- the store is never installed under an unaccepted adapter ------------
     //
@@ -1438,6 +1524,54 @@ fn probeAdapterBridge(arena: std.mem.Allocator, model: *Model) !void {
 /// Move the refusal to after `installStore`, rather than delete it. Deleting
 /// it would be caught by the presence clause, and a probe that trips the
 /// presence clause says nothing about whether the order is checked.
+/// The graph computes the member inline from the kernel's expected manifest.
+/// It contains no `adapterDigest` token, so the single-spelling check ahead of
+/// the scan does not see it.
+fn probeGraphKernelValue(arena: std.mem.Allocator, model: *Model) !void {
+    try replaceOnce(
+        arena,
+        model,
+        .artifact_graph,
+        "inputs.invariant_adapter_digest orelse",
+        "pcc.invariant.adapterManifestDigest(pcc.invariant.expected_adapter_manifest) orelse",
+    );
+}
+
+/// The bridge fills one manifest field from the kernel and leaves the rest
+/// native. Every earlier clause still holds, and so does the floor test, since
+/// the two strings are equal.
+fn probeBridgeKernelIdentity(arena: std.mem.Allocator, model: *Model) !void {
+    try replaceOnce(
+        arena,
+        model,
+        .adapter_bridge,
+        ".identity = native.adapter_manifest.identity,",
+        ".identity = pcc.invariant.adapter_identity,",
+    );
+}
+
+fn probeBridgeKernelSchema(arena: std.mem.Allocator, model: *Model) !void {
+    try replaceOnce(
+        arena,
+        model,
+        .adapter_bridge,
+        ".store_schema_version = native.adapter_manifest.store_schema_version,",
+        ".store_schema_version = pcc.invariant.adapter_store_schema_version,",
+    );
+}
+
+/// The producer keeps binding from the bridge and reaches for the kernel's
+/// catalog beside it. The binding checks pass; the scan does not.
+fn probeProducerKernelValue(arena: std.mem.Allocator, model: *Model) !void {
+    try replaceOnce(
+        arena,
+        model,
+        .producer,
+        "artifact.invariant_spec_digest = invariant_spec_digest;",
+        "artifact.invariant_spec_digest = invariant_spec_digest;\n    _ = pcc.invariant.kind_table;",
+    );
+}
+
 fn probeRuntimeInstall(arena: std.mem.Allocator, model: *Model) !void {
     try replaceOnce(
         arena,
@@ -1682,6 +1816,10 @@ const probes = [_]Probe{
     .{ .name = "activation", .expect = .activation_adapter_binding, .apply = probeActivation },
     .{ .name = "adapter_bridge", .expect = .bridge_reads_native, .apply = probeAdapterBridge },
     .{ .name = "runtime_install", .expect = .install_order, .apply = probeRuntimeInstall },
+    .{ .name = "graph-kernel-value", .expect = .adapter_value_copied, .apply = probeGraphKernelValue },
+    .{ .name = "bridge-kernel-identity", .expect = .adapter_value_copied, .apply = probeBridgeKernelIdentity },
+    .{ .name = "bridge-kernel-schema", .expect = .adapter_value_copied, .apply = probeBridgeKernelSchema },
+    .{ .name = "producer-kernel-value", .expect = .adapter_value_copied, .apply = probeProducerKernelValue },
     .{ .name = "graph-from-kernel", .expect = .graph_adapter_from_kernel, .apply = probeGraphFromKernel },
     .{ .name = "producer-adapter", .expect = .producer_adapter_binding, .apply = probeProducerAdapter },
     .{ .name = "native-post-dispatch", .expect = .native_post_dispatch, .apply = probeNativePostDispatch },
@@ -2000,8 +2138,8 @@ test "every adapter and manifest check is exercised by a probe" {
         }
     }
     // A filter that matched nothing would pass the loop above in silence.
-    // Fourteen is the family's size today; shrinking it is a deliberate edit.
-    try testing.expect(covered >= 14);
+    // Fifteen is the family's size today; shrinking it is a deliberate edit.
+    try testing.expect(covered >= 15);
 }
 
 test "no probe expects the absence of a rejection" {
@@ -2014,6 +2152,33 @@ test "occurrence counting does not overlap a repeated needle" {
     try testing.expectEqual(@as(usize, 2), countOccurrences("abab", "ab"));
     try testing.expectEqual(@as(usize, 1), countOccurrences("aaa", "aa"));
     try testing.expectEqual(@as(usize, 0), countOccurrences("abc", "z"));
+}
+
+test "the forbidden kernel read set is non-empty and spares the shared type and encoder" {
+    // A scan whose set is empty finds nothing in any text and reports a pass
+    // over every producer surface. The set is derived from the kernel's
+    // namespace, so this is the floor that makes the derivation mean something.
+    try testing.expect(forbidden_kernel_reads.len >= 5);
+    var saw_identity = false;
+    var saw_expected_manifest = false;
+    for (forbidden_kernel_reads) |name| {
+        if (std.mem.eql(u8, name, "adapter_identity")) saw_identity = true;
+        if (std.mem.eql(u8, name, "expected_adapter_manifest")) saw_expected_manifest = true;
+    }
+    try testing.expect(saw_identity);
+    try testing.expect(saw_expected_manifest);
+
+    // Values are forbidden; the type and the encoder both sides must name are
+    // not, and neither is the specification surface, which is a function of
+    // artifact bytes rather than a constant.
+    try testing.expect(copiedKernelValue("pcc.invariant.adapter_identity") != null);
+    try testing.expect(copiedKernelValue("pcc.invariant.expected_adapter_manifest") != null);
+    try testing.expect(copiedKernelValue("pcc.invariant.kind_table") != null);
+    try testing.expect(copiedKernelValue("pcc.invariant.adapterManifestDigest(m)") == null);
+    try testing.expect(copiedKernelValue("pcc.invariant.AdapterManifest") == null);
+    try testing.expect(copiedKernelValue("pcc.invariant.AdapterPredicate") == null);
+    try testing.expect(copiedKernelValue("pcc.invariant.digest(bytes)") == null);
+    try testing.expect(copiedKernelValue("pcc.invariant.decode(bytes)") == null);
 }
 
 test "comment stripping blanks a line comment and keeps the length" {
