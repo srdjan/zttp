@@ -113,18 +113,33 @@ seed_payload="$(sed -n 's/^\[seed-coverage\] //p' "$seed_log")"
 
 # The union across every published run of this corpus identity. A single row is
 # a sample: the same prompts, seeds, provider, model and compiler have measured
-# 4, 5 and 2 rules on different draws. `scripts/coverage-union.sh` reads
+# 4, 5 and 2 rules on different draws. `zig build coverage-union` reads
 # `git log docs/coverage.json`, which this page already names as its history,
 # and refuses a shallow clone rather than publishing a truncated union as a
 # complete one. The pending run's own codes are passed in because they are not
-# in git yet.
+# in git yet, and when no published run carries this identity the pending run is
+# itself the one observation - the page prints that count, so a union of one
+# describes itself rather than reading as a complete answer.
+#
+# Read through a marker line, not through the step's whole stdout: `zig build`
+# owns that stream too, and a build that prints anything would otherwise be
+# parsed as part of the payload.
 echo ">> unioning this corpus identity across its published runs"
 union_version="$(printf '%s' "$payload" | python3 -c 'import json,sys; print(json.load(sys.stdin)["corpusVersion"])')"
 union_codes="$(printf '%s' "$payload" | python3 -c 'import json,sys; print(" ".join(json.load(sys.stdin)["tripped"]))')"
-if ! union_payload="$(bash scripts/coverage-union.sh "$union_version" $union_codes)"; then
+union_log="$evidence_tmp/union.log"
+if ! zig build coverage-union -- "$union_version" $union_codes >"$union_log" 2>&1; then
+  cat "$union_log" >&2
   echo "error: the corpus union could not be computed; generated evidence is unchanged" >&2
   exit 1
 fi
+union_lines="$(grep -c '^\[coverage-union\] ' "$union_log" || true)"
+if [[ "$union_lines" != "1" ]]; then
+  cat "$union_log" >&2
+  echo "error: expected exactly one [coverage-union] line, found $union_lines" >&2
+  exit 1
+fi
+union_payload="$(sed -n 's/^\[coverage-union\] //p' "$union_log")"
 
 # No commit field. convergence.md carries one because its rows accumulate and a
 # reader needs to know which build produced each. This page is a single
@@ -202,6 +217,19 @@ union_min = cu["smallestSet"]
 union_max = cu["largestSet"]
 version_short = d["corpusVersion"][:12]
 union_all = len(set(union_codes) | set(seed_codes))
+# The first publication of a corpus identity has exactly one observation, and
+# the sentence below is read by people. "1 published runs ... took 1 distinct
+# shapes" would be the generator telling a reader it cannot count.
+union_runs_phrase = (
+    "the single published run"
+    if union_observations == 1
+    else "the %d published runs" % union_observations
+)
+union_shapes_phrase = (
+    "one shape"
+    if union_distinct == 1
+    else "%d distinct shapes" % union_distinct
+)
 
 def codes(names):
     return ", ".join("`%s`" % n for n in names) if names else "none"
@@ -343,8 +371,8 @@ Untripped: {codes(untripped)}
 The row above is one draw. The same prompts, seeds, provider, model and
 compiler have measured a different set each time they were recorded, because a
 rule is counted only when the model happens to make the mistake that trips it.
-Across the {union_observations} published runs of corpus `{version_short}`, the
-tripped set took {union_distinct} distinct shapes, the smallest naming
+Across {union_runs_phrase} of corpus `{version_short}`, the
+tripped set took {union_shapes_phrase}, the smallest naming
 {union_min} rules and the largest {union_max}.
 
 | Union across runs | Smallest single run | Largest single run |
@@ -354,7 +382,7 @@ tripped set took {union_distinct} distinct shapes, the smallest naming
 Ever tripped: {codes(union_codes)}
 
 This is the fairer answer to "what do these prompts reach", and no single row
-can give it. It is computed by `scripts/coverage-union.sh` from
+can give it. It is computed by `zig build coverage-union` from
 `git log docs/coverage.json`, which is this page's own history; a shallow clone
 is refused rather than published as a complete union.
 

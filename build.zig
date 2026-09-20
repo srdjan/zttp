@@ -583,6 +583,33 @@ pub fn build(b: *std.Build) void {
     const release_provenance_test_step = b.step("test-release-provenance", "Run release provenance tests");
     release_provenance_test_step.dependOn(&run_release_provenance_tests.step);
 
+    // The coverage union across every published run of one corpus identity.
+    // Zig rather than the python3 heredoc it replaces: AGENTS.md says existing
+    // python is legacy to be removed as each area is touched, and this area was
+    // touched because its first-run guard made publishing a new corpus identity
+    // impossible.
+    const coverage_union_mod = b.createModule(.{
+        .root_source_file = b.path("tooling/coverage_union.zig"),
+        .target = b.graph.host,
+        .optimize = optimize,
+    });
+    const coverage_union_exe = b.addExecutable(.{
+        .name = "coverage-union",
+        .root_module = coverage_union_mod,
+    });
+    const coverage_union_cmd = b.addRunArtifact(coverage_union_exe);
+    coverage_union_cmd.has_side_effects = true;
+    if (b.args) |args| coverage_union_cmd.addArgs(args);
+    const coverage_union_step = b.step("coverage-union", "Union the tripped rules across published runs of one corpus identity");
+    coverage_union_step.dependOn(&coverage_union_cmd.step);
+    const coverage_union_tests = b.addTest(.{
+        .filters = test_filters,
+        .root_module = coverage_union_mod,
+    });
+    const run_coverage_union_tests = b.addRunArtifact(coverage_union_tests);
+    const coverage_union_test_step = b.step("test-coverage-union", "Run coverage-union tests");
+    coverage_union_test_step.dependOn(&run_coverage_union_tests.step);
+
     // Release-readiness passport: repository tooling, deliberately not part of
     // any installed binary. It reads this repository's own files, so it means
     // nothing inside a user project; it shipped as `zttp doctor --release`
