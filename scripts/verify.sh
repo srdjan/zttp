@@ -84,8 +84,12 @@ step "zig build test-cli -Dstudio  (studio workbench unit tests)"
 # with studio enabled so they are actually exercised.
 zig build test-cli -Dstudio
 
-step "bash scripts/test-examples.sh  (example handler tests)"
-bash scripts/test-examples.sh
+# The example suites are not run here any more: `zig build test` above depends
+# on them, the same way it owns the docs-drift and link gates. They used to run
+# only from this script, so `zig build test` reported a pass while 56 suites
+# went unrun - and an example claiming a proof property the compiler had
+# stopped discharging surfaced only here. Running them twice would just cost
+# another 24 seconds.
 
 step "bash scripts/check-normalize-idempotent.sh  (double-normalize byte-idempotence)"
 bash scripts/check-normalize-idempotent.sh
@@ -130,6 +134,18 @@ echo "policy hash OK: $ACTUAL"
 
 step "bash scripts/check-proof-checker.sh  (acceptance kernel is a leaf with a non-empty suite)"
 bash scripts/check-proof-checker.sh
+
+step "bash scripts/check-diagnostic-producers.sh  (every advertised diagnostic variant has a producer)"
+bash scripts/check-diagnostic-producers.sh
+
+# The two coverage gates are not run here: `zig build test` above depends on
+# both, the same way it owns the docs-drift and link gates. Running them twice
+# would only reprint their verdicts.
+#   - check-script-reachability.sh: every script in scripts/ is invoked or
+#     declared manual.
+#   - test-step-coverage: every build step's work is run by something, or
+#     declared manual. It reads the real dependency graph, so it can only be
+#     computed inside a build.
 
 step "bash scripts/check-proof-ratchet.sh  (published trusted boundary matches the kernel)"
 bash scripts/check-proof-ratchet.sh

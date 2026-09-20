@@ -2,23 +2,37 @@
 # Run all example handler tests.
 # Exits with code 1 if any test suite fails.
 #
-# Usage: bash scripts/test-examples.sh
+# Usage: bash scripts/test-examples.sh [path/to/zttp]
+#
+# With no argument the script builds the tree itself and uses zig-out/bin/zttp,
+# which is how a developer runs it by hand. With a binary path it uses that and
+# builds nothing: `zig build test` wires it that way through addFileArg, and a
+# nested `zig build` inside a running build would re-enter the build graph.
 
 set -e
 
 ZIG="${ZIG:-zig}"
-ZTTP="${ZTTP:-zig-out/bin/zttp}"
 PASS=0
 FAIL=0
 TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/zttp-examples.XXXXXX")
 trap 'rm -rf "$TMP_ROOT"' EXIT
 NEXT_PORT=39000
 
-# Build once up front, then invoke the produced binary directly. Going through
-# `zig build run --` per suite would re-walk the build graph for every suite.
-echo "Building runtime..."
-$ZIG build
-echo ""
+if [ "$#" -ge 1 ]; then
+    ZTTP="$1"
+    if [ ! -x "$ZTTP" ]; then
+        echo "error: '$ZTTP' is not an executable; this gate has no binary to exercise the examples with" >&2
+        exit 1
+    fi
+else
+    ZTTP="${ZTTP:-zig-out/bin/zttp}"
+    # Build once up front, then invoke the produced binary directly. Going
+    # through `zig build run --` per suite would re-walk the build graph for
+    # every suite.
+    echo "Building runtime..."
+    $ZIG build
+    echo ""
+fi
 
 run_tests_with_args() {
     local handler=$1
@@ -349,6 +363,18 @@ rm -f zttp.d.ts
 echo ""
 echo "====================="
 echo "Suites: $((PASS + FAIL)) total, $PASS passed, $FAIL failed"
+
+# Floor on this gate's own input. Every suite above is an explicit call, so a
+# refactor that drops calls - or an examples/ tree that loses files - leaves
+# this script printing "Suites: 0 total, 0 passed, 0 failed" and exiting 0,
+# which reads as coverage. The number is a backstop against an emptied run and
+# not a target: set well under the current count so adding a suite never has to
+# move it, and a deletion of any real fraction of them does.
+MIN_SUITES=40
+if [ "$((PASS + FAIL))" -lt "$MIN_SUITES" ]; then
+    echo "error: ran $((PASS + FAIL)) suites, fewer than the floor of $MIN_SUITES - this run checked almost nothing and would otherwise report a pass" >&2
+    exit 1
+fi
 
 if [ "$FAIL" -gt 0 ]; then
     exit 1

@@ -180,6 +180,13 @@ pub const binding = mb.ModuleBinding{
             .effect = .write,
             .returns = .unknown,
             .returns_from_param = .{ .param_index = 0, .kind = .identity },
+            // The return IS argument 0, so every label that argument carried
+            // survives the call. Without this the flow checker credited the
+            // call with the closure labels alone and
+            // `using(env("SECRET_KEY"), closeFn)` reached a response with
+            // `no_secret_leakage` PROVEN. `validateBindings` now refuses an
+            // `.identity` return that does not declare this.
+            .derives_from_args = true,
             .param_types = &.{ .unknown, .unknown },
             .param_names = &.{ "resource", "closeFn" },
             .traceable = false,

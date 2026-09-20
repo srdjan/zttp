@@ -53,6 +53,16 @@ corpus, not estimates.
 | 2026-08-28 | `35d3604e` | `0012ad8ca6d5` | 19 | deepseek | deepseek-v4-flash | `97aec67e484a` | 63% (12/19) | 63% (12/19) | 4 | 83% (15/18) |
 | 2026-09-01 | `1b60438e` | `0012ad8ca6d5` | 19 | deepseek | deepseek-v4-flash | `97aec67e484a` | 57% (11/19) | 57% (11/19) | 4 | 88% (16/18) |
 | 2026-09-01 | `f5981dc0` | `0012ad8ca6d5` | 19 | deepseek | deepseek-v4-flash | `97aec67e484a` | 57% (11/19) | 57% (11/19) | 4 | 88% (16/18) |
+| 2026-09-08 | `e6143d78` | `0012ad8ca6d5` | 19 | deepseek | deepseek-v4-flash | `97aec67e484a` | 42% (8/19) | 42% (8/19) | 6 | 77% (14/18) |
+| 2026-09-09 | `2200c7b0` | `0012ad8ca6d5` | 19 | deepseek | deepseek-v4-flash | `97aec67e484a` | 42% (8/19) | 42% (8/19) | 6 | 77% (14/18) |
+| 2026-09-09 | `6638fcf2` | `0012ad8ca6d5` | 19 | deepseek | deepseek-v4-flash | `97aec67e484a` | 42% (8/19) | 42% (8/19) | 6 | 77% (14/18) |
+| 2026-09-09 | `36d34297` | `0012ad8ca6d5` | 19 | deepseek | deepseek-v4-flash | `97aec67e484a` | 42% (8/19) | 42% (8/19) | 6 | 77% (14/18) |
+| 2026-09-09 | `3d173f56` | `0012ad8ca6d5` | 19 | deepseek | deepseek-v4-flash | `97aec67e484a` | 42% (8/19) | 42% (8/19) | 6 | 77% (14/18) |
+| 2026-09-09 | `76618955` | `0012ad8ca6d5` | 19 | deepseek | deepseek-v4-flash | `97aec67e484a` | 42% (8/19) | 42% (8/19) | 6 | 77% (14/18) |
+| 2026-09-09 | `18aec2f7` | `0012ad8ca6d5` | 19 | deepseek | deepseek-v4-flash | `97aec67e484a` | 42% (8/19) | 42% (8/19) | 6 | 77% (14/18) |
+| 2026-09-09 | `424f3fab` | `0012ad8ca6d5` | 19 | deepseek | deepseek-v4-flash | `97aec67e484a` | 42% (8/19) | 42% (8/19) | 6 | 77% (14/18) |
+| 2026-09-09 | `9df11af8` | `0012ad8ca6d5` | 19 | deepseek | deepseek-v4-flash | `97aec67e484a` | 42% (8/19) | 42% (8/19) | 6 | 77% (14/18) |
+| 2026-09-09 | `8ed1b0f6` | `0012ad8ca6d5` | 19 | deepseek | deepseek-v4-flash | `97aec67e484a` | 42% (8/19) | 42% (8/19) | 6 | 77% (14/18) |
 
 Regenerate with `bash scripts/update-convergence.sh`, which appends a row and
 rewrites [convergence.json](convergence.json). History is git history on those

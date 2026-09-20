@@ -459,6 +459,11 @@ pub const FunctionBinding = struct {
     /// Used by the flow checker to track sensitive data through the handler.
     return_labels: LabelSet = .{},
 
+    /// The argument that bounds how much this export declassifies; the
+    /// declassification holds only while that argument is a compile-time
+    /// literal. See the SDK field of the same name for the reasoning.
+    declassify_bound_arg: ?u8 = null,
+
     /// Set when the return value can contain data that arrived as an argument,
     /// and the export validates nothing. The flow checker then unions every
     /// argument's labels into the call's result instead of answering the
@@ -686,6 +691,40 @@ pub fn validateBindings(comptime bindings: []const ModuleBinding) void {
                 }
                 if (f.param_types[from.param_index] != .unknown) {
                     @compileError(b.specifier ++ "." ++ f.name ++ " reads its return type from an argument whose declared kind is not `.unknown`; a callback or pass-through argument has no fixed kind to name");
+                }
+                // An `.identity` return hands the argument back unchanged, so
+                // its result carries every label that argument carried. The
+                // flow checker learns that from `derives_from_args` and from
+                // nothing else: `scanImports` populates
+                // `module_fn_arg_derived` from that field alone, so an
+                // `.identity` declaration on its own is invisible to label
+                // propagation. `zttp:scope.using` shipped that way and
+                // laundered `secret` and `credential` through a pass-through
+                // the checker credited with closure labels only. A pass-through
+                // that must not propagate does not exist: if it transforms its
+                // argument it is not `.identity`.
+                if (from.kind == .identity and !f.derives_from_args) {
+                    @compileError(b.specifier ++ "." ++ f.name ++ " returns an argument unchanged (`.identity`) but does not declare `derives_from_args`; the flow checker propagates labels from that field alone, so the return would launder every label the argument carried");
+                }
+            }
+            // A declassification bound must name an argument that exists, and
+            // it only means something on an export that declassifies: one
+            // whose declared labels replace its input's rather than joining
+            // them. An export declaring `derives_from_args` already keeps
+            // every input label, so a bound there would be a second answer to
+            // a question already settled.
+            if (f.declassify_bound_arg) |bound| {
+                if (bound >= f.arg_count) {
+                    @compileError(std.fmt.comptimePrint(
+                        "{s}.{s} bounds its declassification on argument {d} but declares arg_count={d}",
+                        .{ b.specifier, f.name, bound, f.arg_count },
+                    ));
+                }
+                if (f.return_labels.isEmpty()) {
+                    @compileError(b.specifier ++ "." ++ f.name ++ " bounds a declassification but declares no `return_labels`; only an export whose declared labels replace its input's declassifies anything");
+                }
+                if (f.derives_from_args) {
+                    @compileError(b.specifier ++ "." ++ f.name ++ " declares both `derives_from_args` and `declassify_bound_arg`; an export that keeps every input label declassifies nothing to bound");
                 }
             }
             if (f.laws.len > 0) {

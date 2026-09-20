@@ -23,6 +23,14 @@ The metadata includes compiler version, policy version/hash, rule counts, and
 feature/module summaries. Clients should compare `policy_hash` when resuming
 cached analysis.
 
+`compiler_version` names the **analyzer surface**, not the `zttp` release it
+shipped in, and the two move independently. The envelope is part of the
+recorded model transcript and therefore of the cassette digests, so tying this
+field to the release version made every release invalidate the whole recorded
+corpus while changing nothing about the analyzer. It is pinned in
+`expert_meta.analyzer_surface_version`, and moving it owes a full re-record. A
+client that wants the shipped release reads `zttp --version`.
+
 ## Diagnostics
 
 Machine commands emit diagnostics with this shape:

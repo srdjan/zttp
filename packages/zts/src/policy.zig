@@ -15,6 +15,15 @@ const RuntimePolicy = handler_policy.RuntimePolicy;
 /// What a denial names. Each is one of a fixed set, and none of them is a
 /// value the request chose: an egress decision is about an endpoint, and the
 /// endpoint a denied request asked for is attacker-influenced text.
+///
+/// Two of these five have no producer: nothing constructs a denial event whose
+/// resource kind is `env_key` or `cache_namespace`. They are kept, because
+/// deleting them would delete the record of a real gap rather than close it -
+/// `Action` below has `env_read` and `cache_read`, so those denials happen, and
+/// they are emitted without naming what was denied. An operator reading the
+/// event log can see that a cache read was refused and not which namespace.
+/// The names say what the events owe; removing them would make the log look
+/// complete.
 pub const resource_kind_endpoint = "endpoint";
 pub const resource_kind_address_scope = "address_scope";
 pub const resource_kind_env_key = "env_key";

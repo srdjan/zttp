@@ -38,6 +38,18 @@ gate. If one benchmark misses the threshold once, rerun immediately on the same
 machine; a clean rerun clears the release, while two consecutive failures block
 for investigation.
 
+To replace the checked-in baseline after an intentional performance change,
+commit the source and run:
+
+```bash
+zig build bench-record
+```
+
+The command refuses a dirty or uncommitted tree. It atomically records the
+per-benchmark best result from five runs together with the source commit, Zig
+version, host details, run count, and aggregation method. Review and commit the
+resulting `benchmarks/perf-baseline.json` separately from the tooling change.
+
 ## What Affects Latency
 
 - Build-time precompile with `zig build -Dhandler=handler.ts` or `zttp build`

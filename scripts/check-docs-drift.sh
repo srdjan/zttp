@@ -533,4 +533,51 @@ if [[ -n "${removed_expression_form_hits//[[:space:]]/}" ]]; then
   fail "tracked TypeScript still uses in, unary plus, optional call, or optional computed access; use explicit predicates, conversions, and absence branches"
 fi
 
-printf 'docs drift: OK (%s builtin virtual modules)\n' "$module_count"
+# ---------------------------------------------------------------------------
+# Allowlist row-count claims in the binding instruction files.
+#
+# AGENTS.md said scripts/unseeded-rules.allow carried "19 rows" with "17 of its
+# 19" naming unconstructed codes. The file had one row, and its own header
+# recorded that seventeen were removed. Nothing read the prose: this script has
+# real floors and never looked at AGENTS.md, so a count in the file that also
+# binds other agents could go stale and stay stale.
+#
+# The rule is narrow on purpose. It does not try to check prose; it checks that
+# a sentence naming an allowlist and a row count agrees with that file. Writing
+# the count is optional - referring to the file and getting the number wrong is
+# not.
+# ---------------------------------------------------------------------------
+declare -a allowlists=(
+  scripts/unseeded-rules.allow
+  scripts/proof-swallow.allow
+  scripts/module-boundary.allow
+)
+claim_files=(AGENTS.md CLAUDE.md)
+claims_checked=0
+for allowlist in "${allowlists[@]}"; do
+  [[ -f "$allowlist" ]] || fail "listed allowlist $allowlist does not exist; update this gate"
+  rows="$(grep -cvE '^#|^[[:space:]]*$' "$allowlist" || true)"
+  base="$(basename "$allowlist")"
+  for claim_file in "${claim_files[@]}"; do
+    [[ -f "$claim_file" ]] || fail "listed claim file $claim_file does not exist; update this gate"
+    while IFS= read -r line; do
+      [[ -n "$line" ]] || continue
+      claims_checked=$((claims_checked + 1))
+      # Every "<n> rows" / "<n> row" count in a sentence naming this allowlist
+      # must equal the real row count.
+      while read -r claimed; do
+        [[ -n "$claimed" ]] || continue
+        if [[ "$claimed" != "$rows" ]]; then
+          printf '%s claims %s row(s) for %s, which has %s\n' "$claim_file" "$claimed" "$base" "$rows" >&2
+          fail "a row-count claim in $claim_file disagrees with $allowlist"
+        fi
+      done < <(printf '%s\n' "$line" | grep -oE '[0-9]+ rows?' | grep -oE '^[0-9]+' || true)
+    done < <(grep -n "$base" "$claim_file" | grep -E '[0-9]+ rows?' || true)
+  done
+done
+# Floor: the loop above must have looked at something. With no claim sentence
+# anywhere it iterates zero times and reports a pass, which is the shape this
+# gate exists to refuse.
+[[ "$claims_checked" -ge 1 ]] || fail "no allowlist row-count claim found in ${claim_files[*]}; this check ran over nothing - point it at the file that carries the claim"
+
+printf 'docs drift: OK (%s builtin virtual modules, %s allowlist row-count claim(s))\n' "$module_count" "$claims_checked"

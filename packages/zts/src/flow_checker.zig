@@ -287,6 +287,13 @@ pub const FlowChecker = struct {
     /// can contain what an argument carried, so the call's labels are the union
     /// of the arguments' rather than the declared set alone.
     module_fn_arg_derived: std.AutoHashMapUnmanaged(u16, void),
+    /// Slots of imported exports that declare `declassify_bound_arg`, mapped to
+    /// that argument index. The export's declared labels replace its input's -
+    /// that is what makes it a declassifier - but only while the named argument
+    /// is a compile-time literal. `mask(text, visible)` reveals the trailing
+    /// `visible` bytes, so a runtime `visible` puts the magnitude of the
+    /// declassification in whatever computes it.
+    module_fn_declassify_bound: std.AutoHashMapUnmanaged(u16, u8),
     /// Return labels for functions imported from another file, local slot ->
     /// labels. The checker has no file access, so the caller computes these
     /// with `exportedReturnLabels` over the imported module and installs them
@@ -364,6 +371,7 @@ pub const FlowChecker = struct {
             .module_fn_labels = .empty,
             .module_fn_meta = .empty,
             .module_fn_arg_derived = .empty,
+            .module_fn_declassify_bound = .empty,
             .file_fn_labels = .empty,
             .binding_origin = .empty,
             .result_binding_labels = .empty,
@@ -399,6 +407,7 @@ pub const FlowChecker = struct {
         self.module_fn_labels.deinit(self.allocator);
         self.module_fn_meta.deinit(self.allocator);
         self.module_fn_arg_derived.deinit(self.allocator);
+        self.module_fn_declassify_bound.deinit(self.allocator);
         self.file_fn_labels.deinit(self.allocator);
         self.binding_origin.deinit(self.allocator);
         self.working_constraints.deinit(self.allocator);
@@ -950,6 +959,10 @@ pub const FlowChecker = struct {
                 self.module_fn_arg_derived.put(self.allocator, rec.slot, {}) catch
                     self.markAllocationFailure();
             }
+            if (entry.func.declassify_bound_arg) |bound| {
+                self.module_fn_declassify_bound.put(self.allocator, rec.slot, bound) catch
+                    self.markAllocationFailure();
+            }
             // Matched on the imported name, not the local alias, exactly as
             // before: `import { env as e }` still sets this slot.
             if (std.mem.eql(u8, rec.imported_name, "env")) {
@@ -1481,6 +1494,30 @@ pub const FlowChecker = struct {
         return labels;
     }
 
+    /// True when this call's declassification may be trusted: either the
+    /// export declares no bound, or the argument that bounds it is a numeric
+    /// literal at this call site, or the argument is absent and the export's
+    /// own default supplies it.
+    ///
+    /// Fails closed on every shape it cannot read as a literal - an
+    /// identifier, an arithmetic expression, a call result - because the whole
+    /// question is whether the magnitude is fixed at compile time. A
+    /// `comptime()`-folded bound reads as non-literal here and costs a
+    /// declassification rather than granting one.
+    fn declassificationBoundIsLiteral(
+        self: *const FlowChecker,
+        slot: u16,
+        call_data: Node.CallExpr,
+    ) bool {
+        const bound = self.module_fn_declassify_bound.get(slot) orelse return true;
+        // Argument omitted: the export's own default is the bound, and a
+        // default is fixed at compile time.
+        if (bound >= call_data.args_count) return true;
+        const arg = self.ir_view.getListIndex(call_data.args_start, bound);
+        const tag = self.ir_view.getTag(arg) orelse return false;
+        return tag == .lit_int or tag == .lit_float;
+    }
+
     /// Infer labels for a function call expression.
     fn inferCallLabels(self: *FlowChecker, call_data: Node.CallExpr) LabelSet {
         const callee_tag = self.ir_view.getTag(call_data.callee) orelse return LabelSet.empty;
@@ -1495,6 +1532,16 @@ pub const FlowChecker = struct {
                 }
                 if (base_labels.validated) return self.parsedResultLabels(base_labels, call_data);
                 if (self.module_fn_arg_derived.contains(binding.slot)) {
+                    return self.argDerivedLabels(base_labels, call_data);
+                }
+                // A declassifier whose magnitude is not a compile-time literal
+                // declassifies nothing here: keep the input's labels and let
+                // the sink report what reaches it. `mask` is the case -
+                // `mask(env("SECRET_KEY"), 4)` is the declassification it
+                // exists for, and `mask(env("SECRET_KEY"), n)` for a runtime
+                // `n` lets whatever computes `n` choose how much of the secret
+                // survives.
+                if (!self.declassificationBoundIsLiteral(binding.slot, call_data)) {
                     return self.argDerivedLabels(base_labels, call_data);
                 }
                 return LabelSet.merge(base_labels, self.closureArgLabels(binding.slot, call_data));
@@ -4866,6 +4913,183 @@ test "mask still declassifies, because that is what it is for" {
         \\import { mask } from "zttp:text";
         \\function handler(req) {
         \\  return Response.json({ v: mask(env("API_SECRET"), 4) });
+        \\}
+    ;
+    try std.testing.expect(try runNoSecretLeakage(std.testing.allocator, source));
+}
+
+test "the direct return of a secret is refused" {
+    // The control for the two probes below. Without it a `false` from either
+    // one could mean the harness refuses everything, which would make the
+    // probe pass while checking nothing.
+    const source =
+        \\import { env } from "zttp:env";
+        \\function handler(req) {
+        \\  return Response.json({ v: env("API_SECRET") });
+        \\}
+    ;
+    try std.testing.expect(!try runNoSecretLeakage(std.testing.allocator, source));
+}
+
+test "scope.using does not launder the resource it hands back" {
+    // `using` returns argument 0 unchanged at runtime. It declared
+    // `returns_from_param = .identity` and no `derives_from_args`, and
+    // `scanImports` populates `module_fn_arg_derived` from that field alone, so
+    // the identity return was never wired to label propagation: the call was
+    // credited with closure labels only and the secret arrived unlabelled.
+    const source =
+        \\import { env } from "zttp:env";
+        \\import { using } from "zttp:scope";
+        \\function handler(req) {
+        \\  return Response.json({ v: using(env("API_SECRET"), (r) => r) });
+        \\}
+    ;
+    try std.testing.expect(!try runNoSecretLeakage(std.testing.allocator, source));
+}
+
+test "scope.using does not launder a credential either" {
+    const source =
+        \\import { using } from "zttp:scope";
+        \\function handler(req) {
+        \\  const token = req.headers.get("authorization");
+        \\  return Response.json({ v: using(token, (r) => r) });
+        \\}
+    ;
+    try std.testing.expect(!try runNoCredentialLeakage(std.testing.allocator, source));
+}
+
+test "scope.using still proves clean for an ordinary resource" {
+    // The pass-through has to keep working for the handlers it exists for.
+    // A propagating export is only useful if it does not refuse those.
+    const source =
+        \\import { using } from "zttp:scope";
+        \\function handler(req) {
+        \\  return Response.json({ v: using("plain", (r) => r) });
+        \\}
+    ;
+    try std.testing.expect(try runNoSecretLeakage(std.testing.allocator, source));
+}
+
+test "a secret written to the cache and read back is not proven clean" {
+    // The read call holds no reference to what the write put there, so the
+    // checker cannot follow the provenance - and the export answered with a
+    // benign `.internal` label rather than with ignorance. That reported
+    // `no_secret_leakage` PROVEN for a secret round-tripped through the store.
+    //
+    // `derives_from_args` is the WRONG fix here and is a no-op:
+    // `argDerivedLabels` unions only the current call's own arguments, which
+    // for `cacheGet("ns", "k")` are two string literals - never the secret a
+    // separate `cacheSet` wrote. The primitive that fits is `.unknown`.
+    const source =
+        \\import { env } from "zttp:env";
+        \\import { cacheSet, cacheGet } from "zttp:cache";
+        \\function handler(req) {
+        \\  cacheSet("ns", "k", env("API_SECRET"));
+        \\  return Response.json({ v: cacheGet("ns", "k") });
+        \\}
+    ;
+    try std.testing.expect(!try runNoSecretLeakage(std.testing.allocator, source));
+}
+
+test "a queue read is not proven clean" {
+    const source =
+        \\import { env } from "zttp:env";
+        \\import { send, receive } from "zttp:queue";
+        \\function handler(req) {
+        \\  send("q", env("API_SECRET"));
+        \\  return Response.json({ v: receive("q") });
+        \\}
+    ;
+    try std.testing.expect(!try runNoSecretLeakage(std.testing.allocator, source));
+}
+
+test "a sql row read is not proven clean" {
+    const source =
+        \\import { sqlOne } from "zttp:sql";
+        \\function handler(req) {
+        \\  return Response.json({ row: sqlOne("getUser") });
+        \\}
+    ;
+    try std.testing.expect(!try runNoSecretLeakage(std.testing.allocator, source));
+}
+
+test "a sql row set read is not proven clean" {
+    const source =
+        \\import { sqlMany } from "zttp:sql";
+        \\function handler(req) {
+        \\  return Response.json({ rows: sqlMany("listUsers") });
+        \\}
+    ;
+    try std.testing.expect(!try runNoSecretLeakage(std.testing.allocator, source));
+}
+
+test "a durable signal payload is not proven clean" {
+    // `waitSignalNative` returns `callbacks.wait_signal_fn(...)` directly -
+    // literally the `payload` argument of a separate `signal(key, name,
+    // payload)` call - and relabelled it `.external`.
+    const source =
+        \\import { waitSignal } from "zttp:durable";
+        \\function handler(req) {
+        \\  return Response.json({ v: waitSignal("approved") });
+        \\}
+    ;
+    try std.testing.expect(!try runNoSecretLeakage(std.testing.allocator, source));
+}
+
+test "a rate-limit counter is still proven clean" {
+    // The control that keeps the sweep honest. `rateCheck` declares
+    // `.internal` in the same shape as the five store reads, and is correctly
+    // excluded: it returns a counter derived from the limiter's own state, and
+    // no caller ever writes a value into it. Marking it `.unknown` would cost
+    // every rate-limited handler three properties for no provenance gap.
+    const source =
+        \\import { rateCheck } from "zttp:ratelimit";
+        \\function handler(req) {
+        \\  return Response.json({ allowed: rateCheck("ip", 10, 60) });
+        \\}
+    ;
+    try std.testing.expect(try runNoSecretLeakage(std.testing.allocator, source));
+}
+
+test "mask with a request-controlled bound declassifies nothing" {
+    // `mask` reveals the trailing `visible` bytes, so `visible` decides how
+    // much of the secret survives. It was an unbounded runtime `.number`, and
+    // the pinning test above only ever passed a literal 4 - so a bound read
+    // off the request handed the caller a dial on the declassification.
+    const source =
+        \\import { env } from "zttp:env";
+        \\import { mask } from "zttp:text";
+        \\import { bytesLength } from "zttp:bytes";
+        \\function handler(req) {
+        \\  const n = bytesLength(requestBody(req));
+        \\  return Response.json({ v: mask(env("API_SECRET"), n) });
+        \\}
+    ;
+    try std.testing.expect(!try runNoSecretLeakage(std.testing.allocator, source));
+}
+
+test "mask with a computed bound declassifies nothing either" {
+    // Not only request-derived bounds: the question is whether the magnitude
+    // is fixed at compile time, and an identifier bound to anything is not.
+    const source =
+        \\import { env } from "zttp:env";
+        \\import { mask } from "zttp:text";
+        \\function handler(req) {
+        \\  const n = 4 + 4;
+        \\  return Response.json({ v: mask(env("API_SECRET"), n) });
+        \\}
+    ;
+    try std.testing.expect(!try runNoSecretLeakage(std.testing.allocator, source));
+}
+
+test "mask with its default bound still declassifies" {
+    // The argument is optional and the default is fixed at compile time, so
+    // omitting it is as bounded as writing the literal.
+    const source =
+        \\import { env } from "zttp:env";
+        \\import { mask } from "zttp:text";
+        \\function handler(req) {
+        \\  return Response.json({ v: mask(env("API_SECRET")) });
         \\}
     ;
     try std.testing.expect(try runNoSecretLeakage(std.testing.allocator, source));

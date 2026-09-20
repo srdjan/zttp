@@ -38,6 +38,12 @@ allow_file="scripts/proof-swallow.allow"
 # The analysis pipeline: everything between the parsed IR and the verdict a
 # build reports. A file added here without its swallows listed fails the gate,
 # which is the intended way to bring new analysis code under review.
+#
+# The list is not bounded by the producer. The consumer-side acceptance kernel
+# decides whether a certificate is accepted, and `proof_activation.zig` supplies
+# the independently reconstructed graph it decides over - a swallow there
+# surfaces as an accepted artifact, which is the same fail-open one rung later.
+# Both sat outside this gate while it was cited as covering the proof pipeline.
 proof_files=(
   packages/zts/src/contract_builder.zig
   packages/zts/src/effect_inference.zig
@@ -50,6 +56,9 @@ proof_files=(
   packages/zts/src/spec_discharge.zig
   packages/zts/src/type_checker.zig
   packages/zts/src/type_env.zig
+  packages/proof-checker/src/checker.zig
+  packages/proof-checker/src/capability_policy.zig
+  packages/runtime/src/proof_activation.zig
 )
 
 fail() {
@@ -85,6 +94,19 @@ found_rows="$(
         # `catch return error.X` propagates the failure to the caller, which is
         # the outcome this gate wants; only a `catch` that substitutes a value
         # counts as a swallow.
+        #
+        # That comment describes a shape these patterns do not match, and the
+        # inversion is real: `catch <value>` - an analysis answer replaced by a
+        # substitute the caller cannot tell from a real one - is the stated
+        # subject and the one form not looked for. It is not added here yet
+        # because the population is not what closing it would suggest.
+        # Measured over these files, a `catch <value>` pattern that already
+        # excludes the fail-closed markAllocationFailure idiom, bound-error
+        # handling, and `catch unreachable` still surfaces 35 rows in the
+        # eleven analysis files and 7 in the kernel files below. Every row of
+        # an allowlist here is a claim that someone read the site and found it
+        # sound, so closing this needs 42 code reviews rather than 42 rows -
+        # and rows carrying invented reasons would be worse than the gap.
         if ($0 ~ /catch return error\./)       pattern = ""
         else if ($0 ~ /catch \{\}/)            pattern = "catch-empty"
         else if ($0 ~ /catch \|_\| \{\}/)      pattern = "catch-empty"

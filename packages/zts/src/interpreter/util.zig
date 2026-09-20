@@ -22,25 +22,16 @@ pub inline fn modValues(a: value.JSValue, b: value.JSValue) !value.JSValue {
     return value.JSValue.fromFloat(@rem(an, bn));
 }
 
-// Arithmetic cores shared with the JIT helpers in context.zig. These are the
-// numeric semantics only (no string concat, no per-operand trace), returning a
-// NaN-boxed result or error.TypeError on a non-numeric operand. The interpreter
-// keeps its own trace-emitting slow paths (arith.zig) because those distinguish
-// which operand failed; these cores let the JIT helpers stay thin delegates,
-// mirroring how jitMod already routes through modValues.
-
-/// Numeric addition (integer fast path, overflow -> float). The JIT add helper
-/// handles string concat before calling this.
-pub inline fn addNumeric(a: value.JSValue, b: value.JSValue) !value.JSValue {
-    if (a.isInt() and b.isInt()) {
-        const sum, const overflow = @addWithOverflow(a.getInt(), b.getInt());
-        if (overflow == 0) return value.JSValue.fromInt(sum);
-        return value.JSValue.fromFloat(@as(f64, @floatFromInt(a.getInt())) + @as(f64, @floatFromInt(b.getInt())));
-    }
-    const an = a.toNumber() orelse return error.TypeError;
-    const bn = b.toNumber() orelse return error.TypeError;
-    return value.JSValue.fromFloat(an + bn);
-}
+// Arithmetic cores. These are the numeric semantics only (no string concat, no
+// per-operand trace), returning a NaN-boxed result or error.TypeError on a
+// non-numeric operand. The interpreter keeps its own trace-emitting slow paths
+// (arith.zig) because those distinguish which operand failed.
+//
+// They existed to let the tiered JIT helpers stay thin delegates. The JIT was
+// removed after measurement and the comment here went on describing it, along
+// with three helpers nothing called any more: `addNumeric`, and `incValue` /
+// `decValue` for a `++` / `--` the profile refuses at parse time. Every core
+// left below has a caller.
 
 pub inline fn subValues(a: value.JSValue, b: value.JSValue) !value.JSValue {
     if (a.isInt() and b.isInt()) {
@@ -85,26 +76,6 @@ pub inline fn powValues(a: value.JSValue, b: value.JSValue) !value.JSValue {
     const an = a.toNumber() orelse return error.TypeError;
     const bn = b.toNumber() orelse return error.TypeError;
     return value.JSValue.fromFloat(std.math.pow(f64, an, bn));
-}
-
-pub inline fn incValue(a: value.JSValue) !value.JSValue {
-    if (a.isInt()) {
-        const sum, const overflow = @addWithOverflow(a.getInt(), 1);
-        if (overflow == 0) return value.JSValue.fromInt(sum);
-        return value.JSValue.fromFloat(@as(f64, @floatFromInt(a.getInt())) + 1.0);
-    }
-    if (a.isFloat64()) return value.JSValue.fromFloat(a.getFloat64() + 1.0);
-    return error.TypeError;
-}
-
-pub inline fn decValue(a: value.JSValue) !value.JSValue {
-    if (a.isInt()) {
-        const diff, const overflow = @subWithOverflow(a.getInt(), 1);
-        if (overflow == 0) return value.JSValue.fromInt(diff);
-        return value.JSValue.fromFloat(@as(f64, @floatFromInt(a.getInt())) - 1.0);
-    }
-    if (a.isFloat64()) return value.JSValue.fromFloat(a.getFloat64() - 1.0);
-    return error.TypeError;
 }
 
 /// ECMAScript ToInt32 on a raw f64. Reduces modulo 2^32 *before* the integer

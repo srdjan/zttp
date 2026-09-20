@@ -99,7 +99,7 @@ input, tools, edits, or turn completion.
 
 The package suites: `test-zts`, `test-sdk`, `test-modules`,
 `test-proof-review`, `test-proof-checker`, `test-release-check`, `test-server`,
-`test-compile-bench`.
+`test-compile-bench`, `test-bench-diff`, `test-wasm-playground-publish`.
 
 The audits and gates: `test-capability-audit`, `test-module-boundary`,
 `test-proof-checker-purity`, `test-proof-ratchet`, `test-proof-ratchet-drift`,
@@ -120,10 +120,19 @@ test references them. That is not hypothetical: when the JIT was removed,
 `verify.sh` passed while `zttp-bench` was broken, because the gate never built
 it. Compiling catches that class of breakage. Running the benchmarks here would
 import their measurement noise into the gate, so `bench-check` stays separate.
+The benchmark sampler, threshold policy, and atomic baseline writer live in
+`tooling/benchmark.zig`; the website WASM publisher and its rollback probes live
+in `tooling/wasm_playground_publish.zig`. Both are native Zig test roots. The
+publisher serializes writers and journals cross-file updates so an interrupted
+run can recover before it removes the superseded WASM.
+
+`build.zig.zon` remains the release-version authority. Root `VERSION` is a
+convenience mirror, and `test-release-check` rejects a missing, malformed, or
+stale marker before release.
 
 ## What `zig build test` Excludes
 
-Five build steps:
+Six build steps:
 
 - **`test-zruntime`**, the `zruntime_tests.zig` root. See the next section.
 - **`test-module-scope-panic`**, a focused executable that proves authorization
@@ -138,12 +147,65 @@ Five build steps:
   `scripts/verify.sh` compiles it after the native release binaries so changes
   cannot retain POSIX, libc, SQLite, or other runtime-only dependencies in the
   browser artifact.
+- **`wasm-playground-publish`**, the manual release operation that writes the
+  content-addressed analyzer into the sibling website checkout. Its in-tree
+  recovery and locking tests run under `test-wasm-playground-publish`.
 
 Everything driven by a shell script rather than a build step is also outside
-it: `smoke-v1`, `scripts/test-examples.sh`,
-`scripts/test-install-archive-safety.sh`, `scripts/check-semantics-spec.sh`,
-`zts module-spec-render --check`, the policy-hash and expert-subsystem
-assertions, and `zig fmt --check`. `scripts/verify.sh` runs all of them.
+it: `smoke-v1`, `scripts/test-install-archive-safety.sh`,
+`scripts/check-semantics-spec.sh`, `zts module-spec-render --check`, the
+policy-hash and expert-subsystem assertions, and `zig fmt --check`.
+`scripts/verify.sh` runs all of them.
+
+`scripts/test-examples.sh` used to be on that list and is not any more. Being
+driven by a shell script is a reason to wire the script into the build graph,
+not a reason to leave the suites out of the aggregate step: the exclusion was
+documented rather than enforced, so `zig build test` reported a pass while 56
+example suites went unrun, and `examples/sql/sql-crud.ts` claiming a proof
+property the compiler had stopped discharging (ZTS500) surfaced only under
+`verify.sh`. The suites cost about 24 seconds. `test-examples` now takes the
+built `zttp` as a file argument - a nested `zig build` inside a running build
+would re-enter the build graph - and `zig build test` depends on it, so
+`verify.sh` no longer runs it a second time. The script also asserts a floor on
+its suite count, because a run that lost its calls printed "Suites: 0 total, 0
+passed, 0 failed" and exited 0.
+
+The general form of that mistake now has its own gate.
+`scripts/check-script-reachability.sh` asserts that every script under
+`scripts/` is invoked by `build.zig`, another script, or CI - or carries a row
+in `scripts/manual-scripts.allow` saying why a developer runs it by hand. It
+found `scripts/test-zruntime.sh`, which invoked `zig test` on
+`packages/runtime/src/zruntime.zig`, a file deleted in the monorepo
+restructure, and which nothing had called since; the real path is
+`zig build test-zruntime`. Six scripts are declared manual: two publish or
+build outside the tree, two block on a server or a model run, one is machine
+setup, and one regenerates a doc whose drift is already gated.
+
+The build-step form of the same question is `zig build test-step-coverage`,
+which lives in `build.zig` because only a build can answer it. A named step is
+not what the aggregate step depends on: `test_step.dependOn(&run_server_tests
+.step)` names the Run step, and `b.step("test-server", ...)` names a separate
+top-level step over the same Run, so "is `test-server` reachable from `test`"
+is the wrong question. The gate walks the real dependency graph instead and
+asks, for each of the 94 top-level steps, whether every step in its closure is
+run by something: reached by `zig build test`, reached by a step
+`scripts/verify.sh` or a CI workflow invokes, or - for five steps that only
+wrap a shell gate - the same script run directly by one of those. The workflow
+directory is read rather than listed, so a workflow added later becomes a
+coverage source without anyone remembering this gate.
+
+Thirteen steps are declared manual in `scripts/manual-steps.allow`: two
+interactive run commands, one blocking server, three measurements that pass
+regardless, one that spends real model time, two that need a local MLX server
+or a browser, three release operations, and one release-artifact producer. Both
+directions are enforced, and a row for a step something now runs fails the same
+gate.
+
+Four floors sit under it, because a coverage check over an empty input reports
+that everything is covered: the CI workflow read must find at least one file,
+the coverage text must name at least one `zig build` invocation, the covered
+closure must be plausibly large, and the allowlist must parse at least one row.
+Each was verified by breaking it.
 
 It also runs seven registry-drift and determinism gates, most of which need the
 built binary. `ci.yml` runs the same seven:

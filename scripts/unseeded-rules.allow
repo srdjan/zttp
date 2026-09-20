@@ -6,9 +6,21 @@
 # a rule nothing in this repository has ever been observed enforcing.
 #
 # One row per (code, reason slug), with the finding above it. Enforced in both
-# directions by scripts/check-rule-coverage.sh: an advertised rule that is
-# neither seeded nor listed fails, and so does a row for a code that a seed now
+# directions by the stand-in gate in packages/pi/src/standin_range_tests.zig,
+# which runs under `zig build test-standin`: an advertised rule that is neither
+# seeded nor listed fails, and so does a row for a code that a seed now
 # verifies. The list only ratchets down.
+#
+# (This header named scripts/check-rule-coverage.sh, which does not exist. The
+# gate has always been the Zig test above, so the reference pointed a reader at
+# nothing while reading as though the enforcement were somewhere it could be
+# inspected.)
+#
+# That gate keys on `rule.code`, which is what it must do to answer "is this
+# advertised rule seeded". It therefore cannot see a registry row whose code
+# has a live producer somewhere else - three dead enum variants sharing
+# ZTS500/501/502 were permanently satisfied that way.
+# scripts/check-diagnostic-producers.sh asks the other question.
 #
 # A row is not an exemption and not a plan. It is a claim, checked when it was
 # written, that a seed cannot reach this code as the compiler stands today. The

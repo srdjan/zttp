@@ -458,6 +458,13 @@ const Session = struct {
                         }) };
                     }
                 },
+                // exhaustive: this walk counts the two invariant members and
+                // nothing else. A kind the arms above do not name increments
+                // neither counter, and both counters are then required to be
+                // exactly 1 below, so skipping a kind here cannot turn a
+                // missing or duplicated invariant member into coverage. The
+                // digest of every other kind is checked by the graph walk that
+                // verified integrity before this stage runs.
                 else => {},
             }
         }
@@ -1669,6 +1676,11 @@ pub const test_support = struct {
                     .residual_plan => member.digest = built.identity.residual_plan_digest,
                     .runtime_policy_bytes => member.digest = built.identity.runtime_policy_digest,
                     .proof_certificate => member.digest = [_]u8{0} ** 32,
+                    // exhaustive: the arms above are the members whose digest
+                    // this rebuild owns - each is a fold over bytes just
+                    // recomputed here. Every other kind carries a digest taken
+                    // from the artifact, and overwriting one would replace
+                    // observed bytes with a restated claim.
                     else => {},
                 }
             }

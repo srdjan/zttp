@@ -247,6 +247,24 @@ pub fn build(b: *std.Build) void {
     const proof_checker_purity_step = b.step("test-proof-checker-purity", "Check the acceptance kernel is a leaf with a non-empty suite");
     proof_checker_purity_step.dependOn(&proof_checker_purity.step);
 
+    // Every script in scripts/ must be invoked by something or say why not. A
+    // gate nothing runs reports nothing, which reads the same as a gate that
+    // found nothing - and scripts/test-zruntime.sh sat in the tree invoking a
+    // root file that had been deleted, called by nobody.
+    const script_reachability = b.addSystemCommand(&.{ "bash", "scripts/check-script-reachability.sh" });
+    script_reachability.has_side_effects = true;
+    const script_reachability_step = b.step("test-script-reachability", "Check every script in scripts/ is invoked or declared manual");
+    script_reachability_step.dependOn(&script_reachability.step);
+
+    // Every advertised diagnostic variant must have a construction site. The
+    // rule-coverage gate in packages/pi keys on `rule.code`, so a dead variant
+    // sharing a code with a live producer is permanently satisfied and cannot
+    // be reported - three did exactly that.
+    const diagnostic_producers = b.addSystemCommand(&.{ "bash", "scripts/check-diagnostic-producers.sh" });
+    diagnostic_producers.has_side_effects = true;
+    const diagnostic_producers_step = b.step("test-diagnostic-producers", "Check every advertised diagnostic variant has a producer");
+    diagnostic_producers_step.dependOn(&diagnostic_producers.step);
+
     // The published trusted boundary against the one the kernel implements.
     const proof_ratchet_drift = b.addSystemCommand(&.{ "bash", "scripts/check-proof-ratchet.sh" });
     proof_ratchet_drift.has_side_effects = true;
@@ -990,6 +1008,30 @@ pub fn build(b: *std.Build) void {
     });
     const wasm_step = b.step("wasm", "Build the zts analyzer as a wasm64-freestanding module for the web playground");
     wasm_step.dependOn(&wasm_install.step);
+    const wasm_publish_mod = b.createModule(.{
+        .root_source_file = b.path("tooling/wasm_playground_publish.zig"),
+        .target = b.graph.host,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    const wasm_publish_exe = b.addExecutable(.{
+        .name = "wasm-playground-publish",
+        .root_module = wasm_publish_mod,
+    });
+    const wasm_publish_cmd = b.addRunArtifact(wasm_publish_exe);
+    wasm_publish_cmd.addArg("--wasm");
+    wasm_publish_cmd.addFileArg(wasm_exe.getEmittedBin());
+    if (b.args) |args| wasm_publish_cmd.addArgs(args);
+    wasm_publish_cmd.has_side_effects = true;
+    const wasm_publish_step = b.step("wasm-playground-publish", "Build and publish the website analyzer WASM");
+    wasm_publish_step.dependOn(&wasm_publish_cmd.step);
+    const wasm_publish_tests = b.addTest(.{
+        .filters = test_filters,
+        .root_module = wasm_publish_mod,
+    });
+    const wasm_publish_test_cmd = b.addRunArtifact(wasm_publish_tests);
+    const wasm_publish_test_step = b.step("test-wasm-playground-publish", "Run website WASM publication tests");
+    wasm_publish_test_step.dependOn(&wasm_publish_test_cmd.step);
 
     const run_module_governance = b.addRunArtifact(zts_exe);
     run_module_governance.addArgs(&.{ "verify-modules", "--builtins", "--strict", "--json" });
@@ -1251,6 +1293,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_release_check_tests.step);
     test_step.dependOn(&run_release_provenance_tests.step);
     test_step.dependOn(&run_demo_passport_check_tests.step);
+    test_step.dependOn(wasm_publish_test_step);
     test_step.dependOn(production_branch_metric_test_step);
     test_step.dependOn(comptime_cli_step);
     test_step.dependOn(generic_intersection_cli_step);
@@ -1276,6 +1319,8 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_proof_ratchet_tests.step);
     test_step.dependOn(&proof_ratchet_drift.step);
     test_step.dependOn(&proof_checker_purity.step);
+    test_step.dependOn(&diagnostic_producers.step);
+    test_step.dependOn(&script_reachability.step);
     test_step.dependOn(expert_golden_step);
     test_step.dependOn(contract_golden_step);
     test_step.dependOn(&runtime_purity_cmd.step);
@@ -1307,6 +1352,23 @@ pub fn build(b: *std.Build) void {
     server_test_step.dependOn(&run_server_tests.step);
     test_step.dependOn(&run_server_tests.step);
 
+    // Example handler suites. These were left out of `zig build test` and run
+    // only from scripts/verify.sh, and the exclusion was documented rather than
+    // enforced - so `zig build test` reported a pass while 56 suites went
+    // unrun, and an example claiming a proof property the compiler had stopped
+    // discharging (examples/sql/sql-crud.ts, ZTS500) surfaced only in verify.
+    // The suites take about 24 seconds, which does not buy an exclusion.
+    //
+    // The binary comes in as a file argument rather than the script building
+    // the tree itself: a nested `zig build` inside a running build would
+    // re-enter the build graph.
+    const examples_cmd = b.addSystemCommand(&.{ "/bin/bash", "scripts/test-examples.sh" });
+    examples_cmd.addFileArg(cli_exe.getEmittedBin());
+    examples_cmd.has_side_effects = true;
+    const examples_test_step = b.step("test-examples", "Run the example handler suites");
+    examples_test_step.dependOn(&examples_cmd.step);
+    test_step.dependOn(&examples_cmd.step);
+
     // Benchmark executable
     const bench_exe = b.addExecutable(.{
         .name = "zttp-bench",
@@ -1322,10 +1384,21 @@ pub fn build(b: *std.Build) void {
         bench_cmd.addArgs(args);
     }
 
-    // Run the benchmark binary multiple times through bench-diff.sh directly
-    // (best-of-N handling lives in the script to tame microbench variance).
-    const bench_check_cmd = b.addSystemCommand(&.{ "/bin/bash", "scripts/bench-diff.sh" });
-    bench_check_cmd.addArg("--baseline");
+    // Release benchmark policy is implemented in Zig beside the other
+    // repository tooling. Best-of-N sampling tames microbenchmark variance.
+    const benchmark_tool_mod = b.createModule(.{
+        .root_source_file = b.path("tooling/benchmark.zig"),
+        .target = b.graph.host,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    benchmark_tool_mod.addImport("zts", zts_host_mod);
+    const benchmark_tool_exe = b.addExecutable(.{
+        .name = "zttp-benchmark",
+        .root_module = benchmark_tool_mod,
+    });
+    const bench_check_cmd = b.addRunArtifact(benchmark_tool_exe);
+    bench_check_cmd.addArgs(&.{ "check", "--baseline" });
     bench_check_cmd.addFileArg(b.path("benchmarks/perf-baseline.json"));
     bench_check_cmd.addArg("--bench");
     bench_check_cmd.addFileArg(bench_exe.getEmittedBin());
@@ -1338,6 +1411,23 @@ pub fn build(b: *std.Build) void {
     bench_step.dependOn(&bench_cmd.step);
     const bench_check_step = b.step("bench-check", "Compare benchmark output against the checked-in perf baseline");
     bench_check_step.dependOn(&bench_check_cmd.step);
+    const bench_record_cmd = b.addRunArtifact(benchmark_tool_exe);
+    bench_record_cmd.addArgs(&.{ "record", "--baseline" });
+    bench_record_cmd.addFileArg(b.path("benchmarks/perf-baseline.json"));
+    bench_record_cmd.addArg("--bench");
+    bench_record_cmd.addFileArg(bench_exe.getEmittedBin());
+    bench_record_cmd.addArgs(&.{ "--zig", b.graph.zig_exe });
+    bench_record_cmd.has_side_effects = true;
+    const bench_record_step = b.step("bench-record", "Record a five-run benchmark baseline from clean committed source");
+    bench_record_step.dependOn(&bench_record_cmd.step);
+    const benchmark_tool_tests = b.addTest(.{
+        .filters = test_filters,
+        .root_module = benchmark_tool_mod,
+    });
+    const bench_diff_test_cmd = b.addRunArtifact(benchmark_tool_tests);
+    const bench_diff_test_step = b.step("test-bench-diff", "Run benchmark sampling and comparison tests");
+    bench_diff_test_step.dependOn(&bench_diff_test_cmd.step);
+    test_step.dependOn(bench_diff_test_step);
 
     // End-to-end smoke for the v1 user flow:
     // init -> doctor -> check -> build -> deploy.
@@ -1438,6 +1528,132 @@ pub fn build(b: *std.Build) void {
         }
         const system_step = b.step("system", "Cross-handler contract linking");
         system_step.dependOn(&run_system.step);
+    }
+
+    // ------------------------------------------------------------------
+    // Step coverage: every top-level step's work must be run by something.
+    //
+    // This walks the real dependency graph, not the source. A named step is not
+    // what `test` depends on - `test_step.dependOn(&run_server_tests.step)`
+    // names the Run step, and `b.step("test-server", ...)` names a separate
+    // top-level step over the same Run - so "is test-server reachable from
+    // test" is the wrong question. The right one is whether each top-level
+    // step's dependency closure is covered, and only the graph can answer it.
+    //
+    // A step counts as run when `zig build test` reaches it, when
+    // scripts/verify.sh or a CI workflow invokes the step that reaches it, or
+    // when one of those runs the same shell gate the step wraps - five steps
+    // are covered only by that last route. Anything left must carry a row in
+    // scripts/manual-steps.allow saying why a human asks for it.
+    //
+    // scripts/test-examples.sh is why this exists: it was documented as
+    // outside `zig build test` and run only from verify.sh, and 56 example
+    // suites went unrun while `zig build test` reported a pass.
+    // ------------------------------------------------------------------
+    {
+        const coverage_sources = blk: {
+            var acc: std.ArrayList(u8) = .empty;
+            acc.appendSlice(b.allocator, @embedFile("scripts/verify.sh")) catch @panic("OOM");
+            // Read the workflow directory rather than embedding a fixed list,
+            // so a workflow added later is a coverage source without anyone
+            // having to remember this gate.
+            var wf = b.build_root.handle.openDir(b.graph.io, ".github/workflows", .{ .iterate = true }) catch
+                @panic("step coverage: .github/workflows is missing; this gate would credit no CI invocation");
+            defer wf.close(b.graph.io);
+            var it = wf.iterate();
+            var workflows: usize = 0;
+            while (it.next(b.graph.io) catch @panic("step coverage: cannot iterate .github/workflows")) |entry| {
+                if (entry.kind != .file) continue;
+                if (!std.mem.endsWith(u8, entry.name, ".yml")) continue;
+                const text = wf.readFileAlloc(b.graph.io, entry.name, b.allocator, .unlimited) catch
+                    @panic("step coverage: cannot read a workflow file");
+                acc.appendSlice(b.allocator, text) catch @panic("OOM");
+                acc.append(b.allocator, '\n') catch @panic("OOM");
+                workflows += 1;
+            }
+            // Floor on this gate's own input. With no coverage text every step
+            // reads as manual and the allowlist would have to name all of them;
+            // with a truncated read, steps quietly become "uncovered".
+            if (workflows == 0) @panic("step coverage: no CI workflow files read; the coverage input is empty");
+            break :blk acc.items;
+        };
+        if (std.mem.indexOf(u8, coverage_sources, "zig build ") == null) {
+            @panic("step coverage: the coverage text names no `zig build` invocation; the scan is broken");
+        }
+
+        var covered = std.AutoHashMap(*std.Build.Step, void).init(b.allocator);
+        var name_buf: [128]u8 = undefined;
+        collectReachable(test_step, &covered);
+        for (b.top_level_steps.values()) |tls| {
+            if (verifyInvokes(coverage_sources, tls.step.name, &name_buf)) {
+                collectReachable(&tls.step, &covered);
+            }
+        }
+        if (covered.count() < 50) {
+            @panic("step coverage: the covered closure is implausibly small; the graph walk is broken");
+        }
+
+        const manual_src = @embedFile("scripts/manual-steps.allow");
+        var report: std.ArrayList(u8) = .empty;
+        var violations: usize = 0;
+        var manual_rows: usize = 0;
+        var step_count: usize = 0;
+
+        for (b.top_level_steps.values()) |tls| {
+            step_count += 1;
+            const declared_manual = allowNames(manual_src, tls.step.name);
+            var own = std.AutoHashMap(*std.Build.Step, void).init(b.allocator);
+            collectReachable(&tls.step, &own);
+            var unrun: usize = 0;
+            var it = own.keyIterator();
+            while (it.next()) |entry| {
+                const dep = entry.*;
+                if (dep.id == .top_level) continue;
+                if (covered.contains(dep)) continue;
+                // A step that only wraps a shell gate is run when something
+                // runs that script, whichever Run step instance does it.
+                if (runStepScript(dep)) |script| {
+                    if (std.mem.indexOf(u8, coverage_sources, script) != null) continue;
+                }
+                unrun += 1;
+            }
+            if (unrun > 0 and !declared_manual) {
+                report.print(b.allocator, "  {s}: {d} of {d} dependency steps are run by nothing\n", .{ tls.step.name, unrun, own.count() }) catch @panic("OOM");
+                violations += 1;
+            }
+            if (unrun == 0 and declared_manual) {
+                report.print(b.allocator, "  {s}: listed in scripts/manual-steps.allow, but something runs it now - delete the row\n", .{tls.step.name}) catch @panic("OOM");
+                violations += 1;
+            }
+        }
+
+        // A row naming a step that no longer exists is a claim about nothing.
+        var lines = std.mem.splitScalar(u8, manual_src, '\n');
+        while (lines.next()) |raw| {
+            const line = std.mem.trim(u8, raw, " \t\r");
+            if (line.len == 0 or line[0] == '#') continue;
+            var fields = std.mem.tokenizeAny(u8, line, " \t");
+            const name = fields.next() orelse continue;
+            manual_rows += 1;
+            if (b.top_level_steps.get(name) == null) {
+                report.print(b.allocator, "  {s}: listed in scripts/manual-steps.allow, but no such build step exists\n", .{name}) catch @panic("OOM");
+                violations += 1;
+            }
+        }
+        if (manual_rows == 0) {
+            @panic("step coverage: scripts/manual-steps.allow parsed zero rows; the allowlist read is broken");
+        }
+
+        const step_coverage_step = b.step("test-step-coverage", "Check every build step's work is run by something");
+        if (violations > 0) {
+            const message = std.fmt.allocPrint(b.allocator, "step coverage: {d} problem(s)\n{s}\nRun the step from scripts/verify.sh, a CI workflow, or `zig build test`; or add a row to scripts/manual-steps.allow with the reason a human asks for it.", .{ violations, report.items }) catch @panic("OOM");
+            step_coverage_step.dependOn(&b.addFail(message).step);
+        } else {
+            const ok = b.addSystemCommand(&.{ "/bin/echo", b.fmt("step coverage: OK ({d} steps, {d} run by hand with a stated reason)", .{ step_count, manual_rows }) });
+            ok.has_side_effects = true;
+            step_coverage_step.dependOn(&ok.step);
+        }
+        test_step.dependOn(step_coverage_step);
     }
 }
 
@@ -1561,4 +1777,62 @@ fn addExpertRun(
         run.expectStdOutEqual(expected);
     }
     step.dependOn(&run.step);
+}
+
+/// Collect every step reachable from `root`, including `root` itself.
+fn collectReachable(
+    root: *std.Build.Step,
+    seen: *std.AutoHashMap(*std.Build.Step, void),
+) void {
+    if (seen.contains(root)) return;
+    seen.put(root, {}) catch @panic("OOM");
+    for (root.dependencies.items) |dep| collectReachable(dep, seen);
+}
+
+/// A `scripts/....sh` path named in a Run step's literal argv, if any.
+///
+/// Several build steps only wrap a shell gate, and `scripts/verify.sh` runs
+/// some of those scripts directly rather than through `zig build <step>`. The
+/// work is done either way, so the coverage question is about the script, not
+/// about which Run step instance executed it.
+fn runStepScript(step: *std.Build.Step) ?[]const u8 {
+    const run = step.cast(std.Build.Step.Run) orelse return null;
+    for (run.argv.items) |arg| {
+        switch (arg) {
+            .bytes => |text| {
+                if (std.mem.startsWith(u8, text, "scripts/") and
+                    std.mem.endsWith(u8, text, ".sh")) return text;
+            },
+            else => {},
+        }
+    }
+    return null;
+}
+
+/// True when `verify.sh` runs `zig build <name>`.
+fn verifyInvokes(verify_src: []const u8, name: []const u8, buf: []u8) bool {
+    const needle = std.fmt.bufPrint(buf, "zig build {s}", .{name}) catch return false;
+    var rest = verify_src;
+    while (std.mem.indexOf(u8, rest, needle)) |idx| {
+        // The name must not be a prefix of a longer step name: `zig build test`
+        // must not answer for `zig build test-zruntime`.
+        const after = rest[idx + needle.len ..];
+        const terminated = after.len == 0 or after[0] == ' ' or after[0] == '\n' or after[0] == '\r';
+        if (terminated) return true;
+        rest = after;
+    }
+    return false;
+}
+
+/// True when `allow_src` has a row whose first field is `name`.
+fn allowNames(allow_src: []const u8, name: []const u8) bool {
+    var lines = std.mem.splitScalar(u8, allow_src, '\n');
+    while (lines.next()) |raw| {
+        const line = std.mem.trim(u8, raw, " \t\r");
+        if (line.len == 0 or line[0] == '#') continue;
+        var fields = std.mem.tokenizeAny(u8, line, " \t");
+        const first = fields.next() orelse continue;
+        if (std.mem.eql(u8, first, name)) return true;
+    }
+    return false;
 }

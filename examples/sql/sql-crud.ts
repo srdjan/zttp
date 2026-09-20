@@ -10,13 +10,21 @@ import { sql, sqlExec, sqlMany } from "zttp:sql";
 // the last insert left in the table. This example declared it until the flow
 // checker learned that a read from mutable module state varies the same way a
 // clock read does - `zttp:sql` declares no clock, so nothing had caught it.
+//
+// `no_secret_leakage` and `no_credential_leakage` came off the list for the
+// same reason one rung deeper. `sqlMany` hands back rows some separate write
+// put in the table, and this call holds no reference to that value, so the
+// checker cannot follow where a row came from. The binding says so with
+// `unknown`, and a value the walk could not trace proves nothing about itself:
+// the two properties are cleared where it reaches the response rather than
+// held. Nothing here is known to leak - the honest report is that a handler
+// returning rows out of a database cannot prove the database holds no secret,
+// and it never could.
 structural CrudGuarantees<T> = Proof<T,
     | "state_isolated"
     | "fault_covered"
     | "result_safe"
     | "optional_safe"
-    | "no_secret_leakage"
-    | "no_credential_leakage"
     | "input_validated"
     | "pii_contained"
     | "injection_safe"

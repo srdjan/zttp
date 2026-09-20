@@ -34,6 +34,13 @@ pub const DurableCallbacks = struct {
     }
 };
 
+// `waitSignal` declares `.unknown` alongside `.external`. `waitSignalNative`
+// returns `callbacks.wait_signal_fn(...)` directly - literally the `payload`
+// argument of a separate `signal(key, name, payload)` call - and relabelling
+// that `.external` asserted a benign provenance the checker never established.
+// `.unknown` says it could not be followed, and the sink clears what it
+// decides. `derives_from_args` would be a no-op: this call's own arguments are
+// the signal name, never the payload.
 pub const binding = mb.ModuleBinding{
     .specifier = "zttp:durable",
     .name = "durable",
@@ -47,7 +54,7 @@ pub const binding = mb.ModuleBinding{
         .{ .name = "stepWithTimeout", .func = stepWithTimeoutNative, .arg_count = 3, .effect = .write, .returns = .result, .param_types = &.{ .string, .number, .unknown }, .param_names = &.{ "name", "timeoutMs", "fn" }, .failure_severity = .expected, .traceable = true, .contract_extractions = &.{.{ .category = .durable_step }}, .contract_flags = .{ .sets_durable_used = true, .sets_durable_timers = true } },
         .{ .name = "sleep", .func = sleepNative, .arg_count = 1, .effect = .write, .returns = .undefined, .param_types = &.{.number}, .param_names = &.{"delayMs"}, .contract_flags = .{ .sets_durable_used = true, .sets_durable_timers = true } },
         .{ .name = "sleepUntil", .func = sleepUntilNative, .arg_count = 1, .effect = .write, .returns = .undefined, .param_types = &.{.number}, .param_names = &.{"epochMs"}, .contract_flags = .{ .sets_durable_used = true, .sets_durable_timers = true } },
-        .{ .name = "waitSignal", .func = waitSignalNative, .arg_count = 1, .effect = .write, .returns = .unknown, .param_types = &.{.string}, .param_names = &.{"name"}, .contract_extractions = &.{.{ .category = .durable_signal }}, .contract_flags = .{ .sets_durable_used = true }, .return_labels = .{ .external = true } },
+        .{ .name = "waitSignal", .func = waitSignalNative, .arg_count = 1, .effect = .write, .returns = .unknown, .param_types = &.{.string}, .param_names = &.{"name"}, .contract_extractions = &.{.{ .category = .durable_signal }}, .contract_flags = .{ .sets_durable_used = true }, .return_labels = .{ .external = true, .unknown = true } },
         // The payload is a real third argument - `signalNative` reads `args[2]`
         // and hands it to the runtime callback - and it was undeclared here.
         // The arity rule never rejected the three-argument call, so nothing

@@ -169,7 +169,8 @@ credentials, Docker, or network are involved. `--local` and `--target local`
 are explicit aliases for the default. Hosted cloud deploy is deferred from this
 beta: `--cloud` still parses and rejects with a "not in this beta" message, and
 the related account verbs (`login`, `logout`, `review`, `grants`,
-`revoke-grant`) are not dispatched and read as unknown commands.
+`revoke-grant`) are not dispatched, each answering with the same deferred-feature
+message rather than reading as an unknown command.
 
 Proof ledger commands:
 

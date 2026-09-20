@@ -57,7 +57,15 @@ pub const binding = sdk.ModuleBinding{
             .param_names = &.{ "name", "params" },
             .required_arg_count = 1,
             .failure_severity = .expected,
-            .return_labels = .{ .internal = true },
+            // An unknowable-provenance read: the value came from persistent
+            // cross-call state and this call holds no reference to what wrote it.
+            // `.unknown` is the claim of ignorance, which the sink handles by
+            // clearing every property it decides instead of holding it. The
+            // declared label below stays: it still says what kind of store this
+            // is. `derives_from_args` would be a no-op here - `argDerivedLabels`
+            // unions only this call's own arguments, never what a separate write
+            // put in the store.
+            .return_labels = .{ .internal = true, .unknown = true },
         },
         .{
             .name = "sqlMany",
@@ -74,7 +82,15 @@ pub const binding = sdk.ModuleBinding{
             .param_types = &.{ .string, .object },
             .param_names = &.{ "name", "params" },
             .required_arg_count = 1,
-            .return_labels = .{ .internal = true },
+            // An unknowable-provenance read: the value came from persistent
+            // cross-call state and this call holds no reference to what wrote it.
+            // `.unknown` is the claim of ignorance, which the sink handles by
+            // clearing every property it decides instead of holding it. The
+            // declared label below stays: it still says what kind of store this
+            // is. `derives_from_args` would be a no-op here - `argDerivedLabels`
+            // unions only this call's own arguments, never what a separate write
+            // put in the store.
+            .return_labels = .{ .internal = true, .unknown = true },
         },
         .{
             .name = "sqlExec",

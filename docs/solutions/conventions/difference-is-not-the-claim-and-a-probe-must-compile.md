@@ -200,9 +200,9 @@ quietly turn the first fixture into the second.
 
 The same ambiguity appears in concurrent tests even when the final state is
 exact. The runtime's signal path wakes a blocked `listener.accept()` by opening
-a loopback connection (`packages/runtime/src/server.zig:2423`). Once the
+a loopback connection (`packages/runtime/src/server.zig:2439`). Once the
 accept returns, the loop observes the shutdown flag and exits
-(`packages/runtime/src/server.zig:2439`).
+(`packages/runtime/src/server.zig:2477`).
 
 The first graceful-shutdown E2E ordering raised `SIGTERM`, then opened another
 client before waiting for the accept loop to exit (session history). That client
@@ -210,9 +210,9 @@ could release the same blocked accept call. A broken production wake and a
 working wake therefore reached the same observable end state.
 
 The corrected test waits for `shutdown_started` immediately after the signal
-(`packages/runtime/src/server.zig:3769` raises it, `:3772` waits, and the
-ordering comment at `:3770-3771` says why) and opens the rejection-probe client
-only after that checkpoint (`packages/runtime/src/server.zig:3776`). The accept
+(`packages/runtime/src/server.zig:3732` raises it, `:3776` waits, and the
+ordering comment at `:3774-3775` says why) and opens the rejection-probe client
+only after that checkpoint (`packages/runtime/src/server.zig:3780`). The accept
 thread publishes the checkpoint only after `acceptLoop()` returns
 (`packages/runtime/src/server.zig:3728`). At that point, no test-owned
 connection can create the event being attributed to the production signal path.
@@ -350,11 +350,11 @@ zig build test -j1 --summary all
 
 `server.zig` is not a test root of its own. Its tests compile into the
 `unit_tests` artifact rooted at `packages/runtime/src/main.zig`
-(`build.zig:1197-1210`), which reaches the file through the
+(`build.zig:1239-1251`), which reaches the file through the
 `_ = @import("server.zig");` in that root's test block
 (`packages/runtime/src/main.zig:30`), and `zig build test` runs that artifact
-(`build.zig:1240`). The narrower `zig build test-invariant-drift` runs the same
-artifact (`build.zig:1211`).
+(`build.zig:1282`). The narrower `zig build test-invariant-drift` runs the same
+artifact (`build.zig:1253`).
 
 `zig build test -j1 -Dtest-filter=SIGTERM --summary all` is convenient while you
 iterate on the probe, but its result is not evidence. `-Dtest-filter` reaches
@@ -364,9 +364,9 @@ also gives. Take the verdict from the unfiltered step.
 
 The corrected E2E exits nonzero at
 `Wait.forFlag(&shutdown_started, true, 2_000)` with `error.TestTimedOut`
-(`packages/runtime/src/server.zig:3538` for the test,
-`packages/runtime/src/server.zig:3547` for the timeout, and
-`packages/runtime/src/server.zig:3772` for the wait). Because no later test
+(`packages/runtime/src/server.zig:3542` for the test,
+`packages/runtime/src/server.zig:3551` for the timeout, and
+`packages/runtime/src/server.zig:3776` for the wait). Because no later test
 client exists before that wait, the probe disables the only ordinary wake path
 and the exact claim turns red. Restore the configured port after the probe.
 

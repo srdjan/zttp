@@ -90,6 +90,12 @@ pub const SignError = error{
     InvalidProfileIdentity,
     InvalidFrontendIdentity,
     OutOfMemory,
+    /// The Ed25519 signature could not be produced. Every other failure in
+    /// `sign` propagates, and this one was `catch unreachable` - a panic in
+    /// the production signer, and undefined behavior in a release build, for a
+    /// call whose caller can perfectly well be told. The test helper below
+    /// keeps its `catch unreachable`: there a panic IS the failure report.
+    SignatureFailed,
 };
 
 pub const VerifyError = error{
@@ -145,7 +151,7 @@ pub fn sign(
     const signing_input = joinDot(allocator, header_b64, payload_b64) catch return error.OutOfMemory;
     defer allocator.free(signing_input);
 
-    const signature = key_pair.sign(signing_input, null) catch unreachable;
+    const signature = key_pair.sign(signing_input, null) catch return error.SignatureFailed;
     const signature_bytes = signature.toBytes();
     const signature_b64 = encodeBase64Owned(allocator, &signature_bytes) catch return error.OutOfMemory;
     defer allocator.free(signature_b64);

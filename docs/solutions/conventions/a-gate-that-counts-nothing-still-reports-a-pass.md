@@ -30,7 +30,7 @@ A gate that finds nothing and a gate that checks nothing produce the same output
 
 This repo has now learned that at least four times, and never in a place anyone would find it again.
 
-On 2026-07-30 two instances landed in the same session and were recorded only in a plan that is now archived. `zig build test-zts -- --test-filter "a\|b"` passes a literal `a\|b` to Zig rather than a grep alternation, so it matched zero tests and exited 0 - noted at the time as "the second time this session a verification step silently did nothing" (`docs/archive/plans/2026-07-30-004-item4-c1-plan.md`, finding 3). That sentence is the 2026-07-30 record and nobody can reproduce it against the tree today, which describes the same command form two other ways: `build.zig:7-9` says Zig takes the filter at compile time, so the `-- --test-filter ...` form panics the runner, and `docs/internals/testing.md:221-226` says the run does not filter at all and executes every test in the root while reporting success. Keep the finding as written. Only the mechanism has moved, and all three versions end the same way, with a command that did not do what its author believed. In the same table, a corpus differential was found structurally unable to catch the bug it was cited for, because every corpus case supplied a real atom table: "the differential read as stronger evidence than it was ... This is the same lesson as wave 3 item 1: a check that reads as covering more than it does" (finding 2). Wave 3 item 1 is a third instance, earlier still.
+On 2026-07-30 two instances landed in the same session and were recorded only in a plan that is now archived. `zig build test-zts -- --test-filter "a\|b"` passes a literal `a\|b` to Zig rather than a grep alternation, so it matched zero tests and exited 0 - noted at the time as "the second time this session a verification step silently did nothing" (`docs/archive/plans/2026-07-30-004-item4-c1-plan.md`, finding 3). That sentence is the 2026-07-30 record and nobody can reproduce it against the tree today, which describes the same command form two other ways: `build.zig:7-9` says Zig takes the filter at compile time, so the `-- --test-filter ...` form panics the runner, and `docs/internals/testing.md:283-288` says the run does not filter at all and executes every test in the root while reporting success. Keep the finding as written. Only the mechanism has moved, and all three versions end the same way, with a command that did not do what its author believed. In the same table, a corpus differential was found structurally unable to catch the bug it was cited for, because every corpus case supplied a real atom table: "the differential read as stronger evidence than it was ... This is the same lesson as wave 3 item 1: a check that reads as covering more than it does" (finding 2). Wave 3 item 1 is a third instance, earlier still.
 
 On 2026-08-03 four more shipped at once in the deterministic stand-in and were caught by an adversarial review rather than by any gate. They are the worked examples below.
 
@@ -40,14 +40,14 @@ Two scripts in this repo already carry the remedy locally. Neither states it as 
 
 **A gate asserts a floor on its own input before it trusts a count taken over that input.**
 
-`scripts/check-runtime-purity.sh:42-51` is the model. It searches a binary for provider markers, and before reporting anything it requires at least one marker to have matched:
+`scripts/check-runtime-purity.sh` is the model, and it carries two floors rather than one. Before it reads the binary at all it checks its own marker list against the client directories under `packages/pi/src/providers/`, so a provider family that has a client and no marker fails instead of going unexamined (`:46-61`, whose comment says why: "a family added later is checked by nothing and this gate reports a pass over a binary it never examined for it"). Then, per family, it requires at least one marker to have matched before it reports anything (`:89-92`):
 
 ```bash
 if [ "$present" -eq 0 ]; then
-  echo "error: no agent/provider markers found in dev binary '$(basename "$dev_bin")' - purity check is vacuous; update markers" >&2
+  echo "error: no '$family' markers found in dev binary '$(basename "$dev_bin")' - this gate cannot assert that provider is absent from the shipped binary; update its markers" >&2
 ```
 
-Its comment names the exact failure: the check goes vacuous when "every provider host was renamed and the markers went stale". `scripts/check-docs-drift.sh:239` does the same for a parsed registry - "A registry that stops parsing (renamed table, changed literal) would silently pass the loop above with zero iterations" - and enforces `command_count >= 40`.
+`scripts/check-docs-drift.sh:238-241` does the same for a parsed registry - "A registry that stops parsing (renamed table, changed literal) would silently pass the loop above with zero iterations" - and enforces `command_count >= 40`.
 
 The four shapes below are that rule applied to four different kinds of gate.
 
@@ -61,7 +61,7 @@ try testing.expectEqual(range.entries.len, cases.len);
 
 **A name filter must enforce the naming rule it depends on.** The stand-in test root compiles with the `stand-in` filter, so a test whose name omits that token never runs and never reports. Nothing enforced the convention the filter relied on. Fix: a gate that `@embedFile`s the roots, fails on any column-zero `test "` declaration whose name lacks the token, and - applying this document's own rule to itself - asserts a floor on how many declarations it scanned.
 
-The pin is no longer a bare literal, so do not go looking for one. The `test-standin` row of the `host_test_roots` table carries `.standin_only = true` (`build.zig:458`), and the loop over that table reads the attribute when it builds each test artifact: `.filters = if (root.standin_only) &.{"stand-in"} else test_filters,` (`build.zig:486`). The token is the same and so is the failure it permits.
+The pin is no longer a bare literal, so do not go looking for one. The `test-standin` row of the `host_test_roots` table carries `.standin_only = true` (`build.zig:476`), and the loop over that table reads the attribute when it builds each test artifact: `.filters = if (root.standin_only) &.{"stand-in"} else test_filters,` (`build.zig:504`). The token is the same and so is the failure it permits.
 
 The same shape then reached every test artifact in the repository. `-Dtest-filter` landed on 2026-08-01 in commit `0124cd1f`, two days before this document, and it is wired to `.filters` on all of them (`build.zig:13-18`), so an artifact the filter matches nothing in runs zero tests and exits 0. Measured: a filtered run reported "2 passed" while the named test's assertion was sabotaged to expect an impossible error, because that run executed none of them. There is no floor to add here, because the filter belongs to the caller and not to the gate. The rule is a rule of use instead, and `AGENTS.md` now states it: never cite a `-Dtest-filter` run as evidence, and take every verdict from an unfiltered run of the named step.
 

@@ -24,6 +24,10 @@ pub const BytecodeHeader = packed struct(u88) {
 };
 
 /// Bytecode flags
+/// `jit_hints` is residue of the tiered JIT, which was removed after
+/// measurement, and nothing reads it. It stays for the same reason
+/// `HandlerFlags.pure_dispatch` does: this is a serialized bit at a fixed
+/// offset, and removing it changes what already-written bytecode decodes to.
 pub const BytecodeFlags = packed struct(u8) {
     has_source_map: bool = false,
     optimized: bool = false,
@@ -423,23 +427,14 @@ pub const UpvalueInfo = struct {
     index: u8, // Index in parent's locals or upvalues array
 };
 
-/// Call count threshold before a function becomes a JIT candidate
-pub const JIT_THRESHOLD: u32 = 100;
-
-/// Back-edge threshold for detecting hot loops
+/// Back-edge threshold for detecting hot loops. Read by
+/// `interpreter.zig:100`, the one surviving reader of this group: four
+/// siblings - JIT_THRESHOLD, LOOP_JIT_THRESHOLD, OPTIMIZED_THRESHOLD and
+/// OPTIMIZED_LOOP_THRESHOLD - were tier-promotion thresholds for the tiered
+/// JIT, which was removed after measurement, and nothing read them. Unlike the
+/// `jit_hints` bit above, a constant is not at a fixed offset in a serialized
+/// layout, so removing it costs nothing.
 pub const LOOP_THRESHOLD: u32 = 1000;
-
-/// Back-edge threshold for triggering early JIT compilation of functions with hot loops.
-/// Lower than LOOP_THRESHOLD because functions with loops should JIT faster than
-/// functions that get called many times - the loop already proves the function is hot.
-pub const LOOP_JIT_THRESHOLD: u32 = 50;
-
-/// Execution count threshold for promoting baseline to optimized tier
-pub const OPTIMIZED_THRESHOLD: u32 = 160; // Execution count for baseline -> optimized promotion (after baseline warmup at 150)
-
-/// Back-edge threshold for promoting baseline to optimized tier via hot loops
-/// Lower than call-based threshold since hot loops indicate optimization potential
-pub const OPTIMIZED_LOOP_THRESHOLD: u32 = 5000;
 
 /// Global counter for generating unique guard IDs
 var guard_id_counter: u64 = 1;
@@ -503,7 +498,14 @@ pub const FunctionFlags = packed struct(u8) {
 // HTTP Handler Fast Path Structures
 // ============================================================================
 
-/// Handler flags for fast path optimization
+/// Handler flags for fast path optimization.
+///
+/// `pure_dispatch` has no reader and is kept anyway. This is a packed struct in
+/// a serialized format: the field is one bit at a fixed offset, and deleting it
+/// would either shift `_reserved` - changing what previously written bytes
+/// decode to - or leave a hole that reads as a rename. A dead bit in a wire
+/// layout is not the same thing as a dead function, and the cost of removing it
+/// is paid by every artifact already on disk.
 pub const HandlerFlags = packed struct(u8) {
     is_http_handler: bool = false,
     has_static_routes: bool = false,

@@ -73,7 +73,7 @@ pub const ModuleCapabilityError = error{
     RandomUnavailable,
 };
 
-pub const DataLabel = enum(u3) {
+pub const DataLabel = enum(u4) {
     secret,
     credential,
     user_input,
@@ -82,13 +82,23 @@ pub const DataLabel = enum(u3) {
     external,
     validated,
     nondeterministic,
+    unknown,
 };
 
-/// The provenance labels an extension can declare on a return value. The
-/// analyzer's own set carries one more - `unknown`, for a value it could not
-/// trace - which it assigns and no binding declares, so the adapter maps these
-/// fields across by name rather than by bit pattern.
-pub const LabelSet = packed struct(u8) {
+/// The provenance labels an extension can declare on a return value. Mirrors
+/// the analyzer's own set field for field; the adapter maps them across by name
+/// rather than by bit pattern, so the two widths need not agree.
+///
+/// `unknown` is the one label that is not a data-sensitivity class. It is the
+/// claim that provenance could not be followed, and the analyzer assigns it
+/// wherever its own walk gives up. A binding declares it for the shape the
+/// analyzer cannot see at all: an export that reads persistent cross-call
+/// state - a cache, a queue, a SQL table, a durable signal - and hands back a
+/// value some separate write put there. The read call holds no reference to
+/// that value, so no dataflow rule can reach it and only the binding knows. A
+/// store read that declared a benign label instead reported
+/// `no_secret_leakage` PROVEN for a secret round-tripped through the store.
+pub const LabelSet = packed struct(u16) {
     secret: bool = false,
     credential: bool = false,
     user_input: bool = false,
@@ -97,6 +107,11 @@ pub const LabelSet = packed struct(u8) {
     external: bool = false,
     validated: bool = false,
     nondeterministic: bool = false,
+    /// Provenance the checker could not follow: proves nothing. Distinct from
+    /// the empty set, which is the positive claim that a value carries
+    /// nothing.
+    unknown: bool = false,
+    _reserved: u7 = 0,
 
     pub const empty: LabelSet = .{};
 };
@@ -224,6 +239,20 @@ pub const FunctionBinding = struct {
     contract_extractions: []const ContractExtraction = &.{},
     contract_flags: ContractFlags = .{},
     return_labels: LabelSet = .{},
+
+    /// The argument that bounds how much this export declassifies. Set only on
+    /// an export whose purpose is to make a labelled value publishable, and
+    /// whose declared labels therefore replace its input's instead of joining
+    /// them.
+    ///
+    /// The declassification holds only while that argument is a compile-time
+    /// literal. `mask(text, visible)` reveals the trailing `visible` bytes, so
+    /// a runtime `visible` lets whatever computes it decide how much of the
+    /// secret survives: `mask(env("SECRET_KEY"), bytesLength(requestBody(req)))`
+    /// is request-controlled declassification. With a non-literal bound the
+    /// analyzer keeps the input's labels, and the ordinary sink diagnostic
+    /// reports the secret reaching the response.
+    declassify_bound_arg: ?u8 = null,
     /// The return value can contain data that arrived as an argument, and this
     /// export validates nothing. The flow checker then unions every argument's
     /// labels into the call's result instead of answering `return_labels`

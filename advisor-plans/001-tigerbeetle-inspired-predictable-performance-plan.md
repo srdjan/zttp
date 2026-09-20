@@ -96,7 +96,7 @@ mechanisms.
   `HandlerInstance`. It does not spawn the user-facing binary, open a real
   socket, drive concurrent requests, sample process RSS, or report request
   latency distributions.
-- `scripts/bench-diff.sh:46-77` uses best-of-five microbench results and excludes
+- `tooling/benchmark.zig` uses best-of-five microbench results and excludes
   `httpHandler` and `httpHandlerHeavy` from regression enforcement. This is
   reasonable for microbench noise, but it cannot support public HTTP claims.
 - `packages/runtime/src/runtime_pool.zig:87` enables internal pool percentile
