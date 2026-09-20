@@ -17,9 +17,15 @@
 //! Ported from `scripts/coverage-union.sh`, which computed this in a python3
 //! heredoc. The port is not cosmetic: the shell version refused outright when
 //! no published run carried the identity asked for, which made the first
-//! publication of any new corpus impossible. That guard had never fired,
-//! because the script was written when every identity in history already had
-//! rows, and it fired the first time a prompt edit moved the identity.
+//! publication of any new corpus impossible.
+//!
+//! That guard was probed, and the probe passed: its commit records that the
+//! floor "was probed and refuses". A probe shows the branch executes and that
+//! it rejects what it names. It cannot show that what it rejects is illegitimate,
+//! and here it was: a new identity is what editing a prompt produces, and it
+//! arrives with no published run by definition. The guard was written when
+//! every identity in the tree already had rows, so the one input that would
+//! have exposed it did not exist yet to be tried.
 //!
 //! Usage:
 //!   coverage-union <corpus-version> [code ...]
