@@ -34,6 +34,26 @@ no edit, `workflow-nested-dispatch-avoidance` failed its runtime intent, and
 `parallel-secret` stayed compiler-veto-only by design. Those are properties of
 the case, not samples.
 
+Two of those three were defects in the case rather than in the agent, and both
+are now closed. `cache-counter-holes` seeded a Proof capsule naming
+`no_secret_leakage` and `no_credential_leakage`, which no fill could discharge
+once `cacheGet` began declaring `.unknown` return labels: the response sink
+clears every property it decides when an `.unknown` value reaches it. The model
+spent its whole tool budget on fills that could not pass and then reported that
+it had applied no edit rather than inventing one, which is the right answer to
+an impossible request. `workflow-nested-dispatch-avoidance` asserted a step
+named `reserve` its prompt never stated, and required an egress call to
+`https://inventory.internal/reserve` that no line of the prompt asks for. Both
+were fixed on the side they belong to, the corpus was re-recorded, and the
+2026-09-20 row below is the first measurement of the amended inputs. Intent
+pass moved to 18/18 there.
+
+Read the cohort table as a record of the corpus `0012ad8ca6d5` it was measured
+over. The spread it reports still stands as the repeatability claim - a figure
+stable to about one case - but its 13/19 and the 12/19 below are measurements
+of two different prompt sets and must not be differenced. Neither is a change
+in the compiler or the agent.
+
 Those cohorts report `qualified: false`, because
 `expert_qualification.minimum_raw_first_draft_passes` is 14 and two of the three
 fell below it. That floor authorizes a change of the product default. It is not
@@ -93,6 +113,7 @@ proposed moving a default that already names this provider and model.
 | 2026-09-09 | `9df11af8` | `0012ad8ca6d5` | 19 | deepseek | deepseek-v4-flash | `97aec67e484a` | 42% (8/19) | 42% (8/19) | 6 | 77% (14/18) |
 | 2026-09-09 | `8ed1b0f6` | `0012ad8ca6d5` | 19 | deepseek | deepseek-v4-flash | `97aec67e484a` | 42% (8/19) | 42% (8/19) | 6 | 77% (14/18) |
 | 2026-09-20 | `121f2b49` | `0012ad8ca6d5` | 19 | deepseek | deepseek-v4-flash | `97aec67e484a` | 68% (13/19) | 68% (13/19) | 4 | 83% (15/18) |
+| 2026-09-20 | `b66b3bca` | `e6801afae099` | 19 | deepseek | deepseek-v4-flash | `97aec67e484a` | 63% (12/19) | 63% (12/19) | 4 | 100% (18/18) |
 
 Regenerate with `bash scripts/update-convergence.sh`, which appends a row and
 rewrites [convergence.json](convergence.json). History is git history on those
