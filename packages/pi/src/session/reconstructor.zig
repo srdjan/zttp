@@ -419,8 +419,10 @@ fn parseDisplayMessage(
     const obj = payload.object;
     const llm_text_val = obj.get("llm_text") orelse obj.get("body") orelse return error.CorruptEventsLog;
     if (llm_text_val != .string) return error.CorruptEventsLog;
+    const llm_text = try allocator.dupe(u8, llm_text_val.string);
+    errdefer allocator.free(llm_text);
     return .{
-        .llm_text = try allocator.dupe(u8, llm_text_val.string),
+        .llm_text = llm_text,
         .ui_payload = if (obj.get("ui_payload")) |payload_val|
             try ui_payload.parse(allocator, payload_val)
         else
@@ -438,6 +440,464 @@ const IsolatedTmp = @import("../test_support/tmp.zig").IsolatedTmp;
 
 fn initTmp(allocator: std.mem.Allocator) !IsolatedTmp {
     return IsolatedTmp.init(allocator, "reconstructor");
+}
+
+const JournalEventTag = std.meta.Tag(events.EventRecord);
+
+fn populateAllKindsJournal(allocator: std.mem.Allocator, path: []const u8) !void {
+    try events.appendEntryEvent(allocator, path, 1, null, .{ .user_text = "user" });
+    try events.appendEntryEvent(allocator, path, 2, null, .{ .model_text = "model" });
+    try events.appendEntryEvent(allocator, path, 3, 0, .{ .tool_use = .{
+        .id = "toolu_legacy_1",
+        .name = "workspace_read_file",
+        .args_json = "{\"path\":\"one.ts\"}",
+        .reasoning_content = "first reasoning",
+    } });
+    try events.appendEntryEvent(allocator, path, 3, 1, .{ .tool_use = .{
+        .id = "toolu_legacy_2",
+        .name = "workspace_read_file",
+        .args_json = "{\"path\":\"two.ts\"}",
+    } });
+    const batch = [_]events.ToolUse{
+        .{ .id = "toolu_batch", .name = "zts_expert_meta", .args_json = "{}" },
+    };
+    try events.appendEntryEvent(allocator, path, 4, null, .{ .tool_use_batch = &batch });
+    try events.appendEntryEvent(allocator, path, 5, null, .{ .tool_result = .{
+        .tool_use_id = "toolu_batch",
+        .tool_name = "zts_expert_meta",
+        .ok = true,
+        .llm_text = "result",
+        .ui_payload = .{ .plain_text = @constCast("result display") },
+    } });
+    try events.appendEntryEvent(allocator, path, 6, null, .{ .proof_card = .{
+        .llm_text = "proof",
+        .ui_payload = .{ .plain_text = @constCast("proof display") },
+    } });
+    try events.appendEntryEvent(allocator, path, 7, null, .{ .diagnostic_box = .{
+        .llm_text = "diagnostic",
+    } });
+    try events.appendEntryEvent(allocator, path, 8, null, .{ .verified_change_set = .{
+        .llm_text = "verified",
+    } });
+    try events.appendEntryEvent(allocator, path, 9, null, .{ .system_note = "system" });
+    try events.appendEvent(allocator, path, .{ .autoloop_outcome = .{
+        .verdict = .achieved,
+        .goals_met = &.{"retry_safe"},
+        .iterations = 1,
+    } });
+    try events.appendEvent(allocator, path, .{ .turn_end = .{ .reason = .approved } });
+    try events.appendEvent(allocator, path, .{ .session_summary = .{
+        .turn_count = 1,
+        .total_roundtrips = 2,
+        .final_outcome = .approved,
+    } });
+    try events.appendEvent(allocator, path, .{ .compaction_checkpoint = .{
+        .summary = "summary",
+        .first_kept_entry_id = 9,
+        .reason = .manual,
+        .read_files = &.{"read.ts"},
+        .modified_files = &.{"modified.ts"},
+    } });
+}
+
+fn writeRawSchema4Frame(
+    allocator: std.mem.Allocator,
+    path: []const u8,
+    payload: []const u8,
+) !void {
+    const frame = try rawSchema4Frame(allocator, payload);
+    defer allocator.free(frame);
+    try zts.file_io.writeFile(allocator, path, frame);
+}
+
+fn appendRawSchema4Frame(
+    allocator: std.mem.Allocator,
+    path: []const u8,
+    payload: []const u8,
+) !void {
+    const frame = try rawSchema4Frame(allocator, payload);
+    defer allocator.free(frame);
+    const fd = try zts.file_io.openAppend(allocator, path);
+    defer std.Io.Threaded.closeFd(fd);
+    var written: usize = 0;
+    while (written < frame.len) {
+        const result = std.c.write(fd, frame[written..].ptr, frame.len - written);
+        if (result < 0 and std.posix.errno(result) == .INTR) continue;
+        if (result <= 0) return error.TestWriteFailed;
+        written += @intCast(result);
+    }
+}
+
+fn rawSchema4Frame(allocator: std.mem.Allocator, payload: []const u8) ![]u8 {
+    const frame_magic = "ZTE4";
+    const footer_magic = "4ETZ";
+    const header_len = frame_magic.len + @sizeOf(u64) + 32;
+    const footer_len = @sizeOf(u64) + footer_magic.len;
+    const frame = try allocator.alloc(u8, header_len + payload.len + footer_len + 1);
+    errdefer allocator.free(frame);
+    @memcpy(frame[0..frame_magic.len], frame_magic);
+    std.mem.writeInt(u64, frame[frame_magic.len .. frame_magic.len + @sizeOf(u64)], @intCast(payload.len), .big);
+    std.crypto.hash.sha2.Sha256.hash(payload, frame[frame_magic.len + @sizeOf(u64) .. header_len], .{});
+    @memcpy(frame[header_len .. header_len + payload.len], payload);
+    const footer_start = header_len + payload.len;
+    std.mem.writeInt(u64, frame[footer_start..][0..@sizeOf(u64)], @intCast(payload.len), .big);
+    @memcpy(frame[footer_start + @sizeOf(u64) .. footer_start + footer_len], footer_magic);
+    frame[frame.len - 1] = '\n';
+    return frame;
+}
+
+test "reconstructTranscript applies all event kinds with stable identities" {
+    const allocator = testing.allocator;
+    var tmp = try initTmp(allocator);
+    defer tmp.cleanup(allocator);
+    const path = try tmp.childPath(allocator, "all-kinds.events");
+    defer allocator.free(path);
+    try populateAllKindsJournal(allocator, path);
+
+    var seen = std.EnumSet(JournalEventTag).initEmpty();
+    var frame_count: usize = 0;
+    var reader = try events.Reader.open(allocator, path);
+    defer reader.deinit();
+    while (try reader.next()) |payload| {
+        defer allocator.free(payload);
+        var parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload, .{});
+        defer parsed.deinit();
+        const kind_value = parsed.value.object.get("k") orelse return error.TestExpectedEventKind;
+        const tag = std.meta.stringToEnum(JournalEventTag, kind_value.string) orelse
+            return error.TestExpectedKnownEventKind;
+        seen.insert(tag);
+        frame_count += 1;
+    }
+    try testing.expectEqual(@as(usize, 14), frame_count);
+    for (std.enums.values(JournalEventTag)) |tag| try testing.expect(seen.contains(tag));
+
+    var tr = try reconstructTranscript(allocator, path, null);
+    defer tr.deinit(allocator);
+    const expected_tags = [_]transcript.Tag{
+        .user_text,
+        .model_text,
+        .assistant_tool_use,
+        .assistant_tool_use,
+        .tool_result,
+        .proof_card,
+        .diagnostic_box,
+        .verified_change_set,
+        .system_note,
+    };
+    try testing.expectEqual(expected_tags.len, tr.len());
+    for (expected_tags, 0..) |expected, index| {
+        try testing.expectEqual(expected, std.meta.activeTag(tr.at(index).*));
+        try testing.expectEqual(@as(events.EntryId, @intCast(index + 1)), tr.entryIdAt(index));
+    }
+    try testing.expectEqualStrings("user", tr.at(0).user_text);
+    try testing.expectEqualStrings("model", tr.at(1).model_text);
+    try testing.expectEqual(@as(usize, 2), tr.at(2).assistant_tool_use.len);
+    try testing.expectEqualStrings("toolu_legacy_1", tr.at(2).assistant_tool_use[0].id);
+    try testing.expectEqualStrings("workspace_read_file", tr.at(2).assistant_tool_use[0].name);
+    try testing.expectEqualStrings("{\"path\":\"one.ts\"}", tr.at(2).assistant_tool_use[0].args_json);
+    try testing.expectEqualStrings("first reasoning", tr.at(2).assistant_tool_use[0].reasoning_content.?);
+    try testing.expectEqualStrings("toolu_legacy_2", tr.at(2).assistant_tool_use[1].id);
+    try testing.expectEqual(@as(usize, 1), tr.at(3).assistant_tool_use.len);
+    try testing.expectEqualStrings("toolu_batch", tr.at(3).assistant_tool_use[0].id);
+    try testing.expectEqualStrings("zts_expert_meta", tr.at(3).assistant_tool_use[0].name);
+    try testing.expectEqualStrings("{}", tr.at(3).assistant_tool_use[0].args_json);
+    try testing.expectEqualStrings("toolu_batch", tr.at(4).tool_result.tool_use_id);
+    try testing.expectEqualStrings("zts_expert_meta", tr.at(4).tool_result.tool_name);
+    try testing.expect(tr.at(4).tool_result.ok);
+    try testing.expectEqualStrings("result", tr.at(4).tool_result.llm_text);
+    switch (tr.at(4).tool_result.ui_payload.?) {
+        .plain_text => |text| try testing.expectEqualStrings("result display", text),
+        else => return error.TestExpectedPlainTextPayload,
+    }
+    switch (tr.at(5).proof_card.ui_payload.?) {
+        .plain_text => |text| try testing.expectEqualStrings("proof display", text),
+        else => return error.TestExpectedPlainTextPayload,
+    }
+    try testing.expectEqualStrings("proof", tr.at(5).proof_card.llm_text);
+    try testing.expectEqualStrings("diagnostic", tr.at(6).diagnostic_box.llm_text);
+    try testing.expectEqualStrings("verified", tr.at(7).verified_change_set.llm_text);
+    try testing.expectEqualStrings("system", tr.at(8).system_note);
+    try testing.expectEqualStrings("summary", tr.projection.?.summary);
+    try testing.expectEqual(@as(events.EntryId, 9), tr.projection.?.first_kept_entry_id);
+    try testing.expectEqualStrings("read.ts", tr.projection.?.read_files[0]);
+    try testing.expectEqualStrings("modified.ts", tr.projection.?.modified_files[0]);
+}
+
+test "reconstructTranscript preserves legacy display and body payloads" {
+    const allocator = testing.allocator;
+    var tmp = try initTmp(allocator);
+    defer tmp.cleanup(allocator);
+
+    const display_path = try tmp.childPath(allocator, "display-string.events");
+    defer allocator.free(display_path);
+    try writeRawSchema4Frame(
+        allocator,
+        display_path,
+        "{\"v\":4,\"entry_id\":1,\"k\":\"proof_card\",\"d\":\"legacy proof\"}",
+    );
+    var display = try reconstructTranscript(allocator, display_path, null);
+    defer display.deinit(allocator);
+    try testing.expectEqualStrings("legacy proof", display.at(0).proof_card.llm_text);
+    try testing.expect(display.at(0).proof_card.ui_payload == null);
+
+    const result_path = try tmp.childPath(allocator, "result-body.events");
+    defer allocator.free(result_path);
+    try writeRawSchema4Frame(
+        allocator,
+        result_path,
+        "{\"v\":4,\"entry_id\":1,\"k\":\"tool_result\",\"d\":{\"tool_use_id\":\"toolu_1\",\"tool_name\":\"tool\",\"ok\":true,\"body\":\"legacy result\",\"ui_payload\":{\"kind\":\"plain_text\",\"text\":\"display\"}}}",
+    );
+    var result = try reconstructTranscript(allocator, result_path, null);
+    defer result.deinit(allocator);
+    try testing.expectEqualStrings("legacy result", result.at(0).tool_result.llm_text);
+    switch (result.at(0).tool_result.ui_payload.?) {
+        .plain_text => |text| try testing.expectEqualStrings("display", text),
+        else => return error.TestExpectedPlainTextPayload,
+    }
+
+    const object_path = try tmp.childPath(allocator, "display-body.events");
+    defer allocator.free(object_path);
+    try writeRawSchema4Frame(
+        allocator,
+        object_path,
+        "{\"v\":4,\"entry_id\":1,\"k\":\"verified_change_set\",\"d\":{\"body\":\"legacy verified\",\"ui_payload\":{\"kind\":\"plain_text\",\"text\":\"verified display\"}}}",
+    );
+    var object = try reconstructTranscript(allocator, object_path, null);
+    defer object.deinit(allocator);
+    try testing.expectEqualStrings("legacy verified", object.at(0).verified_change_set.llm_text);
+    switch (object.at(0).verified_change_set.ui_payload.?) {
+        .plain_text => |text| try testing.expectEqualStrings("verified display", text),
+        else => return error.TestExpectedPlainTextPayload,
+    }
+}
+
+test "reader recovery and reconstruction preserve additive journal fields" {
+    const allocator = testing.allocator;
+    var tmp = try initTmp(allocator);
+    defer tmp.cleanup(allocator);
+    const path = try tmp.childPath(allocator, "additive-fields.events");
+    defer allocator.free(path);
+    const entry_payload =
+        "{\"v\":4,\"entry_id\":1,\"future_envelope\":{\"revision\":5},\"k\":\"tool_result\",\"d\":{\"tool_use_id\":\"toolu_1\",\"tool_name\":\"tool\",\"ok\":true,\"body\":\"result\",\"future_payload\":[1,2],\"ui_payload\":{\"kind\":\"plain_text\",\"text\":\"display\",\"future_ui\":true}}}";
+    const checkpoint_payload =
+        "{\"v\":4,\"future_envelope\":\"kept\",\"k\":\"compaction_checkpoint\",\"d\":{\"summary\":\"summary\",\"first_kept_entry_id\":1,\"reason\":\"manual\",\"read_files\":[\"read.ts\"],\"modified_files\":[\"modified.ts\"],\"future_payload\":{\"tokens\":3}}}";
+    try writeRawSchema4Frame(allocator, path, entry_payload);
+    try appendRawSchema4Frame(allocator, path, checkpoint_payload);
+
+    var reader = try events.Reader.open(allocator, path);
+    defer reader.deinit();
+    const first = (try reader.next()) orelse return error.TestExpectedEventFrame;
+    defer allocator.free(first);
+    const second = (try reader.next()) orelse return error.TestExpectedEventFrame;
+    defer allocator.free(second);
+    try testing.expect((try reader.next()) == null);
+    try testing.expectEqualStrings(entry_payload, first);
+    try testing.expectEqualStrings(checkpoint_payload, second);
+
+    try events.recoverIncompleteTail(allocator, path);
+    var tr = try reconstructTranscript(allocator, path, null);
+    defer tr.deinit(allocator);
+    try testing.expectEqual(@as(usize, 1), tr.len());
+    try testing.expectEqualStrings("toolu_1", tr.at(0).tool_result.tool_use_id);
+    try testing.expectEqualStrings("result", tr.at(0).tool_result.llm_text);
+    switch (tr.at(0).tool_result.ui_payload.?) {
+        .plain_text => |text| try testing.expectEqualStrings("display", text),
+        else => return error.TestExpectedPlainTextPayload,
+    }
+    try testing.expectEqualStrings("summary", tr.projection.?.summary);
+    try testing.expectEqual(@as(events.EntryId, 1), tr.projection.?.first_kept_entry_id);
+    try testing.expectEqualStrings("read.ts", tr.projection.?.read_files[0]);
+    try testing.expectEqualStrings("modified.ts", tr.projection.?.modified_files[0]);
+}
+
+test "checkpoint recovery accepts omitted projection fields but reconstruction rejects them" {
+    const allocator = testing.allocator;
+    var tmp = try initTmp(allocator);
+    defer tmp.cleanup(allocator);
+    const path = try tmp.childPath(allocator, "checkpoint-omitted-fields.events");
+    defer allocator.free(path);
+    try writeRawSchema4Frame(
+        allocator,
+        path,
+        "{\"v\":4,\"k\":\"compaction_checkpoint\",\"d\":{\"first_kept_entry_id\":1}}",
+    );
+
+    try events.recoverIncompleteTail(allocator, path);
+    try testing.expectError(error.CorruptEventsLog, reconstructTranscript(allocator, path, null));
+}
+
+test "checkpoint recovery rejects absent or malformed cut identity" {
+    const allocator = testing.allocator;
+    var tmp = try initTmp(allocator);
+    defer tmp.cleanup(allocator);
+
+    const absent_path = try tmp.childPath(allocator, "checkpoint-absent-cut.events");
+    defer allocator.free(absent_path);
+    try writeRawSchema4Frame(
+        allocator,
+        absent_path,
+        "{\"v\":4,\"k\":\"compaction_checkpoint\",\"d\":{}}",
+    );
+    try testing.expectError(
+        error.CorruptEventsLog,
+        events.recoverIncompleteTail(allocator, absent_path),
+    );
+
+    const malformed_path = try tmp.childPath(allocator, "checkpoint-malformed-cut.events");
+    defer allocator.free(malformed_path);
+    try writeRawSchema4Frame(
+        allocator,
+        malformed_path,
+        "{\"v\":4,\"k\":\"compaction_checkpoint\",\"d\":{\"first_kept_entry_id\":\"1\"}}",
+    );
+    try testing.expectError(
+        error.CorruptEventsLog,
+        events.recoverIncompleteTail(allocator, malformed_path),
+    );
+}
+
+test "reader exposes a framed skipped identity while recovery and reconstruction reject it" {
+    const allocator = testing.allocator;
+    var tmp = try initTmp(allocator);
+    defer tmp.cleanup(allocator);
+    const path = try tmp.childPath(allocator, "raw-skipped-entry.events");
+    defer allocator.free(path);
+    const payload = "{\"v\":4,\"entry_id\":2,\"k\":\"user_text\",\"d\":\"skipped\"}";
+    try writeRawSchema4Frame(allocator, path, payload);
+
+    var reader = try events.Reader.open(allocator, path);
+    defer reader.deinit();
+    const framed = (try reader.next()) orelse return error.TestExpectedEventFrame;
+    defer allocator.free(framed);
+    try testing.expectEqualStrings(payload, framed);
+    try testing.expect((try reader.next()) == null);
+
+    try testing.expectError(
+        error.CorruptEventsLog,
+        events.recoverIncompleteTail(allocator, path),
+    );
+    try testing.expectError(error.CorruptEventsLog, reconstructTranscript(allocator, path, null));
+}
+
+test "reconstruction skips opaque session payloads that recovery rejects" {
+    const allocator = testing.allocator;
+    var tmp = try initTmp(allocator);
+    defer tmp.cleanup(allocator);
+    const path = try tmp.childPath(allocator, "opaque-session-payloads.events");
+    defer allocator.free(path);
+    try writeRawSchema4Frame(
+        allocator,
+        path,
+        "{\"v\":4,\"k\":\"autoloop_outcome\",\"d\":\"opaque\"}",
+    );
+    try appendRawSchema4Frame(
+        allocator,
+        path,
+        "{\"v\":4,\"k\":\"turn_end\",\"d\":false}",
+    );
+    try appendRawSchema4Frame(
+        allocator,
+        path,
+        "{\"v\":4,\"k\":\"session_summary\",\"d\":7}",
+    );
+
+    var tr = try reconstructTranscript(allocator, path, null);
+    defer tr.deinit(allocator);
+    try testing.expectEqual(@as(usize, 0), tr.len());
+    try testing.expect(tr.projection == null);
+    try testing.expectError(
+        error.CorruptEventsLog,
+        events.recoverIncompleteTail(allocator, path),
+    );
+}
+
+test "framed version mismatch preserves reconstruction and recovery errors" {
+    const allocator = testing.allocator;
+    var tmp = try initTmp(allocator);
+    defer tmp.cleanup(allocator);
+    const path = try tmp.childPath(allocator, "future-version.events");
+    defer allocator.free(path);
+    const payload = "{\"v\":5,\"entry_id\":1,\"k\":\"user_text\",\"d\":\"future\"}";
+    try writeRawSchema4Frame(allocator, path, payload);
+
+    var reader = try events.Reader.open(allocator, path);
+    defer reader.deinit();
+    const framed = (try reader.next()) orelse return error.TestExpectedEventFrame;
+    defer allocator.free(framed);
+    try testing.expectEqualStrings(payload, framed);
+    try testing.expect((try reader.next()) == null);
+    try testing.expectError(
+        error.SchemaVersionUnsupported,
+        reconstructTranscript(allocator, path, null),
+    );
+    try testing.expectError(
+        error.CorruptEventsLog,
+        events.recoverIncompleteTail(allocator, path),
+    );
+}
+
+test "writer accepts tool use without part index but reconstruction rejects it" {
+    const allocator = testing.allocator;
+    var tmp = try initTmp(allocator);
+    defer tmp.cleanup(allocator);
+    const path = try tmp.childPath(allocator, "tool-use-without-part.events");
+    defer allocator.free(path);
+    try events.appendEntryEvent(allocator, path, 1, null, .{ .tool_use = .{
+        .id = "toolu_1",
+        .name = "workspace_read_file",
+        .args_json = "{\"path\":\"handler.ts\"}",
+    } });
+    try testing.expectError(error.CorruptEventsLog, reconstructTranscript(allocator, path, null));
+}
+
+test "reconstructTranscript preserves parse allocation error compatibility" {
+    const allocator = testing.allocator;
+    var tmp = try initTmp(allocator);
+    defer tmp.cleanup(allocator);
+    const path = try tmp.childPath(allocator, "parse-oom.events");
+    defer allocator.free(path);
+    try events.appendEntryEvent(allocator, path, 1, null, .{ .user_text = "user" });
+
+    // Reader.open allocates the path first and Reader.next allocates the frame
+    // payload second. The next allocation enters std.json parsing, whose
+    // historical public error is CorruptEventsLog rather than OutOfMemory.
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 2 });
+    try testing.expectError(
+        error.CorruptEventsLog,
+        reconstructTranscript(failing.allocator(), path, null),
+    );
+}
+
+test "reconstructTranscript cleans every allocation failure" {
+    const allocator = testing.allocator;
+    var tmp = try initTmp(allocator);
+    defer tmp.cleanup(allocator);
+    const path = try tmp.childPath(allocator, "allocation-sweep.events");
+    defer allocator.free(path);
+    try populateAllKindsJournal(allocator, path);
+
+    var fail_index: usize = 0;
+    while (true) : (fail_index += 1) {
+        var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = fail_index });
+        if (reconstructTranscript(failing.allocator(), path, null)) |value| {
+            var tr = value;
+            defer tr.deinit(failing.allocator());
+            try testing.expectEqual(@as(usize, 9), tr.len());
+            try testing.expectEqualStrings("result", tr.at(4).tool_result.llm_text);
+            try testing.expectEqualStrings("summary", tr.projection.?.summary);
+            break;
+        } else |err| {
+            try testing.expect(failing.has_induced_failure);
+            switch (err) {
+                // JSON parse allocation failure has historically been translated
+                // to corruption. All later owned projection allocations preserve
+                // OutOfMemory. Both paths must clean their partial ownership.
+                error.CorruptEventsLog, error.OutOfMemory => {},
+                else => return err,
+            }
+        }
+    }
+    try testing.expect(fail_index > 0);
 }
 
 test "reconstructTranscript returns an empty Transcript for an empty file" {

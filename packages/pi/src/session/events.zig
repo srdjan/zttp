@@ -1195,6 +1195,277 @@ fn readWhole(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
     return try zts.file_io.readFile(allocator, path, 1 * 1024 * 1024);
 }
 
+const EventTag = std.meta.Tag(EventRecord);
+
+const event_contract_tool_batch = [_]ToolUse{
+    .{ .id = "toolu_batch", .name = "workspace_read_file", .args_json = "{\"path\":\"handler.ts\"}" },
+};
+
+fn eventContractFixture(tag: EventTag) EventRecord {
+    return switch (tag) {
+        .user_text => .{ .user_text = "user" },
+        .model_text => .{ .model_text = "model" },
+        .tool_use => .{ .tool_use = .{
+            .id = "toolu_part",
+            .name = "workspace_read_file",
+            .args_json = "{\"path\":\"handler.ts\"}",
+            .reasoning_content = "reasoning",
+        } },
+        .tool_use_batch => .{ .tool_use_batch = &event_contract_tool_batch },
+        .tool_result => .{ .tool_result = .{
+            .tool_use_id = "toolu_batch",
+            .tool_name = "workspace_read_file",
+            .ok = true,
+            .llm_text = "result",
+            .ui_payload = .{ .plain_text = @constCast("result display") },
+        } },
+        .proof_card => .{ .proof_card = .{
+            .llm_text = "proof",
+            .ui_payload = .{ .plain_text = @constCast("proof display") },
+        } },
+        .diagnostic_box => .{ .diagnostic_box = .{ .llm_text = "diagnostic" } },
+        .verified_change_set => .{ .verified_change_set = .{ .llm_text = "change set" } },
+        .system_note => .{ .system_note = "system" },
+        .autoloop_outcome => .{ .autoloop_outcome = .{
+            .verdict = .achieved,
+            .goals_met = &.{"retry_safe"},
+            .iterations = 1,
+        } },
+        .turn_end => .{ .turn_end = .{ .reason = .approved } },
+        .session_summary => .{ .session_summary = .{
+            .turn_count = 1,
+            .total_roundtrips = 2,
+            .final_outcome = .approved,
+        } },
+        .compaction_checkpoint => .{ .compaction_checkpoint = .{
+            .summary = "summary",
+            .first_kept_entry_id = 1,
+            .reason = .manual,
+            .read_files = &.{"handler.ts"},
+            .modified_files = &.{"handler.ts"},
+        } },
+    };
+}
+
+fn eventContractIsTranscript(tag: EventTag) bool {
+    return switch (tag) {
+        .user_text,
+        .model_text,
+        .tool_use,
+        .tool_use_batch,
+        .tool_result,
+        .proof_card,
+        .diagnostic_box,
+        .verified_change_set,
+        .system_note,
+        => true,
+        .autoloop_outcome,
+        .turn_end,
+        .session_summary,
+        .compaction_checkpoint,
+        => false,
+    };
+}
+
+fn expectEventContractKind(
+    allocator: std.mem.Allocator,
+    tmp: *const IsolatedTmp,
+    tag: EventTag,
+) !void {
+    const filename = try std.fmt.allocPrint(allocator, "{s}.events", .{@tagName(tag)});
+    defer allocator.free(filename);
+    const path = try tmp.childPath(allocator, filename);
+    defer allocator.free(path);
+    const record = eventContractFixture(tag);
+
+    if (eventContractIsTranscript(tag)) {
+        try testing.expectError(error.InvalidEventIdentity, appendEvent(allocator, path, record));
+        try appendEntryEvent(
+            allocator,
+            path,
+            1,
+            if (tag == .tool_use) 0 else null,
+            record,
+        );
+    } else {
+        try testing.expectError(
+            error.InvalidEventIdentity,
+            appendEntryEvent(allocator, path, 1, null, record),
+        );
+        try appendEvent(allocator, path, record);
+    }
+
+    var reader = try Reader.open(allocator, path);
+    defer reader.deinit();
+    const payload = (try reader.next()) orelse return error.TestExpectedEventFrame;
+    defer allocator.free(payload);
+    try testing.expect((try reader.next()) == null);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload, .{});
+    defer parsed.deinit();
+    const object = parsed.value.object;
+    try testing.expectEqual(@as(i64, schema_version), object.get("v").?.integer);
+    try testing.expectEqualStrings(@tagName(tag), object.get("k").?.string);
+    if (eventContractIsTranscript(tag)) {
+        try testing.expectEqual(@as(i64, 1), object.get("entry_id").?.integer);
+    } else {
+        try testing.expect(object.get("entry_id") == null);
+    }
+    if (tag == .tool_use) {
+        try testing.expectEqual(@as(i64, 0), object.get("part_index").?.integer);
+    } else {
+        try testing.expect(object.get("part_index") == null);
+    }
+}
+
+fn expectPartIdentityRejected(
+    allocator: std.mem.Allocator,
+    tmp: *const IsolatedTmp,
+    tag: EventTag,
+) !void {
+    const filename = try std.fmt.allocPrint(allocator, "part-{s}.events", .{@tagName(tag)});
+    defer allocator.free(filename);
+    const path = try tmp.childPath(allocator, filename);
+    defer allocator.free(path);
+    try testing.expectError(
+        error.CorruptEventsLog,
+        appendEntryEvent(allocator, path, 1, 0, eventContractFixture(tag)),
+    );
+}
+
+const InvalidSequenceFixture = enum {
+    skipped_entry,
+    first_part_above_zero,
+    part_gap,
+    different_entry_continuation,
+    continuation_after_ordinary_entry,
+};
+
+fn appendLegacyToolPart(
+    writer: *JournalWriter,
+    allocator: std.mem.Allocator,
+    entry_id: EntryId,
+    part_index: u32,
+) !void {
+    try writer.appendEntryEvent(allocator, entry_id, part_index, .{ .tool_use = .{
+        .id = if (part_index == 0) "toolu_first" else "toolu_next",
+        .name = "workspace_read_file",
+        .args_json = "{\"path\":\"handler.ts\"}",
+    } });
+}
+
+fn countEventFrames(allocator: std.mem.Allocator, path: []const u8) !usize {
+    var reader = try Reader.open(allocator, path);
+    defer reader.deinit();
+    var count: usize = 0;
+    while (try reader.next()) |payload| {
+        allocator.free(payload);
+        count += 1;
+    }
+    return count;
+}
+
+fn expectInvalidSequenceRejected(
+    allocator: std.mem.Allocator,
+    tmp: *const IsolatedTmp,
+    fixture: InvalidSequenceFixture,
+) !void {
+    const filename = try std.fmt.allocPrint(allocator, "sequence-{s}.events", .{@tagName(fixture)});
+    defer allocator.free(filename);
+    const path = try tmp.childPath(allocator, filename);
+    defer allocator.free(path);
+    const expected_frames: usize = switch (fixture) {
+        .skipped_entry, .first_part_above_zero => 1,
+        .part_gap, .different_entry_continuation => 2,
+        .continuation_after_ordinary_entry => 3,
+    };
+
+    {
+        var writer = try JournalWriter.open(allocator, path);
+        defer writer.deinit();
+        switch (fixture) {
+            .skipped_entry => {
+                try testing.expectError(
+                    error.CorruptEventsLog,
+                    writer.appendEntryEvent(allocator, 2, null, .{ .user_text = "skipped" }),
+                );
+                try testing.expect(!writer.poisoned);
+                try writer.appendEntryEvent(allocator, 1, null, .{ .user_text = "recovered" });
+            },
+            .first_part_above_zero => {
+                try testing.expectError(
+                    error.CorruptEventsLog,
+                    appendLegacyToolPart(&writer, allocator, 1, 1),
+                );
+                try testing.expect(!writer.poisoned);
+                try appendLegacyToolPart(&writer, allocator, 1, 0);
+            },
+            .part_gap => {
+                try appendLegacyToolPart(&writer, allocator, 1, 0);
+                try testing.expectError(
+                    error.CorruptEventsLog,
+                    appendLegacyToolPart(&writer, allocator, 1, 2),
+                );
+                try testing.expect(!writer.poisoned);
+                try appendLegacyToolPart(&writer, allocator, 1, 1);
+            },
+            .different_entry_continuation => {
+                try appendLegacyToolPart(&writer, allocator, 1, 0);
+                try testing.expectError(
+                    error.CorruptEventsLog,
+                    appendLegacyToolPart(&writer, allocator, 2, 1),
+                );
+                try testing.expect(!writer.poisoned);
+                try appendLegacyToolPart(&writer, allocator, 1, 1);
+            },
+            .continuation_after_ordinary_entry => {
+                try appendLegacyToolPart(&writer, allocator, 1, 0);
+                try writer.appendEntryEvent(allocator, 2, null, .{ .user_text = "closes parts" });
+                try testing.expectError(
+                    error.CorruptEventsLog,
+                    appendLegacyToolPart(&writer, allocator, 1, 1),
+                );
+                try testing.expect(!writer.poisoned);
+                try writer.appendEntryEvent(allocator, 3, null, .{ .model_text = "still usable" });
+            },
+        }
+        try testing.expect(!writer.poisoned);
+    }
+    try testing.expectEqual(expected_frames, try countEventFrames(allocator, path));
+}
+
+test "every event kind has one encoded tag and identity class" {
+    const allocator = testing.allocator;
+    const tags = std.enums.values(EventTag);
+    try testing.expectEqual(@as(usize, 13), tags.len);
+
+    var tmp = try initTmp(allocator);
+    defer tmp.cleanup(allocator);
+
+    for (tags) |tag| try expectEventContractKind(allocator, &tmp, tag);
+}
+
+test "part identity is exclusive to legacy tool use records" {
+    const allocator = testing.allocator;
+    var tmp = try initTmp(allocator);
+    defer tmp.cleanup(allocator);
+
+    for (std.enums.values(EventTag)) |tag| {
+        if (!eventContractIsTranscript(tag) or tag == .tool_use) continue;
+        try expectPartIdentityRejected(allocator, &tmp, tag);
+    }
+}
+
+test "invalid journal sequence transitions do not poison the writer" {
+    const allocator = testing.allocator;
+    var tmp = try initTmp(allocator);
+    defer tmp.cleanup(allocator);
+
+    for (std.enums.values(InvalidSequenceFixture)) |fixture| {
+        try expectInvalidSequenceRejected(allocator, &tmp, fixture);
+    }
+}
+
 test "appendEntryEvent frames a v4 user_text event with stable identity" {
     const allocator = testing.allocator;
     var tmp = try initTmp(allocator);
