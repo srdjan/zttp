@@ -1319,6 +1319,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&zts_layering.step);
     test_step.dependOn(&run_release_check_tests.step);
     test_step.dependOn(&run_release_provenance_tests.step);
+    test_step.dependOn(&run_coverage_union_tests.step);
     test_step.dependOn(&run_demo_passport_check_tests.step);
     test_step.dependOn(wasm_publish_test_step);
     test_step.dependOn(production_branch_metric_test_step);

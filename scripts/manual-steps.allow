@@ -73,3 +73,11 @@ demo-passport-check release-operation
 # with seven test suites. See
 # docs/solutions/conventions/a-gate-can-be-non-vacuous-and-still-porous.md.
 invariant-gate mutation-harness
+
+# Computes the coverage union for one corpus identity and prints it as a marker
+# line. `scripts/update-coverage.sh` invokes it during publication, which
+# refuses a dirty tree and so cannot run inside a build that is itself producing
+# artifacts. `test-coverage-union` runs its unit tests through `zig build test`,
+# so the logic is covered; what is uncovered here is the invocation, and that is
+# a publication operation a human asks for.
+coverage-union release-operation
