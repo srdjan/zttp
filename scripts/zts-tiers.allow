@@ -182,6 +182,7 @@ zts-compiler grammar_registry.zig
 zts-compiler handler_verifier.zig
 zts-compiler idiom_registry.zig
 zts-compiler ir_identity.zig
+zts-compiler ir_json_literal.zig
 zts-compiler intent_extractor.zig
 zts-compiler kernel_identity.zig
 zts-compiler manifest_registry.zig

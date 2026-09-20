@@ -26,6 +26,7 @@ const type_env_mod = @import("type_env.zig");
 const abi_types = @import("abi_types.zig");
 const service_types_mod = @import("zts-contracts").service_types;
 const match_analysis_mod = @import("match_analysis.zig");
+const ir_json_literal = @import("ir_json_literal.zig");
 
 const Node = ir.Node;
 const NodeIndex = ir.NodeIndex;
@@ -1104,93 +1105,19 @@ pub const TypeChecker = struct {
             },
             .call => blk: {
                 const json_arg = self.getJsonStringifyArg(node_idx) orelse break :blk null;
-                break :blk try self.serializeJsonLiteral(json_arg);
+                break :blk try ir_json_literal.serialize(
+                    self.allocator,
+                    self.ir_view,
+                    json_arg,
+                    jsonLiteralAtomResolver,
+                    self,
+                );
             },
             // exhaustive: null means "not a literal the compiler can read", and
             // the caller treats an unreadable schema as dynamic rather than as
             // an absent one.
             else => null,
         };
-    }
-
-    fn serializeJsonLiteral(self: *TypeChecker, node_idx: NodeIndex) !?[]u8 {
-        var output: std.ArrayList(u8) = .empty;
-        errdefer output.deinit(self.allocator);
-        var aw: std.Io.Writer.Allocating = .fromArrayList(self.allocator, &output);
-        defer aw.deinit();
-        const ok = try self.writeJsonLiteralNode(node_idx, &aw.writer);
-        if (!ok) {
-            output.deinit(self.allocator);
-            return null;
-        }
-        output = aw.toArrayList();
-        return try output.toOwnedSlice(self.allocator);
-    }
-
-    fn writeJsonLiteralNode(self: *TypeChecker, node_idx: NodeIndex, writer: anytype) !bool {
-        const tag = self.ir_view.getTag(node_idx) orelse return false;
-        switch (tag) {
-            .lit_int => {
-                const value_int = self.ir_view.getIntValue(node_idx) orelse return false;
-                try writer.print("{d}", .{value_int});
-                return true;
-            },
-            .lit_float => {
-                const float_idx = self.ir_view.getFloatIdx(node_idx) orelse return false;
-                const value_float = self.ir_view.getFloat(float_idx) orelse return false;
-                try writer.print("{d}", .{value_float});
-                return true;
-            },
-            .lit_string => {
-                const str = self.getLiteralString(node_idx) orelse return false;
-                try writeJsonString(writer, str);
-                return true;
-            },
-            .lit_bool => {
-                const value_bool = self.ir_view.getBoolValue(node_idx) orelse return false;
-                try writer.writeAll(if (value_bool) "true" else "false");
-                return true;
-            },
-            .lit_null => {
-                try writer.writeAll("null");
-                return true;
-            },
-            .unary_op => {
-                const unary = self.ir_view.getUnary(node_idx) orelse return false;
-                if (unary.op != .neg) return false;
-                try writer.writeByte('-');
-                return self.writeJsonLiteralNode(unary.operand, writer);
-            },
-            .array_literal => {
-                const arr = self.ir_view.getArray(node_idx) orelse return false;
-                try writer.writeByte('[');
-                for (0..arr.elements_count) |i| {
-                    if (i > 0) try writer.writeAll(", ");
-                    if (!try self.writeJsonLiteralNode(self.ir_view.getListIndex(arr.elements_start, @intCast(i)), writer)) return false;
-                }
-                try writer.writeByte(']');
-                return true;
-            },
-            .object_literal => {
-                const obj = self.ir_view.getObject(node_idx) orelse return false;
-                try writer.writeByte('{');
-                for (0..obj.properties_count) |i| {
-                    const prop_idx = self.ir_view.getListIndex(obj.properties_start, @intCast(i));
-                    const prop = self.ir_view.getProperty(prop_idx) orelse return false;
-                    const key = self.getObjectPropertyKey(prop.key) orelse return false;
-                    if (i > 0) try writer.writeAll(", ");
-                    try writeJsonString(writer, key);
-                    try writer.writeAll(": ");
-                    if (!try self.writeJsonLiteralNode(prop.value, writer)) return false;
-                }
-                try writer.writeByte('}');
-                return true;
-            },
-            // exhaustive: false means "this node is not a JSON literal", which
-            // abandons the serialization. The caller then has no literal to
-            // reason about, which is the conservative outcome.
-            else => return false,
-        }
     }
 
     fn getObjectPropertyKey(self: *const TypeChecker, node_idx: NodeIndex) ?[]const u8 {
@@ -4212,6 +4139,11 @@ pub const TypeChecker = struct {
         return atom.toPredefinedName();
     }
 
+    fn jsonLiteralAtomResolver(atom_idx: u16, ctx: *const anyopaque) ?[]const u8 {
+        const self: *const TypeChecker = @ptrCast(@alignCast(ctx));
+        return self.resolveAtomName(atom_idx);
+    }
+
     fn markAllocationFailure(self: *TypeChecker) void {
         self.allocation_failed = true;
     }
@@ -4232,8 +4164,6 @@ fn bindingKey(binding: ir.BindingRef) u64 {
         (@as(u64, @intFromEnum(binding.kind)) << 16) |
         @as(u64, binding.slot);
 }
-
-const writeJsonString = json_utils.writeJsonString;
 
 test "TypeChecker fails closed when binding analysis cannot allocate" {
     const allocator = std.testing.allocator;

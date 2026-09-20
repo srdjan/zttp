@@ -108,6 +108,12 @@ Unsupported language features fail before runtime. See
 [Feature Detection](../feature-detection.md) and
 [Verification](../verification.md).
 
+The type checker and contract builder share `ir_json_literal.zig` for static
+JSON literal output. The helper reads an immutable IR view and uses the caller's
+atom resolver. It returns complete owned JSON bytes or no literal, and releases
+partial output on refusal or failure. Each caller still recognizes
+`JSON.stringify`, handles raw schema strings, and interprets schema types.
+
 ### Analysis passes
 
 Step 5 is implemented as four independent IR walkers, each traversing the same

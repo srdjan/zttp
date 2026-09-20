@@ -152,4 +152,32 @@ spreads, malformed input, and JSON shadowing. Its first unfiltered run exposed
 one leaked writer allocation on partial-output refusal. Both writer wrappers
 now defer cleanup of the buffer owner. The same unfiltered combined
 `test-zts test-precompile test-zts-cli -j1 --summary all` run exits 0 with
-2,499 passed and one skipped. No extraction has occurred yet.
+2,499 passed and one skipped. Two deliberate mutations were then tested with
+unfiltered suites. Inverted boolean output failed the exact-byte precompile
+test. Suppressed stringify schema projection failed the inferred-type and
+binding tests in `test-zts`. Both mutations were restored before extraction.
+
+Phase 2: both callers now use `ir_json_literal.zig`. Their separate atom
+resolvers and raw-schema handling remain. The helper tests supported output,
+refusal, malformed properties, resolver use, and every allocation failure.
+The unfiltered `test-zts -j1 --summary all` run exits 0 with 2,216 passed and
+one skipped. The combined `test-precompile test-zts-cli test-contract-golden
+test-zts-layering test-module-boundary test-proof-swallow -j1 --summary all`
+run exits 0 with 288 passed and all gates green. Including the new helper,
+branch points fall from 3,486 to 3,439; functions change from 286 to 287. The
+combined custom score falls from 3,772 to 3,726. These are source measurements,
+not runtime or coverage claims.
+
+Phases 3 and 4 prerequisites: the full event-kind and recovery matrices pass
+under unfiltered `test-expert-app -j1 --summary all`: 1,092 passed and one
+skipped. The journal allocation sweep exposed a display-text leak when UI
+payload parsing failed; cleanup now covers that error. The matrices also pin
+opaque session payloads, version errors, and conflict versus read-error order.
+Deliberate wrong-kind, part-gap, projection-file, marker-precedence, and
+third-state-write changes caused 11 relevant tests to fail. All mutations
+were restored and checked against the committed prerequisite files.
+
+After these prerequisites, the journal files measure 652 branch points and
+73 functions. The recovery file measures 286 branch points and 54 functions.
+The increase from discovery includes fault hooks and top-level test helpers.
+Use these additional baselines when comparing the structural replacements.

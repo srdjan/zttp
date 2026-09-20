@@ -101,6 +101,11 @@ The package suites: `test-zts`, `test-sdk`, `test-modules`,
 `test-proof-review`, `test-proof-checker`, `test-release-check`, `test-server`,
 `test-compile-bench`, `test-bench-diff`, `test-wasm-playground-publish`.
 
+`test-zts` checks the shared IR JSON writer's exact output, unsupported inputs,
+malformed property nodes, caller atom resolution, and allocation cleanup.
+The type checker tests inferred schema types. `test-precompile` checks emitted
+schema bytes, raw JSON retention, dynamic inputs, and JSON binding behavior.
+
 The audits and gates: `test-capability-audit`, `test-module-boundary`,
 `test-proof-checker-purity`, `test-proof-ratchet`, `test-proof-ratchet-drift`,
 `test-residual-guards-drift`, `test-invariant-drift`, `test-proof-swallow`,

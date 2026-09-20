@@ -50,6 +50,7 @@ const saga_extractor = @import("saga_extractor.zig");
 const fanout_extractor = @import("fanout_extractor.zig");
 const effect_inference = @import("effect_inference.zig");
 const function_specs = @import("function_specs.zig");
+const ir_json_literal = @import("ir_json_literal.zig");
 const JsParser = @import("zts-engine").parser.JsParser;
 
 const Node = ir.Node;
@@ -2799,7 +2800,13 @@ pub const ContractBuilder = struct {
             },
             .call => {
                 const json_arg = self.getJsonStringifyArg(node_idx) orelse return null;
-                return try self.serializeJsonLiteral(json_arg);
+                return try ir_json_literal.serialize(
+                    self.allocator,
+                    self.ir_view,
+                    json_arg,
+                    jsonLiteralAtomResolver,
+                    self,
+                );
             },
             // exhaustive: null is how a non-literal schema argument is spelled, and
             // the caller answers it by setting `api_schemas_dynamic`. Reporting
@@ -2828,92 +2835,6 @@ pub const ContractBuilder = struct {
         return self.ir_view.getListIndex(call.args_start, 0);
     }
 
-    fn serializeJsonLiteral(self: *ContractBuilder, node_idx: NodeIndex) !?[]u8 {
-        var output: std.ArrayList(u8) = .empty;
-        errdefer output.deinit(self.allocator);
-        var aw: std.Io.Writer.Allocating = .fromArrayList(self.allocator, &output);
-        defer aw.deinit();
-        const ok = try self.writeJsonLiteralNode(node_idx, &aw.writer);
-        if (!ok) {
-            output.deinit(self.allocator);
-            return null;
-        }
-        output = aw.toArrayList();
-        return try output.toOwnedSlice(self.allocator);
-    }
-
-    fn writeJsonLiteralNode(self: *ContractBuilder, node_idx: NodeIndex, writer: anytype) !bool {
-        const tag = self.ir_view.getTag(node_idx) orelse return false;
-        switch (tag) {
-            .lit_int => {
-                const value = self.ir_view.getIntValue(node_idx) orelse return false;
-                try writer.print("{d}", .{value});
-                return true;
-            },
-            .lit_float => {
-                const float_idx = self.ir_view.getFloatIdx(node_idx) orelse return false;
-                const value = self.ir_view.getFloat(float_idx) orelse return false;
-                try writer.print("{d}", .{value});
-                return true;
-            },
-            .lit_string => {
-                const value = self.getLiteralString(node_idx) orelse return false;
-                try writeJsonString(writer, value);
-                return true;
-            },
-            .lit_bool => {
-                const value = self.ir_view.getBoolValue(node_idx) orelse return false;
-                try writer.writeAll(if (value) "true" else "false");
-                return true;
-            },
-            .lit_null => {
-                try writer.writeAll("null");
-                return true;
-            },
-            .unary_op => {
-                const unary = self.ir_view.getUnary(node_idx) orelse return false;
-                if (unary.op != .neg) return false;
-                try writer.writeByte('-');
-                return self.writeJsonLiteralNode(unary.operand, writer);
-            },
-            .array_literal => {
-                const arr = self.ir_view.getArray(node_idx) orelse return false;
-                try writer.writeByte('[');
-                var i: u16 = 0;
-                while (i < arr.elements_count) : (i += 1) {
-                    if (i > 0) try writer.writeAll(", ");
-                    const elem_idx = self.ir_view.getListIndex(arr.elements_start, i);
-                    if (!try self.writeJsonLiteralNode(elem_idx, writer)) return false;
-                }
-                try writer.writeByte(']');
-                return true;
-            },
-            .object_literal => {
-                const obj = self.ir_view.getObject(node_idx) orelse return false;
-                try writer.writeByte('{');
-                var i: u16 = 0;
-                while (i < obj.properties_count) : (i += 1) {
-                    const prop_idx = self.ir_view.getListIndex(obj.properties_start, i);
-                    const prop_tag = self.ir_view.getTag(prop_idx) orelse return false;
-                    if (prop_tag != .object_property) return false;
-
-                    const prop = self.ir_view.getProperty(prop_idx) orelse return false;
-                    const key = self.getObjectPropertyKey(prop.key) orelse return false;
-
-                    if (i > 0) try writer.writeAll(", ");
-                    try writeJsonString(writer, key);
-                    try writer.writeAll(": ");
-                    if (!try self.writeJsonLiteralNode(prop.value, writer)) return false;
-                }
-                try writer.writeByte('}');
-                return true;
-            },
-            // exhaustive: false abandons the literal serialization, so the caller
-            // treats the value as dynamic instead of recording a partial one.
-            else => return false,
-        }
-    }
-
     fn getObjectPropertyKey(self: *const ContractBuilder, key_idx: NodeIndex) ?[]const u8 {
         const tag = self.ir_view.getTag(key_idx) orelse return null;
         return switch (tag) {
@@ -2927,6 +2848,11 @@ pub const ContractBuilder = struct {
             // rather than inventing a name.
             else => null,
         };
+    }
+
+    fn jsonLiteralAtomResolver(atom_idx: u16, ctx: *const anyopaque) ?[]const u8 {
+        const self: *const ContractBuilder = @ptrCast(@alignCast(ctx));
+        return self.resolveAtomName(atom_idx);
     }
 
     fn getLiteralString(self: *const ContractBuilder, node_idx: NodeIndex) ?[]const u8 {
