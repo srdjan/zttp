@@ -51,6 +51,21 @@ projection supplies the model with the latest validated summary plus a retained
 suffix of raw entries. Ledger export, proof reconstruction, patch-chain hashes,
 and workspace state never derive authority from a summary.
 
+`session/events.zig` decodes event payloads into a typed record whose borrowed
+fields belong to one parsed envelope. Journal sequence validation and transcript
+reconstruction use exhaustive switches over those records. They retain separate
+acceptance rules for legacy parts, session payloads, checkpoints, and version
+errors. `Reader` checks framing only. Tail recovery validates complete frames
+before it repairs an incomplete tail, then derives the entry sequence.
+
+Workspace recovery stays under the existing lock in `change_transaction.zig`.
+It observes markers in precedence order and validates the manifest and images
+before classifying a prepared transaction. A pure planner checks each target
+digest before the next target read. It publishes a plan only after all required
+observations succeed. One interpreter performs the planned writes, synchronization,
+candidate verification, and commit marking. Committed receipts remain pending
+until the session acknowledges them durably.
+
 All provider adapters serialize a shared `ModelRequestSnapshot`. The snapshot
 measures system, tools, active history, transient text, framing, wire bytes, and
 model limits before transport. Typed tool context policies produce exact,

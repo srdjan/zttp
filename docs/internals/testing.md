@@ -97,6 +97,15 @@ around an old response, because that would attribute it to a request the model
 never received. Compaction flow tests assert that retry does not duplicate user
 input, tools, edits, or turn completion.
 
+The same expert suite checks all 13 journal event kinds, exact reconstructed
+entries and projections, invalid identity transitions, legacy payloads,
+consumer-specific acceptance, and allocation cleanup. Transaction tests cover
+all 32 marker combinations, existing and absent target states, conflict and
+read-error precedence, durable effect faults, recovery retries, and receipt
+acknowledgement. Pure planner tests check exact actions and reject incomplete
+plan publication. These matrices test named behaviors; they are not source
+coverage or a power-loss simulation.
+
 The package suites: `test-zts`, `test-sdk`, `test-modules`,
 `test-proof-review`, `test-proof-checker`, `test-release-check`, `test-server`,
 `test-compile-bench`, `test-bench-diff`, `test-wasm-playground-publish`.

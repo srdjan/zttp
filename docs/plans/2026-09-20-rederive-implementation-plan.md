@@ -181,3 +181,38 @@ After these prerequisites, the journal files measure 652 branch points and
 73 functions. The recovery file measures 286 branch points and 54 functions.
 The increase from discovery includes fault hooks and top-level test helpers.
 Use these additional baselines when comparing the structural replacements.
+
+Phase 3: `DecodedEnvelope` owns the parsed JSON; `DecodedRecord` holds borrowed
+typed fields. Journal sequence and transcript/projection application now use
+exhaustive switches. The consumer policy preserves the different acceptance
+rules of journal recovery and reconstruction. Framing and write order are
+unchanged. The main review and an independent read-only review found no
+compatibility regression. Zig does not enforce borrowed lifetimes; current
+callers copy retained data before releasing the envelope.
+
+Phase 4: marker observation retains its short-circuit order. The pure staged
+planner rejects a target conflict before the next target read and publishes
+only after all actions are known. The effect interpreter handles every action
+explicitly. Incomplete publication returns an error in all build modes. Direct
+tests distinguish keeping a candidate from rewriting it, including equal
+baseline and candidate digests. Mutations that rewrote candidates and removed
+the completion check failed all three new planner tests.
+
+Removing one case from each journal fold and adding an unhandled recovery action
+produced three compiler exhaustiveness errors. All probes were restored, and
+SHA-256 checks confirmed the reviewed PI source before final suite execution.
+The unfiltered `test-expert-app test-cassette -j1 --summary all` run exits 0:
+1,095 expert tests pass with one skipped, and 421 cassette tests pass. The
+`test-simulator test-standin test-module-boundary -j1 --summary all` run exits 0:
+930 simulator tests and 56 stand-in tests pass; the boundary gate passes.
+
+After the structural replacements, the journal files measure 519 branch points
+and 80 functions, down from 652 and 73 after prerequisites. Recovery measures
+325 branch points and 61 functions, up from 286 and 54 after prerequisites.
+No runtime speed or source coverage improvement is claimed.
+
+Additional integration checks: the final committed schema tests pass again
+with 2,216 passed and one skipped. `test-zruntime -j1 --summary all` exits 0
+with 411 passed and one skipped. `zig build wasm --summary all` exits 0.
+The full aggregate and `scripts/verify.sh` remain outstanding until their
+complete runs finish within the time limit or longer execution is approved.
