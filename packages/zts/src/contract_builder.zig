@@ -2832,6 +2832,7 @@ pub const ContractBuilder = struct {
         var output: std.ArrayList(u8) = .empty;
         errdefer output.deinit(self.allocator);
         var aw: std.Io.Writer.Allocating = .fromArrayList(self.allocator, &output);
+        defer aw.deinit();
         const ok = try self.writeJsonLiteralNode(node_idx, &aw.writer);
         if (!ok) {
             output.deinit(self.allocator);

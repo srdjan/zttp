@@ -140,3 +140,16 @@ Completion requires all selected phases, tested failure behavior, measured
 schema branch reduction, unchanged journal/source authority contracts, a green
 full gate, isolated local commits, and a clean working tree. Any unresolved
 item must remain explicit rather than being reported as complete.
+
+## Execution record
+
+Phase 0: the focused expert baseline and documentation gates pass. The full
+aggregate and final gate still require permission to exceed two minutes.
+
+Phase 1: the public schema matrix now checks exact literal bytes, raw JSON
+retention, inferred string/number/boolean/array types, dynamic values and
+spreads, malformed input, and JSON shadowing. Its first unfiltered run exposed
+one leaked writer allocation on partial-output refusal. Both writer wrappers
+now defer cleanup of the buffer owner. The same unfiltered combined
+`test-zts test-precompile test-zts-cli -j1 --summary all` run exits 0 with
+2,499 passed and one skipped. No extraction has occurred yet.

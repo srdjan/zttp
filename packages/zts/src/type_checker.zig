@@ -1117,6 +1117,7 @@ pub const TypeChecker = struct {
         var output: std.ArrayList(u8) = .empty;
         errdefer output.deinit(self.allocator);
         var aw: std.Io.Writer.Allocating = .fromArrayList(self.allocator, &output);
+        defer aw.deinit();
         const ok = try self.writeJsonLiteralNode(node_idx, &aw.writer);
         if (!ok) {
             output.deinit(self.allocator);
@@ -5600,6 +5601,97 @@ test "TypeChecker tracks schema enum members beyond 32 values" {
     const members = pool.getUnionMembers(schema_type);
     try std.testing.expectEqual(@as(usize, 33), members.len);
     try std.testing.expectEqualStrings("v32", pool.getLiteralStringValue(members[32]).?);
+}
+
+test "TypeChecker infers every supported JSON stringify schema literal" {
+    try checkTypedSourceSaying(
+        \\import { schemaCompile, validateJson } from "zttp:validate";
+        \\schemaCompile("matrix", JSON.stringify({
+        \\  type: "object",
+        \\  "required": ["title", "count", "enabled", "items"],
+        \\  properties: {
+        \\    title: { type: "string", description: "line\nquote:\" slash:\\ tab:\t" },
+        \\    count: { type: "number", minimum: -1.5, maximum: 2.25 },
+        \\    enabled: { type: "boolean", default: true },
+        \\    items: { type: "array", items: { type: "integer" } },
+        \\    absent: null,
+        \\    examples: [0, -2, 3.5, false, null],
+        \\  },
+        \\}));
+        \\const parsed = validateJson("matrix", "{}");
+        \\const title: string = parsed.value.title;
+        \\const count: number = parsed.value.count;
+        \\const enabled: boolean = parsed.value.enabled;
+        \\const items: number[] = parsed.value.items;
+        \\const wrongTitle: number = parsed.value.title;
+        \\const wrongCount: string = parsed.value.count;
+        \\const wrongEnabled: number = parsed.value.enabled;
+        \\const wrongItems: string = parsed.value.items;
+    , 4, "type 'string' is not assignable to type 'number'");
+}
+
+test "TypeChecker preserves raw schema typing and skips unreadable schemas" {
+    try checkTypedSourceSaying(
+        \\import { schemaCompile, validateJson } from "zttp:validate";
+        \\schemaCompile("raw", ' { "type" : "object", "properties" : { "title" : { "type" : "string" } } } ');
+        \\const parsed = validateJson("raw", "{}");
+        \\const title: number = parsed.value.title;
+    , 1, "type 'string' is not assignable to type 'number'");
+
+    try checkTypedSource(
+        \\import { schemaCompile, validateJson } from "zttp:validate";
+        \\schemaCompile("broken", '{"type":');
+        \\const parsed = validateJson("broken", "{}");
+        \\const title: number = parsed.value.title;
+    , 0, 0);
+
+    try checkTypedSource(
+        \\import { schemaCompile, validateJson } from "zttp:validate";
+        \\const schema = { type: "object", properties: { title: { type: "string" } } };
+        \\schemaCompile("dynamic", JSON.stringify(schema));
+        \\const parsed = validateJson("dynamic", "{}");
+        \\const title: number = parsed.value.title;
+    , 0, 0);
+}
+
+test "TypeChecker refuses a partially written dynamic schema without leaking" {
+    try checkTypedSource(
+        \\import { schemaCompile, validateJson } from "zttp:validate";
+        \\function schemaType() { return "object"; }
+        \\schemaCompile("partial", JSON.stringify({
+        \\  type: schemaType(),
+        \\  properties: { title: { type: "string" } },
+        \\}));
+        \\const parsed = validateJson("partial", "{}");
+        \\const title: number = parsed.value.title;
+    , 0, 0);
+}
+
+test "TypeChecker keeps the current JSON binding distinction for schemas" {
+    try checkTypedSourceSaying(
+        \\import { schemaCompile, validateJson } from "zttp:validate";
+        \\const JSON = { stringify: (value) => "ignored" };
+        \\schemaCompile("global-shadow", JSON.stringify({
+        \\  type: "object",
+        \\  properties: { title: { type: "string" } },
+        \\}));
+        \\const parsed = validateJson("global-shadow", "{}");
+        \\const title: number = parsed.value.title;
+    , 1, "type 'string' is not assignable to type 'number'");
+
+    try checkTypedSource(
+        \\import { schemaCompile, validateJson } from "zttp:validate";
+        \\function register() {
+        \\  const JSON = { stringify: (value) => "ignored" };
+        \\  schemaCompile("local-shadow", JSON.stringify({
+        \\    type: "object",
+        \\    properties: { title: { type: "string" } },
+        \\  }));
+        \\}
+        \\register();
+        \\const parsed = validateJson("local-shadow", "{}");
+        \\const title: number = parsed.value.title;
+    , 0, 0);
 }
 
 test "TypeChecker: toSorted with no comparator type-checks clean" {

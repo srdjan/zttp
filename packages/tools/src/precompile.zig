@@ -3927,6 +3927,142 @@ test "buildTestContractForSource keeps decodeQuery schemas out of request bodies
     try std.testing.expectEqual(@as(usize, 0), route.request_schema_refs.items.len);
 }
 
+test "schema contract preserves supported JSON stringify literal bytes" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { schemaCompile } from "zttp:validate";
+        \\schemaCompile("matrix", JSON.stringify({
+        \\  type: "object",
+        \\  "required": ["title", "count", "enabled", "items"],
+        \\  properties: {
+        \\    title: { type: "string", description: "line\nquote:\" slash:\\ tab:\t" },
+        \\    count: { type: "number", minimum: -1.5, maximum: 2.25 },
+        \\    enabled: { type: "boolean", default: true },
+        \\    items: { type: "array", items: { type: "integer" } },
+        \\    absent: null,
+        \\    examples: [0, -2, 3.5, false, null],
+        \\  },
+        \\}));
+        \\function handler(req) { return Response.json({ ok: true }); }
+    ;
+
+    var contract = try buildTestContractForSource(allocator, source, "schema-matrix.ts", null);
+    defer contract.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), contract.api.schemas.items.len);
+    try std.testing.expect(!contract.api.schemas_dynamic);
+    try std.testing.expectEqualStrings("matrix", contract.api.schemas.items[0].name);
+    try std.testing.expectEqualStrings(
+        "{\"type\": \"object\", \"required\": [\"title\", \"count\", \"enabled\", \"items\"], \"properties\": {\"title\": {\"type\": \"string\", \"description\": \"line\\nquote:\\\" slash:\\\\ tab:\\t\"}, \"count\": {\"type\": \"number\", \"minimum\": -1.5, \"maximum\": 2.25}, \"enabled\": {\"type\": \"boolean\", \"default\": true}, \"items\": {\"type\": \"array\", \"items\": {\"type\": \"integer\"}}, \"absent\": null, \"examples\": [0, -2, 3.5, false, null]}}",
+        contract.api.schemas.items[0].schema_json,
+    );
+}
+
+test "schema contract retains raw JSON bytes" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { schemaCompile } from "zttp:validate";
+        \\schemaCompile("raw", ' { "type" : "string" } ');
+        \\function handler(req) { return Response.text("ok"); }
+    ;
+
+    var contract = try buildTestContractForSource(allocator, source, "raw-schema.ts", null);
+    defer contract.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), contract.api.schemas.items.len);
+    try std.testing.expect(!contract.api.schemas_dynamic);
+    try std.testing.expectEqualStrings(" { \"type\" : \"string\" } ", contract.api.schemas.items[0].schema_json);
+}
+
+test "schema contract marks readable dynamic forms and malformed raw JSON dynamic" {
+    const allocator = std.testing.allocator;
+
+    const cases = [_][]const u8{
+        \\import { schemaCompile } from "zttp:validate";
+        \\const schema = { type: "object" };
+        \\schemaCompile("direct", schema);
+        \\function handler(req) { return Response.text("ok"); }
+        ,
+        \\import { schemaCompile } from "zttp:validate";
+        \\const schema = { type: "object" };
+        \\schemaCompile("stringify-root", JSON.stringify(schema));
+        \\function handler(req) { return Response.text("ok"); }
+        ,
+        \\import { schemaCompile } from "zttp:validate";
+        \\const base = { type: "object" };
+        \\schemaCompile("spread", JSON.stringify({ ...base, properties: {} }));
+        \\function handler(req) { return Response.text("ok"); }
+        ,
+        \\import { schemaCompile } from "zttp:validate";
+        \\const values = ["string", "number"];
+        \\schemaCompile("array-spread", JSON.stringify({ enum: ["boolean", ...values] }));
+        \\function handler(req) { return Response.text("ok"); }
+        ,
+        \\import { schemaCompile } from "zttp:validate";
+        \\function schemaType() { return "object"; }
+        \\schemaCompile("call", JSON.stringify({ type: schemaType() }));
+        \\function handler(req) { return Response.text("ok"); }
+        ,
+        \\import { schemaCompile } from "zttp:validate";
+        \\function register() {
+        \\  const JSON = { stringify: (value) => "ignored" };
+        \\  schemaCompile("local-shadow", JSON.stringify({ type: "object" }));
+        \\}
+        \\register();
+        \\function handler(req) { return Response.text("ok"); }
+        ,
+        \\import { schemaCompile } from "zttp:validate";
+        \\schemaCompile("malformed", '{"type":');
+        \\function handler(req) { return Response.text("ok"); }
+    };
+
+    for (cases) |source| {
+        var contract = try buildTestContractForSource(allocator, source, "dynamic-schema.ts", null);
+        try std.testing.expectEqual(@as(usize, 0), contract.api.schemas.items.len);
+        try std.testing.expect(contract.api.schemas_dynamic);
+        contract.deinit(allocator);
+    }
+}
+
+test "schema contract keeps the current top-level JSON shadow behavior" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { schemaCompile } from "zttp:validate";
+        \\const JSON = { stringify: (value) => "ignored" };
+        \\schemaCompile("global-shadow", JSON.stringify({ type: "string" }));
+        \\function handler(req) { return Response.text("ok"); }
+    ;
+
+    var contract = try buildTestContractForSource(allocator, source, "global-json-shadow.ts", null);
+    defer contract.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), contract.api.schemas.items.len);
+    try std.testing.expect(!contract.api.schemas_dynamic);
+    try std.testing.expectEqualStrings(
+        "{\"type\": \"string\"}",
+        contract.api.schemas.items[0].schema_json,
+    );
+}
+
+test "schema contract refuses computed object keys before extraction" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { schemaCompile } from "zttp:validate";
+        \\const key = "type";
+        \\schemaCompile("computed", JSON.stringify({ [key]: "object" }));
+        \\function handler(req) { return Response.text("ok"); }
+    ;
+
+    const result = buildTestContractForSource(allocator, source, "computed-schema-key.ts", null);
+    if (result) |built| {
+        var contract = built;
+        contract.deinit(allocator);
+        return error.TestExpectedError;
+    } else |err| {
+        try std.testing.expectEqual(error.ParseError, err);
+    }
+}
+
 test "buildTestContractForSource extracts durable workflow contract" {
     const allocator = std.testing.allocator;
     const source =
