@@ -1528,13 +1528,19 @@ const record_corpus = [_]RecordCase{
         // then names its step `reserve-inventory` where the spec asserts
         // `reserve`, a name the prompt never states.
         //
-        // The pin does not move yet, and it is still describing the committed
-        // handler rather than the amended case: the recorded draft named its
-        // step `reserve-inventory`, so it fails the amended spec too, on the
-        // one assertion the rename does not reach. Flip it when a recording
-        // against the amended prompt measures it passing, and say what closed
-        // the gap.
-        .expect_committed_intent_pass = false,
+        // 2026-09-20: flipped to true, and what closed the gap was the case
+        // asking for what it tests. The prompt now names the `reserve` step and
+        // what it returns, and the spec no longer stubs an inventory fetch the
+        // prompt never mentions. The draft recorded against those inputs names
+        // its step `reserve`, keeps `call("notify", ...)` outside the step
+        // callback - the behaviour the case exists to measure - and the run
+        // reports intent-qualified 19/19.
+        //
+        // The two earlier pins are kept above because they say different
+        // things. Neither was the model failing the task: run 4 applied no edit
+        // to run, and the 2026-08-27 draft did the task and was marked down for
+        // a step name and an egress call nobody asked it to make.
+        .expect_committed_intent_pass = true,
     },
     .{
         .name = "workflow-saga-compensation",
@@ -3832,7 +3838,20 @@ const deepseek_coverage_baseline = [_][]const u8{
 // exercise is scoped in
 // docs/plans/2026-08-26-034-rule-coverage-widening-scope.md; closing it needs
 // cases built for the purpose, not a better draw.
-const deepseek_coverage_headline_input_id = "0012ad8ca6d5d08ac5023862378fe0c971b3672dadbc079256fb47d810033516";
+//
+// Moved again on 2026-09-20, and again by a prompt edit rather than a compiler
+// change: `cache-counter-holes` seeded a capsule naming two specs no fill could
+// discharge, and `workflow-nested-dispatch-avoidance` asserted a step name and
+// an egress call its prompt never stated. Both are model-visible input, so the
+// identity moved by construction.
+//
+// The two codes above carry across that move because the recording made against
+// the amended inputs still trips both. That is measured, not assumed: the
+// ratchet loop below is what checks it, and it passed on a run that measured
+// three of fifty-nine. One recording is not an intersection, so under the
+// identity below this pin is a floor taken from a single draw, and it regains
+// its three-run standing only as runs accumulate.
+const deepseek_coverage_headline_input_id = "e6801afae0990b304b924bcb27e5d435cf75ed922f6064241cb401a1d6845576";
 
 /// Return the live coverage floor for one exact model-visible input and model.
 /// Expected outcomes and thresholds cannot reset this ratchet.
