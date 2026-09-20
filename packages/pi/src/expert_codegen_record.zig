@@ -1552,7 +1552,7 @@ const record_corpus = [_]RecordCase{
             \\{"type":"runtime","durable":true,"workflowQueue":false}
             \\{"type":"test","name":"shipping failure compensates charge then reserve"}
             \\{"type":"request","method":"POST","url":"/","headers":{"idempotency-key":"saga-1"},"body":null}
-            \\{"type":"expect","bodyContains":"outcome"}
+            \\{"type":"expect","bodyContains":"compensated"}
             \\{"type":"expect-run","runKey":"saga-1","complete":true}
             \\{"type":"expect-event","runKey":"saga-1","kind":"step_start","name":"do:reserve"}
             \\{"type":"expect-event","runKey":"saga-1","kind":"step_result","name":"do:reserve","resultContains":"reserve-complete"}
@@ -1602,11 +1602,37 @@ const record_corpus = [_]RecordCase{
         // in the body because the draft named the binding in the object rather
         // than returning it bare. `bodyContains:"outcome"` matches, the run
         // proceeds, and the step and compensation events it then measures are
-        // the ones the case is about. The mismatch the three notes above
-        // describe is still not closed: the spec asserts a key shape the prompt
-        // does not state, so this pin keeps tracking the draft and not the
-        // handler being right, and it will move again on the next re-record
-        // unless the spec and the prompt are made to agree.
+        // the ones the case is about.
+        //
+        // Closed on 2026-09-20, in the spec rather than in the prompt. The
+        // first assertion is now `bodyContains:"compensated"`, which names
+        // content the runtime writes into the outcome at
+        // `runtime_workflow.zig:797` rather than a key the prompt never asks
+        // for. Both drafts this pin has flipped over satisfy it: the
+        // 2026-08-25/27 shape `{"ok":false,"failed":"ship","compensated":true}`
+        // carries the word, and so does this draft's
+        // `Response.json({ outcome: outcome })`, because the outcome is
+        // serialized inside whatever wrapper the draft chose. A handler that
+        // answers without the saga result carries neither, which is the
+        // failure the case exists to catch and the one the binding's own
+        // summary warns about.
+        //
+        // The three notes above say closing this needs a re-record because it
+        // changes the request identity. That is true of the prompt half and
+        // not of this one: `headlineInputIdentity` hashes name, prompt,
+        // seed_files and mode, so a spec change moves `intentSuiteIdentity`
+        // and leaves the corpus version alone, and the committed recordings
+        // still replay. Measured after the change: unfiltered
+        // `zig build test-expert-app` exits 0 with this pin at true.
+        //
+        // Not probed, and worth knowing why. Editing the committed
+        // `expected/handler.ts` to drop the outcome and watching this
+        // assertion refuse it does not work: the flow artifact is
+        // content-addressed, so the edit fails as `invalid_digest in
+        // expected_workspace` and `error.UnloadableFlowArtifact` before the
+        // intent check runs at all. Probing the negative side needs a
+        // standalone workspace built from `saga_runtime_files` and this
+        // tests_jsonl, not a mutation of the corpus.
         .expect_committed_intent_pass = true,
     },
     .{
