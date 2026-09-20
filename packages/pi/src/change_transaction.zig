@@ -347,71 +347,230 @@ pub fn recoverAllLockedWithOptions(
     return recovered;
 }
 
+const PreparationState = enum { unprepared, prepared };
+
+const RecoveryPhase = enum {
+    unprepared,
+    aborted,
+    committed,
+    prepared,
+    applying,
+};
+
+const PreparedRecoveryPhase = enum { aborted, committed, prepared, applying };
+
+const TargetObservation = struct {
+    current: [32]u8,
+    baseline: [32]u8,
+    candidate: [32]u8,
+};
+
+const TargetAction = enum { keep_candidate, write_candidate };
+
+const ApplyingPlan = struct {
+    /// Borrows storage owned by the parsed manifest in `recoverOne`.
+    manifest: Manifest,
+    /// Owned by this plan.
+    actions: []TargetAction,
+};
+
+const RecoveryPlan = union(RecoveryPhase) {
+    unprepared: void,
+    aborted: void,
+    committed: void,
+    prepared: void,
+    applying: ApplyingPlan,
+
+    fn deinit(self: *RecoveryPlan, allocator: std.mem.Allocator) void {
+        switch (self.*) {
+            .applying => |applying| allocator.free(applying.actions),
+            .unprepared, .aborted, .committed, .prepared => {},
+        }
+        self.* = undefined;
+    }
+};
+
+const ApplyingPlanner = struct {
+    /// Borrows storage owned by the parsed manifest in `recoverOne`.
+    manifest: Manifest,
+    /// Owned until `finish` transfers it to a `RecoveryPlan`.
+    actions: []TargetAction,
+    next_index: usize,
+};
+
+const RecoveryPlanner = union(RecoveryPhase) {
+    unprepared: void,
+    aborted: void,
+    committed: void,
+    prepared: void,
+    applying: ApplyingPlanner,
+
+    fn observe(self: *RecoveryPlanner, observation: TargetObservation) !void {
+        const applying = switch (self.*) {
+            .applying => |*value| value,
+            .unprepared, .aborted, .committed, .prepared => return error.RecoveryPhaseHasNoTargets,
+        };
+        if (applying.next_index >= applying.actions.len) return error.TooManyRecoveryObservations;
+        const action: TargetAction = if (std.mem.eql(u8, &observation.current, &observation.candidate))
+            .keep_candidate
+        else if (std.mem.eql(u8, &observation.current, &observation.baseline))
+            .write_candidate
+        else
+            return error.WorkspaceRecoveryConflict;
+        applying.actions[applying.next_index] = action;
+        applying.next_index += 1;
+    }
+
+    fn finish(self: *RecoveryPlanner) !RecoveryPlan {
+        const plan: RecoveryPlan = switch (self.*) {
+            .unprepared => .{ .unprepared = {} },
+            .aborted => .{ .aborted = {} },
+            .committed => .{ .committed = {} },
+            .prepared => .{ .prepared = {} },
+            .applying => |applying| blk: {
+                if (applying.actions.len != applying.manifest.changes.len or
+                    applying.next_index != applying.actions.len)
+                {
+                    return error.IncompleteRecoveryPlan;
+                }
+                break :blk .{ .applying = .{
+                    .manifest = applying.manifest,
+                    .actions = applying.actions,
+                } };
+            },
+        };
+        self.* = undefined;
+        return plan;
+    }
+
+    fn deinit(self: *RecoveryPlanner, allocator: std.mem.Allocator) void {
+        switch (self.*) {
+            .applying => |applying| allocator.free(applying.actions),
+            .unprepared, .aborted, .committed, .prepared => {},
+        }
+        self.* = undefined;
+    }
+};
+
+fn observePreparation(allocator: std.mem.Allocator, transaction_dir: []const u8) !PreparationState {
+    if (try markerPresent(allocator, transaction_dir, "prepared")) return .prepared;
+    if (try markerPresent(allocator, transaction_dir, "applying") or
+        try markerPresent(allocator, transaction_dir, "committed") or
+        try markerPresent(allocator, transaction_dir, "receipted"))
+    {
+        return error.CorruptTransactionJournal;
+    }
+    return .unprepared;
+}
+
+fn observePreparedPhase(allocator: std.mem.Allocator, transaction_dir: []const u8) !PreparedRecoveryPhase {
+    if (try markerPresent(allocator, transaction_dir, "aborted")) return .aborted;
+    if (try markerPresent(allocator, transaction_dir, "committed")) return .committed;
+    if (!try markerPresent(allocator, transaction_dir, "applying")) return .prepared;
+    return .applying;
+}
+
 fn recoverOne(
     allocator: std.mem.Allocator,
     transaction_dir: []const u8,
     options: RecoveryOptions,
 ) !bool {
-    if (!try markerPresent(allocator, transaction_dir, "prepared")) {
-        if (try markerPresent(allocator, transaction_dir, "applying") or
-            try markerPresent(allocator, transaction_dir, "committed") or
-            try markerPresent(allocator, transaction_dir, "receipted"))
-        {
-            return error.CorruptTransactionJournal;
-        }
-        try deleteTransactionDirectory(allocator, transaction_dir, options);
-        return true;
+    if (try observePreparation(allocator, transaction_dir) == .unprepared) {
+        var planner: RecoveryPlanner = .{ .unprepared = {} };
+        var plan = try planner.finish();
+        defer plan.deinit(allocator);
+        return executeRecoveryPlan(allocator, transaction_dir, &plan, options);
     }
+
     var parsed = try loadManifest(allocator, transaction_dir);
     defer parsed.deinit();
     const manifest = parsed.value;
     try validateManifestAndImages(allocator, transaction_dir, manifest);
-    if (try markerPresent(allocator, transaction_dir, "aborted")) {
-        try deleteTransactionDirectory(allocator, transaction_dir, options);
-        return true;
-    }
-    if (try markerPresent(allocator, transaction_dir, "committed")) {
+    const phase = try observePreparedPhase(allocator, transaction_dir);
+    if (phase == .committed) {
         try validateReceipt(allocator, transaction_dir, manifest.proof_id);
-        return false;
-    }
-    if (!try markerPresent(allocator, transaction_dir, "applying")) {
-        try writeMarker(allocator, transaction_dir, "aborted");
-        if (options.fault == .after_aborted_marker) return error.InjectedTransactionFailure;
-        try deleteTransactionDirectory(allocator, transaction_dir, options);
-        return true;
     }
 
-    const needs_write = try allocator.alloc(bool, manifest.changes.len);
-    defer allocator.free(needs_write);
-    for (manifest.changes, 0..) |change, index| {
-        const current = try readStateDigest(allocator, change.path);
-        const candidate_digest = parseDigest(change.candidate_sha256) orelse return error.CorruptTransactionJournal;
-        const baseline_digest = parseDigest(change.baseline_sha256) orelse return error.CorruptTransactionJournal;
-        if (std.mem.eql(u8, &current, &candidate_digest)) {
-            needs_write[index] = false;
-            continue;
+    var planner: RecoveryPlanner = switch (phase) {
+        .aborted => .{ .aborted = {} },
+        .committed => .{ .committed = {} },
+        .prepared => .{ .prepared = {} },
+        .applying => blk: {
+            const actions = try allocator.alloc(TargetAction, manifest.changes.len);
+            break :blk .{ .applying = .{
+                .manifest = manifest,
+                .actions = actions,
+                .next_index = 0,
+            } };
+        },
+    };
+    var planner_owned = true;
+    defer if (planner_owned) planner.deinit(allocator);
+
+    if (phase == .applying) {
+        for (manifest.changes) |change| {
+            const current = try readStateDigest(allocator, change.path);
+            const candidate = parseDigest(change.candidate_sha256) orelse return error.CorruptTransactionJournal;
+            const baseline = parseDigest(change.baseline_sha256) orelse return error.CorruptTransactionJournal;
+            try planner.observe(.{
+                .current = current,
+                .baseline = baseline,
+                .candidate = candidate,
+            });
         }
-        if (!std.mem.eql(u8, &current, &baseline_digest)) return error.WorkspaceRecoveryConflict;
-        needs_write[index] = true;
     }
-    for (manifest.changes, needs_write, 0..) |change, should_write, index| {
-        if (!should_write) continue;
-        const after_path = try imagePath(allocator, transaction_dir, index, "after");
-        defer allocator.free(after_path);
-        const after = try zts.file_io.readFile(allocator, after_path, change_set.max_file_bytes);
-        defer allocator.free(after);
-        try durableRecoveryWrite(allocator, change.path, after, index, options);
-        switch (options.fault) {
-            .after_source_write => |fault_index| if (fault_index == index)
-                return error.InjectedTransactionFailure,
-            else => {},
-        }
+
+    var plan = try planner.finish();
+    planner_owned = false;
+    defer plan.deinit(allocator);
+    return executeRecoveryPlan(allocator, transaction_dir, &plan, options);
+}
+
+fn executeRecoveryPlan(
+    allocator: std.mem.Allocator,
+    transaction_dir: []const u8,
+    plan: *const RecoveryPlan,
+    options: RecoveryOptions,
+) !bool {
+    switch (plan.*) {
+        .unprepared, .aborted => {
+            try deleteTransactionDirectory(allocator, transaction_dir, options);
+            return true;
+        },
+        .committed => return false,
+        .prepared => {
+            try writeMarker(allocator, transaction_dir, "aborted");
+            if (options.fault == .after_aborted_marker) return error.InjectedTransactionFailure;
+            try deleteTransactionDirectory(allocator, transaction_dir, options);
+            return true;
+        },
+        .applying => |applying| {
+            if (applying.actions.len != applying.manifest.changes.len)
+                return error.IncompleteRecoveryPlan;
+            for (applying.manifest.changes, applying.actions, 0..) |change, action, index| {
+                switch (action) {
+                    .keep_candidate => continue,
+                    .write_candidate => {
+                        const after_path = try imagePath(allocator, transaction_dir, index, "after");
+                        defer allocator.free(after_path);
+                        const after = try zts.file_io.readFile(allocator, after_path, change_set.max_file_bytes);
+                        defer allocator.free(after);
+                        try durableRecoveryWrite(allocator, change.path, after, index, options);
+                        switch (options.fault) {
+                            .after_source_write => |fault_index| if (fault_index == index)
+                                return error.InjectedTransactionFailure,
+                            else => {},
+                        }
+                    },
+                }
+            }
+            try verifyManifestCandidates(allocator, applying.manifest);
+            if (options.fault == .after_candidate_verification) return error.InjectedTransactionFailure;
+            try writeMarker(allocator, transaction_dir, "committed");
+            if (options.fault == .after_committed_marker) return error.InjectedTransactionFailure;
+            return true;
+        },
     }
-    try verifyManifestCandidates(allocator, manifest);
-    if (options.fault == .after_candidate_verification) return error.InjectedTransactionFailure;
-    try writeMarker(allocator, transaction_dir, "committed");
-    if (options.fault == .after_committed_marker) return error.InjectedTransactionFailure;
-    return true;
 }
 
 fn durableRecoveryWrite(
@@ -894,6 +1053,130 @@ fn lockExclusiveNonBlocking(fd: std.c.fd_t) !void {
 }
 
 const testing = std.testing;
+
+test "recovery planner publishes exact target actions" {
+    const baseline: [32]u8 = @splat(0x11);
+    const candidate: [32]u8 = @splat(0x22);
+    const changes = [_]ManifestChange{
+        .{ .path = "a", .baseline_state = "present", .baseline_sha256 = "", .candidate_sha256 = "" },
+        .{ .path = "b", .baseline_state = "present", .baseline_sha256 = "", .candidate_sha256 = "" },
+    };
+    const manifest: Manifest = .{
+        .schema_version = journal_schema_version,
+        .proof_id = "",
+        .workspace_root = "",
+        .changes = &changes,
+    };
+    const Case = struct {
+        baseline: [32]u8,
+        candidate: [32]u8,
+        current: [2][32]u8,
+        expected: [2]TargetAction,
+    };
+    const cases = [_]Case{
+        .{ .baseline = baseline, .candidate = candidate, .current = .{ baseline, baseline }, .expected = .{ .write_candidate, .write_candidate } },
+        .{ .baseline = baseline, .candidate = candidate, .current = .{ baseline, candidate }, .expected = .{ .write_candidate, .keep_candidate } },
+        .{ .baseline = baseline, .candidate = candidate, .current = .{ candidate, baseline }, .expected = .{ .keep_candidate, .write_candidate } },
+        .{ .baseline = baseline, .candidate = candidate, .current = .{ candidate, candidate }, .expected = .{ .keep_candidate, .keep_candidate } },
+        .{ .baseline = baseline, .candidate = baseline, .current = .{ baseline, baseline }, .expected = .{ .keep_candidate, .keep_candidate } },
+    };
+    for (cases) |case| {
+        const actions = try testing.allocator.alloc(TargetAction, changes.len);
+        var planner: RecoveryPlanner = .{ .applying = .{
+            .manifest = manifest,
+            .actions = actions,
+            .next_index = 0,
+        } };
+        var planner_owned = true;
+        defer if (planner_owned) planner.deinit(testing.allocator);
+        for (case.current) |current| try planner.observe(.{
+            .current = current,
+            .baseline = case.baseline,
+            .candidate = case.candidate,
+        });
+        var plan = try planner.finish();
+        planner_owned = false;
+        defer plan.deinit(testing.allocator);
+        switch (plan) {
+            .applying => |applying| try testing.expectEqualSlices(
+                TargetAction,
+                &case.expected,
+                applying.actions,
+            ),
+            .unprepared, .aborted, .committed, .prepared => return error.TestUnexpectedResult,
+        }
+    }
+}
+
+test "recovery planner refuses incomplete publication" {
+    const baseline: [32]u8 = @splat(0x11);
+    const candidate: [32]u8 = @splat(0x22);
+    const changes = [_]ManifestChange{
+        .{ .path = "a", .baseline_state = "present", .baseline_sha256 = "", .candidate_sha256 = "" },
+        .{ .path = "b", .baseline_state = "present", .baseline_sha256 = "", .candidate_sha256 = "" },
+    };
+    const actions = try testing.allocator.alloc(TargetAction, changes.len);
+    var planner: RecoveryPlanner = .{ .applying = .{
+        .manifest = .{
+            .schema_version = journal_schema_version,
+            .proof_id = "",
+            .workspace_root = "",
+            .changes = &changes,
+        },
+        .actions = actions,
+        .next_index = 0,
+    } };
+    var planner_owned = true;
+    defer if (planner_owned) planner.deinit(testing.allocator);
+    try planner.observe(.{
+        .current = baseline,
+        .baseline = baseline,
+        .candidate = candidate,
+    });
+    if (planner.finish()) |finished| {
+        planner_owned = false;
+        var plan = finished;
+        defer plan.deinit(testing.allocator);
+        return error.TestExpectedError;
+    } else |err| {
+        try testing.expectEqual(error.IncompleteRecoveryPlan, err);
+    }
+}
+
+test "recovery planner conflict publishes no plan" {
+    const baseline: [32]u8 = @splat(0x11);
+    const candidate: [32]u8 = @splat(0x22);
+    const third: [32]u8 = @splat(0x33);
+    const changes = [_]ManifestChange{
+        .{ .path = "a", .baseline_state = "present", .baseline_sha256 = "", .candidate_sha256 = "" },
+    };
+    const actions = try testing.allocator.alloc(TargetAction, changes.len);
+    var planner: RecoveryPlanner = .{ .applying = .{
+        .manifest = .{
+            .schema_version = journal_schema_version,
+            .proof_id = "",
+            .workspace_root = "",
+            .changes = &changes,
+        },
+        .actions = actions,
+        .next_index = 0,
+    } };
+    var planner_owned = true;
+    defer if (planner_owned) planner.deinit(testing.allocator);
+    try testing.expectError(error.WorkspaceRecoveryConflict, planner.observe(.{
+        .current = third,
+        .baseline = baseline,
+        .candidate = candidate,
+    }));
+    if (planner.finish()) |finished| {
+        planner_owned = false;
+        var plan = finished;
+        defer plan.deinit(testing.allocator);
+        return error.TestExpectedError;
+    } else |err| {
+        try testing.expectEqual(error.IncompleteRecoveryPlan, err);
+    }
+}
 
 const Fixture = struct {
     root: []u8,
