@@ -88,3 +88,9 @@ __pycache__/
 *.visual-check.html
 *.visual-check.json
 *.visual-check.*.png
+
+# The proof gate's sticky PR comment body. `scripts/proof-gate.sh` writes it at
+# the repository root and .github/workflows/proof-gate.yml posts it as a comment;
+# it is a verdict about one base..head range, so a committed copy is a claim
+# about a range nobody is looking at. Regenerated on every run.
+proof-gate.md
