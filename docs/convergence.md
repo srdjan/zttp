@@ -11,6 +11,35 @@ retry. **First-attempt green** is reported beside it and includes compiler
 normalization or repair on that attempt. Both are counted results over a frozen
 corpus, not estimates.
 
+## Repeatability
+
+A row is one run of a sampling model, so the figure moves between runs with the
+corpus, the model and the request policy all held fixed. Measured on 2026-09-20
+at commit `e2644fc2` over corpus `0012ad8ca6d5`, by three report-only
+qualification cohorts that promoted nothing:
+
+| Cohort | Raw first-draft pass | First-attempt green | Median round-trips | Intent pass |
+|---|---|---|---|---|
+| 1 | 13/19 | 14/19 | 4 | 16/18 |
+| 2 | 15/19 | 15/19 | 5 | 15/18 |
+| 3 | 13/19 | 13/19 | 4 | 16/18 |
+
+The published row for that corpus is 13/19, which is the low value of the
+spread and was matched exactly twice. Read the headline as stable to about one
+case rather than as exact, and do not read a one-case difference between two
+rows as a change in the compiler or the agent.
+
+Three cases behaved identically in every cohort: `cache-counter-holes` applied
+no edit, `workflow-nested-dispatch-avoidance` failed its runtime intent, and
+`parallel-secret` stayed compiler-veto-only by design. Those are properties of
+the case, not samples.
+
+Those cohorts report `qualified: false`, because
+`expert_qualification.minimum_raw_first_draft_passes` is 14 and two of the three
+fell below it. That floor authorizes a change of the product default. It is not
+a statement about whether the published figure is correct, and no cohort
+proposed moving a default that already names this provider and model.
+
 ## Results
 
 | Recorded | Commit | Corpus | Cases | Provider | Model | Policy | Raw first-draft pass | First-attempt green | Median round-trips | Intent pass |
