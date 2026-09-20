@@ -832,7 +832,7 @@ Decisions, Next Steps, and Critical Context. The host derives read and modified
 file blocks from typed tool calls rather than trusting model-authored file facts.
 
 Raw session entries remain append-only for proof reconstruction and ledger
-export. A successful summary is stored as a checksummed v3 compaction
+export. A successful summary is stored as a checksummed v4 compaction
 checkpoint, then installed as the provider-visible projection. Resume and fork
 preserve both the raw ancestry and the active projection. A provider
 `PromptTooLong` response can compact and retry that exact pending model call

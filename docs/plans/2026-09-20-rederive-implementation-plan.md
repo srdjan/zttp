@@ -216,3 +216,26 @@ with 2,216 passed and one skipped. `test-zruntime -j1 --summary all` exits 0
 with 411 passed and one skipped. `zig build wasm --summary all` exits 0.
 The full aggregate and `scripts/verify.sh` remain outstanding until their
 complete runs finish within the time limit or longer execution is approved.
+
+Further integration checks pass: `test-cli -Dstudio -j1 --summary all` reports
+776 passed and one skipped, with no failures, leaks, or logged errors.
+`test-panic-isolation -j1 --summary all` passes all 14 build steps, including
+top-level and nested handler recovery. `smoke-v1 --summary all` passes the
+init, doctor, check, build, deploy, and HTTP request checks. The final named
+documentation drift and link gates pass.
+
+The individual verification scripts for normalization, idiom tables, canonical
+style, grammar, decision producers, metadata pins, agent determinism, installer
+archive safety, proof-checker boundaries, diagnostic producers, proof ratchets,
+residual guards, and semantics all exit 0. Normalization checks 60 files with
+no skips; 55 are printed and five JSX inputs retain their original layout.
+The semantics gate proves all 14 SMT equivalences and refutes all four excluded
+laws with Z3. Generated module specifications match, the policy hash matches
+its committed pin, and the expert metadata assertions pass.
+
+The final aggregate attempt and the ReleaseFast build each remained active at
+the two-minute limit and were stopped. Neither produced a complete build
+summary. They are incomplete checks, not established functional failures.
+The full `bash scripts/verify.sh` gate has not run. Approval for execution
+beyond two minutes remains pending under the user-supplied session instruction.
+The individual green checks above do not replace these outstanding commands.

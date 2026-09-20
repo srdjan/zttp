@@ -289,7 +289,7 @@ pub fn appendEntryEvent(
     });
 }
 
-/// Exclusive, session-scoped writer for one v3 journal. Opening validates and
+/// Exclusive, session-scoped writer for one v4 journal. Opening validates and
 /// recovers the complete journal once, then holds a sidecar lock until deinit.
 /// Each append checks that the validated EOF is unchanged and validates only
 /// the new typed envelope before writing and syncing it.
