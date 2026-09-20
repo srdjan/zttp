@@ -79,6 +79,7 @@ pub const Failure = error{
     NoParsedBlob,
     NoTrippedList,
     FirstRunWithoutCodes,
+    FirstRunWithUnreadableHistory,
 };
 
 /// The message each refusal prints. Kept beside the error set so a new member
@@ -93,6 +94,7 @@ pub fn failureMessage(failure: Failure) []const u8 {
         error.NoParsedBlob => "no coverage.json blob in history parsed",
         error.NoTrippedList => "no entry for this corpus carries a tripped list",
         error.FirstRunWithoutCodes => "this identity has no published run and no pending codes were given; that would publish an empty set as an observation",
+        error.FirstRunWithUnreadableHistory => "no readable published run carries this identity, but some coverage.json blob in history could not be read; it may have been one, so this cannot be reported as a first publication",
     };
 }
 
@@ -166,12 +168,19 @@ fn sortedUnique(
 /// orders them. A blob that does not parse is skipped rather than fatal: the
 /// page predates its own schema in early history, and refusing there would make
 /// this unusable for the identity it is actually about.
+///
+/// `unreadable` counts those skips, and the caller needs it. A skipped blob has
+/// no readable `corpusVersion`, so it could have carried the identity being
+/// asked about. An empty result therefore means one of two different things -
+/// no run of this identity was ever published, or one was and could not be read
+/// - and only the first of them may be reported as a first publication.
 fn publishedSets(
     arena: std.mem.Allocator,
     io: std.Io,
     root: []const u8,
     version: []const u8,
     parsed_any: *bool,
+    unreadable: *usize,
 ) !std.ArrayList(CodeSet) {
     const log = try runGit(arena, io, root, &.{ "git", "log", "--format=%H", "--", "docs/coverage.json" });
     if (!log.ok or std.mem.trim(u8, log.stdout, " \t\r\n").len == 0) return error.NoCoverageHistory;
@@ -181,15 +190,24 @@ fn publishedSets(
     while (commits.next()) |commit| {
         const spec = try std.fmt.allocPrint(arena, "{s}:docs/coverage.json", .{commit});
         const blob = try runGit(arena, io, root, &.{ "git", "show", spec });
-        if (!blob.ok) continue;
+        if (!blob.ok) {
+            unreadable.* += 1;
+            continue;
+        }
 
         const parsed = std.json.parseFromSliceLeaky(
             std.json.Value,
             arena,
             blob.stdout,
             .{},
-        ) catch continue;
-        if (parsed != .object) continue;
+        ) catch {
+            unreadable.* += 1;
+            continue;
+        };
+        if (parsed != .object) {
+            unreadable.* += 1;
+            continue;
+        }
         parsed_any.* = true;
 
         const published = parsed.object.get("corpusVersion") orelse continue;
@@ -242,7 +260,8 @@ pub fn compute(
     const arena = scratch.allocator();
 
     var parsed_any = false;
-    const published = try publishedSets(arena, io, root, version, &parsed_any);
+    var unreadable: usize = 0;
+    const published = try publishedSets(arena, io, root, version, &parsed_any, &unreadable);
     if (!parsed_any) return error.NoParsedBlob;
 
     const pending_set = try sortedUnique(arena, pending);
@@ -250,6 +269,13 @@ pub fn compute(
     var sets: []const CodeSet = published.items;
     if (published.items.len == 0) {
         if (pending_set.len == 0) return error.FirstRunWithoutCodes;
+        // The first-publication path claims that nothing of this identity was
+        // ever published. A blob that could not be read carries no readable
+        // identity, so it may have been exactly that run, and the claim would
+        // be false. Relaxing the shell version's refusal here must not turn it
+        // into a silent wrong count: where history is unreadable the honest
+        // answer is a refusal that says which commit to look at.
+        if (unreadable != 0) return error.FirstRunWithUnreadableHistory;
         const only = try arena.alloc(CodeSet, 1);
         only[0] = .{ .codes = pending_set };
         sets = only;
@@ -586,6 +612,15 @@ test "every refusal carries a message and each reachable one is probed" {
     try testing.expectError(
         error.FirstRunWithoutCodes,
         compute(testing.allocator, io, fixture.root, version_a, &.{}),
+    );
+
+    // FirstRunWithUnreadableHistory: the unparseable blob published earlier in
+    // this fixture carries no readable identity, so it may have been a run of
+    // the identity being asked about. Reporting a first publication here would
+    // be a claim the history cannot support.
+    try testing.expectError(
+        error.FirstRunWithUnreadableHistory,
+        compute(testing.allocator, io, fixture.root, version_a, &.{"ZTS400"}),
     );
 
     // UsageMissingVersion and ShallowClone are reached from `main` and from a
