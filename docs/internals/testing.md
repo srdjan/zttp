@@ -202,6 +202,15 @@ Reassess this limitation when the pinned Zig toolchain changes.
 
 ## Running One Test
 
+This is a shortening device for the edit loop, not a way to establish anything.
+A filtered run is never evidence: `-Dtest-filter` is wired to `.filters` on every
+test artifact (`build.zig:13-18`), so an artifact holding no test the filter
+matches runs zero tests and exits 0, and the aggregate step reports a pass for
+it. A filtered run was measured here reporting "2 passed" while the named test's
+assertion had been sabotaged to expect an impossible error, because that run
+executed neither of them. Take every verdict you intend to cite from an
+unfiltered run of the named step, as `AGENTS.md` requires.
+
 ```bash
 zig build test -Dtest-filter="runtime init and deinit"
 ```
