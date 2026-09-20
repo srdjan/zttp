@@ -1595,7 +1595,19 @@ const record_corpus = [_]RecordCase{
         // (`runtime_workflow.zig`), which carries no literal `outcome` key. So
         // `bodyContains:"outcome"` fails first and the run measures nothing
         // about the step and compensation events after it.
-        .expect_committed_intent_pass = false,
+        //
+        // True again on the 2026-09-20 re-record, and by the same coin landing
+        // the other way up. This draft answers
+        // `Response.json({ outcome: outcome })`, so the key the spec asserts is
+        // in the body because the draft named the binding in the object rather
+        // than returning it bare. `bodyContains:"outcome"` matches, the run
+        // proceeds, and the step and compensation events it then measures are
+        // the ones the case is about. The mismatch the three notes above
+        // describe is still not closed: the spec asserts a key shape the prompt
+        // does not state, so this pin keeps tracking the draft and not the
+        // handler being right, and it will move again on the next re-record
+        // unless the spec and the prompt are made to agree.
+        .expect_committed_intent_pass = true,
     },
     .{
         .name = "workflow-wait-signal",
