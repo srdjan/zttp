@@ -1,6 +1,7 @@
 # Bounded rederive implementation
 
-Status: approved by the user, with revalidation required before implementation.
+Status: complete. Revalidation, selected implementation phases, and the full
+verification gate passed. Conditional work remains outside this plan.
 
 ## Revalidation
 
@@ -144,7 +145,8 @@ item must remain explicit rather than being reported as complete.
 ## Execution record
 
 Phase 0: the focused expert baseline and documentation gates pass. The full
-aggregate and final gate still require permission to exceed two minutes.
+aggregate and final gate subsequently passed after the user approved execution
+beyond two minutes.
 
 Phase 1: the public schema matrix now checks exact literal bytes, raw JSON
 retention, inferred string/number/boolean/array types, dynamic values and
@@ -214,8 +216,8 @@ No runtime speed or source coverage improvement is claimed.
 Additional integration checks: the final committed schema tests pass again
 with 2,216 passed and one skipped. `test-zruntime -j1 --summary all` exits 0
 with 411 passed and one skipped. `zig build wasm --summary all` exits 0.
-The full aggregate and `scripts/verify.sh` remain outstanding until their
-complete runs finish within the time limit or longer execution is approved.
+At this point, the full aggregate and `scripts/verify.sh` were outstanding.
+Their completed results are recorded below.
 
 Further integration checks pass: `test-cli -Dstudio -j1 --summary all` reports
 776 passed and one skipped, with no failures, leaks, or logged errors.
@@ -233,9 +235,24 @@ The semantics gate proves all 14 SMT equivalences and refutes all four excluded
 laws with Z3. Generated module specifications match, the policy hash matches
 its committed pin, and the expert metadata assertions pass.
 
-The final aggregate attempt and the ReleaseFast build each remained active at
+An earlier aggregate attempt and the ReleaseFast build each remained active at
 the two-minute limit and were stopped. Neither produced a complete build
-summary. They are incomplete checks, not established functional failures.
-The full `bash scripts/verify.sh` gate has not run. Approval for execution
-beyond two minutes remains pending under the user-supplied session instruction.
-The individual green checks above do not replace these outstanding commands.
+summary. Those attempts were incomplete checks, not established functional
+failures. They did not replace a complete verification run.
+
+Final integration: after the user approved longer execution, the main agent
+ran `bash scripts/verify.sh` against clean source commit `9be65e0d` on
+2026-09-20. The script exited 0 and reported that all CI test-job steps passed.
+The complete run passed the unfiltered aggregate suite, standalone runtime
+suite, ReleaseFast build, WebAssembly build, user-flow smoke test, panic
+isolation test, studio suite, registry and policy checks, semantics audit,
+generated specification checks, expert metadata checks, and formatting check.
+All 56 example suites passed. The studio suite reported 776 passed and one
+skipped, with zero failures, leaks, or logged errors. The semantics audit
+proved all 14 SMT equivalences and refuted all four excluded laws with Z3.
+
+The completion audit found and corrected two remaining current v3 journal
+descriptions in the user guide and writer comment. Historical plans and
+intentional old-frame rejection fixtures remain unchanged. No implementation
+correction was needed after the full gate. The final documentation-only update
+is checked separately with the documentation drift and link gates.
