@@ -43,11 +43,8 @@ Two gates were written over that work. Both reported a pass while checking
 nothing.
 
 [A gate that counts nothing still reports a pass](a-gate-that-counts-nothing-still-reports-a-pass.md)
-was written the day before, over four instances in this same subsystem. It covers
-the gate whose input has gone empty: a corpus outside the hash that guards it, a
-hand-written case list untied to its table, a name filter that matches no test, a
-build product nothing depends on. Its remedy is a floor on the input, and its
-probe is to delete that input and see whether the gate stays green.
+was written the day before, over earlier instances in this same subsystem, and
+covers the gate whose input has gone empty.
 
 Neither gate here had an empty input. Both already carried floors. The first
 passed while checking nothing because its assertion over a full input was weaker
@@ -247,8 +244,8 @@ condition is still unconditionally true, and the gate reports the duplicate.
 
 ## Why This Matters
 
-The sibling document already records three earlier recurrences of this
-class and four more that landed at once on 2026-08-03. These two landed on
+The [sibling document](a-gate-that-counts-nothing-still-reports-a-pass.md)
+already records earlier recurrences of this class. These two landed on
 2026-08-04, in the same subsystem, one day after the rule was written down, while
 its author was working from it. That is the useful fact: the floor-on-input rule
 was necessary and is not sufficient. A gate can hold a full input, count it, print
@@ -392,7 +389,9 @@ Two questions to put to any gate, after the sibling document's "delete its input
 
 ## Related Issues
 
+- `CONCEPTS.md`, the Gate and Probe entries - the whole class in one place, kept current as these documents change; read it before restating any of them here
 - [a-gate-that-counts-nothing-still-reports-a-pass](a-gate-that-counts-nothing-still-reports-a-pass.md) - the parent rule, over a degenerate input rather than a degenerate assertion or probe. Read it first
+- [a-gate-can-be-non-vacuous-and-still-porous](a-gate-can-be-non-vacuous-and-still-porous.md) - the failure that remains once a gate satisfies both this rule and the parent
 - [empty-baseline-made-a-file-destroying-edit-prove-clean](../logic-errors/empty-baseline-made-a-file-destroying-edit-prove-clean.md) - the defect in this same subsystem that these gates exist to catch, and the same fail-open one level down
 - [normalize-unions-without-dropping-members](../logic-errors/normalize-unions-without-dropping-members.md) - the polarity rule underneath the family: when something cannot see, it must widen or fail, never narrow to a pass
 - [two-hole-fills-in-one-turn-do-not-compose](../logic-errors/two-hole-fills-in-one-turn-do-not-compose.md) - another stand-in loop invariant carried by an assertion rather than by structure

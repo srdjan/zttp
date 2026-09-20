@@ -1,6 +1,7 @@
 ---
 title: A gate can be non-vacuous and still porous, and only a mutation shows it
 date: 2026-09-19
+last_updated: 2026-09-20
 category: conventions
 module: packages/tools (invariant drift gate), packages/runtime (adapter bridge), packages/proof-checker (acceptance kernel), repo-wide (attacking any gate)
 problem_type: convention
@@ -43,9 +44,11 @@ The repair gave the comparison two sources. `linked_manifest` is filled field by
 field from the native module at `packages/runtime/src/invariant_adapter.zig:44-49`,
 `linkedDigest()` hashes that manifest at `:64-66`, and `require()` reads the
 consumer's expectation `pcc.invariant.adapterDigest()` at `:75-79` and compares
-the two. The bridge file was added by local-main commit `a5d9eeb9`, "feat(invariant):
-bind the linked adapter manifest, not the checker's constant". That commit is
-unpushed and can still be rewritten.
+the two. The bridge file was added by the commit "feat(invariant): bind the
+linked adapter manifest, not the checker's constant". Every commit cited in this
+document is named by its subject and not by its hash, because this history was
+local when the document was written and a rebase before it is pushed would
+invalidate every hash written down here; find one with `git log --grep`.
 
 The repair has one awkward quality: it is a property of how the code is written,
 not of what the code computes. A bridge that copies the kernel's constant into
@@ -60,17 +63,17 @@ The friction is what happened next. The gate went through four review rounds. In
 each round the gate was read, and in each round the reading said the gate was
 working. The reading was correct. Every check fired. Every probe rejected its
 mutation. The gate has floors that refuse an empty input, an empty row set and a
-scan that recognises nothing, so it is not one of the gates described in
+scan that recognises nothing, so it is not vacuous by any shape named in
 [docs/solutions/conventions/a-gate-that-counts-nothing-still-reports-a-pass.md](a-gate-that-counts-nothing-still-reports-a-pass.md).
-It is not vacuous by any of the four shapes that doc names.
 
 And in rounds 1, 2 and 3, single-line edits to the bridge still passed the gate
-at exit 0. The round 2 commit message records how they were found:
-"shown empirically by the re-reviewer running the head gate against single-line
-mutations: three next-nearest regressions passed the whole gate at exit 0"
-(local-main commit `5d70bd23`). Round 3 found five more, and its commit says
-where they were: "Five single-edit regressions sat in the two places round 2
-introduced and did not probe" (local-main commit `2d57147b`).
+at exit 0. The round 2 commit, "fix(invariant): deny by default over the kernel
+namespace, and scan linkedDigest", records how they were found: "shown
+empirically by the re-reviewer running the head gate against single-line
+mutations: three next-nearest regressions passed the whole gate at exit 0".
+Round 3, "fix(invariant): scan the whole bridge, resolve aliases, and floor the
+scan", found five more and says where they were: "Five single-edit regressions
+sat in the two places round 2 introduced and did not probe".
 
 Reading the gate did not find any of them. A mutation harness found all of them.
 
@@ -252,9 +255,8 @@ that list is the verdict enum.
 **Vacuity and porosity are different failures, and only one is visible by
 reading.**
 
-A vacuous gate checks nothing. Its corpus is empty, its filter matches no test,
-its build product nothing depends on. You find it by deleting its input and
-watching it still pass. Those four shapes and the delete-its-input check are in
+A vacuous gate checks nothing, and the shapes it takes and the delete-its-input
+check that finds them are in
 [docs/solutions/conventions/a-gate-that-counts-nothing-still-reports-a-pass.md](a-gate-that-counts-nothing-still-reports-a-pass.md).
 
 A porous gate checks something real, over a real input, and what it checks is
@@ -268,9 +270,8 @@ unprobed.** A probe is an example the gate's author wrote, so the set of
 mutations the probes cover is exactly the set the author thought of. The floor
 `covered >= 19` at `:3131` is a floor on how many examples the author wrote. It
 is not a floor on the property. This is the same caution as in
-[docs/solutions/conventions/difference-is-not-the-claim-and-a-probe-must-compile.md](difference-is-not-the-claim-and-a-probe-must-compile.md),
-which says a gate can hold a full input and still assert something weaker than
-its own name. Here the weaker assertion is "these 83 edits are rejected", and the
+[docs/solutions/conventions/difference-is-not-the-claim-and-a-probe-must-compile.md](difference-is-not-the-claim-and-a-probe-must-compile.md).
+Here the weaker assertion is "these 83 edits are rejected", and the
 name claims "the bridge does not read the kernel's value".
 
 **A text scan over source has no terminating condition.** There is always another
@@ -299,8 +300,9 @@ states the bound in its own source at `:711-720`:
 That statement is verifiable and it is verified below: the `@field` form still
 escapes the namespace scan at this tree. The value of writing the bound down is
 that it stops the next reviewer reading a green gate as a guarantee it never
-made. The docs commit that made this correction, local-main `525f7ba9`, opens
-with the reason: "A limit statement that under-claims is worse than none."
+made. The docs commit that made this correction, "docs(invariant): correct the
+limit statement; the package graph guards one side", opens with the reason: "A
+limit statement that under-claims is worse than none."
 
 **A positive requirement narrows the evasion surface, but it does not close
 it.** A rule that says "must not name X" is defeated by any new way to name X,
@@ -513,7 +515,7 @@ declaration can move".
 
 ### 5. Aliases, resolved to a fixed point
 
-Three alias forms slipped round 2, per local-main commit `2d57147b`: a `pub const`
+Three alias forms slipped round 2, per the round 3 commit: a `pub const`
 binding where only a bare `const ` was accepted, the inline `@import` form that
 nothing seeded, and a transitive binding because resolution ran once rather than
 to a fixed point.
@@ -653,3 +655,9 @@ no failure message." That is the rule from
 [docs/solutions/conventions/difference-is-not-the-claim-and-a-probe-must-compile.md](difference-is-not-the-claim-and-a-probe-must-compile.md),
 and the census above is only worth its floors because the build refuses to run
 the gate if the census does not compile.
+
+## Related Issues
+
+- `CONCEPTS.md`, the Gate and Probe entries - the whole class in one place, kept current as these documents change; read it before restating any of them here
+- [a-gate-that-counts-nothing-still-reports-a-pass](a-gate-that-counts-nothing-still-reports-a-pass.md) - vacuity, the failure this one is not
+- [difference-is-not-the-claim-and-a-probe-must-compile](difference-is-not-the-claim-and-a-probe-must-compile.md) - a degenerate assertion and a degenerate probe, the two failures between vacuity and porosity
