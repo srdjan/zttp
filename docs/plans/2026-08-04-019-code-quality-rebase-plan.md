@@ -2,6 +2,12 @@
 
 Status: approved for implementation
 
+Historical plan: the typed contract decoder, compile-time evaluator, explicit
+runtime state ownership, and real shutdown drain test have since landed. The
+[2026-09-20 bounded rederive plan](2026-09-20-rederive-implementation-plan.md)
+records fresh measurements and the selected follow-up work. The baseline below
+describes the original checkout, not the current tree.
+
 Date: 2026-08-04
 
 Checkout: `main` at `662c2416c11418ba14d2948d23741792c7079431`

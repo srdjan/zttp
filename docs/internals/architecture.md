@@ -45,7 +45,7 @@ uses the hybrid arena allocator, which disables collection on the serving path
 
 ## Expert Model Context
 
-The expert agent keeps two views of a session. The v3 event journal and raw
+The expert agent keeps two views of a session. The v4 event journal and raw
 `Transcript` entries are append-only proof and audit authority. A separate
 projection supplies the model with the latest validated summary plus a retained
 suffix of raw entries. Ledger export, proof reconstruction, patch-chain hashes,

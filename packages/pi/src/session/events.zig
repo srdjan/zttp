@@ -3,8 +3,8 @@
 //! Event schema `v4` keeps the raw journal append-only, assigns stable logical
 //! entry IDs, and persists model-projection checkpoints independently from the
 //! proof and ledger history. It adds the aggregate verified-change-set receipt.
-//! Metadata schema `v4` adds the required expert protocol identity. The event
-//! envelope did not change, so its framed wire remains v3.
+//! Metadata schema `v4` adds the required expert protocol identity. Event frames
+//! use the `ZTE4` header and `4ETZ` footer.
 
 const std = @import("std");
 const zts = @import("zts");

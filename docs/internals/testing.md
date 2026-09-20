@@ -79,7 +79,7 @@ does not contain synthetic replacements for that evidence.
 
 `test-expert-app` also owns the pure request-budget and compaction matrices:
 soft and hard boundaries, whole- and split-turn cuts, closed tool pairs,
-standalone summary validation, settings precedence and rejection, v3 checkpoint
+standalone summary validation, settings precedence and rejection, v4 checkpoint
 resume/fork, and one-shot overflow recovery. `test-cassette` verifies the four
 provider summary request shapes and cache controls. `test-simulator` verifies
 provider-neutral request checkpoints and hard admission. New checkpoints
