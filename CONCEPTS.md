@@ -24,7 +24,11 @@ The set of Properties a Handler must discharge. A Handler that declares nothing 
 An author's declaration, written on the Handler's return type, of which Properties it claims. The compiler discharges each claim against what it inferred; a claim it cannot discharge is an error, not a warning.
 
 ### Proof capsule
-The same declaration applied to a helper rather than the Handler. A capsule is what lets a proof compose across a call boundary: without one, a helper that breaks a Property the Handler needs makes the Handler's proof fail, because nothing states what the helper promises.
+A Spec written as a wrapper around the declared return type, so the claim travels with the value it is made about. The form is the same on a Handler and on a helper, and the compiler names it this way when it reports an undischarged claim on either, so the term is not a helper-only one.
+
+A capsule is what lets a proof compose across a call boundary: without one, a helper that breaks a Property the Handler needs makes the Handler's proof fail, because nothing states what the helper promises.
+
+A capsule written into a fixture is a claim about a program that does not exist yet, and it can stop being satisfiable without being edited. When a rule change elsewhere makes some Property unprovable for the shape the fixture asks for, every answer to it becomes an error, and the capsule still reads as a reasonable request.
 
 ### Effects ceiling
 A declared upper bound on the Capabilities a function may reach. The inferred set must sit inside the ceiling; reaching past it is an error, and declaring a Capability never reached is a warning, so the ceiling stays honest in both directions.
@@ -212,6 +216,13 @@ The share of prompts whose first generated attempt clears the Veto with no retri
 
 ### Policy hash
 A fingerprint of the compiler's rule set, recorded beside every published rate so two measurements taken under different rules are never compared as though they were the same. It covers the rules and not the analysis behind them, so a change to what a rule concludes can leave it identical; the build a measurement came from is what distinguishes those.
+
+### Corpus identity
+A fingerprint of everything a measured agent was shown: for each case, what it was asked, the workspace it was given, and how the task was posed. It is the companion of the Policy hash, which fingerprints the rules instead, and two published rates are comparable only when both agree.
+
+It deliberately excludes the expectations a case is judged against, because the agent never sees them. That split decides what a correction costs: changing what the agent was shown invalidates the recordings and forces fresh ones, while changing only what the outcome is judged against leaves them replayable.
+
+The identity fingerprints what was asked, not whether it can be answered. A rule change elsewhere can make a fixture's declared claim impossible to satisfy without altering anything the fingerprint covers, so the identity stays equal while the task has quietly become unanswerable. Nothing in the fingerprint detects that, and re-measuring the fixture against the current compiler is what does.
 
 ### Turn
 One ask and everything the agent does to answer it: the model round-trips, the tool calls, the drafts, and the Veto's verdict on each. A Turn is the unit a rate is measured over and the unit a Cassette records.
