@@ -10,7 +10,7 @@ constructed and round-tripped through a served handler; `scripts/verify.sh` is
 green; the two invalidated corpus cases are re-recorded and replay.
 
 **Source of truth:**
-[docs/zts-advanced-v2.1.md](../zts-advanced-v2.1.md) section 1, which owns the
+[docs/zttp-next/zts-advanced-v2.1.md](../zttp-next/zts-advanced-v2.1.md) section 1, which owns the
 rule, its scope, and the composite and ABI carve-outs.
 
 Date: 2026-08-16. Snapshot: `main` at `767e7bba`.
