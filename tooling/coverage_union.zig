@@ -19,8 +19,9 @@
 //! no published run carried the identity asked for, which made the first
 //! publication of any new corpus impossible.
 //!
-//! That guard was probed, and the probe passed: its commit records that the
-//! floor "was probed and refuses". A probe shows the branch executes and that
+//! That guard was probed, and the probe passed: its commit names three floors
+//! and records that "All three were probed and refuse". A probe shows the
+//! branch executes and that
 //! it rejects what it names. It cannot show that what it rejects is illegitimate,
 //! and here it was: a new identity is what editing a prompt produces, and it
 //! arrives with no published run by definition. The guard was written when
