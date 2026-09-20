@@ -21,7 +21,7 @@ const frame_footer_magic = "4ETZ";
 const frame_footer_len = @sizeOf(u64) + frame_footer_magic.len;
 const max_frame_payload_bytes: usize = 64 * 1024 * 1024;
 
-const EventKind = enum {
+pub const EventKind = enum {
     user_text,
     model_text,
     tool_use,
@@ -174,6 +174,68 @@ pub const EventRecord = union(EventKind) {
     turn_end: TurnEnd,
     session_summary: SessionSummary,
     compaction_checkpoint: CompactionCheckpoint,
+};
+
+pub const DecodeConsumer = enum { journal, reconstruction };
+
+pub const WireIdentity = union(enum) {
+    session,
+    entry: struct {
+        value: i64,
+        part_index: ?i64,
+    },
+};
+
+pub const ToolUseBatchView = struct {
+    items: []const std.json.Value,
+
+    pub fn at(self: ToolUseBatchView, index: usize) !ToolUse {
+        return decodeToolUseValue(self.items[index]);
+    }
+};
+
+pub const ToolResultView = struct {
+    tool_use_id: []const u8,
+    tool_name: []const u8,
+    ok: bool,
+    llm_text: []const u8,
+    ui_payload_value: ?std.json.Value,
+};
+
+pub const DisplayView = union(enum) {
+    string: []const u8,
+    object: std.json.ObjectMap,
+};
+
+/// Borrowed typed views into `DecodedEnvelope.document`. None of these values
+/// may outlive that owner.
+pub const DecodedRecord = union(EventKind) {
+    user_text: []const u8,
+    model_text: []const u8,
+    tool_use: ToolUse,
+    tool_use_batch: ToolUseBatchView,
+    tool_result: ToolResultView,
+    proof_card: DisplayView,
+    diagnostic_box: DisplayView,
+    verified_change_set: DisplayView,
+    system_note: []const u8,
+    autoloop_outcome: std.json.Value,
+    turn_end: std.json.Value,
+    session_summary: std.json.Value,
+    compaction_checkpoint: std.json.ObjectMap,
+};
+
+/// Owns one parsed event payload. `identity` and `record` borrow from the JSON
+/// document and become invalid after `deinit`.
+pub const DecodedEnvelope = struct {
+    document: std.json.Parsed(std.json.Value),
+    identity: WireIdentity,
+    record: DecodedRecord,
+
+    pub fn deinit(self: *DecodedEnvelope) void {
+        self.document.deinit();
+        self.* = undefined;
+    }
 };
 
 const Envelope = struct {
@@ -372,9 +434,10 @@ pub const JournalWriter = struct {
         try writeEnvelopeJson(buf.writer(), envelope);
         const payload = buf.written();
         if (payload.len > max_frame_payload_bytes) return error.EventTooLarge;
-        try validateEnvelopePayload(allocator, payload);
+        var decoded = try decodeEnvelope(allocator, payload, .journal);
+        defer decoded.deinit();
         var next_sequence = self.sequence;
-        try applySequenceTransition(allocator, &next_sequence, payload);
+        try applySequenceTransition(&next_sequence, &decoded);
         errdefer self.poisoned = true;
         const current_size = (try zts.file_io.fstatFd(self.events_fd)).size;
         if (current_size != self.validated_size) return error.ConcurrentJournalMutation;
@@ -586,7 +649,8 @@ fn recoverTail(
         if (!std.mem.eql(u8, &digest, header[frame_magic.len + @sizeOf(u64) ..])) {
             return error.CorruptEventsLog;
         }
-        try validateEnvelopePayload(allocator, payload);
+        var decoded = try decodeEnvelope(allocator, payload, .journal);
+        decoded.deinit();
         offset += frame_len;
     }
     if (offset != size) {
@@ -610,144 +674,231 @@ fn deriveJournalSequence(
     var reader: Reader = .{ .allocator = allocator, .fd = fd, .size = size };
     while (try reader.next()) |payload| {
         defer allocator.free(payload);
-        try applySequenceTransition(allocator, &sequence, payload);
+        var decoded = try decodeEnvelope(allocator, payload, .journal);
+        defer decoded.deinit();
+        try applySequenceTransition(&sequence, &decoded);
     }
     return sequence;
 }
 
-fn applySequenceTransition(
+/// Decode one JSON envelope into borrowed typed views. The returned value owns
+/// the parse arena; callers must finish consuming every view before `deinit`.
+pub fn decodeEnvelope(
     allocator: std.mem.Allocator,
-    sequence: *JournalSequence,
     payload: []const u8,
-) !void {
-    var parsed = std.json.parseFromSlice(std.json.Value, allocator, payload, .{}) catch
+    consumer: DecodeConsumer,
+) !DecodedEnvelope {
+    var document = std.json.parseFromSlice(std.json.Value, allocator, payload, .{}) catch
         return error.CorruptEventsLog;
-    defer parsed.deinit();
-    if (parsed.value != .object) return error.CorruptEventsLog;
-    const object = parsed.value.object;
+    errdefer document.deinit();
+    if (document.value != .object) return error.CorruptEventsLog;
+    const object = document.value.object;
+    const version = object.get("v") orelse return error.CorruptEventsLog;
+    switch (consumer) {
+        .journal => if (version != .integer or version.integer != schema_version) {
+            return error.CorruptEventsLog;
+        },
+        .reconstruction => {
+            if (version != .integer or version.integer < 0) return error.CorruptEventsLog;
+            const supported = std.math.cast(u32, version.integer) orelse
+                return error.SchemaVersionUnsupported;
+            if (supported != schema_version) return error.SchemaVersionUnsupported;
+        },
+    }
+
     const kind_value = object.get("k") orelse return error.CorruptEventsLog;
     if (kind_value != .string) return error.CorruptEventsLog;
     const kind = std.meta.stringToEnum(EventKind, kind_value.string) orelse
         return error.CorruptEventsLog;
-    const entry_value = object.get("entry_id");
-    if (entry_value) |raw_entry| {
-        if (raw_entry != .integer or raw_entry.integer <= 0) return error.CorruptEventsLog;
-        const entry_id = std.math.cast(EntryId, raw_entry.integer) orelse
-            return error.CorruptEventsLog;
-        const part_value = object.get("part_index");
-        if (kind == .tool_use and part_value != null) {
-            const raw_part = part_value orelse return error.CorruptEventsLog;
-            if (raw_part != .integer or raw_part.integer < 0) return error.CorruptEventsLog;
-            const part = std.math.cast(u32, raw_part.integer) orelse
-                return error.CorruptEventsLog;
-            if (part == 0) {
-                if (entry_id != sequence.next_entry_id) return error.CorruptEventsLog;
-                sequence.next_entry_id = std.math.add(EntryId, sequence.next_entry_id, 1) catch
-                    return error.EventIdentityOverflow;
-                sequence.legacy_tool_entry_id = entry_id;
-                sequence.next_legacy_part = 1;
-            } else {
-                const current_tool_id = sequence.legacy_tool_entry_id orelse
-                    return error.CorruptEventsLog;
-                if (entry_id != current_tool_id or part != sequence.next_legacy_part) {
-                    return error.CorruptEventsLog;
-                }
-                sequence.next_legacy_part = std.math.add(u32, part, 1) catch
-                    return error.EventIdentityOverflow;
-            }
-        } else {
-            if (entry_id != sequence.next_entry_id) return error.CorruptEventsLog;
-            sequence.next_entry_id = std.math.add(EntryId, sequence.next_entry_id, 1) catch
-                return error.EventIdentityOverflow;
-            sequence.legacy_tool_entry_id = null;
-            sequence.next_legacy_part = 0;
-        }
-        return;
-    }
-
-    if (kind == .compaction_checkpoint) {
-        const data = object.get("d") orelse return error.CorruptEventsLog;
-        if (data != .object) return error.CorruptEventsLog;
-        const first_kept = data.object.get("first_kept_entry_id") orelse
-            return error.CorruptEventsLog;
-        if (first_kept != .integer or first_kept.integer <= 0) return error.CorruptEventsLog;
-        const kept_id = std.math.cast(EntryId, first_kept.integer) orelse
-            return error.CorruptEventsLog;
-        // The next entry ID is an exclusive tail boundary. It represents a
-        // checkpoint whose summary covers every entry currently in the raw
-        // journal; a later append with that ID becomes the first visible suffix
-        // entry. Anything beyond the next ID is still a corrupt cut identity.
-        if (kept_id > sequence.next_entry_id) return error.CorruptEventsLog;
-    }
-}
-
-fn validateEnvelopePayload(allocator: std.mem.Allocator, payload: []const u8) !void {
-    var parsed = std.json.parseFromSlice(std.json.Value, allocator, payload, .{}) catch
-        return error.CorruptEventsLog;
-    defer parsed.deinit();
-    if (parsed.value != .object) return error.CorruptEventsLog;
-    const object = parsed.value.object;
-    const version = object.get("v") orelse return error.CorruptEventsLog;
-    const kind = object.get("k") orelse return error.CorruptEventsLog;
     const data = object.get("d") orelse return error.CorruptEventsLog;
-    if (version != .integer or version.integer != schema_version or kind != .string) {
-        return error.CorruptEventsLog;
-    }
-    const event_kind = std.meta.stringToEnum(EventKind, kind.string) orelse
-        return error.CorruptEventsLog;
-    const entry_id = object.get("entry_id");
-    const part_index = object.get("part_index");
-    const transcript_record = switch (event_kind) {
-        .user_text, .model_text, .tool_use, .tool_use_batch, .tool_result, .proof_card, .diagnostic_box, .verified_change_set, .system_note => true,
-        .autoloop_outcome, .turn_end, .session_summary, .compaction_checkpoint => false,
-    };
-    if (transcript_record) {
-        const id = entry_id orelse return error.CorruptEventsLog;
-        if (id != .integer or id.integer <= 0) {
-            return error.CorruptEventsLog;
-        }
-    } else if (entry_id != null or part_index != null) return error.CorruptEventsLog;
-    if (part_index) |part| {
-        if (event_kind != .tool_use or part != .integer or part.integer < 0) {
-            return error.CorruptEventsLog;
-        }
-    }
-    switch (event_kind) {
-        .user_text, .model_text, .system_note => if (data != .string) return error.CorruptEventsLog,
-        .tool_use => try validateToolUseValue(data),
-        .tool_use_batch => {
-            if (data != .array or data.array.items.len == 0) return error.CorruptEventsLog;
-            for (data.array.items) |item| try validateToolUseValue(item);
-        },
-        .tool_result => {
-            if (data != .object) return error.CorruptEventsLog;
-            const id = data.object.get("tool_use_id") orelse return error.CorruptEventsLog;
-            const name = data.object.get("tool_name") orelse return error.CorruptEventsLog;
-            const ok = data.object.get("ok") orelse return error.CorruptEventsLog;
-            const text = data.object.get("llm_text") orelse data.object.get("body") orelse
-                return error.CorruptEventsLog;
-            if (id != .string or name != .string or ok != .bool or text != .string) {
+    const entry_value = object.get("entry_id");
+    const part_value = object.get("part_index");
+    const identity: WireIdentity = if (isTranscriptKind(kind)) blk: {
+        const entry = entry_value orelse return error.CorruptEventsLog;
+        if (entry != .integer or entry.integer <= 0) return error.CorruptEventsLog;
+        const part = if (part_value) |part| part_blk: {
+            if (kind != .tool_use or part != .integer or part.integer < 0) {
                 return error.CorruptEventsLog;
             }
+            break :part_blk part.integer;
+        } else null;
+        break :blk .{ .entry = .{ .value = entry.integer, .part_index = part } };
+    } else blk: {
+        if (entry_value != null or part_value != null) return error.CorruptEventsLog;
+        break :blk .session;
+    };
+
+    const record: DecodedRecord = switch (kind) {
+        .user_text => .{ .user_text = try decodeTextValue(data) },
+        .model_text => .{ .model_text = try decodeTextValue(data) },
+        .tool_use => .{ .tool_use = try decodeToolUseValue(data) },
+        .tool_use_batch => blk: {
+            if (data != .array or data.array.items.len == 0) return error.CorruptEventsLog;
+            for (data.array.items) |item| _ = try decodeToolUseValue(item);
+            break :blk .{ .tool_use_batch = .{ .items = data.array.items } };
         },
-        .proof_card, .diagnostic_box, .verified_change_set => if (data != .string and data != .object) {
-            return error.CorruptEventsLog;
+        .tool_result => .{ .tool_result = try decodeToolResultValue(data) },
+        .proof_card => .{ .proof_card = try decodeDisplayValue(data) },
+        .diagnostic_box => .{ .diagnostic_box = try decodeDisplayValue(data) },
+        .verified_change_set => .{ .verified_change_set = try decodeDisplayValue(data) },
+        .system_note => .{ .system_note = try decodeTextValue(data) },
+        .autoloop_outcome => blk: {
+            if (consumer == .journal and data != .object) return error.CorruptEventsLog;
+            break :blk .{ .autoloop_outcome = data };
         },
-        .autoloop_outcome, .turn_end, .session_summary, .compaction_checkpoint => if (data != .object) {
-            return error.CorruptEventsLog;
+        .turn_end => blk: {
+            if (consumer == .journal and data != .object) return error.CorruptEventsLog;
+            break :blk .{ .turn_end = data };
         },
-    }
+        .session_summary => blk: {
+            if (consumer == .journal and data != .object) return error.CorruptEventsLog;
+            break :blk .{ .session_summary = data };
+        },
+        .compaction_checkpoint => blk: {
+            if (data != .object) return error.CorruptEventsLog;
+            break :blk .{ .compaction_checkpoint = data.object };
+        },
+    };
+    return .{ .document = document, .identity = identity, .record = record };
 }
 
-fn validateToolUseValue(value: std.json.Value) !void {
+fn decodeTextValue(value: std.json.Value) ![]const u8 {
+    if (value != .string) return error.CorruptEventsLog;
+    return value.string;
+}
+
+fn decodeToolUseValue(value: std.json.Value) !ToolUse {
     if (value != .object) return error.CorruptEventsLog;
     const id = value.object.get("id") orelse return error.CorruptEventsLog;
     const name = value.object.get("name") orelse return error.CorruptEventsLog;
     const args = value.object.get("args_json") orelse return error.CorruptEventsLog;
     if (id != .string or name != .string or args != .string) return error.CorruptEventsLog;
-    if (value.object.get("reasoning_content")) |reasoning| {
-        if (reasoning != .string) return error.CorruptEventsLog;
+    const reasoning = if (value.object.get("reasoning_content")) |item| blk: {
+        if (item != .string) return error.CorruptEventsLog;
+        break :blk item.string;
+    } else null;
+    return .{
+        .id = id.string,
+        .name = name.string,
+        .args_json = args.string,
+        .reasoning_content = reasoning,
+    };
+}
+
+fn decodeToolResultValue(value: std.json.Value) !ToolResultView {
+    if (value != .object) return error.CorruptEventsLog;
+    const id = value.object.get("tool_use_id") orelse return error.CorruptEventsLog;
+    const name = value.object.get("tool_name") orelse return error.CorruptEventsLog;
+    const ok = value.object.get("ok") orelse return error.CorruptEventsLog;
+    const text = value.object.get("llm_text") orelse value.object.get("body") orelse
+        return error.CorruptEventsLog;
+    if (id != .string or name != .string or ok != .bool or text != .string) {
+        return error.CorruptEventsLog;
     }
+    return .{
+        .tool_use_id = id.string,
+        .tool_name = name.string,
+        .ok = ok.bool,
+        .llm_text = text.string,
+        .ui_payload_value = value.object.get("ui_payload"),
+    };
+}
+
+fn decodeDisplayValue(value: std.json.Value) !DisplayView {
+    return switch (value) {
+        .string => |text| .{ .string = text },
+        .object => |object| .{ .object = object },
+        else => error.CorruptEventsLog,
+    };
+}
+
+fn applySequenceTransition(sequence: *JournalSequence, decoded: *const DecodedEnvelope) !void {
+    switch (decoded.record) {
+        .tool_use => {
+            const wire = switch (decoded.identity) {
+                .entry => |entry| entry,
+                .session => return error.CorruptEventsLog,
+            };
+            const entry_id = std.math.cast(EntryId, wire.value) orelse
+                return error.CorruptEventsLog;
+            if (wire.part_index) |raw_part| {
+                const part = std.math.cast(u32, raw_part) orelse return error.CorruptEventsLog;
+                if (part == 0) {
+                    if (entry_id != sequence.next_entry_id) return error.CorruptEventsLog;
+                    sequence.next_entry_id = std.math.add(EntryId, sequence.next_entry_id, 1) catch
+                        return error.EventIdentityOverflow;
+                    sequence.legacy_tool_entry_id = entry_id;
+                    sequence.next_legacy_part = 1;
+                } else {
+                    const current_tool_id = sequence.legacy_tool_entry_id orelse
+                        return error.CorruptEventsLog;
+                    if (entry_id != current_tool_id or part != sequence.next_legacy_part) {
+                        return error.CorruptEventsLog;
+                    }
+                    sequence.next_legacy_part = std.math.add(u32, part, 1) catch
+                        return error.EventIdentityOverflow;
+                }
+            } else {
+                try applyOrdinaryEntry(sequence, entry_id);
+            }
+        },
+        .user_text,
+        .model_text,
+        .tool_use_batch,
+        .tool_result,
+        .proof_card,
+        .diagnostic_box,
+        .verified_change_set,
+        .system_note,
+        => {
+            const wire = switch (decoded.identity) {
+                .entry => |entry| entry,
+                .session => return error.CorruptEventsLog,
+            };
+            const entry_id = std.math.cast(EntryId, wire.value) orelse
+                return error.CorruptEventsLog;
+            try applyOrdinaryEntry(sequence, entry_id);
+        },
+        .autoloop_outcome, .turn_end, .session_summary => {},
+        .compaction_checkpoint => |object| {
+            const first_kept = object.get("first_kept_entry_id") orelse
+                return error.CorruptEventsLog;
+            if (first_kept != .integer or first_kept.integer <= 0) {
+                return error.CorruptEventsLog;
+            }
+            const kept_id = std.math.cast(EntryId, first_kept.integer) orelse
+                return error.CorruptEventsLog;
+            // The next entry ID is an exclusive tail boundary. It represents a
+            // checkpoint whose summary covers every entry currently in the raw
+            // journal; a later append with that ID becomes the first visible
+            // suffix entry. Anything beyond it is a corrupt cut identity.
+            if (kept_id > sequence.next_entry_id) return error.CorruptEventsLog;
+        },
+    }
+}
+
+fn applyOrdinaryEntry(sequence: *JournalSequence, entry_id: EntryId) !void {
+    if (entry_id != sequence.next_entry_id) return error.CorruptEventsLog;
+    sequence.next_entry_id = std.math.add(EntryId, sequence.next_entry_id, 1) catch
+        return error.EventIdentityOverflow;
+    sequence.legacy_tool_entry_id = null;
+    sequence.next_legacy_part = 0;
+}
+
+fn isTranscriptKind(kind: EventKind) bool {
+    return switch (kind) {
+        .user_text,
+        .model_text,
+        .tool_use,
+        .tool_use_batch,
+        .tool_result,
+        .proof_card,
+        .diagnostic_box,
+        .verified_change_set,
+        .system_note,
+        => true,
+        .autoloop_outcome, .turn_end, .session_summary, .compaction_checkpoint => false,
+    };
 }
 
 pub fn nextEntryId(allocator: std.mem.Allocator, events_path: []const u8) !EntryId {
@@ -819,37 +970,11 @@ pub fn writeEntryEventLine(
 }
 
 fn isTranscriptRecord(record: EventRecord) bool {
-    return switch (record) {
-        .user_text,
-        .model_text,
-        .tool_use,
-        .tool_use_batch,
-        .tool_result,
-        .proof_card,
-        .diagnostic_box,
-        .verified_change_set,
-        .system_note,
-        => true,
-        .autoloop_outcome, .turn_end, .session_summary, .compaction_checkpoint => false,
-    };
+    return isTranscriptKind(std.meta.activeTag(record));
 }
 
 fn kindTag(record: EventRecord) []const u8 {
-    return switch (record) {
-        .user_text => "user_text",
-        .model_text => "model_text",
-        .tool_use => "tool_use",
-        .tool_use_batch => "tool_use_batch",
-        .tool_result => "tool_result",
-        .proof_card => "proof_card",
-        .diagnostic_box => "diagnostic_box",
-        .verified_change_set => "verified_change_set",
-        .system_note => "system_note",
-        .autoloop_outcome => "autoloop_outcome",
-        .turn_end => "turn_end",
-        .session_summary => "session_summary",
-        .compaction_checkpoint => "compaction_checkpoint",
-    };
+    return @tagName(std.meta.activeTag(record));
 }
 
 fn writePayload(writer: *std.Io.Writer, record: EventRecord) !void {

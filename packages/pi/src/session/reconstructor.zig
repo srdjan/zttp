@@ -56,8 +56,19 @@ pub fn reconstructTranscript(
         } orelse break;
         defer allocator.free(record_json);
         record_number += 1;
-        appendFromLine(allocator, &tr, record_json) catch |err| switch (err) {
+        var decoded = events.decodeEnvelope(allocator, record_json, .reconstruction) catch |err| switch (err) {
             error.SchemaVersionUnsupported => return error.SchemaVersionUnsupported,
+            error.CorruptEventsLog => {
+                if (diag) |d| d.* = .{
+                    .line_number = record_number,
+                    .message = "invalid or malformed v4 event frame",
+                };
+                return error.CorruptEventsLog;
+            },
+            else => |e| return e,
+        };
+        defer decoded.deinit();
+        applyDecodedEnvelope(allocator, &tr, &decoded) catch |err| switch (err) {
             error.CorruptEventsLog, error.InvalidProjectionCut => {
                 if (diag) |d| d.* = .{
                     .line_number = record_number,
@@ -72,119 +83,103 @@ pub fn reconstructTranscript(
     return tr;
 }
 
-fn appendFromLine(
+fn applyDecodedEnvelope(
     allocator: std.mem.Allocator,
     tr: *transcript.Transcript,
-    line: []const u8,
+    decoded: *const events.DecodedEnvelope,
 ) !void {
-    var parsed = std.json.parseFromSlice(std.json.Value, allocator, line, .{}) catch {
-        return error.CorruptEventsLog;
+    switch (decoded.record) {
+        .user_text => |text| {
+            _ = try requireNextEntry(tr, decoded.identity);
+            try appendText(allocator, tr, text, .user_text);
+        },
+        .model_text => |text| {
+            _ = try requireNextEntry(tr, decoded.identity);
+            try appendText(allocator, tr, text, .model_text);
+        },
+        .tool_use => |tool_use| {
+            const identity = try decodeEntryIdentity(decoded.identity);
+            if (identity.entry_id == tr.nextEntryId() - 1) {
+                try appendToolUsePart(
+                    allocator,
+                    tr,
+                    tool_use,
+                    identity.part_index orelse return error.CorruptEventsLog,
+                );
+                return;
+            }
+            if (identity.entry_id != tr.nextEntryId() or identity.part_index != 0) {
+                return error.CorruptEventsLog;
+            }
+            try appendToolUse(allocator, tr, tool_use);
+        },
+        .tool_use_batch => |batch| {
+            _ = try requireNextEntry(tr, decoded.identity);
+            try appendToolUseBatch(allocator, tr, batch);
+        },
+        .tool_result => |result| {
+            _ = try requireNextEntry(tr, decoded.identity);
+            try appendToolResult(allocator, tr, result);
+        },
+        .proof_card => |message| {
+            _ = try requireNextEntry(tr, decoded.identity);
+            try appendDisplayMessage(allocator, tr, message, .proof_card);
+        },
+        .diagnostic_box => |message| {
+            _ = try requireNextEntry(tr, decoded.identity);
+            try appendDisplayMessage(allocator, tr, message, .diagnostic_box);
+        },
+        .verified_change_set => |message| {
+            _ = try requireNextEntry(tr, decoded.identity);
+            try appendDisplayMessage(allocator, tr, message, .verified_change_set);
+        },
+        .system_note => |text| {
+            _ = try requireNextEntry(tr, decoded.identity);
+            try appendText(allocator, tr, text, .system_note);
+        },
+        .autoloop_outcome, .turn_end, .session_summary => {},
+        .compaction_checkpoint => |object| try applyCheckpoint(allocator, tr, object),
+    }
+}
+
+const EntryIdentity = struct {
+    entry_id: events.EntryId,
+    part_index: ?u32,
+};
+
+fn decodeEntryIdentity(identity: events.WireIdentity) !EntryIdentity {
+    const entry = switch (identity) {
+        .entry => |value| value,
+        .session => return error.CorruptEventsLog,
     };
-    defer parsed.deinit();
+    return .{
+        .entry_id = std.math.cast(events.EntryId, entry.value) orelse
+            return error.CorruptEventsLog,
+        .part_index = if (entry.part_index) |part|
+            std.math.cast(u32, part) orelse return error.CorruptEventsLog
+        else
+            null,
+    };
+}
 
-    if (parsed.value != .object) return error.CorruptEventsLog;
-    const obj = parsed.value.object;
-
-    const version_val = obj.get("v") orelse return error.CorruptEventsLog;
-    if (version_val != .integer) return error.CorruptEventsLog;
-    const version_i = version_val.integer;
-    if (version_i < 0) return error.CorruptEventsLog;
-    const version: u32 = std.math.cast(u32, version_i) orelse return error.SchemaVersionUnsupported;
-    if (version != events.schema_version) return error.SchemaVersionUnsupported;
-
-    const kind_val = obj.get("k") orelse return error.CorruptEventsLog;
-    if (kind_val != .string) return error.CorruptEventsLog;
-
-    const payload = obj.get("d") orelse return error.CorruptEventsLog;
-
-    const kind = kind_val.string;
-    const entry_id = try parseOptionalEntryId(obj);
-    const part_index = try parseOptionalPartIndex(obj);
-    const transcript_kind = isTranscriptKind(kind);
-    if (transcript_kind and entry_id == null) return error.CorruptEventsLog;
-    if (!transcript_kind and (entry_id != null or part_index != null)) return error.CorruptEventsLog;
-
-    if (transcript_kind) {
-        const id = entry_id orelse return error.CorruptEventsLog;
-        if (std.mem.eql(u8, kind, "tool_use") and id == tr.nextEntryId() - 1) {
-            try appendToolUsePart(allocator, tr, payload, part_index orelse return error.CorruptEventsLog);
-            return;
-        }
-        if (id != tr.nextEntryId()) return error.CorruptEventsLog;
-        if (std.mem.eql(u8, kind, "tool_use")) {
-            if (part_index != 0) return error.CorruptEventsLog;
-        } else if (part_index != null) return error.CorruptEventsLog;
-    }
-
-    if (std.mem.eql(u8, kind, "user_text")) {
-        try appendText(allocator, tr, payload, .user_text);
-    } else if (std.mem.eql(u8, kind, "model_text")) {
-        try appendText(allocator, tr, payload, .model_text);
-    } else if (std.mem.eql(u8, kind, "proof_card")) {
-        try appendDisplayMessage(allocator, tr, payload, .proof_card);
-    } else if (std.mem.eql(u8, kind, "diagnostic_box")) {
-        try appendDisplayMessage(allocator, tr, payload, .diagnostic_box);
-    } else if (std.mem.eql(u8, kind, "verified_change_set")) {
-        try appendDisplayMessage(allocator, tr, payload, .verified_change_set);
-    } else if (std.mem.eql(u8, kind, "tool_use")) {
-        try appendToolUse(allocator, tr, payload);
-    } else if (std.mem.eql(u8, kind, "tool_use_batch")) {
-        try appendToolUseBatch(allocator, tr, payload);
-    } else if (std.mem.eql(u8, kind, "tool_result")) {
-        try appendToolResult(allocator, tr, payload);
-    } else if (std.mem.eql(u8, kind, "system_note")) {
-        try appendText(allocator, tr, payload, .system_note);
-    } else if (std.mem.eql(u8, kind, "autoloop_outcome")) {
-        // Session-level summary; not rebuilt into the transcript.
-        return;
-    } else if (std.mem.eql(u8, kind, "turn_end")) {
-        // Session-level turn marker; not rebuilt into the transcript.
-        return;
-    } else if (std.mem.eql(u8, kind, "session_summary")) {
-        // Session-level metrics row; not rebuilt into the transcript.
-        return;
-    } else if (std.mem.eql(u8, kind, "compaction_checkpoint")) {
-        try applyCheckpoint(allocator, tr, payload);
-    } else {
+fn requireNextEntry(tr: *const transcript.Transcript, identity: events.WireIdentity) !events.EntryId {
+    const entry = try decodeEntryIdentity(identity);
+    if (entry.entry_id != tr.nextEntryId() or entry.part_index != null) {
         return error.CorruptEventsLog;
     }
-}
-
-fn isTranscriptKind(kind: []const u8) bool {
-    return std.mem.eql(u8, kind, "user_text") or
-        std.mem.eql(u8, kind, "model_text") or
-        std.mem.eql(u8, kind, "proof_card") or
-        std.mem.eql(u8, kind, "diagnostic_box") or
-        std.mem.eql(u8, kind, "verified_change_set") or
-        std.mem.eql(u8, kind, "tool_use") or
-        std.mem.eql(u8, kind, "tool_use_batch") or
-        std.mem.eql(u8, kind, "tool_result") or
-        std.mem.eql(u8, kind, "system_note");
-}
-
-fn parseOptionalEntryId(obj: std.json.ObjectMap) !?events.EntryId {
-    const value = obj.get("entry_id") orelse return null;
-    if (value != .integer or value.integer <= 0) return error.CorruptEventsLog;
-    return std.math.cast(events.EntryId, value.integer) orelse error.CorruptEventsLog;
-}
-
-fn parseOptionalPartIndex(obj: std.json.ObjectMap) !?u32 {
-    const value = obj.get("part_index") orelse return null;
-    if (value != .integer or value.integer < 0) return error.CorruptEventsLog;
-    return std.math.cast(u32, value.integer) orelse error.CorruptEventsLog;
+    return entry.entry_id;
 }
 
 fn applyCheckpoint(
     allocator: std.mem.Allocator,
     tr: *transcript.Transcript,
-    payload: std.json.Value,
+    object: std.json.ObjectMap,
 ) !void {
-    if (payload != .object) return error.CorruptEventsLog;
-    const summary = payload.object.get("summary") orelse return error.CorruptEventsLog;
-    const first_kept = payload.object.get("first_kept_entry_id") orelse return error.CorruptEventsLog;
-    const reason = payload.object.get("reason") orelse return error.CorruptEventsLog;
-    const read_files_value = payload.object.get("read_files") orelse return error.CorruptEventsLog;
-    const modified_files_value = payload.object.get("modified_files") orelse return error.CorruptEventsLog;
+    const summary = object.get("summary") orelse return error.CorruptEventsLog;
+    const first_kept = object.get("first_kept_entry_id") orelse return error.CorruptEventsLog;
+    const reason = object.get("reason") orelse return error.CorruptEventsLog;
+    const read_files_value = object.get("read_files") orelse return error.CorruptEventsLog;
+    const modified_files_value = object.get("modified_files") orelse return error.CorruptEventsLog;
     if (summary != .string or first_kept != .integer or first_kept.integer <= 0 or reason != .string) {
         return error.CorruptEventsLog;
     }
@@ -213,11 +208,10 @@ const TextKind = enum { user_text, model_text, system_note };
 fn appendText(
     allocator: std.mem.Allocator,
     tr: *transcript.Transcript,
-    payload: std.json.Value,
+    text: []const u8,
     kind: TextKind,
 ) !void {
-    if (payload != .string) return error.CorruptEventsLog;
-    const body = try allocator.dupe(u8, payload.string);
+    const body = try allocator.dupe(u8, text);
     errdefer allocator.free(body);
 
     const entry: transcript.OwnedEntry = switch (kind) {
@@ -233,15 +227,16 @@ const DisplayKind = enum { proof_card, diagnostic_box, verified_change_set };
 fn appendDisplayMessage(
     allocator: std.mem.Allocator,
     tr: *transcript.Transcript,
-    payload: std.json.Value,
+    view: events.DisplayView,
     kind: DisplayKind,
 ) !void {
-    var message = if (payload == .string) blk: {
-        break :blk transcript.OwnedDisplayMessage{
-            .llm_text = try allocator.dupe(u8, payload.string),
+    var message = switch (view) {
+        .string => |text| transcript.OwnedDisplayMessage{
+            .llm_text = try allocator.dupe(u8, text),
             .ui_payload = null,
-        };
-    } else try parseDisplayMessage(allocator, payload);
+        },
+        .object => |object| try parseDisplayMessage(allocator, object),
+    };
     errdefer {
         allocator.free(message.llm_text);
         if (message.ui_payload) |*p| p.deinit(allocator);
@@ -257,79 +252,28 @@ fn appendDisplayMessage(
 fn appendToolUse(
     allocator: std.mem.Allocator,
     tr: *transcript.Transcript,
-    payload: std.json.Value,
+    tool_use: events.ToolUse,
 ) !void {
-    if (payload != .object) return error.CorruptEventsLog;
-    const obj = payload.object;
-
-    const id_val = obj.get("id") orelse return error.CorruptEventsLog;
-    const name_val = obj.get("name") orelse return error.CorruptEventsLog;
-    const args_val = obj.get("args_json") orelse return error.CorruptEventsLog;
-    if (id_val != .string or name_val != .string or args_val != .string) {
-        return error.CorruptEventsLog;
-    }
-
     const calls = try allocator.alloc(transcript.OwnedToolCall, 1);
     errdefer allocator.free(calls);
-
-    const id_copy = try allocator.dupe(u8, id_val.string);
-    errdefer allocator.free(id_copy);
-    const name_copy = try allocator.dupe(u8, name_val.string);
-    errdefer allocator.free(name_copy);
-    const args_copy = try allocator.dupe(u8, args_val.string);
-    errdefer allocator.free(args_copy);
-    const reasoning_copy = if (obj.get("reasoning_content")) |value| blk: {
-        if (value != .string) return error.CorruptEventsLog;
-        break :blk try allocator.dupe(u8, value.string);
-    } else null;
-    errdefer if (reasoning_copy) |body| allocator.free(body);
-
-    calls[0] = .{
-        .id = id_copy,
-        .name = name_copy,
-        .args_json = args_copy,
-        .reasoning_content = reasoning_copy,
-    };
+    calls[0] = try ownToolUse(allocator, tool_use);
+    errdefer calls[0].deinit(allocator);
     try tr.entries.append(allocator, .{ .assistant_tool_use = calls });
 }
 
 fn appendToolUseBatch(
     allocator: std.mem.Allocator,
     tr: *transcript.Transcript,
-    payload: std.json.Value,
+    batch: events.ToolUseBatchView,
 ) !void {
-    if (payload != .array or payload.array.items.len == 0) return error.CorruptEventsLog;
-    const calls = try allocator.alloc(transcript.OwnedToolCall, payload.array.items.len);
+    const calls = try allocator.alloc(transcript.OwnedToolCall, batch.items.len);
     errdefer allocator.free(calls);
     var initialized: usize = 0;
     errdefer {
         for (calls[0..initialized]) |*call| call.deinit(allocator);
     }
-    for (payload.array.items, 0..) |item, index| {
-        if (item != .object) return error.CorruptEventsLog;
-        const id_val = item.object.get("id") orelse return error.CorruptEventsLog;
-        const name_val = item.object.get("name") orelse return error.CorruptEventsLog;
-        const args_val = item.object.get("args_json") orelse return error.CorruptEventsLog;
-        if (id_val != .string or name_val != .string or args_val != .string) {
-            return error.CorruptEventsLog;
-        }
-        const id_copy = try allocator.dupe(u8, id_val.string);
-        errdefer allocator.free(id_copy);
-        const name_copy = try allocator.dupe(u8, name_val.string);
-        errdefer allocator.free(name_copy);
-        const args_copy = try allocator.dupe(u8, args_val.string);
-        errdefer allocator.free(args_copy);
-        const reasoning_copy = if (item.object.get("reasoning_content")) |value| blk: {
-            if (value != .string) return error.CorruptEventsLog;
-            break :blk try allocator.dupe(u8, value.string);
-        } else null;
-        errdefer if (reasoning_copy) |body| allocator.free(body);
-        calls[index] = .{
-            .id = id_copy,
-            .name = name_copy,
-            .args_json = args_copy,
-            .reasoning_content = reasoning_copy,
-        };
+    for (batch.items, 0..) |_, index| {
+        calls[index] = try ownToolUse(allocator, try batch.at(index));
         initialized += 1;
     }
     try tr.entries.append(allocator, .{ .assistant_tool_use = calls });
@@ -338,66 +282,54 @@ fn appendToolUseBatch(
 fn appendToolUsePart(
     allocator: std.mem.Allocator,
     tr: *transcript.Transcript,
-    payload: std.json.Value,
+    tool_use: events.ToolUse,
     part_index: u32,
 ) !void {
     if (tr.entries.items.len == 0) return error.CorruptEventsLog;
     const last = &tr.entries.items[tr.entries.items.len - 1];
     if (last.* != .assistant_tool_use) return error.CorruptEventsLog;
     if (part_index != last.assistant_tool_use.len) return error.CorruptEventsLog;
-    if (payload != .object) return error.CorruptEventsLog;
-    const id_val = payload.object.get("id") orelse return error.CorruptEventsLog;
-    const name_val = payload.object.get("name") orelse return error.CorruptEventsLog;
-    const args_val = payload.object.get("args_json") orelse return error.CorruptEventsLog;
-    if (id_val != .string or name_val != .string or args_val != .string) return error.CorruptEventsLog;
-
-    const id_copy = try allocator.dupe(u8, id_val.string);
-    errdefer allocator.free(id_copy);
-    const name_copy = try allocator.dupe(u8, name_val.string);
-    errdefer allocator.free(name_copy);
-    const args_copy = try allocator.dupe(u8, args_val.string);
-    errdefer allocator.free(args_copy);
-    const reasoning_copy = if (payload.object.get("reasoning_content")) |value| blk: {
-        if (value != .string) return error.CorruptEventsLog;
-        break :blk try allocator.dupe(u8, value.string);
-    } else null;
-    errdefer if (reasoning_copy) |body| allocator.free(body);
-
+    var call = try ownToolUse(allocator, tool_use);
+    errdefer call.deinit(allocator);
     const old_len = last.assistant_tool_use.len;
     const calls = try allocator.realloc(last.assistant_tool_use, old_len + 1);
     last.assistant_tool_use = calls;
-    calls[old_len] = .{
-        .id = id_copy,
-        .name = name_copy,
-        .args_json = args_copy,
-        .reasoning_content = reasoning_copy,
+    calls[old_len] = call;
+}
+
+fn ownToolUse(allocator: std.mem.Allocator, tool_use: events.ToolUse) !transcript.OwnedToolCall {
+    const id = try allocator.dupe(u8, tool_use.id);
+    errdefer allocator.free(id);
+    const name = try allocator.dupe(u8, tool_use.name);
+    errdefer allocator.free(name);
+    const args_json = try allocator.dupe(u8, tool_use.args_json);
+    errdefer allocator.free(args_json);
+    const reasoning_content = if (tool_use.reasoning_content) |reasoning|
+        try allocator.dupe(u8, reasoning)
+    else
+        null;
+    errdefer if (reasoning_content) |reasoning| allocator.free(reasoning);
+    return .{
+        .id = id,
+        .name = name,
+        .args_json = args_json,
+        .reasoning_content = reasoning_content,
     };
 }
 
 fn appendToolResult(
     allocator: std.mem.Allocator,
     tr: *transcript.Transcript,
-    payload: std.json.Value,
+    result: events.ToolResultView,
 ) !void {
-    if (payload != .object) return error.CorruptEventsLog;
-    const obj = payload.object;
-
-    const tu_id_val = obj.get("tool_use_id") orelse return error.CorruptEventsLog;
-    const tool_name_val = obj.get("tool_name") orelse return error.CorruptEventsLog;
-    const ok_val = obj.get("ok") orelse return error.CorruptEventsLog;
-    const llm_text_val = obj.get("llm_text") orelse obj.get("body") orelse return error.CorruptEventsLog;
-    if (tu_id_val != .string or tool_name_val != .string or ok_val != .bool or llm_text_val != .string) {
-        return error.CorruptEventsLog;
-    }
-
-    const tu_id_copy = try allocator.dupe(u8, tu_id_val.string);
+    const tu_id_copy = try allocator.dupe(u8, result.tool_use_id);
     errdefer allocator.free(tu_id_copy);
-    const tool_name_copy = try allocator.dupe(u8, tool_name_val.string);
+    const tool_name_copy = try allocator.dupe(u8, result.tool_name);
     errdefer allocator.free(tool_name_copy);
-    const llm_text_copy = try allocator.dupe(u8, llm_text_val.string);
+    const llm_text_copy = try allocator.dupe(u8, result.llm_text);
     errdefer allocator.free(llm_text_copy);
-    var payload_copy = if (obj.get("ui_payload")) |payload_val|
-        try ui_payload.parse(allocator, payload_val)
+    var payload_copy = if (result.ui_payload_value) |payload_value|
+        try ui_payload.parse(allocator, payload_value)
     else
         null;
     errdefer if (payload_copy) |*copied_payload| copied_payload.deinit(allocator);
@@ -405,7 +337,7 @@ fn appendToolResult(
     try tr.entries.append(allocator, .{ .tool_result = .{
         .tool_use_id = tu_id_copy,
         .tool_name = tool_name_copy,
-        .ok = ok_val.bool,
+        .ok = result.ok,
         .llm_text = llm_text_copy,
         .ui_payload = payload_copy,
     } });
@@ -413,17 +345,16 @@ fn appendToolResult(
 
 fn parseDisplayMessage(
     allocator: std.mem.Allocator,
-    payload: std.json.Value,
+    object: std.json.ObjectMap,
 ) !transcript.OwnedDisplayMessage {
-    if (payload != .object) return error.CorruptEventsLog;
-    const obj = payload.object;
-    const llm_text_val = obj.get("llm_text") orelse obj.get("body") orelse return error.CorruptEventsLog;
+    const llm_text_val = object.get("llm_text") orelse object.get("body") orelse
+        return error.CorruptEventsLog;
     if (llm_text_val != .string) return error.CorruptEventsLog;
     const llm_text = try allocator.dupe(u8, llm_text_val.string);
     errdefer allocator.free(llm_text);
     return .{
         .llm_text = llm_text,
-        .ui_payload = if (obj.get("ui_payload")) |payload_val|
+        .ui_payload = if (object.get("ui_payload")) |payload_val|
             try ui_payload.parse(allocator, payload_val)
         else
             null,
