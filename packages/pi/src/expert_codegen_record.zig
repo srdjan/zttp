@@ -1449,22 +1449,38 @@ const record_corpus = [_]RecordCase{
         //
         // 2026-08-27: pinned false. The draft dispatches the child outside the
         // step callback, which is the behaviour the case is named for and the
-        // thing it exists to measure. It fails on a name: the spec asserts a
-        // `step_start` for a step called `reserve`, and the draft called its
-        // step `reserve-inventory`. The prompt says "Reserve inventory with a
-        // durable step" and never states the step's name.
+        // thing it exists to measure. That diagnosis said it failed "on a
+        // name", and running the committed handler against the spec shows it
+        // failed on two things, of which the name was one:
         //
-        // That is the defect durable-order's comment above already names - a
-        // test asking for more than its prompt says measures guessing rather
-        // than convergence - and the fix is the same shape: state the step name
-        // in the prompt, which moves the request identity and so belongs to a
-        // deliberate re-record rather than to this one.
-        .prompt = "Create a durable order workflow in handler.ts. Reserve inventory with a " ++
-            "durable step that returns the reservation response, then dispatch the " ++
-            "already-registered `notify` child handler with workflow.call after the step " ++
-            "completes. Keep the child dispatch outside the step callback. Respond 201 with " ++
-            "a body carrying notified as the child call's status code. The child handler " ++
-            "already exists in the system registry - write only handler.ts.",
+        //   FAIL  runtime scenario left 1 I/O expectation(s) unconsumed
+        //   FAIL  run 'nested-1' event 0: expected name 'reserve',
+        //         found 'reserve-inventory'
+        //
+        // Renaming the step alone still leaves "1 passed, 1 failed". Both are
+        // the defect durable-order's comment above already names - a test
+        // asking for more than its prompt says measures guessing rather than
+        // convergence - and the two are fixed on the sides they belong to.
+        //
+        // The name: the prompt now says the step is called `reserve` and what
+        // it returns, so `step_result` `resultContains:"reserved"` is derivable
+        // from the prompt instead of guessed.
+        //
+        // The I/O: the spec used to stub a `fetch` of
+        // `https://inventory.internal/reserve` that no line of the prompt asks
+        // for, against a host this case's own `intent-system.json` does not
+        // register - it registers `notify` and nothing else. It is a leftover
+        // from saga's runtime files, and a spec that requires an unmentioned
+        // egress call to be consumed fails every correct draft. Deleted.
+        //
+        // Measured before recording, exactly as durable-order was: the handler
+        // the amended prompt describes passes the amended spec 3/3.
+        .prompt = "Create a durable order workflow in handler.ts. Run a durable step named " ++
+            "`reserve` that returns { reserved: true }, then dispatch the already-registered " ++
+            "`notify` child handler with workflow.call after the step completes. Keep the " ++
+            "child dispatch outside the step callback. Respond 201 with a body carrying " ++
+            "notified as the child call's status code. The child handler already exists in " ++
+            "the system registry - write only handler.ts.",
         .intent = .{ .runtime = .{
             .zttp_json = "{\n  \"entry\": \"handler.ts\",\n  \"system\": \"intent-system.json\"\n}\n",
             .runtime_files = &nested_dispatch_runtime_files,
@@ -1472,7 +1488,6 @@ const record_corpus = [_]RecordCase{
             \\{"type":"runtime","durable":true,"workflowQueue":true}
             \\{"type":"test","name":"notify dispatch occurs outside the durable step"}
             \\{"type":"request","method":"POST","url":"/","headers":{"idempotency-key":"nested-1"},"body":"{\"sku\":\"one\"}"}
-            \\{"type":"io","seq":0,"module":"fetch","fn":"fetch","args":["https://inventory.internal/reserve"],"result":{"status":200,"body":"{\"reserved\":true}"}}
             \\{"type":"expect","status":201,"bodyContains":"\"notified\":200"}
             \\{"type":"expect-run","runKey":"nested-1","complete":true}
             \\{"type":"expect-event","runKey":"nested-1","kind":"step_start","name":"reserve"}
@@ -1513,8 +1528,12 @@ const record_corpus = [_]RecordCase{
         // then names its step `reserve-inventory` where the spec asserts
         // `reserve`, a name the prompt never states.
         //
-        // The pin does not move, but its reason did. Flip it back when a
-        // recording measures it passing, and say what closed the gap.
+        // The pin does not move yet, and it is still describing the committed
+        // handler rather than the amended case: the recorded draft named its
+        // step `reserve-inventory`, so it fails the amended spec too, on the
+        // one assertion the rename does not reach. Flip it when a recording
+        // against the amended prompt measures it passing, and say what closed
+        // the gap.
         .expect_committed_intent_pass = false,
     },
     .{
@@ -1971,6 +1990,23 @@ const record_corpus = [_]RecordCase{
         .expect_first_attempt_green = true,
     },
     .{
+        // The seed capsule omits `no_secret_leakage` and `no_credential_leakage`
+        // deliberately. `cacheGet` declares `.unknown` in its return labels -
+        // a store read cannot know what a separate write left there - and the
+        // response sink clears every property it decides when an `.unknown`
+        // value reaches it. No fill that carries the counter into the body can
+        // discharge those two, and coercion does not launder it: `String(hits)`,
+        // `Number(hits)` and `String(Number(hits))` were each measured tripping
+        // the same pair of ZTS500s.
+        //
+        // The whole-file sibling `cache-counter` absorbs that fence, because
+        // there the model authors the Spec and narrowing it is the behaviour
+        // being measured. Hole mode hands the capsule over as fixed input, so
+        // the old capsule made the task impossible and every cohort recorded
+        // the honest outcome: the model spent its tool budget on fills that
+        // could not pass, then reported that it had applied no edit rather than
+        // inventing one. The case was measuring an unsatisfiable request, not
+        // the agent.
         .name = "cache-counter-holes",
         .prompt = "handler.ts reads the \"hits\" counter from the \"counters\" namespace and " ++
             "has a hole() on each branch. Fill them so the handler returns the counter as " ++
@@ -1982,7 +2018,7 @@ const record_corpus = [_]RecordCase{
                 .bytes =
                 \\import { cacheGet } from "zttp:cache";
                 \\
-                \\function handler(req: Request): Proof<Response, "retry_safe" | "state_isolated" | "result_safe" | "optional_safe" | "no_secret_leakage" | "no_credential_leakage" | "input_validated" | "pii_contained" | "injection_safe" | "canonical" | "cost_bounded"> {
+                \\function handler(req: Request): Proof<Response, "retry_safe" | "state_isolated" | "result_safe" | "optional_safe" | "input_validated" | "pii_contained" | "injection_safe" | "canonical" | "cost_bounded"> {
                 \\  const hits = cacheGet("counters", "hits");
                 \\  if (hits === undefined) {
                 \\    return Response.json({ hits: "0" });
