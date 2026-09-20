@@ -231,6 +231,9 @@ A scripted responder that replaces only a live model's choice on the wire while 
 
 A Stand-in can show that the machinery runs correctly and can never measure an agent. Its drafts and defect seeds are written to produce declared outcomes through the same Veto, so a First-draft veto-pass rate taken over one describes the script rather than a model.
 
+### Defect seed
+A deliberately wrong draft, kept as a fixture, whose purpose is to make a rejection path reachable without spending a model turn. Each seed declares the verdict it should receive, which makes the seed set double as a census of the rules that are actually reachable: a rule no seed trips and no recorded draft trips is advertised but unreachable, and belongs on an explicit exception list carrying the reason rather than being assumed covered. A seed whose declared verdict is a salvage, where a diagnostic is raised and then cleared before the draft is judged, is the case most easily mistaken for a pass, because the rejection path it is meant to exercise never runs.
+
 ## Guarding the repo
 
 ### Gate
@@ -242,9 +245,14 @@ When a Gate classifies a closed set, it must also reject inputs outside that set
 
 The floor is necessary and not sufficient. A Gate holding a full input can still assert something weaker than its own name claims, so that runs in which the named behavior never happened satisfy it too. An assertion must name the value expected rather than the values excluded, since a difference from two wrong answers is satisfied by a third. A Gate is also only as good as the fixture beneath it: when two outcomes it is meant to separate write identical observable state, no assertion over that state can tell them apart.
 
-The probe that tests a Gate is itself code, and a probe that does not compile runs no check. Since a build that failed to compile and a Gate that passed both produce no failure message, a probe's verdict is read from the build's exit status rather than from its output.
+The Probe that tests a Gate is itself code, and one that does not compile runs no check. Since a build that failed to compile and a Gate that passed both produce no failure message, a Probe's verdict is read from the build's exit status rather than from its output.
 
 A Gate can satisfy every rule above and still be porous. Passing probes show that the cases they name are caught; they say nothing about the cases nobody named, and counting them by input or by file rather than by verdict hides which verdicts have no probe at all. Reading such a Gate does not expose the gap, because the holes are in what it never looks at. Applying a one-line change to a copy of its inputs and running the built Gate against them does. A prohibition stated over an open vocabulary has no terminating condition, since another spelling always exists. Requiring what the code must do is the cheaper half of the pair, because it spares the author enumerating a vocabulary that cannot be closed, but it is still a rule about the shape of the text and dead code satisfies it, so it belongs beside the prohibition rather than in place of it. A Gate whose subject stays open must declare which threat it bounds, rather than leaving a reader to assume it bounds every one.
+
+### Probe
+A deliberate edit that must make a Gate fail. It is how a Gate is shown to be load-bearing rather than merely green, because without one a Gate that checks nothing and a Gate that checks correctly look the same from outside. A Probe names the check it expects to reject it, and one caught by a different check is a Probe failure rather than agreement, since a rejection for the wrong reason says nothing about the check the Probe was written for.
+
+The word covers two things worth keeping apart. One is a Probe a Gate carries and can run against itself, which holds the named cases caught as the Gate changes. The other is a one-off edit a reviewer applies to a copy of the Gate's inputs. Only the second can find a case nobody named, so a Gate whose whole assurance is the first kind is assured against its author's imagination and nothing wider.
 
 ### Frozen signature corpus
 The generated type surface of every virtual-module export, used as a Gate's input so that adding an export adds a case by construction and the corpus cannot drift from what it describes.
