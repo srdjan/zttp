@@ -3539,7 +3539,12 @@ test "threaded health and readiness probes return over socket accept path" {
     try Runner.expectProbe("/_readiness");
 }
 
-test "SIGTERM graceful shutdown stops accepts and drains an in-flight request" {
+const ShutdownGraceScenario = enum {
+    completes_within_grace,
+    expires,
+};
+
+fn runShutdownGraceScenario(scenario: ShutdownGraceScenario) !void {
     if (builtin.os.tag == .windows) return error.SkipZigTest;
 
     const allocator = std.heap.c_allocator;
@@ -3548,6 +3553,15 @@ test "SIGTERM graceful shutdown stops accepts and drains an in-flight request" {
         fn forFlag(flag: *const std.atomic.Value(bool), expected: bool, timeout_ms: u64) !void {
             var timer = try engine.Timer.start();
             while (flag.load(.acquire) != expected) {
+                if (timer.read() > timeout_ms * std.time.ns_per_ms) return error.TestTimedOut;
+                const pause = std.c.timespec{ .sec = 0, .nsec = std.time.ns_per_ms };
+                _ = std.c.nanosleep(&pause, null);
+            }
+        }
+
+        fn forPoolOccupancy(pool: *const HandlerPool, expected: usize, timeout_ms: u64) !void {
+            var timer = try engine.Timer.start();
+            while (pool.getInUse() != expected) {
                 if (timer.read() > timeout_ms * std.time.ns_per_ms) return error.TestTimedOut;
                 const pause = std.c.timespec{ .sec = 0, .nsec = std.time.ns_per_ms };
                 _ = std.c.nanosleep(&pause, null);
@@ -3661,6 +3675,12 @@ test "SIGTERM graceful shutdown stops accepts and drains an in-flight request" {
         }
     };
 
+    const grace_ms: u32 = switch (scenario) {
+        .completes_within_grace => 2_000,
+        .expires => 25,
+    };
+    const expiry_timeout_ms: u64 = 500;
+
     var previous_term: std.posix.Sigaction = undefined;
     var previous_int: std.posix.Sigaction = undefined;
     std.posix.sigaction(std.posix.SIG.TERM, null, &previous_term);
@@ -3717,12 +3737,15 @@ test "SIGTERM graceful shutdown stops accepts and drains an in-flight request" {
     var shutdown_started = std.atomic.Value(bool).init(false);
     var allow_shutdown = std.atomic.Value(bool).init(false);
     var shutdown_done = std.atomic.Value(bool).init(false);
+    var shutdown_elapsed_ns = std.atomic.Value(u64).init(0);
     const AcceptContext = struct {
         server: *Server,
         result: *std.atomic.Value(ErrorInt),
         shutdown_started: *std.atomic.Value(bool),
         allow_shutdown: *const std.atomic.Value(bool),
         shutdown_done: *std.atomic.Value(bool),
+        shutdown_elapsed_ns: *std.atomic.Value(u64),
+        grace_ms: u32,
 
         fn run(context: @This()) void {
             context.server.acceptLoop() catch |err| {
@@ -3734,7 +3757,13 @@ test "SIGTERM graceful shutdown stops accepts and drains an in-flight request" {
                 context.result.store(@intFromError(err), .release);
                 return;
             };
-            context.server.shutdown(2_000);
+            var shutdown_timer = engine.Timer.start() catch |err| {
+                context.result.store(@intFromError(err), .release);
+                context.shutdown_done.store(true, .release);
+                return;
+            };
+            context.server.shutdown(context.grace_ms);
+            context.shutdown_elapsed_ns.store(shutdown_timer.read(), .release);
             context.shutdown_done.store(true, .release);
         }
     };
@@ -3744,6 +3773,8 @@ test "SIGTERM graceful shutdown stops accepts and drains an in-flight request" {
         .shutdown_started = &shutdown_started,
         .allow_shutdown = &allow_shutdown,
         .shutdown_done = &shutdown_done,
+        .shutdown_elapsed_ns = &shutdown_elapsed_ns,
+        .grace_ms = grace_ms,
     }});
     var accept_joined = false;
     defer if (!accept_joined) {
@@ -3789,15 +3820,34 @@ test "SIGTERM graceful shutdown stops accepts and drains an in-flight request" {
     };
     try std.testing.expectEqual(@as(usize, 0), rejected_len);
 
-    // Give shutdown time to reach its drain loop while the upstream remains
-    // blocked. It must not return until that request is released.
-    const drain_probe_pause = std.c.timespec{ .sec = 0, .nsec = 100 * std.time.ns_per_ms };
-    _ = std.c.nanosleep(&drain_probe_pause, null);
-    try std.testing.expect(!shutdown_done.load(.acquire));
-    try std.testing.expectEqual(@as(usize, 1), server.pool.?.getInUse());
-
-    upstream.release_response.store(true, .release);
-    try Wait.forFlag(&shutdown_done, true, 2_000);
+    switch (scenario) {
+        .completes_within_grace => {
+            // Give shutdown time to reach its drain loop while the upstream
+            // remains blocked. It must not return until that request is released.
+            const drain_probe_pause = std.c.timespec{ .sec = 0, .nsec = 100 * std.time.ns_per_ms };
+            _ = std.c.nanosleep(&drain_probe_pause, null);
+            try std.testing.expect(!shutdown_done.load(.acquire));
+            try std.testing.expectEqual(@as(usize, 1), server.pool.?.getInUse());
+            upstream.release_response.store(true, .release);
+            try Wait.forFlag(&shutdown_done, true, 2_000);
+        },
+        .expires => {
+            try Wait.forFlag(&shutdown_done, true, expiry_timeout_ms);
+            const accept_err_int = accept_error.load(.acquire);
+            if (accept_err_int != 0) return @errorFromInt(accept_err_int);
+            const elapsed_ns = shutdown_elapsed_ns.load(.acquire);
+            try std.testing.expect(elapsed_ns >= grace_ms * std.time.ns_per_ms);
+            try std.testing.expect(elapsed_ns < expiry_timeout_ms * std.time.ns_per_ms);
+            try std.testing.expect(!upstream.release_response.load(.acquire));
+            try std.testing.expectEqual(@as(usize, 1), server.pool.?.getInUse());
+            try std.testing.expectError(
+                error.ConnectionRefused,
+                server_address.connect(io, .{ .mode = .stream }),
+            );
+            upstream.release_response.store(true, .release);
+            try Wait.forPoolOccupancy(&server.pool.?, 0, expiry_timeout_ms);
+        },
+    }
     accept_thread.join();
     accept_joined = true;
     const accept_err_int = accept_error.load(.acquire);
@@ -3822,8 +3872,18 @@ test "SIGTERM graceful shutdown stops accepts and drains an in-flight request" {
         try response.appendSlice(allocator, response_chunk[0..n]);
     }
     try std.testing.expect(std.mem.startsWith(u8, response.items, "HTTP/1.1 200 OK\r\n"));
-    try std.testing.expect(std.mem.endsWith(u8, response.items, "\r\n\r\ndrained"));
+    const body_start = std.mem.indexOf(u8, response.items, "\r\n\r\n") orelse return error.InvalidResponse;
+    try std.testing.expectEqualStrings("drained", response.items[body_start + 4 ..]);
+    try Wait.forPoolOccupancy(&server.pool.?, 0, expiry_timeout_ms);
     try upstream.join();
+}
+
+test "SIGTERM graceful shutdown stops accepts and drains an in-flight request" {
+    try runShutdownGraceScenario(.completes_within_grace);
+}
+
+test "SIGTERM graceful shutdown returns when grace expires" {
+    try runShutdownGraceScenario(.expires);
 }
 
 test "parseRequestFromBuffer rejects duplicate content length" {
