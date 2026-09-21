@@ -122,8 +122,10 @@ of the same corpus it has ever tripped 6. The deterministic defect-seed suite ve
 
 What is unmeasured: provable-set reach, the convergence metric itself. Given a reference
 suite of programs the compiler certifies green, the fraction the agent reproduces to
-green inside a fixed budget is one hundred percent minus the convergence gap, and nothing
-computes it today. The eval corpus is recorded once and replayed, so it cannot be tuned
+green inside a fixed budget is one hundred percent minus the convergence gap. The
+[bounded reach harness](docs/provable-reach.md) now checks eight reference-backed tasks
+and retains every outcome. Its first fresh DeepSeek run still needs cost approval.
+The eval corpus is recorded once and replayed, so it cannot be tuned
 against without leaking the benchmark, and growing it is the binding constraint on every
 number this section cites.
 

@@ -214,6 +214,13 @@ At edit time the Veto answers a narrower question than its name suggests. It cou
 ### First-draft veto-pass rate
 The share of prompts whose first generated attempt clears the Veto with no retries, counted over a frozen corpus. Retries are excluded deliberately because a rate counting them would measure a retry loop's persistence rather than the agent's aim.
 
+### Bounded provable-set reach
+The fraction of a frozen reference-backed task suite that a fresh model run completes within fixed limits.
+Each reference and generated handler must pass the same absolute compiler checks, required properties, and runtime acceptance checks.
+Every selected task stays in the denominator, including failures.
+A deterministic harness run, replay, or partial pilot does not establish the full-suite fraction.
+The result describes that suite, not every program the compiler can prove.
+
 ### Policy hash
 A fingerprint of the compiler's rule set, recorded beside every published rate so two measurements taken under different rules are never compared as though they were the same. It covers the rules and not the analysis behind them, so a change to what a rule concludes can leave it identical; the build a measurement came from is what distinguishes those.
 

@@ -57,7 +57,10 @@ Governs R1.
 The initial design has four task families, each exercised in whole-handler and typed-hole mode: eight task instances.
 This is a design limit, not a statistical sample-size claim.
 Choose small deterministic request/response families that are absent from the recorded corpus; preserve exact task behavior across modes.
-The selected families are request media classification with `zttp:http`, optional query combination, bounded content previews with `zttp:text`, and a seeded deadline helper with `zttp:time`.
+The selected families are request-header classification, optional query combination, bounded uppercase previews, and a seeded label-normalization helper.
+An initial reference check showed that `zttp test` substitutes replay values for the proposed HTTP, text, and time module calls.
+The admitted design therefore uses built-in request and string operations, with a local helper for the fourth family.
+This change precedes suite freezing and leaves runtime behavior unchanged.
 Exact fixture values are established by reference admission before the suite is frozen.
 Hold them out from the shipped persona, examples, skills, and stand-in playbooks.
 Describe this as a repository holdout, with no claim about provider training data.
@@ -217,3 +220,44 @@ Remove experimental code and temporary fixtures before committing.
 M3 itself is complete only after an authorized full fresh run has a retained report covering every task and failure under the frozen identities and budgets.
 A low reach result is a valid measurement; an incomplete or invalid report is not.
 Live cost and long-running command approval remain pending until the concrete handoff.
+
+## Implementation record
+
+The offline implementation is complete. No paid model request was made.
+The run guide is [docs/provable-reach.md](../provable-reach.md).
+M3 remains open until the authorized full fresh measurement exists.
+Local implementation commits are `eb136afd` for U2, `1796ecd5` for U1, and `c6393566` for U3.
+
+All eight references pass the absolute compiler, named-property, and runtime checks.
+All four typed-hole seeds compile but fail acceptance until completed.
+A seed with a hole only on an untested branch is refused because it already satisfies acceptance.
+Constant-success handlers fail every family's runtime checks.
+The paired-mode gate rejects reference, acceptance, or property drift.
+
+The final one-task deterministic smoke completed in 11.63 seconds, including compilation.
+The eight-task run completed in 1.76 seconds with cached build products and the same limits.
+It retained eight reached outcomes: four whole-handler and four typed-hole tasks.
+Both reports have `deterministic_harness` origin and a null headline.
+These are harness checks, not model measurements.
+Local evidence is retained in `/tmp/zttp-m3-final-one-20260921/` and `/tmp/zttp-m3-final-eight-20260921/`.
+
+Report mutation probes compiled and failed their tests when the headline accepted offline evidence or when its denominator counted only successes.
+The restored report passes its unfiltered tests.
+Runner regressions cover no edit, wrong intent, provider failure, exhausted budgets, veto exhaustion over a green hole seed, frozen-helper changes, extra source retention, and artifact-write failure after a completed turn.
+The last case retains the observed work counts even when the transcript cannot be written.
+
+Final verification passed without test filters: `test-provable-reach` ran 928 tests; `test-expert-app` passed 1,116 tests with one existing skip.
+`test-module-boundary`, `test-docs-drift`, `test-doc-links`, Zig formatting, and diff whitespace checks passed.
+The full repository verification script was not run; M2's separate approval remains pending.
+
+Independent Sol review and a main-agent line-by-line review identified and closed request-policy drift, session state shared between tasks, omitted generated source, and lost failure counts.
+The cleanup pass reused existing path and substring helpers, removed redundant progress state, made build dependencies explicit, and released task scratch memory between cases.
+The review left bounded duplicate hashing and failure-recovery I/O unchanged; a performance change needs measured evidence.
+Shared production APIs were not widened solely to remove small private wrappers.
+
+Code review: skipped (ce-code-review unavailable). Its required Python scope and stage-log helpers conflict with the repository's no-Python rule. The independent reviews and main-agent verification above are separate evidence, not a completed CE review receipt.
+
+The proposed next run is one fresh `deepseek-v4-flash` task with a 600,000-millisecond ceiling, 18 model round trips, 16 tool calls, and five verification attempts.
+The operator must approve API charges and a command that can exceed two minutes before running the live command in the guide.
+Actual live usage and billed cost still need measurement.
+The full eight-task live run needs a separate decision after the pilot result.
