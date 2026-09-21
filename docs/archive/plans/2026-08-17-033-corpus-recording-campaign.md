@@ -1,6 +1,11 @@
 # Corpus recording campaign: get a promoted DeepSeek corpus and publish it
 
-Status: revised after review, not started. Written 2026-08-17.
+Archive status, reviewed 2026-09-21: Completed historical campaign. `e0cebde2`
+recorded the DeepSeek corpus; `1bfbbac0` and `fdc118a6` published its
+evidence. Later recordings are recorded in the maintained convergence and
+coverage pages. Current work status is in [Roadmap](../../roadmap.md).
+
+Original status: revised after review, not started. Written 2026-08-17.
 
 The first draft claimed one run would promote and publish. A review found that
 false: relaxing the activation gate left two other gates enforcing a perfect

@@ -1,5 +1,9 @@
 # D1: type-system design doc
 
+Status: retained design reference. The implementation phases are complete.
+Baseline tables describe the original design date. [Roadmap](../roadmap.md)
+owns any new work; this document does not schedule another execution.
+
 **Owns:** the assignability relation, generic inference, narrowing dataflow, the
 join and union normalization, and the canonical type serialization.
 **Unblocks:** master-plan Phase 2 (type-system rock), Phase 3 (recursive

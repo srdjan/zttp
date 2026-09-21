@@ -1,5 +1,10 @@
 # Phase 6: Idiom Table, Validators, and the Gate-Complete Protocol - Implementation Plan
 
+Archive status, reviewed 2026-09-21: Completed language phase. The closed
+advanced-language program record confirms phases 0 through 7 are delivered.
+The plan and checkpoint text below preserve their original baseline. Current
+work status is in [Roadmap](../../roadmap.md).
+
 **Goal:** Make the idiom table a channel rather than a data structure, give the
 rewrites that ship an equivalence method that runs, and close the parts of the
 agent protocol that `meta` itself reports as absent. The canonical formatter is
@@ -12,7 +17,7 @@ corpus; atomic `apply_repair` rejection tests; meta drift gates wired into
 
 **Source of truth:** `docs/zts-formal-spec-northstar-advanced.md` revision 4,
 sections 4.2.1, 4.8, 5.5, and 8; and
-[D3 canonical form and wire](2026-07-30-016-d3-canonical-form-wire-design.md)
+[D3 canonical form and wire](../../plans/2026-07-30-016-d3-canonical-form-wire-design.md)
 sections 1, 2, 4, 5, 6, and 7, which own every decision this phase consumes.
 
 ## Scope decisions, stated before the tasks

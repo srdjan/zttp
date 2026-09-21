@@ -1,5 +1,10 @@
 # Residual Runtime Guard Addendum - Session Handoff
 
+Archive status, reviewed 2026-09-21: Superseded handoff. The remaining
+assurance surfaces and cutover landed in `52bcd919` and `58f30552`. Do not
+resume from the intermediate unit table below. Current work status is in
+[Roadmap](../../roadmap.md).
+
 Written 2026-09-01, paused at `5fc7bd5b` with a clean tree and
 `bash scripts/verify.sh` green on that commit.
 
@@ -122,7 +127,7 @@ and the golden-output gates.
   that makes the successor certificate the strict default. Turning it on alone
   is the one thing that must not happen.**
 - **The shape-table bug is documented, not fixed**, by explicit instruction. See
-  [docs/solutions/logic-errors/a-second-program-load-kept-the-first-ones-object-shapes.md](../solutions/logic-errors/a-second-program-load-kept-the-first-ones-object-shapes.md).
+  [docs/solutions/logic-errors/a-second-program-load-kept-the-first-ones-object-shapes.md](../../solutions/logic-errors/a-second-program-load-kept-the-first-ones-object-shapes.md).
   It is test-only today: production reload builds a fresh `HandlerInstance`.
 
 ## Gotchas this session paid for

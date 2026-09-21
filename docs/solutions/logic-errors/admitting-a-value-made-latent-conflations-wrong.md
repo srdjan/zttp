@@ -125,7 +125,7 @@ follow where the answer comes back wrong.
 ## Related Issues
 
 - Phase 3 plan and its measured record:
-  `docs/plans/2026-08-09-022-zts-advanced-rev4-phase3-plan.md`
+  `docs/archive/plans/2026-08-09-022-zts-advanced-rev4-phase3-plan.md`
 - The spec rule the fixes restore: `docs/zts-formal-spec-northstar-advanced.md`
   section 5.3.
 - A second finding from the same phase, distinct in shape and not covered here:

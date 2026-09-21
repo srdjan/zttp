@@ -9,7 +9,7 @@
 //! `parser/codegen.zig` import the whole boolean analysis - and through it the
 //! module-facts table and the IR walk - to name a nine-case enum. This file has
 //! no dependency beyond the IR node index. See
-//! docs/plans/2026-08-07-021-zts-three-module-split-plan.md.
+//! docs/archive/plans/2026-08-07-021-zts-three-module-split-plan.md.
 
 const std = @import("std");
 const ir = @import("parser/ir.zig");

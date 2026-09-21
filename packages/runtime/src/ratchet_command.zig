@@ -23,7 +23,7 @@
 //! declared name, measured on both. What this file still owns is the
 //! *view* - the declared/proven/unmet/extra read-out, which `show` now
 //! prints. See wave 4 item 3 in
-//! docs/plans/2026-07-28-001-reset-simplification-plan.md.
+//! docs/archive/plans/2026-07-28-001-reset-simplification-plan.md.
 //!
 //! No waiver system. An earlier draft of this header announced signed
 //! waivers under `.zttp/waivers/` as a follow-up; nothing was built, nothing

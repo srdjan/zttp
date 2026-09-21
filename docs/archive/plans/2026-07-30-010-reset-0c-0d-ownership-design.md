@@ -1,6 +1,6 @@
 # Reset 0c and 0d: runtime ownership and explicit invocation state
 
-Items 0c and 0d of `docs/plans/2026-07-28-001-reset-simplification-plan.md`. Section 6.1 of
+Items 0c and 0d of `docs/archive/plans/2026-07-28-001-reset-simplification-plan.md`. Section 6.1 of
 that plan already says these are one problem with one fix, so this design covers both.
 
 0c: `HandlerInstance` owns the engine runtime, installed builtins, loaded handler, invocation

@@ -10,7 +10,7 @@
 
 ## Scope boundary, read this before starting
 
-The reset plan (`docs/plans/2026-07-28-001-reset-simplification-plan.md`, section 4.5) describes a full compile-session redesign: one `CompileRequest` to `CompiledModule` API, explicit Parsed/Resolved/Checked/Contracted/Lowered stages, one idempotent `deinit`, and an end to recreating type and checker state during contract extraction.
+The reset plan (`docs/archive/plans/2026-07-28-001-reset-simplification-plan.md`, section 4.5) describes a full compile-session redesign: one `CompileRequest` to `CompiledModule` API, explicit Parsed/Resolved/Checked/Contracted/Lowered stages, one idempotent `deinit`, and an end to recreating type and checker state during contract extraction.
 
 **This plan implements only the first, independently valuable slice of that: making construction fallible.** The reasons to split it:
 
@@ -502,7 +502,7 @@ If the test fails with "expected error.OutOfMemory, found ...", the first alloca
 
 - [x] **Step 6: Update the reset plan's section 4.5**
 
-In `docs/plans/2026-07-28-001-reset-simplification-plan.md`, in the "Compilation ownership, verified" subsection, append:
+In `docs/archive/plans/2026-07-28-001-reset-simplification-plan.md`, in the "Compilation ownership, verified" subsection, append:
 
 ```markdown
 **Status, 2026-07-29:** The infallible constructors are removed. `ScopeAnalyzer.init`,

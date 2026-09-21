@@ -1,9 +1,30 @@
 # Roadmap
 
-The one forward-looking document in the maintained docs. It records the current
-support boundary, what the implementation does not cover, and the work that is
-planned but not built. Shipped changes live in `../CHANGELOG.md`; current user
-behavior lives in [User Guide](user-guide.md).
+This document owns work status and scheduling. Reviewed against local `main`
+at `1b0686a1` on 2026-09-21. Shipped changes live in
+[CHANGELOG.md](../CHANGELOG.md); current behavior lives in the
+[User Guide](user-guide.md). The [plan index](plans/README.md) separates open
+work from reference designs. [Product proposals](zttp-next/README.md) and
+[advisory plans](../advisor-plans/README.md) require a decision before execution.
+
+## Milestones
+
+The user selected M1. M2 through M4 are proposed follow-up milestones; this
+order does not authorize their implementation. No release date is assigned.
+
+| Milestone | Status | Dependency | Next action | Completion evidence |
+|---|---|---|---|---|
+| M1: accurate active backlog | Complete, 2026-09-21 | Codebase review at `1b0686a1` | Select the next milestone | [Completion record](archive/plans/2026-09-21-active-backlog-cleanup.md); documentation gates pass and remaining work is classified |
+| M2: bounded correctness and assurance | Proposed | Select scope after M1; recheck current tests | Reproduce the HTTP status-text difference, then check shutdown grace-expiry and certificate decode-error coverage | Public response regression test; selected lifecycle and decoder cases reject deliberate wrong behavior; affected unfiltered suites pass |
+| M3: provable-set reach measurement | Proposed | Approve held-out task families, budgets, provider, and run cost | Specify executable acceptance checks and distinguish fresh model results from replay | Retained report covers every selected task and failure, with source, policy, model, budget, and runtime-intent evidence |
+| M4: next release boundary | Proposed decision | M1 proposal inventory and current strategy | Reconcile custom agent handlers with the tool-profile proposal; select or park each | One accepted release contract states scope, threat model, dependencies, and completion checks |
+
+M2's source evidence is `packages/zts/src/http.zig`,
+`packages/runtime/src/server_response.zig`, and the conditional test gaps in
+the [completed rederive record](archive/plans/2026-09-20-rederive-implementation-plan.md#conditional-discovery-items).
+M3 addresses the unmeasured metric in [STRATEGY.md](../STRATEGY.md#key-metrics).
+M4 compares the [agent-handler specification](plans/2026-09-19-feat-agent-handler-spec.md)
+with the [tool-profile recommendation](zttp-next/zttp-v1.0-scope-and-v1x-roadmap.md).
 
 ## Supported Now
 
@@ -23,6 +44,10 @@ behavior lives in [User Guide](user-guide.md).
 - Built-in `zttp:*` virtual modules listed in
   [Virtual Modules](virtual-modules/README.md).
 - Optional Studio and edge runtime builds via `-Dstudio` and `-Dedge`.
+- Consumer-checked residual guards for computed environment keys, egress
+  endpoints, and cache namespaces under an explicit capability policy.
+- Protected local ledger invariants: mandatory balance conservation and
+  optional declared-account matching, with independently checked coverage.
 
 ## Current Limitations
 
@@ -44,43 +69,40 @@ behavior lives in [User Guide](user-guide.md).
   declared trusted, while `results_checked`, `no_secret_leakage`, and
   `capability_bounded` enter at `tested`. See
   [Verification](verification.md#what-is-not-checked-said-out-loud).
-- Computed capability resources still fail static analysis. The residual guard
-  design that would admit selected dynamic env, egress, cache, and SQL resources
-  under consumer-checked coverage is not implemented.
+- Computed SQL resources remain refused. The configured SQL policy cannot
+  distinguish read from write authority. Other residual-guard limits are in
+  [Verification](verification.md#residual-runtime-guard-boundary).
 
 ## Runtime And Product Work
 
-- Close the remaining runtime lifecycle verification gaps before hosted deploy
-  claims: broader accept-path coverage for deadlines, graceful shutdown, probes,
-  and panic isolation; hosted request-timeout policy; and shutdown
-  thread-safety semantics.
-- Finish the engine-to-runtime boundary refactor by routing runtime calls
-  through a strict facade and exposing stable runtime-facing engine types. The
-  file split landed (`handler_instance.zig` owns `HandlerInstance`;
-  `zruntime_tests.zig` is the test root), but six import cycles remain between
-  the instance and the sibling files its methods moved into.
-- Keep near-term module work limited to table-stakes gaps: fetch resilience,
-  capability surfacing, and build-feature diagnostics. Cloud-adapter modules
-  stay in a separate evaluated track.
-- Keep `zttp help --all` and `packages/zts/src/builtin_modules.zig` as the
-  sources of truth for CLI and module docs. `packages/modules/module-specs/` is
-  not one of them: it is generated from the typed Zig module bindings by
-  `zttp module-spec-render`, and `--check` gates it in `scripts/verify.sh`. Edit
-  the binding, then regenerate.
-- Add server-level rate limiting only if the standalone server becomes a
-  first-class unproxied deployment target. Application limits are handled with
-  `zttp:ratelimit`.
-- Promote hosted deploy only after the control-plane path has CI smoke coverage
-  and user-facing commands appear in default docs.
-- Implement the [residual runtime guard addendum](plans/2026-08-31-1242-feat-residual-runtime-guard-addendum-plan.md)
-  on top of the completed artifact-level checker. Keep static Properties and
-  guarded runtime operations separate, bind exact guard coverage to policy and
-  the executable graph, and retain fail-closed live decisions at the effect
-  boundary.
-- Ratchet the certificate's disclosed boundary one property or opcode family at
-  a time. Each promotion needs a real producer case, an independent checker
-  rule or witness, and a mutation the checker rejects. The shipped boundary is
-  pinned by `zig build test-proof-ratchet test-proof-ratchet-drift`.
+These items remain open. They are not all release blockers. A selected release
+contract must identify which ones it needs.
+
+| Work | Status | Dependency | Next action | Completion evidence |
+|---|---|---|---|---|
+| Runtime lifecycle | Open; M2 candidate | Current socket and panic-isolation tests | Check grace expiry, request-timeout policy, and control-thread shutdown semantics against the intended deployment | Tests assert accepted requests, drain and expiry outcomes, and isolation; unfiltered runtime and panic suites pass |
+| Engine/runtime facade | Deferred | Lifecycle behavior pinned before changing state ownership | Replace one sibling back-import with a narrow interface | Selected cycle removed; request, durable, queue, and pool behavior preserved; boundary and runtime gates pass |
+| Module gaps | Needs scope | A concrete handler requirement | Identify a missing fetch-resilience, capability, or build-feature diagnostic case | Public example and regression test demonstrate the selected behavior |
+| Hosted deploy | Deferred | Accepted hosted scope, lifecycle policy, and control-plane CI | Define a supported end-to-end deployment flow | CI exercises the control plane; released commands and user docs agree |
+| Server rate limiting | Conditional | Standalone unproxied server selected as a product target | Decide whether application limits through `zttp:ratelimit` are insufficient | Approved server policy and accept-path tests, or a recorded decision to retain application limits |
+| Computed SQL guards | Deferred | Policy preserves read/write authority | Design that policy distinction before enabling the family | Consumer coverage and sink tests reject cross-authority use; guard drift gate passes |
+| Certificate assurance | Open, incremental | Select one property or opcode family | Add a producer case and an independent checker rule or witness | Checker rejects a mutation; `test-proof-ratchet` and `test-proof-ratchet-drift` pass with the revised disclosed boundary |
+| Protected-ledger startup cost | Measurement required | Representative ledger and pool sizes; current store exclusion rules | Measure repeated baseline validation and statement preparation before changing ownership | Retained startup and contention measurements justify statement reuse or validation per generation; invariant behavior remains unchanged |
+
+Socket health/readiness and in-flight shutdown-drain tests already exist in
+`packages/runtime/src/server.zig`. The file split and server adapter also
+exist, but `HandlerInstance` and extracted siblings still import each other.
+The remaining facade work concerns that dependency boundary.
+
+The [residual guard delivery record](archive/plans/2026-08-31-1242-feat-residual-runtime-guard-addendum-plan.md)
+is closed for env, egress, and cache. SQL remains deferred in the table above.
+CLI and module documentation derive from `zttp help --all` and the typed
+bindings exposed through `packages/zts/src/builtin_modules.zig`.
+`zttp module-spec-render --check` checks the generated module specifications.
+The [ledger foundation record](archive/plans/2026-09-18-feat-application-invariants-plan.md)
+describes the startup measurement question. General predicates, distributed
+ledger stores, currency conversion, and automatic migration remain outside
+the supported invariant scope.
 
 ## Agent-Compiler Agenda
 
@@ -101,6 +123,11 @@ did not support the expectation the item was written on. One item is still open,
 the refusals below stand.
 
 ### 5. The small-local-model qualification evidence
+
+Status: parked measurement. Dependency: explicit authorization for the live
+runs and exact model and serving provenance. Next action: follow the recording
+guide with the selected candidate. Completion: retain the three-run report
+under the criteria below. A default-provider change needs a separate decision.
 
 The report-only qualification path is implemented. What remains is an explicitly
 authorized three-run measurement of `mlx-community/Qwen3-8B-4bit`. Each run attempts
@@ -220,78 +247,69 @@ Recorded so they are not proposed again:
 
 ## The Advanced ZTS Language Program
 
-Implement the advanced language incrementally on the existing engine, keeping
-`scripts/verify.sh` green at every phase boundary. The implemented source
-identities are `zts-model-1` for core `.ts` and `zts-tsx-1` for the lowering
-frontend. The source
-spec is [zts-formal-spec-northstar-advanced.md](zts-formal-spec-northstar-advanced.md)
-revision 6. The artifact certificate and independent acceptance kernel now
-ship as a staged implementation of sections 13.3-13.4. Eliminating its
-disclosed trusted edges and the two-client conformance lab (14.2) remain
-outside this language program.
+Status: complete for phases 0 through 7. The implemented source identities are
+`zts-model-1` for core TypeScript and `zts-tsx-1` for the lowering frontend.
+The [formal spec](zts-formal-spec-northstar-advanced.md), revision 6, states the
+language and assurance target. Its stronger target does not mean the shipped
+certificate has no tested or trusted edges.
 
-Three ground rules survive from phase to phase: the engine stays
-interpreter-only with no kernel growth except where the spec names it; each
-admitted form adds its semantics-registry rules in the same phase, so
-`spec-check` stays green by construction; and no `meta` payload is ever
-hand-written, because a hand-written payload is another drift gate.
-
-Phases 0 through 7 are done. What each phase found is
-[the closed phase record](archive/plans/2026-08-16-029-zts-advanced-language-program-closed.md),
-and the executed plans and the program's decision log are in
-[docs/archive/plans/](archive/README.md). Phase 2's plan is still
-[docs/plans/2026-08-04-018-zts-advanced-rev4-phase2-plan.md](plans/2026-08-04-018-zts-advanced-rev4-phase2-plan.md),
-phase 3's is
-[docs/plans/2026-08-09-022-zts-advanced-rev4-phase3-plan.md](plans/2026-08-09-022-zts-advanced-rev4-phase3-plan.md),
-and phase 4's is
-[docs/plans/2026-08-09-023-zts-advanced-rev4-phase4-plan.md](plans/2026-08-09-023-zts-advanced-rev4-phase4-plan.md).
-
-Three design documents own the decisions the phases consume. Two of them also
-retire an interim marker left in the code by phase 0:
-
-- [D1 type system](plans/2026-07-30-014-d1-type-system-design.md) - assignability,
-  generic inference, narrowing dataflow, join and union normalization, canonical
-  type serialization. Unblocks phases 2, 3, and 4; retired `// D1-interim`, and
-  no marker of that name is left in the tree.
-- [D2 effects and purity](plans/2026-07-30-015-d2-effects-purity-design.md) -
-  the effect-row atom set and its capability mapping, row inference and join, the
-  purity predicate, and `Proof<T, P>`'s property domain. Unblocks phases 4 and 5;
-  retires `// D2-interim`.
-- [D3 canonical form and wire](plans/2026-07-30-016-d3-canonical-form-wire-design.md) -
-  the lexical grammar, the canonical formatter, digest pre-images, protocol
-  payload schemas, and the equivalence-validator taxonomy. Unblocks phase 6.
-
-The no-ASI flip landed in phase 6 and did not wait on a validator: the corpus
-needed no migration, so a statement with no terminator is refused with ZTS047
-and a location, and the repair that shipped beside it was withdrawn when a
-review found it unsound. The migration policy is now decided: phase 7 performs
-a direct cutover to the model-minimal profile. `|>`, `pipe()`, `guard()`, and
+The [closed phase record](archive/plans/2026-08-16-029-zts-advanced-language-program-closed.md)
+and [archived execution plans](archive/README.md) retain the implementation
+history. D1, D2, and D3 remain [design references](plans/README.md).
+The model-minimal cutover shipped. `|>`, `pipe()`, `guard()`, and
 `interface` are removed; no compatibility profile is planned.
+
+The independent checker ships. Further assurance work is in the runtime table
+above. The two-client conformance lab remains deferred: it needs an approved
+external-client scope. The next action is to define shared accepted and refused
+fixtures. Completion requires two independent clients to produce the same
+specified protocol outcomes under the same identities.
+
+| Work | Status | Dependency | Next action | Completion evidence |
+|---|---|---|---|---|
+| Exported boundary-type scope | Investigation required | Revalidate the questions in the archived boundary-type plan against current diagnostics | Probe exported constants and generic signatures instantiated with raw scalar types through the public checker | Record accepted or refused behavior for each case; any scope change gets a separate decision and public regression tests |
+
+The [boundary-type record](archive/plans/2026-08-16-030-boundary-types-plan.md)
+left those questions outside its delivered scope. Current strict-checker tests
+already pin refusal of exported function-valued constants through the canonical
+declaration rule, rather than ZTS061. That does not settle every exported value
+or generic-instantiation case. This is an investigation, not a confirmed bypass.
 
 ## Reset And Simplification
 
-The reset ledger is
-[2026-07-28-001-reset-simplification-plan.md](plans/2026-07-28-001-reset-simplification-plan.md).
-Waves 0 through 3 and wave 6 are executed, and waves 4 and 5 are done except
-for three items:
+The [reset ledger](archive/plans/2026-07-28-001-reset-simplification-plan.md) is historical.
+The shared import/binding index and compile-time parser reuse shipped. The
+compile-time evaluator uses `JsParser.initExpression` and the main IR; its
+separate value/evaluation model remains. The old parser-deletion estimate is
+obsolete. No further evaluator rewrite is selected.
 
-- Shared IR shape helpers (wave 4, item 4). The shared import and binding index
-  shipped as `packages/zts/src/module_facts.zig` and all six analyzers adopted
-  it. The shape-helper library is deferred, and the orchestration move is closed
-  as declined: it had an architectural justification and no performance or
-  correctness one, and it needed an IO boundary inside `pipeline.zig` that does
-  not exist. Revisit only with a concrete consumer for a fourth `LoweredModule`
-  phase, such as a build cache or incremental compile.
-- The collector's role (wave 5, item 3). Inverted by the wave 0 RSS
-  measurement. The memory defect it started from was found, fixed, and closed by
-  a two-hour soak (per-runtime lifetime arena), but what the collector still
-  earns has not been measured. No GC code is deleted until the remaining growth
-  is attributed.
-- `comptime.zig` unification (wave 5, item 4). Replacing its separate tokenizer,
-  parser, and value model with evaluation over the main IR after parse would
-  delete roughly 1,800 lines and structurally resolve the `==` inconsistency. It
-  needs more comptime tests first.
+| Work | Status | Dependency | Next action | Completion evidence |
+|---|---|---|---|---|
+| Shared IR shape helpers | Deferred | A concrete new consumer, such as a build cache or incremental compile | Identify the repeated shape operation the consumer needs | A shared helper replaces measured duplication and preserves analyzer behavior |
+| Collector role | Measurement required | Reproduce remaining memory growth after the lifetime-arena fix | Attribute retained allocations before selecting any deletion | Repeatable allocation and RSS evidence identifies what grows and whether collection is required |
+| Compile-time value/evaluation unification | Deferred | New evidence of a behavior or maintenance problem | Measure the remaining evaluator overlap and pin public behavior | Accepted scope with measured benefit and equivalent public results, or a decision to keep the separate evaluator |
+| VM-loop deduplication | Deferred | Runtime hardening, engine facade, and the existing measurement gates | Revalidate the [deferred plan](archive/DEFERRED_VM_LOOP_DEDUPE_PLAN.md) against the selected runtime path | Public behavior preserved and the plan's measurements justify the change |
 
-VM-loop dedupe stays deferred behind the FaaS hardening, engine facade, and
-measurement gates. The standalone plan is
-[Deferred VM Loop Dedupe Plan](archive/DEFERRED_VM_LOOP_DEDUPE_PLAN.md).
+The reset's orchestration move remains declined. It has no selected consumer
+for another `LoweredModule` phase and no measured correctness or performance
+benefit. The [bounded rederive](archive/plans/2026-09-20-rederive-implementation-plan.md)
+closed the selected schema-writer, journal-decoding, and recovery-planning work.
+
+The reset ledger's owner-decision and retention sections are historical
+suggestions. Their default remains to keep the capabilities still present.
+No removal of extension support, edge, demo, Studio views, proof commands,
+receipt signing, expectation inputs, providers, module governance, code
+generation, or the separate analyzer is selected. Reopening a removal requires
+a product decision and current usage evidence.
+
+## Proposal Decisions
+
+| Proposal | Status | Dependency | Next action | Completion evidence |
+|---|---|---|---|---|
+| Custom agent handlers and tool-profile v1 | Parked; M4 candidates | Product owner selects the release boundary | Compare overlapping catalog, capability, streaming, and artifact work | One accepted contract and reconciled implementation scope, or an explicit deferral |
+| Broader tool platform, confidential hosting, and cloud adapters | Parked | A customer need and an accepted threat model | Evaluate separately from the current handler product | Recorded accept/defer decision and a bounded plan for any accepted work |
+| Predictable-performance advisory plan | Proposed; old baseline | Fresh process-level measurements | Revalidate the measurement unit before any optimization | Retained receipts identify a current bottleneck and justify a selected change |
+
+The [proposal index](zttp-next/README.md), [agent-handler specification](plans/2026-09-19-feat-agent-handler-spec.md),
+and [advisory index](../advisor-plans/README.md) hold the supporting documents.
+Their presence does not schedule them.

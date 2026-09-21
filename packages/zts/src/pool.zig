@@ -55,7 +55,7 @@ pub const LockFreePool = struct {
         /// still climbing, with only ~5 percent returned when load stopped).
         /// Nothing was leaked in the Zig sense; the memory sat in freelists.
         /// Routing runtime-lifetime allocations through one arena makes destroy
-        /// an unmap. See docs/plans/2026-07-28-001-reset-simplification-plan.md.
+        /// an unmap. See docs/archive/plans/2026-07-28-001-reset-simplification-plan.md.
         lifetime_arena: *std.heap.ArenaAllocator,
         /// The allocator `lifetime_arena` draws from, and the one that owns the
         /// arena struct itself. Kept so `destroy` can release it last.

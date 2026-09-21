@@ -27,7 +27,7 @@
 # "rewiring 36 of the 84 files in packages/zts/src off relative imports". Both
 # numbers went stale, and the import rewiring was never the blocker. Run
 # `bash scripts/zts-import-graph.sh` for the live figures and
-# `docs/plans/2026-08-07-021-zts-three-module-split-plan.md` for what the split
+# `docs/archive/plans/2026-08-07-021-zts-three-module-split-plan.md` for what the split
 # costs: the package is one cyclic import graph, its engine entry points reach
 # every file in it, and a cycle spanning a module line is exactly what makes
 # Zig analyze the engine twice and turn one type into two incompatible ones.
@@ -60,7 +60,7 @@ fail() {
 # umbrella now and spells them `= engine.value`, `= compiler.flow_checker`, and
 # so on, one per tier module. The pattern moved with it. The floor below is what
 # caught the change rather than letting the gate quietly parse nothing: see
-# docs/plans/2026-08-07-021-zts-three-module-split-plan.md.
+# docs/archive/plans/2026-08-07-021-zts-three-module-split-plan.md.
 internals="$(
   awk '
     /^\/\/ Internal implementation modules/ { in_section = 1 }

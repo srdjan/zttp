@@ -47,7 +47,7 @@ projected `HandlerContract` (`packages/zts/src/contract_json_parser.zig:428-435`
 The decoder rederive was preceded by a characterization matrix and a measured
 branch baseline, so the implementation could be judged against observed behavior
 instead of translating the old parser line by line
-(`docs/plans/2026-08-04-019-code-quality-rebase-plan.md:226-253`).
+(`docs/archive/plans/2026-08-04-019-code-quality-rebase-plan.md:226-253`).
 
 ## Guidance
 

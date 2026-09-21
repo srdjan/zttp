@@ -243,7 +243,7 @@ and the veto. It says nothing about whether a model would ever write that
 draft. That is the other claim, and only lever 2 measures it.
 
 **Lever 2: new corpus cases.** This moves the published number and requires
-recording. `docs/plans/2026-08-17-033-corpus-recording-campaign.md` measures a
+recording. `docs/archive/plans/2026-08-17-033-corpus-recording-campaign.md` measures a
 full run at roughly 24 minutes of wall clock plus a DeepSeek spend, and handler
 source leaves the machine on every turn. Adding cases changes `corpusVersion`,
 so it is a whole-corpus re-record, not an incremental one.

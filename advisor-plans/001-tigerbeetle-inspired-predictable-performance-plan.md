@@ -226,7 +226,7 @@ mechanisms.
 - performance-receipt signatures;
 - hand-editing `CHANGELOG.md`, generated module specs, or benchmark receipts;
 - the separate active
-  `docs/plans/2026-08-07-021-zts-three-module-split-plan.md`.
+  `docs/archive/plans/2026-08-07-021-zts-three-module-split-plan.md`.
 
 ## Assumptions and approval gates
 

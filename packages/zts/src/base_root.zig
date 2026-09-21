@@ -13,7 +13,7 @@
 //! `scripts/check-zts-layering.sh` fails on it.
 //!
 //! Tier membership is recorded in `scripts/zts-tiers.allow`. See
-//! docs/plans/2026-08-07-021-zts-three-module-split-plan.md.
+//! docs/archive/plans/2026-08-07-021-zts-three-module-split-plan.md.
 
 /// Monotonic and wall clocks, and the platform shims around them.
 pub const compat = @import("compat.zig");

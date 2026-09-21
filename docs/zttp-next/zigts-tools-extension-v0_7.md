@@ -1,4 +1,9 @@
 # zigts: agent tool extension
+
+Status: parked proposal. [Roadmap](../roadmap.md#proposal-decisions) owns the
+release decision. This draft does not authorize implementation. Its title's
+use of "complete" describes the draft's coverage, not shipped behavior.
+
 ## Draft v0.7 — complete specification
 
 **Supersedes v0.1 to v0.6**, all included in full.

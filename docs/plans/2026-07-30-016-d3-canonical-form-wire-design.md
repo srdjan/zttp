@@ -1,5 +1,9 @@
 # D3: canonical form and wire design doc
 
+Status: retained design reference. The implementation phases are complete.
+Baseline tables describe the original design date. [Roadmap](../roadmap.md)
+owns any new work; this document does not schedule another execution.
+
 **Owns:** the lexical grammar, the canonical formatter, digest algorithms and
 pre-images, the agent-protocol payload schemas, and the equivalence-validator
 method taxonomy.

@@ -1,11 +1,16 @@
 # zts-advanced-v2.1
 
-**Status: draft. Nothing here is implemented, and no rule below is enforced by
-the compiler.** This file stages the next language increment on top of
+Archive status, reviewed 2026-09-21: Delivered boundary-type design. The
+exported-boundary rule and nominal construction path shipped; the draft
+baseline below is historical. See the archived boundary-types delivery plan
+and the maintained TypeScript guide. Current work status is in
+[Roadmap](../../roadmap.md).
+
+**Original status: draft.** This file stages the next language increment on top of
 `zts-model-1`. More features are coming; each lands as its own section with the
 same shape, and a section leaves this file when it either ships or is refused.
 
-Read [zts-formal-spec-northstar-advanced.md](../zts-formal-spec-northstar-advanced.md)
+Read [zts-formal-spec-northstar-advanced.md](../../zts-formal-spec-northstar-advanced.md)
 first. That document is the northstar for the implemented profile. This one is
 narrower: it proposes changes to that profile, states what each buys, and
 records the measured cost of adopting it.
@@ -82,7 +87,7 @@ the gap; shipping both would give one operation two spellings, which design law
 on the precompile path and nowhere else, so a constructor erasure keyed on it
 would work under `zttp build` and fault under `zttp dev`. The implementation plan
 is
-[2026-08-16-030-boundary-types-plan.md](../plans/2026-08-16-030-boundary-types-plan.md).
+[2026-08-16-030-boundary-types-plan.md](2026-08-16-030-boundary-types-plan.md).
 
 ### 1.3 Scope
 
@@ -189,7 +194,7 @@ request that produced it, and the veto verdict is part of the recorded turn. A
 new rule that fires inside a recorded workspace changes that verdict, so both
 cases go stale and neither can be repaired by hand: they need a live re-record
 against each provider. See
-[Cassette Recording](../internals/cassette-recording.md).
+[Cassette Recording](../../internals/cassette-recording.md).
 
 So the migration is two edits and a four-artifact re-record, not two edits.
 Sequence it with other corpus-invalidating work rather than spending a recording
@@ -213,6 +218,6 @@ today no literal can become a branded value.
   `string` would route around the rule.
 - Whether `ZTS061` belongs in the restriction registry, which would move
   `restriction_matrix_hash` and add a row to
-  [Restrictions to Proofs](../restrictions-to-proofs.md), or only in the rule
+  [Restrictions to Proofs](../../restrictions-to-proofs.md), or only in the rule
   registry, which moves `policy_hash`. The two identities answer different
   questions and this rule arguably belongs in both.

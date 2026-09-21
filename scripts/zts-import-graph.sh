@@ -2,7 +2,7 @@
 #
 # Measure the relative-import graph inside `packages/zts`.
 #
-# `docs/plans/2026-08-07-021-zts-three-module-split-plan.md` prices the
+# `docs/archive/plans/2026-08-07-021-zts-three-module-split-plan.md` prices the
 # zts-base / zts-contracts / zts / zts-compiler split from this graph. The
 # header of `scripts/check-module-boundary.sh` used to carry that price as two
 # written-down numbers, and both went stale: it said 84 files where the tree had

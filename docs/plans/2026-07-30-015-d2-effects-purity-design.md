@@ -1,5 +1,9 @@
 # D2: effects and purity design doc
 
+Status: retained design reference. The implementation phases are complete.
+Baseline tables describe the original design date. [Roadmap](../roadmap.md)
+owns any new work; this document does not schedule another execution.
+
 **Owns:** the effect-row atom set and its capability mapping, row syntax and
 inference, the row join, the purity predicate, `Proof<T, P>`'s property domain,
 and the flow labels behind the `assert` rule.

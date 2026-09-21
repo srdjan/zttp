@@ -237,7 +237,7 @@ Edits:
 **Goal:** stop the reset plan from asking for something its own section 5.5 rejects.
 
 The sentence to replace is the last one of section 5.6
-(`docs/plans/2026-07-28-001-reset-simplification-plan.md:260-280`):
+(`docs/archive/plans/2026-07-28-001-reset-simplification-plan.md:260-280`):
 
 > The same principle applies to contract construction on the producing side, where
 > `ContractBuilder` accumulates facts through repeated mutable scans; one immutable

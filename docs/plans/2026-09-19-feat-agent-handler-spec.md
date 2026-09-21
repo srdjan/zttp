@@ -4,6 +4,7 @@ type: feat
 date: 2026-09-19
 last_reviewed: 2026-09-20
 product_contract_source: user-request
+status: proposed
 ---
 
 # Custom LLM Agent Handlers - Specification
@@ -50,10 +51,11 @@ incremental handler fetch, the agent tool catalog, and the turn recorder remain
 new work. The main changes since the original baseline are stricter provenance
 analysis, exhaustive return analysis, and broader verification gates.
 
-This refresh uses source and history inspection. It claims no new runtime
-measurements or test results. Concurrent uncommitted work in schema extraction
-and the development agent is outside this baseline. Recheck those paths before
-implementation; an in-progress refactor is not an available dependency.
+This refresh used source and history inspection. It claims no new runtime
+measurements or test results. The 2026-09-21 backlog review checked one later
+dependency change: the schema writer and development-agent refactors are now
+committed, with completion evidence in the bounded rederive record. Recheck
+these paths before implementation.
 
 | Existing surface | Consequence for this enhancement |
 | --- | --- |
@@ -86,11 +88,11 @@ The language does not expose general JavaScript async execution. This feature
 must fit the admitted language and native callback model. It must not silently
 depend on promises, `async` functions, or browser `ReadableStream` support.
 
-The schema literal writers still live in `ContractBuilder` and `TypeChecker` at
-this baseline. The partial-output allocation fix is committed, but their proposed
-shared writer in `docs/plans/2026-09-20-rederive-implementation-plan.md` is not.
-U1 must use the implementation present when it starts and preserve the existing
-schema-byte and inferred-type contracts rather than invent a third literal reader.
+`ContractBuilder` and `TypeChecker` now use `ir_json_literal.zig`, delivered in
+`6be705a6` and verified in the
+[bounded rederive record](../archive/plans/2026-09-20-rederive-implementation-plan.md).
+U1 must preserve the existing schema-byte and inferred-type contracts when it
+uses that writer.
 
 `ApiSchemaInfo` currently records a name and schema JSON. Contract JSON carries
 those schemas, but `packages/runtime/src/contract_runtime.zig` does not carry a

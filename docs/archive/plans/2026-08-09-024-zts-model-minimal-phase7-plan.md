@@ -1,5 +1,10 @@
 # Phase 7: Model-Minimal ZTS - Direct Cutover Plan
 
+Archive status, reviewed 2026-09-21: Completed language phase. The closed
+advanced-language program record confirms phases 0 through 7 are delivered.
+The plan and checkpoint text below preserve their original baseline. Current
+work status is in [Roadmap](../../roadmap.md).
+
 **Goal:** Replace the remaining TypeScript compatibility surface with one
 explicit, model-oriented language profile. The result keeps the application
 expressiveness Zttp needs while removing equivalent spellings, JavaScript
@@ -21,7 +26,7 @@ compiler-authored repairs that produce the new source form before the old
 parser and checker paths are deleted.
 
 **Source of truth:**
-[zts-formal-spec-northstar-advanced.md](../zts-formal-spec-northstar-advanced.md)
+[zts-formal-spec-northstar-advanced.md](../../zts-formal-spec-northstar-advanced.md)
 revision 4 remains the semantic base. This plan supersedes its TypeScript
 spellings and resolves the migration-policy deferral for `interface`, `|>`,
 `pipe()`, and `guard()`.

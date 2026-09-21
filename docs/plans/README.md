@@ -1,0 +1,21 @@
+# Plans and design references
+
+[Roadmap](../roadmap.md) owns work status, dependencies, next actions, and
+completion checks. A file here does not authorize implementation. Update this
+index when a plan starts, closes, or moves to the archive.
+
+| Document | Role and status | Work authority |
+|---|---|---|
+| [D1: type system](2026-07-30-014-d1-type-system-design.md) | Retained design reference; language phases complete | No new work scheduled |
+| [D2: effects and purity](2026-07-30-015-d2-effects-purity-design.md) | Retained design reference; language phases complete | No new work scheduled |
+| [D3: canonical form and wire](2026-07-30-016-d3-canonical-form-wire-design.md) | Retained design reference; language phases complete | No new work scheduled |
+| [Custom LLM agent handlers](2026-09-19-feat-agent-handler-spec.md) | Proposed; parked | Roadmap M4 requires a product decision before implementation |
+
+[Archived execution records](../archive/README.md) preserve completed work,
+superseded plans, and historical measurements. The reset ledger's remaining
+questions are in the roadmap. The [product proposal index](../zttp-next/README.md)
+and [advisory index](../../advisor-plans/README.md) classify separate proposals.
+
+M1 is complete in the [backlog cleanup record](../archive/plans/2026-09-21-active-backlog-cleanup.md).
+No implementation plan is currently selected. The roadmap records the proposed
+next milestones.

@@ -10,7 +10,7 @@ Date: 2026-08-06
 
 Snapshot: `main` at `267376fe20c64f482a84d75f06dbb6fdbfca6894`
 
-Parent plan: `docs/plans/2026-08-04-019-code-quality-rebase-plan.md`, Phase 5
+Parent plan: `docs/archive/plans/2026-08-04-019-code-quality-rebase-plan.md`, Phase 5
 
 ## Scope
 

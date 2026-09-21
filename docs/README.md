@@ -1,13 +1,13 @@
 # Documentation
 
 These docs describe the current codebase. Release history lives in
-`CHANGELOG.md`, and [Roadmap](roadmap.md) is the only forward-looking list of
-work. [docs/plans/](plans/) holds design documents for named subsystems, each
-owning one area and stating what it unblocks. A plan can define a design, but
-only the roadmap states whether that design is current, complete, blocked, or
-scheduled. Finished records normally move under [archive](archive/README.md).
-The repository-level [advisor-plans](../advisor-plans/README.md) directory holds
-saved proposals, not approved or active work.
+`CHANGELOG.md`, and [Roadmap](roadmap.md) owns work status and scheduling.
+The [plan index](plans/README.md) identifies active work, retained design
+references, and parked proposals. A plan can define a design; the roadmap
+states its status, dependencies, next action, and completion checks. Finished
+and superseded execution records live under [archive](archive/README.md).
+The [product proposals](zttp-next/README.md) and repository-level
+[advisory plans](../advisor-plans/README.md) require a decision before execution.
 
 ## Start Here
 

@@ -1,6 +1,6 @@
 # Wave 4 item 6: comptime argument decoding from `param_types`
 
-Item 6 of `docs/plans/2026-07-28-001-reset-simplification-plan.md` reads: "Add the comptime
+Item 6 of `docs/archive/plans/2026-07-28-001-reset-simplification-plan.md` reads: "Add the comptime
 argument-decode wrapper for module impl functions, generated from the `param_types` already
 declared in each binding."
 

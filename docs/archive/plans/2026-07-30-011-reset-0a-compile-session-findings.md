@@ -1,6 +1,6 @@
 # Reset 0a: the compile session, measured
 
-Item 0a of `docs/plans/2026-07-28-001-reset-simplification-plan.md`, section 4.5. The first
+Item 0a of `docs/archive/plans/2026-07-28-001-reset-simplification-plan.md`, section 4.5. The first
 slice, removing the three infallible constructors, shipped as
 `docs/plans/2026-07-29-001-wave4-reset-a-fallible-compile-plan.md` and told the next reader to
 write a separate plan for the rest. This is that document, written after measuring rather than

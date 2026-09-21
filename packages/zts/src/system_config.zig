@@ -8,7 +8,7 @@
 //! the type and the parser inside the linker meant that runtime read pulled the
 //! whole cross-handler proof, and through it the contract types and the route
 //! matcher, into the engine's import closure. See
-//! docs/plans/2026-08-07-021-zts-three-module-split-plan.md.
+//! docs/archive/plans/2026-08-07-021-zts-three-module-split-plan.md.
 
 const std = @import("std");
 const json_wire = @import("zts-base").json_wire;

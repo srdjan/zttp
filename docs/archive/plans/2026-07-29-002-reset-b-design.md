@@ -2,7 +2,7 @@
 
 **Status:** done. All three plans executed: B1 (`2026-07-29-003`), B2 (`2026-07-29-004`), B3 (`2026-07-29-005`). Each plan records where it corrected this document. The one sub-clause of wave 4 item 0b that this design scoped out, generating `docs/virtual-modules/README.md` from the bindings, was closed afterwards in `docs/plans/2026-07-30-001-module-doc-mirror-plan.md`. Item 0b is fully closed.
 
-**Source:** wave 4 item 0b of `docs/plans/2026-07-28-001-reset-simplification-plan.md`,
+**Source:** wave 4 item 0b of `docs/archive/plans/2026-07-28-001-reset-simplification-plan.md`,
 which sections 5.5 and 5.6 of that document describe. Reset A
 (`docs/plans/2026-07-29-001-wave4-reset-a-fallible-compile-plan.md`) closed wave 4 item 0a
 and is done.

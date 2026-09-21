@@ -46,7 +46,7 @@
 # `scripts/check-module-boundary.sh` does, for consumer packages.
 #
 # Run `bash scripts/zts-import-graph.sh` for the underlying graph, and see
-# docs/plans/2026-08-07-021-zts-three-module-split-plan.md for the plan this
+# docs/archive/plans/2026-08-07-021-zts-three-module-split-plan.md for the plan this
 # enforces.
 
 set -euo pipefail

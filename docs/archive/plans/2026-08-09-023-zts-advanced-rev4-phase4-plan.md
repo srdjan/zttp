@@ -1,5 +1,10 @@
 # Phase 4: Dict and JSON - Implementation Plan
 
+Archive status, reviewed 2026-09-21: Completed language phase. The closed
+advanced-language program record confirms phases 0 through 7 are delivered.
+The plan and checkpoint text below preserve their original baseline. Current
+work status is in [Roadmap](../../roadmap.md).
+
 **Goal:** Give the profile its dynamic keyed data and its JSON boundary.
 `Dict<K, V>` as a real value kind with deterministic iteration and
 SameValueZero key equality, `zttp:collections` over it, and `zttp:json` with a

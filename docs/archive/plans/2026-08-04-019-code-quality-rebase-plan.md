@@ -1,6 +1,11 @@
 # Code quality rebase plan
 
-Status: approved for implementation
+Archive status, reviewed 2026-09-21: Superseded execution plan. The selected
+follow-up work is complete in the bounded rederive record. The original
+measurements below are historical. Current work status is in
+[Roadmap](../../roadmap.md).
+
+Status: superseded execution record
 
 Historical plan: the typed contract decoder, compile-time evaluator, explicit
 runtime state ownership, and real shutdown drain test have since landed. The
@@ -319,8 +324,8 @@ The acceptance metric is monotonic: 102 must never increase. Do not set a lower 
 
 The planning surface has drifted from the live code and history:
 
-- `docs/plans/2026-07-28-001-reset-simplification-plan.md` still says the reset is proposed and unapproved, while `docs/roadmap.md` records most reset waves as executed.
-- `docs/plans/2026-08-04-018-zts-advanced-rev4-phase2-plan.md` describes phase work that appears in current history, but the active documents do not conclusively record phase completion.
+- `docs/archive/plans/2026-07-28-001-reset-simplification-plan.md` still says the reset is proposed and unapproved, while `docs/roadmap.md` records most reset waves as executed.
+- `docs/archive/plans/2026-08-04-018-zts-advanced-rev4-phase2-plan.md` describes phase work that appears in current history, but the active documents do not conclusively record phase completion.
 - D1 and D2 contain ground-truth statements that no longer match the implemented type and effect systems.
 
 Use `docs/roadmap.md` as the single active roadmap authority. Treat dated plan files as decision records with explicit status. In the documentation phase:

@@ -1,5 +1,12 @@
 # Boundary types: declared types at the exported boundary - Implementation Plan
 
+Archive status, reviewed 2026-09-21: Delivered language scope. Nominal
+construction and exported-boundary enforcement landed in `51166a43`,
+`b0256959`, and `8871845e`. Later DeepSeek recordings and the full gate
+recorded in the bounded rederive record supersede the old recording debt.
+Local-model qualification remains parked in the roadmap. Current work status
+is in [Roadmap](../../roadmap.md).
+
 **Goal:** Make an exported function's parameter and return types declared rather
 than raw. A `nominal` or `structural` alias is required in both positions; the
 brand is erased at comptime and costs nothing at runtime.
@@ -10,7 +17,7 @@ constructed and round-tripped through a served handler; `scripts/verify.sh` is
 green; the two invalidated corpus cases are re-recorded and replay.
 
 **Source of truth:**
-[docs/zttp-next/zts-advanced-v2.1.md](../zttp-next/zts-advanced-v2.1.md) section 1, which owns the
+[docs/archive/plans/zts-advanced-v2.1.md](zts-advanced-v2.1.md) section 1, which owns the
 rule, its scope, and the composite and ABI carve-outs.
 
 Date: 2026-08-16. Snapshot: `main` at `767e7bba`.
@@ -255,7 +262,7 @@ This is therefore a full re-record, not the two cases the original scope named.
 `sibling-helper` and `sibling-helper-holes` remain the two whose *workspaces*
 trip `ZTS061` once task 3 lands, so running this task after task 3 rather than
 before it pays the cost once. Per
-[Cassette Recording](../internals/cassette-recording.md).
+[Cassette Recording](../../internals/cassette-recording.md).
 
 The local corpus is parked at 16 of 19 cases and neither of these two is among
 the three that fail, so both should record. If either does not, that is the

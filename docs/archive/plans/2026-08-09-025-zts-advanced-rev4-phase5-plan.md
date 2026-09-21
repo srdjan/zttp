@@ -1,5 +1,10 @@
 # Phase 5: Bytes, ABI Re-typing, Defaults, and the Effects Ceiling - Implementation Plan
 
+Archive status, reviewed 2026-09-21: Completed language phase. The closed
+advanced-language program record confirms phases 0 through 7 are delivered.
+The plan and checkpoint text below preserve their original baseline. Current
+work status is in [Roadmap](../../roadmap.md).
+
 **Goal:** Give the profile its binary value and its typed framework boundary.
 `Bytes` as a real value kind with an immutable pure surface, `zttp:bytes` over
 it, the HTTP, WebSocket, queue, and durable ABIs re-typed to the shapes spec
@@ -12,7 +17,7 @@ ceiling-rule repair tests.
 **Source of truth:** `docs/zts-formal-spec-northstar-advanced.md` revision 4,
 sections 6.3, 7.2, 5.2's default-parameter paragraph, and 5.7's ceiling
 sentence; plus
-[D2 effects and purity](2026-07-30-015-d2-effects-purity-design.md) sections 4
+[D2 effects and purity](../../plans/2026-07-30-015-d2-effects-purity-design.md) sections 4
 and 5, which own the ceiling decisions this phase consumes.
 
 ## Scope decisions, stated before the tasks

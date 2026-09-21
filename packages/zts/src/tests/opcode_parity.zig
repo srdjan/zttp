@@ -6,7 +6,7 @@
 //!
 //! This was a parity gate across three execution tiers. The optimized and
 //! baseline JIT tiers were removed (see
-//! docs/plans/2026-07-28-001-reset-simplification-plan.md, section 8.1), leaving
+//! docs/archive/plans/2026-07-28-001-reset-simplification-plan.md, section 8.1), leaving
 //! the interpreter as the single execution path, so the cross-tier comparison
 //! has nothing left to compare. The corpus and its expected values are kept:
 //! they are the substantive coverage, and they are what a future second

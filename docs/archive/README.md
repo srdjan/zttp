@@ -1,11 +1,12 @@
 # Archive
 
-Dated records of work that is finished. Nothing here is maintained, nothing
-here is a gate, and nothing here is guaranteed to describe the current system.
-Read it for why a decision was made, never for how the code works today.
+Dated records of completed work, superseded plans, and past investigations.
+Their technical content is historical. Read them for decisions and evidence;
+use maintained docs for current behavior. Links can change when records move.
 
-Every claim in these files was true when it was written. Paths, command names,
-and file layouts have moved since. The prose bans in
+Claims and unchecked tasks describe the named baseline. Later corrections can
+supersede them. Paths, command names, and file layouts have moved since. The
+prose bans in
 `scripts/check-docs-drift.sh` skip this directory for exactly that reason: a
 record that documents retiring a path has to be able to name the path it
 retired.
@@ -35,25 +36,16 @@ Both are worth reading before proposing work in those areas: several entries
 record a measurement that did not support the expectation the item was written
 on, which is the part a summary would drop.
 
-Still live, and deliberately not archived:
+The 2026-09-21 backlog cleanup moved the remaining closed language phases,
+module split, boundary-type increment, local-provider cutover, corpus and
+coverage investigations, artifact and guard work, ledger invariant plans,
+and bounded rederive records here. Their status notes distinguish delivered
+scope from deferred work. The reset ledger is historical; its open questions
+are retained in the roadmap.
 
-- `docs/plans/2026-07-28-001-reset-simplification-plan.md`, because three items
-  across waves 4 and 5 are unfinished. It archives itself once they close;
-  `docs/roadmap.md` names what is left.
-- The three `zts-advanced-1` companion design documents, D1 to D3. They are
-  reference specifications that later phases consume, not plans to execute.
-  Their master plan and the executed phase 0 and phase 1 plans are here in
-  `plans/`; `docs/roadmap.md` carries the remaining phase map.
-- The phase 2 through phase 7 plans, and the local-LFM cutover plan. Each phase
-  is closed, but `docs/roadmap.md` links its row to the plan that recorded what
-  the phase actually found, so archiving them would break the roadmap's
-  evidence trail.
-- The completed artifact-level proof-carrying-code plan. Its residual runtime
-  guard companion uses the original path as a stable prerequisite reference,
-  and the roadmap records that the prerequisite is complete.
-- `docs/solutions/`, which agents are pointed at and which is not planning
-  residue.
+D1, D2, and D3 remain [design references](../plans/README.md). The custom
+agent-handler specification remains a parked proposal there. Recurring bug
+classes remain maintained under [solutions](../solutions/).
 
-`docs/roadmap.md` is the only forward-looking document in the maintained docs.
-When a plan here contradicts it, the roadmap is current and the plan is
-history.
+[Roadmap](../roadmap.md) owns current work status and scheduling. An archived
+instruction or unchecked task does not authorize another execution.

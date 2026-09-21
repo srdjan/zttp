@@ -1,5 +1,10 @@
 # InvalidChangeSetArgs: make it diagnosable before deciding anything else
 
+Archive status, reviewed 2026-09-21: Closed investigation. Both diagnostic
+steps landed in `7c3a337e` and `87cf11a0`. A new observed occurrence is
+required before proposing another fix. Current work status is in
+[Roadmap](../../roadmap.md).
+
 Status: both diagnosis steps landed 2026-08-17. Step 1 named the shape; step 2
 keeps the body. Step 3 - choosing a fix - waits on an observed occurrence.
 

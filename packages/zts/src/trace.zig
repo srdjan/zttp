@@ -2068,7 +2068,7 @@ test "parseTraceFile rejects response-less traces without a witness tag" {
 /// engine's built-ins transitively import the flow checker, the type checker,
 /// and the semantics registry. Removing them drops 26 files out of the engine's
 /// import closure. See
-/// docs/plans/2026-08-07-021-zts-three-module-split-plan.md.
+/// docs/archive/plans/2026-08-07-021-zts-three-module-split-plan.md.
 ///
 /// The allocator is expected to be an arena: the GC and heap records are
 /// allocated from it and reclaimed when it is torn down, so only the resources

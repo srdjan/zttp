@@ -1,5 +1,10 @@
 # Phase 3: source `null`, recursive aliases, match upgrades - Implementation Plan
 
+Archive status, reviewed 2026-09-21: Completed language phase. The closed
+advanced-language program record confirms phases 0 through 7 are delivered.
+The plan and checkpoint text below preserve their original baseline. Current
+work status is in [Roadmap](../../roadmap.md).
+
 **Goal:** Admit the three source forms phase 4's data abstractions are written
 in. `null` as explicit data with the absence-operator rule that keeps it from
 being swallowed, contractive recursive aliases over the finite named type graph,

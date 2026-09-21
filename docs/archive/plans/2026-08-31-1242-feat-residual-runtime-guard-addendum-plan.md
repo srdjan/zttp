@@ -8,12 +8,17 @@ artifact_contract: ce-unified-plan/v1
 artifact_readiness: implementation-ready
 product_contract_source: ce-plan-bootstrap
 execution: code
-related_plan: docs/plans/2026-08-31-1147-feat-artifact-proof-carrying-code-plan.md
+related_plan: docs/archive/plans/2026-08-31-1147-feat-artifact-proof-carrying-code-plan.md
 resolved_against: 99bb0289
-status: planned
+status: complete
 ---
 
 # Residual Runtime Guard Addendum - Plan
+
+Archive status, reviewed 2026-09-21: Delivered for env, egress, and cache.
+`52bcd919` exposed assurance surfaces and `58f30552` landed the enforcement
+cutover. Computed SQL remains deferred because policy cannot distinguish read
+and write authority. Current work status is in [Roadmap](../../roadmap.md).
 
 ## Goal Capsule
 
@@ -119,7 +124,7 @@ Everything below is read from the tree, not from the earlier draft.
 This addendum introduces a CCured-style hybrid acceptance path for a narrow class of Zttp operations. The compiler continues to prove every Property it claims. When it cannot resolve the resource selected by a supported capability operation, it may emit a residual runtime obligation instead of rejecting the handler, but only when the consumer proves complete guard coverage and the runtime enforces the bound policy before the operation crosses its effect boundary.
 
 This is a separate companion to the completed
-`docs/plans/2026-08-31-1147-feat-artifact-proof-carrying-code-plan.md`. It does
+`docs/archive/plans/2026-08-31-1147-feat-artifact-proof-carrying-code-plan.md`. It does
 not amend or renumber that plan. It starts from the checker, executable-graph
 binding, and proof-checked runtime contract that plan delivered.
 
@@ -258,7 +263,7 @@ The runtime already observes three of the four resource values immediately befor
 
 - Necula, [Proof-Carrying Code, POPL 1997](https://homes.cs.washington.edu/~mernst/teaching/6.893/readings/necula-popl97.pdf), for consumer-owned policy, obligation generation, small independent checking, and safe activation only after acceptance.
 - Necula, McPeak, and Weimer, [CCured: Type-Safe Retrofitting of Legacy Code](https://dl.acm.org/doi/10.1145/2442776.2442786), for inferring the minimum dynamic portion and inserting runtime checks for residual uncertainty.
-- `docs/plans/2026-08-31-1147-feat-artifact-proof-carrying-code-plan.md` for the independent checker, executable-graph binding, proof-checked contract, and unchanged dynamic-control boundary this addendum requires.
+- `docs/archive/plans/2026-08-31-1147-feat-artifact-proof-carrying-code-plan.md` for the independent checker, executable-graph binding, proof-checked contract, and unchanged dynamic-control boundary this addendum requires.
 - `packages/zts/src/strict_checker.zig` `checkCall` and `literalRequiredArg` for the current unconditional `ZTS602` rejection and its five module surfaces.
 - `packages/zts/src/handler_policy.zig` `contractToRuntimePolicy`, `RuntimeAllowList.allows`, `parsePolicyJson` for the permissive dynamic projection and the configured policy format.
 - `packages/zts/src/module_binding/capabilities.zig` `readEnvForActiveModule`, `packages/modules/src/data/cache.zig` `denyIfNamespaceBlocked`, and `packages/modules/src/data/sql.zig` `executeQuery` for the three sinks that already check before their effects.

@@ -241,7 +241,7 @@ Out of scope:
   JSON, or coverage Markdown by hand.
 - Manually editing any changelog or generated/vendor directory.
 - Phase 7 model-minimal syntax work under
-  `docs/plans/2026-08-09-024-zts-model-minimal-phase7-plan.md`.
+  `docs/archive/plans/2026-08-09-024-zts-model-minimal-phase7-plan.md`.
 - Unrelated cleanup in the existing dirty working tree.
 
 ## Git and workflow guidance

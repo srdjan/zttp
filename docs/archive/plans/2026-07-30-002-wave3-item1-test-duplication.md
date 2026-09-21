@@ -2,7 +2,7 @@
 
 **Status:** done. No refactor was needed; the item's premise no longer held.
 
-**Source:** wave 3 item 1 of `docs/plans/2026-07-28-001-reset-simplification-plan.md`:
+**Source:** wave 3 item 1 of `docs/archive/plans/2026-07-28-001-reset-simplification-plan.md`:
 "Stop double-executing the zruntime and server suites. `main.zig:10-18` imports both
 `zruntime.zig` and `server.zig` into the aggregate test root while standalone roots run the
 same tests again."

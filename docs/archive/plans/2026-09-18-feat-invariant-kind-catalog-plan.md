@@ -1,6 +1,13 @@
 # ZTTP Invariant Kind Catalog
 
-## Purpose and current baseline
+Archive status, reviewed 2026-09-21: Implemented. Delivery from `d571a6ed`
+through `0df4e7f2` added per-kind metadata, schema 2, Zig authoring and drift
+tooling, linked-adapter evidence, declared-account enforcement, and status
+reporting. Current behavior is in the verification guide. The baseline and
+intended steps below describe the original plan. Current work status is in
+[Roadmap](../../roadmap.md).
+
+## Purpose and original baseline
 
 Extend the implemented balance invariant with a closed catalog over the protected
 ledger. Developers select a supported kind and review its canonical description.
@@ -9,12 +16,12 @@ it cannot verify an arbitrary sentence or authorize an artifact.
 
 Refreshed against `6ad648ae` on 2026-09-19. The changes since the foundation commit
 `f0d8c5e8` are this catalog plan and the No Python rule in `AGENTS.md`. The catalog
-is not implemented. This plan continues
+was not implemented at that baseline. This plan continues
 [ZTTP Application Invariants](2026-09-18-feat-application-invariants-plan.md).
 It preserves that plan's exclusion of general predicates and automatic migration.
 This refresh used source inspection, not new test results.
 
-The current implementation has one kind, `balance_conservation_v1`, and two
+The original implementation had one kind, `balance_conservation_v1`, and two
 operations, `post` and `balance`. These are separate catalogs. The kernel owns
 specification schema 1 and a fixed adapter identity in
 `packages/proof-checker/src/invariant.zig`. The native module enforces conservation

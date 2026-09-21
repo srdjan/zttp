@@ -1,5 +1,11 @@
 # ZTTP Application Invariants
 
+Archive status, reviewed 2026-09-21: Implemented foundation at `f0d8c5e8`,
+followed by the closed invariant catalog delivery. The full repository gate
+subsequently passed at `9be65e0d`, as recorded in the bounded rederive record.
+The pending validation and broken-link statements below describe the earlier
+checkpoint. Current work status is in [Roadmap](../../roadmap.md).
+
 This is the implemented foundation, through commit `f0d8c5e8`. The next work is
 defined in [ZTTP Invariant Kind Catalog](2026-09-18-feat-invariant-kind-catalog-plan.md).
 That plan adds a closed catalog and replaces the invariant feature's Python

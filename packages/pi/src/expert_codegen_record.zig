@@ -3836,7 +3836,7 @@ const deepseek_coverage_baseline = [_][]const u8{
 // intersection - a floor under model behaviour, not under compiler coverage,
 // and re-pinning it cannot make it the second. What the corpus does not
 // exercise is scoped in
-// docs/plans/2026-08-26-034-rule-coverage-widening-scope.md; closing it needs
+// docs/archive/plans/2026-08-26-034-rule-coverage-widening-scope.md; closing it needs
 // cases built for the purpose, not a better draw.
 //
 // Moved again on 2026-09-20, and again by a prompt edit rather than a compiler

@@ -14,7 +14,7 @@
 //! callers are the type checker, the handler verifier, and the analysis
 //! pipeline. It is analysis code that happened to be filed with the module
 //! implementations. See
-//! docs/plans/2026-08-07-021-zts-three-module-split-plan.md.
+//! docs/archive/plans/2026-08-07-021-zts-three-module-split-plan.md.
 
 const std = @import("std");
 const type_pool_mod = @import("type_pool.zig");

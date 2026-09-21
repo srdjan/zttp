@@ -1,5 +1,10 @@
 # Reset and Simplification Plan
 
+Archive status, reviewed 2026-09-21: Historical ledger. Remaining collector,
+shape-helper, evaluator, and VM-loop questions are tracked in the roadmap. The
+shared compile-time parser landed in `61950ed9`; the old deletion estimate is
+obsolete. Current work status is in [Roadmap](../../roadmap.md).
+
 Date: 2026-07-28. Baseline commit: 113022e3. Status: findings and proposed plan, not
 yet approved.
 

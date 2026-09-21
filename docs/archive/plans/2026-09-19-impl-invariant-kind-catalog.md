@@ -1,5 +1,11 @@
 # Invariant Kind Catalog Implementation Plan
 
+Archive status, reviewed 2026-09-21: Implemented. Delivery from `d571a6ed`
+through `0df4e7f2` closed the selected units and added rejection probes. The
+full gate subsequently passed at `9be65e0d`, as recorded in the bounded
+rederive record. The original checklist below is historical, not pending work.
+Current work status is in [Roadmap](../../roadmap.md).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Grow the accepted invariant catalog from one closed template to a closed, gated set of kinds over the protected ledger, adding `declared_accounts_v1` end to end.
@@ -8,7 +14,7 @@
 
 **Tech Stack:** Zig 0.16.0 stable, SQLite via the module SDK, the existing proof-checker acceptance kernel.
 
-**Spec:** [docs/plans/2026-09-18-feat-invariant-kind-catalog-plan.md](2026-09-18-feat-invariant-kind-catalog-plan.md). That document is the design and carries the reasoning; this one is its execution order. Executors read both.
+**Spec:** [docs/archive/plans/2026-09-18-feat-invariant-kind-catalog-plan.md](2026-09-18-feat-invariant-kind-catalog-plan.md). That document is the design and carries the reasoning; this one is its execution order. Executors read both.
 
 **Plan location note:** this repository keeps plans in `docs/plans/`, so that convention is used instead of the skill default.
 

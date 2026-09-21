@@ -8,7 +8,7 @@
 //! `module_manifest.zig` made the parser import the manifest parser, the module
 //! binding registry and the data-label lattice to test whether a string starts
 //! with "zttp:". This file has no dependency at all. See
-//! docs/plans/2026-08-07-021-zts-three-module-split-plan.md.
+//! docs/archive/plans/2026-08-07-021-zts-three-module-split-plan.md.
 
 const std = @import("std");
 

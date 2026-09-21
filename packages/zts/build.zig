@@ -22,7 +22,7 @@ pub fn build(b: *std.Build) void {
     // compile a second copy of the file into the importing module, and the two
     // copies' types would not be interchangeable.
     // `scripts/check-zts-layering.sh` fails on that; see
-    // docs/plans/2026-08-07-021-zts-three-module-split-plan.md.
+    // docs/archive/plans/2026-08-07-021-zts-three-module-split-plan.md.
     const base_mod = b.addModule("zts-base", .{
         .root_source_file = b.path("src/base_root.zig"),
         .target = target,

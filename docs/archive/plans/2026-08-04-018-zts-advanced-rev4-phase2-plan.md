@@ -1,5 +1,10 @@
 # Phase 2: type-system rock - Implementation Plan
 
+Archive status, reviewed 2026-09-21: Completed language phase. The closed
+advanced-language program record confirms phases 0 through 7 are delivered.
+The plan and checkpoint text below preserve their original baseline. Current
+work status is in [Roadmap](../../roadmap.md).
+
 **Goal:** Land D1 in the engine. Sound generic inference and instantiation,
 constraints and explicit type arguments before inference, the closed narrowing
 list with its kill rules, and canonical type serialization as the identity

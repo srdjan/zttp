@@ -9,7 +9,7 @@ const std = @import("std");
 /// defined here and only re-exported by `handler_contract.zig`, which adds the
 /// JSON reader and writer on top. Taking the alias route meant `context.zig`,
 /// which imports this file, dragged both serializers along. See
-/// docs/plans/2026-08-07-021-zts-three-module-split-plan.md.
+/// docs/archive/plans/2026-08-07-021-zts-three-module-split-plan.md.
 const contract_mod = @import("zts-contracts").contract_types;
 const endpoint = @import("zts-base").endpoint;
 const guard_catalog = @import("zts-base").guard_catalog;

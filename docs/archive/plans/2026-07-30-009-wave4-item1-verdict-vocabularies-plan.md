@@ -1,6 +1,6 @@
 # Wave 4 item 1: collapse the verdict vocabularies
 
-Item 1 of `docs/plans/2026-07-28-001-reset-simplification-plan.md` reads: "Collapse the four
+Item 1 of `docs/archive/plans/2026-07-28-001-reset-simplification-plan.md` reads: "Collapse the four
 verdict vocabularies onto one type, and delete the hand-mirrored enum at
 `proof-review/review.zig:27-30`."
 

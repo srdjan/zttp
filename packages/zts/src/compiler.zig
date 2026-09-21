@@ -6,7 +6,7 @@
 //! `CompileUnit` list, and a shared `ThreadSafeInternPool`) was removed during
 //! the reset: it had no caller anywhere in the repository, and its only
 //! importer used these two functions. See
-//! docs/plans/2026-07-28-001-reset-simplification-plan.md.
+//! docs/archive/plans/2026-07-28-001-reset-simplification-plan.md.
 
 const std = @import("std");
 const parser = @import("zts-engine").parser;

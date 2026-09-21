@@ -14,7 +14,7 @@
 //! can leave the interpreter subtree out of the module graph entirely.
 //!
 //! Tier membership is recorded in `scripts/zts-tiers.allow`. See
-//! docs/plans/2026-08-07-021-zts-three-module-split-plan.md.
+//! docs/archive/plans/2026-08-07-021-zts-three-module-split-plan.md.
 
 const std = @import("std");
 const build_options = @import("build_options");

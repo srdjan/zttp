@@ -17,7 +17,7 @@
 //! `scripts/check-zts-layering.sh` fails on it, and so does zig.
 //!
 //! Tier membership is recorded in `scripts/zts-tiers.allow`. See
-//! docs/plans/2026-08-07-021-zts-three-module-split-plan.md.
+//! docs/archive/plans/2026-08-07-021-zts-three-module-split-plan.md.
 
 /// The contract's data types: routes, env vars, egress hosts, capabilities,
 /// properties, and the rest of what a build proves about a handler.

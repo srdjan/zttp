@@ -21,7 +21,7 @@
 # The split is done: all five modules exist and there are zero cross-tier
 # relative imports. Moving a file between tiers is a deliberate edit: say why in
 # the commit, and expect both this gate and zig itself to name whatever the move
-# breaks. See docs/plans/2026-08-07-021-zts-three-module-split-plan.md.
+# breaks. See docs/archive/plans/2026-08-07-021-zts-three-module-split-plan.md.
 #
 # Same-tier imports are unconstrained. This file pins the direction between
 # tiers, not the size of any tier's surface; scripts/module-boundary.allow does
