@@ -47,6 +47,11 @@ wasm-playground-publish release-operation
 # every build would bill every build.
 expert-qualification manual-model-spend
 
+# Requires an explicit run mode and a new evidence directory; live mode spends
+# model credits and needs authorization. `test-provable-reach` covers the
+# offline admission, report, and runner checks automatically.
+provable-reach manual-model-spend
+
 # Needs a local MLX server, which this project never starts or manages. The
 # absence from the aggregate step is stated at its definition in build.zig.
 test-expert-mlx-e2e needs-local-server
