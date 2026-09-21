@@ -11,6 +11,7 @@ const Io = std.Io;
 const http_types = @import("http_types.zig");
 const attest_header_strings = @import("attest/header_strings.zig");
 const attest_well_known = @import("attest/well_known.zig");
+const statusTextFor = @import("zts").statusTextFor;
 
 const HttpResponse = http_types.HttpResponse;
 
@@ -236,33 +237,7 @@ pub fn appendAttestationHeaders(
 }
 
 pub fn getStatusText(status: u16) []const u8 {
-    return switch (status) {
-        100 => "Continue",
-        101 => "Switching Protocols",
-        103 => "Early Hints",
-        200 => "OK",
-        201 => "Created",
-        204 => "No Content",
-        301 => "Moved Permanently",
-        302 => "Found",
-        304 => "Not Modified",
-        400 => "Bad Request",
-        401 => "Unauthorized",
-        403 => "Forbidden",
-        404 => "Not Found",
-        405 => "Method Not Allowed",
-        413 => "Payload Too Large",
-        414 => "URI Too Long",
-        422 => "Unprocessable Entity",
-        429 => "Too Many Requests",
-        431 => "Request Header Fields Too Large",
-        500 => "Internal Server Error",
-        501 => "Not Implemented",
-        502 => "Bad Gateway",
-        503 => "Service Unavailable",
-        504 => "Gateway Timeout",
-        else => "Unknown",
-    };
+    return statusTextFor(status);
 }
 
 /// Pre-computed status lines for common status codes.
@@ -330,6 +305,47 @@ test "get status text" {
     try std.testing.expectEqualStrings("OK", getStatusText(200));
     try std.testing.expectEqualStrings("Not Found", getStatusText(404));
     try std.testing.expectEqualStrings("Internal Server Error", getStatusText(500));
+}
+
+test "dynamic status lines use canonical status text" {
+    const cases = [_]struct {
+        status: u16,
+        line: []const u8,
+    }{
+        .{ .status = 201, .line = "HTTP/1.1 201 Created\r\n" },
+        .{ .status = 202, .line = "HTTP/1.1 202 Accepted\r\n" },
+        .{ .status = 408, .line = "HTTP/1.1 408 Request Timeout\r\n" },
+        .{ .status = 502, .line = "HTTP/1.1 502 Bad Gateway\r\n" },
+        .{ .status = 599, .line = "HTTP/1.1 599 Network Connect Timeout Error\r\n" },
+        .{ .status = 418, .line = "HTTP/1.1 418 Unknown\r\n" },
+    };
+
+    for (cases) |case| {
+        inline for (.{ false, true }) |prefer_precomputed| {
+            var buf: [128]u8 = undefined;
+            var pos: usize = 0;
+            try appendStatusLine(&buf, &pos, case.status, prefer_precomputed);
+            try std.testing.expectEqualStrings(case.line, buf[0..pos]);
+        }
+    }
+}
+
+test "precomputed status lines match canonical lookup" {
+    var observed: usize = 0;
+    for (100..600) |raw_status| {
+        const status: u16 = @intCast(raw_status);
+        if (getStatusLine(status)) |cached| {
+            var expected_buf: [64]u8 = undefined;
+            const expected = try std.fmt.bufPrint(
+                &expected_buf,
+                "HTTP/1.1 {d} {s}\r\n",
+                .{ status, statusTextFor(status) },
+            );
+            try std.testing.expectEqualStrings(expected, cached);
+            observed += 1;
+        }
+    }
+    try std.testing.expect(observed > 0);
 }
 
 test "dynamic response headers omit content length when status forbids a body" {

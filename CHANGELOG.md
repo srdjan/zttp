@@ -10,6 +10,13 @@ For releases prior to v0.16 see git tags and [RELEASE_CHECKLIST.md](RELEASE_CHEC
 
 ## [Unreleased]
 
+### Fixed
+
+- Response objects and HTTP wire output now use the same status text, including
+  `202 Accepted`, `408 Request Timeout`, `413 Payload Too Large`,
+  `502 Bad Gateway`, and `599 Network Connect Timeout Error`. Fetch responses
+  retain reason phrases supplied by the upstream server or replay record.
+
 ## [0.20.0] - 2026-09-09
 
 ### Breaking changes

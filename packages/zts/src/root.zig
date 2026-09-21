@@ -193,6 +193,7 @@ pub const InlineCache = object.InlineCache;
 pub const JSString = string.JSString;
 pub const StringTable = string.StringTable;
 pub const createString = string.createString;
+pub const statusTextFor = base.status_text.forCode;
 pub const Parser = parser.Parser;
 /// Read-only view over a parsed IR store, for walking a program without
 /// holding the parser.

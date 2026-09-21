@@ -2630,6 +2630,55 @@ test "Headers Request and Response factories share the HTTP model" {
     try std.testing.expectEqualStrings("done", obj.get("responseText").?.string);
 }
 
+test "Response factories expose canonical status text" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const rt = try HandlerInstance.init(allocator, .{});
+    defer rt.deinit();
+
+    try rt.loadHandler(
+        \\function handler(req) {
+        \\  const cached = Response("created", { status: 201 });
+        \\  const badGateway = Response.json({ error: true }, { status: 502 });
+        \\  const networkTimeout = Response.rawJson("{}", { status: 599 });
+        \\  const accepted = Response.text("pending", { status: 202 });
+        \\  const requestTimeout = Response.html("", { status: 408 });
+        \\  const unknown = Response("teapot", { status: 418 });
+        \\  return Response.json({
+        \\    cached: cached.statusText,
+        \\    badGateway: badGateway.statusText,
+        \\    networkTimeout: networkTimeout.statusText,
+        \\    accepted: accepted.statusText,
+        \\    requestTimeout: requestTimeout.statusText,
+        \\    unknown: unknown.statusText
+        \\  });
+        \\}
+    , "<response-status-text>");
+
+    var request = HttpRequestOwned{
+        .method = try allocator.dupe(u8, "GET"),
+        .url = try allocator.dupe(u8, "/"),
+        .headers = .empty,
+        .body = null,
+    };
+    defer request.deinit(allocator);
+
+    var response = try rt.executeHandler(request.asView());
+    defer response.deinit();
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, response.body, .{});
+    defer parsed.deinit();
+    const obj = parsed.value.object;
+    try std.testing.expectEqualStrings("Created", obj.get("cached").?.string);
+    try std.testing.expectEqualStrings("Bad Gateway", obj.get("badGateway").?.string);
+    try std.testing.expectEqualStrings("Network Connect Timeout Error", obj.get("networkTimeout").?.string);
+    try std.testing.expectEqualStrings("Accepted", obj.get("accepted").?.string);
+    try std.testing.expectEqualStrings("Request Timeout", obj.get("requestTimeout").?.string);
+    try std.testing.expectEqualStrings("Unknown", obj.get("unknown").?.string);
+}
+
 test "body readers are single-use for inbound and constructed HTTP objects" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -3604,14 +3653,14 @@ test "zttp fetch replay consumes traced inner and outer rows and preserves heade
             .module = "http",
             .func = "fetchSync",
             .args_json = "[\"http://example.com/weather\"]",
-            .result_json = "{\"status\":200,\"statusText\":\"OK\",\"ok\":true,\"headers\":{\"content-type\":\"application/json\",\"x-request-id\":\"trace-123\"},\"body\":\"{\\\"temperature\\\":21}\"}",
+            .result_json = "{\"status\":200,\"statusText\":\"Origin Supplied\",\"ok\":true,\"headers\":{\"content-type\":\"application/json\",\"x-request-id\":\"trace-123\"},\"body\":\"{\\\"temperature\\\":21}\"}",
         },
         .{
             .seq = 1,
             .module = "fetch",
             .func = "fetch",
             .args_json = "[\"http://example.com/weather\"]",
-            .result_json = "{\"status\":200,\"statusText\":\"OK\",\"ok\":true,\"headers\":{\"content-type\":\"application/json\",\"x-request-id\":\"trace-123\"},\"body\":\"{\\\"temperature\\\":21}\"}",
+            .result_json = "{\"status\":200,\"statusText\":\"Origin Supplied\",\"ok\":true,\"headers\":{\"content-type\":\"application/json\",\"x-request-id\":\"trace-123\"},\"body\":\"{\\\"temperature\\\":21}\"}",
         },
         .{
             .seq = 2,
@@ -3640,6 +3689,7 @@ test "zttp fetch replay consumes traced inner and outer rows and preserves heade
         \\  const response = fetch("http://example.com/weather");
         \\  const body = response.json();
         \\  return Response.json({
+        \\    statusText: response.statusText,
         \\    requestId: response.headers.get("x-request-id"),
         \\    contentType: response.headers.get("content-type"),
         \\    temperature: body.temperature,
@@ -3663,6 +3713,7 @@ test "zttp fetch replay consumes traced inner and outer rows and preserves heade
     var parsed = try std.json.parseFromSlice(std.json.Value, allocator, response.body, .{});
     defer parsed.deinit();
     const obj = parsed.value.object;
+    try std.testing.expectEqualStrings("Origin Supplied", obj.get("statusText").?.string);
     try std.testing.expectEqualStrings("trace-123", obj.get("requestId").?.string);
     try std.testing.expectEqualStrings("application/json", obj.get("contentType").?.string);
     try std.testing.expectEqual(@as(i64, 21), obj.get("temperature").?.integer);

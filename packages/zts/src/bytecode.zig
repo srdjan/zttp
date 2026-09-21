@@ -4,6 +4,7 @@
 
 const std = @import("std");
 const compat = @import("zts-base").compat;
+const statusTextFor = @import("zts-base").status_text.forCode;
 const value = @import("value.zig");
 const object = @import("object.zig");
 
@@ -562,7 +563,7 @@ pub const HandlerPattern = struct {
             1 => "text/plain; charset=utf-8",
             else => "text/html; charset=utf-8",
         };
-        const status_text = getStatusText(self.status);
+        const status_text = statusTextFor(self.status);
 
         // Calculate total size needed
         // "HTTP/1.1 XXX STATUS\r\nContent-Type: ...\r\nContent-Length: NNN\r\nConnection: keep-alive\r\n\r\nBODY"
@@ -600,28 +601,30 @@ pub const HandlerPattern = struct {
     }
 };
 
-/// Get HTTP status text
-fn getStatusText(status: u16) []const u8 {
-    return switch (status) {
-        200 => "OK",
-        201 => "Created",
-        204 => "No Content",
-        301 => "Moved Permanently",
-        302 => "Found",
-        304 => "Not Modified",
-        400 => "Bad Request",
-        401 => "Unauthorized",
-        403 => "Forbidden",
-        404 => "Not Found",
-        405 => "Method Not Allowed",
-        422 => "Unprocessable Entity",
-        429 => "Too Many Requests",
-        500 => "Internal Server Error",
-        502 => "Bad Gateway",
-        503 => "Service Unavailable",
-        504 => "Gateway Timeout",
-        else => "Unknown",
+test "prebuilt response uses canonical status text" {
+    const cases = [_]struct {
+        status: u16,
+        status_line: []const u8,
+    }{
+        .{ .status = 413, .status_line = "HTTP/1.1 413 Payload Too Large\r\n" },
+        .{ .status = 202, .status_line = "HTTP/1.1 202 Accepted\r\n" },
+        .{ .status = 599, .status_line = "HTTP/1.1 599 Network Connect Timeout Error\r\n" },
     };
+
+    for (cases) |case| {
+        var pattern = HandlerPattern{
+            .pattern_type = .exact,
+            .url_atom = .null,
+            .url_bytes = try std.testing.allocator.dupe(u8, "/"),
+            .static_body = try std.testing.allocator.dupe(u8, "body"),
+            .status = case.status,
+            .content_type_idx = 1,
+        };
+        defer pattern.deinit(std.testing.allocator);
+
+        try pattern.buildPrebuiltResponse(std.testing.allocator);
+        try std.testing.expect(std.mem.startsWith(u8, pattern.prebuilt_response.?, case.status_line));
+    }
 }
 
 /// Fast dispatch table for handler

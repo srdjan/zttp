@@ -538,7 +538,7 @@ pub fn buildPendingDurableResponseValue(rt: *HandlerInstance) !zq.JSValue {
     }
 
     try body.appendSlice(rt.allocator, "}}");
-    const created = try createFetchResponse(rt, 202, "Accepted", body.items, "application/json");
+    const created = try createFetchResponse(rt, 202, statusTextFor(202), body.items, "application/json");
     return created.value;
 }
 

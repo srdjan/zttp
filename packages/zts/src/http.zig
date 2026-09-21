@@ -16,6 +16,7 @@ const bytes_mod = @import("bytes.zig");
 const dict_mod = @import("dict.zig");
 const helpers = @import("builtins/helpers.zig");
 const json_mod = @import("modules/data/json_mod.zig");
+const statusTextFor = @import("zts-base").status_text.forCode;
 
 // ============================================================================
 // Function Component Callback
@@ -138,22 +139,7 @@ pub fn createResponse(
 
         resp_obj.setSlot(shapes.response.status_slot, value.JSValue.fromInt(@intCast(status)));
 
-        const status_text_val: value.JSValue = if (ctx.getCachedStatusText(status)) |cached| value.JSValue.fromPtr(cached) else blk: {
-            const status_text = switch (status) {
-                200 => "OK",
-                201 => "Created",
-                204 => "No Content",
-                301 => "Moved Permanently",
-                302 => "Found",
-                400 => "Bad Request",
-                401 => "Unauthorized",
-                403 => "Forbidden",
-                404 => "Not Found",
-                500 => "Internal Server Error",
-                else => "Unknown",
-            };
-            break :blk try ctx.createString(status_text);
-        };
+        const status_text_val: value.JSValue = if (ctx.getCachedStatusText(status)) |cached| value.JSValue.fromPtr(cached) else try ctx.createString(statusTextFor(status));
         resp_obj.setSlot(shapes.response.status_text_slot, status_text_val);
 
         resp_obj.setSlot(shapes.response.ok_slot, value.JSValue.fromBool(status >= 200 and status < 300));
@@ -177,20 +163,7 @@ pub fn createResponse(
 
     // Set statusText
     const status_text_atom = if (ctx.http.strings) |cache| cache.status_text_atom else try ctx.atoms.intern("statusText");
-    const status_text = switch (status) {
-        200 => "OK",
-        201 => "Created",
-        204 => "No Content",
-        301 => "Moved Permanently",
-        302 => "Found",
-        400 => "Bad Request",
-        401 => "Unauthorized",
-        403 => "Forbidden",
-        404 => "Not Found",
-        500 => "Internal Server Error",
-        else => "Unknown",
-    };
-    const status_text_val: value.JSValue = if (ctx.getCachedStatusText(status)) |cached| value.JSValue.fromPtr(cached) else try ctx.createString(status_text);
+    const status_text_val: value.JSValue = if (ctx.getCachedStatusText(status)) |cached| value.JSValue.fromPtr(cached) else try ctx.createString(statusTextFor(status));
     try ctx.setPropertyChecked(resp_obj, status_text_atom, status_text_val);
 
     // Set ok (status 200-299)
@@ -220,22 +193,7 @@ pub fn createResponseFromString(
         resp_obj.setSlot(shapes.response.body_slot, value.JSValue.fromPtr(body_str));
         resp_obj.setSlot(shapes.response.status_slot, value.JSValue.fromInt(@intCast(status)));
 
-        const status_text_val: value.JSValue = if (ctx.getCachedStatusText(status)) |cached| value.JSValue.fromPtr(cached) else blk: {
-            const status_text = switch (status) {
-                200 => "OK",
-                201 => "Created",
-                204 => "No Content",
-                301 => "Moved Permanently",
-                302 => "Found",
-                400 => "Bad Request",
-                401 => "Unauthorized",
-                403 => "Forbidden",
-                404 => "Not Found",
-                500 => "Internal Server Error",
-                else => "Unknown",
-            };
-            break :blk try ctx.createString(status_text);
-        };
+        const status_text_val: value.JSValue = if (ctx.getCachedStatusText(status)) |cached| value.JSValue.fromPtr(cached) else try ctx.createString(statusTextFor(status));
         resp_obj.setSlot(shapes.response.status_text_slot, status_text_val);
 
         resp_obj.setSlot(shapes.response.ok_slot, value.JSValue.fromBool(status >= 200 and status < 300));
@@ -258,20 +216,7 @@ pub fn createResponseFromString(
 
     // Set statusText
     const status_text_atom = if (ctx.http.strings) |cache| cache.status_text_atom else try ctx.atoms.intern("statusText");
-    const status_text = switch (status) {
-        200 => "OK",
-        201 => "Created",
-        204 => "No Content",
-        301 => "Moved Permanently",
-        302 => "Found",
-        400 => "Bad Request",
-        401 => "Unauthorized",
-        403 => "Forbidden",
-        404 => "Not Found",
-        500 => "Internal Server Error",
-        else => "Unknown",
-    };
-    const status_text_val: value.JSValue = if (ctx.getCachedStatusText(status)) |cached| value.JSValue.fromPtr(cached) else try ctx.createString(status_text);
+    const status_text_val: value.JSValue = if (ctx.getCachedStatusText(status)) |cached| value.JSValue.fromPtr(cached) else try ctx.createString(statusTextFor(status));
     try ctx.setPropertyChecked(resp_obj, status_text_atom, status_text_val);
 
     // Set ok (status 200-299)
@@ -1488,6 +1433,29 @@ test "createResponse" {
     const status = resp_obj.getProperty(pool, status_atom);
     try std.testing.expect(status != null);
     try std.testing.expectEqual(@as(i32, 200), status.?.getInt());
+}
+
+test "cached status text matches canonical lookup" {
+    const gc = @import("gc.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    var observed: usize = 0;
+    for (100..600) |raw_status| {
+        const status: u16 = @intCast(raw_status);
+        if (ctx.getCachedStatusText(status)) |cached| {
+            try std.testing.expectEqualStrings(statusTextFor(status), cached.data());
+            observed += 1;
+        }
+    }
+    try std.testing.expect(observed > 0);
 }
 
 test "Response helpers normalize invalid status" {
