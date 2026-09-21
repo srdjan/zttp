@@ -416,6 +416,7 @@ pub fn build(b: *std.Build) void {
         /// rather than relative imports, so their file graphs stay disjoint.
         pi_modules: bool = false,
         standin_only: bool = false,
+        needs_install: bool = false,
     };
 
     const host_test_roots = [_]HostTestRoot{
@@ -467,7 +468,8 @@ pub fn build(b: *std.Build) void {
         .{ .owner = .tools, .src = "src/project_config.zig", .step = "test-project-config", .desc = "Run project config discovery tests" },
         .{ .owner = .tools, .src = "src/proof_quest_fixture.zig", .step = "test-proof-quest-fixture", .desc = "Run proof quest fixture tests", .project_config = true },
         .{ .owner = .tools, .src = "src/openapi_manifest.zig", .step = "test-openapi-manifest", .desc = "Run OpenAPI manifest tests", .project_config = true },
-        .{ .owner = .pi, .src = "src/tests.zig", .step = "test-expert-app", .desc = "Run zts expert in-process app tests", .project_config = true, .pi_modules = true },
+        .{ .owner = .pi, .src = "src/tests.zig", .step = "test-expert-app", .desc = "Run zts expert in-process app tests", .project_config = true, .pi_modules = true, .needs_install = true },
+        .{ .owner = .pi, .src = "src/expert_reach_tests.zig", .step = "test-provable-reach", .desc = "Check bounded reach admission and report integrity (offline)", .project_config = true, .pi_modules = true, .needs_install = true },
         // Focused subset covering only the record/replay layer: runs offline,
         // never needs an API key, and does not transitively pull in the
         // tools/skills tests, so it stays fast.
@@ -524,6 +526,9 @@ pub fn build(b: *std.Build) void {
         if (root.standin_only) tests.root_module.addOptions("standin_range_doc", standin_range_doc);
         if (root.standin_only) tests.root_module.addOptions("unseeded_rules", unseeded_rules);
         host_test_runs[i] = b.addRunArtifact(tests);
+        if (root.needs_install) {
+            host_test_runs[i].step.dependOn(b.getInstallStep());
+        }
         b.step(root.step, root.desc).dependOn(&host_test_runs[i].step);
         // The residual gate's source comparison is useful only if its
         // behavioral evidence compiles and runs. Keep that dependency on the
@@ -724,6 +729,26 @@ pub fn build(b: *std.Build) void {
         "Assess three report-only expert qualification runs",
     );
     expert_qualification_step.dependOn(&expert_qualification_cmd.step);
+
+    // Repository-only reach measurement. A normal build or test never calls
+    // a model; the executable requires an explicit live mode and confirmation.
+    const reach_mod = b.createModule(.{
+        .root_source_file = pi_host_dep.path("src/expert_reach_main.zig"),
+        .target = b.graph.host,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{
+            .{ .name = "zts", .module = zts_host_mod },
+            .{ .name = "zts_cli", .module = pi_zts_cli_host_mod },
+            .{ .name = "project_config", .module = project_config_mod },
+        },
+    });
+    const reach_exe = b.addExecutable(.{ .name = "provable-reach", .root_module = reach_mod });
+    const reach_cmd = b.addRunArtifact(reach_exe);
+    reach_cmd.has_side_effects = true;
+    reach_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| reach_cmd.addArgs(args);
+    b.step("provable-reach", "Run reference admission, offline smoke, or an authorized fresh reach measurement").dependOn(&reach_cmd.step);
 
     const module_boundary = b.addSystemCommand(&.{ "/bin/bash", "scripts/test-module-boundary.sh" });
     const module_boundary_step = b.step("test-module-boundary", "Check consumer reach into zts internals against the allowlist");
