@@ -4,7 +4,8 @@ This measurement asks whether the default agent can solve a frozen set of tasks 
 Every task has a reference program that must pass the same compiler and runtime checks as the generated program.
 The report keeps every selected task, including model, transport, budget, and harness failures.
 
-There is no published fresh M3 result yet.
+There is no full-suite fresh M3 result yet.
+The approved one-task pilot passed on 2026-09-21; its measured result is below.
 An offline smoke result verifies the harness and does not measure the model.
 The [existing convergence corpus](convergence.md) remains a separate measurement.
 
@@ -90,7 +91,8 @@ zig build provable-reach -- --live --confirm-live --limit 1 --output /tmp/zttp-r
 
 Review the pilot's retained usage and outcome before authorizing the full eight-task run.
 The authoring limits stay the same for the larger run.
-Live runs have not been authorized in the M3 implementation session.
+The one-task pilot was authorized and completed on 2026-09-21.
+The full eight-task run still needs separate approval.
 
 Run the offline integrity suite with `zig build test-provable-reach`.
 It checks report membership, evidence origin, success evidence, and failure accounting.
@@ -101,3 +103,41 @@ The summary's `headline` is null for offline and pilot runs.
 `suite.json`, `tasks/`, `references/`, and `seeds/` retain the frozen task inputs and admission evidence.
 Each `cases/<task-id>/` directory retains generated source, its manifest, the transcript, compiler and runtime output, and `result.json` with observed usage.
 Live cases also retain provider exchanges and response diagnostics under `provider/`.
+
+## First live pilot
+
+Run `reach-live-1790001297-82545` used `deepseek-v4-flash` at clean source revision `d460a68ab5efe78f845400b416b64d78c3461a9c`.
+The source revision and clean state were unchanged after the run.
+All eight references were admitted before the one selected task began.
+The request-header whole-handler task reached acceptance with zero compiler errors, all nine required properties proven, and all five runtime checks passing.
+The report has `fresh_model` origin, `pilot` scope, and a null headline.
+It does not establish full-suite reach.
+
+| Observed quantity | Pilot result |
+|---|---|
+| Task wall time | 19,561 ms |
+| Full command time | 20.83 s |
+| Model round trips | 3 |
+| Tool calls | 4 |
+| Verification attempts | 1 |
+| Input tokens | 34,231 |
+| Output tokens | 3,850 |
+| Provider attempts | 3 |
+
+Raw provider usage reports 14,976 input tokens served from cache and 19,255 input tokens outside the cache.
+The adapter's normalized cache counters are zero for this run; use the raw responses for those cache totals.
+The retained evidence contains no billed dollar amount. Token counts do not establish the exact bill.
+
+The complete local evidence is retained outside the repository at `/Users/srdjans/Code/_TEAMOK/ZTTP-evidence/m3/reach-live-1790001297-82545/`.
+The original output remains at `/tmp/zttp-m3-live-pilot-20260921/`.
+No agent behavior, prompt, seed, or acceptance check was changed after the pilot.
+
+The proposed full run changes the task count to eight and uses a new output directory:
+
+```sh
+zig build provable-reach -- --live --confirm-live --limit 8 --output /tmp/zttp-reach-live-full
+```
+
+The limits remain 600,000 ms, 18 model round trips, 16 tool calls, and five verification attempts per task.
+Review all eight fresh outcomes together; do not replace a failed case with the pilot or a retry.
+The pilot's usage is one observation, not a prediction of the full run's cost or time.

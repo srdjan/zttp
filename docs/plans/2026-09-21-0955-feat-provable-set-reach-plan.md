@@ -223,7 +223,7 @@ Live cost and long-running command approval remain pending until the concrete ha
 
 ## Implementation record
 
-The offline implementation is complete. No paid model request was made.
+The offline implementation is complete. It used no paid model requests.
 The run guide is [docs/provable-reach.md](../provable-reach.md).
 M3 remains open until the authorized full fresh measurement exists.
 Local implementation commits are `eb136afd` for U2, `1796ecd5` for U1, and `c6393566` for U3.
@@ -257,7 +257,8 @@ Shared production APIs were not widened solely to remove small private wrappers.
 
 Code review: skipped (ce-code-review unavailable). Its required Python scope and stage-log helpers conflict with the repository's no-Python rule. The independent reviews and main-agent verification above are separate evidence, not a completed CE review receipt.
 
-The proposed next run is one fresh `deepseek-v4-flash` task with a 600,000-millisecond ceiling, 18 model round trips, 16 tool calls, and five verification attempts.
-The operator must approve API charges and a command that can exceed two minutes before running the live command in the guide.
-Actual live usage and billed cost still need measurement.
-The full eight-task live run needs a separate decision after the pilot result.
+The user approved the one-task live pilot after the offline implementation.
+Run `reach-live-1790001297-82545` completed at clean revision `d460a68ab5efe78f845400b416b64d78c3461a9c` with one reached result, three model round trips, four tool calls, and one verification attempt in 19,561 ms.
+The provider reported 34,231 input tokens and 3,850 output tokens. No billed dollar amount was returned.
+The [run guide](../provable-reach.md#first-live-pilot) records the acceptance checks, raw cache usage, local evidence location, and the next command.
+The full eight-task live run still needs separate approval; no failed result may be replaced by the pilot or a retry.
