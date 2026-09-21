@@ -219,13 +219,13 @@ Remove experimental code and temporary fixtures before committing.
 
 M3 itself is complete only after an authorized full fresh run has a retained report covering every task and failure under the frozen identities and budgets.
 A low reach result is a valid measurement; an incomplete or invalid report is not.
-Live cost and long-running command approval remain pending until the concrete handoff.
+The user approved the pilot and full live commands in separate handoffs.
 
 ## Implementation record
 
 The offline implementation is complete. It used no paid model requests.
 The run guide is [docs/provable-reach.md](../provable-reach.md).
-M3 remains open until the authorized full fresh measurement exists.
+M3 is complete with the authorized full fresh measurement recorded below.
 Local implementation commits are `eb136afd` for U2, `1796ecd5` for U1, and `c6393566` for U3.
 
 All eight references pass the absolute compiler, named-property, and runtime checks.
@@ -261,4 +261,21 @@ The user approved the one-task live pilot after the offline implementation.
 Run `reach-live-1790001297-82545` completed at clean revision `d460a68ab5efe78f845400b416b64d78c3461a9c` with one reached result, three model round trips, four tool calls, and one verification attempt in 19,561 ms.
 The provider reported 34,231 input tokens and 3,850 output tokens. No billed dollar amount was returned.
 The [run guide](../provable-reach.md#first-live-pilot) records the acceptance checks, raw cache usage, local evidence location, and the next command.
-The full eight-task live run still needs separate approval; no failed result may be replaced by the pilot or a retry.
+The user then separately approved the full eight-task live run.
+
+## Completion record
+
+Run `reach-live-1790002155-86713` completed on 2026-09-21 at clean revision `d5209b09fd08c8c27956d8afcfc5ced16bf13375`.
+The full fresh report records 8/8 reached: whole-handler 4/4 and typed-hole 4/4.
+Every selected task is present, every required property passed, and runtime acceptance passed 36/36 checks.
+The source remained unchanged during the run. Task, compiler, model, and budget identities matched the approved configuration.
+Independent Sol review and the main agent checked the retained evidence.
+
+The command took 167.68 seconds. Raw usage across 46 provider exchanges was 697,398 input tokens and 29,856 output tokens.
+Those totals include one context-compaction call omitted by the normalized turn summaries.
+No exact billed dollar amount was returned.
+No case was replaced, and no agent behavior or task acceptance was changed after the pilot.
+
+The [measurement record](../provable-reach.md#first-full-measurement) contains each outcome and the evidence location.
+The [machine-readable report](../provable-reach.json) retains all eight rows and the frozen identities.
+M3 is complete for this bounded suite. M2's full verification remains separate and pending.

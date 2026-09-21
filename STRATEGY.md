@@ -120,11 +120,11 @@ the latest recording trips 3 of the compiler's 59 advertised rules. Across recor
 of the same corpus it has ever tripped 6. The deterministic defect-seed suite verifies
 58 of 59 rules independently of model behavior, so those figures must remain separate.
 
-What is unmeasured: provable-set reach, the convergence metric itself. Given a reference
-suite of programs the compiler certifies green, the fraction the agent reproduces to
-green inside a fixed budget is one hundred percent minus the convergence gap. The
-[bounded reach harness](docs/provable-reach.md) now checks eight reference-backed tasks
-and retains every outcome. Its one-task DeepSeek pilot passed; the full fresh run still needs approval.
+Bounded provable-set reach is now measured. The first fresh DeepSeek run on 2026-09-21
+reached [8/8 reference-backed tasks](docs/provable-reach.md#first-full-measurement)
+within fixed budgets: four whole-handler and four typed-hole tasks. Every candidate
+passed absolute proof and runtime checks. This describes that small suite; reach over
+a wider task population remains unmeasured.
 The eval corpus is recorded once and replayed, so it cannot be tuned
 against without leaking the benchmark, and growing it is the binding constraint on every
 number this section cites.
@@ -158,13 +158,13 @@ Stated in three tiers, so a reader knows which numbers exist today.
   proof rather than `unproven`. `ledger stats` reports the median. It never stands
   alone: a handler that returns 501 on every path is fully green, so this pairs with a
   functional acceptance check.
+- **Bounded provable-set reach** - fraction of a frozen reference-backed suite that
+  the agent completes within fixed budgets and passes both proof and runtime checks.
+  The first [full fresh measurement](docs/provable-reach.md#first-full-measurement)
+  reached 8/8 tasks. This is a suite result, not a general capability estimate.
 
 **Needs a measurement home.**
 
-- **Provable-set reach** - the convergence metric. Given a reference suite of programs
-  the compiler certifies green, each with a task spec, the fraction the agent
-  reproduces to green inside a fixed budget. One hundred percent minus this is the
-  convergence gap. Nothing measures it today.
 - **Fence-breach rate** - share of agent-applied edits that re-verify with zero *total*
   violations, not only zero new ones. By construction this sits near one. Any deviation
   is a soundness incident, not a quality dip.

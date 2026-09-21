@@ -4,8 +4,8 @@ This measurement asks whether the default agent can solve a frozen set of tasks 
 Every task has a reference program that must pass the same compiler and runtime checks as the generated program.
 The report keeps every selected task, including model, transport, budget, and harness failures.
 
-There is no full-suite fresh M3 result yet.
-The approved one-task pilot passed on 2026-09-21; its measured result is below.
+The first full fresh measurement on 2026-09-21 reached all eight tasks: four whole-handler and four typed-hole tasks.
+The result and its limits are recorded below, with the [machine-readable report](provable-reach.json).
 An offline smoke result verifies the harness and does not measure the model.
 The [existing convergence corpus](convergence.md) remains a separate measurement.
 
@@ -92,7 +92,7 @@ zig build provable-reach -- --live --confirm-live --limit 1 --output /tmp/zttp-r
 Review the pilot's retained usage and outcome before authorizing the full eight-task run.
 The authoring limits stay the same for the larger run.
 The one-task pilot was authorized and completed on 2026-09-21.
-The full eight-task run still needs separate approval.
+The full eight-task run was separately authorized and completed on the same date.
 
 Run the offline integrity suite with `zig build test-provable-reach`.
 It checks report membership, evidence origin, success evidence, and failure accounting.
@@ -132,7 +132,7 @@ The complete local evidence is retained outside the repository at `/Users/srdjan
 The original output remains at `/tmp/zttp-m3-live-pilot-20260921/`.
 No agent behavior, prompt, seed, or acceptance check was changed after the pilot.
 
-The proposed full run changes the task count to eight and uses a new output directory:
+The approved full run changed the task count to eight and used a new output directory:
 
 ```sh
 zig build provable-reach -- --live --confirm-live --limit 8 --output /tmp/zttp-reach-live-full
@@ -141,3 +141,43 @@ zig build provable-reach -- --live --confirm-live --limit 8 --output /tmp/zttp-r
 The limits remain 600,000 ms, 18 model round trips, 16 tool calls, and five verification attempts per task.
 Review all eight fresh outcomes together; do not replace a failed case with the pilot or a retry.
 The pilot's usage is one observation, not a prediction of the full run's cost or time.
+
+## First full measurement
+
+Run `reach-live-1790002155-86713` completed with **8/8 reached** under `deepseek-v4-flash`: whole-handler 4/4 and typed-hole 4/4.
+All eight selected tasks remain in the denominator. There were no terminal failures or omitted tasks.
+This was one full fresh run. No case was replaced by the pilot or a second run.
+In-turn repair remained available within the fixed budgets, so this result is not a first-draft pass rate.
+
+Every candidate had zero compiler errors, all nine required properties proven, and passing runtime acceptance.
+The runtime suite passed 36/36 tests across the eight tasks.
+All task rows were within the configured time, round-trip, tool-call, and verification-attempt limits.
+The command completed in 167.68 seconds; the sum of measured task wall times was 166,401 ms.
+
+| Task family | Mode | Outcome | Wall time (ms) | Round trips | Tool calls | Verification attempts |
+|---|---|---|---|---|---|---|
+| Request-header classification | Whole handler | Reached | 13,190 | 3 | 4 | 1 |
+| Request-header classification | Typed hole | Reached | 7,386 | 5 | 4 | 1 |
+| Optional query greeting | Whole handler | Reached | 37,438 | 7 | 9 | 3 |
+| Optional query greeting | Typed hole | Reached | 5,814 | 3 | 3 | 1 |
+| Bounded text preview | Whole handler | Reached | 24,547 | 6 | 9 | 1 |
+| Bounded text preview | Typed hole | Reached | 6,372 | 4 | 4 | 1 |
+| Seeded label helper | Whole handler | Reached | 65,272 | 13 | 15 | 1 |
+| Seeded label helper | Typed hole | Reached | 6,382 | 4 | 5 | 1 |
+
+The raw provider responses record 697,398 input tokens and 29,856 output tokens, for 727,254 total tokens.
+Input includes 586,624 cache-hit tokens and 110,774 cache-miss tokens.
+These totals cover 46 provider exchanges: 45 task-loop round trips plus one context-compaction call in the whole-handler label task.
+That compaction call used 2,181 input tokens and 509 output tokens.
+The normalized task summaries omit its usage and report zero cache counts; use the raw responses for total provider consumption.
+No exact billed dollar amount was returned.
+
+The source revision was `d5209b09fd08c8c27956d8afcfc5ced16bf13375`, known and clean before and after the run.
+The suite hash was `4aa3b09be556c5802cf3dd9b2627c7750f5050934fca8d4ebac2d9e241c49971`.
+All frozen task identities matched the offline full suite; model, compiler, request-policy, and budget identities matched the approved pilot configuration.
+The [report](provable-reach.json) retains those identities and all eight outcome rows.
+Complete local evidence is retained at `/Users/srdjans/Code/_TEAMOK/ZTTP-evidence/m3/reach-live-1790002155-86713/`, with the original output at `/tmp/zttp-reach-live-full/`.
+
+This closes M3's bounded measurement.
+It establishes reach only over these eight task instances, not over every provable program or a wider task population.
+Keep this suite as regression evidence if its outcomes guide product changes; use a new suite for a new holdout claim.

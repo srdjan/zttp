@@ -9,20 +9,20 @@ work from reference designs. [Product proposals](zttp-next/README.md) and
 
 ## Milestones
 
-M1 is complete. M2 has final verification pending. The user selected M3 with
-the current DeepSeek default only. M4 remains proposed. No release date is assigned.
+M1 and M3 are complete. M2 has final verification pending.
+M4 remains proposed. No release date is assigned.
 
 | Milestone | Status | Dependency | Next action | Completion evidence |
 |---|---|---|---|---|
 | M1: accurate active backlog | Complete, 2026-09-21 | Codebase review at `1b0686a1` | Select the next milestone | [Completion record](archive/plans/2026-09-21-active-backlog-cleanup.md); documentation gates pass and remaining work is classified |
 | M2: bounded correctness and assurance | Implemented; final verification pending | Three implementation units committed and reviewed; affected suites and mutation probes pass | Run the full local gate after approval, as recorded in the [bounded plan](plans/2026-09-21-bounded-correctness-assurance.md) | Public response regression test; selected lifecycle and decoder cases reject deliberate wrong behavior; affected unfiltered suites pass |
-| M3: provable-set reach measurement | Live pilot passed; full fresh measurement pending | Current DeepSeek default only; full-run approval pending | Review the pilot usage and approve the eight-task run in the [run guide](provable-reach.md) | Retained fresh report covers every selected task and failure, with source, policy, model, budget, and runtime-intent evidence |
+| M3: provable-set reach measurement | Complete, 2026-09-21 | Current DeepSeek default; pilot and full run authorized | Keep the used suite as regression evidence; select a new suite before a new holdout claim | [Full fresh report](provable-reach.md#first-full-measurement): 8/8 reached, 4/4 in each mode, with all selected tasks and source, policy, model, budget, and runtime evidence retained |
 | M4: next release boundary | Proposed decision | M1 proposal inventory and current strategy | Reconcile custom agent handlers with the tool-profile proposal; select or park each | One accepted release contract states scope, threat model, dependencies, and completion checks |
 
 M2's source evidence is `packages/zts/src/http.zig`,
 `packages/runtime/src/server_response.zig`, and the conditional test gaps in
 the [completed rederive record](archive/plans/2026-09-20-rederive-implementation-plan.md#conditional-discovery-items).
-M3 addresses the unmeasured metric in [STRATEGY.md](../STRATEGY.md#key-metrics).
+M3 establishes bounded reach for the frozen suite in [STRATEGY.md](../STRATEGY.md#key-metrics).
 M4 compares the [agent-handler specification](plans/2026-09-19-feat-agent-handler-spec.md)
 with the [tool-profile recommendation](zttp-next/zttp-v1.0-scope-and-v1x-roadmap.md).
 
