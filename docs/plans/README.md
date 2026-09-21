@@ -6,6 +6,7 @@ index when a plan starts, closes, or moves to the archive.
 
 | Document | Role and status | Work authority |
 |---|---|---|
+| [M3: provable-set reach measurement](2026-09-21-0955-feat-provable-set-reach-plan.md) | Selected; offline implementation first, live cost approval pending | User selected M3 and the current DeepSeek default on 2026-09-21 |
 | [M2: bounded correctness and assurance](2026-09-21-bounded-correctness-assurance.md) | Implemented; final verification pending | User selected M2 on 2026-09-21 |
 | [D1: type system](2026-07-30-014-d1-type-system-design.md) | Retained design reference; language phases complete | No new work scheduled |
 | [D2: effects and purity](2026-07-30-015-d2-effects-purity-design.md) | Retained design reference; language phases complete | No new work scheduled |
@@ -18,5 +19,5 @@ questions are in the roadmap. The [product proposal index](../zttp-next/README.m
 and [advisory index](../../advisor-plans/README.md) classify separate proposals.
 
 M1 is complete in the [backlog cleanup record](../archive/plans/2026-09-21-active-backlog-cleanup.md).
-M2 is the selected implementation plan. The roadmap records the proposed
-later milestones.
+M2 has final verification pending. M3 is the selected implementation plan.
+The roadmap records the proposed later milestones.
