@@ -8,11 +8,10 @@
 
 ## Tests run
 
-<!-- The `zig build test*` commands you ran locally, and their result. -->
+<!-- List the commands you ran locally and their result. Use focused test steps
+while you work, then run the full verifier before you open the PR. -->
 
-- [ ] `zig build test`
-- [ ] `zig build test-zts` / `test-zruntime` (if engine or runtime touched)
-- [ ] `bash scripts/test-examples.sh` (if handler-facing behavior changed)
+- [ ] `bash scripts/verify.sh`
 
 ## Checklist
 

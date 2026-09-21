@@ -2,9 +2,13 @@
 
 How to build, how to test, and the conventions a PR must respect before merge. For agent-facing conventions and repo automation guidance, see [AGENTS.md](AGENTS.md) and [CLAUDE.md](CLAUDE.md).
 
-## Toolchain
+## Prerequisites
 
-Validated on Zig `0.16.0` stable. Use the exact version in `build.zig.zon`'s `minimum_zig_version` if you hit confusing build errors.
+Use Zig `0.16.0` stable. The full verifier also requires Python 3, `jq`, Z3,
+and ripgrep. Ripgrep is part of the recorded expert output, so its in-process
+fallback does not produce the same cassette bytes. The semantics gate requires
+Z3 unless you set `ZTTP_Z3=off` to skip the SMT checks explicitly. A run with
+that setting does not verify the SMT soundness boundary.
 
 ## Build
 
@@ -18,22 +22,24 @@ zig build -Dhandler=handler.ts         # precompile a handler
 
 ```bash
 bash scripts/verify.sh                 # the full gate; CI runs exactly this
-zig build test                         # the aggregate unit suite (not the full gate)
+zig build test                         # aggregate suite, including examples
 zig build test-zts                     # engine only
 zig build test-zruntime                # runtime only, a standalone root
-bash scripts/test-examples.sh          # end-to-end example handlers
+bash scripts/test-examples.sh          # optional focused example check
 zig build bench                        # Zig-native microbenchmarks
 ```
 
 `zig build test` leaves out the standalone runtime root, the smoke and
-panic-isolation steps, the example handlers, and the shell-driven registry
-gates. `scripts/verify.sh` runs all of them, and `ci.yml` runs it as its single
-step, so a PR that passed only `zig build test` can still go red.
+panic-isolation steps, and shell-driven registry gates. It includes the
+end-to-end example handlers. `scripts/verify.sh` runs the full sequence, and
+`ci.yml` uses it as the authoritative test command. A PR that passed only
+`zig build test` can still fail CI.
 [Test Steps](docs/internals/testing.md) maps which step runs what.
 
-Run the relevant `test*` step while iterating and `scripts/verify.sh` before
-opening a PR. If you touched the compile-time checkers or the rule registry,
-also run:
+Run the relevant focused step while you work. Run `scripts/verify.sh` before
+you open a PR. You can run `scripts/test-examples.sh` by itself when you debug
+handler-facing behavior, but you do not need to run it after `zig build test`.
+If you touched the compile-time checkers or the rule registry, also run:
 
 ```bash
 zig build release
