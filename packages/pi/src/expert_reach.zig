@@ -107,6 +107,7 @@ pub fn admitReferences(
 ) ![]const report.ExpectedCase {
     try corpus.validate();
     const descriptors = try allocator.alloc(report.ExpectedCase, corpus.tasks.len);
+    errdefer allocator.free(descriptors);
     for (corpus.tasks, 0..) |task, index| {
         var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
         defer arena.deinit();
@@ -230,4 +231,13 @@ test "reach runtime acceptance rejects constant success in every family" {
 comptime {
     _ = report;
     _ = corpus;
+    // The runner selects work as `admitted[0..limit]`, and the only full-scope
+    // limit it accepts is `report.full_task_count`. A corpus that stops having
+    // exactly that many tasks either slices out of bounds, or silently measures
+    // a prefix while still reporting scope `.full`. A validated report cannot
+    // catch the second: its denominator is `full_task_count` by construction,
+    // so the missing tasks never appear in `selected` to be counted.
+    if (corpus.tasks.len != report.full_task_count) @compileError(
+        "expert_reach_report.full_task_count must equal expert_reach_corpus.tasks.len",
+    );
 }

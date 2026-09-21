@@ -196,6 +196,7 @@ fn suiteHash(
         intent_hash: []const u8,
     };
     const stable = try allocator.alloc(StableCase, selected.len);
+    defer allocator.free(stable);
     for (selected, 0..) |case, index| stable[index] = .{
         .id = case.id,
         .family = case.family,
@@ -549,6 +550,7 @@ fn retainWorkspace(
     task: corpus.Task,
 ) ![]const WorkspaceRecord {
     var records: std.ArrayList(WorkspaceRecord) = .empty;
+    errdefer records.deinit(allocator);
     var backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
     defer backend.deinit();
     const io = backend.io();
@@ -700,6 +702,12 @@ fn runTurnInWorkspace(
     defer allocator.free(saved_cwd);
     var counted: CountingClient = .{ .inner = client };
     try std.Io.Threaded.chdir(workspace_abs);
+    // Restoring the directory is not optional work this function may report and
+    // move on from. The caller deletes `workspace_abs` as soon as it returns, so
+    // a run that continued from here would evaluate every later case against a
+    // deleted directory, and no case row records the working directory.
+    defer std.Io.Threaded.chdir(saved_cwd) catch |err|
+        std.debug.panic("[reach] could not restore the working directory: {s}", .{@errorName(err)});
     const attempted = loop.runTurnWith(
         allocator,
         counted.asModelClient(),
@@ -716,7 +724,6 @@ fn runTurnInWorkspace(
             .turn_timeout_ms = task_timeout_ms,
         },
     );
-    try std.Io.Threaded.chdir(saved_cwd);
     if (attempted) |result| {
         return .{ .result = result, .error_name = null, .error_outcome = null, .requests = counted.requests };
     } else |err| {
@@ -1037,13 +1044,15 @@ fn retainCaseResult(allocator: std.mem.Allocator, result: report.CaseResult) !re
     return retained;
 }
 
+/// `common.nowUnixMs` widens `timespec.sec` rather than narrowing it. Reading
+/// that field here through a checked `@intCast` instead traps on a clock call
+/// that failed and left the value undefined, which would abort a run that has
+/// already spent model credits.
 fn runId(allocator: std.mem.Allocator, mode: Mode) ![]const u8 {
-    var ts: std.posix.timespec = undefined;
-    _ = std.c.clock_gettime(@enumFromInt(@intFromEnum(std.posix.CLOCK.REALTIME)), &ts);
     return std.fmt.allocPrint(
         allocator,
         "reach-{s}-{d}-{d}",
-        .{ @tagName(mode), @as(u64, @intCast(ts.sec)), std.c.getpid() },
+        .{ @tagName(mode), @divTrunc(common.nowUnixMs(), 1000), std.c.getpid() },
     );
 }
 
