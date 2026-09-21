@@ -1315,46 +1315,112 @@ test "the encoder refuses a buffer that cannot hold the certificate" {
     try testing.expectError(error.BufferTooSmall, buildMinimal(&small));
 }
 
-test "bad magic, wrong schema, and trailing data each reject" {
-    var buf: [4096]u8 = undefined;
-    const bytes = try buildMinimal(&buf);
-    var budget = Budget.init(.{});
-
-    var mutated: [4096]u8 = undefined;
-    @memcpy(mutated[0..bytes.len], bytes);
-    mutated[0] +%= 1;
-    try testing.expectError(error.BadMagic, decode(mutated[0..bytes.len], .{}, &budget));
-
-    @memcpy(mutated[0..bytes.len], bytes);
-    mutated[8] +%= 1;
-    budget = Budget.init(.{});
-    try testing.expectError(error.UnsupportedSchemaVersion, decode(mutated[0..bytes.len], .{}, &budget));
-
-    @memcpy(mutated[0..bytes.len], bytes);
-    mutated[bytes.len] = 0xAA;
-    budget = Budget.init(.{});
-    try testing.expectError(error.TrailingData, decode(mutated[0 .. bytes.len + 1], .{}, &budget));
+fn sectionHeaderOffset(bytes: []const u8, records: []const u8) usize {
+    // The four-byte table count sits between the section header and records.
+    return @intFromPtr(records.ptr) - @intFromPtr(bytes.ptr) - 4 - section_header_size;
 }
 
-test "an unknown proof system rejects" {
+fn probeDecodeError(comptime expected: DecodeError) !void {
     var buf: [4096]u8 = undefined;
     const bytes = try buildMinimal(&buf);
-    var mutated: [4096]u8 = undefined;
-    @memcpy(mutated[0..bytes.len], bytes);
-    std.mem.writeInt(u16, mutated[10..12], 999, .little);
+
+    // Every refusal starts from a certificate accepted by the public decoder.
     var budget = Budget.init(.{});
-    try testing.expectError(error.UnknownEnumMember, decode(mutated[0..bytes.len], .{}, &budget));
+    const cert = try decode(bytes, .{}, &budget);
+
+    var mutated: [4097]u8 = undefined;
+    @memcpy(mutated[0..bytes.len], bytes);
+    budget = Budget.init(.{});
+
+    switch (expected) {
+        error.CertificateTooLarge => try testing.expectError(
+            expected,
+            decode(bytes, .{ .max_certificate_bytes = 8 }, &budget),
+        ),
+        error.Truncated => try testing.expectError(
+            expected,
+            decode(bytes[0..header_size], .{}, &budget),
+        ),
+        error.BadMagic => {
+            mutated[0] +%= 1;
+            try testing.expectError(expected, decode(mutated[0..bytes.len], .{}, &budget));
+        },
+        error.UnsupportedSchemaVersion => {
+            mutated[8] +%= 1;
+            try testing.expectError(expected, decode(mutated[0..bytes.len], .{}, &budget));
+        },
+        error.UnknownSectionTag => {
+            std.mem.writeInt(u16, mutated[header_size..][0..2], 4242, .little);
+            try testing.expectError(expected, decode(mutated[0..bytes.len], .{}, &budget));
+        },
+        error.DuplicateSection => {
+            const obligations_header = sectionHeaderOffset(bytes, cert.obligations.bytes);
+            std.mem.writeInt(
+                u16,
+                mutated[obligations_header..][0..2],
+                @intFromEnum(SectionTag.graph),
+                .little,
+            );
+            try testing.expectError(expected, decode(mutated[0..bytes.len], .{}, &budget));
+        },
+        error.MissingRequiredSection => {
+            const evidence_header = sectionHeaderOffset(bytes, cert.evidence.bytes);
+            std.mem.writeInt(u16, mutated[16..18], 4, .little);
+            try testing.expectError(expected, decode(mutated[0..evidence_header], .{}, &budget));
+        },
+        error.TrailingData => {
+            mutated[bytes.len] = 0xAA;
+            try testing.expectError(expected, decode(mutated[0 .. bytes.len + 1], .{}, &budget));
+        },
+        error.SectionTooLarge => {
+            std.mem.writeInt(
+                u32,
+                mutated[header_size + 2 ..][0..4],
+                Limits.production.max_section_bytes + 1,
+                .little,
+            );
+            try testing.expectError(expected, decode(mutated[0..bytes.len], .{}, &budget));
+        },
+        error.SectionLengthMismatch => {
+            std.mem.writeInt(u32, mutated[header_size + 2 ..][0..4], identity_size - 1, .little);
+            try testing.expectError(expected, decode(mutated[0..bytes.len], .{}, &budget));
+        },
+        error.CountExceedsLimit => try testing.expectError(
+            expected,
+            decode(bytes, .{ .max_graph_members = 2 }, &budget),
+        ),
+        error.UnknownEnumMember => {
+            std.mem.writeInt(u16, mutated[10..12], 999, .little);
+            try testing.expectError(expected, decode(mutated[0..bytes.len], .{}, &budget));
+        },
+        error.SectionNotCanonicallyOrdered => {
+            const graph_header = sectionHeaderOffset(bytes, cert.graph.bytes);
+            const obligations_header = sectionHeaderOffset(bytes, cert.obligations.bytes);
+            const obligations_end = @intFromPtr(cert.obligations.bytes.ptr) -
+                @intFromPtr(bytes.ptr) + cert.obligations.bytes.len;
+            const graph_span = bytes[graph_header..obligations_header];
+            const obligations_span = bytes[obligations_header..obligations_end];
+
+            @memcpy(mutated[graph_header..][0..obligations_span.len], obligations_span);
+            @memcpy(mutated[graph_header + obligations_span.len ..][0..graph_span.len], graph_span);
+            try testing.expectError(expected, decode(mutated[0..bytes.len], .{}, &budget));
+        },
+        error.ReservedFieldNonZero => {
+            const obligations_records = @intFromPtr(cert.obligations.bytes.ptr) - @intFromPtr(bytes.ptr);
+            mutated[obligations_records + 3] = 0xFF;
+            try testing.expectError(expected, decode(mutated[0..bytes.len], .{}, &budget));
+        },
+        error.WorkBudgetExhausted => {
+            budget = Budget.init(.{ .max_work = 2 });
+            try testing.expectError(expected, decode(bytes, .{}, &budget));
+        },
+    }
 }
 
-test "an unknown section tag rejects" {
-    var buf: [4096]u8 = undefined;
-    const bytes = try buildMinimal(&buf);
-    var mutated: [4096]u8 = undefined;
-    @memcpy(mutated[0..bytes.len], bytes);
-    // First section header sits right after the fixed header.
-    std.mem.writeInt(u16, mutated[header_size..][0..2], 4242, .little);
-    var budget = Budget.init(.{});
-    try testing.expectError(error.UnknownSectionTag, decode(mutated[0..bytes.len], .{}, &budget));
+test "every decode error is observed through the public decoder" {
+    inline for (@typeInfo(DecodeError).error_set.?) |member| {
+        try probeDecodeError(@field(DecodeError, member.name));
+    }
 }
 
 test "a truncated certificate rejects rather than reading past the end" {
@@ -1367,106 +1433,13 @@ test "a truncated certificate rejects rather than reading past the end" {
     }
 }
 
-test "a missing required section rejects" {
-    const members = minimalGraph();
-    const ir = [_]IrNode{
-        .{ .id = 0, .tag = .function, .parent = 0, .first_child = 0, .child_count = 0, .digest = fixture.digest(20) },
-    };
-    // Hand-build a container that omits the evidence section but claims four.
-    var buf: [4096]u8 = undefined;
-    var cursor = Cursor{ .buf = &buf };
-    try cursor.u64At(magic);
-    try cursor.u16At(ps.schema_version);
-    try cursor.u16At(@intFromEnum(ps.ProofSystem.zttp_pcc_v3));
-    try cursor.u32At(ps.semantics_epoch);
-    try cursor.u16At(4);
-    try cursor.u16At(@intFromEnum(SectionTag.identity));
-    try cursor.u32At(identity_size);
-    try cursor.zeros(identity_size);
-    try writeTable(&cursor, .graph, members.len, graph_record_size);
-    for (members) |member| {
-        try cursor.u16At(@intFromEnum(member.kind));
-        try cursor.u32At(member.ordinal);
-        try cursor.raw(&member.digest);
-    }
-    try writeTable(&cursor, .obligations, 0, obligation_record_size);
-    try writeTable(&cursor, .proof_ir, ir.len, ir_record_size);
-    for (ir) |node| {
-        try cursor.u32At(node.id);
-        try cursor.u16At(@intFromEnum(node.tag));
-        try cursor.zeros(2);
-        try cursor.u32At(node.parent);
-        try cursor.u32At(node.first_child);
-        try cursor.u32At(node.child_count);
-        try cursor.raw(&node.digest);
-        try cursor.u32At(node.aux);
-    }
-    var budget = Budget.init(.{});
-    try testing.expectError(error.MissingRequiredSection, decode(buf[0..cursor.at], .{}, &budget));
-}
-
-test "reserved bytes must be zero" {
-    var buf: [4096]u8 = undefined;
-    const bytes = try buildMinimal(&buf);
-    // The obligations section's reserved byte: find it by decoding first.
-    var budget = Budget.init(.{});
-    const cert = try decode(bytes, .{}, &budget);
-    const offset = @intFromPtr(cert.obligations.bytes.ptr) - @intFromPtr(bytes.ptr);
-    var mutated: [4096]u8 = undefined;
-    @memcpy(mutated[0..bytes.len], bytes);
-    mutated[offset + 3] = 0xFF;
-    budget = Budget.init(.{});
-    try testing.expectError(error.ReservedFieldNonZero, decode(mutated[0..bytes.len], .{}, &budget));
-}
-
-test "a count over the limit rejects before the records are walked" {
-    var buf: [4096]u8 = undefined;
-    const bytes = try buildMinimal(&buf);
-    var budget = Budget.init(.{});
-    try testing.expectError(
-        error.CountExceedsLimit,
-        decode(bytes, .{ .max_graph_members = 2 }, &budget),
-    );
-}
-
-test "an oversized certificate rejects before decoding" {
-    var buf: [4096]u8 = undefined;
-    const bytes = try buildMinimal(&buf);
-    var budget = Budget.init(.{});
-    try testing.expectError(
-        error.CertificateTooLarge,
-        decode(bytes, .{ .max_certificate_bytes = 8 }, &budget),
-    );
-}
-
-test "a starved work budget rejects rather than running to completion" {
-    var buf: [4096]u8 = undefined;
-    const bytes = try buildMinimal(&buf);
-    var budget = Budget.init(.{ .max_work = 2 });
-    try testing.expectError(error.WorkBudgetExhausted, decode(bytes, .{}, &budget));
-}
-
 test "every decode error maps to a distinct stable reason code" {
-    const errors = [_]DecodeError{
-        error.CertificateTooLarge,
-        error.Truncated,
-        error.BadMagic,
-        error.UnsupportedSchemaVersion,
-        error.UnknownSectionTag,
-        error.DuplicateSection,
-        error.MissingRequiredSection,
-        error.TrailingData,
-        error.SectionTooLarge,
-        error.SectionLengthMismatch,
-        error.CountExceedsLimit,
-        error.UnknownEnumMember,
-        error.SectionNotCanonicallyOrdered,
-        error.ReservedFieldNonZero,
-        error.WorkBudgetExhausted,
-    };
-    for (errors, 0..) |a, i| {
-        for (errors, 0..) |b, j| {
+    const errors = @typeInfo(DecodeError).error_set.?;
+    inline for (errors, 0..) |a_member, i| {
+        inline for (errors, 0..) |b_member, j| {
             if (i == j) continue;
+            const a = @field(DecodeError, a_member.name);
+            const b = @field(DecodeError, b_member.name);
             try testing.expect(reasonFor(a) != reasonFor(b));
         }
     }
