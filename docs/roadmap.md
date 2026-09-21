@@ -9,13 +9,13 @@ work from reference designs. [Product proposals](zttp-next/README.md) and
 
 ## Milestones
 
-The user selected M1. M2 through M4 are proposed follow-up milestones; this
-order does not authorize their implementation. No release date is assigned.
+M1 is complete. The user selected M2. M3 and M4 remain proposed; their order
+does not authorize implementation. No release date is assigned.
 
 | Milestone | Status | Dependency | Next action | Completion evidence |
 |---|---|---|---|---|
 | M1: accurate active backlog | Complete, 2026-09-21 | Codebase review at `1b0686a1` | Select the next milestone | [Completion record](archive/plans/2026-09-21-active-backlog-cleanup.md); documentation gates pass and remaining work is classified |
-| M2: bounded correctness and assurance | Proposed | Select scope after M1; recheck current tests | Reproduce the HTTP status-text difference, then check shutdown grace-expiry and certificate decode-error coverage | Public response regression test; selected lifecycle and decoder cases reject deliberate wrong behavior; affected unfiltered suites pass |
+| M2: bounded correctness and assurance | In progress | M1 complete; current test gaps rechecked | Execute the [bounded plan](plans/2026-09-21-bounded-correctness-assurance.md) | Public response regression test; selected lifecycle and decoder cases reject deliberate wrong behavior; affected unfiltered suites pass |
 | M3: provable-set reach measurement | Proposed | Approve held-out task families, budgets, provider, and run cost | Specify executable acceptance checks and distinguish fresh model results from replay | Retained report covers every selected task and failure, with source, policy, model, budget, and runtime-intent evidence |
 | M4: next release boundary | Proposed decision | M1 proposal inventory and current strategy | Reconcile custom agent handlers with the tool-profile proposal; select or park each | One accepted release contract states scope, threat model, dependencies, and completion checks |
 
