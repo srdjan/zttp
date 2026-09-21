@@ -6,7 +6,7 @@ index when a plan starts, closes, or moves to the archive.
 
 | Document | Role and status | Work authority |
 |---|---|---|
-| [M2: bounded correctness and assurance](2026-09-21-bounded-correctness-assurance.md) | Selected; in progress | User selected M2 on 2026-09-21 |
+| [M2: bounded correctness and assurance](2026-09-21-bounded-correctness-assurance.md) | Implemented; final verification pending | User selected M2 on 2026-09-21 |
 | [D1: type system](2026-07-30-014-d1-type-system-design.md) | Retained design reference; language phases complete | No new work scheduled |
 | [D2: effects and purity](2026-07-30-015-d2-effects-purity-design.md) | Retained design reference; language phases complete | No new work scheduled |
 | [D3: canonical form and wire](2026-07-30-016-d3-canonical-form-wire-design.md) | Retained design reference; language phases complete | No new work scheduled |

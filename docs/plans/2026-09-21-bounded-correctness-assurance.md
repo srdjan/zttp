@@ -1,6 +1,7 @@
 # M2: bounded correctness and assurance
 
-Status: selected by the user on 2026-09-21. Baseline: `e28355b6` on local
+Status: implementation and review complete; full local verification pending.
+Selected by the user on 2026-09-21. Baseline: `e28355b6` on local
 `main`, with a clean working tree and Zig `0.16.0`.
 
 ## Scope and completion checks
@@ -67,11 +68,66 @@ so the main agent can observe the failure before the fix.
 
 Run unfiltered targets and read their exit status directly. Start with bounded
 checks. Ask before running a script that exceeds two minutes, as required by
-`AGENTS.md`. Save temporary logs and mutation backups outside the tracked tree.
+the AGENTS instructions supplied in this session. Save temporary logs and
+mutation backups outside the tracked tree.
 Restore each mutation before the next probe. Run the relevant checks again on
 the restored tree. Review the integrated diff, update the roadmap, and archive
 this record when complete. Commit each complete unit on local `main`; do not
 push.
 
+## Implementation and observed checks
+
 Baseline check: `zig build test-proof-checker --summary all` passed all 160 tests.
 The cached build completed in 0.1 seconds; the test process took 28 milliseconds.
+
+U1 is committed as `a0181c16`. Before the fix, unfiltered regressions observed
+`Unknown` for a handler-created 502, a prebuilt 413 response, and a threaded
+202 response. One base-tier lookup now supplies all response paths. It retains
+all 26 phrases from the old switches and the durable response's `202 Accepted`.
+Cache checks enumerate the supported status range and require non-empty input.
+Fetch replay checks that an upstream phrase survives unchanged.
+
+U2 is committed as `96516a89`. Both full socket scenarios pass. The complete
+within-grace scenario took 121.558 milliseconds; the expiry scenario took
+44.740 milliseconds in an unfiltered instrumented run. The test measures the
+shutdown call on its control thread and requires a duration from 25 to less
+than 500 milliseconds. Disabling the grace limit made only the new expiry
+test fail with `TestTimedOut`. Both the mutation and temporary timing code
+were restored byte for byte before the final run.
+
+U3 is committed as `d9cb0e23`. An exhaustive dispatch over `DecodeError`
+executes public decoder probes for all 15 variants. Each starts from an
+accepted certificate. Consolidation reduces the number of named kernel tests
+from 160 to 153; it retains the predecessor case and truncation sweep. Separate
+mutations bypassed the duplicate, section-size, section-order, and identity
+length checks. Each made the executable census fail. An additional mutation
+returned the wrong error for the length mismatch and also failed. Restoring
+the decoder made the suite pass again. No production
+decoder or shutdown behavior changed.
+
+The main agent reviewed every changed line and ran these unfiltered checks:
+
+| Check | Observed result |
+|---|---|
+| `zig build test-zts -j1 --summary all` | 2,218 passed; one skipped |
+| `zig build test-zruntime -j1 --summary all` | 412 passed; one skipped |
+| `zig build test-server test-proof-checker test-proof-checker-purity -j1 --summary all` | 566 passed; two skipped; purity check passed |
+| `zig build test-zts-layering test-module-boundary -j1 --summary all` | Both gates passed |
+| `zig build test-docs-drift test-doc-links -j1 --summary all` | All seven build steps passed |
+| `zig fmt --check build.zig packages/` | Passed |
+
+Three independent simplification readers checked reuse, code quality, and
+efficiency. One comment now explains the decoder test's table-count offset.
+A suggested extra helper for the direct cached-or-create expressions was not
+needed. No other simplification finding remains.
+
+Code review: skipped (ce-code-review unavailable). The skill requires Python
+helpers, which conflict with the project's no-Python rule. An independent
+manual correctness review and a separate concurrency review covered all 13
+changed files against `0efdf160` and found no actionable defects. The reviewers
+checked the root agent's test evidence but did not run builds themselves. The
+500-millisecond expiry-test ceiling can fail under an extreme scheduler stall;
+the measured run was within that bound.
+
+The full `bash scripts/verify.sh` run can exceed two minutes. Approval was
+requested under the supplied AGENTS time limit; it has not run for M2 yet.

@@ -1,7 +1,7 @@
 # Roadmap
 
 This document owns work status and scheduling. Reviewed against local `main`
-at `1b0686a1` on 2026-09-21. Shipped changes live in
+at `a0181c16` on 2026-09-21. Shipped changes live in
 [CHANGELOG.md](../CHANGELOG.md); current behavior lives in the
 [User Guide](user-guide.md). The [plan index](plans/README.md) separates open
 work from reference designs. [Product proposals](zttp-next/README.md) and
@@ -15,7 +15,7 @@ does not authorize implementation. No release date is assigned.
 | Milestone | Status | Dependency | Next action | Completion evidence |
 |---|---|---|---|---|
 | M1: accurate active backlog | Complete, 2026-09-21 | Codebase review at `1b0686a1` | Select the next milestone | [Completion record](archive/plans/2026-09-21-active-backlog-cleanup.md); documentation gates pass and remaining work is classified |
-| M2: bounded correctness and assurance | In progress | M1 complete; current test gaps rechecked | Execute the [bounded plan](plans/2026-09-21-bounded-correctness-assurance.md) | Public response regression test; selected lifecycle and decoder cases reject deliberate wrong behavior; affected unfiltered suites pass |
+| M2: bounded correctness and assurance | Implemented; final verification pending | Three implementation units committed and reviewed; affected suites and mutation probes pass | Run the full local gate after approval, as recorded in the [bounded plan](plans/2026-09-21-bounded-correctness-assurance.md) | Public response regression test; selected lifecycle and decoder cases reject deliberate wrong behavior; affected unfiltered suites pass |
 | M3: provable-set reach measurement | Proposed | Approve held-out task families, budgets, provider, and run cost | Specify executable acceptance checks and distinguish fresh model results from replay | Retained report covers every selected task and failure, with source, policy, model, budget, and runtime-intent evidence |
 | M4: next release boundary | Proposed decision | M1 proposal inventory and current strategy | Reconcile custom agent handlers with the tool-profile proposal; select or park each | One accepted release contract states scope, threat model, dependencies, and completion checks |
 
@@ -80,7 +80,7 @@ contract must identify which ones it needs.
 
 | Work | Status | Dependency | Next action | Completion evidence |
 |---|---|---|---|---|
-| Runtime lifecycle | Open; M2 candidate | Current socket and panic-isolation tests | Check grace expiry, request-timeout policy, and control-thread shutdown semantics against the intended deployment | Tests assert accepted requests, drain and expiry outcomes, and isolation; unfiltered runtime and panic suites pass |
+| Runtime lifecycle | Open; M2 grace-expiry coverage added | Current socket and panic-isolation tests | Check request-timeout policy and control-thread shutdown semantics against the intended deployment | Tests assert accepted requests, drain and expiry outcomes, and isolation; unfiltered runtime and panic suites pass |
 | Engine/runtime facade | Deferred | Lifecycle behavior pinned before changing state ownership | Replace one sibling back-import with a narrow interface | Selected cycle removed; request, durable, queue, and pool behavior preserved; boundary and runtime gates pass |
 | Module gaps | Needs scope | A concrete handler requirement | Identify a missing fetch-resilience, capability, or build-feature diagnostic case | Public example and regression test demonstrate the selected behavior |
 | Hosted deploy | Deferred | Accepted hosted scope, lifecycle policy, and control-plane CI | Define a supported end-to-end deployment flow | CI exercises the control plane; released commands and user docs agree |
@@ -89,7 +89,7 @@ contract must identify which ones it needs.
 | Certificate assurance | Open, incremental | Select one property or opcode family | Add a producer case and an independent checker rule or witness | Checker rejects a mutation; `test-proof-ratchet` and `test-proof-ratchet-drift` pass with the revised disclosed boundary |
 | Protected-ledger startup cost | Measurement required | Representative ledger and pool sizes; current store exclusion rules | Measure repeated baseline validation and statement preparation before changing ownership | Retained startup and contention measurements justify statement reuse or validation per generation; invariant behavior remains unchanged |
 
-Socket health/readiness and in-flight shutdown-drain tests already exist in
+Socket health/readiness, in-flight shutdown-drain, and grace-expiry tests exist in
 `packages/runtime/src/server.zig`. The file split and server adapter also
 exist, but `HandlerInstance` and extracted siblings still import each other.
 The remaining facade work concerns that dependency boundary.

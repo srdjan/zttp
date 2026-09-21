@@ -122,6 +122,11 @@ certificate decoder work. Neither is selected by this plan. Leave their current
 implementation unchanged. Their identified grace-expiry and four decode-error
 probe gaps remain prerequisites for any later rederive in those areas.
 
+Update, 2026-09-21: M2 added the grace-expiry test in `96516a89` and executable
+probes for every certificate decode error in `d9cb0e23`. Deliberate mutations
+were detected by both suites. These test gaps are closed; the shutdown and
+decoder implementations were not changed.
+
 The flow sink classifier and metric redesign were additional discovery ideas,
 not selected implementation phases. Do not widen this change to include them.
 
