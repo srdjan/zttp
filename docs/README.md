@@ -59,6 +59,10 @@ The [product proposals](zttp-next/README.md) and repository-level
 - [Performance](performance.md) - current benchmark claims and tuning notes.
 - [Reliability](reliability.md) - limits, failure behavior, and exit codes.
 - [Threat Model](threat-model.md) - current trust boundaries and non-goals.
+- [Consumer Contract](consumer-contract.md) - proposed: the declaration a downstream
+  application writes, the admissibility, adjudication, and acceptance stages, and the
+  closed vocabularies both sides pin. [Roadmap](roadmap.md#proposal-decisions) owns its
+  status.
 
 ## Internals
 

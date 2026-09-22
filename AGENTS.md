@@ -16,6 +16,7 @@
 | `docs/feature-detection.md` | Unsupported feature detection matrix |
 | `docs/verification.md` | `-Dverify` compile-time proof of handler correctness |
 | `docs/sound-mode.md` | Type-directed analysis across operators (arithmetic, comparison, boolean) |
+| `docs/consumer-contract.md` | Proposed: how a downstream application programs against zttp - the declaration it writes, the three stages, and the closed vocabularies that bound both |
 | `docs/roadmap.md` | What is deferred from the current beta and what comes next |
 | `docs/convergence.md` | Measured first-draft veto-pass rate over the frozen prompt corpus; regenerate with `scripts/update-convergence.sh` |
 | `docs/coverage.md` | Which advertised rules the corpus trips, and what the offline suite does and does not prove; regenerate with `scripts/update-coverage.sh`. The replay fails when it drifts |
