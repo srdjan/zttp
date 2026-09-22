@@ -306,7 +306,92 @@ proposal that moves effect authority into the artifact MUST demonstrate it inste
 
 ---
 
-## 9. Producer obligations
+## 9. The proven adapter
+
+A named arrangement, not an addition to the contract: a handler placed in front of a
+system the producer cannot analyze. A legacy service, a third-party API, or a runtime in
+another language. The handler validates and shapes what goes in, constrains where it may
+go, enforces the classifications the consumer declared on what comes back, and interprets
+the result. It needs no mechanism this document has not already defined.
+
+It is the shape section 8 describes, applied to a system nobody intends to rewrite. It is
+also the one section here whose mechanism is implemented today: the labels, the capability
+policy, and the declared-binding input all exist, so the arrangement is available before
+any obligation in section 10 is met.
+
+### 9.1 Three levels of claim, which MUST stay apart
+
+**Unconditional.** The adapter's own handling is proven, to whatever the declaration
+required and adjudication established: input validation, injection safety, response
+totality, result checking, and no leakage of secrets the adapter itself handled. Egress is
+constrained by the capability policy, which checks the address scope a permitted endpoint
+resolves to and not only the endpoint, so a permitted name resolving to a link-local
+address is refused at the socket. The adapter is also a deterministic function of its
+request and the virtual-module responses it received, which is what lets `--trace` and
+`-Dreplay` reproduce a run. Replay reproduces the recorded wrapped-system response; it
+does not call the wrapped system again and establishes nothing about what that system
+would answer now.
+
+**Conditional.** Classifications the consumer declares over the wrapped system's response
+are enforced. This holds only for what was declared, and only by the names declared.
+
+**Never.** Nothing about the wrapped system's interior is discovered. If it leaks,
+corrupts, or mis-authorizes internally, no property in this contract reaches that.
+
+### 9.2 The mechanism, and its default
+
+`zttp:fetch` and `zttp:service` declare `.return_labels = .{ .external = true }`. The
+`external` label is not `secret` and not `credential`, so by default a wrapped system's
+response reaches a client without violating `no_secret_leakage`. That default is correct:
+the producer makes no claim about data it did not produce. It also means the default
+stops nothing.
+
+The flow checker accepts externally declared label bindings, supplied through
+`-Ddata-labels` and keyed by field name. A consumer that declares the response field
+`ssn` as `secret` gets it enforced from that point: the value cannot reach a response
+body, a log, or an outbound request without failing the build.
+
+This is what makes the arrangement more than a proxy. It is declared and enforced, never
+discovered, and it catches the names declared and no others.
+
+### 9.3 The claim a consumer MUST NOT make
+
+A consumer MUST NOT describe this arrangement as making the wrapped system safe. Safety is
+compound, and what this produces is implementation evidence about one component.
+
+The claim that survives review names the boundary and the declared set: the adapter's
+handling is proven, and these named fields are enforced. Section 11 states this as C7.
+
+### 9.4 Containment is a deployment property
+
+A proven adapter in front of a system does not stop anything else reaching that system.
+What the certificate establishes is what the adapter does. Whether another path bypasses
+it is arranged in the network and is not visible in any artifact this contract defines. A
+consumer that needs exclusive reachability MUST establish it separately and MUST NOT read
+it out of an acceptance.
+
+This is the same shape as the standing deployment assumption already recorded for the
+protected ledger, where excluding other writers from the store is an assumption nothing in
+the artifact verifies.
+
+### 9.5 The first enforcement-map entry
+
+The arrangement is also the worked example of a per-construct enforcement statement, which
+a target owes for every construct it is handed:
+
+| Construct | Answer |
+|---|---|
+| Declared response field classification | Checked at build |
+| Egress endpoint and address scope | Enforced at runtime |
+| Any property of the wrapped system's interior | Not expressible |
+
+A target answers with exactly one of those three for every construct. A boolean
+"supported" is not an answer, because it lets a construct land on a target that nominally
+supports its category while enforcing nothing specific about it.
+
+---
+
+## 10. Producer obligations
 
 - **P1.** The producer MUST publish the section 6 vocabularies in one machine-readable
   envelope carrying a contract version, and MUST fail a build in which an alphabet grows
@@ -327,10 +412,16 @@ proposal that moves effect authority into the artifact MUST demonstrate it inste
   section 3.1.
 - **P7.** Specification mode MUST reuse the existing veto loop and MUST be measured
   against a named corpus before any convergence figure derived from it is published.
+- **P8.** The producer MUST report which declared field classifications matched a field
+  the analysis actually saw, and which matched none. A declaration naming a field that
+  never appears enforces nothing while the build passes, which is the vacuous-gate shape
+  `AGENTS.md` records: a gate whose input is empty reports success and is then cited as
+  evidence. An unmatched binding is not necessarily an error, because a field may be
+  absent on some paths, but it MUST NOT be silent.
 
 ---
 
-## 10. Consumer obligations
+## 11. Consumer obligations
 
 - **C1.** A consumer MUST pin every alphabet it reads by equality, and MUST refuse to
   start when the envelope names a member it does not know. A range admits a member whose
@@ -346,10 +437,14 @@ proposal that moves effect authority into the artifact MUST demonstrate it inste
 - **C6.** A consumer MUST demonstrate C1 to C5 in its own test suite, and MUST name which
   case demonstrates which obligation. This document states both sides' obligations; it
   carries neither side's evidence.
+- **C7.** A consumer operating a proven adapter MUST NOT describe the arrangement as
+  making the wrapped system safe. It MUST state the boundary claim and the declared field
+  set, and MUST NOT present exclusive reachability of the wrapped system as something an
+  acceptance established.
 
 ---
 
-## 11. Versioning and growth
+## 12. Versioning and growth
 
 A change that makes a conforming consumer or a conforming artifact non-conforming bumps
 the contract version.
@@ -365,7 +460,7 @@ the table is the growth mechanism rather than a convention.
 
 ---
 
-## 12. Not in version 1
+## 13. Not in version 1
 
 Named so an omission is not read as permission.
 
@@ -380,14 +475,14 @@ Named so an omission is not read as permission.
 
 ---
 
-## 13. Future consideration
+## 14. Future consideration
 
 **The full application surface.** A later declaration could name persistence, governed
 transitions, durable orchestration, and service bindings. This is more tractable than it
 sounds, because the producer already owns those as virtual modules: `zttp:sql`,
 `zttp:durable`, `zttp:workflow`, and `zttp:service`. Such a declaration would name module
 operations rather than introduce semantics, and the vocabulary would grow by the same
-rule as section 11. The open question is not expressibility. It is that naming the
+rule as section 12. The open question is not expressibility. It is that naming the
 application structure makes the producer the owner of that structure, which is a product
 decision rather than a compiler one.
 
@@ -400,7 +495,7 @@ around it.
 
 ---
 
-## 14. Sources
+## 15. Sources
 
 - [Agent Protocol v2](internals/agent-protocol-v2.md) - the adjudication transport, its
   closed operation set, the `expected` guard, and version negotiation.
