@@ -13,9 +13,12 @@ A consumer is any system that wants zttp to build, prove, or serve a handler on 
 behalf. The first is Metadoor, which authors specifications and invariants and lowers
 them into the declaration defined here. The reference producer is this repository.
 
-Conformance language is MUST, MUST NOT, and MAY, per RFC 2119, and applies only to the
-obligation sections. Version 1 states no SHOULD: an obligation either binds or it is not
-an obligation yet.
+Conformance language is MUST, MUST NOT, and MAY, per RFC 2119. Every binding requirement
+carries a number in section 10 or section 11, and the prose that motivates one names that
+number. A MUST with no number is a drafting error: C6 requires each side to name the case
+that demonstrates each obligation, and an unnumbered requirement cannot be named by one.
+Version 1 states no SHOULD: an obligation either binds or it is not an obligation yet.
+Section 8.1 is change control rather than conformance and says so where it stands.
 
 ---
 
@@ -38,20 +41,18 @@ The declared data-label path described in section 9.2 is **not wired**. `-Ddata-
 declared in `build.zig`, parsed into `precompile_args.zig`, and recorded in the build
 report as a boolean. It does not reach the flow checker: `parseExternalLabels` and
 `setExternalLabels` in `packages/zts/src/flow_checker.zig` have no production caller, and
-no `CompileOptions` field carries the labels. Section 9 states the consequence.
+no `CompileOptions` field carries the labels. The mechanism is wanted, not present: P9
+states it as an obligation with the conditions its implementation must meet.
 
 Nothing else in this document is implemented. The declaration document, the admissibility
 stage, spec-driven generation, and the published vocabulary envelope are obligations
 stated here, not behaviour that exists.
 
-Three claims in this document are unresolved against the tree and are marked where they
-are made. Each states the finding and the ways out, and none is decided here.
-
-| Decision | Where | What is unresolved |
-|---|---|---|
-| D1 | section 9.2 | The declared-classification path is not wired, so section 9 overstates what is enforced |
-| D2 | section 4.3 | A capability ceiling does not determine a property, so P3 predicts what it cannot know |
-| D3 | section 8 | Stateful modules sit inside the default ceiling, so "the handler holds no store" does not follow from it |
+Three earlier claims in this document did not hold against the tree. Each is now stated as
+what it actually is rather than as shipped behaviour: the declared-classification path is
+obligation P9, the capability ceiling no longer predicts a property (section 4.3 and P3),
+and the no-store topology is a named profile rather than a consequence of the default
+ceiling (section 8).
 
 **Consumer, Metadoor.** Its engine seam produces code and does not consume this contract.
 Its zts adapter is out of tree, carries one commit, and is stale against the current
@@ -93,7 +94,7 @@ A consumer traverses all three. Consumers differ only in which stages they own.
 | Adjudication | Is this source acceptable? | declaration plus candidate bytes | implemented as `verify` |
 | Acceptance | Is this artifact the one that was declared? | artifact plus certificate | implemented |
 
-### 3.1 Two refusals that MUST stay apart
+### 3.1 Two refusals that stay apart, per P6
 
 Admissibility refuses a declaration that names something the producer has no vocabulary
 for: an invariant kind outside the catalog, a capability category it does not model, a
@@ -103,9 +104,15 @@ Adjudication reports a property it could not establish for the source it was giv
 source is legal and the property is expressible; the code does not carry it. The remedy is
 to change the code.
 
-A producer MUST NOT report one as the other. Collapsing them tells a consumer to edit the
-wrong artifact, and a consumer that cannot separate them cannot route the answer to
-whoever can act on it.
+P6 binds a producer not to report one as the other. Collapsing them tells a consumer to
+edit the wrong artifact, and a consumer that cannot separate them cannot route the answer
+to whoever can act on it.
+
+"Could not prove" is also not one answer. Analysis can exhaust a budget, meet a construct
+it does not model, lack a schema, or produce no contract at all, and none of those means
+the source lacks the property. P2 carries the taxonomy that keeps them apart, and the
+existing `verify` answers already distinguish `unknown_property`, `not_decided`,
+`analyzer_proved`, and `analyzer_not_proved`.
 
 Acceptance already honours the same discipline by stopping at a named `SemanticState`
 rather than answering a bare no.
@@ -114,6 +121,15 @@ rather than answering a bare no.
 
 What a consumer declares at admissibility is what generation targets, what adjudication
 checks against, and what an artifact commits to by digest. One document fills four roles.
+
+Those four roles want different things from the document, which is why P4 separates the
+authored form from the canonical one. Admissibility and generation want a form a consumer
+iterates on. Adjudication wants a frozen obligation set. The artifact wants bytes that do
+not move. A digest over a canonical encoding gives the last two without freezing the first,
+and it is the same split `invariant_config.zig` already makes between authored JSON and
+bound `ZTINV1` bytes. A digest proves that one document was carried through; it does not
+prove that generation targeted every item in it or that adjudication checked each one, and
+P2's per-item answers are what carry that.
 
 This generalizes a mechanism that already exists rather than introducing one. The
 application invariant specification is authored as JSON, canonicalized to `ZTINV1` bytes,
@@ -131,7 +147,7 @@ vocabulary this repository publishes, so the document cannot state anything the 
 has no way to answer. This is the discipline `packages/tools/src/invariant_config.zig`
 already applies to invariants, raised one level.
 
-Version 1 covers the handler boundary and has four sections.
+Version 1 covers the handler boundary and has five sections.
 
 ### 4.1 Interface
 
@@ -145,10 +161,16 @@ fields this section draws on.
 
 `ApiInfo` carries `schemas_dynamic` and `routes_dynamic`. Those flags describe a handler,
 so they are read at adjudication rather than at admissibility, where no source exists yet.
-Adjudication MUST fail a handler whose route or schema surface is dynamic against a
+P10 binds adjudication to fail a handler whose route or schema surface is dynamic against a
 declaration that states an interface, because a surface the compiler could not enumerate
 cannot be compared to a declared one. This is an unproven interface, not a refused
-declaration, and section 3.1 governs which one it is reported as.
+declaration, and P6 governs which one it is reported as.
+
+A handler whose dynamism is deliberate, such as a gateway or a catch-all proxy, has no
+remedy under that reading, because "change the code" is not an answer when the code is
+correct. Version 1 does not solve this. A declaration states an interface or it does not,
+and a handler that intends a dynamic surface declares no interface and forgoes the
+comparison. Section 13 records the missing case.
 
 ### 4.2 Properties
 
@@ -168,14 +190,23 @@ Admissibility classifies each name through `classify` in
 `classify` is not by itself a registry check. Its structural branch accepts any boolean
 field of `ui_payload.PropertiesSnapshot`, which is a wider set than the seventeen version-1
 spec names: `has_egress` and `post_only` classify as `structural` while being absent from
-`v1_specs`. Admissibility MUST check a declared property name against `v1_specs` as well,
-or it will accept a name the declaration has no vocabulary for.
+`v1_specs`. P11 binds admissibility to check a declared property name against `v1_specs` as
+well, because `classify` alone will accept a name the declaration has no vocabulary for.
 
 A declaration name is also not always the verifier wire name. The registry spells
 `result_safe`; the name a client sends and reads is `results_safe`, mapped in
-`packages/zts/src/proof_trace.zig`. A producer MUST translate rather than forward, and
-version 1 owes the full mapping between the seventeen spec names, the twenty handler
-property fields, the verifier wire names, and the eight consumer obligation properties.
+`packages/zts/src/proof_trace.zig`. P12 binds a producer to translate rather than forward,
+and to publish the mapping between the seventeen spec names, the twenty handler property
+fields, the verifier wire names, and the eight consumer obligation properties. Those four
+sets are not one vocabulary, and an analyzer result must not become a kernel-checked claim
+by passing under a similar name.
+
+A structural property that adjudication cannot establish has no automated remedy, because
+generation cannot drive it. Version 1 does not answer that with a refusal of the whole
+declaration. P13 binds the producer to report it as a disclosed gap, following the disclosed
+edge and residual guard pattern the certificate already carries, and C8 binds the consumer
+to record which gaps it accepted. A declaration carrying an accepted gap was not proven
+entire, and the accepted gap has an owner.
 
 The split between driven and checked is not a design choice.
 [Roadmap](roadmap.md#considered-and-refused) records a refusal to widen the autoloop past
@@ -187,46 +218,61 @@ The categories the handler may reach, from the ten in
 `packages/zts/src/module_authorization.zig`, and the modules it may import, from the
 twenty-seven in `packages/zts/src/builtin_modules.zig`.
 
-The ceiling is a parameter of the declaration, not a fixed rule. Admissibility reports
-which properties survive it: a declaration naming `clock` makes `deterministic`
-unprovable, and admissibility MUST say so before any source is generated rather than
-letting adjudication discover it.
+The ceiling is a parameter of the declaration, not a fixed rule.
 
-> **Open decision D2: the ceiling does not determine the property.** The claim above does
-> not hold against the compiler that would implement it. `deterministic` is computed
-> per-export and by reachability, so it asks whether the generated call graph touches a
-> clock export, not whether the ceiling permits one to exist.
-> `packages/zts/src/contract_builder.zig` states it directly: determinism "answers whether
-> a varying value reaches the response rather than whether one was read at all, so a
-> handler that logs a timestamp and answers a constant keeps the property." The test
-> `"a clock read that never reaches the response keeps determinism"` in
-> `packages/zts/src/flow_checker.zig` covers exactly that handler, and its comment names
-> this as "the false negative the interim capability rule had to special-case." Permission
-> is an upper bound on what may happen and establishes nothing about what does.
-> Admissibility also runs with no source, so it cannot know which exports the eventual code
-> reaches.
->
-> The claim is therefore not merely unsound. It reintroduces at the declaration boundary
-> the capability-based rule the compiler already replaced with a flow-based one, and it
-> would hand a consumer a refusal the compiler would not have made.
->
-> This is not only a wrong sentence. It puts a policy pessimism in the vocabulary-refusal
-> bucket that section 3.1 forbids, because `deterministic` is in the registry and is
-> expressible under a narrower ceiling.
->
-> Two ways out. Either admissibility answers a third value, "requires source analysis",
-> for every conclusion the declaration alone does not determine, and reports only explicit
-> contradictions as refusals. Or the inference stays as a deliberately conservative policy
-> and says so in those words, which costs the consumer a generation run it could have been
-> spared. P3 depends on which is chosen.
+**A ceiling does not determine a property.** A ceiling is an upper bound on what the
+handler may reach. It establishes that an operation is permitted, never that one occurs,
+so it settles almost no property in either direction. Determinism is the worked case.
+`packages/zts/src/contract_builder.zig` states that determinism "answers whether a varying
+value reaches the response rather than whether one was read at all, so a handler that logs
+a timestamp and answers a constant keeps the property," and the test
+`"a clock read that never reaches the response keeps determinism"` in
+`packages/zts/src/flow_checker.zig` covers exactly that handler. Its comment names the
+capability rule as "the false negative the interim capability rule had to special-case."
+Permitting `clock` therefore does not make `deterministic` unprovable, and neither does
+reading a clock. Admissibility also runs with no source, so it cannot know which exports
+the eventual code reaches.
 
-For version 1 the default ceiling excludes `sqlite`, `network`, `filesystem`, and
-`runtime_callback`. Section 8 states why. A declaration MAY narrow or widen the default,
-and admissibility reports the consequence either way.
+Exclusions do not run the other way either. Excluding a category generally makes a property
+easier to establish rather than harder, so a narrow ceiling is not a source of
+unprovability to report.
+
+P3 therefore binds admissibility to answer `requires_source_analysis` for every conclusion
+the declaration alone does not determine, and to refuse only an explicit contradiction: a
+declared property whose discharge the declared ceiling forbids outright. That set is small
+and version 1 expects it to be near empty. Admissibility's value is vocabulary checking
+rather than prediction, and a producer that predicts here hands a consumer a refusal the
+compiler would not have made, which is also the policy pessimism P6 forbids in the
+vocabulary-refusal bucket.
+
+#### Profiles
+
+Version 1 names two ceilings rather than one default, because the document already needs
+both. A declaration selects one and MAY narrow it.
+
+| Profile | Categories | What it is for |
+|---|---|---|
+| `boundary` | `env`, `clock`, `random`, `crypto`, `stderr`, `policy_check` | The no-store handler of section 8. Excludes `sqlite`, `network`, `filesystem`, and `runtime_callback`, and excludes the stateful modules `zttp:cache` and `zttp:ratelimit` by name |
+| `adapter` | `boundary` plus `network` | The proven adapter of section 9, which cannot reach a wrapped system without egress |
+
+A ceiling carries a module list and not only a category list, because categories alone do
+not deliver the no-store property. Of the four modules that hold state across calls, three
+fall to a category: `zttp:sql` needs `sqlite`, and `zttp:queue` and `zttp:durable` need
+`runtime_callback`. `zttp:cache` does not. It needs only `clock` and `policy_check`, both
+of which a boundary handler wants for ordinary reasons, and it hands back a value a
+separate write put there, which is why its bindings declare `.unknown`. A category-only
+ceiling admits it.
+
+`zttp:ratelimit` is excluded for a weaker reason and the difference is worth keeping.
+It needs only `clock`, and it retains a counter between requests, but its result derives
+from the limiter's own state rather than from a value some other call stored, which
+`AGENTS.md` records as a different shape from `zttp:cache`. It is excluded from `boundary`
+because a profile that promises no retained data cannot admit a module that retains data,
+not because it launders a label.
 
 An absent category is a refusal, never a permissive default. This matches
 `packages/proof-checker/src/capability_policy.zig`, which records that an absent list is
-not an empty one and neither is a licence.
+not an empty one and neither is a licence. The same holds for an absent module.
 
 ### 4.4 Invariants
 
@@ -238,10 +284,34 @@ a ledger identifier and a currency set. `declared_accounts_v1` takes a matcher s
 exact and prefix rules. The predicate itself is the producer's, dispatched by the linked
 native adapter whose manifest is bound as its own graph member.
 
-An invariant the catalog cannot express MUST be reported as `no_enforcement`. It MUST NOT
-be silently dropped and MUST NOT contribute to any proven property. The term is taken
+P5 binds an invariant the catalog cannot express to be reported as `no_enforcement`,
+never silently dropped and never contributing to a proven property. The term is taken
 from Metadoor's `InvariantProofStatus` rather than invented, so both sides read one word
 the same way.
+
+### 4.5 Classifications
+
+The classifications the consumer asserts over data the producer did not produce, each
+naming a field and the label it carries. This is the section sections 9.2, P8, P9 and C7
+depend on, and without it those obligations name a declaration field that does not exist.
+
+A classification entry names the source it applies to, the field path within that source,
+and one label from the flow checker's vocabulary. A consumer declares a field of a wrapped
+system's response as `secret`, and from that point the value cannot reach a response body,
+a log, or an outbound request without failing the build.
+
+Three properties of this section are not optional, because each is a way the section could
+report success while enforcing nothing:
+
+- A field path is matched by the whole path, never by its trailing segment. `User.email`
+  and an unrelated `.email` are different fields, and P9 forbids conflating them.
+- A declared field that the analysis never saw is reported, per P8. A declaration naming a
+  field that never appears enforces nothing while the build passes.
+- A malformed entry is a refusal, not a skipped line. A discarded entry is an enforcement
+  the consumer believes it has.
+
+The label vocabulary, the source selector, and whether an entry is required or optional are
+owed by version 1 and are part of the serialization P4 requires. Section 13 records this.
 
 ---
 
@@ -264,7 +334,7 @@ That figure belongs beside the existing one in [Convergence](convergence.md) and
 subject to the same rule: a published number names the corpus, the model revision, and
 the policy hash it was recorded against.
 
-A producer implementing specification mode MUST reuse the existing veto loop. A second
+P7 binds a producer implementing specification mode to reuse the existing veto loop. A second
 generation path with its own acceptance rules would produce a second, unmeasured
 convergence claim.
 
@@ -296,10 +366,11 @@ stated so a drift gate can check them and a reader can fail the document against
 
 Two counts need a qualifier before a gate reads them. Virtual modules = 27 counts
 `runtime_builtins`, the in-tree base. `all = builtins ++ extension_bindings.all`, so a
-build that registers an extension holds more, and the envelope MUST state which of the two
-it publishes. Residual guard families = 4 counts the catalog; three are in
-`enabled_families` today, and `sql` is catalogued but not release-enabled. The alphabet and
-the enabled set are different questions and the envelope MUST answer both separately.
+build that registers an extension holds more. Residual guard families = 4 counts the
+catalog; three are in `enabled_families` today, and `sql` is catalogued but not
+release-enabled. In both cases the alphabet and the effective set are different questions,
+and P1 binds the envelope to publish both as separate blocks. A consumer pins one of them
+and has to be able to tell which.
 
 Pinned identities, each compared by equality:
 
@@ -343,23 +414,15 @@ remove.
 ## 8. Topology
 
 Version 1 places the consumer and the producer in separate processes. The consumer holds
-persistence and effect authority. The handler holds no store.
+persistence and effect authority.
 
-> **Open decision D3: the default ceiling does not deliver the no-store claim.**
-> `zttp:cache` requires only `clock` and `policy_check`. `zttp:ratelimit` requires only
-> `clock`. Neither reaches `sqlite`, `network`, `filesystem`, or `runtime_callback`, so
-> both sit inside the section 4.3 default ceiling, and both hold state across calls and
-> write to it. "The handler holds no store" is therefore false as a consequence of the
-> stated default. Section 9's own network calls are effects for the same reason and need a
-> category the default excludes, so the arrangement section 9 describes is already outside
-> the default rather than inside it.
->
-> Two ways out. Either the default ceiling is tightened to exclude the stateful modules
-> and the claim becomes true by construction, or the claim is narrowed to what the ceiling
-> actually gives and the no-store property becomes a separate, named profile a declaration
-> selects. The second reading makes section 8 a set of supported profiles rather than one
-> topology. Section 8.1 is unaffected either way: it is a test a proposal must pass, not a
-> claim about the default.
+**The handler holds no store under the `boundary` profile, and only under it.** That is a
+property of the ceiling section 4.3 names, not of process separation. Separate processes
+place no authority anywhere by themselves. `zttp:cache` and `zttp:ratelimit` need nothing
+beyond `clock` and `policy_check`, so a category-only ceiling admits both while both hold
+state across calls, which is why `boundary` excludes them by name. The `adapter` profile
+adds `network`, and a network call is itself an effect, so an adapter handler is not a
+no-store, no-effect handler and does not claim to be.
 
 The reason is the consumer's own atomicity requirement. Metadoor's decision D-022 has its
 state writer persist the permit's idempotency key on the history entry in the same write
@@ -372,8 +435,10 @@ transaction against the adapter's own rows, and no callback crosses that port.
 This is not a reduced producer. All five goal-driveable properties are boundary data
 properties: `no_secret_leakage`, `no_credential_leakage`, `injection_safe`,
 `input_validated`, and `pii_contained`. A handler that validates input, shapes data, and
-constructs a response is where those properties live. Such a handler is also a pure
-function of its request, which is what makes `--trace` and `-Dreplay` meaningful over it.
+constructs a response is where those properties live. A `boundary` handler is also a pure
+function of its request, and an `adapter` handler is a deterministic function of its
+request and the virtual-module responses it received, which is what makes `--trace` and
+`-Dreplay` meaningful over either.
 
 The consumer passes the data in. A handler that needs a record receives it in the request
 rather than reading it.
@@ -385,8 +450,15 @@ and the system restarts. The system must preserve the unknown effect, block auto
 retry, retain the original permit and receipt lineage, and refuse new execution without
 current authority.
 
-Version 1 passes this by construction, because the handler performs no effect. Any
-proposal that moves effect authority into the artifact MUST demonstrate it instead.
+A `boundary` handler passes this by construction, because it performs no effect. An
+`adapter` handler does not pass it by construction, because a network call is an effect
+whose outcome a crash can leave unknown; it passes only where the consumer still owns the
+permit and the record, which is what section 8 places there.
+
+This subsection is change control, not conformance. It states what a proposal has to
+demonstrate before effect authority moves into the artifact, so it binds a future change
+to this document rather than a producer or a consumer, and it carries no P or C number for
+that reason.
 
 ---
 
@@ -406,7 +478,7 @@ decision D1 in section 9.2 states what that costs. Until it is settled, the arra
 available before any obligation in section 10 is met is the constrained-egress half, not
 the declared-classification half.
 
-### 9.1 Three levels of claim, which MUST stay apart
+### 9.1 Three levels of claim, which C7 keeps apart
 
 **Unconditional.** The adapter's own handling is proven, to whatever the declaration
 required and adjudication established: input validation, injection safety, response
@@ -441,31 +513,24 @@ declaring the response field `ssn` as `secret` gets it enforced from that point,
 value cannot reach a response body, a log, or an outbound request without failing the
 build.
 
-> **Open decision D1: that path is not wired, so the arrangement is a proxy today.**
-> `-Ddata-labels` is declared in `build.zig`, parsed into `precompile_args.zig`, and
-> recorded in the build report as a boolean. It stops there. `parseExternalLabels` and
-> `setExternalLabels` have no production caller, `ExternalLabel` appears in no file but
-> `packages/zts/src/flow_checker.zig`, and no `CompileOptions` field carries the labels.
-> Nothing a consumer declares is enforced.
->
-> This is load-bearing for section 9. The introduction calls this the one section whose
-> mechanism is implemented today, 9.5 answers "Checked at build" for a declared response
-> field classification, and the Conditional tier of 9.1 rests on it. All three overstate
-> what exists. What is real in section 9 is the capability policy, the address-scope egress
-> check, the `external` default, and replay.
->
-> Two ways out. Either `-Ddata-labels` is wired into `CompileOptions` and the flow checker,
-> which makes the section true as written, or section 9 is narrowed to the mechanisms that
-> exist and the label enforcement moves to an obligation beside P1. Wiring it is not
-> sufficient on its own: the binding consults external labels for named member access, so
-> computed access and whole-object forwarding, which is the shape an untyped wrapped
-> response takes, would still pass unchecked. A qualified binding also registers its short
-> name, so `User.email` matches an unrelated `.email`. P8 is the obligation that has to
-> close those, and it does not yet.
+**That path is not wired today, so the Conditional tier of 9.1 is specified rather than
+enforced.** `-Ddata-labels` is declared in `build.zig`, parsed into `precompile_args.zig`,
+and recorded in the build report as a boolean. It stops there. `parseExternalLabels` and
+`setExternalLabels` have no production caller, `ExternalLabel` appears in no file but
+`packages/zts/src/flow_checker.zig`, and no `CompileOptions` field carries the labels.
 
-### 9.3 The claim a consumer MUST NOT make
+P9 binds the producer to close that, and it is not satisfied by wiring the option alone.
+The binding consults external labels for named member access, so computed access and
+whole-object forwarding, which is the shape an untyped wrapped response takes, would still
+pass unchecked. A qualified binding also registers its short name, so `User.email` matches
+an unrelated `.email`, and a malformed entry is discarded silently. An implementation that
+wires the path without closing those three produces a build-time claim backed by a check
+that is blind where the arrangement is used, which is the vacuous-gate shape `AGENTS.md`
+records. P8 and P9 together state what it has to answer.
 
-A consumer MUST NOT describe this arrangement as making the wrapped system safe. Safety is
+### 9.3 The claim C7 forbids
+
+C7 forbids a consumer to describe this arrangement as making the wrapped system safe. Safety is
 compound, and what this produces is implementation evidence about one component.
 
 The claim that survives review names the boundary and the declared set: the adapter's
@@ -476,7 +541,7 @@ handling is proven, and these named fields are enforced. Section 11 states this 
 A proven adapter in front of a system does not stop anything else reaching that system.
 What the certificate establishes is what the adapter does. Whether another path bypasses
 it is arranged in the network and is not visible in any artifact this contract defines. A
-consumer that needs exclusive reachability MUST establish it separately and MUST NOT read
+consumer that needs exclusive reachability establishes it separately, and C7 forbids reading
 it out of an acceptance.
 
 This is the same shape as the standing deployment assumption already recorded for the
@@ -488,47 +553,66 @@ the artifact verifies.
 The arrangement is also the worked example of a per-construct enforcement statement, which
 a target owes for every construct it is handed:
 
-| Construct | Answer |
-|---|---|
-| Declared response field classification | Specified, not wired: see open decision D1 |
-| Egress endpoint and address scope | Enforced at runtime |
-| Any property of the wrapped system's interior | Not expressible |
+A target answers on two axes for every construct it is handed. **Status** is one of
+`implemented`, `specified`, or `not expressible`. **Enforcement point** is one of `build`,
+`runtime`, `build and runtime`, or `none`. Neither axis alone is an answer.
 
-A target answers with exactly one of those three for every construct. A boolean
-"supported" is not an answer, because it lets a construct land on a target that nominally
-supports its category while enforcing nothing specific about it.
+| Construct | Status | Enforcement point |
+|---|---|---|
+| Declared response field classification | specified | build, once P9 is met |
+| Egress endpoint and address scope | implemented | runtime |
+| Any property of the wrapped system's interior | not expressible | none |
 
-The first row is the reason this map needs a fourth answer and probably more than one
-axis. "Checked at build" was the answer this table carried while nothing checked anything,
-which is the failure the map exists to prevent, reproduced inside the map itself. A
-construct can also be checked statically and guarded at runtime at once, or expressible
-and unproven. Version 1 owes a decision on whether the answer stays one value or becomes
-separate statements of support, analysis result, runtime obligation, and assurance.
+Two axes rather than one, because one value already produced a false answer here. This
+table read "Checked at build" for the first row while nothing checked anything, which is
+the exact failure the map exists to prevent, reproduced inside the map. A single value
+forces a construct that is specified but unbuilt to borrow the vocabulary of one that
+works. Splitting status from enforcement point also lets a construct be checked statically
+and guarded at runtime, which a single value cannot express.
+
+A boolean "supported" is not an answer either, because it lets a construct land on a target
+that nominally supports its category while enforcing nothing specific about it.
 
 ---
 
 ## 10. Producer obligations
 
 - **P1.** The producer MUST publish the section 6 vocabularies in one machine-readable
-  envelope carrying a contract version, and MUST fail a build in which an alphabet grows
-  without the envelope changing. An alphabet a consumer cannot enumerate is one it must
-  track by hand, which is not a contract.
+  envelope carrying a contract version, and MUST publish both the in-tree alphabet and the
+  effective set for the build, as separate labelled blocks, wherever the two can differ.
+  The envelope MUST carry the P12 name mapping. The producer MUST gate it by comparing a
+  source-derived inventory against the published one for equality, member by member, and
+  the gate MUST fail on a missing input, an empty inventory, and a build in which nothing
+  depends on it. A gate that only asks whether the envelope changed is satisfied by an
+  unrelated edit, and a count alone misses a substitution. An alphabet a consumer cannot
+  enumerate is one it must track by hand, which is not a contract.
 - **P2.** The producer MUST accept a declaration at the admissibility stage and answer per
-  item, with `goal_driveable`, `structural`, or a refusal naming the field and the
-  vocabulary it fell outside.
-- **P3.** The producer MUST report, at admissibility, which declared properties are
-  unprovable under the declared capability ceiling. Reporting this only at adjudication
-  spends a generation run to deliver an answer the declaration already determined.
-- **P4.** The producer MUST bind the declaration bytes as their own executable-graph
-  member, in a form a consumer can reproduce and compare against a digest it computed
-  itself. `invariant_spec` is the nearest existing member but is not a precedent for
-  binding authored bytes: `packages/tools/src/invariant_config.zig` loads authored JSON
-  and binds the canonical `ZTINV1` encoding. Version 1 owes a stated choice between the
-  two, and the choice is empty until section 4 defines a serialization.
+  item, with `goal_driveable`, `structural`, `requires_source_analysis`, or a refusal. The
+  answer MUST be typed, not prose: a stable reason code, the item identifier, the field, the
+  vocabulary it fell outside, and the expected identity where one applies, following the
+  diagnostic envelope `verify` already carries. The producer MUST state whether one refused
+  item stops the remaining checks, and MUST keep these apart as distinct answers: malformed
+  declaration, unknown vocabulary, incompatible requirements, invalid source, failed
+  property, incomplete analysis, timeout, and internal failure. A consumer cannot write a
+  parser against a shape that is named but not typed.
+- **P3.** The producer MUST answer `requires_source_analysis` at admissibility for every
+  conclusion the declaration alone does not determine, and MUST NOT infer that a declared
+  property is unprovable from the capability ceiling. It MAY refuse an explicit
+  contradiction, meaning a declared property whose discharge the declared ceiling forbids
+  outright. Section 4.3 states why a ceiling settles almost nothing: it bounds what is
+  permitted and establishes nothing about what occurs.
+- **P4.** The producer MUST bind the declaration's canonical encoding as its own
+  executable-graph member, following `invariant_spec`, whose loader in
+  `packages/tools/src/invariant_config.zig` reads authored JSON and binds the canonical
+  `ZTINV1` bytes. The canonical form MUST be specified well enough that a consumer computes
+  the same digest from the same declaration without holding the producer's serializer:
+  field order, defaults and omissions, duplicate-key handling, encoding, and size bounds.
+  Binding authored bytes instead would make whitespace and key order load-bearing and buys
+  no property this obligation needs.
 - **P5.** The producer MUST report a declared invariant outside the catalog as
   `no_enforcement`, and MUST NOT let it contribute to any proven property.
 - **P6.** The producer MUST keep a refusal distinct from an unproven property, per
-  section 3.1.
+  section 3.1, and MUST NOT report a policy pessimism as a vocabulary refusal.
 - **P7.** Specification mode MUST reuse the existing veto loop and MUST be measured
   against a named corpus before any convergence figure derived from it is published.
 - **P8.** The producer MUST report which declared field classifications matched a field
@@ -536,15 +620,47 @@ separate statements of support, analysis result, runtime obligation, and assuran
   never appears enforces nothing while the build passes, which is the vacuous-gate shape
   `AGENTS.md` records: a gate whose input is empty reports success and is then cited as
   evidence. An unmatched binding is not necessarily an error, because a field may be
-  absent on some paths, but it MUST NOT be silent.
+  absent on some paths, but it MUST NOT be silent. The report MUST distinguish a field
+  genuinely absent on a path from a field whose value was present but never named, and MUST
+  answer `indeterminate` rather than `matched` for the second. A nonzero match count is not
+  the claim.
+- **P9.** The producer MUST enforce declared field classifications in the flow checker,
+  and the option that carries them MUST reach the checker rather than the build report
+  alone. An implementation satisfies P9 only when it also: refuses or reports
+  `indeterminate` for whole-object forwarding of a value carrying declared fields, rather
+  than passing it; matches a qualified binding only on the qualified path, never on its
+  short name; and refuses a malformed binding entry rather than discarding it. Section 9.2
+  records the current state, which meets none of this.
+- **P10.** Adjudication MUST fail a handler whose route or schema surface is dynamic
+  against a declaration that states an interface, and MUST report it as an unproven
+  interface rather than a refused declaration.
+- **P11.** Admissibility MUST check a declared property name against the version-1 spec
+  registry, and MUST NOT treat `classify` as that check. `classify` accepts any boolean
+  field of `PropertiesSnapshot`, which is the wider set.
+- **P12.** The producer MUST translate a declaration property name into the verifier wire
+  name rather than forwarding it, and MUST publish the mapping between the spec names, the
+  handler property fields, the verifier wire names, and the consumer obligation properties.
+  An analyzer result MUST NOT become a kernel-checked claim by passing under a similar name.
+- **P13.** The producer MUST report a declared property it could not establish as a
+  disclosed gap, following the disclosed edge and residual guard pattern the certificate
+  already carries. It MUST NOT pass the declaration silently and MUST NOT refuse the whole
+  declaration for that reason alone. Which gaps a consumer then accepts is C8.
+- **P14.** The producer MUST demonstrate P1 to P13 in its own test suite, and MUST name
+  which case demonstrates which obligation. Evidence MUST include complete vocabulary
+  coverage, a malformed input, an empty input, and a probe that deletes or mutates a gate's
+  input and confirms the gate fails. This mirrors C6: a document that binds one side to
+  evidence and not the other sets the lower bar where the claims are made.
 
 ---
 
 ## 11. Consumer obligations
 
 - **C1.** A consumer MUST pin every alphabet it reads by equality, and MUST refuse to
-  start when the envelope names a member it does not know. A range admits a member whose
-  meaning the consumer has not been taught.
+  start when an alphabet it reads names a member it does not know. A range admits a member
+  whose meaning the consumer has not been taught. The refusal is scoped to what the
+  consumer interprets: a member added to an alphabet it never reads is not its concern, and
+  reading that as an envelope-wide refusal would stop every consumer on any growth
+  anywhere.
 - **C2.** A consumer MUST treat an absent capability category as a refusal, never as
   permitting nothing and never as permitting anything.
 - **C3.** A consumer MUST obtain language verdicts by calling the producer's checker. It
@@ -553,13 +669,17 @@ separate statements of support, analysis result, runtime obligation, and assuran
   expect the producer to read that representation.
 - **C5.** A consumer MUST declare the contract version it implements, and a producer
   matches it by equality.
-- **C6.** A consumer MUST demonstrate C1 to C5 in its own test suite, and MUST name which
+- **C6.** A consumer MUST demonstrate C1 to C8 in its own test suite, and MUST name which
   case demonstrates which obligation. This document states both sides' obligations; it
   carries neither side's evidence.
 - **C7.** A consumer operating a proven adapter MUST NOT describe the arrangement as
   making the wrapped system safe. It MUST state the boundary claim and the declared field
-  set, and MUST NOT present exclusive reachability of the wrapped system as something an
-  acceptance established.
+  set, MUST keep the three levels of claim in section 9.1 apart when it restates them, and
+  MUST NOT present exclusive reachability of the wrapped system as something an acceptance
+  established.
+- **C8.** A consumer MUST record which disclosed gaps it accepted for a given artifact, and
+  MUST NOT treat a declaration carrying an accepted gap as one that was proven entire. An
+  accepted gap is a decision with an owner, not an absence.
 
 ---
 
@@ -591,6 +711,11 @@ Named so an omission is not read as permission.
 | Hosted deploy | An accepted hosted scope, lifecycle policy, and control-plane CI |
 | Promotion of any disclosed property to consumer-checked | One property or opcode family selected, per [Roadmap](roadmap.md#runtime-and-product-work) |
 | Computed SQL resources in a declared ceiling | A policy that distinguishes read from write authority |
+| More than one handler under one declaration: handler identities, route ownership, shared invariants, and whether acceptance is per handler or per release | One single-handler declaration proven end to end first. Metadoor is not a single-handler system, so this is a known gap rather than an unnoticed one |
+| A declared interface for a handler whose route or schema surface is dynamic by design, such as a gateway | A declaration field that states intended dynamism. Version 1 offers no interface comparison for such a handler and P10 fails it, which is correct but unhelpful |
+| The classification label vocabulary, source selector, and required-versus-optional rule of section 4.5 | The declaration serialization P4 requires, which owns the encoding all three are expressed in |
+| Interface comparison rules: whether extra routes are admitted, how overlapping routes resolve, and whether schemas require equality or compatibility | A version-1 declaration that has compared one interface |
+| Generation lifecycle: cancellation, retry, progress, resource budgets, and whether a retry resumes | Measurement of the veto loop under a declaration, per P7 |
 
 ---
 
