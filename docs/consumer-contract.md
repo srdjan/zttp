@@ -250,25 +250,44 @@ vocabulary-refusal bucket.
 Version 1 names two ceilings rather than one default, because the document already needs
 both. A declaration selects one and MAY narrow it.
 
-| Profile | Categories | What it is for |
-|---|---|---|
-| `boundary` | `env`, `clock`, `random`, `crypto`, `stderr`, `policy_check` | The no-store handler of section 8. Excludes `sqlite`, `network`, `filesystem`, and `runtime_callback`, and excludes the stateful modules `zttp:cache` and `zttp:ratelimit` by name |
-| `adapter` | `boundary` plus `network` | The proven adapter of section 9, which cannot reach a wrapped system without egress |
+| Profile | Categories | Module exclusions | What it is for |
+|---|---|---|---|
+| `boundary` | `env`, `clock`, `random`, `crypto`, `stderr`, `policy_check` | `zttp:cache`, `zttp:ratelimit` | The no-store handler of section 8 |
+| `adapter` | `boundary` plus `network`, `runtime_callback` | `zttp:cache`, `zttp:ratelimit` | The proven adapter of section 9. `zttp:fetch` needs `network` and `runtime_callback` together, so egress alone does not reach a wrapped system. `zttp:service` additionally needs `filesystem`, and a declaration that uses it widens the ceiling by that one category and says so |
 
 A ceiling carries a module list and not only a category list, because categories alone do
-not deliver the no-store property. Of the four modules that hold state across calls, three
-fall to a category: `zttp:sql` needs `sqlite`, and `zttp:queue` and `zttp:durable` need
-`runtime_callback`. `zttp:cache` does not. It needs only `clock` and `policy_check`, both
-of which a boundary handler wants for ordinary reasons, and it hands back a value a
-separate write put there, which is why its bindings declare `.unknown`. A category-only
-ceiling admits it.
+not deliver the no-store property. Twelve module bindings declare `.stateful = true`. Most
+fall to a category the `boundary` profile already excludes: `zttp:sql` and `zttp:ledger`
+need `sqlite`, and `zttp:durable`, `zttp:queue`, `zttp:io`, `zttp:scope` and
+`zttp:workflow` need `runtime_callback`. `zttp:fetch` and `zttp:service` need `network`.
+Three are admitted by the six `boundary` categories and have to be handled by name.
+
+`zttp:cache` is the one that matters. It needs only `clock` and `policy_check`, both of
+which a boundary handler wants for ordinary reasons, and it hands back a value a separate
+write put there, which is why its bindings declare `.unknown`.
 
 `zttp:ratelimit` is excluded for a weaker reason and the difference is worth keeping.
 It needs only `clock`, and it retains a counter between requests, but its result derives
 from the limiter's own state rather than from a value some other call stored, which
-`AGENTS.md` records as a different shape from `zttp:cache`. It is excluded from `boundary`
-because a profile that promises no retained data cannot admit a module that retains data,
-not because it launders a label.
+`AGENTS.md` records as a different shape from `zttp:cache`. It is excluded because a
+profile that promises no retained data cannot admit a module that retains data, not because
+it launders a label.
+
+`zttp:validate` is `.stateful = true` and needs no capability at all, so no ceiling
+excludes it. It is not excluded here either: its state is a schema registry populated by
+`schemaCompile` at module scope, not request-derived data accumulated across requests.
+That distinction is the actual rule, and `.stateful` is a wider flag than it. A profile
+that promised "no module marked stateful" would exclude `zttp:validate` for no reason and
+would still be the wrong test.
+
+**A category is coarser than a module, and `adapter` shows the cost.** `zttp:fetch` needs
+`runtime_callback`, and that one category also admits `zttp:durable`, `zttp:queue`,
+`zttp:io`, `zttp:scope` and `zttp:workflow`, which is the whole workflow family and every
+piece of durable state in it. An `adapter` handler is therefore not a no-store handler that
+also makes calls; it is a handler with durable orchestration available to it, whether or
+not the declaration wanted that. This is why a ceiling needs the module list. A declaration
+that wants egress and nothing else narrows `adapter` by excluding those five, and
+admissibility reports the ceiling it was actually given rather than the one that was meant.
 
 An absent category is a refusal, never a permissive default. This matches
 `packages/proof-checker/src/capability_policy.zig`, which records that an absent list is
@@ -421,8 +440,10 @@ property of the ceiling section 4.3 names, not of process separation. Separate p
 place no authority anywhere by themselves. `zttp:cache` and `zttp:ratelimit` need nothing
 beyond `clock` and `policy_check`, so a category-only ceiling admits both while both hold
 state across calls, which is why `boundary` excludes them by name. The `adapter` profile
-adds `network`, and a network call is itself an effect, so an adapter handler is not a
-no-store, no-effect handler and does not claim to be.
+adds `network` and `runtime_callback`, a network call is itself an effect, and
+`runtime_callback` admits the whole workflow family with its durable state, so an adapter
+handler is not a no-store, no-effect handler and does not claim to be. A declaration that
+wants egress without durable orchestration narrows `adapter` by module, per section 4.3.
 
 The reason is the consumer's own atomicity requirement. Metadoor's decision D-022 has its
 state writer persist the permit's idempotency key on the history entry in the same write
