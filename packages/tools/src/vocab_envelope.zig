@@ -22,6 +22,7 @@ const pcc = @import("zttp_proof_checker");
 
 const mb = zts.module_binding;
 const builtin_modules = zts.builtin_modules;
+const agent_identity = @import("agent_identity.zig");
 
 /// The contract version this envelope describes. A consumer matches it by
 /// equality, per C5.
@@ -336,4 +337,149 @@ test "derived counts match what the contract prose states" {
         matched += 1;
     }
     try std.testing.expectEqual(typedAlphabets().len, matched);
+}
+
+// ============================================================================
+// Capability profiles
+// ============================================================================
+
+/// A named ceiling from section 4.3. The declaration is here rather than in the
+/// document because a gate cannot check prose: while the profile table lived
+/// only in Markdown it was the one alphabet with no source to compare against,
+/// and it shipped twice with an error nobody could have caught mechanically.
+/// The `adapter` row named `network` without `runtime_callback`, so it could not
+/// reach a wrapped system at all, which is the arrangement section 9 exists for.
+pub const Profile = struct {
+    name: []const u8,
+    /// Capability categories the profile admits.
+    categories: []const mb.ModuleCapability,
+    /// Modules refused by name despite falling inside `categories`. A category
+    /// list alone does not deliver the no-store property: `zttp:cache` needs
+    /// only `clock` and `policy_check`, and `cacheGet` returns a value a
+    /// separate request wrote.
+    excluded_modules: []const []const u8,
+    /// Whether the profile requires the handler to carry `read_only`. This
+    /// bounds effects and is a different question from retained storage.
+    requires_read_only: bool,
+};
+
+pub const profiles = [_]Profile{
+    .{
+        .name = "boundary",
+        .categories = &.{ .env, .clock, .random, .crypto, .stderr, .policy_check },
+        .excluded_modules = &.{ "zttp:cache", "zttp:ratelimit" },
+        .requires_read_only = true,
+    },
+    .{
+        .name = "adapter",
+        .categories = &.{ .env, .clock, .random, .crypto, .stderr, .policy_check, .network, .runtime_callback },
+        .excluded_modules = &.{ "zttp:cache", "zttp:ratelimit" },
+        .requires_read_only = false,
+    },
+    .{
+        .name = "ledger",
+        .categories = &.{ .env, .clock, .random, .crypto, .stderr, .policy_check, .sqlite },
+        .excluded_modules = &.{ "zttp:cache", "zttp:ratelimit", "zttp:sql" },
+        .requires_read_only = false,
+    },
+};
+
+/// Pinned identities, each compared by equality.
+pub const Identities = struct {
+    certificate_schema: u16,
+    proof_system: u16,
+    semantics_epoch: u32,
+    handler_contract_version: u32,
+    agent_protocol_schema: u32,
+    policy_hash: [64]u8,
+    module_registry_hash: [64]u8,
+};
+
+/// The declared default of `HandlerContract.version`, read through reflection
+/// rather than by constructing a contract, which would need every field.
+fn handlerContractVersion() u32 {
+    const fields = @typeInfo(zts.handler_contract.HandlerContract).@"struct".fields;
+    inline for (fields) |f| {
+        if (comptime std.mem.eql(u8, f.name, "version")) {
+            const dv = f.defaultValue() orelse @compileError("HandlerContract.version lost its default");
+            return dv;
+        }
+    }
+    @compileError("HandlerContract has no version field");
+}
+
+pub fn identities() Identities {
+    return .{
+        .certificate_schema = pcc.proof_system.schema_version,
+        .proof_system = @intFromEnum(pcc.proof_system.ProofSystem.zttp_pcc_v3),
+        .semantics_epoch = pcc.proof_system.semantics_epoch,
+        .handler_contract_version = handlerContractVersion(),
+        .agent_protocol_schema = agent_identity.schema_version,
+        .policy_hash = zts.policyHash(),
+        .module_registry_hash = zts.ModuleMetadata.builtinRegistryHash(),
+    };
+}
+
+test "every profile admits only real capability categories" {
+    for (profiles) |p| {
+        try std.testing.expect(p.categories.len > 0);
+        try std.testing.expect(p.name.len > 0);
+    }
+}
+
+test "the adapter profile can actually reach a wrapped system" {
+    // The regression this encoding exists to prevent. `zttp:fetch` requires
+    // `network` and `runtime_callback` together; a profile granting only the
+    // first cannot call it, which makes section 9's arrangement unreachable.
+    const fetch = builtin_modules.fromSpecifier("zttp:fetch") orelse
+        return error.FetchBindingMissing;
+    var adapter: ?Profile = null;
+    for (profiles) |p| {
+        if (std.mem.eql(u8, p.name, "adapter")) adapter = p;
+    }
+    const a = adapter orelse return error.AdapterProfileMissing;
+    for (fetch.required_capabilities) |need| {
+        var admitted = false;
+        for (a.categories) |have| {
+            if (have == need) admitted = true;
+        }
+        if (!admitted) {
+            std.debug.print("adapter profile does not admit {s}, which zttp:fetch requires\n", .{@tagName(need)});
+            return error.AdapterCannotReachWrappedSystem;
+        }
+    }
+}
+
+test "the boundary profile excludes every module that retains request data" {
+    // `zttp:cache` is the case a category list cannot catch. Assert it is
+    // refused by name rather than trusting the category filter.
+    var boundary: ?Profile = null;
+    for (profiles) |p| {
+        if (std.mem.eql(u8, p.name, "boundary")) boundary = p;
+    }
+    const b = boundary orelse return error.BoundaryProfileMissing;
+    const cache = builtin_modules.fromSpecifier("zttp:cache") orelse
+        return error.CacheBindingMissing;
+    // It falls inside the categories, which is why the exclusion is needed.
+    for (cache.required_capabilities) |need| {
+        var admitted = false;
+        for (b.categories) |have| {
+            if (have == need) admitted = true;
+        }
+        try std.testing.expect(admitted);
+    }
+    var excluded = false;
+    for (b.excluded_modules) |m| {
+        if (std.mem.eql(u8, m, "zttp:cache")) excluded = true;
+    }
+    try std.testing.expect(excluded);
+}
+
+test "pinned identities match what the contract states" {
+    const id = identities();
+    try std.testing.expectEqual(@as(u16, 4), id.certificate_schema);
+    try std.testing.expectEqual(@as(u16, 3), id.proof_system);
+    try std.testing.expectEqual(@as(u32, 1), id.semantics_epoch);
+    try std.testing.expectEqual(@as(u32, 18), id.handler_contract_version);
+    try std.testing.expectEqual(@as(u32, 2), id.agent_protocol_schema);
 }
