@@ -865,6 +865,10 @@ pub fn build(b: *std.Build) void {
         }),
     });
     precompile_exe.root_module.addImport("zts", zts_host_mod);
+    precompile_exe.root_module.addImport(
+        "zttp_proof_checker",
+        proof_checker_dep.module("zttp_proof_checker"),
+    );
 
     // Runtime template binary — used for self-contained outputs and direct
     // runtime tests. Minimal dependencies:
