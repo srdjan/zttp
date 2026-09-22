@@ -1,13 +1,13 @@
 # M4: release contract for scoped tool routes
 
-Status: decisions accepted 2026-09-22; contract text pending owner acceptance.
+Status: accepted by the owner on 2026-09-22. T1 is in progress.
 Baseline: local `main` at `176d81ca`. Roadmap row:
 [M4 in the roadmap](../roadmap.md) (`docs/roadmap.md:20`). This document
 reconciles proposal A, the
 [agent-handler specification](2026-09-19-feat-agent-handler-spec.md), with
 proposal B, the
 [tool-profile recommendation](../zttp-next/zttp-v1.0-scope-and-v1x-roadmap.md).
-It does not authorize implementation before the owner accepts this text.
+The owner accepted this text on 2026-09-22, which authorizes T1 to T7 in order.
 
 ## Status and decision record
 
