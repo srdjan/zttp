@@ -1,13 +1,13 @@
 # M4: release contract for scoped tool routes
 
-Status: accepted by the owner on 2026-09-22. T1 is in progress.
+Status: accepted by the owner on 2026-09-22. T1a is in progress.
 Baseline: local `main` at `176d81ca`. Roadmap row:
 [M4 in the roadmap](../roadmap.md) (`docs/roadmap.md:20`). This document
 reconciles proposal A, the
 [agent-handler specification](2026-09-19-feat-agent-handler-spec.md), with
 proposal B, the
 [tool-profile recommendation](../zttp-next/zttp-v1.0-scope-and-v1x-roadmap.md).
-The owner accepted this text on 2026-09-22, which authorizes T1 to T7 in order.
+The owner accepted this text on 2026-09-22, which authorizes T1a to T7 in order.
 
 ## Status and decision record
 
@@ -139,15 +139,37 @@ citations need verification before the unit that uses them starts.
 ## Delivery units
 
 The units are ordered. A unit starts only after the units it depends on are
-committed. Unit labels T1 to T7 are local to this document. File lists are the
+committed. Unit labels T1a to T7 are local to this document. File lists are the
 known owners; a unit that needs another file names it in its commit.
 
-**T1. Finite outbound deadlines.** Depends on nothing. Owned files:
-`packages/runtime/src/runtime_http.zig`, `runtime_config.zig`, `runtime_cli.zig`,
-and `edge_server.zig` (`:711` parses the same field). A tool-profile artifact
-must refuse to start with a zero or absent outbound deadline. Whether ordinary
-handlers keep the zero path is a T1 design choice that the commit states.
-Completion: check C1.
+**T1. Finite outbound deadlines.** The owner split T1 into two units on
+2026-09-22. An outbound fetch has three phases: connect, TLS handshake, and
+exchange. Before T1, only the exchange had a bound, from the watchdog in
+`packages/runtime/src/fetch_deadline.zig`, and only when the timeout was not 0.
+The connect has no bound at any timeout value: Zig 0.16 `std.http.Client`
+declares `ConnectTcpOptions.timeout` but never reads it
+(`std/http/Client.zig:1460` connects with no timeout), and the Threaded backend
+panics on a connect timeout (`std/Io/Threaded.zig:12077`). The watchdog doc
+comment records that the TLS handshake is also outside its bound
+(`fetch_deadline.zig:20-21`).
+
+**T1a. No zero or unarmed deadline.** Depends on nothing. Owned files:
+`packages/runtime/src/runtime_http.zig`, `fetch_deadline.zig`,
+`runtime_cli.zig`, `edge_server.zig` (`:711` parses the same field),
+`handler_instance.zig`, and `invariant_cli.zig` as a watchdog caller. The
+exchange deadline is finite for every handler, not only under the tool profile:
+0 is refused at the CLI, in edge configuration, and at `HandlerInstance.init`,
+and no code path maps a timeout to `.none`. A watchdog that fails to start
+fails the fetch rather than letting the exchange run without a bound.
+Completion: check C1a.
+
+**T1b. Bounded connect and TLS handshake.** Depends on T1a. Owned files:
+`packages/runtime/src/runtime_http.zig` and a design note that compares the
+approaches before code: an own non-blocking connect to the already-resolved
+address, a vendored patch of the std HTTP client, or a different outbound
+client. The std connection constructors are private, so the client cannot take
+a stream that zttp connected itself. Until T1b lands, the connect and the TLS
+handshake of an outbound fetch have no deadline. Completion: check C1b.
 
 **T2. Canonical catalog and schema subset.** Depends on nothing. Owned files:
 `packages/zts/src/contract_builder.zig`, `contract_types.zig` (`ApiSchemaInfo` at
@@ -182,7 +204,7 @@ and tenant from its claims (decision 4). Each tool route receives only its own
 grants, and the build refuses a tool route that reaches a cross-call read
 (decision 6). This unit meets P15. Completion: check C5.
 
-**T6. Credential injection.** Depends on T1 and T5. Owned files:
+**T6. Credential injection.** Depends on T1a, T1b, and T5. Owned files:
 `packages/runtime/src/runtime_http.zig`, `packages/modules/src/net/fetch.zig` and
 its module spec, and `runtime_config.zig`. The runtime resolves a
 deployment-owned secret reference and injects it only after it authorizes the
@@ -190,7 +212,7 @@ exact request. Redirects stay unhandled (`runtime_http.zig:2044`) and never carr
 it. A search of `packages/runtime/src` and `packages/modules/src` finds no
 resolver or injection step today, as `A:78-79` also records. Completion: check C6.
 
-**T7. Reference tools and documentation.** Depends on T1 to T6. Owned files: a
+**T7. Reference tools and documentation.** Depends on T1a to T6. Owned files: a
 new directory under `examples/`, its entry in the example suite, and
 `docs/user-guide.md`. It holds one pure bounded tool and one scoped,
 credentialed upstream lookup (`B:151`). Completion: check C7.
@@ -206,7 +228,8 @@ Restore each mutation byte for byte before the next probe.
 
 | Check | Gate or step | Positive case | Negative case | Non-vacuity |
 |---|---|---|---|---|
-| C1 (T1) | `test-server`, `test-zruntime` | A tool route with a finite deadline answers | Deadline 0 under the tool profile refuses startup; a stalled upstream ends at the deadline | Restore the `.none` branch at `runtime_http.zig:2001`; the new test must fail |
+| C1a (T1a) | `test-zruntime`, `test-server`, `zig build test` | A fetch with a finite deadline answers; an upstream that accepts and then goes silent ends at the deadline | Deadline 0 is refused by the CLI, by edge configuration, and by `HandlerInstance.init`; a watchdog that cannot start fails the fetch | Restore a `.none` branch or the zero skip in `arm`; a new test must fail |
+| C1b (T1b) | `test-zruntime` | A fetch to a reachable upstream answers | A connect to an address that never answers, and a peer that accepts TCP and stalls the TLS handshake, each end at the deadline | Remove the connect or handshake bound; the matching test must hang past its ceiling and fail |
 | C2 (T2) | `test-zts`, `test-modules`, `test-precompile`, `test-contract-golden` | AE21 valid bounded input; schema bytes and validator agree after round trip | AE21 rejections; AE5 duplicate keys and invalid JSON (non-stream part); B8.2; B8.4 | Remove the duplicate-key check and the closed-field check in turn; each must fail a test. Census over every refusal reason |
 | C3 (T3) | `test-proof-checker`, `test-proof-checker-purity`, `test-zruntime`, `test-vocab-envelope-drift` | An accepted artifact serves its catalog | AE11; B8.8; B8.9 | Mutate one catalog byte in a copy of an accepted artifact; acceptance must refuse. Delete the catalog member; the gate must fail, not pass |
 | C4 (T4) | `test-zts`, `test-precompile`, `test-proof-swallow` | A clean value through the same path stays admissible | AE4, asserting `no_secret_leakage` and not a neighbor; AE18 negative cases; AE19; whole-object forwarding, short-name match, and a malformed entry are refused | Return a labelled value directly and confirm refusal, then route it through each export (AGENTS.md method). Empty label file must fail |
