@@ -483,3 +483,167 @@ test "pinned identities match what the contract states" {
     try std.testing.expectEqual(@as(u32, 18), id.handler_contract_version);
     try std.testing.expectEqual(@as(u32, 2), id.agent_protocol_schema);
 }
+
+// ============================================================================
+// Serialization
+// ============================================================================
+
+fn writeJsonString(w: *std.Io.Writer, s: []const u8) !void {
+    try w.writeByte('"');
+    for (s) |c| switch (c) {
+        '"' => try w.writeAll("\\\""),
+        '\\' => try w.writeAll("\\\\"),
+        '\n' => try w.writeAll("\\n"),
+        '\r' => try w.writeAll("\\r"),
+        '\t' => try w.writeAll("\\t"),
+        else => try w.writeByte(c),
+    };
+    try w.writeByte('"');
+}
+
+fn writeMembers(w: *std.Io.Writer, members: []const Member) !void {
+    try w.writeAll("[\n");
+    for (members, 0..) |m, i| {
+        try w.writeAll("      { \"name\": ");
+        try writeJsonString(w, m.name);
+        if (m.ordinal) |o| try w.print(", \"ordinal\": {d}", .{o});
+        if (m.digest) |d| {
+            try w.writeAll(", \"binding_digest\": ");
+            try writeJsonString(w, &d);
+        }
+        try w.writeAll(" }");
+        if (i + 1 != members.len) try w.writeByte(',');
+        try w.writeByte('\n');
+    }
+    try w.writeAll("    ]");
+}
+
+/// Render the envelope. The output is the published artifact a consumer reads
+/// and the gate compares against, so it is deterministic: every list is emitted
+/// in declaration order and nothing is formatted from a hash-map iteration.
+pub fn render(allocator: std.mem.Allocator, w: *std.Io.Writer) !void {
+    try w.print(
+        \\{{
+        \\  "contract_version": {d},
+        \\  "envelope_version": {d},
+        \\  "alphabets": {{
+        \\
+    , .{ contract_version, envelope_version });
+
+    const typed = typedAlphabets();
+    for (typed, 0..) |a, i| {
+        try w.writeAll("    ");
+        try writeJsonString(w, a.key);
+        try w.writeAll(": { \"source\": ");
+        try writeJsonString(w, a.source);
+        try w.writeAll(", \"members\": ");
+        try writeMembers(w, a.members);
+        try w.writeAll(" }");
+        if (i + 1 != typed.len) try w.writeByte(',');
+        try w.writeByte('\n');
+    }
+
+    // Both the in-tree base and the effective set, per P1. A consumer pins one
+    // of them and has to be able to tell which.
+    const base = try virtualModules(allocator, .base);
+    defer allocator.free(base);
+    const effective = try virtualModules(allocator, .effective);
+    defer allocator.free(effective);
+    try w.writeAll(",\n    \"virtual_modules_base\": { \"source\": \"packages/zts/src/builtin_modules.zig\", \"members\": ");
+    try writeMembers(w, base);
+    try w.writeAll(" },\n    \"virtual_modules_effective\": { \"source\": \"packages/zts/src/builtin_modules.zig\", \"members\": ");
+    try writeMembers(w, effective);
+    try w.writeAll(" }");
+
+    const enabled = try enabledResidualFamilies(allocator);
+    defer allocator.free(enabled);
+    try w.writeAll(",\n    \"residual_guard_families_enabled\": { \"source\": \"packages/proof-checker/src/residual.zig\", \"members\": ");
+    try writeMembers(w, enabled);
+    try w.writeAll(" }\n  },\n");
+
+    try w.writeAll("  \"profiles\": [\n");
+    for (profiles, 0..) |p, i| {
+        try w.writeAll("    { \"name\": ");
+        try writeJsonString(w, p.name);
+        try w.writeAll(", \"categories\": [");
+        for (p.categories, 0..) |c, j| {
+            try writeJsonString(w, @tagName(c));
+            if (j + 1 != p.categories.len) try w.writeAll(", ");
+        }
+        try w.writeAll("], \"excluded_modules\": [");
+        for (p.excluded_modules, 0..) |m, j| {
+            try writeJsonString(w, m);
+            if (j + 1 != p.excluded_modules.len) try w.writeAll(", ");
+        }
+        try w.print("], \"requires_read_only\": {} }}", .{p.requires_read_only});
+        if (i + 1 != profiles.len) try w.writeByte(',');
+        try w.writeByte('\n');
+    }
+    try w.writeAll("  ],\n");
+
+    const id = identities();
+    try w.print(
+        \\  "identities": {{
+        \\    "certificate_schema": {d},
+        \\    "proof_system": {d},
+        \\    "semantics_epoch": {d},
+        \\    "handler_contract_version": {d},
+        \\    "agent_protocol_schema": {d},
+        \\
+    , .{
+        id.certificate_schema,
+        id.proof_system,
+        id.semantics_epoch,
+        id.handler_contract_version,
+        id.agent_protocol_schema,
+    });
+    try w.writeAll("    \"policy_hash\": ");
+    try writeJsonString(w, &id.policy_hash);
+    try w.writeAll(",\n    \"module_registry_hash\": ");
+    try writeJsonString(w, &id.module_registry_hash);
+    try w.writeAll("\n  }\n}\n");
+}
+
+pub fn renderToOwned(allocator: std.mem.Allocator) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+    var adapter = std.Io.Writer.Allocating.fromArrayList(allocator, &buf);
+    defer buf = adapter.toArrayList();
+    try render(allocator, &adapter.writer);
+    buf = adapter.toArrayList();
+    return buf.toOwnedSlice(allocator);
+}
+
+test "rendering is deterministic and carries every block" {
+    const a = try renderToOwned(std.testing.allocator);
+    defer std.testing.allocator.free(a);
+    const b = try renderToOwned(std.testing.allocator);
+    defer std.testing.allocator.free(b);
+    try std.testing.expectEqualStrings(a, b);
+
+    for ([_][]const u8{
+        "\"contract_version\"",
+        "\"capability_categories\"",
+        "\"reason_codes\"",
+        "\"virtual_modules_base\"",
+        "\"virtual_modules_effective\"",
+        "\"residual_guard_families_enabled\"",
+        "\"binding_digest\"",
+        "\"profiles\"",
+        "\"identities\"",
+        "\"module_registry_hash\"",
+    }) |needle| {
+        if (std.mem.indexOf(u8, a, needle) == null) {
+            std.debug.print("rendered envelope is missing {s}\n", .{needle});
+            return error.MissingBlock;
+        }
+    }
+}
+
+test "the rendered envelope parses as JSON" {
+    const text = try renderToOwned(std.testing.allocator);
+    defer std.testing.allocator.free(text);
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, text, .{});
+    defer parsed.deinit();
+    try std.testing.expect(parsed.value == .object);
+}

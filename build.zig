@@ -312,6 +312,47 @@ pub fn build(b: *std.Build) void {
     invariant_drift_step.dependOn(&invariant_gate_cmd.step);
     invariant_drift_step.dependOn(&run_proof_checker_tests.step);
     invariant_drift_step.dependOn(&run_modules_tests.step);
+
+    // The published vocabulary envelope and its drift gate: producer obligation
+    // P1. Section 6 of docs/consumer-contract.md states sixteen closed alphabets
+    // as literal counts in prose. Three review rounds verified them by hand and
+    // each found counts that had drifted. This compares them mechanically.
+    const vocab_envelope_mod = b.createModule(.{
+        .root_source_file = tools_dep.path("src/vocab_envelope_gate.zig"),
+        .target = b.graph.host,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    vocab_envelope_mod.addImport("zts", zts_host_mod);
+    vocab_envelope_mod.addImport(
+        "zttp_proof_checker",
+        proof_checker_dep.module("zttp_proof_checker"),
+    );
+    const vocab_envelope_exe = b.addExecutable(.{
+        .name = "vocab-envelope-gate",
+        .root_module = vocab_envelope_mod,
+    });
+    const vocab_envelope_check = b.addRunArtifact(vocab_envelope_exe);
+    vocab_envelope_check.addArg("--check");
+    vocab_envelope_check.has_side_effects = true;
+    const vocab_envelope_step = b.step("test-vocab-envelope-drift", "Check the published vocabulary envelope against the tree");
+    vocab_envelope_step.dependOn(&vocab_envelope_check.step);
+
+    // A probe is code: one that does not compile runs no check, and a failed
+    // build and a passing gate both emit no failure message. The gate's own
+    // tests hang off the same named step for that reason.
+    const vocab_envelope_gate_tests = b.addTest(.{
+        .filters = test_filters,
+        .root_module = vocab_envelope_mod,
+    });
+    const run_vocab_envelope_gate_tests = b.addRunArtifact(vocab_envelope_gate_tests);
+    vocab_envelope_step.dependOn(&run_vocab_envelope_gate_tests.step);
+
+    const vocab_envelope_write = b.addRunArtifact(vocab_envelope_exe);
+    vocab_envelope_write.addArgs(&.{ "--out", "docs/consumer-contract-envelope.json" });
+    vocab_envelope_write.has_side_effects = true;
+    const vocab_envelope_write_step = b.step("vocab-envelope-write", "Regenerate the published vocabulary envelope");
+    vocab_envelope_write_step.dependOn(&vocab_envelope_write.step);
     invariant_drift_step.dependOn(zts_test_step);
 
     // A probe is code. One that does not compile runs no check, and a failed

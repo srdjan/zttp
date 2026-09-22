@@ -162,6 +162,14 @@ step "zts module-spec-render --check  (module specs match the Zig bindings)"
 # stale rather than skipping it.
 ./zig-out/bin/zts module-spec-render --check
 
+step "zig build test-vocab-envelope-drift  (published vocabulary envelope matches the tree)"
+# Producer obligation P1. Section 6 of docs/consumer-contract.md states sixteen
+# closed alphabets as literal counts in prose; this compares them against the
+# declarations that own them. The step also runs the gate's own probe tests,
+# because a probe that does not compile runs no check and a failed build and a
+# passing gate both emit no failure message.
+zig build test-vocab-envelope-drift
+
 step "verify expert subsystem  (ci.yml: Verify expert subsystem)"
 if ! command -v jq >/dev/null 2>&1; then
   echo "error: jq is required for the expert-subsystem check (matches ci.yml)" >&2
