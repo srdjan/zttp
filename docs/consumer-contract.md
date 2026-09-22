@@ -277,20 +277,32 @@ for the weaker reason that it retains a counter between requests; its result der
 the limiter's own state rather than from a value some other call stored, which `AGENTS.md`
 records as a different shape.
 
-The second test is `read_only`, which the compiler already computes. `zttp:validate` needs
-no capability at all, so no ceiling can exclude it, and it should not be excluded: a
-handler that cannot validate its input cannot carry `input_validated`. Its registry is
-meant to be filled at module scope, but nothing forces that, and `schemaCompile` and
-`schemaDrop` are `.effect = .write`. The test `"handler-body registration remains a
-request-path write"` in `packages/zts/src/contract_builder.zig` calls `schemaCompile` inside
-the handler and asserts that `read_only`, `retry_safe` and `idempotent` all become false.
-So a module list cannot catch this and does not need to: `boundary` requires the handler to
-carry `read_only`, and that refuses the request-path write wherever it comes from.
+`zttp:validate` needs no capability at all, so no ceiling can exclude it, and it is
+correctly not excluded. Its state is a schema registry the handler compiles from literals
+in its own run, so it is not a channel through which one request's data reaches another.
+The compiler already draws this line rather than leaving it to a reader:
+`exportReadsVaryingSource` in `packages/zts/src/flow_checker.zig` keys on `stateful` and a
+`.read` effect, which is the precise test for "another request could have written what this
+returns," and its comment names `zttp:validate` as the exclusion, because demoting it "would
+be a false negative on the most common validation path." A handler that cannot validate its
+input cannot carry `input_validated`, so excluding it would cost a goal-driveable property
+to prevent nothing.
 
-Neither test subsumes the other. `read_only` catches writes and misses `cacheGet`, which is
-a read. The module list catches `cacheGet` and misses a handler-body `schemaCompile`,
-because excluding `zttp:validate` is the wrong answer. A profile that ran only one of them
-would report a no-store handler that stores.
+The second requirement is `read_only`, and it is about effects rather than storage. The two
+should not be run together. `schemaCompile` and `schemaDrop` are `.effect = .write`, and the
+test `"handler-body registration remains a request-path write"` in
+`packages/zts/src/contract_builder.zig` calls `schemaCompile` inside the handler and asserts
+that `read_only`, `retry_safe` and `idempotent` all become false. That is a real constraint
+and `boundary` keeps it, because section 8 wants no effect outside logging as well as no
+store. It is not a no-store test: the module's own documented usage registers schemas at
+module scope, where `read_only` holds, and the handler-body form is the discouraged pattern
+rather than a storage channel.
+
+So `boundary` carries three requirements and each answers a different question. The category
+list bounds what the handler may reach. The module list is what delivers no retained store,
+because `cacheGet` returns a value a separate request wrote and no category excludes it.
+`read_only` bounds effects. A profile that ran only the category list would report a
+no-store handler that stores.
 
 **A category is coarser than a module, and `adapter` shows the cost.** `zttp:fetch` needs
 `network` and `runtime_callback` together, so egress alone does not reach a wrapped system,
@@ -350,7 +362,7 @@ report success while enforcing nothing:
   and an unrelated `.email` are different fields, and P9 forbids conflating them.
 - A declared field that the analysis never saw is reported, per P8. A declaration naming a
   field that never appears enforces nothing while the build passes.
-- A malformed entry is a refusal, not a skipped line. A discarded entry is an enforcement
+- A malformed entry is a refusal, not a skipped line, per P9. A discarded entry is an enforcement
   the consumer believes it has.
 
 The label vocabulary, the source selector, and whether an entry is required or optional are
@@ -398,7 +410,7 @@ stated so a drift gate can check them and a reader can fail the document against
 | Virtual modules | 27 | `packages/zts/src/builtin_modules.zig` |
 | Compiler spec names | 17 | `packages/zts/src/spec_discharge.zig` |
 | Goal-driveable properties | 5 | `packages/pi/src/property_goals.zig` |
-| Handler properties | 20 | `packages/zts/src/contract_types.zig` |
+| Handler property fields | 20, of which 19 are boolean | `packages/zts/src/contract_types.zig` |
 | Consumer obligation properties | 8 | `packages/proof-checker/src/proof_system.zig` |
 | Assurance grades | 5 | `packages/proof-checker/src/verdict.zig` |
 | Acceptance stages | 11 | `packages/proof-checker/src/verdict.zig` |
@@ -507,7 +519,10 @@ and the system restarts. The system must preserve the unknown effect, block auto
 retry, retain the original permit and receipt lineage, and refuse new execution without
 current authority.
 
-A `boundary` handler passes this by construction, because it performs no effect. An
+A `boundary` handler passes this by construction, because it performs no effect that a
+crash could leave unrecorded. That comes from the whole profile in section 4.3, the module
+exclusions and the `read_only` requirement as well as the six categories, and not from the
+categories alone. An
 `adapter` handler does not pass it by construction, because a network call is an effect
 whose outcome a crash can leave unknown; it passes only where the consumer still owns the
 permit and the record, which is what section 8 places there.
@@ -705,7 +720,7 @@ that nominally supports its category while enforcing nothing specific about it.
   name rather than forwarding it, and MUST publish the mapping between the spec names, the
   handler property fields, the verifier wire names, and the consumer obligation properties.
   An analyzer result MUST NOT become a kernel-checked claim by passing under a similar name.
-- **P13.** The producer MUST report a declared property it could not establish as a
+- **P13.** At adjudication, the producer MUST report a declared property it could not establish as a
   disclosed gap, following the disclosed edge and residual guard pattern the certificate
   already carries. It MUST NOT pass the declaration silently and MUST NOT refuse the whole
   declaration for that reason alone. A gap MUST carry the P2 reason that produced it, so a
@@ -713,6 +728,11 @@ that nominally supports its category while enforcing nothing specific about it.
   disclosure. A declaration MAY name a minimum established set, and a producer MUST refuse
   the declaration rather than disclose a gap over a member of it. Without that set an
   all-gap outcome is conforming, which means conformance alone implies no minimum proof.
+  A gap MUST also carry what the producer actually attempted, because P13 otherwise governs
+  only reporting: an implementation that answers "could not establish" for every property
+  without running an analysis satisfies every word of it. Reporting the attempt does not by
+  itself impose a floor, and version 1 states none; what it does is make the absence of one
+  visible to a consumer rather than indistinguishable from real work.
   Which gaps a consumer then accepts is C8.
 - **P14.** The producer MUST demonstrate P1 to P13 and P15 to P17 in its own test suite, and
   MUST name which case demonstrates which obligation. A name is not evidence: each case MUST
@@ -757,7 +777,7 @@ that nominally supports its category while enforcing nothing specific about it.
   expect the producer to read that representation.
 - **C5.** A consumer MUST declare the contract version it implements, and a producer
   matches it by equality.
-- **C6.** A consumer MUST demonstrate C1 to C8 in its own test suite, and MUST name which
+- **C6.** A consumer MUST demonstrate C1 to C5, C7 and C8 in its own test suite, and MUST name which
   case demonstrates which obligation. This document states both sides' obligations; it
   carries neither side's evidence.
 - **C7.** A consumer operating a proven adapter MUST NOT describe the arrangement as
