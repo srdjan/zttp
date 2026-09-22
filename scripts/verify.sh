@@ -69,6 +69,23 @@ zig build test-zruntime
 step "zig build -Doptimize=ReleaseFast  (release binaries)"
 zig build -Doptimize=ReleaseFast
 
+step "zig build -Dhandler -Dverify -Dcontract  (handler precompilation path)"
+# The documented precompile path. It was broken and stayed broken: precompile.zig
+# has imported zttp_proof_checker since f0d8c5e8 while build.zig never gave
+# precompile_exe that module, so `zig build -Dhandler=...` failed to compile.
+# Nothing caught it because nothing ran it - neither this script nor any CI
+# workflow passed -Dhandler, so a path CLAUDE.md, README.md, CONTRIBUTING.md and
+# the zttp-build skill all document was never built by a gate.
+#
+# Measured at 68s marginal on top of the plain and ReleaseFast builds above,
+# against a script that already spends 183s on those two alone. That is the same
+# trade the example-handler suites made at 24s, for a path whose breakage was
+# invisible rather than merely late.
+#
+# The canonical example carries `Proof<>` guardrails, so -Dverify discharges real
+# obligations rather than compiling an empty claim.
+zig build -Dhandler=examples/handler/handler.ts -Dverify -Dcontract
+
 step "zig build wasm  (browser proof analyzer)"
 zig build wasm
 

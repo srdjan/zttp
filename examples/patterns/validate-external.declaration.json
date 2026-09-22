@@ -1,0 +1,39 @@
+{
+  "contract_version": 1,
+  "handler": "examples/patterns/validate-external.ts",
+
+  "interface": {
+    "routes": [
+      {
+        "method": "POST",
+        "path": "/todos",
+        "request_schema": "todo",
+        "responses": [
+          { "status": 201, "shape": "todo" },
+          { "status": 400, "shape": "error" }
+        ],
+        "authentication": "none"
+      }
+    ]
+  },
+
+  "properties": [
+    "deterministic",
+    "read_only",
+    "retry_safe",
+    "idempotent",
+    "state_isolated",
+    "injection_safe",
+    "no_secret_leakage",
+    "input_validated"
+  ],
+
+  "capability_ceiling": {
+    "profile": "boundary",
+    "modules": ["zttp:validate"]
+  },
+
+  "invariants": [],
+
+  "classifications": []
+}
