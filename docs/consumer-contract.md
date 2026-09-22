@@ -256,11 +256,15 @@ vocabulary-refusal bucket.
 Version 1 names three ceilings rather than one default. A declaration selects one and MAY
 narrow it by module. P15 binds the producer to enforce the selected ceiling.
 
-| Profile | Categories | What it is for |
-|---|---|---|
-| `boundary` | `env`, `clock`, `random`, `crypto`, `stderr`, `policy_check` | The no-store handler of section 8 |
-| `adapter` | `boundary` plus `network`, `runtime_callback` | The proven adapter of section 9 |
-| `ledger` | `boundary` plus `sqlite` | A declaration that names an application invariant, which has nowhere else to live |
+<!-- BEGIN GENERATED: capability profiles. Edit packages/tools/src/vocab_envelope.zig, then run `zig build vocab-envelope-write`. -->
+
+| Profile | Categories | Excluded modules | Requires `read_only` | What it is for |
+|---|---|---|---|---|
+| `boundary` | `env`, `clock`, `random`, `crypto`, `stderr`, `policy_check` | `zttp:cache`, `zttp:ratelimit` | yes | The no-store handler of section 8 |
+| `adapter` | `env`, `clock`, `random`, `crypto`, `stderr`, `policy_check`, `network`, `runtime_callback` | `zttp:cache`, `zttp:ratelimit` | no | The proven adapter of section 9 |
+| `ledger` | `env`, `clock`, `random`, `crypto`, `stderr`, `policy_check`, `sqlite` | `zttp:cache`, `zttp:ratelimit`, `zttp:sql` | no | A declaration naming an application invariant, which has nowhere else to live |
+
+<!-- END GENERATED: capability profiles -->
 
 **The no-store property needs two tests, not one.** A category list alone does not deliver
 it, and neither does a module list.
@@ -404,25 +408,36 @@ convergence claim.
 Every closed alphabet the declaration draws on, with the file that owns it. Counts are
 stated so a drift gate can check them and a reader can fail the document against the tree.
 
+<!-- BEGIN GENERATED: alphabet counts. Edit the Zig declarations, then run `zig build vocab-envelope-write`. -->
+
 | Alphabet | Members | Source of truth |
 |---|---|---|
 | Capability categories | 10 | `packages/zts/src/module_authorization.zig` |
-| Virtual modules | 27 | `packages/zts/src/builtin_modules.zig` |
 | Compiler spec names | 17 | `packages/zts/src/spec_discharge.zig` |
-| Goal-driveable properties | 5 | `packages/pi/src/property_goals.zig` |
-| Handler property fields | 20, of which 19 are boolean | `packages/zts/src/contract_types.zig` |
+| Handler property boolean fields | 19 | `packages/zts/src/contract_types.zig` |
 | Consumer obligation properties | 8 | `packages/proof-checker/src/proof_system.zig` |
 | Assurance grades | 5 | `packages/proof-checker/src/verdict.zig` |
 | Acceptance stages | 11 | `packages/proof-checker/src/verdict.zig` |
 | Reason codes | 89 | `packages/proof-checker/src/verdict.zig` |
 | Evidence edge kinds | 6 | `packages/proof-checker/src/certificate.zig` |
 | Residual guard kinds | 5 | `packages/proof-checker/src/residual.zig` |
-| Residual guard families | 4 | `packages/proof-checker/src/residual.zig` |
+| Residual guard families, catalogued | 4 | `packages/proof-checker/src/residual.zig` |
 | Invariant kinds | 2 | `packages/proof-checker/src/invariant.zig` |
 | Account matcher tags | 2 | `packages/proof-checker/src/invariant.zig` |
 | Executable-graph member kinds | 18 | `packages/proof-checker/src/executable_graph.zig` |
-| Capability profiles | 3 | section 4.3 of this document |
-| Diagnostic codes | ZTS0xx to ZTS7xx | `packages/zts/src/diagnostic_catalog.zig` |
+| Virtual modules, in-tree base | 27 | `packages/zts/src/builtin_modules.zig` |
+| Virtual modules, effective for this build | 27 | `packages/zts/src/builtin_modules.zig` |
+| Residual guard families, enabled | 3 | `packages/proof-checker/src/residual.zig` |
+| Goal-driveable properties | 5 | `packages/pi/src/property_goals.zig` |
+| Capability profiles | 3 | `packages/tools/src/vocab_envelope.zig` |
+
+<!-- END GENERATED: alphabet counts -->
+
+One alphabet sits outside the generated table because it is not a membership.
+Diagnostic codes run from ZTS0xx to ZTS7xx, owned by
+`packages/zts/src/diagnostic_catalog.zig`. The envelope publishes member lists, and a
+range is a claim about numbering rather than a set, so a count here would be a different
+kind of statement from every other row. `zts describe-rule` enumerates them.
 
 Two counts need a qualifier before a gate reads them. Virtual modules = 27 counts
 `runtime_builtins`, the in-tree base. `all = builtins ++ extension_bindings.all`, so a

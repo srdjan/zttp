@@ -126,6 +126,84 @@ fn runProbes(allocator: std.mem.Allocator, derived: []const u8) Failure!void {
     }
 }
 
+const contract_doc_path = "docs/consumer-contract.md";
+
+/// Splice both managed regions of the contract document. Returns the document a
+/// correct tree would produce, so the caller either writes it or compares it.
+fn renderContractDoc(allocator: std.mem.Allocator, doc: []const u8) ![]u8 {
+    const alpha_table = try envelope.alphabetTableToOwned(allocator);
+    defer allocator.free(alpha_table);
+    const profile_table = try envelope.profileTableToOwned(allocator);
+    defer allocator.free(profile_table);
+
+    const a = try envelope.splitRegion(doc, envelope.alphabet_region_begin, envelope.alphabet_region_end);
+    const with_alpha = try std.mem.concat(allocator, u8, &.{ a.before, alpha_table, a.after });
+    defer allocator.free(with_alpha);
+
+    const p = try envelope.splitRegion(with_alpha, envelope.profile_region_begin, envelope.profile_region_end);
+    return std.mem.concat(allocator, u8, &.{ p.before, profile_table, p.after });
+}
+
+fn checkContractDoc(allocator: std.mem.Allocator) !void {
+    const doc = file_io.readFile(allocator, contract_doc_path, 4 * 1024 * 1024) catch |err| {
+        writeErr("{s} could not be read ({s}); a missing input is a failure, not a skip\n", .{ contract_doc_path, @errorName(err) });
+        return Failure.PublishedFileMissing;
+    };
+    defer allocator.free(doc);
+
+    const want = renderContractDoc(allocator, doc) catch |err| {
+        writeErr(
+            \\{s}: could not splice a managed region ({s}).
+            \\Both regions must be present and terminated. A generator must never write a
+            \\file whose boundary it could not find, and a check that cannot find its
+            \\region would otherwise report agreement with nothing.
+            \\
+        , .{ contract_doc_path, @errorName(err) });
+        return Failure.EnvelopeDrift;
+    };
+    defer allocator.free(want);
+
+    if (!std.mem.eql(u8, doc, want)) {
+        writeErr(
+            \\{s} does not match the tables derived from the tree.
+            \\The prose and the declarations disagree, which is the condition the envelope
+            \\exists to end. Regenerate with `zig build vocab-envelope-write`.
+            \\
+        , .{contract_doc_path});
+        return Failure.EnvelopeDrift;
+    }
+}
+
+fn writeContractDoc(allocator: std.mem.Allocator) !void {
+    const doc = try file_io.readFile(allocator, contract_doc_path, 4 * 1024 * 1024);
+    defer allocator.free(doc);
+    const next = try renderContractDoc(allocator, doc);
+    defer allocator.free(next);
+    try file_io.writeFile(allocator, contract_doc_path, next);
+    writeOut("wrote {s} ({d} bytes)\n", .{ contract_doc_path, next.len });
+}
+
+test "the contract document's managed regions are present and terminated" {
+    // The gate's own floor. A missing marker means the check silently compares
+    // nothing, so it is asserted here rather than left to the run.
+    const doc = try file_io.readFile(std.testing.allocator, contract_doc_path, 4 * 1024 * 1024);
+    defer std.testing.allocator.free(doc);
+    _ = try envelope.splitRegion(doc, envelope.alphabet_region_begin, envelope.alphabet_region_end);
+    _ = try envelope.splitRegion(doc, envelope.profile_region_begin, envelope.profile_region_end);
+}
+
+test "splicing is idempotent" {
+    // Rendering a rendered document must not move it, or the gate would report
+    // drift against its own output.
+    const doc = try file_io.readFile(std.testing.allocator, contract_doc_path, 4 * 1024 * 1024);
+    defer std.testing.allocator.free(doc);
+    const once = try renderContractDoc(std.testing.allocator, doc);
+    defer std.testing.allocator.free(once);
+    const twice = try renderContractDoc(std.testing.allocator, once);
+    defer std.testing.allocator.free(twice);
+    try std.testing.expectEqualStrings(once, twice);
+}
+
 fn check(allocator: std.mem.Allocator, path: []const u8) !void {
     try assertFloor();
 
@@ -168,6 +246,8 @@ fn check(allocator: std.mem.Allocator, path: []const u8) !void {
         return Failure.EnvelopeDrift;
     }
 
+    try checkContractDoc(allocator);
+
     writeOut("vocabulary envelope: OK ({d} alphabets, {d} profiles)\n", .{
         envelope.typedAlphabets().len,
         envelope.profiles.len,
@@ -180,6 +260,7 @@ fn write(allocator: std.mem.Allocator, path: []const u8) !void {
     defer allocator.free(text);
     try file_io.writeFile(allocator, path, text);
     writeOut("wrote {s} ({d} bytes)\n", .{ path, text.len });
+    try writeContractDoc(allocator);
 }
 
 pub fn main(init: std.process.Init.Minimal) !void {

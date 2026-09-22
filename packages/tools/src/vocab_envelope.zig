@@ -47,6 +47,9 @@ pub const Member = struct {
 pub const Alphabet = struct {
     /// Stable key a consumer pins. Never renamed; a rename is a new block.
     key: []const u8,
+    /// How the row reads in the section 6 table. The key is the contract and
+    /// this is the label, the same split section 12 states for a reason code.
+    label: []const u8,
     /// The file that owns the members, for a reader chasing a mismatch.
     source: []const u8,
     members: []const Member,
@@ -120,66 +123,79 @@ pub fn typedAlphabets() []const Alphabet {
         const value = [_]Alphabet{
             .{
                 .key = "capability_categories",
+                .label = "Capability categories",
                 .source = "packages/zts/src/module_authorization.zig",
                 .members = enumMembers(mb.ModuleCapability),
             },
             .{
                 .key = "compiler_spec_names",
+                .label = "Compiler spec names",
                 .source = "packages/zts/src/spec_discharge.zig",
                 .members = &NamedRowMembers(zts.spec_discharge.v1_specs).list,
             },
             .{
                 .key = "handler_property_bool_fields",
+                .label = "Handler property boolean fields",
                 .source = "packages/zts/src/contract_types.zig",
                 .members = &BoolFieldMembers(zts.handler_contract.HandlerProperties).list,
             },
             .{
                 .key = "consumer_obligation_properties",
+                .label = "Consumer obligation properties",
                 .source = "packages/proof-checker/src/proof_system.zig",
                 .members = enumMembers(pcc.proof_system.Property),
             },
             .{
                 .key = "assurance_grades",
+                .label = "Assurance grades",
                 .source = "packages/proof-checker/src/verdict.zig",
                 .members = enumMembers(pcc.verdict.AssuranceGrade),
             },
             .{
                 .key = "acceptance_stages",
+                .label = "Acceptance stages",
                 .source = "packages/proof-checker/src/verdict.zig",
                 .members = enumMembers(pcc.verdict.Stage),
             },
             .{
                 .key = "reason_codes",
+                .label = "Reason codes",
                 .source = "packages/proof-checker/src/verdict.zig",
                 .members = enumMembers(pcc.verdict.ReasonCode),
             },
             .{
                 .key = "evidence_edge_kinds",
+                .label = "Evidence edge kinds",
                 .source = "packages/proof-checker/src/certificate.zig",
                 .members = enumMembers(pcc.certificate.EdgeKind),
             },
             .{
                 .key = "residual_guard_kinds",
+                .label = "Residual guard kinds",
                 .source = "packages/proof-checker/src/residual.zig",
                 .members = enumMembers(pcc.residual.GuardKind),
             },
             .{
                 .key = "residual_guard_families",
+                .label = "Residual guard families, catalogued",
                 .source = "packages/proof-checker/src/residual.zig",
                 .members = enumMembers(pcc.residual.Family),
             },
             .{
                 .key = "invariant_kinds",
+                .label = "Invariant kinds",
                 .source = "packages/proof-checker/src/invariant.zig",
                 .members = enumMembers(pcc.invariant.Kind),
             },
             .{
                 .key = "account_matcher_tags",
+                .label = "Account matcher tags",
                 .source = "packages/proof-checker/src/invariant.zig",
                 .members = enumMembers(pcc.invariant.AccountMatcherTag),
             },
             .{
                 .key = "executable_graph_member_kinds",
+                .label = "Executable-graph member kinds",
                 .source = "packages/proof-checker/src/executable_graph.zig",
                 .members = enumMembers(pcc.executable_graph.MemberKind),
             },
@@ -361,6 +377,9 @@ pub const Profile = struct {
     /// Whether the profile requires the handler to carry `read_only`. This
     /// bounds effects and is a different question from retained storage.
     requires_read_only: bool,
+    /// What the profile is for. Prose, but it belongs beside the declaration
+    /// rather than in the document, or the two drift the way the counts did.
+    purpose: []const u8,
 };
 
 pub const profiles = [_]Profile{
@@ -369,18 +388,21 @@ pub const profiles = [_]Profile{
         .categories = &.{ .env, .clock, .random, .crypto, .stderr, .policy_check },
         .excluded_modules = &.{ "zttp:cache", "zttp:ratelimit" },
         .requires_read_only = true,
+        .purpose = "The no-store handler of section 8",
     },
     .{
         .name = "adapter",
         .categories = &.{ .env, .clock, .random, .crypto, .stderr, .policy_check, .network, .runtime_callback },
         .excluded_modules = &.{ "zttp:cache", "zttp:ratelimit" },
         .requires_read_only = false,
+        .purpose = "The proven adapter of section 9",
     },
     .{
         .name = "ledger",
         .categories = &.{ .env, .clock, .random, .crypto, .stderr, .policy_check, .sqlite },
         .excluded_modules = &.{ "zttp:cache", "zttp:ratelimit", "zttp:sql" },
         .requires_read_only = false,
+        .purpose = "A declaration naming an application invariant, which has nowhere else to live",
     },
 };
 
@@ -916,6 +938,178 @@ test "every alphabet is a direct child of the alphabets object" {
                 std.debug.print("block {s} carries an unexpected key {s}\n", .{ key, k });
                 return error.BlockHasNestedKey;
             }
+        }
+    }
+}
+
+// ============================================================================
+// Documentation rendering
+// ============================================================================
+//
+// Section 6 and the section 4.3 profile table are generated from the same
+// declarations the envelope publishes, so the prose stops being a second source
+// that can disagree with the tree. This is the `module-spec-render` pattern:
+// the Zig declarations are authoritative and the Markdown is output.
+
+pub const alphabet_region_begin =
+    "<!-- BEGIN GENERATED: alphabet counts. Edit the Zig declarations, then run `zig build vocab-envelope-write`. -->\n";
+pub const alphabet_region_end = "<!-- END GENERATED: alphabet counts -->";
+pub const profile_region_begin =
+    "<!-- BEGIN GENERATED: capability profiles. Edit packages/tools/src/vocab_envelope.zig, then run `zig build vocab-envelope-write`. -->\n";
+pub const profile_region_end = "<!-- END GENERATED: capability profiles -->";
+
+/// Render the section 6 alphabet table. Counts come from the same derivation the
+/// envelope publishes, so a number here cannot disagree with the JSON.
+pub fn renderAlphabetTable(allocator: std.mem.Allocator, w: *std.Io.Writer) !void {
+    try w.writeAll("\n| Alphabet | Members | Source of truth |\n|---|---|---|\n");
+    for (typedAlphabets()) |a| {
+        try w.print("| {s} | {d} | `{s}` |\n", .{ a.label, a.members.len, a.source });
+    }
+
+    const base = try virtualModules(allocator, .base);
+    defer allocator.free(base);
+    try w.print(
+        "| Virtual modules, in-tree base | {d} | `packages/zts/src/builtin_modules.zig` |\n",
+        .{base.len},
+    );
+    const effective = try virtualModules(allocator, .effective);
+    defer allocator.free(effective);
+    try w.print(
+        "| Virtual modules, effective for this build | {d} | `packages/zts/src/builtin_modules.zig` |\n",
+        .{effective.len},
+    );
+
+    const enabled = try enabledResidualFamilies(allocator);
+    defer allocator.free(enabled);
+    try w.print(
+        "| Residual guard families, enabled | {d} | `packages/proof-checker/src/residual.zig` |\n",
+        .{enabled.len},
+    );
+
+    const goals_src = try zts.file_io.readFile(allocator, goals_source_path, 1 << 20);
+    defer allocator.free(goals_src);
+    const tags_src = try zts.file_io.readFile(allocator, tags_source_path, 1 << 20);
+    defer allocator.free(tags_src);
+    const goals = try goalDriveableProperties(allocator, goals_src, tags_src);
+    defer allocator.free(goals);
+    try w.print(
+        "| Goal-driveable properties | {d} | `{s}` |\n",
+        .{ goals.len, goals_source_path },
+    );
+
+    try w.print(
+        "| Capability profiles | {d} | `packages/tools/src/vocab_envelope.zig` |\n",
+        .{profiles.len},
+    );
+    try w.writeAll("\n");
+}
+
+/// Render the section 4.3 profile table.
+pub fn renderProfileTable(w: *std.Io.Writer) !void {
+    try w.writeAll("\n| Profile | Categories | Excluded modules | Requires `read_only` | What it is for |\n|---|---|---|---|---|\n");
+    for (profiles) |p| {
+        try w.print("| `{s}` | ", .{p.name});
+        for (p.categories, 0..) |c, i| {
+            try w.print("`{s}`", .{@tagName(c)});
+            if (i + 1 != p.categories.len) try w.writeAll(", ");
+        }
+        try w.writeAll(" | ");
+        for (p.excluded_modules, 0..) |m, i| {
+            try w.print("`{s}`", .{m});
+            if (i + 1 != p.excluded_modules.len) try w.writeAll(", ");
+        }
+        try w.print(" | {s} | {s} |\n", .{ if (p.requires_read_only) "yes" else "no", p.purpose });
+    }
+    try w.writeAll("\n");
+}
+
+const Region = struct { before: []const u8, body: []const u8, after: []const u8 };
+
+/// Split a document around one managed region. A missing marker is an error
+/// rather than a silent skip: a generator must never write a file whose boundary
+/// it could not find, and a check that cannot find its region would otherwise
+/// report agreement with nothing.
+pub fn splitRegion(doc: []const u8, begin: []const u8, end: []const u8) !Region {
+    const at = std.mem.indexOf(u8, doc, begin) orelse return ScanError.AnchorMissing;
+    const body_start = at + begin.len;
+    const end_at = std.mem.indexOfPos(u8, doc, body_start, end) orelse return ScanError.Unterminated;
+    return .{
+        .before = doc[0..body_start],
+        .body = doc[body_start..end_at],
+        .after = doc[end_at..],
+    };
+}
+
+test "splitRegion refuses a document with no begin marker" {
+    try std.testing.expectError(
+        ScanError.AnchorMissing,
+        splitRegion("no markers here", alphabet_region_begin, alphabet_region_end),
+    );
+}
+
+test "splitRegion refuses an unterminated region" {
+    const doc = alphabet_region_begin ++ "body with no end";
+    try std.testing.expectError(
+        ScanError.Unterminated,
+        splitRegion(doc, alphabet_region_begin, alphabet_region_end),
+    );
+}
+
+/// Render one managed region's body to an owned slice, mirroring
+/// `renderToOwned` so the writer-adapter handoff is done one way here.
+fn renderRegionToOwned(
+    allocator: std.mem.Allocator,
+    comptime f: anytype,
+    args: anytype,
+) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+    var adapter = std.Io.Writer.Allocating.fromArrayList(allocator, &buf);
+    defer buf = adapter.toArrayList();
+    try @call(.auto, f, args ++ .{&adapter.writer});
+    buf = adapter.toArrayList();
+    return buf.toOwnedSlice(allocator);
+}
+
+pub fn alphabetTableToOwned(allocator: std.mem.Allocator) ![]u8 {
+    return renderRegionToOwned(allocator, renderAlphabetTable, .{allocator});
+}
+
+pub fn profileTableToOwned(allocator: std.mem.Allocator) ![]u8 {
+    return renderRegionToOwned(allocator, renderProfileTable, .{});
+}
+
+test "the rendered alphabet table carries one row per alphabet" {
+    const text = try alphabetTableToOwned(std.testing.allocator);
+    defer std.testing.allocator.free(text);
+
+    for (typedAlphabets()) |a| {
+        if (std.mem.indexOf(u8, text, a.label) == null) {
+            std.debug.print("rendered table is missing a row for {s}\n", .{a.label});
+            return error.MissingRow;
+        }
+    }
+    for ([_][]const u8{
+        "Virtual modules, in-tree base",
+        "Virtual modules, effective for this build",
+        "Residual guard families, enabled",
+        "Goal-driveable properties",
+        "Capability profiles",
+    }) |label| {
+        if (std.mem.indexOf(u8, text, label) == null) {
+            std.debug.print("rendered table is missing a row for {s}\n", .{label});
+            return error.MissingRow;
+        }
+    }
+}
+
+test "the rendered profile table carries every profile and its exclusions" {
+    const text = try profileTableToOwned(std.testing.allocator);
+    defer std.testing.allocator.free(text);
+    for (profiles) |p| {
+        if (std.mem.indexOf(u8, text, p.name) == null) return error.MissingProfile;
+        for (p.excluded_modules) |m| {
+            if (std.mem.indexOf(u8, text, m) == null) return error.MissingExclusion;
         }
     }
 }
