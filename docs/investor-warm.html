@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Making Unsafe Software Unbuildable</title>
+<style>
+  :root {
+    --ink: #16181d;
+    --muted: #5b6270;
+    --rule: #dcdfe5;
+    --accent: #1c4f8b;
+    --bg: #ffffff;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ink: #e6e8ec; --muted: #9aa2b1; --rule: #2f343d;
+      --accent: #7fb0ea; --bg: #14161a;
+    }
+  }
+  :root[data-theme="dark"] {
+    --ink: #e6e8ec; --muted: #9aa2b1; --rule: #2f343d;
+    --accent: #7fb0ea; --bg: #14161a;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, "Helvetica Neue", Arial, sans-serif;
+    font-size: 17px;
+    line-height: 1.62;
+    -webkit-font-smoothing: antialiased;
+  }
+  main { max-width: 37rem; margin: 0 auto; padding: 4.5rem 16px 5rem; }
+  .kicker {
+    font-size: .74rem; letter-spacing: .13em; text-transform: uppercase;
+    color: var(--muted); font-weight: 600; margin: 0 0 1.1rem;
+  }
+  h1 {
+    font-size: 2.45rem; line-height: 1.1; letter-spacing: -.024em;
+    font-weight: 700; margin: 0 0 1.4rem;
+  }
+  .lede {
+    font-size: 1.24rem; line-height: 1.5;
+    margin: 0 0 2.6rem; padding-bottom: 2.1rem;
+    border-bottom: 1px solid var(--rule);
+  }
+  h2 {
+    font-size: 1.12rem; font-weight: 700; letter-spacing: -.008em;
+    margin: 2.7rem 0 .85rem;
+  }
+  p { margin: 0 0 1.1rem; }
+  em { font-style: italic; }
+  .kicker-accent { color: var(--accent); }
+  footer {
+    margin-top: 3.4rem; padding-top: 1.3rem; border-top: 1px solid var(--rule);
+    font-size: .85rem; color: var(--muted);
+  }
+  @media print {
+    :root { --ink: #000; --muted: #444; --rule: #bbb; --accent: #000; --bg: #fff; }
+    body { font-size: 10.5pt; line-height: 1.45; }
+    main { padding: 0; max-width: none; }
+    h1 { font-size: 22pt; }
+    .lede { font-size: 12pt; margin-bottom: 1.4rem; padding-bottom: 1.1rem; }
+    h2 { font-size: 11.5pt; margin: 1.5rem 0 .5rem; }
+    p, h2 { page-break-inside: avoid; }
+    h2 { page-break-after: avoid; }
+  }
+  @media (max-width: 480px) {
+    body { font-size: 16px; }
+    main { padding: 2.75rem 16px 3rem; }
+    h1 { font-size: 1.95rem; }
+    .lede { font-size: 1.1rem; }
+  }
+</style>
+</head>
+<body>
+<main>
+  <p class="kicker">Metadoor <span class="kicker-accent">&middot;</span> ZTTP</p>
+  <h1>Making Unsafe Software Unbuildable</h1>
+
+  <p class="lede">Every tool in this market is a smoke alarm. We are making the walls out of something that does not burn.</p>
+
+  <h2>Something changed, quietly</h2>
+  <p>For most of computing's history, software was written by people and run for people. When it did something wrong, there was someone to ask. That arrangement is ending faster than most boards have noticed.</p>
+  <p>AI now writes a large and growing share of new code. More importantly, AI has started <em>doing</em> things rather than suggesting them: approving the refund, updating the record, moving the money, sending the message.</p>
+  <p>The industry's answer has been to watch more carefully. Better logs, better monitoring, filters on what the model says, more people reviewing output. All of it useful. All of it arrives after the thing has already happened.</p>
+  <p>When the action is a paragraph of text, that is fine. When the action is a payment, it is not.</p>
+
+  <h2>The idea is five hundred years old</h2>
+  <p>In 1494 a Franciscan friar wrote down the rules of double-entry bookkeeping, and accountants have used them ever since. The clever part is easy to miss. Double-entry does not catch an unbalanced transaction. It makes one impossible to write down.</p>
+  <p>No alarm, no review, no reconciliation meeting. The shape of the ledger simply will not hold the mistake.</p>
+  <p>That is what we are building for software. ZTTP is a programming language and runtime designed so that whole categories of dangerous behaviour cannot be expressed at all. Not discouraged. Not caught in review. Unable to compile.</p>
+  <p>Metadoor is where a company writes down its rules: who may approve what, which step must come before which, which two people must not be the same person, what must always balance. Those rules stop being a policy document nobody can run, and become something a compiler enforces before the software exists.</p>
+
+  <h2>What that looks like</h2>
+  <p>Someone writes code that would put a customer's bank details into a log file. The build fails. Not a warning in a dashboard nobody reads. The software does not get made.</p>
+  <p>A service is allowed to call your payment provider, and quietly also reaches an address inside your own cloud that hands out credentials. The connection is refused before it opens. That exact mistake sits behind some of the largest breaches on record.</p>
+  <p>An accounting entry is written that does not balance. It is rejected as it is written, by the system itself, rather than found in a month-end review.</p>
+  <p>And the AI writing all of this works inside the same fence. It proposes, the compiler refuses, it tries again, and it keeps going until what it has written can be proved correct. It cannot talk its way past this. Neither can a tired engineer at six o'clock on a Friday.</p>
+
+  <h2>Why this is the moment</h2>
+  <p>Three things are converging, and they all push the same way.</p>
+  <p>AI writes more of the world's software every month. Agents are being handed real authority in finance, healthcare and operations, because the productivity is too large to turn down. And regulators are moving from asking companies what went wrong to asking them to show the controls that stop it going wrong.</p>
+  <p>The first two make every after-the-fact tool weaker. The third turns provable controls from something a company would like into something it has to buy.</p>
+  <p>We are early, and we would rather say so. The compiler, the runtime, and the independent checker that verifies its claims are built and running. The rules engine is built. The piece that joins them is designed, and building it is what comes next.</p>
+  <p>What we are building toward is simple to say. A company writes down how it works. The software that results cannot violate it. And at the end there is a certificate stating exactly what was proved, which an auditor can check rather than take on trust.</p>
+
+  <footer>Metadoor and ZTTP &middot; 22 September 2026</footer>
+</main>
+</body>
+</html>

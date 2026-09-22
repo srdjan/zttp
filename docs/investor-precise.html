@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Prevention, Not Alerts</title>
+<style>
+  :root {
+    --ink: #16181d;
+    --muted: #5b6270;
+    --rule: #dcdfe5;
+    --accent: #1c4f8b;
+    --bg: #ffffff;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ink: #e6e8ec; --muted: #9aa2b1; --rule: #2f343d;
+      --accent: #7fb0ea; --bg: #14161a;
+    }
+  }
+  :root[data-theme="dark"] {
+    --ink: #e6e8ec; --muted: #9aa2b1; --rule: #2f343d;
+    --accent: #7fb0ea; --bg: #14161a;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, "Helvetica Neue", Arial, sans-serif;
+    font-size: 17px;
+    line-height: 1.62;
+    -webkit-font-smoothing: antialiased;
+  }
+  main { max-width: 37rem; margin: 0 auto; padding: 4.5rem 16px 5rem; }
+  .kicker {
+    font-size: .74rem; letter-spacing: .13em; text-transform: uppercase;
+    color: var(--muted); font-weight: 600; margin: 0 0 1.1rem;
+  }
+  h1 {
+    font-size: 2.45rem; line-height: 1.1; letter-spacing: -.024em;
+    font-weight: 700; margin: 0 0 1.4rem;
+  }
+  .lede {
+    font-size: 1.24rem; line-height: 1.5; color: var(--ink);
+    margin: 0 0 2.6rem; padding-bottom: 2.1rem;
+    border-bottom: 1px solid var(--rule);
+  }
+  h2 {
+    font-size: 1.12rem; font-weight: 700; letter-spacing: -.008em;
+    margin: 2.7rem 0 .85rem;
+  }
+  p { margin: 0 0 1.1rem; }
+  strong { font-weight: 650; }
+  em { font-style: italic; }
+  .kicker-accent { color: var(--accent); }
+  footer {
+    margin-top: 3.4rem; padding-top: 1.3rem; border-top: 1px solid var(--rule);
+    font-size: .85rem; color: var(--muted);
+  }
+  @media print {
+    :root { --ink: #000; --muted: #444; --rule: #bbb; --accent: #000; --bg: #fff; }
+    body { font-size: 10.5pt; line-height: 1.45; }
+    main { padding: 0; max-width: none; }
+    h1 { font-size: 22pt; }
+    .lede { font-size: 12pt; margin-bottom: 1.4rem; padding-bottom: 1.1rem; }
+    h2 { font-size: 11.5pt; margin: 1.5rem 0 .5rem; }
+    p, h2 { page-break-inside: avoid; }
+    h2 { page-break-after: avoid; }
+  }
+  @media (max-width: 480px) {
+    body { font-size: 16px; }
+    main { padding: 2.75rem 16px 3rem; }
+    h1 { font-size: 1.95rem; }
+    .lede { font-size: 1.1rem; }
+  }
+</style>
+</head>
+<body>
+<main>
+  <p class="kicker">Metadoor <span class="kicker-accent">&middot;</span> ZTTP</p>
+  <h1>Prevention, Not Alerts</h1>
+
+  <p class="lede">Metadoor and ZTTP make unsafe software impossible to build. Every other company in this market tells you what your software already did.</p>
+
+  <h2>Every control in this market is a receipt</h2>
+  <p>Software is the only engineering discipline that ships first and watches afterward. A bridge is proved before the concrete is poured. Software is deployed, then monitored.</p>
+  <p>For forty years that was a fair trade, because a person wrote every line and another person read it. Both halves of that premise are now gone. AI writes the code, and AI agents take the action: moving money, changing records, granting access, contacting customers.</p>
+  <p>The market's answer is to watch harder. Observability, audit trails, model monitoring, output filters, red-teaming, evaluation suites. They differ in sophistication and agree on one thing: they answer the question <em>what happened</em>.</p>
+  <p>A record of a breach is not a control. It is a receipt.</p>
+
+  <h2>The oldest idea in accounting, applied to software</h2>
+  <p>Double-entry bookkeeping does not detect an unbalanced transaction. It makes one impossible to write down. The format carries the guarantee, so the error never exists to be caught.</p>
+  <p>ZTTP does that for software. It is a compiler and runtime for a deliberately reduced programming language. Every feature it removes buys a property that becomes decidable: no hidden exceptions, no unbounded loops, no dynamic code. The result is that a program able to leak a credential does not compile. Not flagged in review. Does not build.</p>
+  <p>Metadoor is where the rules come from. A company states its governance as structured data rather than as a policy document nobody can execute: who may approve what, which steps must precede which, which two actors must differ, what must always balance. Metadoor compiles that. ZTTP proves what can be proved, enforces at runtime what proof cannot reach, and refuses to build the rest.</p>
+  <p>The result is policy that executes, and a deployable artifact that carries its own evidence.</p>
+
+  <h2>Three things it will not build</h2>
+  <p><strong>A response that could carry a secret.</strong> Name the sensitive fields once, and any path that would put one into a response body, a log, or an outbound request fails the build.</p>
+  <p><strong>A request to your own cloud's credential service.</strong> A permitted hostname that quietly resolves to an internal metadata address is refused at the socket. That one mistake has produced some of the largest cloud breaches on record.</p>
+  <p><strong>A ledger entry that does not balance.</strong> Postings commit atomically, and a group whose signed entries do not sum to zero is rejected, as is one naming an account the specification never declared. The runtime does that rejecting, so it holds even for code no proof reached.</p>
+  <p>The AI that writes this code works inside the same fence. It proposes, the compiler vetoes, it tries again. On a frozen nineteen-case benchmark every case reaches a proven result, and about six in ten clear the compiler on the model's first raw attempt.</p>
+
+  <h2>Why you can check these claims</h2>
+  <p>Every deployment carries a certificate. An independent checker, sharing no code with the compiler that produced it, rebuilds the claim from the artifact's own bytes and either accepts or refuses. The producer's word is never evidence.</p>
+  <p>The certificate also states what was <em>not</em> proved. Each guarantee carries the strength of its weakest link, never averaged and never rounded up, and everything taken on trust is published by name.</p>
+  <p>Nobody else in this market publishes that list, because publishing one requires having measured it. For us it is a ratchet: the list only shrinks, so progress is a number rather than a narrative.</p>
+  <p>It is also the commercial wedge. Proving a control exists today means producing a policy document and a sample log. We hand the auditor a machine-checkable artifact instead.</p>
+
+  <h2>Why now, and where we stand</h2>
+  <p>Three things arrived together. AI writes a fast-rising share of new code. Agents have begun taking actions with consequences rather than drafting text for a person to send. And regulators are shifting from asking for logs of what went wrong toward asking for controls that can be demonstrated.</p>
+  <p>Each of those makes detection-after-the-fact worse, and each makes a compiler that can say no worth more.</p>
+  <p>Where we stand, precisely. ZTTP's compiler, runtime, proof format and independent checker are built and running, and the agent loop is measured against a frozen benchmark rather than demonstrated. Metadoor's governance model, its authority and receipt machinery, and its compilation pipeline are built. The contract joining the two is specified; building it is the next step. There is no hosted product: a deployment today is a self-contained binary the customer runs.</p>
+  <p>We would rather state that plainly than let a demonstration imply more. The discipline that makes our certificates publish their own gaps is the same one that makes this company worth underwriting.</p>
+
+  <footer>Metadoor and ZTTP &middot; 22 September 2026</footer>
+</main>
+</body>
+</html>
