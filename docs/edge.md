@@ -62,7 +62,7 @@ for the full contract/proof verification pipeline before running edge.
 | `lifecycle`            | string | pool default | Optional override: `ephemeral` \| `bounded` \| `ttl` \| `reuse` |
 | `outboundHttp`         | boolean| `false` | Enable outbound HTTP for this handler          |
 | `outboundHost`         | string | unset   | Single allowed outbound host; also enables outbound HTTP |
-| `outboundTimeoutMs`    | integer| `10000` | Per-handler outbound HTTP timeout in milliseconds |
+| `outboundTimeoutMs`    | integer| `10000` | Per-handler outbound HTTP exchange deadline in milliseconds. Must be greater than 0 |
 | `system`               | string | unset   | Path to a `zttp:service` registry JSON file  |
 
 ### `routes`

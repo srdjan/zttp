@@ -4117,6 +4117,13 @@ test "fetchSync enforces response byte limits" {
     try std.testing.expectEqualStrings("response exceeded max_response_bytes", obj.get("details").?.string);
 }
 
+test "a runtime refuses a zero outbound timeout instead of running unbounded" {
+    try std.testing.expectError(
+        error.ZeroOutboundTimeout,
+        HandlerInstance.init(std.testing.allocator, .{ .outbound_timeout_ms = 0 }),
+    );
+}
+
 test "fetchSync times out instead of hanging when upstream accepts and goes silent" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

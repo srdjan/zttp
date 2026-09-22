@@ -691,6 +691,7 @@ fn parseServeArgs(allocator: std.mem.Allocator, argv: []const []const u8) !Serve
             const value = try shared.takeArg(&i, argv, error.MissingOutboundTimeout);
             config.runtime_config.outbound_http_enabled = true;
             config.runtime_config.outbound_timeout_ms = std.fmt.parseInt(u32, value, 10) catch return error.InvalidOutboundTimeout;
+            if (config.runtime_config.outbound_timeout_ms == 0) return error.InvalidOutboundTimeout;
         } else if (std.mem.eql(u8, arg, "--outbound-max-response")) {
             const value = try shared.takeArg(&i, argv, error.MissingOutboundMaxResponse);
             config.runtime_config.outbound_http_enabled = true;
@@ -913,7 +914,7 @@ fn printServeHelp() void {
         \\  --static <DIR>        Serve static files from directory
         \\  --outbound-http       Enable native outbound HTTP bridge
         \\  --outbound-host <H>   Restrict outbound bridge to exact host H (host only, not port)
-        \\  --outbound-timeout-ms Connect timeout for outbound bridge in ms
+        \\  --outbound-timeout-ms Outbound exchange deadline in ms, greater than 0
         \\  --outbound-max-response <SIZE>
         \\  --sqlite <FILE>       SQLite database path for zttp:sql
         \\  --trace <FILE>        Record handler I/O traces to JSONL file
@@ -1014,6 +1015,18 @@ test "parseServeArgs parses internal debug panic path flag" {
 
     const config = try parseServeArgs(arena.allocator(), &.{ "handler.ts", "--_debug-panic-path", "/flag" });
     try std.testing.expectEqualStrings("/flag", config.runtime_config.debug_panic_path.?);
+}
+
+test "parseServeArgs refuses a zero outbound timeout" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+
+    try std.testing.expectError(
+        error.InvalidOutboundTimeout,
+        parseServeArgs(arena.allocator(), &.{ "handler.ts", "--outbound-timeout-ms", "0" }),
+    );
+    const config = try parseServeArgs(arena.allocator(), &.{ "handler.ts", "--outbound-timeout-ms", "1" });
+    try std.testing.expectEqual(@as(u32, 1), config.runtime_config.outbound_timeout_ms);
 }
 
 test "serve policy validation never bypasses a configured policy" {

@@ -77,7 +77,7 @@ Common `dev` and `serve` flags:
 | `--workflow-queue` | Persist durable workflow `call`, `follow`, and `fanout` child dispatch through the workflow queue. Requires `--durable <dir>` and `--system <file>`. |
 | `--actor-queue` | Enable process-local in-memory mailboxes for `zttp:queue`. |
 | `--outbound-http` / `--outbound-host <host>` | Enable outbound HTTP. The host allowlist matches on host only, not port. |
-| `--outbound-timeout-ms <ms>` | Outbound connect timeout (default 10000). Implies `--outbound-http`. |
+| `--outbound-timeout-ms <ms>` | Outbound exchange deadline in milliseconds (default 10000). Must be greater than 0. It bounds the request and response exchange; the connect and the TLS handshake have no deadline yet. Implies `--outbound-http`. |
 | `--outbound-max-response <size>` | Outbound response body cap (default 1m). Implies `--outbound-http`. |
 | `--security-log <file>` | Append security events as JSONL: policy denials, arena audit failures, persistent-string escapes. |
 | `--lifecycle <mode>` | Override the proof-gated runtime lifecycle: `ephemeral`, `bounded`, `ttl`, or `reuse`. |

@@ -49,7 +49,7 @@ fn effectiveOutboundTimeoutMs(rt: *HandlerInstance) u32 {
                 1
             else
                 @intCast(@min(remaining_ms, std.math.maxInt(u32)));
-            if (timeout_ms == 0 or step_timeout_ms < timeout_ms) timeout_ms = step_timeout_ms;
+            if (step_timeout_ms < timeout_ms) timeout_ms = step_timeout_ms;
         }
     }
     return timeout_ms;
@@ -62,7 +62,6 @@ fn stepDeadlinePassed(rt: *HandlerInstance) bool {
 }
 
 fn outboundTimeout(timeout_ms: u32) std.Io.Timeout {
-    if (timeout_ms == 0) return .none;
     const duration = std.Io.Duration.fromMilliseconds(@intCast(timeout_ms));
     return .{ .duration = .{ .raw = duration, .clock = .awake } };
 }
@@ -1018,7 +1017,7 @@ fn fetchSyncResult(rt: *HandlerInstance, args: []const zq.JSValue) !zq.JSValue {
         .timeout_ms = timeout_ms,
         .io = client.io,
     };
-    deadline.arm();
+    deadline.arm() catch |err| return createFetchErrorResponse(rt, "DeadlineUnavailable", @errorName(err));
     // Declared after req's deinit defer so disarm joins the watchdog first.
     defer deadline.disarm();
 
@@ -1998,10 +1997,7 @@ fn doFetchWorkerInner(
     var host_buf: [std.Io.net.HostName.max_len]u8 = undefined;
     const host = try resolveHostSafe(uri, &host_buf);
 
-    const timeout: std.Io.Timeout = if (config.outbound_timeout_ms == 0) .none else blk: {
-        const duration = std.Io.Duration.fromMilliseconds(@intCast(config.outbound_timeout_ms));
-        break :blk .{ .duration = .{ .raw = duration, .clock = .awake } };
-    };
+    const timeout = outboundTimeout(config.outbound_timeout_ms);
 
     const port: u16 = uri.port orelse switch (protocol) {
         .plain => 80,
@@ -2063,7 +2059,12 @@ fn doFetchWorkerInner(
         .timeout_ms = config.outbound_timeout_ms,
         .io = client.io,
     };
-    deadline.arm();
+    deadline.arm() catch |err| return zq.modules.io.FetchResult{
+        .status = 599,
+        .ok = false,
+        .error_code = try allocator.dupe(u8, "DeadlineUnavailable"),
+        .error_details = try allocator.dupe(u8, @errorName(err)),
+    };
     // Declared after req's deinit defer so disarm joins the watchdog first.
     defer deadline.disarm();
 
@@ -2380,7 +2381,7 @@ fn httpRequestResultJsonAlloc(rt: *HandlerInstance, args: []const zq.JSValue) ![
         .timeout_ms = timeout_ms,
         .io = client.io,
     };
-    deadline.arm();
+    deadline.arm() catch |err| return try httpRequestErrorJsonAlloc(a, "DeadlineUnavailable", @errorName(err));
     // Declared after req's deinit defer so disarm joins the watchdog first.
     defer deadline.disarm();
 
@@ -2485,14 +2486,12 @@ pub fn httpRequestErrorJsonAlloc(a: std.mem.Allocator, err_code: []const u8, det
 
 const testing = std.testing;
 
-test "a zero outbound timeout means no timeout, not an instant one" {
-    // The distinction that matters: 0 is the "unset" sentinel from config, and
-    // reading it as a zero-duration deadline would fail every outbound request
-    // immediately instead of allowing an unbounded one.
-    try testing.expectEqual(std.meta.Tag(std.Io.Timeout).none, std.meta.activeTag(outboundTimeout(0)));
-
-    const bounded = outboundTimeout(1500);
-    try testing.expect(std.meta.activeTag(bounded) != .none);
+test "no outbound timeout value maps to an unbounded wait" {
+    // 0 once meant "no timeout". Startup now refuses it, and no value that
+    // reaches this helper may select `.none`.
+    for ([_]u32{ 0, 1, 1500, std.math.maxInt(u32) }) |timeout_ms| {
+        try testing.expect(std.meta.activeTag(outboundTimeout(timeout_ms)) != .none);
+    }
 }
 
 test "header splitting copies every pair and reports the count" {

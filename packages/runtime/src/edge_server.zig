@@ -76,15 +76,7 @@ pub const EdgeConfig = struct {
 
     pub fn deinit(self: *EdgeConfig, allocator: std.mem.Allocator) void {
         allocator.free(self.listener.host);
-        for (self.handlers) |*handler| {
-            allocator.free(handler.name);
-            allocator.free(handler.entry);
-            if (handler.runtime_config.outbound_allow_host) |host| allocator.free(host);
-            if (handler.runtime_config.sqlite_path) |path| allocator.free(path);
-            if (handler.runtime_config.system_config_path) |path| allocator.free(path);
-            if (handler.runtime_config.durable_oplog_dir) |path| allocator.free(path);
-        }
-        allocator.free(self.handlers);
+        freeHandlers(allocator, self.handlers);
         for (self.routes) |*route| {
             allocator.free(route.host);
             allocator.free(route.method);
@@ -95,6 +87,18 @@ pub const EdgeConfig = struct {
         allocator.free(self.routes);
     }
 };
+
+fn freeHandlers(allocator: std.mem.Allocator, handlers: []HandlerConfig) void {
+    for (handlers) |*handler| {
+        allocator.free(handler.name);
+        allocator.free(handler.entry);
+        if (handler.runtime_config.outbound_allow_host) |host| allocator.free(host);
+        if (handler.runtime_config.sqlite_path) |path| allocator.free(path);
+        if (handler.runtime_config.system_config_path) |path| allocator.free(path);
+        if (handler.runtime_config.durable_oplog_dir) |path| allocator.free(path);
+    }
+    allocator.free(handlers);
+}
 
 pub fn loadConfig(allocator: std.mem.Allocator, path: []const u8) !EdgeConfig {
     const bytes = try readFilePosix(allocator, path, 1024 * 1024);
@@ -112,15 +116,9 @@ pub fn parseConfig(allocator: std.mem.Allocator, bytes: []const u8, root_dir: []
     const timeout_ms = try parseU32Field(obj, "timeoutMs", 30_000);
     if (timeout_ms == 0) return error.InvalidEdgeConfig;
     const listener = try parseListener(allocator, obj.get("listener"));
+    errdefer allocator.free(listener.host);
     const handlers = try parseHandlers(allocator, obj.get("handlers"), root_dir);
-    errdefer {
-        var tmp = EdgeConfig{
-            .listener = listener,
-            .handlers = handlers,
-            .routes = &.{},
-        };
-        tmp.deinit(allocator);
-    }
+    errdefer freeHandlers(allocator, handlers);
     for (handlers) |*handler| {
         if (handler.runtime_config.request_timeout_ms == 0) {
             handler.runtime_config.request_timeout_ms = timeout_ms;
@@ -709,6 +707,7 @@ fn parseHandlers(allocator: std.mem.Allocator, value_opt: ?std.json.Value, root_
         errdefer if (runtime_config.outbound_allow_host) |h| allocator.free(h);
         if (runtime_config.outbound_allow_host != null) runtime_config.outbound_http_enabled = true;
         runtime_config.outbound_timeout_ms = try parseU32Field(obj, "outboundTimeoutMs", 10_000);
+        if (runtime_config.outbound_timeout_ms == 0) return error.InvalidEdgeConfig;
         runtime_config.system_config_path = try dupOptionalResolvedPath(allocator, obj, "system", root_dir);
         errdefer if (runtime_config.system_config_path) |p| allocator.free(p);
 
@@ -1102,6 +1101,19 @@ test "edge config rejects a zero connection timeout" {
         \\{
         \\  "timeoutMs": 0,
         \\  "handlers": [{"name":"api","entry":"src/api.ts"}],
+        \\  "routes": [{"pathPrefix":"/","target":"api"}]
+        \\}
+    ;
+    try std.testing.expectError(
+        error.InvalidEdgeConfig,
+        parseConfig(std.testing.allocator, json, "/tmp/app"),
+    );
+}
+
+test "edge config rejects a zero outbound timeout" {
+    const json =
+        \\{
+        \\  "handlers": [{"name":"api","entry":"src/api.ts","outboundTimeoutMs":0}],
         \\  "routes": [{"pathPrefix":"/","target":"api"}]
         \\}
     ;

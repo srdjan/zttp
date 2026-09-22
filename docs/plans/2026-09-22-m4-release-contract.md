@@ -1,6 +1,6 @@
 # M4: release contract for scoped tool routes
 
-Status: accepted by the owner on 2026-09-22. T1a is in progress.
+Status: accepted by the owner on 2026-09-22. T1a is complete; T1b is next.
 Baseline: local `main` at `176d81ca`. Roadmap row:
 [M4 in the roadmap](../roadmap.md) (`docs/roadmap.md:20`). This document
 reconciles proposal A, the
@@ -162,6 +162,23 @@ exchange deadline is finite for every handler, not only under the tool profile:
 and no code path maps a timeout to `.none`. A watchdog that fails to start
 fails the fetch rather than letting the exchange run without a bound.
 Completion: check C1a.
+
+T1a result, 2026-09-22. Zero is refused at `runtime_cli.zig:694`,
+`edge_server.zig:710`, and both `HandlerInstance` initializers
+(`handler_instance.zig:252`, `:375`). `outboundTimeout` has no `.none` branch,
+the durable step clamp no longer treats 0 as unset, and `FetchDeadline.arm`
+returns `ZeroTimeout` or `WatchdogUnavailable`, which each caller maps to a
+`DeadlineUnavailable` fetch error. The new edge test exposed an older leak: a
+handler parse error leaked the listener host, because `parseConfig` had no
+cleanup between the two parses. It is fixed with one owner per allocation.
+Four new tests failed before the fix. Five mutations, applied together and each
+caught by its own test, restored the `.none` branch, the zero skip in `arm`, and
+the three startup refusals; unfiltered `test-zruntime` and `zig build test`
+reported all five. The restored tree then passed `zig build test` (188 of 188
+steps, 8546 tests passed, 6 skipped), `test-zruntime` with `test-server` (826
+passed, 3 skipped), `zig fmt --check`, and the docs and module-boundary gates.
+The spawn-failure arm of `arm` has no test, because a thread spawn failure
+cannot be forced from a unit test here.
 
 **T1b. Bounded connect and TLS handshake.** Depends on T1a. Owned files:
 `packages/runtime/src/runtime_http.zig` and a design note that compares the

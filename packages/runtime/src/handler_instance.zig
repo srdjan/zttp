@@ -249,6 +249,7 @@ pub const HandlerInstance = struct {
     }
 
     pub fn init(allocator: std.mem.Allocator, config: RuntimeConfig) !*Self {
+        if (config.outbound_timeout_ms == 0) return error.ZeroOutboundTimeout;
         try runtime_config_mod.validateLedgerOutputPaths(allocator, config, null);
         const self = try allocator.create(Self);
         errdefer allocator.destroy(self);
@@ -371,6 +372,7 @@ pub const HandlerInstance = struct {
         config: RuntimeConfig,
         policy_generation: *RuntimePolicyGeneration,
     ) !*Self {
+        if (config.outbound_timeout_ms == 0) return error.ZeroOutboundTimeout;
         const allocator = pool_rt.ctx.allocator;
         const self = try allocator.create(Self);
         errdefer allocator.destroy(self);

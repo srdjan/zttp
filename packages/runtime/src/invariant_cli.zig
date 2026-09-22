@@ -253,7 +253,7 @@ const HostTransport = struct {
             .timeout_ms = exchange_timeout_ms,
             .io = self.io,
         };
-        deadline.arm();
+        try deadline.arm();
         defer deadline.disarm();
 
         return exchange(allocator, &req, body) catch |err| {

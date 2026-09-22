@@ -27,9 +27,12 @@ pub const FetchDeadline = struct {
     fired: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     thread: ?std.Thread = null,
 
-    pub fn arm(self: *FetchDeadline) void {
-        if (self.timeout_ms == 0) return;
-        self.thread = std.Thread.spawn(.{}, watch, .{self}) catch null;
+    /// Refuses rather than skips: an exchange that runs without its watchdog
+    /// has no bound at all, so neither a zero timeout nor a failed spawn may
+    /// leave the caller believing it is bounded.
+    pub fn arm(self: *FetchDeadline) error{ ZeroTimeout, WatchdogUnavailable }!void {
+        if (self.timeout_ms == 0) return error.ZeroTimeout;
+        self.thread = std.Thread.spawn(.{}, watch, .{self}) catch return error.WatchdogUnavailable;
     }
 
     fn watch(self: *FetchDeadline) void {
@@ -90,7 +93,7 @@ test "an armed deadline shuts down a stalled read and reports that it fired" {
     defer stream.close(io);
 
     var deadline: FetchDeadline = .{ .stream = stream, .timeout_ms = 50, .io = io };
-    deadline.arm();
+    try deadline.arm();
     defer deadline.disarm();
     try std.testing.expect(!deadline.expired());
 
@@ -103,13 +106,13 @@ test "an armed deadline shuts down a stalled read and reports that it fired" {
     try std.testing.expectEqualStrings("TimedOut", deadline.failCode("ResponseReadFailed"));
 }
 
-test "a zero timeout arms nothing and disarm stays safe" {
+test "a zero timeout refuses to arm and disarm stays safe" {
     var io_backend = std.Io.Threaded.init(std.testing.allocator, .{ .environ = .empty });
     defer io_backend.deinit();
     const io = io_backend.io();
 
     var deadline: FetchDeadline = .{ .stream = undefined, .timeout_ms = 0, .io = io };
-    deadline.arm();
+    try std.testing.expectError(error.ZeroTimeout, deadline.arm());
     deadline.disarm();
     try std.testing.expect(!deadline.expired());
     try std.testing.expectEqualStrings("ResponseReadFailed", deadline.failCode("ResponseReadFailed"));
