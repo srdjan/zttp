@@ -559,6 +559,19 @@ pub fn render(allocator: std.mem.Allocator, w: *std.Io.Writer) !void {
     defer allocator.free(enabled);
     try w.writeAll(",\n    \"residual_guard_families_enabled\": { \"source\": \"packages/proof-checker/src/residual.zig\", \"members\": ");
     try writeMembers(w, enabled);
+    try w.writeAll(" }");
+
+    // Read from source rather than imported, and cross-checked against the tag
+    // enum. `goalDriveableProperties` refuses a disagreement, so a render that
+    // succeeds has already established the two surfaces agree.
+    const goals_src = try zts.file_io.readFile(allocator, goals_source_path, 1 << 20);
+    defer allocator.free(goals_src);
+    const tags_src = try zts.file_io.readFile(allocator, tags_source_path, 1 << 20);
+    defer allocator.free(tags_src);
+    const goals = try goalDriveableProperties(allocator, goals_src, tags_src);
+    defer allocator.free(goals);
+    try w.writeAll(",\n    \"goal_driveable_properties\": { \"source\": \"packages/pi/src/property_goals.zig\", \"members\": ");
+    try writeMembers(w, goals);
     try w.writeAll(" }\n  },\n");
 
     try w.writeAll("  \"profiles\": [\n");
@@ -646,4 +659,263 @@ test "the rendered envelope parses as JSON" {
     const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, text, .{});
     defer parsed.deinit();
     try std.testing.expect(parsed.value == .object);
+}
+
+// ============================================================================
+// Goal-driveable properties
+// ============================================================================
+//
+// `packages/pi` is not importable from `tools`, and `counterexample` sits in the
+// internal tier of `zts/src/root.zig` with no `tools` row in
+// `scripts/module-boundary.allow`. So this alphabet is read as text rather than
+// imported as a value, which `invariant_drift_gate.zig` establishes as the
+// treatment for a surface that is code.
+//
+// Two files are scanned, not one. `pi` owns the driveable set and `zts` owns the
+// tag enum the solver models, and the pi source states that the set is "the full
+// set rather than a subset chosen for convenience". Requiring the two to agree
+// turns that comment into a check: a tag added to the enum and not to the goal
+// list, or a goal naming a tag the enum lost, fails here. Scanning one file
+// alone would trust whichever it read.
+
+fn isIdentifier(s: []const u8) bool {
+    if (s.len == 0) return false;
+    for (s) |c| {
+        const ok = (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or
+            (c >= '0' and c <= '9') or c == '_';
+        if (!ok) return false;
+    }
+    return true;
+}
+
+pub const ScanError = error{
+    AnchorMissing,
+    Unterminated,
+    EmptyList,
+    GoalsDisagreeWithTags,
+};
+
+/// Parse a Zig list of enum literals (`.a,` `.b,`) between an anchor and the
+/// closing `};`. Returns names without the leading dot, in source order.
+pub fn scanTagList(
+    allocator: std.mem.Allocator,
+    text: []const u8,
+    anchor: []const u8,
+) ![]const []const u8 {
+    const at = std.mem.indexOf(u8, text, anchor) orelse return ScanError.AnchorMissing;
+    const body_start = at + anchor.len;
+    const end_rel = std.mem.indexOf(u8, text[body_start..], "};") orelse return ScanError.Unterminated;
+    const body = text[body_start .. body_start + end_rel];
+
+    var out: std.ArrayList([]const u8) = .empty;
+    errdefer out.deinit(allocator);
+
+    var lines = std.mem.splitScalar(u8, body, '\n');
+    while (lines.next()) |raw| {
+        const line = std.mem.trim(u8, raw, " \t\r");
+        if (line.len == 0) continue;
+        if (std.mem.startsWith(u8, line, "//")) continue;
+        // Two shapes reach here. A list entry is `.name,` and an enum member is
+        // `name,` or `name = 3,`. Everything else in an enum body - methods,
+        // their statements, closing braces - is skipped by the identifier check
+        // below rather than by a pattern guessing at each one.
+        const after_dot = if (line[0] == '.') line[1..] else line;
+        const comma = std.mem.indexOfScalar(u8, after_dot, ',') orelse continue;
+        const name = std.mem.trim(u8, after_dot[0..comma], " \t");
+        const eq = std.mem.indexOfScalar(u8, name, '=');
+        const ident = std.mem.trim(u8, if (eq) |e| name[0..e] else name, " \t");
+        if (!isIdentifier(ident)) continue;
+        try out.append(allocator, ident);
+    }
+    if (out.items.len == 0) return ScanError.EmptyList;
+    return out.toOwnedSlice(allocator);
+}
+
+/// The driveable goal set, cross-checked against the tag enum the solver models.
+/// `goals_src` is `packages/pi/src/property_goals.zig` and `tags_src` is
+/// `packages/zts/src/counterexample.zig`.
+pub fn goalDriveableProperties(
+    allocator: std.mem.Allocator,
+    goals_src: []const u8,
+    tags_src: []const u8,
+) ![]const Member {
+    const goals = try scanTagList(allocator, goals_src, "pub const supported_goals = [_]counterexample.PropertyTag{");
+    defer allocator.free(goals);
+    const tags = try scanTagList(allocator, tags_src, "pub const PropertyTag = enum {");
+    defer allocator.free(tags);
+
+    // Set equality in both directions. A goal the enum does not carry is a stale
+    // name; a tag no goal carries contradicts the pi source's own claim that the
+    // list is the full set.
+    if (goals.len != tags.len) return ScanError.GoalsDisagreeWithTags;
+    for (goals) |g| {
+        var found = false;
+        for (tags) |t| {
+            if (std.mem.eql(u8, g, t)) found = true;
+        }
+        if (!found) return ScanError.GoalsDisagreeWithTags;
+    }
+    for (tags) |t| {
+        var found = false;
+        for (goals) |g| {
+            if (std.mem.eql(u8, g, t)) found = true;
+        }
+        if (!found) return ScanError.GoalsDisagreeWithTags;
+    }
+
+    const out = try allocator.alloc(Member, goals.len);
+    errdefer allocator.free(out);
+    for (goals, 0..) |g, i| out[i] = .{ .name = g };
+    return out;
+}
+
+test "scanTagList reads a list and refuses a missing anchor" {
+    const src =
+        \\pub const supported_goals = [_]counterexample.PropertyTag{
+        \\    .alpha,
+        \\    // a comment line
+        \\    .beta,
+        \\};
+    ;
+    const got = try scanTagList(std.testing.allocator, src, "pub const supported_goals = [_]counterexample.PropertyTag{");
+    defer std.testing.allocator.free(got);
+    try std.testing.expectEqual(@as(usize, 2), got.len);
+    try std.testing.expectEqualStrings("alpha", got[0]);
+    try std.testing.expectEqualStrings("beta", got[1]);
+
+    try std.testing.expectError(
+        ScanError.AnchorMissing,
+        scanTagList(std.testing.allocator, src, "pub const absent = [_]T{"),
+    );
+}
+
+test "scanTagList refuses an empty list rather than reporting success" {
+    const src =
+        \\pub const supported_goals = [_]counterexample.PropertyTag{
+        \\};
+    ;
+    try std.testing.expectError(
+        ScanError.EmptyList,
+        scanTagList(std.testing.allocator, src, "pub const supported_goals = [_]counterexample.PropertyTag{"),
+    );
+}
+
+test "a goal the tag enum does not carry is refused" {
+    const goals =
+        \\pub const supported_goals = [_]counterexample.PropertyTag{
+        \\    .alpha,
+        \\    .ghost,
+        \\};
+    ;
+    const tags =
+        \\pub const PropertyTag = enum {
+        \\    alpha,
+        \\    beta,
+        \\};
+    ;
+    try std.testing.expectError(
+        ScanError.GoalsDisagreeWithTags,
+        goalDriveableProperties(std.testing.allocator, goals, tags),
+    );
+}
+
+test "a tag no goal carries is refused" {
+    const goals =
+        \\pub const supported_goals = [_]counterexample.PropertyTag{
+        \\    .alpha,
+        \\};
+    ;
+    const tags =
+        \\pub const PropertyTag = enum {
+        \\    alpha,
+        \\    beta,
+        \\};
+    ;
+    try std.testing.expectError(
+        ScanError.GoalsDisagreeWithTags,
+        goalDriveableProperties(std.testing.allocator, goals, tags),
+    );
+}
+
+pub const goals_source_path = "packages/pi/src/property_goals.zig";
+pub const tags_source_path = "packages/zts/src/counterexample.zig";
+
+test "the real pi goal list and zts tag enum agree" {
+    // The cross-check against the actual tree, not a literal. If pi adds a goal
+    // the solver does not model, or the enum grows a tag no goal drives, this
+    // is where it surfaces.
+    const file_io = zts.file_io;
+    const goals_src = try file_io.readFile(std.testing.allocator, goals_source_path, 1 << 20);
+    defer std.testing.allocator.free(goals_src);
+    const tags_src = try file_io.readFile(std.testing.allocator, tags_source_path, 1 << 20);
+    defer std.testing.allocator.free(tags_src);
+
+    const members = try goalDriveableProperties(std.testing.allocator, goals_src, tags_src);
+    defer std.testing.allocator.free(members);
+
+    try std.testing.expectEqual(@as(usize, 5), members.len);
+    for ([_][]const u8{
+        "no_secret_leakage",
+        "no_credential_leakage",
+        "injection_safe",
+        "input_validated",
+        "pii_contained",
+    }) |want| {
+        var found = false;
+        for (members) |m| {
+            if (std.mem.eql(u8, m.name, want)) found = true;
+        }
+        if (!found) {
+            std.debug.print("goal-driveable set is missing {s}\n", .{want});
+            return error.MissingGoal;
+        }
+    }
+}
+
+test "every alphabet is a direct child of the alphabets object" {
+    // A JSON-validity test is not enough. A block written inside the previous
+    // block's object is still valid JSON, and the goal-driveable block shipped
+    // that way once: nested under `residual_guard_families_enabled` rather than
+    // beside it, accepted by `jq` and wrong. This asserts placement, which is
+    // the property a consumer actually reads.
+    const text = try renderToOwned(std.testing.allocator);
+    defer std.testing.allocator.free(text);
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, text, .{});
+    defer parsed.deinit();
+
+    const root = parsed.value.object;
+    const alphabets = (root.get("alphabets") orelse return error.NoAlphabetsObject).object;
+
+    // Every typed alphabet, plus the four derived blocks, must be a direct key.
+    for (typedAlphabets()) |a| {
+        if (alphabets.get(a.key) == null) {
+            std.debug.print("alphabet {s} is not a direct child of alphabets\n", .{a.key});
+            return error.AlphabetMisplaced;
+        }
+    }
+    for ([_][]const u8{
+        "virtual_modules_base",
+        "virtual_modules_effective",
+        "residual_guard_families_enabled",
+        "goal_driveable_properties",
+    }) |key| {
+        const block = alphabets.get(key) orelse {
+            std.debug.print("block {s} is not a direct child of alphabets\n", .{key});
+            return error.AlphabetMisplaced;
+        };
+        // Each block is an object carrying `source` and a non-empty `members`.
+        const obj = block.object;
+        _ = obj.get("source") orelse return error.BlockMissingSource;
+        const members = (obj.get("members") orelse return error.BlockMissingMembers).array;
+        if (members.items.len == 0) return error.BlockHasNoMembers;
+        // And carries no nested alphabet block, which is how the bug looked.
+        var it = obj.iterator();
+        while (it.next()) |entry| {
+            const k = entry.key_ptr.*;
+            if (!std.mem.eql(u8, k, "source") and !std.mem.eql(u8, k, "members")) {
+                std.debug.print("block {s} carries an unexpected key {s}\n", .{ key, k });
+                return error.BlockHasNestedKey;
+            }
+        }
+    }
 }

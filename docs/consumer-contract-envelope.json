@@ -287,6 +287,13 @@
       { "name": "env", "ordinal": 0 },
       { "name": "egress", "ordinal": 1 },
       { "name": "cache", "ordinal": 2 }
+    ] },
+    "goal_driveable_properties": { "source": "packages/pi/src/property_goals.zig", "members": [
+      { "name": "no_secret_leakage" },
+      { "name": "no_credential_leakage" },
+      { "name": "injection_safe" },
+      { "name": "input_validated" },
+      { "name": "pii_contained" }
     ] }
   },
   "profiles": [
