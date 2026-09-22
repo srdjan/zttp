@@ -28,13 +28,30 @@ carries the adjudication stage: `verify` takes `file`, `properties`, and `conten
 answers with `file`, `source_digest`, and `results`. Prompt-driven generation is
 implemented. Property-goal generation is implemented and drives the five properties the
 counterexample solver models. The application invariant specification is the only
-consumer document bound into the executable graph. The acceptance policy is a compile-time
-value with two presets and no file format. One of eight consumer obligation properties is
-re-derived by the acceptance kernel; the other seven are disclosed.
+consumer document that traverses all three stages; a project-supplied capability policy is
+also bound, as executable-graph member kind 8, but it is not authored against this
+contract. The acceptance policy is a compile-time value with two presets and no file
+format. One of eight consumer obligation properties is re-derived by the acceptance
+kernel; the other seven are disclosed.
+
+The declared data-label path described in section 9.2 is **not wired**. `-Ddata-labels` is
+declared in `build.zig`, parsed into `precompile_args.zig`, and recorded in the build
+report as a boolean. It does not reach the flow checker: `parseExternalLabels` and
+`setExternalLabels` in `packages/zts/src/flow_checker.zig` have no production caller, and
+no `CompileOptions` field carries the labels. Section 9 states the consequence.
 
 Nothing else in this document is implemented. The declaration document, the admissibility
 stage, spec-driven generation, and the published vocabulary envelope are obligations
 stated here, not behaviour that exists.
+
+Three claims in this document are unresolved against the tree and are marked where they
+are made. Each states the finding and the ways out, and none is decided here.
+
+| Decision | Where | What is unresolved |
+|---|---|---|
+| D1 | section 9.2 | The declared-classification path is not wired, so section 9 overstates what is enforced |
+| D2 | section 4.3 | A capability ceiling does not determine a property, so P3 predicts what it cannot know |
+| D3 | section 8 | Stateful modules sit inside the default ceiling, so "the handler holds no store" does not follow from it |
 
 **Consumer, Metadoor.** Its engine seam produces code and does not consume this contract.
 Its zts adapter is out of tree, carries one commit, and is stale against the current
@@ -119,9 +136,12 @@ Version 1 covers the handler boundary and has four sections.
 ### 4.1 Interface
 
 The routes the handler answers and the shapes it accepts and returns. Bounded by what
-`RouteInfo` and `ApiInfo` in `packages/zts/src/contract_types.zig` already express:
-method and path pattern, request schemas, response variants with their status codes, and
-authentication metadata.
+`ApiRouteInfo`, reached through `ApiInfo.routes` in
+`packages/zts/src/contract_types.zig`, already expresses: method and path pattern,
+request schemas, response variants with their status codes, and authentication metadata.
+The sibling `RouteInfo` in the same file is the AOT route-table record. It carries
+`pattern`, `route_type`, `field`, `status`, `content_type`, and `aot`, and none of the
+fields this section draws on.
 
 `ApiInfo` carries `schemas_dynamic` and `routes_dynamic`. Those flags describe a handler,
 so they are read at adjudication rather than at admissibility, where no source exists yet.
@@ -142,7 +162,20 @@ Admissibility classifies each name through `classify` in
   aim at a falsifying input and repair toward green.
 - `structural` - the compiler computes this property, and generation cannot drive it. It
   is checked, not repaired.
-- `unknown` - the name is outside the registry. This is a refusal.
+- `unknown` - `classify` recognizes the name as neither a driveable goal nor a boolean
+  field of `PropertiesSnapshot`. This is a refusal.
+
+`classify` is not by itself a registry check. Its structural branch accepts any boolean
+field of `ui_payload.PropertiesSnapshot`, which is a wider set than the seventeen version-1
+spec names: `has_egress` and `post_only` classify as `structural` while being absent from
+`v1_specs`. Admissibility MUST check a declared property name against `v1_specs` as well,
+or it will accept a name the declaration has no vocabulary for.
+
+A declaration name is also not always the verifier wire name. The registry spells
+`result_safe`; the name a client sends and reads is `results_safe`, mapped in
+`packages/zts/src/proof_trace.zig`. A producer MUST translate rather than forward, and
+version 1 owes the full mapping between the seventeen spec names, the twenty handler
+property fields, the verifier wire names, and the eight consumer obligation properties.
 
 The split between driven and checked is not a design choice.
 [Roadmap](roadmap.md#considered-and-refused) records a refusal to widen the autoloop past
@@ -158,6 +191,34 @@ The ceiling is a parameter of the declaration, not a fixed rule. Admissibility r
 which properties survive it: a declaration naming `clock` makes `deterministic`
 unprovable, and admissibility MUST say so before any source is generated rather than
 letting adjudication discover it.
+
+> **Open decision D2: the ceiling does not determine the property.** The claim above does
+> not hold against the compiler that would implement it. `deterministic` is computed
+> per-export and by reachability, so it asks whether the generated call graph touches a
+> clock export, not whether the ceiling permits one to exist.
+> `packages/zts/src/contract_builder.zig` states it directly: determinism "answers whether
+> a varying value reaches the response rather than whether one was read at all, so a
+> handler that logs a timestamp and answers a constant keeps the property." The test
+> `"a clock read that never reaches the response keeps determinism"` in
+> `packages/zts/src/flow_checker.zig` covers exactly that handler, and its comment names
+> this as "the false negative the interim capability rule had to special-case." Permission
+> is an upper bound on what may happen and establishes nothing about what does.
+> Admissibility also runs with no source, so it cannot know which exports the eventual code
+> reaches.
+>
+> The claim is therefore not merely unsound. It reintroduces at the declaration boundary
+> the capability-based rule the compiler already replaced with a flow-based one, and it
+> would hand a consumer a refusal the compiler would not have made.
+>
+> This is not only a wrong sentence. It puts a policy pessimism in the vocabulary-refusal
+> bucket that section 3.1 forbids, because `deterministic` is in the registry and is
+> expressible under a narrower ceiling.
+>
+> Two ways out. Either admissibility answers a third value, "requires source analysis",
+> for every conclusion the declaration alone does not determine, and reports only explicit
+> contradictions as refusals. Or the inference stays as a deliberately conservative policy
+> and says so in those words, which costs the consumer a generation run it could have been
+> spared. P3 depends on which is chosen.
 
 For version 1 the default ceiling excludes `sqlite`, `network`, `filesystem`, and
 `runtime_callback`. Section 8 states why. A declaration MAY narrow or widen the default,
@@ -231,7 +292,14 @@ stated so a drift gate can check them and a reader can fail the document against
 | Invariant kinds | 2 | `packages/proof-checker/src/invariant.zig` |
 | Account matcher tags | 2 | `packages/proof-checker/src/invariant.zig` |
 | Executable-graph member kinds | 18 | `packages/proof-checker/src/executable_graph.zig` |
-| Diagnostic codes | ZTS0xx to ZTS6xx | the policy catalog |
+| Diagnostic codes | ZTS0xx to ZTS7xx | `packages/zts/src/diagnostic_catalog.zig` |
+
+Two counts need a qualifier before a gate reads them. Virtual modules = 27 counts
+`runtime_builtins`, the in-tree base. `all = builtins ++ extension_bindings.all`, so a
+build that registers an extension holds more, and the envelope MUST state which of the two
+it publishes. Residual guard families = 4 counts the catalog; three are in
+`enabled_families` today, and `sql` is catalogued but not release-enabled. The alphabet and
+the enabled set are different questions and the envelope MUST answer both separately.
 
 Pinned identities, each compared by equality:
 
@@ -277,6 +345,22 @@ remove.
 Version 1 places the consumer and the producer in separate processes. The consumer holds
 persistence and effect authority. The handler holds no store.
 
+> **Open decision D3: the default ceiling does not deliver the no-store claim.**
+> `zttp:cache` requires only `clock` and `policy_check`. `zttp:ratelimit` requires only
+> `clock`. Neither reaches `sqlite`, `network`, `filesystem`, or `runtime_callback`, so
+> both sit inside the section 4.3 default ceiling, and both hold state across calls and
+> write to it. "The handler holds no store" is therefore false as a consequence of the
+> stated default. Section 9's own network calls are effects for the same reason and need a
+> category the default excludes, so the arrangement section 9 describes is already outside
+> the default rather than inside it.
+>
+> Two ways out. Either the default ceiling is tightened to exclude the stateful modules
+> and the claim becomes true by construction, or the claim is narrowed to what the ceiling
+> actually gives and the no-store property becomes a separate, named profile a declaration
+> selects. The second reading makes section 8 a set of supported profiles rather than one
+> topology. Section 8.1 is unaffected either way: it is a test a proposal must pass, not a
+> claim about the default.
+
 The reason is the consumer's own atomicity requirement. Metadoor's decision D-022 has its
 state writer persist the permit's idempotency key on the history entry in the same write
 as the state change, and its reconciler answers `applied` only when that key is present.
@@ -314,10 +398,13 @@ another language. The handler validates and shapes what goes in, constrains wher
 go, enforces the classifications the consumer declared on what comes back, and interprets
 the result. It needs no mechanism this document has not already defined.
 
-It is the shape section 8 describes, applied to a system nobody intends to rewrite. It is
-also the one section here whose mechanism is implemented today: the labels, the capability
-policy, and the declared-binding input all exist, so the arrangement is available before
-any obligation in section 10 is met.
+It is the shape section 8 describes, applied to a system nobody intends to rewrite. Its
+mechanism is the closest to implemented of anything here, but it is not complete: the
+capability policy, the address-scope egress check, the `external` label default, and
+replay all exist, and the declared-binding input does not reach the flow checker. Open
+decision D1 in section 9.2 states what that costs. Until it is settled, the arrangement
+available before any obligation in section 10 is met is the constrained-egress half, not
+the declared-classification half.
 
 ### 9.1 Three levels of claim, which MUST stay apart
 
@@ -326,7 +413,9 @@ required and adjudication established: input validation, injection safety, respo
 totality, result checking, and no leakage of secrets the adapter itself handled. Egress is
 constrained by the capability policy, which checks the address scope a permitted endpoint
 resolves to and not only the endpoint, so a permitted name resolving to a link-local
-address is refused at the socket. The adapter is also a deterministic function of its
+address is refused before a socket is opened. The refusal is conditional on the policy:
+`link_local` is a configurable scope, so the check holds only where that scope is not
+permitted. The adapter is also a deterministic function of its
 request and the virtual-module responses it received, which is what lets `--trace` and
 `-Dreplay` reproduce a run. Replay reproduces the recorded wrapped-system response; it
 does not call the wrapped system again and establishes nothing about what that system
@@ -346,13 +435,33 @@ response reaches a client without violating `no_secret_leakage`. That default is
 the producer makes no claim about data it did not produce. It also means the default
 stops nothing.
 
-The flow checker accepts externally declared label bindings, supplied through
-`-Ddata-labels` and keyed by field name. A consumer that declares the response field
-`ssn` as `secret` gets it enforced from that point: the value cannot reach a response
-body, a log, or an outbound request without failing the build.
+The flow checker holds the shape of externally declared label bindings, keyed by field
+name, in `parseExternalLabels` and `setExternalLabels`. The intent is that a consumer
+declaring the response field `ssn` as `secret` gets it enforced from that point, so the
+value cannot reach a response body, a log, or an outbound request without failing the
+build.
 
-This is what makes the arrangement more than a proxy. It is declared and enforced, never
-discovered, and it catches the names declared and no others.
+> **Open decision D1: that path is not wired, so the arrangement is a proxy today.**
+> `-Ddata-labels` is declared in `build.zig`, parsed into `precompile_args.zig`, and
+> recorded in the build report as a boolean. It stops there. `parseExternalLabels` and
+> `setExternalLabels` have no production caller, `ExternalLabel` appears in no file but
+> `packages/zts/src/flow_checker.zig`, and no `CompileOptions` field carries the labels.
+> Nothing a consumer declares is enforced.
+>
+> This is load-bearing for section 9. The introduction calls this the one section whose
+> mechanism is implemented today, 9.5 answers "Checked at build" for a declared response
+> field classification, and the Conditional tier of 9.1 rests on it. All three overstate
+> what exists. What is real in section 9 is the capability policy, the address-scope egress
+> check, the `external` default, and replay.
+>
+> Two ways out. Either `-Ddata-labels` is wired into `CompileOptions` and the flow checker,
+> which makes the section true as written, or section 9 is narrowed to the mechanisms that
+> exist and the label enforcement moves to an obligation beside P1. Wiring it is not
+> sufficient on its own: the binding consults external labels for named member access, so
+> computed access and whole-object forwarding, which is the shape an untyped wrapped
+> response takes, would still pass unchecked. A qualified binding also registers its short
+> name, so `User.email` matches an unrelated `.email`. P8 is the obligation that has to
+> close those, and it does not yet.
 
 ### 9.3 The claim a consumer MUST NOT make
 
@@ -381,13 +490,20 @@ a target owes for every construct it is handed:
 
 | Construct | Answer |
 |---|---|
-| Declared response field classification | Checked at build |
+| Declared response field classification | Specified, not wired: see open decision D1 |
 | Egress endpoint and address scope | Enforced at runtime |
 | Any property of the wrapped system's interior | Not expressible |
 
 A target answers with exactly one of those three for every construct. A boolean
 "supported" is not an answer, because it lets a construct land on a target that nominally
 supports its category while enforcing nothing specific about it.
+
+The first row is the reason this map needs a fourth answer and probably more than one
+axis. "Checked at build" was the answer this table carried while nothing checked anything,
+which is the failure the map exists to prevent, reproduced inside the map itself. A
+construct can also be checked statically and guarded at runtime at once, or expressible
+and unproven. Version 1 owes a decision on whether the answer stays one value or becomes
+separate statements of support, analysis result, runtime obligation, and assurance.
 
 ---
 
@@ -403,9 +519,12 @@ supports its category while enforcing nothing specific about it.
 - **P3.** The producer MUST report, at admissibility, which declared properties are
   unprovable under the declared capability ceiling. Reporting this only at adjudication
   spends a generation run to deliver an answer the declaration already determined.
-- **P4.** The producer MUST bind the declaration's exact source bytes as their own
-  executable-graph member, following `invariant_spec`. Binding a derived form instead
-  leaves a consumer unable to compare a digest it computed itself.
+- **P4.** The producer MUST bind the declaration bytes as their own executable-graph
+  member, in a form a consumer can reproduce and compare against a digest it computed
+  itself. `invariant_spec` is the nearest existing member but is not a precedent for
+  binding authored bytes: `packages/tools/src/invariant_config.zig` loads authored JSON
+  and binds the canonical `ZTINV1` encoding. Version 1 owes a stated choice between the
+  two, and the choice is empty until section 4 defines a serialization.
 - **P5.** The producer MUST report a declared invariant outside the catalog as
   `no_enforcement`, and MUST NOT let it contribute to any proven property.
 - **P6.** The producer MUST keep a refusal distinct from an unproven property, per
