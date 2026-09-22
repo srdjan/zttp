@@ -9,13 +9,13 @@ work from reference designs. [Product proposals](zttp-next/README.md) and
 
 ## Milestones
 
-M1 and M3 are complete. M2 has final verification pending.
+M1, M2, and M3 are complete.
 M4 remains proposed. No release date is assigned.
 
 | Milestone | Status | Dependency | Next action | Completion evidence |
 |---|---|---|---|---|
 | M1: accurate active backlog | Complete, 2026-09-21 | Codebase review at `1b0686a1` | Select the next milestone | [Completion record](archive/plans/2026-09-21-active-backlog-cleanup.md); documentation gates pass and remaining work is classified |
-| M2: bounded correctness and assurance | Implemented; final verification pending | Three implementation units committed and reviewed; affected suites and mutation probes pass | Run the full local gate after approval, as recorded in the [bounded plan](plans/2026-09-21-bounded-correctness-assurance.md) | Public response regression test; selected lifecycle and decoder cases reject deliberate wrong behavior; affected unfiltered suites pass |
+| M2: bounded correctness and assurance | Complete, 2026-09-22 | Three implementation units committed and reviewed; affected suites and mutation probes pass | Select the next milestone | [Completion record](archive/plans/2026-09-21-bounded-correctness-assurance.md); full local gate passed at `181d31d4`; public response regression test; selected lifecycle and decoder cases reject deliberate wrong behavior; affected unfiltered suites pass |
 | M3: provable-set reach measurement | Complete, 2026-09-21 | Current DeepSeek default; pilot and full run authorized | Keep the used suite as regression evidence; select a new suite before a new holdout claim | [Full fresh report](provable-reach.md#first-full-measurement): 8/8 reached, 4/4 in each mode, with all selected tasks and source, policy, model, budget, and runtime evidence retained |
 | M4: next release boundary | Proposed decision | M1 proposal inventory and current strategy | Reconcile custom agent handlers with the tool-profile proposal; select or park each | One accepted release contract states scope, threat model, dependencies, and completion checks |
 

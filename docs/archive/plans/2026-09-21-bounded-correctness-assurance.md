@@ -1,6 +1,6 @@
 # M2: bounded correctness and assurance
 
-Status: implementation and review complete; full local verification pending.
+Status: complete, 2026-09-22.
 Selected by the user on 2026-09-21. Baseline: `e28355b6` on local
 `main`, with a clean working tree and Zig `0.16.0`.
 
@@ -129,5 +129,12 @@ checked the root agent's test evidence but did not run builds themselves. The
 500-millisecond expiry-test ceiling can fail under an extreme scheduler stall;
 the measured run was within that bound.
 
-The full `bash scripts/verify.sh` run can exceed two minutes. Approval was
-requested under the supplied AGENTS time limit; it has not run for M2 yet.
+## Completion record
+
+The user approved the full local gate on 2026-09-22. `bash scripts/verify.sh`
+ran on local `main` at `181d31d4` with a clean working tree. It ran all 27
+steps, starting with the aggregate `zig build test` and ending with
+`zig fmt --check`, and exited 0. The script sets `set -euo pipefail` and pipes
+no step through another command, so the exit status is the status of every
+step. The run covers U1, U2, and U3 together with every later commit up to
+`181d31d4`.
