@@ -15,10 +15,11 @@ them into the declaration defined here. The reference producer is this repositor
 
 Conformance language is MUST, MUST NOT, and MAY, per RFC 2119. Every binding requirement
 carries a number in section 10 or section 11, and the prose that motivates one names that
-number. A MUST with no number is a drafting error: C6 requires each side to name the case
-that demonstrates each obligation, and an unnumbered requirement cannot be named by one.
-Version 1 states no SHOULD: an obligation either binds or it is not an obligation yet.
-Section 8.1 is change control rather than conformance and says so where it stands.
+number. A MUST with no number is a drafting error: C6 and P14 require each side to name
+the case that demonstrates each of its obligations, and an unnumbered requirement cannot
+be named by one. Version 1 states no SHOULD: an obligation either binds or it is not an
+obligation yet. Section 8.1 is change control rather than conformance and says so where
+it stands.
 
 ---
 
@@ -88,11 +89,16 @@ Application invariant. This document uses those terms and does not restate them.
 
 A consumer traverses all three. Consumers differ only in which stages they own.
 
-| Stage | Question | Input | Status |
-|---|---|---|---|
-| Admissibility | Can you express this? | declaration | not implemented |
-| Adjudication | Is this source acceptable? | declaration plus candidate bytes | implemented as `verify` |
-| Acceptance | Is this artifact the one that was declared? | artifact plus certificate | implemented |
+| Stage | Question | Input | Existing mechanism | Declaration integration |
+|---|---|---|---|---|
+| Admissibility | Can you express this? | declaration | none | not implemented |
+| Adjudication | Is this source acceptable? | declaration plus candidate bytes | `verify`, over source and property names | not implemented |
+| Acceptance | Is this artifact the one that was declared? | artifact plus certificate | the acceptance kernel, over artifact obligations | not implemented |
+
+The two columns are separate on purpose. `verify` and the acceptance kernel exist and work,
+but neither accepts a declaration, compares an interface, enforces a ceiling, or reports per
+declaration item. Reading the middle column as the right-hand one is how a reader concludes
+that two of the three stages are done. No stage of this contract is implemented.
 
 ### 3.1 Two refusals that stay apart, per P6
 
@@ -128,8 +134,8 @@ iterates on. Adjudication wants a frozen obligation set. The artifact wants byte
 not move. A digest over a canonical encoding gives the last two without freezing the first,
 and it is the same split `invariant_config.zig` already makes between authored JSON and
 bound `ZTINV1` bytes. A digest proves that one document was carried through; it does not
-prove that generation targeted every item in it or that adjudication checked each one, and
-P2's per-item answers are what carry that.
+prove that generation targeted every item in it or that adjudication checked each one. P16
+is the obligation that carries per-item coverage; P2 only types the admissibility answer.
 
 This generalizes a mechanism that already exists rather than introducing one. The
 application invariant specification is authored as JSON, canonicalized to `ZTINV1` bytes,
@@ -247,47 +253,65 @@ vocabulary-refusal bucket.
 
 #### Profiles
 
-Version 1 names two ceilings rather than one default, because the document already needs
-both. A declaration selects one and MAY narrow it.
+Version 1 names three ceilings rather than one default. A declaration selects one and MAY
+narrow it by module. P15 binds the producer to enforce the selected ceiling.
 
-| Profile | Categories | Module exclusions | What it is for |
-|---|---|---|---|
-| `boundary` | `env`, `clock`, `random`, `crypto`, `stderr`, `policy_check` | `zttp:cache`, `zttp:ratelimit` | The no-store handler of section 8 |
-| `adapter` | `boundary` plus `network`, `runtime_callback` | `zttp:cache`, `zttp:ratelimit` | The proven adapter of section 9. `zttp:fetch` needs `network` and `runtime_callback` together, so egress alone does not reach a wrapped system. `zttp:service` additionally needs `filesystem`, and a declaration that uses it widens the ceiling by that one category and says so |
+| Profile | Categories | What it is for |
+|---|---|---|
+| `boundary` | `env`, `clock`, `random`, `crypto`, `stderr`, `policy_check` | The no-store handler of section 8 |
+| `adapter` | `boundary` plus `network`, `runtime_callback` | The proven adapter of section 9 |
+| `ledger` | `boundary` plus `sqlite` | A declaration that names an application invariant, which has nowhere else to live |
 
-A ceiling carries a module list and not only a category list, because categories alone do
-not deliver the no-store property. Twelve module bindings declare `.stateful = true`. Most
-fall to a category the `boundary` profile already excludes: `zttp:sql` and `zttp:ledger`
-need `sqlite`, and `zttp:durable`, `zttp:queue`, `zttp:io`, `zttp:scope` and
-`zttp:workflow` need `runtime_callback`. `zttp:fetch` and `zttp:service` need `network`.
-Three are admitted by the six `boundary` categories and have to be handled by name.
+**The no-store property needs two tests, not one.** A category list alone does not deliver
+it, and neither does a module list.
 
-`zttp:cache` is the one that matters. It needs only `clock` and `policy_check`, both of
-which a boundary handler wants for ordinary reasons, and it hands back a value a separate
-write put there, which is why its bindings declare `.unknown`.
+The first test is the module list. Twelve module bindings declare `.stateful = true`. Most
+fall to a category `boundary` already excludes: `zttp:sql` and `zttp:ledger` need `sqlite`,
+the workflow family `zttp:durable`, `zttp:queue`, `zttp:io`, `zttp:scope` and
+`zttp:workflow` needs `runtime_callback`, and `zttp:fetch` and `zttp:service` need
+`network`. `zttp:cache` does not. It needs only `clock` and `policy_check`, both of which a
+boundary handler wants for ordinary reasons, and `cacheGet` hands back a value a separate
+write put there, which is why its binding declares `.unknown`. No capability category
+excludes it, so `boundary` excludes it by name. `zttp:ratelimit` is excluded by name too,
+for the weaker reason that it retains a counter between requests; its result derives from
+the limiter's own state rather than from a value some other call stored, which `AGENTS.md`
+records as a different shape.
 
-`zttp:ratelimit` is excluded for a weaker reason and the difference is worth keeping.
-It needs only `clock`, and it retains a counter between requests, but its result derives
-from the limiter's own state rather than from a value some other call stored, which
-`AGENTS.md` records as a different shape from `zttp:cache`. It is excluded because a
-profile that promises no retained data cannot admit a module that retains data, not because
-it launders a label.
+The second test is `read_only`, which the compiler already computes. `zttp:validate` needs
+no capability at all, so no ceiling can exclude it, and it should not be excluded: a
+handler that cannot validate its input cannot carry `input_validated`. Its registry is
+meant to be filled at module scope, but nothing forces that, and `schemaCompile` and
+`schemaDrop` are `.effect = .write`. The test `"handler-body registration remains a
+request-path write"` in `packages/zts/src/contract_builder.zig` calls `schemaCompile` inside
+the handler and asserts that `read_only`, `retry_safe` and `idempotent` all become false.
+So a module list cannot catch this and does not need to: `boundary` requires the handler to
+carry `read_only`, and that refuses the request-path write wherever it comes from.
 
-`zttp:validate` is `.stateful = true` and needs no capability at all, so no ceiling
-excludes it. It is not excluded here either: its state is a schema registry populated by
-`schemaCompile` at module scope, not request-derived data accumulated across requests.
-That distinction is the actual rule, and `.stateful` is a wider flag than it. A profile
-that promised "no module marked stateful" would exclude `zttp:validate` for no reason and
-would still be the wrong test.
+Neither test subsumes the other. `read_only` catches writes and misses `cacheGet`, which is
+a read. The module list catches `cacheGet` and misses a handler-body `schemaCompile`,
+because excluding `zttp:validate` is the wrong answer. A profile that ran only one of them
+would report a no-store handler that stores.
 
 **A category is coarser than a module, and `adapter` shows the cost.** `zttp:fetch` needs
-`runtime_callback`, and that one category also admits `zttp:durable`, `zttp:queue`,
-`zttp:io`, `zttp:scope` and `zttp:workflow`, which is the whole workflow family and every
-piece of durable state in it. An `adapter` handler is therefore not a no-store handler that
-also makes calls; it is a handler with durable orchestration available to it, whether or
-not the declaration wanted that. This is why a ceiling needs the module list. A declaration
-that wants egress and nothing else narrows `adapter` by excluding those five, and
-admissibility reports the ceiling it was actually given rather than the one that was meant.
+`network` and `runtime_callback` together, so egress alone does not reach a wrapped system,
+and `zttp:service` additionally needs `filesystem`. Granting `runtime_callback` also admits
+the whole workflow family and every piece of durable state in it. An `adapter` handler is
+therefore not a no-store handler that also makes calls. A declaration that wants egress and
+nothing else narrows `adapter` by excluding those five modules, and P15 requires
+admissibility to report the ceiling it was actually given rather than the one that was
+meant.
+
+**The `ledger` profile exists because section 4.4 would otherwise be unreachable.** Both
+catalogued invariant kinds, `balance_conservation_v1` and `declared_accounts_v1`, are
+predicates over committed posting groups, and `packages/proof-checker/src/checker.zig`
+rejects with `invariant_operation_required` when a certificate declares invariants and no
+invariant operation was observed. Those operations come from `zttp:ledger`, which needs
+`sqlite`. Under `boundary` or `adapter` a declaration could name an invariant that no
+artifact could ever discharge. The remedy is the third profile, not a relaxation of the
+checker's requirement: an invariant with no operation to constrain is a claim about
+nothing, and the checker is right to refuse it. A `ledger` declaration admits `zttp:ledger`
+and not `zttp:sql`, which is what a module list is for, and it does not carry `read_only`,
+because posting to a ledger is a write.
 
 An absent category is a refusal, never a permissive default. This matches
 `packages/proof-checker/src/capability_policy.zig`, which records that an absent list is
@@ -330,7 +354,11 @@ report success while enforcing nothing:
   the consumer believes it has.
 
 The label vocabulary, the source selector, and whether an entry is required or optional are
-owed by version 1 and are part of the serialization P4 requires. Section 13 records this.
+version-1 content, not deferred work. P8 and P9 cannot define conformance without them: a
+producer cannot report a match against a path grammar nobody wrote, and a consumer cannot
+know which labels it may name. They are expressed in the serialization P4 requires, and
+they are the reason P4 has to land before P8 and P9 can be tested rather than merely
+stated.
 
 ---
 
@@ -381,6 +409,7 @@ stated so a drift gate can check them and a reader can fail the document against
 | Invariant kinds | 2 | `packages/proof-checker/src/invariant.zig` |
 | Account matcher tags | 2 | `packages/proof-checker/src/invariant.zig` |
 | Executable-graph member kinds | 18 | `packages/proof-checker/src/executable_graph.zig` |
+| Capability profiles | 3 | section 4.3 of this document |
 | Diagnostic codes | ZTS0xx to ZTS7xx | `packages/zts/src/diagnostic_catalog.zig` |
 
 Two counts need a qualifier before a gate reads them. Virtual modules = 27 counts
@@ -456,10 +485,17 @@ transaction against the adapter's own rows, and no callback crosses that port.
 This is not a reduced producer. All five goal-driveable properties are boundary data
 properties: `no_secret_leakage`, `no_credential_leakage`, `injection_safe`,
 `input_validated`, and `pii_contained`. A handler that validates input, shapes data, and
-constructs a response is where those properties live. A `boundary` handler is also a pure
-function of its request, and an `adapter` handler is a deterministic function of its
-request and the virtual-module responses it received, which is what makes `--trace` and
-`-Dreplay` meaningful over either.
+constructs a response is where those properties live. Both profiles also make a handler a
+deterministic function of its request and the virtual-module responses it received, which
+is what makes `--trace` and `-Dreplay` meaningful over either.
+
+A `boundary` handler is not a pure function of its request, and the document should not say
+so. It may read `env`, `clock` and `random`, and it may write to `stderr`. What `boundary`
+establishes is narrower and worth stating exactly: no retained store, and no effect outside
+logging. Retained state, external effect and response determinism are three properties, and
+none of them follows from another. `deterministic` in particular is decided by whether a
+varying value reaches the response, per section 4.3, not by whether the ceiling admits a
+varying source.
 
 The consumer passes the data in. A handler that needs a record receives it in the request
 rather than reading it.
@@ -495,7 +531,7 @@ It is the shape section 8 describes, applied to a system nobody intends to rewri
 mechanism is the closest to implemented of anything here, but it is not complete: the
 capability policy, the address-scope egress check, the `external` label default, and
 replay all exist, and the declared-binding input does not reach the flow checker. Open
-decision D1 in section 9.2 states what that costs. Until it is settled, the arrangement
+P9 in section 10 states what that costs. Until P9 is met, the arrangement
 available before any obligation in section 10 is met is the constrained-egress half, not
 the declared-classification half.
 
@@ -572,7 +608,7 @@ the artifact verifies.
 ### 9.5 The first enforcement-map entry
 
 The arrangement is also the worked example of a per-construct enforcement statement, which
-a target owes for every construct it is handed:
+P17 binds a target to publish for every construct it is handed.
 
 A target answers on two axes for every construct it is handed. **Status** is one of
 `implemented`, `specified`, or `not expressible`. **Enforcement point** is one of `build`,
@@ -608,13 +644,17 @@ that nominally supports its category while enforcing nothing specific about it.
   unrelated edit, and a count alone misses a substitution. An alphabet a consumer cannot
   enumerate is one it must track by hand, which is not a contract.
 - **P2.** The producer MUST accept a declaration at the admissibility stage and answer per
-  item, with `goal_driveable`, `structural`, `requires_source_analysis`, or a refusal. The
-  answer MUST be typed, not prose: a stable reason code, the item identifier, the field, the
-  vocabulary it fell outside, and the expected identity where one applies, following the
-  diagnostic envelope `verify` already carries. The producer MUST state whether one refused
-  item stops the remaining checks, and MUST keep these apart as distinct answers: malformed
-  declaration, unknown vocabulary, incompatible requirements, invalid source, failed
-  property, incomplete analysis, timeout, and internal failure. A consumer cannot write a
+  item. The answer MUST carry driveability and resolution as separate fields, because they
+  are separate questions: a `goal_driveable` property can still need source analysis, and so
+  can a `structural` one. Driveability is `goal_driveable`, `structural`, or `unknown`.
+  Resolution is `admissible`, `requires_source_analysis`, or `refused`. The answer MUST be
+  typed, not prose: a stable reason code, the item identifier, the field, the vocabulary it
+  fell outside, and the expected identity where one applies, following the diagnostic
+  envelope `verify` already carries. The producer MUST state whether one refused item stops
+  the remaining checks, and MUST keep these apart as distinct answers: malformed
+  declaration, unknown vocabulary, incompatible requirements, timeout, and internal failure.
+  Invalid source, failed property and incomplete analysis belong to adjudication, which is
+  the stage that holds source; admissibility MUST NOT report them. A consumer cannot write a
   parser against a shape that is named but not typed.
 - **P3.** The producer MUST answer `requires_source_analysis` at admissibility for every
   conclusion the declaration alone does not determine, and MUST NOT infer that a declared
@@ -641,10 +681,13 @@ that nominally supports its category while enforcing nothing specific about it.
   never appears enforces nothing while the build passes, which is the vacuous-gate shape
   `AGENTS.md` records: a gate whose input is empty reports success and is then cited as
   evidence. An unmatched binding is not necessarily an error, because a field may be
-  absent on some paths, but it MUST NOT be silent. The report MUST distinguish a field
-  genuinely absent on a path from a field whose value was present but never named, and MUST
-  answer `indeterminate` rather than `matched` for the second. A nonzero match count is not
-  the claim.
+  absent on some paths, but it MUST NOT be silent. The report MUST answer `indeterminate`
+  rather than `matched` or `absent` whenever presence cannot be established, which includes
+  possible presence. A static checker cannot know whether an opaque remote response carries
+  a field the source never names, and two runs of the same source can receive `{}` and
+  `{"ssn": "..."}`, so `absent` is a claim about the analysis and never about the data. The
+  report MUST cover aliases, computed access, and whole aggregates as their own cases. A
+  nonzero match count is not the claim.
 - **P9.** The producer MUST enforce declared field classifications in the flow checker,
   and the option that carries them MUST reach the checker rather than the build report
   alone. An implementation satisfies P9 only when it also: refuses or reports
@@ -665,12 +708,36 @@ that nominally supports its category while enforcing nothing specific about it.
 - **P13.** The producer MUST report a declared property it could not establish as a
   disclosed gap, following the disclosed edge and residual guard pattern the certificate
   already carries. It MUST NOT pass the declaration silently and MUST NOT refuse the whole
-  declaration for that reason alone. Which gaps a consumer then accepts is C8.
-- **P14.** The producer MUST demonstrate P1 to P13 in its own test suite, and MUST name
-  which case demonstrates which obligation. Evidence MUST include complete vocabulary
-  coverage, a malformed input, an empty input, and a probe that deletes or mutates a gate's
-  input and confirms the gate fails. This mirrors C6: a document that binds one side to
-  evidence and not the other sets the lower bar where the claims are made.
+  declaration for that reason alone. A gap MUST carry the P2 reason that produced it, so a
+  failed property, an incomplete analysis and an internal failure stay apart after
+  disclosure. A declaration MAY name a minimum established set, and a producer MUST refuse
+  the declaration rather than disclose a gap over a member of it. Without that set an
+  all-gap outcome is conforming, which means conformance alone implies no minimum proof.
+  Which gaps a consumer then accepts is C8.
+- **P14.** The producer MUST demonstrate P1 to P13 and P15 to P17 in its own test suite, and
+  MUST name which case demonstrates which obligation. A name is not evidence: each case MUST
+  carry a stable identifier, an execution record, and its exact expected outcome, and an
+  obligation carrying several distinct requirements MUST have a case per requirement rather
+  than one case for the obligation. Evidence MUST include complete vocabulary coverage, a
+  malformed input, an empty input, and, for every rejection path a gate can take, a probe
+  that provokes that path and confirms the gate fails. One mutation of one gate is not
+  coverage. This mirrors C6: a document that binds one side to evidence and not the other
+  sets the lower bar where the claims are made.
+- **P15.** The producer MUST enforce the declared capability ceiling: the selected profile,
+  every narrowing the declaration applied, and the module list as well as the category list.
+  It MUST report the ceiling that was actually applied, which is not always the one that was
+  meant, because a category admits every module in it. Binding a ceiling into the artifact
+  without enforcing it would satisfy every other obligation here while restricting nothing.
+- **P16.** Adjudication MUST report, per declaration item, whether that item was checked,
+  and with what outcome. A digest binds one document to one artifact and establishes that
+  the document did not change; it does not establish that anything read it. An item the
+  producer never examined MUST NOT be reported as established, and MUST be distinguishable
+  from one that was examined and held. This is what makes section 3.2's four roles more
+  than a claim about bytes.
+- **P17.** The producer MUST publish the section 9.5 enforcement map for every construct a
+  declaration can name, answering on both axes. A construct with no row is unanswered, not
+  supported, and P14 MUST carry a case proving the map covers every construct the
+  declaration vocabulary admits.
 
 ---
 
@@ -734,7 +801,6 @@ Named so an omission is not read as permission.
 | Computed SQL resources in a declared ceiling | A policy that distinguishes read from write authority |
 | More than one handler under one declaration: handler identities, route ownership, shared invariants, and whether acceptance is per handler or per release | One single-handler declaration proven end to end first. Metadoor is not a single-handler system, so this is a known gap rather than an unnoticed one |
 | A declared interface for a handler whose route or schema surface is dynamic by design, such as a gateway | A declaration field that states intended dynamism. Version 1 offers no interface comparison for such a handler and P10 fails it, which is correct but unhelpful |
-| The classification label vocabulary, source selector, and required-versus-optional rule of section 4.5 | The declaration serialization P4 requires, which owns the encoding all three are expressed in |
 | Interface comparison rules: whether extra routes are admitted, how overlapping routes resolve, and whether schemas require equality or compatibility | A version-1 declaration that has compared one interface |
 | Generation lifecycle: cancellation, retry, progress, resource budgets, and whether a retry resumes | Measurement of the veto loop under a declaration, per P7 |
 
