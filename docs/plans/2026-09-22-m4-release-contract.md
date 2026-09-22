@@ -28,6 +28,29 @@ The product owner accepted three decisions on 2026-09-22.
    [the consumer contract](../consumer-contract.md). It is not a separate
    surface. For this reason, producer obligation P9 is a named M4 dependency.
 
+On the same day the owner accepted three more decisions, which answer the open
+questions of the first draft.
+
+4. **Identity source.** The runtime verifies an HS256 bearer JWT with a
+   deployment-owned key before the handler runs. The `sub` claim sets the
+   subject, and a claim that the deployment configuration names sets the tenant.
+   The runtime injects both into the call, and the handler cannot read the raw
+   claims. The verifier core already exists and refuses an unexpected `alg`
+   (`packages/modules/src/security/auth.zig:122-127`, `:299`). It supports HS256
+   only (`auth.zig:46-48`), so the issuer and the deployment share one secret.
+   M4 accepts this limit and has one identity source. Asymmetric keys and OIDC
+   discovery are later work.
+5. **Catalog carriage.** The catalog enters the executable graph as a new member
+   kind, `tool_catalog = 19`, not inside `contract_bytes = 7`. This follows
+   `residual_plan = 16`, which is committed separately so that a mutated plan
+   names itself (`packages/proof-checker/src/executable_graph.zig:52-55`), and
+   `invariant_spec = 17` (`:57`).
+6. **Stored-data tools.** Under the tool profile, the build refuses a tool route
+   that reaches a cross-call read: `zttp:cache` reads, `zttp:sql`, `zttp:queue`
+   receive, or a durable signal wait. Ordinary handlers are not affected. Such
+   tools return with the recipient-scoped release operation of `A:642`, as part
+   of the next boundary.
+
 In this document, "A:n" and "B:n" are line references into the two proposals.
 B's milestone labels M0 to M5 (`B:142-149`) are local to B. They are not the
 roadmap M-series, and this document always writes them as "B-M0" to "B-M5".
@@ -54,10 +77,10 @@ variant.
 | B-M5, artifact and developer integration | Partly in. Acceptance through the current checker is in. Tool-aware expert diagnostics and deployment fixtures are parked. |
 | B v1.1 to v1.4 and the policy tracks (`B:159-166`) | Out. |
 
-Also out: a tool that returns a value read from cross-call state (cache, SQL,
-queue, durable signal) with a leakage property claimed. Such reads carry
-`.unknown` provenance (`A:70`), and A's stored-data release decision (`A:642`)
-is not resolved. See open question 3.
+Also out: a tool that reaches a read of cross-call state (cache, SQL, queue,
+durable signal). Such reads carry `.unknown` provenance (`A:70`), so no tool that
+uses one can reach a proven `no_secret_leakage` verdict. Decision 6 makes the
+build refuse it.
 
 ## Threat model
 
@@ -139,7 +162,9 @@ construction (`A:268-280`). Completion: check C2.
 a declaration loader under `packages/tools/src/` that follows
 `invariant_config.zig`, `packages/proof-checker/src/executable_graph.zig`, the
 checker, `packages/runtime/src/contract_runtime.zig`, and the envelope source.
-This unit meets P4 for the sections M4 uses. The runtime lowers the catalog from
+This unit meets P4 for the sections M4 uses. It adds `tool_catalog = 19` to
+`MemberKind` and `fromWire`, with a producer that emits it, and regenerates the
+envelope (decision 5). The runtime lowers the catalog from
 the accepted artifact, not from producer output. A search of
 `contract_runtime.zig` finds no tool catalog today. Completion: check C3.
 
@@ -151,9 +176,11 @@ Completion: check C4.
 
 **T5. Subject scope and tool-local grants.** Depends on T3. Owned files:
 `packages/zts/src/handler_policy.zig`, `module_authorization.zig`, and the
-runtime dispatch path in `contract_runtime.zig`. The runtime sets subject and
-tenant from the trusted identity source, and each tool route receives only its
-own grants. This unit meets P15. Completion: check C5.
+runtime dispatch path in `contract_runtime.zig`, plus a runtime caller of the
+`auth.zig` verifier core. The runtime verifies the bearer JWT and sets subject
+and tenant from its claims (decision 4). Each tool route receives only its own
+grants, and the build refuses a tool route that reaches a cross-call read
+(decision 6). This unit meets P15. Completion: check C5.
 
 **T6. Credential injection.** Depends on T1 and T5. Owned files:
 `packages/runtime/src/runtime_http.zig`, `packages/modules/src/net/fetch.zig` and
@@ -183,7 +210,7 @@ Restore each mutation byte for byte before the next probe.
 | C2 (T2) | `test-zts`, `test-modules`, `test-precompile`, `test-contract-golden` | AE21 valid bounded input; schema bytes and validator agree after round trip | AE21 rejections; AE5 duplicate keys and invalid JSON (non-stream part); B8.2; B8.4 | Remove the duplicate-key check and the closed-field check in turn; each must fail a test. Census over every refusal reason |
 | C3 (T3) | `test-proof-checker`, `test-proof-checker-purity`, `test-zruntime`, `test-vocab-envelope-drift` | An accepted artifact serves its catalog | AE11; B8.8; B8.9 | Mutate one catalog byte in a copy of an accepted artifact; acceptance must refuse. Delete the catalog member; the gate must fail, not pass |
 | C4 (T4) | `test-zts`, `test-precompile`, `test-proof-swallow` | A clean value through the same path stays admissible | AE4, asserting `no_secret_leakage` and not a neighbor; AE18 negative cases; AE19; whole-object forwarding, short-name match, and a malformed entry are refused | Return a labelled value directly and confirm refusal, then route it through each export (AGENTS.md method). Empty label file must fail |
-| C5 (T5) | `test-zruntime`, `test-capability-audit`, `test-module-boundary` | The trusted subject reads its own resource | AE2; AE3; AE15; B8.1; B8.7; missing policy or identity denies | Remove the scope comparison; AE3 must fail. Census over each denial reason |
+| C5 (T5) | `test-zruntime`, `test-capability-audit`, `test-module-boundary` | The trusted subject reads its own resource | AE2; AE3; AE15; B8.1; B8.7; missing policy or identity denies; a bad signature, an unexpected `alg`, or a missing `sub` denies; a tool route that calls a `zttp:cache` read is refused at build | Remove the scope comparison; AE3 must fail. Remove the cross-call refusal; the cache case must fail. Census over each denial reason |
 | C6 (T6) | `test-zruntime`, `test-modules`, `test-runtime-purity` | AE17 authorized request carries the credential | AE17 refusals; B8.3; AE6 no-retry half; no credential in values, failures, or logs | Inject before authorization in a probe build; AE17 must fail |
 | C7 (T7) | `zig build test`, then `bash scripts/verify.sh` | B's path from author to accepted, scoped, bounded call (`B:230`), without replay | Every applicable B8 case at its documented boundary | The example suite must run the new example; the suite floor at `scripts/test-examples.sh:374` counts suites, not this one, so a probe that breaks the new example must also fail the step |
 
@@ -218,12 +245,4 @@ states the resumed scope.
 
 ## Open questions
 
-1. **Identity source.** Per-call subject scope needs a trusted identity source.
-   A leaves this open (`A:645`). T5 cannot start without a selected source.
-2. **Catalog carriage.** The member alphabet is closed
-   (`packages/proof-checker/src/executable_graph.zig:18-20`). The catalog can
-   enter as a new member kind or inside `contract_bytes = 7` (`:35`). The choice
-   changes the envelope and the acceptance rule, and T3 needs it.
-3. **Stored-data tools.** M4 admits no leakage claim over a cross-call read. The
-   owner must say whether such a tool ships as unproven or stays unavailable
-   until A's stored-data release decision (`A:642`) is resolved.
+None. Decisions 4 to 6 answer the three questions of the first draft.
