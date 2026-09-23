@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "specifier": "zttp:tool",
+  "source": "packages/modules/src/http/tool.zig",
+  "summary": "Call toolCatalog({...}) once at module scope with an object literal; each entry names a routerMatch route key and two schemaCompile names, and every route in the table must have an entry.",
+  "requiredCapabilities": [],
+  "exports": [
+    {
+      "name": "toolCatalog",
+      "effect": "none",
+      "returns": "undefined",
+      "params": [
+        "object"
+      ],
+      "paramNames": [
+        "entries"
+      ],
+      "contractExtractions": [
+        {
+          "category": "tool_catalog"
+        }
+      ],
+      "laws": [
+        "pure"
+      ]
+    }
+  ]
+}

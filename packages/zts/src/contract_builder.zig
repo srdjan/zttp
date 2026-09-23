@@ -1901,7 +1901,7 @@ pub const ContractBuilder = struct {
             .fetch_host => .{ .list = &self.egress_endpoints, .dynamic = &self.egress_dynamic },
             // Custom categories are dispatched directly, not via generic target
             .rate_limit_key => .{ .list = &self.rate_limit_keys, .dynamic = &self.rate_limit_key_dynamic },
-            .sql_registration, .schema_compile, .route_pattern, .service_call, .workflow_call, .cookie_name, .cors_origin => null,
+            .sql_registration, .schema_compile, .route_pattern, .service_call, .workflow_call, .cookie_name, .cors_origin, .tool_catalog => null,
             // Partner-declared categories route through the extensions store, not the built-in target table.
             .extension_specific => null,
         };

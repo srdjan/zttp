@@ -25,6 +25,7 @@ const ported = struct {
     const env = adapter.adaptModuleBinding(modules.catalog.env);
     const crypto = adapter.adaptModuleBinding(modules.catalog.crypto);
     const router = adapter.adaptModuleBinding(modules.catalog.router);
+    const tool = adapter.adaptModuleBinding(modules.catalog.tool);
     const auth = adapter.adaptModuleBinding(modules.catalog.auth);
     const validate = adapter.adaptModuleBinding(modules.catalog.validate);
     const decode = adapter.adaptModuleBinding(modules.catalog.decode);
@@ -88,6 +89,7 @@ const runtime_builtins = [_]ModuleBinding{
     ported.ratelimit,
     service_mod.binding,
     fetch_mod.binding,
+    ported.tool,
 };
 
 /// The freestanding analyzer consumes module names, signatures, effects, and
@@ -189,6 +191,7 @@ pub const builtin_governance_entries = [_]BuiltinGovernanceEntry{
     .{ .specifier = "zttp:ratelimit", .module_path = "packages/modules/src/data/ratelimit.zig", .spec_path = "packages/modules/module-specs/data/ratelimit.json" },
     .{ .specifier = "zttp:service", .module_path = "packages/modules/src/net/service.zig", .spec_path = "packages/modules/module-specs/net/service.json" },
     .{ .specifier = "zttp:fetch", .module_path = "packages/modules/src/net/fetch.zig", .spec_path = "packages/modules/module-specs/net/fetch.json" },
+    .{ .specifier = "zttp:tool", .module_path = "packages/modules/src/http/tool.zig", .spec_path = "packages/modules/module-specs/http/tool.json" },
 };
 
 comptime {
@@ -415,7 +418,7 @@ test "governance entries stay aligned with public built-ins" {
     try std.testing.expectEqualStrings("zttp:env", entries[0].specifier);
     try std.testing.expectEqualStrings("packages/modules/src/platform/env.zig", entries[0].module_path);
     try std.testing.expectEqualStrings("packages/modules/module-specs/platform/env.json", entries[0].spec_path);
-    try std.testing.expectEqualStrings("zttp:fetch", entries[entries.len - 1].specifier);
+    try std.testing.expectEqualStrings("zttp:tool", entries[entries.len - 1].specifier);
 }
 
 /// Union `required_capabilities` across every module resolved from

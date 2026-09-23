@@ -425,8 +425,8 @@ stated so a drift gate can check them and a reader can fail the document against
 | Invariant kinds | 2 | `packages/proof-checker/src/invariant.zig` |
 | Account matcher tags | 2 | `packages/proof-checker/src/invariant.zig` |
 | Executable-graph member kinds | 18 | `packages/proof-checker/src/executable_graph.zig` |
-| Virtual modules, in-tree base | 27 | `packages/zts/src/builtin_modules.zig` |
-| Virtual modules, effective for this build | 27 | `packages/zts/src/builtin_modules.zig` |
+| Virtual modules, in-tree base | 28 | `packages/zts/src/builtin_modules.zig` |
+| Virtual modules, effective for this build | 28 | `packages/zts/src/builtin_modules.zig` |
 | Residual guard families, enabled | 3 | `packages/proof-checker/src/residual.zig` |
 | Goal-driveable properties | 5 | `packages/pi/src/property_goals.zig` |
 | Capability profiles | 3 | `packages/tools/src/vocab_envelope.zig` |

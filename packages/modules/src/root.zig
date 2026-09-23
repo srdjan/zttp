@@ -24,6 +24,7 @@ pub const platform = struct {
 
 pub const http = struct {
     pub const router = @import("http/router.zig");
+    pub const tool = @import("http/tool.zig");
     pub const url = @import("http/url.zig");
     pub const http_mod = @import("http/http_mod.zig");
 };
@@ -55,6 +56,7 @@ pub const catalog = struct {
     pub const log = platform.log.binding;
 
     pub const router = http.router.binding;
+    pub const tool = http.tool.binding;
     pub const url = http.url.binding;
     pub const http_mod = http.http_mod.binding;
 
@@ -78,6 +80,7 @@ pub const all_bindings = [_]sdk.ModuleBinding{
     catalog.time,
     catalog.log,
     catalog.router,
+    catalog.tool,
     catalog.url,
     catalog.http_mod,
     catalog.ratelimit,
@@ -105,6 +108,7 @@ test {
     _ = platform.time;
     _ = platform.log;
     _ = http.router;
+    _ = http.tool;
     _ = http.url;
     _ = http.http_mod;
     _ = data.ratelimit;

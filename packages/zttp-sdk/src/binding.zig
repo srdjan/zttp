@@ -140,6 +140,10 @@ pub const ContractCategory = enum {
     // ContractExtraction.extension_category and is keyed under
     // contract.json's extensions.<specifier>.categories.
     extension_specific,
+    // A zttp:tool catalog declaration: the literal argument becomes the
+    // contract's tool catalog. Built-in only; a partner manifest cannot
+    // declare it.
+    tool_catalog,
 };
 
 pub const ContractTransform = enum {

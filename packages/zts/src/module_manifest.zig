@@ -191,6 +191,14 @@ pub fn parse(allocator: std.mem.Allocator, bytes: []const u8) ManifestError!Mani
     if (exports_value != .array) return error.InvalidExport;
     for (exports_value.array.items) |item| {
         const exp = try parseExport(allocator, item);
+        // The tool catalog is a built-in declaration: only `zttp:tool` may
+        // carry it. A partner manifest that could declare one would put a
+        // catalog source outside the reviewed module set.
+        if (!std.mem.eql(u8, manifest.specifier, "zttp:tool") and declaresToolCatalog(exp)) {
+            var owned = exp;
+            owned.deinit(allocator);
+            return error.InvalidContractCategory;
+        }
         if (containsExport(manifest.exports.items, exp.name)) {
             var owned = exp;
             owned.deinit(allocator);
@@ -204,6 +212,13 @@ pub fn parse(allocator: std.mem.Allocator, bytes: []const u8) ManifestError!Mani
     }
 
     return manifest;
+}
+
+fn declaresToolCatalog(exp: Export) bool {
+    for (exp.contract_extractions.items) |rule| {
+        if (rule.category == .tool_catalog) return true;
+    }
+    return false;
 }
 
 const BindingHasher = struct {
@@ -887,6 +902,20 @@ test "parse manifest rejects an unknown contract category without freeing the ex
         \\  "exports": [
         \\    { "name": "f", "params": ["string"], "returns": "string", "effect": "none",
         \\      "contractExtractions": [{ "category": "no_such_category" }] }
+        \\  ]
+        \\}
+    ;
+    try std.testing.expectError(error.InvalidContractCategory, parse(std.testing.allocator, json));
+}
+
+test "parse manifest rejects a partner tool catalog extraction" {
+    const json =
+        \\{
+        \\  "schemaVersion": 1,
+        \\  "specifier": "zttp-ext:tools",
+        \\  "exports": [
+        \\    { "name": "catalog", "params": ["object"], "returns": "undefined", "effect": "none",
+        \\      "contractExtractions": [{ "category": "tool_catalog" }] }
         \\  ]
         \\}
     ;

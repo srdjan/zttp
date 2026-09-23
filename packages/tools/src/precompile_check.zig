@@ -965,7 +965,8 @@ fn signatureCorpusDigest(allocator: std.mem.Allocator, out_members: *usize) ![32
 /// an array of rows and for `{ rowsAffected, lastInsertRowId? }`.
 /// Parameter names are not part of this digest, which covers arity and types.
 // Moved 2026-09-18 for the exact protected-ledger post and balance shapes.
-const frozen_signature_digest = "355e23a791742b331e99eeb60f828ad7855c424e71334812f58128b123718c71";
+// Moved 2026-09-23 when zttp:tool added `toolCatalog(entries: object): undefined`.
+const frozen_signature_digest = "dcfca72f55b6f228c0dbb1bd2d15ca1e213269464fde9c5487fdb2d375ba5963";
 
 test "frozen signature corpus: the gate has an input before it has a verdict" {
     // The floor. A corpus that is empty, or an emitter that writes nothing,

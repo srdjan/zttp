@@ -93,6 +93,7 @@ These modules are pure compute - string manipulation, parsing, URL encoding, str
 - `zttp:router`
 - `zttp:text`
 - `zttp:time`
+- `zttp:tool`
 - `zttp:url`
 - `zttp:validate`
 

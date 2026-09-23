@@ -252,7 +252,8 @@
       { "name": "zttp:time", "binding_digest": "c92ca4b021e33abd1f6b735502d4637046029234ce813fcb8fecad64d88fa82d" },
       { "name": "zttp:ratelimit", "binding_digest": "fac23b4a7784653b7e17b0d53f383f6ea7b74eab627a59177db22c2e582bc87b" },
       { "name": "zttp:service", "binding_digest": "0e13487277a309390c123b1d973a3ff884b7469ab86a12146db76fc8a7437d32" },
-      { "name": "zttp:fetch", "binding_digest": "28557ec247130841bcd6f1e69c13ef849618630337e1df781d80da99ed81b15b" }
+      { "name": "zttp:fetch", "binding_digest": "28557ec247130841bcd6f1e69c13ef849618630337e1df781d80da99ed81b15b" },
+      { "name": "zttp:tool", "binding_digest": "7c0a9ad70a23842262e0d71a2485c9cb445fef42e3cfc388f931129a1fa9343a" }
     ] },
     "virtual_modules_effective": { "source": "packages/zts/src/builtin_modules.zig", "members": [
       { "name": "zttp:env", "binding_digest": "2513fed47233e2a7b0181c3b18ba63683b4bcdee893beef07a8a2f5706b29aa3" },
@@ -281,7 +282,8 @@
       { "name": "zttp:time", "binding_digest": "c92ca4b021e33abd1f6b735502d4637046029234ce813fcb8fecad64d88fa82d" },
       { "name": "zttp:ratelimit", "binding_digest": "fac23b4a7784653b7e17b0d53f383f6ea7b74eab627a59177db22c2e582bc87b" },
       { "name": "zttp:service", "binding_digest": "0e13487277a309390c123b1d973a3ff884b7469ab86a12146db76fc8a7437d32" },
-      { "name": "zttp:fetch", "binding_digest": "28557ec247130841bcd6f1e69c13ef849618630337e1df781d80da99ed81b15b" }
+      { "name": "zttp:fetch", "binding_digest": "28557ec247130841bcd6f1e69c13ef849618630337e1df781d80da99ed81b15b" },
+      { "name": "zttp:tool", "binding_digest": "7c0a9ad70a23842262e0d71a2485c9cb445fef42e3cfc388f931129a1fa9343a" }
     ] },
     "residual_guard_families_enabled": { "source": "packages/proof-checker/src/residual.zig", "members": [
       { "name": "env", "ordinal": 0 },
@@ -308,6 +310,6 @@
     "handler_contract_version": 18,
     "agent_protocol_schema": 2,
     "policy_hash": "97aec67e484acda2ee3c13bf9fa8cd9de9becd8ea24cd51509092f2ca0068bc7",
-    "module_registry_hash": "722433aa905540f621f9eaa73c29e6e9e22ef9a8250453af9f9d2992cd671281"
+    "module_registry_hash": "3002a7ecf70f94c81a429bd90ca98d7400ac7c02d9ee5e31ecd807a816c1df8b"
   }
 }

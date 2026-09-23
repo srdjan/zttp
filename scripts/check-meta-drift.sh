@@ -63,7 +63,8 @@ EXPECTED_RESTRICTION_HASH="3409f9e0490c698e67dcd1e7a6e3465f0d14c50e0a611bbe96520
 # all 26 modules doubled the discovery payload to 14,616 bytes; four leaves it
 # at 11,061 against a 7,213-byte baseline.
 # Moved 2026-09-18: zttp:ledger adds protected post and balance exports.
-EXPECTED_BUILTIN_HASH="722433aa905540f621f9eaa73c29e6e9e22ef9a8250453af9f9d2992cd671281"
+# Moved 2026-09-23: zttp:tool joins, the inert toolCatalog declaration of M4 T2.
+EXPECTED_BUILTIN_HASH="3002a7ecf70f94c81a429bd90ca98d7400ac7c02d9ee5e31ecd807a816c1df8b"
 
 fail() {
   printf 'meta drift: %s\n' "$1" >&2
