@@ -77,6 +77,8 @@ pub const CostEnvelope = contract_types.CostEnvelope;
 pub const ServiceCallInfo = contract_types.ServiceCallInfo;
 pub const WorkflowCallInfo = contract_types.WorkflowCallInfo;
 pub const EmittedAffordance = contract_types.EmittedAffordance;
+pub const ToolEntry = contract_types.ToolEntry;
+pub const ToolExport = contract_types.ToolExport;
 pub const CapabilityMatrix = contract_types.CapabilityMatrix;
 // `computeCapabilityMatrix` is NOT re-exported: it resolves specifiers
 // through the linked module registry, so it lives in `builtin_modules.zig`
@@ -1243,7 +1245,7 @@ test "writeContractJson minimal" {
     output = aw.toArrayList();
 
     // Should be valid-looking JSON with expected fields
-    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"version\": 18") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"version\": 19") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"handler.ts\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"modules\": []") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"serviceCalls\": []") != null);
@@ -1807,4 +1809,180 @@ test "sandbox block roundtrips through writeContractJson and parseFromJson" {
     try std.testing.expectEqualSlices(u8, &written_caps.hash, &parsed_caps.hash);
     try std.testing.expect(parsed_caps.has(.clock));
     try std.testing.expect(parsed_caps.has(.crypto));
+}
+
+// ---------------------------------------------------------------------------
+// Tool catalog (M4 T2)
+// ---------------------------------------------------------------------------
+
+const tool_schema_for_tests = @import("zts-base").tool_schema;
+
+const tool_input_schema =
+    \\{"type":"object","additionalProperties":false,"required":["id"],
+    \\ "properties":{"id":{"type":"string","maxLength":8,"description":"café \"quoted\""},
+    \\  "tags":{"type":"array","maxItems":2,"items":{"type":"string","maxLength":3}}}}
+;
+const tool_output_schema =
+    \\{"type":"object","additionalProperties":false,"properties":{"status":{"type":"string","maxLength":16}}}
+;
+
+fn toolCatalogFixture(allocator: std.mem.Allocator) !HandlerContract {
+    var contract = contract_types.emptyContract(try allocator.dupe(u8, "tool.ts"));
+    errdefer contract.deinit(allocator);
+    var entry = contract_types.ToolEntry{
+        .name = &.{},
+        .route = &.{},
+        .description = &.{},
+        .input_schema_name = &.{},
+        .input_schema_json = &.{},
+        .output_schema_name = &.{},
+        .output_schema_json = &.{},
+        .max_input_bytes = 4096,
+    };
+    errdefer entry.deinit(allocator);
+    entry.name = try allocator.dupe(u8, "lookupOrder");
+    entry.route = try allocator.dupe(u8, "POST /tools/lookup-order");
+    entry.description = try allocator.dupe(u8, "Return one order.\nIt belongs to the caller.");
+    entry.input_schema_name = try allocator.dupe(u8, "LookupOrderInput");
+    entry.input_schema_json = try allocator.dupe(u8, tool_input_schema);
+    entry.output_schema_name = try allocator.dupe(u8, "LookupOrderOutput");
+    entry.output_schema_json = try allocator.dupe(u8, tool_output_schema);
+    const exports = [_][2][]const u8{ .{ "zttp:fetch", "fetch" }, .{ "zttp:validate", "validateJson" } };
+    for (exports) |pair| {
+        const module = try allocator.dupe(u8, pair[0]);
+        errdefer allocator.free(module);
+        const name = try allocator.dupe(u8, pair[1]);
+        errdefer allocator.free(name);
+        try entry.reachable_exports.append(allocator, .{ .module = module, .name = name });
+    }
+    try contract.tools.append(allocator, entry);
+    return contract;
+}
+
+fn expectToolEntriesEqual(want: contract_types.ToolEntry, got: contract_types.ToolEntry) !void {
+    try std.testing.expectEqualStrings(want.name, got.name);
+    try std.testing.expectEqualStrings(want.route, got.route);
+    try std.testing.expectEqualStrings(want.description, got.description);
+    try std.testing.expectEqualStrings(want.input_schema_name, got.input_schema_name);
+    try std.testing.expectEqualStrings(want.input_schema_json, got.input_schema_json);
+    try std.testing.expectEqualStrings(want.output_schema_name, got.output_schema_name);
+    try std.testing.expectEqualStrings(want.output_schema_json, got.output_schema_json);
+    try std.testing.expectEqual(want.max_input_bytes, got.max_input_bytes);
+    try std.testing.expectEqual(want.reachable_exports.items.len, got.reachable_exports.items.len);
+    for (want.reachable_exports.items, got.reachable_exports.items) |w, g| {
+        try std.testing.expectEqualStrings(w.module, g.module);
+        try std.testing.expectEqualStrings(w.name, g.name);
+    }
+}
+
+test "tool catalog survives a v1 and a v2 round trip byte for byte" {
+    const allocator = std.testing.allocator;
+    var original = try toolCatalogFixture(allocator);
+    defer original.deinit(allocator);
+
+    inline for (.{ writeContractJson, writeContractJsonV2 }) |write| {
+        var out: std.Io.Writer.Allocating = .init(allocator);
+        defer out.deinit();
+        try write(&original, &out.writer);
+        var parsed = try parseFromJson(allocator, out.written());
+        defer parsed.deinit(allocator);
+        try std.testing.expectEqual(@as(usize, 1), parsed.tools.items.len);
+        try expectToolEntriesEqual(original.tools.items[0], parsed.tools.items[0]);
+    }
+}
+
+test "tool schema bytes and validator verdicts agree after a round trip" {
+    const allocator = std.testing.allocator;
+    var original = try toolCatalogFixture(allocator);
+    defer original.deinit(allocator);
+
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    defer out.deinit();
+    try writeContractJson(&original, &out.writer);
+    var parsed = try parseFromJson(allocator, out.written());
+    defer parsed.deinit(allocator);
+
+    var before = try tool_schema_for_tests.compile(allocator, original.tools.items[0].input_schema_json);
+    defer before.deinit();
+    var after = try tool_schema_for_tests.compile(allocator, parsed.tools.items[0].input_schema_json);
+    defer after.deinit();
+
+    const corpus = [_][]const u8{
+        "{\"id\":\"a1\"}",
+        "{\"id\":\"a1\",\"tags\":[\"x\",\"yz\"]}",
+        "{\"id\":\"a1\",\"id\":\"a2\"}",
+        "{\"id\":\"a1\",\"extra\":1}",
+        "{\"tags\":[]}",
+        "{\"id\":\"123456789\"}",
+        "{\"id\":\"a1\",\"tags\":[\"a\",\"b\",\"c\"]}",
+    };
+    var accepted: usize = 0;
+    var refused: usize = 0;
+    for (corpus) |input| {
+        const want = try tool_schema_for_tests.validate(allocator, &before, input, 4096);
+        const got = try tool_schema_for_tests.validate(allocator, &after, input, 4096);
+        try std.testing.expectEqualDeep(want, got);
+        switch (want) {
+            .ok => accepted += 1,
+            .refused => refused += 1,
+        }
+    }
+    // Floor: the corpus holds both verdicts, so agreement is not vacuous.
+    try std.testing.expectEqual(@as(usize, 2), accepted);
+    try std.testing.expectEqual(@as(usize, 5), refused);
+}
+
+fn toolCatalogJson(comptime tools: []const u8) []const u8 {
+    return "{\"version\": 19, \"handler\": {\"path\": \"tool.ts\"}, \"tools\": [" ++ tools ++ "]}";
+}
+
+const good_schema_field =
+    \\{"name": "In", "json": "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{}}"}
+;
+
+fn toolJson(comptime name: []const u8, comptime route: []const u8, comptime max_bytes: []const u8, comptime input: []const u8, comptime exports: []const u8) []const u8 {
+    return "{\"name\": \"" ++ name ++ "\", \"route\": \"" ++ route ++ "\", \"description\": \"d\", " ++
+        "\"inputSchema\": " ++ input ++ ", \"outputSchema\": " ++ good_schema_field ++ ", " ++
+        max_bytes ++ "\"reachableExports\": [" ++ exports ++ "]}";
+}
+
+test "tool catalog projection accepts a well-formed entry" {
+    var contract = try parseFromJson(std.testing.allocator, toolCatalogJson(toolJson("a", "POST /a", "\"maxInputBytes\": 16, ", good_schema_field, "")));
+    defer contract.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 1), contract.tools.items.len);
+    try std.testing.expectEqual(@as(u32, 16), contract.tools.items[0].max_input_bytes);
+}
+
+test "tool catalog projection refuses a catalog the build could not have written" {
+    const ok_bytes = "\"maxInputBytes\": 16, ";
+    const cases = [_][]const u8{
+        // Empty name and empty route.
+        toolCatalogJson(toolJson("", "POST /a", ok_bytes, good_schema_field, "")),
+        toolCatalogJson(toolJson("a", "", ok_bytes, good_schema_field, "")),
+        // Duplicate name, then duplicate route.
+        toolCatalogJson(toolJson("a", "POST /a", ok_bytes, good_schema_field, "") ++ ", " ++ toolJson("a", "POST /b", ok_bytes, good_schema_field, "")),
+        toolCatalogJson(toolJson("a", "POST /a", ok_bytes, good_schema_field, "") ++ ", " ++ toolJson("b", "POST /a", ok_bytes, good_schema_field, "")),
+        // An escaped spelling of a name already present is the same name.
+        toolCatalogJson(toolJson("a", "POST /a", ok_bytes, good_schema_field, "") ++ ", " ++ toolJson("\\u0061", "POST /b", ok_bytes, good_schema_field, "")),
+        // Byte bound missing, zero, and above the ceiling.
+        toolCatalogJson(toolJson("a", "POST /a", "", good_schema_field, "")),
+        toolCatalogJson(toolJson("a", "POST /a", "\"maxInputBytes\": 0, ", good_schema_field, "")),
+        toolCatalogJson(toolJson("a", "POST /a", "\"maxInputBytes\": 1048577, ", good_schema_field, "")),
+        // A schema outside the subset (an open object), and one with no name.
+        toolCatalogJson(toolJson("a", "POST /a", ok_bytes, "{\"name\": \"In\", \"json\": \"{\\\"type\\\":\\\"object\\\",\\\"properties\\\":{}}\"}", "")),
+        toolCatalogJson(toolJson("a", "POST /a", ok_bytes, "{\"name\": \"\", \"json\": \"{\\\"type\\\":\\\"object\\\",\\\"additionalProperties\\\":false,\\\"properties\\\":{}}\"}", "")),
+        // Reachable exports out of order, duplicated, and with an empty name.
+        toolCatalogJson(toolJson("a", "POST /a", ok_bytes, good_schema_field, "{\"module\": \"zttp:validate\", \"name\": \"validateJson\"}, {\"module\": \"zttp:fetch\", \"name\": \"fetch\"}")),
+        toolCatalogJson(toolJson("a", "POST /a", ok_bytes, good_schema_field, "{\"module\": \"zttp:fetch\", \"name\": \"fetch\"}, {\"module\": \"zttp:fetch\", \"name\": \"fetch\"}")),
+        toolCatalogJson(toolJson("a", "POST /a", ok_bytes, good_schema_field, "{\"module\": \"zttp:fetch\", \"name\": \"\"}")),
+    };
+    for (cases, 0..) |json, i| {
+        const result = parseFromJson(std.testing.allocator, json);
+        if (result) |parsed| {
+            var owned = parsed;
+            owned.deinit(std.testing.allocator);
+            std.debug.print("case {d} was accepted: {s}\n", .{ i, json });
+            return error.TestExpectedRefusal;
+        } else |err| try std.testing.expectEqual(error.InvalidToolCatalog, err);
+    }
 }

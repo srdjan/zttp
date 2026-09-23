@@ -45,7 +45,7 @@ Every precompilation extracts a contract from the handler's IR. Add
 
 ```json
 {
-  "version": 18,
+  "version": 19,
   "modules": ["zttp:auth", "zttp:cache", "zttp:scope"],
   "functions": {
     "zttp:auth": ["jwtVerify", "parseBearer"],

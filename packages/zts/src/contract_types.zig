@@ -1491,6 +1491,60 @@ pub const EmittedAffordance = struct {
     }
 };
 
+/// One module export a tool route can reach. Owned.
+pub const ToolExport = struct {
+    module: []const u8,
+    name: []const u8,
+
+    pub fn deinit(self: *ToolExport, allocator: std.mem.Allocator) void {
+        allocator.free(self.module);
+        allocator.free(self.name);
+    }
+
+    /// Sort by module, then by export name: the one order the catalog stores.
+    pub fn lessThan(_: void, a: ToolExport, b: ToolExport) bool {
+        return switch (std.mem.order(u8, a.module, b.module)) {
+            .lt => true,
+            .gt => false,
+            .eq => std.mem.lessThan(u8, a.name, b.name),
+        };
+    }
+};
+
+/// One entry of the handler's tool catalog (M4 T2), read from the literal
+/// argument of `zttp:tool`'s `toolCatalog`. The schema texts are the literal
+/// `schemaCompile` sources the entry names, carried here so the catalog stands
+/// on its own when T3 binds it. Every string is owned.
+pub const ToolEntry = struct {
+    /// The public tool name: the catalog key.
+    name: []const u8,
+    /// The `routerMatch` key the tool is served on, such as `"POST /tools/x"`.
+    route: []const u8,
+    description: []const u8,
+    input_schema_name: []const u8,
+    input_schema_json: []const u8,
+    output_schema_name: []const u8,
+    output_schema_json: []const u8,
+    /// The declared input byte ceiling, at most
+    /// `tool_schema.max_input_bytes_ceiling`.
+    max_input_bytes: u32,
+    /// The module exports the route function reaches, sorted with
+    /// `ToolExport.lessThan`.
+    reachable_exports: std.ArrayList(ToolExport) = .empty,
+
+    pub fn deinit(self: *ToolEntry, allocator: std.mem.Allocator) void {
+        allocator.free(self.name);
+        allocator.free(self.route);
+        allocator.free(self.description);
+        allocator.free(self.input_schema_name);
+        allocator.free(self.input_schema_json);
+        allocator.free(self.output_schema_name);
+        allocator.free(self.output_schema_json);
+        for (self.reachable_exports.items) |*e| e.deinit(allocator);
+        self.reachable_exports.deinit(allocator);
+    }
+};
+
 /// Aggregate of module capabilities required by a handler's imports.
 /// Stable SHA-256 hash over the canonically-ordered tag names lets the
 /// runtime detect drift between the embedded contract and the linked
@@ -1750,7 +1804,7 @@ pub const HoleSummary = struct {
 };
 
 pub const HandlerContract = struct {
-    version: u32 = 18,
+    version: u32 = 19,
     handler: HandlerLoc,
     routes: std.ArrayList(RouteInfo),
     modules: std.ArrayList([]const u8), // each entry owned
@@ -1770,6 +1824,9 @@ pub const HandlerContract = struct {
     /// argument, so the emitted affordance set cannot be enumerated. Counted as
     /// a dynamic link: downgrades the bundle proof, never claimed resolved.
     affordances_dynamic: bool = false,
+    /// The tool catalog (M4 T2): one entry per `toolCatalog` key, in source
+    /// order. Empty when the handler is not under the tool profile. Owned.
+    tools: std.ArrayList(ToolEntry) = .empty,
     cache: CacheInfo,
     sql: SqlInfo,
     durable: DurableInfo,
@@ -1905,6 +1962,10 @@ pub const HandlerContract = struct {
             aff.deinit(allocator);
         }
         self.affordances.deinit(allocator);
+        for (self.tools.items) |*tool| {
+            tool.deinit(allocator);
+        }
+        self.tools.deinit(allocator);
         for (self.cache.namespaces.items) |s| {
             allocator.free(s);
         }

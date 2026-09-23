@@ -260,6 +260,43 @@ fn writeContractJsonVersion(
     try writer.writeAll("],\n");
     try writer.print("  \"" ++ comptime contractKey(json_version, "affordancesDynamic") ++ "\": {s},\n", .{if (contract.affordances_dynamic) "true" else "false"});
 
+    // tools (the M4 T2 catalog; schema texts are written as JSON strings so
+    // the bytes survive a round trip unchanged)
+    try writer.writeAll("  \"tools\": [");
+    for (contract.tools.items, 0..) |tool, i| {
+        if (i > 0) try writer.writeAll(",");
+        try writer.writeAll("\n    {\n");
+        try writer.writeAll("      \"name\": ");
+        try writeJsonString(writer, tool.name);
+        try writer.writeAll(",\n      \"route\": ");
+        try writeJsonString(writer, tool.route);
+        try writer.writeAll(",\n      \"description\": ");
+        try writeJsonString(writer, tool.description);
+        try writer.writeAll(",\n      \"" ++ comptime contractKey(json_version, "inputSchema") ++ "\": { \"name\": ");
+        try writeJsonString(writer, tool.input_schema_name);
+        try writer.writeAll(", \"json\": ");
+        try writeJsonString(writer, tool.input_schema_json);
+        try writer.writeAll(" },\n      \"" ++ comptime contractKey(json_version, "outputSchema") ++ "\": { \"name\": ");
+        try writeJsonString(writer, tool.output_schema_name);
+        try writer.writeAll(", \"json\": ");
+        try writeJsonString(writer, tool.output_schema_json);
+        try writer.print(" }},\n      \"" ++ comptime contractKey(json_version, "maxInputBytes") ++ "\": {d},\n", .{tool.max_input_bytes});
+        try writer.writeAll("      \"" ++ comptime contractKey(json_version, "reachableExports") ++ "\": [");
+        for (tool.reachable_exports.items, 0..) |exp, j| {
+            if (j > 0) try writer.writeAll(", ");
+            try writer.writeAll("{ \"module\": ");
+            try writeJsonString(writer, exp.module);
+            try writer.writeAll(", \"name\": ");
+            try writeJsonString(writer, exp.name);
+            try writer.writeAll(" }");
+        }
+        try writer.writeAll("]\n    }");
+    }
+    if (contract.tools.items.len > 0) {
+        try writer.writeAll("\n  ");
+    }
+    try writer.writeAll("],\n");
+
     // cache
     try writer.writeAll("  \"cache\": {\n");
     try writer.writeAll("    \"namespaces\": [");

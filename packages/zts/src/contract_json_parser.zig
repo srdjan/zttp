@@ -13,6 +13,7 @@ const json_wire = @import("zts-base").json_wire;
 // into a contract parser.
 const module_binding = @import("zts-base").module_authorization;
 const json_utils = @import("zts-base").json_utils;
+const tool_schema = @import("zts-base").tool_schema;
 
 const HandlerContract = handler_contract.HandlerContract;
 const RouteInfo = handler_contract.RouteInfo;
@@ -124,6 +125,26 @@ const AffordanceWire = struct {
     href: WireString = .{ .bytes = "" },
     templated: bool = false,
     dynamic: bool = false,
+};
+
+const ToolSchemaWire = struct {
+    name: WireString = .{ .bytes = "" },
+    json: WireString = .{ .bytes = "" },
+};
+
+const ToolExportWire = struct {
+    module: WireString = .{ .bytes = "" },
+    name: WireString = .{ .bytes = "" },
+};
+
+const ToolWire = struct {
+    name: WireString = .{ .bytes = "" },
+    route: WireString = .{ .bytes = "" },
+    description: WireString = .{ .bytes = "" },
+    inputSchema: ToolSchemaWire = .{},
+    outputSchema: ToolSchemaWire = .{},
+    maxInputBytes: WireU32 = .{ .value = null },
+    reachableExports: []const ToolExportWire = &.{},
 };
 
 const SqlQueryWire = struct {
@@ -444,6 +465,7 @@ const ContractWire = struct {
     workflowCalls: []const WorkflowCallWire = &.{},
     affordances: []const AffordanceWire = &.{},
     affordancesDynamic: bool = false,
+    tools: []const ToolWire = &.{},
     cache: struct {
         namespaces: []const WireString = &.{},
         dynamic: bool = false,
@@ -681,6 +703,7 @@ fn projectContract(
     try projectWorkflowCalls(allocator, wire.workflowCalls, &contract);
     try projectAffordances(allocator, wire.affordances, &contract);
     contract.affordances_dynamic = wire.affordancesDynamic;
+    try projectTools(allocator, wire.tools, &contract);
     contract.cache.namespaces = try projectStringList(allocator, wire.cache.namespaces);
     contract.cache.dynamic = wire.cache.dynamic;
     try projectSql(allocator, &wire.sql, &contract);
@@ -920,6 +943,88 @@ fn projectAffordances(
         errdefer affordance.deinit(allocator);
         contract.affordances.appendAssumeCapacity(affordance);
     }
+}
+
+/// Project the tool catalog. A catalog that the build could not have written is
+/// refused rather than repaired: an empty or duplicate name, an empty or
+/// duplicate route, a missing, zero, or over-ceiling byte bound, a schema with
+/// no name or outside the closed subset, or a reachable-export list that is not
+/// strictly sorted. Every check runs on the decoded strings, so an escaped
+/// spelling of a name is still the same name.
+fn projectTools(
+    allocator: std.mem.Allocator,
+    wires: []const ToolWire,
+    contract: *HandlerContract,
+) !void {
+    try contract.tools.ensureTotalCapacity(allocator, wires.len);
+    for (wires) |wire| {
+        const max_input_bytes = wire.maxInputBytes.value orelse return error.InvalidToolCatalog;
+        if (max_input_bytes == 0 or max_input_bytes > tool_schema.max_input_bytes_ceiling) return error.InvalidToolCatalog;
+
+        var entry = contract_types.ToolEntry{
+            .name = &.{},
+            .route = &.{},
+            .description = &.{},
+            .input_schema_name = &.{},
+            .input_schema_json = &.{},
+            .output_schema_name = &.{},
+            .output_schema_json = &.{},
+            .max_input_bytes = max_input_bytes,
+        };
+        errdefer entry.deinit(allocator);
+        entry.name = try decodeWireString(allocator, wire.name);
+        entry.route = try decodeWireString(allocator, wire.route);
+        entry.description = try decodeWireString(allocator, wire.description);
+        entry.input_schema_name = try decodeWireString(allocator, wire.inputSchema.name);
+        entry.input_schema_json = try decodeWireString(allocator, wire.inputSchema.json);
+        entry.output_schema_name = try decodeWireString(allocator, wire.outputSchema.name);
+        entry.output_schema_json = try decodeWireString(allocator, wire.outputSchema.json);
+        try entry.reachable_exports.ensureTotalCapacity(allocator, wire.reachableExports.len);
+        for (wire.reachableExports) |exp| {
+            const module = try decodeWireString(allocator, exp.module);
+            errdefer allocator.free(module);
+            const name = try decodeWireString(allocator, exp.name);
+            entry.reachable_exports.appendAssumeCapacity(.{ .module = module, .name = name });
+        }
+
+        if (entry.name.len == 0 or entry.route.len == 0) return error.InvalidToolCatalog;
+        for (contract.tools.items) |prior| {
+            if (std.mem.eql(u8, prior.name, entry.name)) return error.InvalidToolCatalog;
+            if (std.mem.eql(u8, prior.route, entry.route)) return error.InvalidToolCatalog;
+        }
+        if (!try schemaInSubset(allocator, entry.input_schema_name, entry.input_schema_json)) return error.InvalidToolCatalog;
+        if (!try schemaInSubset(allocator, entry.output_schema_name, entry.output_schema_json)) return error.InvalidToolCatalog;
+        for (entry.reachable_exports.items, 0..) |exp, j| {
+            if (exp.module.len == 0 or exp.name.len == 0) return error.InvalidToolCatalog;
+            if (j > 0 and !contract_types.ToolExport.lessThan({}, entry.reachable_exports.items[j - 1], exp)) {
+                return error.InvalidToolCatalog;
+            }
+        }
+        contract.tools.appendAssumeCapacity(entry);
+    }
+}
+
+fn schemaInSubset(allocator: std.mem.Allocator, name: []const u8, schema_json: []const u8) !bool {
+    if (name.len == 0) return false;
+    const result = try tool_schema.checkSubset(allocator, schema_json);
+    defer result.deinit(allocator);
+    return result == .ok;
+}
+
+/// Decode one wire string. `WireString` keeps the raw bytes between the quotes,
+/// escapes included, which is harmless for the plain names elsewhere in the
+/// contract but not for schema text and descriptions. The scanner already
+/// validated the string, so decoding it again with `std.json` is exact.
+fn decodeWireString(allocator: std.mem.Allocator, wire: WireString) ![]const u8 {
+    if (std.mem.indexOfScalar(u8, wire.bytes, '\\') == null) return allocator.dupe(u8, wire.bytes);
+    const quoted = try std.mem.concat(allocator, u8, &.{ "\"", wire.bytes, "\"" });
+    defer allocator.free(quoted);
+    const decoded = std.json.parseFromSlice([]const u8, allocator, quoted, .{}) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.InvalidToolCatalog,
+    };
+    defer decoded.deinit();
+    return allocator.dupe(u8, decoded.value);
 }
 
 fn projectSql(
@@ -1837,7 +1942,7 @@ test "parseFromJson compatibility matrix preserves duplicate trailing and overfl
         version: u32,
     }{
         .{ .json = "{\"version\":1,\"version\":23} trailing", .version = 23 },
-        .{ .json = "{\"version\":99999999999999999999}", .version = 18 },
+        .{ .json = "{\"version\":99999999999999999999}", .version = 19 },
     };
     for (cases) |case| {
         var contract = try parseFromJson(std.testing.allocator, case.json);
@@ -1860,7 +1965,7 @@ test "parseFromJson keeps raw structural keys and appends repeated collections" 
     var contract = try parseFromJson(std.testing.allocator, json);
     defer contract.deinit(std.testing.allocator);
 
-    try std.testing.expectEqual(@as(u32, 18), contract.version);
+    try std.testing.expectEqual(@as(u32, 19), contract.version);
     try std.testing.expectEqual(@as(usize, 2), contract.modules.items.len);
     try std.testing.expectEqualStrings("zttp:env", contract.modules.items[0]);
     try std.testing.expectEqualStrings("zttp:cache", contract.modules.items[1]);
@@ -2020,4 +2125,24 @@ test "parseFromJson cleans every allocation failure" {
         parseAllocationFixture,
         .{json},
     );
+}
+
+test "parseFromJson cleans every allocation failure in the tool catalog" {
+    const json =
+        \\{
+        \\  "handler": {"path": "tool.ts"},
+        \\  "tools": [{
+        \\    "name": "lookup", "route": "POST /t", "description": "line one\nline two",
+        \\    "inputSchema": {"name": "In", "json": "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"id\":{\"type\":\"string\",\"maxLength\":4}}}"},
+        \\    "outputSchema": {"name": "Out", "json": "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{}}"},
+        \\    "maxInputBytes": 64,
+        \\    "reachableExports": [{"module": "zttp:fetch", "name": "fetch"}, {"module": "zttp:validate", "name": "validateJson"}]
+        \\  }]
+        \\}
+    ;
+    var contract = try parseFromJson(std.testing.allocator, json);
+    defer contract.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("lookup", contract.tools.items[0].name);
+    try std.testing.expectEqualStrings("line one\nline two", contract.tools.items[0].description);
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, parseAllocationFixture, .{json});
 }
