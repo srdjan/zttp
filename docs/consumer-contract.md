@@ -9,7 +9,7 @@ This page defines how a downstream application programs against zttp. It covers 
 document a consumer writes, the three questions it can ask, the answers it can receive,
 and the closed vocabularies that bound all three.
 
-A consumer is any system that wants zttp to build, prove, or serve a handler on its
+A consumer is any system that wants **zttp to build, prove, or serve a handler** on its
 behalf. The first is Metadoor, which authors specifications and invariants and lowers
 them into the declaration defined here. The reference producer is this repository.
 
