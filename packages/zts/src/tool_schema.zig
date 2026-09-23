@@ -229,6 +229,11 @@ pub const CompiledToolSchema = struct {
     /// The total number of object properties in the tree: the size of the
     /// key-seen bit set `validate` allocates.
     slot_count: u32,
+    /// The `title` and `description` of the nodes that declare them. They
+    /// constrain nothing, so `validate` ignores them, but they are what a
+    /// reader of the schema is told about a field, and `canonicalize` keeps
+    /// them.
+    annotations: []const Annotation,
 
     pub fn deinit(self: *CompiledToolSchema) void {
         const child = self.arena.child_allocator;
@@ -236,6 +241,13 @@ pub const CompiledToolSchema = struct {
         child.destroy(self.arena);
         self.* = undefined;
     }
+};
+
+/// The descriptive keywords of one schema node.
+pub const Annotation = struct {
+    node: *const Node,
+    title: ?[]const u8,
+    description: ?[]const u8,
 };
 
 pub const CompileError = Allocator.Error || error{SchemaNotInSubset};
@@ -302,7 +314,12 @@ fn analyze(allocator: Allocator, schema_bytes: []const u8) Allocator.Error!Analy
         error.Refused => return .{ .refused = walker.refusal orelse unreachable },
     };
     keep_arena = true;
-    return .{ .compiled = .{ .arena = arena, .root = root, .slot_count = walker.slot_count } };
+    return .{ .compiled = .{
+        .arena = arena,
+        .root = root,
+        .slot_count = walker.slot_count,
+        .annotations = try walker.annotations.toOwnedSlice(arena.allocator()),
+    } };
 }
 
 fn refusedAtRoot(allocator: Allocator, reason: SubsetRefusal) Allocator.Error!Analysis {
@@ -373,6 +390,8 @@ const Walker = struct {
     path: std.ArrayList(u8) = .empty,
     slot_count: u32 = 0,
     refusal: ?SubsetResult.Refused = null,
+    /// Allocated in `arena`, so it needs no cleanup of its own.
+    annotations: std.ArrayList(Annotation) = .empty,
 
     /// Record `reason` at the current path and unwind.
     fn refuse(w: *Walker, reason: SubsetRefusal) WalkError {
@@ -461,6 +480,13 @@ const Walker = struct {
             .boolean => .boolean,
             .array => .{ .array = try w.walkArray(obj, depth) },
         };
+        // The keyword loop above already refused a non-string title or
+        // description, so each is a string here when present.
+        const title: ?[]const u8 = if (obj.get("title")) |v| try w.arena.dupe(u8, v.string) else null;
+        const description: ?[]const u8 = if (obj.get("description")) |v| try w.arena.dupe(u8, v.string) else null;
+        if (title != null or description != null) {
+            try w.annotations.append(w.arena, .{ .node = node, .title = title, .description = description });
+        }
         return node;
     }
 
@@ -625,6 +651,177 @@ fn finiteNumber(value: JsonValue) ?f64 {
     const n = std.fmt.parseFloat(f64, text) catch return null;
     if (!std.math.isFinite(n)) return null;
     return n;
+}
+
+// ---------------------------------------------------------------------------
+// Canonical form
+// ---------------------------------------------------------------------------
+
+/// Write `compiled` back out as the one canonical schema text for its meaning,
+/// so authored whitespace, key order, and set order cannot move a digest (P4).
+///
+/// The rules, which docs/consumer-contract.md states for a reader who must
+/// reproduce them without this code:
+/// - no whitespace; strings are JSON-escaped (`"`, `\`, and control bytes
+///   below 0x20 escaped, `\u00XX` for those without a short escape) and every
+///   other byte is written as it is;
+/// - keys per node in this order: `type`, `title`, `description`, then
+///   object: `additionalProperties`, `properties`, `required`;
+///   string: `minLength`, `maxLength`, `format`, `enum`;
+///   number and integer: `minimum`, `maximum`, `enum`;
+///   array: `items`, `maxItems`, `minItems`;
+/// - `title` and `description` only when declared; `minLength` and `minItems`
+///   only when not 0; `format`, `minimum`, `maximum`, and `enum` only when
+///   declared; `required` always, possibly empty;
+/// - `properties` sorted by name bytes, `required` sorted by name bytes, string
+///   `enum` members sorted by bytes, number `enum` members sorted ascending;
+/// - a number that is a whole value of magnitude below 2^53 is written as an
+///   integer; any other is written in the shortest decimal form that reads
+///   back to the same f64.
+pub fn canonicalize(allocator: Allocator, compiled: *const CompiledToolSchema) Allocator.Error![]u8 {
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    errdefer out.deinit();
+    canonicalNode(allocator, &out.writer, compiled, compiled.root) catch |err| switch (err) {
+        error.WriteFailed, error.OutOfMemory => return error.OutOfMemory,
+    };
+    return out.toOwnedSlice() catch return error.OutOfMemory;
+}
+
+const CanonicalError = std.Io.Writer.Error || Allocator.Error;
+
+fn canonicalNode(allocator: Allocator, w: *std.Io.Writer, compiled: *const CompiledToolSchema, node: *const Node) CanonicalError!void {
+    const type_name: []const u8 = switch (node.*) {
+        .object => "object",
+        .string => "string",
+        .number => |n| if (n.integer) "integer" else "number",
+        .boolean => "boolean",
+        .array => "array",
+    };
+    try w.writeAll("{\"type\":");
+    try canonicalString(w, type_name);
+    for (compiled.annotations) |a| {
+        if (a.node != node) continue;
+        if (a.title) |t| {
+            try w.writeAll(",\"title\":");
+            try canonicalString(w, t);
+        }
+        if (a.description) |d| {
+            try w.writeAll(",\"description\":");
+            try canonicalString(w, d);
+        }
+        break;
+    }
+    switch (node.*) {
+        .object => |o| {
+            const order = try allocator.alloc(usize, o.properties.len);
+            defer allocator.free(order);
+            for (order, 0..) |*slot, i| slot.* = i;
+            std.mem.sort(usize, order, o.properties, propertyNameLess);
+            try w.writeAll(",\"additionalProperties\":false,\"properties\":{");
+            for (order, 0..) |index, k| {
+                if (k > 0) try w.writeByte(',');
+                try canonicalString(w, o.properties[index].name);
+                try w.writeByte(':');
+                try canonicalNode(allocator, w, compiled, o.properties[index].schema);
+            }
+            try w.writeAll("},\"required\":[");
+            var first = true;
+            for (order) |index| {
+                if (!o.properties[index].required) continue;
+                if (!first) try w.writeByte(',');
+                first = false;
+                try canonicalString(w, o.properties[index].name);
+            }
+            try w.writeByte(']');
+        },
+        .string => |s| {
+            if (s.min_length != 0) try w.print(",\"minLength\":{d}", .{s.min_length});
+            try w.print(",\"maxLength\":{d}", .{s.max_length});
+            if (s.format) |f| {
+                try w.writeAll(",\"format\":");
+                try canonicalString(w, switch (f) {
+                    .email => "email",
+                    .uuid => "uuid",
+                    .iso_date => "iso-date",
+                    .iso_datetime => "iso-datetime",
+                });
+            }
+            if (s.enum_values) |members| {
+                const sorted = try allocator.dupe([]const u8, members);
+                defer allocator.free(sorted);
+                std.mem.sort([]const u8, sorted, {}, bytesLess);
+                try w.writeAll(",\"enum\":[");
+                for (sorted, 0..) |m, k| {
+                    if (k > 0) try w.writeByte(',');
+                    try canonicalString(w, m);
+                }
+                try w.writeByte(']');
+            }
+        },
+        .number => |n| {
+            if (n.minimum) |lo| {
+                try w.writeAll(",\"minimum\":");
+                try canonicalNumber(w, lo);
+            }
+            if (n.maximum) |hi| {
+                try w.writeAll(",\"maximum\":");
+                try canonicalNumber(w, hi);
+            }
+            if (n.enum_values) |members| {
+                const sorted = try allocator.dupe(f64, members);
+                defer allocator.free(sorted);
+                std.mem.sort(f64, sorted, {}, std.sort.asc(f64));
+                try w.writeAll(",\"enum\":[");
+                for (sorted, 0..) |m, k| {
+                    if (k > 0) try w.writeByte(',');
+                    try canonicalNumber(w, m);
+                }
+                try w.writeByte(']');
+            }
+        },
+        .boolean => {},
+        .array => |a| {
+            try w.writeAll(",\"items\":");
+            try canonicalNode(allocator, w, compiled, a.items);
+            try w.print(",\"maxItems\":{d}", .{a.max_items});
+            if (a.min_items != 0) try w.print(",\"minItems\":{d}", .{a.min_items});
+        },
+    }
+    try w.writeByte('}');
+}
+
+fn propertyNameLess(properties: []const Property, a: usize, b: usize) bool {
+    return std.mem.lessThan(u8, properties[a].name, properties[b].name);
+}
+
+fn bytesLess(_: void, a: []const u8, b: []const u8) bool {
+    return std.mem.lessThan(u8, a, b);
+}
+
+fn canonicalString(w: *std.Io.Writer, s: []const u8) std.Io.Writer.Error!void {
+    try w.writeByte('"');
+    for (s) |c| switch (c) {
+        '"' => try w.writeAll("\\\""),
+        '\\' => try w.writeAll("\\\\"),
+        '\n' => try w.writeAll("\\n"),
+        '\r' => try w.writeAll("\\r"),
+        '\t' => try w.writeAll("\\t"),
+        0x08 => try w.writeAll("\\b"),
+        0x0c => try w.writeAll("\\f"),
+        0x00...0x07, 0x0b, 0x0e...0x1f => try w.print("\\u{x:0>4}", .{c}),
+        else => try w.writeByte(c),
+    };
+    try w.writeByte('"');
+}
+
+fn canonicalNumber(w: *std.Io.Writer, n: f64) std.Io.Writer.Error!void {
+    const limit: f64 = 9007199254740992.0; // 2^53
+    if (@floor(n) == n and @abs(n) < limit) {
+        // -0 is whole and writes as 0, which reads back as the same bound.
+        const whole: i64 = @intFromFloat(n);
+        return w.print("{d}", .{whole});
+    }
+    return w.print("{d}", .{n});
 }
 
 // ---------------------------------------------------------------------------
@@ -1302,4 +1499,117 @@ test "allocation failure is an error and never a verdict" {
         full_schema,
         "{\"name\":\"\\u00e9\",\"count\":1,\"tags\":[\"x\"]}",
     });
+}
+
+fn canonicalBytes(allocator: Allocator, schema: []const u8) ![]u8 {
+    var compiled = try compile(allocator, schema);
+    defer compiled.deinit();
+    return canonicalize(allocator, &compiled);
+}
+
+test "canonicalize writes the documented key order and sorted sets" {
+    const canonical = try canonicalBytes(testing.allocator, full_schema);
+    defer testing.allocator.free(canonical);
+    const expected =
+        \\{"type":"object","title":"order","description":"one order","additionalProperties":false,"properties":{
+    ++
+        \\"count":{"type":"integer","minimum":0,"maximum":10,"enum":[1,2,3]},
+    ++
+        \\"email":{"type":"string","maxLength":64,"format":"email"},
+    ++
+        \\"flag":{"type":"boolean","description":"on or off"},
+    ++
+        \\"kind":{"type":"string","maxLength":10,"enum":["a","b"]},
+    ++
+        \\"name":{"type":"string","minLength":1,"maxLength":8},
+    ++
+        \\"nested":{"type":"object","additionalProperties":false,"properties":{"x":{"type":"integer"}},"required":[]},
+    ++
+        \\"score":{"type":"number","minimum":0,"maximum":1.5},
+    ++
+        \\"tags":{"type":"array","items":{"type":"string","maxLength":4},"maxItems":3,"minItems":1},
+    ++
+        \\"when":{"type":"string","maxLength":40,"format":"iso-datetime"}
+    ++
+        \\},"required":["count","name"]}
+    ;
+    try testing.expectEqualStrings(expected, canonical);
+}
+
+test "canonicalize is a fixed point and survives checkSubset" {
+    const once = try canonicalBytes(testing.allocator, full_schema);
+    defer testing.allocator.free(once);
+    const verdict = try checkSubset(testing.allocator, once);
+    defer verdict.deinit(testing.allocator);
+    try testing.expectEqual(SubsetResult.ok, verdict);
+    const twice = try canonicalBytes(testing.allocator, once);
+    defer testing.allocator.free(twice);
+    try testing.expectEqualStrings(once, twice);
+}
+
+test "authored whitespace, key order, and set order do not move the canonical bytes" {
+    const a =
+        \\{"type":"object","additionalProperties":false,"required":["b","a"],
+        \\ "properties":{"b":{"maxLength":3,"type":"string","enum":["y","x"]},"a":{"type":"number","enum":[2,1.0,-3],"minimum":-3}}}
+    ;
+    const b =
+        \\{ "properties" : { "a" : { "minimum" : -3.0, "enum" : [ -3, 1, 2 ], "type" : "number" },
+        \\   "b" : { "enum" : [ "x", "y" ], "type" : "string", "maxLength" : 3, "minLength" : 0 } },
+        \\  "required" : [ "a", "b" ], "type" : "object", "additionalProperties" : false }
+    ;
+    const ca = try canonicalBytes(testing.allocator, a);
+    defer testing.allocator.free(ca);
+    const cb = try canonicalBytes(testing.allocator, b);
+    defer testing.allocator.free(cb);
+    try testing.expectEqualStrings(ca, cb);
+    try testing.expectEqualStrings(
+        \\{"type":"object","additionalProperties":false,"properties":{"a":{"type":"number","minimum":-3,"enum":[-3,1,2]},"b":{"type":"string","maxLength":3,"enum":["x","y"]}},"required":["a","b"]}
+    , ca);
+}
+
+test "canonicalize escapes strings and keeps non-ASCII bytes" {
+    const schema =
+        \\{"type":"object","additionalProperties":false,"description":"caf\u00e9 \"q\" \\ \t\u0001",
+        \\ "properties":{"a\"b":{"type":"string","maxLength":1}}}
+    ;
+    const canonical = try canonicalBytes(testing.allocator, schema);
+    defer testing.allocator.free(canonical);
+    try testing.expectEqualStrings(
+        "{\"type\":\"object\",\"description\":\"caf\xc3\xa9 \\\"q\\\" \\\\ \\t\\u0001\",\"additionalProperties\":false,\"properties\":{\"a\\\"b\":{\"type\":\"string\",\"maxLength\":1}},\"required\":[]}",
+        canonical,
+    );
+    const again = try canonicalBytes(testing.allocator, canonical);
+    defer testing.allocator.free(again);
+    try testing.expectEqualStrings(canonical, again);
+}
+
+test "the canonical schema gives the same verdicts as the authored one" {
+    const canonical = try canonicalBytes(testing.allocator, full_schema);
+    defer testing.allocator.free(canonical);
+    var authored = try compile(testing.allocator, full_schema);
+    defer authored.deinit();
+    var reread = try compile(testing.allocator, canonical);
+    defer reread.deinit();
+    var accepted: usize = 0;
+    for (validate_cases) |case| {
+        if (!std.mem.eql(u8, case.schema, full_schema)) continue;
+        const want = try validate(testing.allocator, &authored, case.input, case.max_bytes);
+        const got = try validate(testing.allocator, &reread, case.input, case.max_bytes);
+        try testing.expectEqualDeep(want, got);
+    }
+    const good = "{\"name\":\"a\",\"count\":1,\"tags\":[\"x\"],\"nested\":{\"x\":1}}";
+    const want = try validate(testing.allocator, &authored, good, 1024);
+    try testing.expectEqualDeep(want, try validate(testing.allocator, &reread, good, 1024));
+    if (want == .ok) accepted += 1;
+    // Floor: the comparison covered an accepted input, not only refusals.
+    try testing.expectEqual(@as(usize, 1), accepted);
+}
+
+test "canonicalize under allocation failure is an error, never partial bytes" {
+    try testing.checkAllAllocationFailures(testing.allocator, canonicalUnderFailure, .{full_schema});
+}
+
+fn canonicalUnderFailure(allocator: Allocator, schema: []const u8) !void {
+    const bytes = try canonicalBytes(allocator, schema);
+    allocator.free(bytes);
 }
