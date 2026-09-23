@@ -722,6 +722,24 @@ fn writeArtifactTail(
     var runtime_policy_digest: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(policy_section, &runtime_policy_digest, .{});
 
+    // The canonical tool catalog, encoded once from the contract the compiler
+    // built. The same bytes are shipped as the section and hashed into the
+    // `tool_catalog` graph member, so the consumer rebuilds the member from
+    // exactly what it loads. A handler with no catalog has neither.
+    const tool_catalog_section: ?[]u8 = if (input.contract) |contract|
+        project_config_mod.tool_catalog_encoding.encode(allocator, contract.tools.items) catch |err| {
+            if (!builtin.is_test) {
+                std.log.err(
+                    "failed to encode the tool catalog ({s}); refusing to write an artifact whose catalog the consumer could not read",
+                    .{@errorName(err)},
+                );
+            }
+            return err;
+        }
+    else
+        null;
+    defer if (tool_catalog_section) |bytes| allocator.free(bytes);
+
     const artifact_sections = artifact_graph.ArtifactInputs{
         .bytecode = input.bytecode,
         .dep_bytecodes = input.dep_bytecodes,
@@ -739,6 +757,10 @@ fn writeArtifactTail(
         // root below, so it must name the adapter itself rather than rely on
         // the certificate builder having named one.
         .invariant_adapter_digest = invariant_adapter.linkedDigest(),
+        .tool_catalog_digest = if (tool_catalog_section) |bytes|
+            pcc.tool_catalog.digest(bytes)
+        else
+            null,
     };
 
     // The certificate, when the compile captured the evidence for one. Building
@@ -832,6 +854,7 @@ fn writeArtifactTail(
             .attestation = attestation_jws,
             .certificate = if (certificate) |value| value.bytes else null,
             .invariant_section = input.invariant_spec,
+            .tool_catalog_section = tool_catalog_section,
         },
     );
 }
@@ -1839,7 +1862,6 @@ test "a balance-only handler is accepted and reports vacuous write applicability
 
     // The promoted generation carries the same answer, and coverage readiness
     // is untouched by it.
-    const contract_runtime = @import("contract_runtime.zig");
     const status = contract_runtime.InvariantStatus.fromVerdicts(assessment.invariants);
     try std.testing.expect(status.coverageReady());
     try std.testing.expectEqual(
@@ -2378,6 +2400,340 @@ test "the signed root and the startup rebuild are the same fold" {
         .identity = artifact_graph.identityFromContract(&contract),
     })).?;
     try std.testing.expect(!std.mem.eql(u8, &built.executable_root, &without_ir));
+}
+
+// ---------------------------------------------------------------------------
+// Tool catalog: from a real compile, through the artifact, to promotion
+// ---------------------------------------------------------------------------
+
+const contract_runtime = @import("contract_runtime.zig");
+
+/// `packages/tools/tests/fixtures/contract/tool_catalog.ts`, verbatim. The
+/// runtime test root cannot embed a file outside its package, so the source is
+/// repeated here; the fixture's own tests pin the contract it yields.
+const tool_catalog_fixture_source =
+    \\import { toolCatalog } from "zttp:tool";
+    \\import { routerMatch } from "zttp:router";
+    \\import { schemaCompile } from "zttp:validate";
+    \\
+    \\schemaCompile("PingInput", "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{}}");
+    \\schemaCompile("PingOutput", "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"ok\":{\"type\":\"boolean\"}}}");
+    \\
+    \\toolCatalog({
+    \\  ping: {
+    \\    route: "POST /tools/ping",
+    \\    description: "Report that the service is up.",
+    \\    input: "PingInput",
+    \\    output: "PingOutput",
+    \\    maxInputBytes: 256
+    \\  }
+    \\});
+    \\
+    \\function ping(req: Request): Response {
+    \\  return Response.json({ ok: true });
+    \\}
+    \\
+    \\const routes = { "POST /tools/ping": ping };
+    \\
+    \\function handler(req: Request): Proof<Response, "deterministic" | "read_only"> {
+    \\  const found = routerMatch(routes, req);
+    \\  if (found !== undefined) {
+    \\    return found.handler(req);
+    \\  }
+    \\  return Response.json({ error: "not found" }, { status: 404 });
+    \\}
+;
+
+/// Captures the payload the artifact tail would write, serialized exactly as
+/// `self_extract.create` serializes it, so a test reads it back the way a
+/// deployed binary does.
+const PayloadCapture = struct {
+    allocator: std.mem.Allocator,
+    serialized: ?[]u8 = null,
+
+    fn deinit(self: *PayloadCapture) void {
+        if (self.serialized) |bytes| self.allocator.free(bytes);
+    }
+
+    fn capture(
+        context: ?*anyopaque,
+        _: std.mem.Allocator,
+        _: []const u8,
+        _: []const u8,
+        payload: self_extract.PayloadInput,
+    ) !void {
+        const self: *PayloadCapture = @ptrCast(@alignCast(context.?));
+        if (self.serialized) |old| self.allocator.free(old);
+        self.serialized = null;
+        self.serialized = try self_extract.serializePayload(self.allocator, payload);
+    }
+
+    fn capabilities(self: *PayloadCapture) ArtifactTailCapabilities {
+        return .{
+            .context = self,
+            .serialize_contract = serializeContractCapability,
+            .sign_contract = signContractCapability,
+            .create_artifact = capture,
+        };
+    }
+};
+
+/// A deployed artifact as the serving binary holds it: the parsed payload and
+/// the contract validated from its own section 3.
+const LoadedArtifact = struct {
+    payload: self_extract.Payload,
+    contract: contract_runtime.ValidatedRuntimeContract,
+    allocator: std.mem.Allocator,
+
+    fn deinit(self: *LoadedArtifact) void {
+        self.contract.deinit();
+        self.payload.deinit(self.allocator);
+    }
+
+    /// The same activation inputs `Server.acceptEmbeddedCertificate` builds.
+    fn activationInputs(self: *const LoadedArtifact) proof_activation.Inputs {
+        const view = self.contract.view();
+        return .{
+            .certificate = self.payload.certificate,
+            .bytecode = self.payload.bytecode,
+            .dep_bytecodes = self.payload.dep_bytecodes,
+            .contract_section = self.payload.contract_json,
+            .policy_section_digest = self.payload.policy_section_sha256,
+            .policy_section = self.payload.policy_section,
+            .identity = .{
+                .module_specifiers = view.modules,
+                .core_profile_id = view.source_identity.core_profile.id(),
+                .core_grammar_hash = view.source_identity.core_grammar_hash,
+                .semantics_hash = view.source_identity.semantics_hash,
+                .capability_hash = if (view.capabilities) |caps| caps.hash else [_]u8{0} ** 32,
+                .frontend_profile_id = if (view.source_identity.frontend) |f| f.profile.id() else null,
+                .frontend_grammar_hash = if (view.source_identity.frontend) |f| f.grammar_hash else null,
+            },
+            .tool_catalog = self.payload.tool_catalog_section,
+        };
+    }
+
+    fn certificateMembers(self: *const LoadedArtifact, kind: artifact_graph.MemberKind, out: []artifact_graph.Member) ![]artifact_graph.Member {
+        var budget = pcc.limits.Budget.init(.{});
+        const decoded = try pcc.certificate.decode(self.payload.certificate orelse return error.TestUnexpectedResult, .{}, &budget);
+        var count: usize = 0;
+        var index: u32 = 0;
+        while (index < decoded.graph.len()) : (index += 1) {
+            const member = try decoded.graph.get(index);
+            if (member.kind != kind) continue;
+            out[count] = member;
+            count += 1;
+        }
+        return out[0..count];
+    }
+
+    fn executableRoot(self: *const LoadedArtifact) ![32]u8 {
+        var budget = pcc.limits.Budget.init(.{});
+        const decoded = try pcc.certificate.decode(self.payload.certificate orelse return error.TestUnexpectedResult, .{}, &budget);
+        return decoded.identity.executable_root;
+    }
+};
+
+/// Compile `source`, run the production artifact tail over it, and load the
+/// payload it would have written.
+fn loadArtifactForSource(allocator: std.mem.Allocator, source: []const u8) !LoadedArtifact {
+    var compiled = try precompile.compileHandler(allocator, source, "handler.ts", .{
+        .emit_verify = true,
+        .emit_contract = true,
+        .emit_proof_evidence = true,
+    });
+    defer compiled.deinit(allocator);
+    const evidence = compiled.proof_evidence orelse return error.TestUnexpectedResult;
+    const contract = compiled.contract orelse return error.TestUnexpectedResult;
+
+    var capture = PayloadCapture{ .allocator = allocator };
+    defer capture.deinit();
+    try writeArtifactTail(allocator, .{
+        .runtime_binary = "runtime",
+        .output_path = "artifact.bin",
+        .attest_requested = false,
+        .bytecode = compiled.bytecode,
+        .dep_bytecodes = compiled.dep_bytecodes orelse &.{},
+        .contract = &contract,
+        .proof_evidence = &evidence,
+    }, capture.capabilities());
+
+    var payload = (try self_extract.parse(allocator, capture.serialized orelse return error.TestUnexpectedResult)) orelse
+        return error.TestUnexpectedResult;
+    errdefer payload.deinit(allocator);
+    const raw = try contract_runtime.parseContractJson(allocator, payload.contract_json orelse return error.TestUnexpectedResult);
+    const validated = try contract_runtime.validate(raw, .{ .bytecode = payload.bytecode });
+    return .{ .payload = payload, .contract = validated, .allocator = allocator };
+}
+
+fn expectAccepted(assessment: pcc.Assessment) !void {
+    if (assessment.rejection) |rejection| {
+        std.debug.print(
+            "unexpected rejection: {s} / {s}\n",
+            .{ rejection.stage.name(), rejection.code.text() },
+        );
+        return error.TestUnexpectedResult;
+    }
+    try std.testing.expect(assessment.accepted());
+}
+
+fn expectRefusedAt(assessment: pcc.Assessment, stage: pcc.verdict.Stage, code: pcc.ReasonCode) !void {
+    const rejection = assessment.rejection orelse return error.TestUnexpectedResult;
+    std.testing.expectEqual(code, rejection.code) catch |err| {
+        std.debug.print("refused with {s} at {s}\n", .{ rejection.code.text(), rejection.stage.name() });
+        return err;
+    };
+    try std.testing.expectEqual(stage, rejection.stage);
+}
+
+test "a real compile of a tool handler reaches acceptance and promotes the catalog it shipped" {
+    const allocator = std.testing.allocator;
+    var artifact = try loadArtifactForSource(allocator, tool_catalog_fixture_source);
+    defer artifact.deinit();
+
+    // The producer shipped the section and committed the member to it.
+    const section = artifact.payload.tool_catalog_section orelse return error.TestUnexpectedResult;
+    var member_buf: [4]artifact_graph.Member = undefined;
+    const members = try artifact.certificateMembers(.tool_catalog, &member_buf);
+    try std.testing.expectEqual(@as(usize, 1), members.len);
+    try std.testing.expectEqual(@as(u32, 0), members[0].ordinal);
+    try std.testing.expectEqualSlices(u8, &pcc.tool_catalog.digest(section), &members[0].digest);
+
+    // The startup rebuild from the loaded sections folds the root the
+    // certificate names.
+    const inputs = artifact.activationInputs();
+    const observed = (try proof_activation.observedRoot(allocator, inputs)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualSlices(u8, &(try artifact.executableRoot()), &observed);
+
+    const assessment = try proof_activation.accept(allocator, inputs, pcc.policy.production);
+    try expectAccepted(assessment);
+
+    var promoted = (try contract_runtime.promote(
+        &artifact.contract,
+        assessment,
+        artifact.payload.policy_section_sha256,
+        section,
+    )) orelse return error.TestUnexpectedResult;
+    defer promoted.deinit();
+    const catalog = promoted.tool_catalog orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), catalog.entries.len);
+    const ping = catalog.entries[0];
+    try std.testing.expectEqualStrings("ping", ping.name);
+    try std.testing.expectEqualStrings("POST", ping.method);
+    try std.testing.expectEqualStrings("/tools/ping", ping.path);
+    try std.testing.expectEqual(@as(u32, 256), ping.max_input_bytes);
+}
+
+test "one changed catalog byte in a copy of an accepted tool artifact is refused at artifact binding" {
+    const allocator = std.testing.allocator;
+    var artifact = try loadArtifactForSource(allocator, tool_catalog_fixture_source);
+    defer artifact.deinit();
+    const section = artifact.payload.tool_catalog_section orelse return error.TestUnexpectedResult;
+
+    // A byte inside the description, so the tampered copy still decodes: the
+    // refusal is the member binding, not a decode failure.
+    const tampered = try allocator.dupe(u8, section);
+    defer allocator.free(tampered);
+    const at = std.mem.indexOf(u8, tampered, "service is up") orelse return error.TestUnexpectedResult;
+    tampered[at] = 'S';
+    _ = try pcc.tool_catalog.decode(tampered);
+
+    var inputs = artifact.activationInputs();
+    inputs.tool_catalog = tampered;
+    const assessment = try proof_activation.accept(allocator, inputs, pcc.policy.production);
+    // The runtime rebuilds the member from the bytes it loaded, so the changed
+    // byte moves the member digest away from the certificate's.
+    try expectRefusedAt(assessment, .artifact_binding, .graph_member_digest_mismatch);
+}
+
+test "a tool artifact whose catalog section was deleted is refused at artifact binding" {
+    const allocator = std.testing.allocator;
+    var artifact = try loadArtifactForSource(allocator, tool_catalog_fixture_source);
+    defer artifact.deinit();
+
+    var inputs = artifact.activationInputs();
+    inputs.tool_catalog = null;
+    const assessment = try proof_activation.accept(allocator, inputs, pcc.policy.production);
+    // The certificate's graph still names member 19; the loaded sections no
+    // longer produce it.
+    try expectRefusedAt(assessment, .artifact_binding, .graph_member_missing);
+}
+
+test "a changed runtime policy member is refused at artifact binding (B8.8)" {
+    const allocator = std.testing.allocator;
+    var artifact = try loadArtifactForSource(allocator, tool_catalog_fixture_source);
+    defer artifact.deinit();
+    const policy_section = artifact.payload.policy_section orelse return error.TestUnexpectedResult;
+
+    // A consistent change: new bytes and their own digest, so the only thing
+    // that disagrees is the `runtime_policy_bytes` member the certificate names.
+    const changed = try allocator.dupe(u8, policy_section);
+    defer allocator.free(changed);
+    changed[changed.len - 1] +%= 1;
+    var changed_digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(changed, &changed_digest, .{});
+
+    var inputs = artifact.activationInputs();
+    inputs.policy_section = changed;
+    inputs.policy_section_digest = changed_digest;
+    const assessment = try proof_activation.accept(allocator, inputs, pcc.policy.production);
+    try expectRefusedAt(assessment, .artifact_binding, .graph_member_digest_mismatch);
+}
+
+test "a contract tool list that disagrees with the accepted catalog refuses to start" {
+    const allocator = std.testing.allocator;
+    var artifact = try loadArtifactForSource(allocator, tool_catalog_fixture_source);
+    defer artifact.deinit();
+    const section = artifact.payload.tool_catalog_section orelse return error.TestUnexpectedResult;
+    const assessment = try proof_activation.accept(allocator, artifact.activationInputs(), pcc.policy.production);
+    try expectAccepted(assessment);
+
+    // The same contract with one byte bound changed. The accepted catalog wins,
+    // and a disagreement is a refusal, not a merge.
+    const contract_json = artifact.payload.contract_json orelse return error.TestUnexpectedResult;
+    const needle = "\"maxInputBytes\": 256";
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, contract_json, needle));
+    const changed_json = try std.mem.replaceOwned(u8, allocator, contract_json, needle, "\"maxInputBytes\": 257");
+    defer allocator.free(changed_json);
+    const raw = try contract_runtime.parseContractJson(allocator, changed_json);
+    var disagreeing = try contract_runtime.validate(raw, .{ .bytecode = artifact.payload.bytecode });
+    defer disagreeing.deinit();
+    try std.testing.expectError(
+        error.ToolCatalogContractMismatch,
+        contract_runtime.promote(&disagreeing, assessment, artifact.payload.policy_section_sha256, section),
+    );
+
+    // And the contract names tools while no catalog section was accepted.
+    try std.testing.expectError(
+        error.ToolCatalogMissing,
+        contract_runtime.promote(&artifact.contract, assessment, artifact.payload.policy_section_sha256, null),
+    );
+}
+
+test "a handler with no tool catalog ships no section and no member, and promotes none" {
+    const allocator = std.testing.allocator;
+    var artifact = try loadArtifactForSource(allocator,
+        \\export function handler(req: Request): Proof<Response, "deterministic" | "read_only" | "state_isolated" | "no_secret_leakage" | "result_safe"> {
+        \\  return Response.text("ok");
+        \\}
+    );
+    defer artifact.deinit();
+
+    try std.testing.expect(artifact.payload.tool_catalog_section == null);
+    var member_buf: [4]artifact_graph.Member = undefined;
+    try std.testing.expectEqual(@as(usize, 0), (try artifact.certificateMembers(.tool_catalog, &member_buf)).len);
+    try std.testing.expectEqual(@as(usize, 0), artifact.contract.view().tools.len);
+
+    const assessment = try proof_activation.accept(allocator, artifact.activationInputs(), pcc.policy.production);
+    try expectAccepted(assessment);
+    var promoted = (try contract_runtime.promote(
+        &artifact.contract,
+        assessment,
+        artifact.payload.policy_section_sha256,
+        null,
+    )) orelse return error.TestUnexpectedResult;
+    defer promoted.deinit();
+    try std.testing.expect(promoted.tool_catalog == null);
 }
 
 test "a handler that does not always return is not accepted" {

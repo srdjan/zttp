@@ -1497,6 +1497,7 @@ pub const Server = struct {
         if (self.system_runtime) |*sr| sr.deinit();
         if (self.actor_queue) |*q| q.deinit();
         if (self.proof_cache) |*pc| pc.deinit();
+        self.clearProofChecked();
         if (self.contract) |*c| c.deinit();
         if (self.attestation_headers) |*ah| ah.deinit(self.allocator);
         if (self.well_known_doc) |*wkd| wkd.deinit(self.allocator);
@@ -1523,6 +1524,12 @@ pub const Server = struct {
     /// replaces the executable without re-running acceptance, so it cannot
     /// produce that tuple, and the swap is refused rather than allowed to leave
     /// a new handler standing on the old policy's coverage.
+    /// Drop the promotion and release the accepted tool catalog it owns.
+    fn clearProofChecked(self: *Self) void {
+        if (self.proof_checked) |*promoted| promoted.deinit();
+        self.proof_checked = null;
+    }
+
     pub fn generationIsGuarded(self: *const Self) bool {
         const promoted = self.proof_checked orelse return false;
         return promoted.guards.required > 0 or promoted.invariants.configured;
@@ -1549,7 +1556,7 @@ pub const Server = struct {
         // therefore drops the promotion rather than carrying it across: the new
         // handler has not been checked by anything, and the proof cache,
         // unbounded reuse, and the durable-workflow guarantees all go with it.
-        self.proof_checked = null;
+        self.clearProofChecked();
         if (self.pool) |*pool| {
             pool.setDurableWorkflowProperties(.{});
         }
@@ -1586,7 +1593,7 @@ pub const Server = struct {
             c.deinit();
             self.contract = null;
         }
-        self.proof_checked = null;
+        self.clearProofChecked();
         if (self.pool) |*pool| {
             pool.setDurableWorkflowProperties(.{});
         }
@@ -1822,9 +1829,38 @@ pub const Server = struct {
             else
                 .absent,
             .invariant_spec = self.config.runtime_config.invariant_section,
+            .tool_catalog = self.config.runtime_config.tool_catalog_section,
         }, pcc.policy.production);
 
-        self.proof_checked = contract_runtime.promote(contract, assessment, policy_digest);
+        self.proof_checked = contract_runtime.promote(
+            contract,
+            assessment,
+            policy_digest,
+            self.config.runtime_config.tool_catalog_section,
+        ) catch |err| {
+            if (!builtin.is_test) {
+                switch (err) {
+                    error.OutOfMemory => {},
+                    error.AcceptedToolCatalogUndecodable => std.log.err(
+                        "activation: the accepted tool catalog does not decode; refusing to serve",
+                        .{},
+                    ),
+                    error.ToolSchemaNotCompilable => std.log.err(
+                        "activation: a schema in the accepted tool catalog does not compile; refusing to serve",
+                        .{},
+                    ),
+                    error.ToolCatalogContractMismatch => std.log.err(
+                        "activation: the contract's tool list does not match the accepted tool catalog; refusing to serve",
+                        .{},
+                    ),
+                    error.ToolCatalogMissing => std.log.err(
+                        "activation: the contract lists tools but the artifact carries no accepted tool catalog; refusing to serve",
+                        .{},
+                    ),
+                }
+            }
+            return err;
+        };
         if (self.proof_checked == null) {
             if (!builtin.is_test) {
                 if (assessment.rejection) |rejection| {
@@ -1892,6 +1928,7 @@ pub const Server = struct {
             .policy_section_digest = policy_section_sha256,
             .identity = self.observedArtifactIdentity(),
             .invariant_spec = self.config.runtime_config.invariant_section,
+            .tool_catalog = self.config.runtime_config.tool_catalog_section,
         }) catch |err| {
             if (!builtin.is_test) {
                 std.log.err(
@@ -4325,14 +4362,14 @@ test "a live swap drops the promotion the replaced artifact earned" {
     server.contract = try contract_runtime.validate(raw, .{});
 
     // Stand in for what an accepted certificate earns.
-    server.proof_checked = contract_runtime.promote(&server.contract.?, .{
+    server.proof_checked = try contract_runtime.promote(&server.contract.?, .{
         .semantic = .policy_accepted,
         .provenance = .absent,
         .grade = .translation_validated,
         .development_only = false,
         .rejection = null,
         .work_spent = 1,
-    }, [_]u8{0} ** 32);
+    }, [_]u8{0} ** 32, null);
     try std.testing.expect(server.proof_checked != null);
 
     // The certificate described the artifact that is being replaced, so the
@@ -4357,7 +4394,7 @@ test "promotion refuses anything short of acceptance" {
     defer validated.deinit();
 
     // Checked but refused by policy.
-    try std.testing.expect(contract_runtime.promote(&validated, .{
+    try std.testing.expect((try contract_runtime.promote(&validated, .{
         .semantic = .proof_checked,
         .provenance = .absent,
         .grade = .trusted,
@@ -4368,28 +4405,28 @@ test "promotion refuses anything short of acceptance" {
             .recertifiable = true,
         },
         .work_spent = 1,
-    }, [_]u8{0} ** 32) == null);
+    }, [_]u8{0} ** 32, null)) == null);
 
     // Accepted, but with no grade to report. An acceptance that cannot say how
     // strong it is does not get to drive anything.
-    try std.testing.expect(contract_runtime.promote(&validated, .{
+    try std.testing.expect((try contract_runtime.promote(&validated, .{
         .semantic = .policy_accepted,
         .provenance = .absent,
         .grade = null,
         .development_only = false,
         .rejection = null,
         .work_spent = 1,
-    }, [_]u8{0} ** 32) == null);
+    }, [_]u8{0} ** 32, null)) == null);
 
     // Integrity alone is not acceptance.
-    try std.testing.expect(contract_runtime.promote(&validated, .{
+    try std.testing.expect((try contract_runtime.promote(&validated, .{
         .semantic = .integrity_verified,
         .provenance = .trusted_origin,
         .grade = null,
         .development_only = false,
         .rejection = null,
         .work_spent = 1,
-    }, [_]u8{0} ** 32) == null);
+    }, [_]u8{0} ** 32, null)) == null);
 }
 
 test "self-extract runtime policy binding rejects a widened policy" {

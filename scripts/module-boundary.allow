@@ -70,6 +70,9 @@ runtime spec_discharge
 # a denied write did not add.
 runtime sqlite
 runtime string
+# Compiling the accepted tool catalog's schemas at startup (M4 T3): the
+# runtime refuses to serve a catalog whose schema does not compile.
+runtime tool_schema
 runtime trace
 runtime witness_corpus
 

@@ -45,6 +45,10 @@ pub const RuntimeConfig = struct {
     ledger_path: ?[]const u8 = null,
     /// Exact consumer-checked bytes, borrowed for the runtime generation.
     invariant_section: ?[]const u8 = null,
+    /// Exact `ZTCAT1` tool catalog section loaded with the artifact, borrowed
+    /// for the runtime generation. It is handed to acceptance and lowered only
+    /// from there. Null when the handler has no tool catalog.
+    tool_catalog_section: ?[]const u8 = null,
     invariant_coverage_accepted: bool = false,
     trace_file_path: ?[]const u8 = null,
     /// Opt-in JSONL sink for runtime soundness incidents (`--incident-log`).

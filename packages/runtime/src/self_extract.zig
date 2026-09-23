@@ -14,11 +14,27 @@ const handler_policy = zts.handler_policy;
 // 24      8     magic
 
 pub const MAGIC: u64 = 0x5A54_5042_4331_0000; // "ZTPBC1\0\0"
-/// Bumped to 4 for the application-invariant specification section. The reader
-/// checks equality, not an upper bound. Version 3 cannot carry the invariant
-/// section, so interpreting it under current rules would report coverage it
-/// never held.
-pub const FORMAT_VERSION: u16 = 4;
+/// Bumped to 5 for the tool catalog section. The reader checks equality, not an
+/// upper bound. Version 4 cannot carry the catalog section, so interpreting it
+/// under current rules would serve a tool handler without the catalog its
+/// certificate names. Version 4 added the application-invariant specification
+/// section for the same reason.
+pub const FORMAT_VERSION: u16 = 5;
+
+/// The largest `ZTCAT1` section the reader accepts, derived from the kernel's
+/// own per-field bounds so the two cannot drift. One entry is eight u32 length
+/// prefixes, each string at its maximum, the u32 byte bound, the u16 export
+/// count, and `max_exports` exports of two prefixed strings each. The catalog
+/// is the header plus `max_entries` such entries. Anything larger cannot
+/// decode, so it is refused before it is copied.
+pub const max_tool_catalog_section_bytes: usize = blk: {
+    const cat = @import("zttp_proof_checker").tool_catalog;
+    const strings: usize = 8 * 4 + cat.max_name_bytes + cat.max_method_bytes + cat.max_path_bytes +
+        cat.max_description_bytes + 2 * cat.max_schema_name_bytes + 2 * cat.max_schema_bytes;
+    const exports: usize = @as(usize, cat.max_exports) * (2 * 4 + 2 * cat.max_export_field_bytes);
+    const entry: usize = strings + 4 + 2 + exports;
+    break :blk cat.header_size + @as(usize, cat.max_entries) * entry;
+};
 pub const TRAILER_SIZE: usize = 32;
 const base_copy_chunk_size: usize = 64 * 1024;
 
@@ -36,6 +52,9 @@ pub const Section = enum(u8) {
     certificate = 7,
     /// Canonical structured application invariant specification bytes.
     invariant = 8,
+    /// Canonical `ZTCAT1` tool catalog bytes, bound as the `tool_catalog`
+    /// executable-graph member. Present only for a handler with a catalog.
+    tool_catalog = 9,
 };
 
 pub const Payload = struct {
@@ -60,6 +79,8 @@ pub const Payload = struct {
     /// absent certificate is a missing proof, not a permissive default.
     certificate: ?[]const u8 = null,
     invariant_section: ?[]const u8 = null,
+    /// Section 9, exactly as read. Null when the handler has no tool catalog.
+    tool_catalog_section: ?[]const u8 = null,
 
     pub fn deinit(self: *const Payload, allocator: std.mem.Allocator) void {
         allocator.free(self.bytecode);
@@ -70,6 +91,7 @@ pub const Payload = struct {
         if (self.attestation_jws) |a| allocator.free(a);
         if (self.certificate) |c| allocator.free(c);
         if (self.invariant_section) |section| allocator.free(section);
+        if (self.tool_catalog_section) |section| allocator.free(section);
         // Free the values arrays inside each policy allow list
         if (self.policy.env.values.len > 0) allocator.free(self.policy.env.values);
         if (self.policy.egress.values.len > 0) allocator.free(self.policy.egress.values);
@@ -206,6 +228,8 @@ pub const PayloadInput = struct {
     certificate: ?[]const u8 = null,
     /// Exact canonical invariant bytes committed by the proof certificate.
     invariant_section: ?[]const u8 = null,
+    /// Exact canonical `ZTCAT1` bytes bound as the `tool_catalog` graph member.
+    tool_catalog_section: ?[]const u8 = null,
 };
 
 const ArtifactWriteCapability = struct {
@@ -370,6 +394,7 @@ pub fn serializePayload(allocator: std.mem.Allocator, input: PayloadInput) ![]u8
     if (input.attestation != null) section_count += 1;
     if (input.certificate != null) section_count += 1;
     if (input.invariant_section != null) section_count += 1;
+    if (input.tool_catalog_section != null) section_count += 1;
 
     try buf.ensureTotalCapacity(allocator, input.bytecode.len + 256);
     try writeU16(&buf, allocator, section_count);
@@ -418,6 +443,11 @@ pub fn serializePayload(allocator: std.mem.Allocator, input: PayloadInput) ![]u8
         try writeSection(&buf, allocator, .invariant, invariant_section);
     }
 
+    // Section 9: canonical tool catalog (if the handler has one)
+    if (input.tool_catalog_section) |tool_catalog_section| {
+        try writeSection(&buf, allocator, .tool_catalog, tool_catalog_section);
+    }
+
     return buf.toOwnedSlice(allocator);
 }
 
@@ -433,11 +463,12 @@ pub fn parse(allocator: std.mem.Allocator, data: []const u8) !?Payload {
     var attestation_jws: ?[]const u8 = null;
     var certificate: ?[]const u8 = null;
     var invariant_section: ?[]const u8 = null;
+    var tool_catalog_section: ?[]const u8 = null;
     var policy: zts.RuntimePolicy = .{};
     var policy_section: ?[]const u8 = null;
     var policy_section_sha256 = [_]u8{0} ** 32;
     var policy_strings: std.ArrayList([]const u8) = .empty;
-    var seen_sections = [_]bool{false} ** 9;
+    var seen_sections = [_]bool{false} ** 10;
     errdefer {
         if (bytecode) |b| allocator.free(b);
         if (dep_bytecodes) |deps| {
@@ -449,6 +480,7 @@ pub fn parse(allocator: std.mem.Allocator, data: []const u8) !?Payload {
         if (attestation_jws) |a| allocator.free(a);
         if (certificate) |c| allocator.free(c);
         if (invariant_section) |section| allocator.free(section);
+        if (tool_catalog_section) |section| allocator.free(section);
         freePolicyArrays(allocator, policy);
         for (policy_strings.items) |s| allocator.free(s);
         policy_strings.deinit(allocator);
@@ -495,6 +527,10 @@ pub fn parse(allocator: std.mem.Allocator, data: []const u8) !?Payload {
                 if (section_data.len > @import("zttp_proof_checker").invariant.max_spec_bytes) return error.InvalidPayload;
                 invariant_section = try allocator.dupe(u8, section_data);
             },
+            @intFromEnum(Section.tool_catalog) => {
+                if (section_data.len > max_tool_catalog_section_bytes) return error.InvalidPayload;
+                tool_catalog_section = try allocator.dupe(u8, section_data);
+            },
             // No forward-compatibility skip. The payload version is checked for
             // equality, so a section this reader does not know is not a future
             // artifact - it is a malformed one, and reading the rest of it would
@@ -517,6 +553,7 @@ pub fn parse(allocator: std.mem.Allocator, data: []const u8) !?Payload {
         .attestation_jws = attestation_jws,
         .certificate = certificate,
         .invariant_section = invariant_section,
+        .tool_catalog_section = tool_catalog_section,
     };
 }
 
@@ -1403,6 +1440,67 @@ test "payload parser rejects oversized and duplicate policy sections" {
     try std.testing.expectError(error.DuplicatePayloadSection, parse(allocator, encoded.items));
 }
 
+test "roundtrip: payload with a tool catalog section" {
+    const allocator = std.testing.allocator;
+    const policy = zts.RuntimePolicy{};
+    var catalog_buf: [4096]u8 = undefined;
+    const catalog = @import("zttp_proof_checker").tool_catalog.test_support.sample(&catalog_buf);
+
+    const serialized = try serializePayload(allocator, .{
+        .bytecode = "bytecode",
+        .contract_json = "{}",
+        .policy = &policy,
+        .invariant_section = "invariant",
+        .tool_catalog_section = catalog,
+    });
+    defer allocator.free(serialized);
+    // bytecode, contract, policy, invariant, tool catalog.
+    try std.testing.expectEqual(@as(u16, 5), std.mem.readInt(u16, serialized[0..2], .little));
+
+    const parsed = (try parse(allocator, serialized)).?;
+    defer parsed.deinit(allocator);
+    try std.testing.expectEqualSlices(u8, catalog, parsed.tool_catalog_section.?);
+    try std.testing.expectEqualStrings("invariant", parsed.invariant_section.?);
+
+    // A handler with no catalog carries no section, and parses to null.
+    const without = try serializePayload(allocator, .{ .bytecode = "bytecode", .policy = &policy });
+    defer allocator.free(without);
+    const parsed_without = (try parse(allocator, without)).?;
+    defer parsed_without.deinit(allocator);
+    try std.testing.expect(parsed_without.tool_catalog_section == null);
+}
+
+test "payload parser rejects oversized and duplicate tool catalog sections" {
+    const allocator = std.testing.allocator;
+    const oversized = try allocator.alloc(u8, max_tool_catalog_section_bytes + 1);
+    defer allocator.free(oversized);
+    @memset(oversized, 0);
+
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try writeU16(&encoded, allocator, 2);
+    try writeSection(&encoded, allocator, .bytecode, "bytecode");
+    try writeSection(&encoded, allocator, .tool_catalog, oversized);
+    try std.testing.expectError(error.InvalidPayload, parse(allocator, encoded.items));
+
+    // The bound itself is accepted by the framing: the kernel, not the
+    // framing, decides whether such bytes are a catalog.
+    encoded.clearRetainingCapacity();
+    try writeU16(&encoded, allocator, 2);
+    try writeSection(&encoded, allocator, .bytecode, "bytecode");
+    try writeSection(&encoded, allocator, .tool_catalog, oversized[0..max_tool_catalog_section_bytes]);
+    const at_bound = (try parse(allocator, encoded.items)).?;
+    defer at_bound.deinit(allocator);
+    try std.testing.expectEqual(max_tool_catalog_section_bytes, at_bound.tool_catalog_section.?.len);
+
+    encoded.clearRetainingCapacity();
+    try writeU16(&encoded, allocator, 3);
+    try writeSection(&encoded, allocator, .bytecode, "bytecode");
+    try writeSection(&encoded, allocator, .tool_catalog, "first");
+    try writeSection(&encoded, allocator, .tool_catalog, "second");
+    try std.testing.expectError(error.DuplicatePayloadSection, parse(allocator, encoded.items));
+}
+
 test "getCleanBinarySize: no trailer returns full size" {
     const data = "just some binary data without a trailer";
     try std.testing.expectEqual(data.len, getCleanBinarySize(data));
@@ -1441,11 +1539,18 @@ fn buildTrailer(payload_offset: u64, payload_size: u64, version: u16) [TRAILER_S
 }
 
 test "a trailer from the previous payload format is refused with a rebuild diagnostic" {
-    try std.testing.expectEqual(@as(u16, 4), FORMAT_VERSION);
+    try std.testing.expectEqual(@as(u16, 5), FORMAT_VERSION);
     const trailer = buildTrailer(100, 50, 2);
     try std.testing.expectError(
         error.UnsupportedArtifactFormat,
         readTrailer(100 + 50 + TRAILER_SIZE, &trailer),
+    );
+    // Version 4 has no tool catalog section. Reading it under current rules
+    // would serve a tool handler with no accepted catalog, so it is refused.
+    const version_four = buildTrailer(100, 50, 4);
+    try std.testing.expectError(
+        error.UnsupportedArtifactFormat,
+        readTrailer(100 + 50 + TRAILER_SIZE, &version_four),
     );
 }
 

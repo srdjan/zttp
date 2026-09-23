@@ -49,6 +49,71 @@ pub const Route = struct {
     path: []const u8,
 };
 
+/// What the contract says about one tool, lowered for the startup cross-check
+/// against the accepted catalog. The contract is producer output; the accepted
+/// catalog is what the runtime serves, and a difference refuses to start.
+pub const ToolSummary = struct {
+    name: []const u8,
+    /// Uppercase ASCII, split from the route key at its first space.
+    method: []const u8,
+    path: []const u8,
+    max_input_bytes: u32,
+};
+
+/// One tool from the accepted `ZTCAT1` catalog, with both schemas compiled.
+/// The string fields borrow from `AcceptedCatalog.bytes`.
+pub const AcceptedTool = struct {
+    name: []const u8,
+    method: []const u8,
+    path: []const u8,
+    max_input_bytes: u32,
+    input: zq.tool_schema.CompiledToolSchema,
+    output: zq.tool_schema.CompiledToolSchema,
+};
+
+/// The tool catalog lowered from the section bytes that passed acceptance,
+/// never from producer output. Owns a copy of those bytes and every compiled
+/// schema.
+pub const AcceptedCatalog = struct {
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    entries: []AcceptedTool,
+
+    pub fn deinit(self: *AcceptedCatalog) void {
+        for (self.entries) |*entry| {
+            entry.input.deinit();
+            entry.output.deinit();
+        }
+        self.allocator.free(self.entries);
+        self.allocator.free(self.bytes);
+        self.* = undefined;
+    }
+
+    pub fn find(self: *const AcceptedCatalog, name: []const u8) ?*const AcceptedTool {
+        for (self.entries) |*entry| {
+            if (std.mem.eql(u8, entry.name, name)) return entry;
+        }
+        return null;
+    }
+};
+
+/// Why a promotion that the kernel accepted still refuses to start.
+pub const PromoteError = std.mem.Allocator.Error || error{
+    /// The accepted section bytes do not decode. Acceptance already decoded
+    /// them, so this is an invariant violation, and it refuses rather than
+    /// serves without a catalog.
+    AcceptedToolCatalogUndecodable,
+    /// A schema in the accepted catalog does not compile under the closed
+    /// subset. The kernel does not re-check the subset, so this is where an
+    /// out-of-subset schema stops.
+    ToolSchemaNotCompilable,
+    /// The contract's tool list and the accepted catalog disagree on the set
+    /// of names, or on a method, path, or byte bound.
+    ToolCatalogContractMismatch,
+    /// The contract lists tools and no catalog section was accepted.
+    ToolCatalogMissing,
+};
+
 /// How aggressively the runtime pool may reuse a warmed handler runtime.
 pub const PoolingPolicy = enum {
     ephemeral, // one runtime per request
@@ -133,10 +198,18 @@ pub const ProofCheckedContract = struct {
     /// the contract, the residual plan, and this digest install and retire
     /// together; a request reads one generation's tuple or none of it.
     runtime_policy_digest: [32]u8,
+    /// The tool catalog lowered from the accepted section bytes. Null when the
+    /// artifact carries no catalog. Owned: release it with `deinit`.
+    tool_catalog: ?AcceptedCatalog = null,
     /// Construction gate, the same one `ValidatedRuntimeContract` uses: the
     /// field's type names a file-private opaque, so no struct literal outside
     /// this file can produce one. `promote` is the only way in.
     _proof: ValidationProof,
+
+    pub fn deinit(self: *ProofCheckedContract) void {
+        if (self.tool_catalog) |*catalog| catalog.deinit();
+        self.tool_catalog = null;
+    }
 };
 
 /// Promote a validated contract using an acceptance the kernel produced.
@@ -145,11 +218,18 @@ pub const ProofCheckedContract = struct {
 /// reached `proof_checked` but failed the policy. There is no partial
 /// promotion: a property that did not clear the consumer's bar does not get to
 /// drive the runtime a little.
+///
+/// `tool_catalog_section` is the exact `ZTCAT1` section that was handed to the
+/// acceptance run, or null when the artifact carries none. When present it is
+/// lowered into an `AcceptedCatalog` and cross-checked against the contract's
+/// tool list; an error return is a refusal to start, never a promotion
+/// without the catalog.
 pub fn promote(
     validated: *const ValidatedRuntimeContract,
     assessment: pcc.Assessment,
     runtime_policy_digest: [32]u8,
-) ?ProofCheckedContract {
+    tool_catalog_section: ?[]const u8,
+) PromoteError!?ProofCheckedContract {
     if (!assessment.accepted()) return null;
     const grade = assessment.grade orelse return null;
     // Coverage is part of acceptance, not a note beside it. A certificate
@@ -157,6 +237,17 @@ pub fn promote(
     // consumer could not account for, and the kernel rejects it; this refuses
     // to promote one that arrives uncovered by any other route.
     if (!assessment.guards.ready()) return null;
+
+    const contract_tools = validated.view().tools;
+    var tool_catalog: ?AcceptedCatalog = null;
+    errdefer if (tool_catalog) |*catalog| catalog.deinit();
+    if (tool_catalog_section) |bytes| {
+        tool_catalog = try lowerAcceptedCatalog(validated.view().allocator, bytes);
+        try crossCheckToolCatalog(&tool_catalog.?, contract_tools);
+    } else if (contract_tools.len != 0) {
+        return error.ToolCatalogMissing;
+    }
+
     return .{
         .properties = acceptedProperties(validated.properties(), assessment.properties),
         .durable_workflow = acceptedWorkflowProperties(
@@ -169,8 +260,76 @@ pub fn promote(
         .guards = assessment.guards,
         .invariants = InvariantStatus.fromVerdicts(assessment.invariants),
         .runtime_policy_digest = runtime_policy_digest,
+        .tool_catalog = tool_catalog,
         ._proof = validation_proof,
     };
+}
+
+/// Decode the accepted `ZTCAT1` bytes and compile every schema they carry.
+fn lowerAcceptedCatalog(allocator: std.mem.Allocator, bytes: []const u8) PromoteError!AcceptedCatalog {
+    const owned = try allocator.dupe(u8, bytes);
+    errdefer allocator.free(owned);
+    const catalog = pcc.tool_catalog.decode(owned) catch return error.AcceptedToolCatalogUndecodable;
+
+    const entries = try allocator.alloc(AcceptedTool, catalog.entry_count);
+    var filled: usize = 0;
+    errdefer {
+        for (entries[0..filled]) |*entry| {
+            entry.input.deinit();
+            entry.output.deinit();
+        }
+        allocator.free(entries);
+    }
+
+    var iterator = catalog.entries();
+    while (iterator.next() catch return error.AcceptedToolCatalogUndecodable) |entry| {
+        if (filled >= entries.len) return error.AcceptedToolCatalogUndecodable;
+        var input = try compileAcceptedSchema(allocator, entry.input_schema);
+        errdefer input.deinit();
+        const output = try compileAcceptedSchema(allocator, entry.output_schema);
+        entries[filled] = .{
+            .name = entry.name,
+            .method = entry.method,
+            .path = entry.path,
+            .max_input_bytes = entry.max_input_bytes,
+            .input = input,
+            .output = output,
+        };
+        filled += 1;
+    }
+    if (filled != entries.len) return error.AcceptedToolCatalogUndecodable;
+
+    return .{ .allocator = allocator, .bytes = owned, .entries = entries };
+}
+
+fn compileAcceptedSchema(allocator: std.mem.Allocator, schema: []const u8) PromoteError!zq.tool_schema.CompiledToolSchema {
+    return zq.tool_schema.compile(allocator, schema) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.SchemaNotInSubset => return error.ToolSchemaNotCompilable,
+    };
+}
+
+/// The accepted catalog wins, and a disagreement is a refusal rather than a
+/// merge: the same set of names, and for each the same method, path, and
+/// input byte bound.
+fn crossCheckToolCatalog(catalog: *const AcceptedCatalog, contract_tools: []const ToolSummary) PromoteError!void {
+    // Both directions: the contract is producer output and may repeat a name,
+    // so one direction plus equal counts would let [a, a] stand for [a, b].
+    if (catalog.entries.len != contract_tools.len) return error.ToolCatalogContractMismatch;
+    for (catalog.entries) |entry| {
+        for (contract_tools) |tool| {
+            if (std.mem.eql(u8, tool.name, entry.name)) break;
+        } else return error.ToolCatalogContractMismatch;
+    }
+    for (contract_tools) |tool| {
+        const entry = catalog.find(tool.name) orelse return error.ToolCatalogContractMismatch;
+        if (!std.mem.eql(u8, entry.method, tool.method) or
+            !std.mem.eql(u8, entry.path, tool.path) or
+            entry.max_input_bytes != tool.max_input_bytes)
+        {
+            return error.ToolCatalogContractMismatch;
+        }
+    }
 }
 
 pub const NativeAdapterAssumption = enum {
@@ -310,6 +469,9 @@ pub const RuntimeContract = struct {
     policy_hash: [32]u8 = [_]u8{0} ** 32,
     modules: []const []const u8 = &.{},
     cost_envelope: ?CostEnvelope = null,
+    /// The contract's tool list, kept for the startup cross-check against the
+    /// accepted catalog. Empty for a handler with no tool catalog.
+    tools: []const ToolSummary = &.{},
     allocator: std.mem.Allocator,
 
     pub fn hasCapability(self: *const RuntimeContract, cap: ModuleCapability) bool {
@@ -328,6 +490,7 @@ pub const RuntimeContract = struct {
         for (self.modules) |m| self.allocator.free(m);
         self.allocator.free(self.modules);
         if (self.cost_envelope) |*envelope| envelope.deinit(self.allocator);
+        freeToolSummaries(self.allocator, self.tools);
     }
 
     /// Check if a request method+path matches any proven route.
@@ -607,6 +770,30 @@ pub fn fromHandlerContract(allocator: std.mem.Allocator, hc: *const HandlerContr
         cost_envelope = try envelope.dupeOwned(allocator);
     }
 
+    var tools: std.ArrayList(ToolSummary) = .empty;
+    errdefer {
+        freeToolSummaryItems(allocator, tools.items);
+        tools.deinit(allocator);
+    }
+    for (hc.tools.items) |tool| {
+        // The same split the `ZTCAT1` encoder makes, so the two sides of the
+        // startup cross-check compare like with like.
+        const space = std.mem.indexOfScalar(u8, tool.route, ' ') orelse return error.ToolRouteInvalid;
+        if (space == 0 or space + 1 >= tool.route.len) return error.ToolRouteInvalid;
+        try tools.ensureUnusedCapacity(allocator, 1);
+        const name = try allocator.dupe(u8, tool.name);
+        errdefer allocator.free(name);
+        const method = try std.ascii.allocUpperString(allocator, tool.route[0..space]);
+        errdefer allocator.free(method);
+        const path = try allocator.dupe(u8, tool.route[space + 1 ..]);
+        tools.appendAssumeCapacity(.{
+            .name = name,
+            .method = method,
+            .path = path,
+            .max_input_bytes = tool.max_input_bytes,
+        });
+    }
+
     const cost_envelope_out = cost_envelope;
     cost_envelope = null;
 
@@ -633,6 +820,8 @@ pub fn fromHandlerContract(allocator: std.mem.Allocator, hc: *const HandlerContr
         for (modules_out) |m| allocator.free(m);
         allocator.free(modules_out);
     }
+    const tools_out = try tools.toOwnedSlice(allocator);
+    errdefer freeToolSummaries(allocator, tools_out);
 
     return .{ .inner = .{
         .env_vars = env_vars_out,
@@ -653,8 +842,22 @@ pub fn fromHandlerContract(allocator: std.mem.Allocator, hc: *const HandlerContr
         .policy_hash = hc.policy_hash,
         .modules = modules_out,
         .cost_envelope = cost_envelope_out,
+        .tools = tools_out,
         .allocator = allocator,
     } };
+}
+
+fn freeToolSummaryItems(allocator: std.mem.Allocator, tools: []const ToolSummary) void {
+    for (tools) |tool| {
+        allocator.free(tool.name);
+        allocator.free(tool.method);
+        allocator.free(tool.path);
+    }
+}
+
+fn freeToolSummaries(allocator: std.mem.Allocator, tools: []const ToolSummary) void {
+    freeToolSummaryItems(allocator, tools);
+    allocator.free(tools);
 }
 
 /// Rebuild the capability matrix from the currently-linked registry for
@@ -1552,7 +1755,7 @@ test "promotion exposes only properties that cleared the policy" {
     };
 
     const digest = [_]u8{0xab} ** 32;
-    const promoted = promote(&validated, assessment, digest) orelse return error.TestUnexpectedResult;
+    const promoted = (try promote(&validated, assessment, digest, null)) orelse return error.TestUnexpectedResult;
     try std.testing.expect(promoted.properties.no_secret_leakage);
     try std.testing.expect(promoted.properties.result_safe);
     try std.testing.expect(!promoted.properties.read_only);
@@ -1573,11 +1776,11 @@ test "promotion exposes only properties that cleared the policy" {
     // it becomes no promotion.
     var uncovered = assessment;
     uncovered.guards = .{ .required = 2, .covered = 1 };
-    try std.testing.expect(promote(&validated, uncovered, digest) == null);
+    try std.testing.expect((try promote(&validated, uncovered, digest, null)) == null);
 
     var covered = assessment;
     covered.guards = .{ .required = 2, .covered = 2, .kinds = 0x01 };
-    const guarded = promote(&validated, covered, digest) orelse return error.TestUnexpectedResult;
+    const guarded = (try promote(&validated, covered, digest, null)) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(u32, 2), guarded.guards.required);
     // Guard coverage is beside the properties, never inside them: the same
     // property set comes back.
@@ -1591,7 +1794,7 @@ test "promotion exposes only properties that cleared the policy" {
         .writes = 1,
         .kind_bits = 1,
     };
-    const invariant_contract = promote(&validated, invariant_covered, digest) orelse
+    const invariant_contract = (try promote(&validated, invariant_covered, digest, null)) orelse
         return error.TestUnexpectedResult;
     try std.testing.expect(invariant_contract.invariants.coverageReady());
     try std.testing.expectEqual(@as(u32, 1), invariant_contract.invariants.reads);
@@ -1628,7 +1831,7 @@ test "a read-only generation is coverage ready and reports vacuous write applica
         .writes = 0,
         .kind_bits = 0b11,
     };
-    const promoted = promote(&validated, assessment, [_]u8{0xcd} ** 32) orelse
+    const promoted = (try promote(&validated, assessment, [_]u8{0xcd} ** 32, null)) orelse
         return error.TestUnexpectedResult;
 
     // Vacuity is a report, never a relabelling. Coverage readiness reads
@@ -1903,4 +2106,201 @@ test "a wrong-typed route field is rejected outright" {
     ;
 
     try std.testing.expectError(error.InvalidJson, parseContractJson(allocator, source));
+}
+
+// ---------------------------------------------------------------------------
+// Accepted tool catalog: lowering and the startup cross-check
+// ---------------------------------------------------------------------------
+
+const catalog_test_support = pcc.tool_catalog.test_support;
+const closed_test_schema = "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{}}";
+
+const catalog_test_entries = [_]catalog_test_support.SampleEntry{
+    .{
+        .name = "alpha",
+        .path = "/tools/alpha",
+        .input_schema = closed_test_schema,
+        .output_schema = closed_test_schema,
+        .max_input_bytes = 64,
+    },
+    .{
+        .name = "beta",
+        .method = "GET",
+        .path = "/tools/beta",
+        .input_schema = closed_test_schema,
+        .output_schema = "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"ok\":{\"type\":\"boolean\"}}}",
+        .max_input_bytes = 128,
+    },
+};
+
+const matching_tool_summaries = [_]ToolSummary{
+    .{ .name = "alpha", .method = "POST", .path = "/tools/alpha", .max_input_bytes = 64 },
+    .{ .name = "beta", .method = "GET", .path = "/tools/beta", .max_input_bytes = 128 },
+};
+
+fn testCatalog(buf: []u8, entries: []const catalog_test_support.SampleEntry) []const u8 {
+    var w = catalog_test_support.Writer{ .buf = buf };
+    catalog_test_support.writeCatalog(&w, entries);
+    return w.bytes();
+}
+
+fn acceptedTestAssessment() pcc.Assessment {
+    return .{
+        .semantic = .policy_accepted,
+        .provenance = .absent,
+        .grade = .trusted,
+        .development_only = false,
+        .rejection = null,
+        .work_spent = 1,
+    };
+}
+
+/// A validated contract over static tool summaries. Never deinit'd: nothing in
+/// it is owned.
+fn toolTestContract(tools: []const ToolSummary) ValidatedRuntimeContract {
+    return validatedFromInner(.{
+        .env_vars = &.{},
+        .env_dynamic = false,
+        .routes = &.{},
+        .routes_dynamic = false,
+        .properties = .{},
+        .tools = tools,
+        .allocator = std.testing.allocator,
+    });
+}
+
+test "promotion lowers the accepted tool catalog and compiles every schema" {
+    var buf: [2048]u8 = undefined;
+    const bytes = testCatalog(&buf, &catalog_test_entries);
+    const validated = toolTestContract(&matching_tool_summaries);
+
+    var promoted = (try promote(&validated, acceptedTestAssessment(), [_]u8{0} ** 32, bytes)) orelse
+        return error.TestUnexpectedResult;
+    defer promoted.deinit();
+
+    const catalog = promoted.tool_catalog orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 2), catalog.entries.len);
+    const beta = catalog.find("beta") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("GET", beta.method);
+    try std.testing.expectEqualStrings("/tools/beta", beta.path);
+    try std.testing.expectEqual(@as(u32, 128), beta.max_input_bytes);
+    // The lowered catalog borrows from its own copy, not from the caller's
+    // buffer, so it outlives the section it was lowered from.
+    @memset(&buf, 0);
+    try std.testing.expectEqualStrings("alpha", catalog.find("alpha").?.name);
+}
+
+test "promotion refuses a contract tool list that disagrees with the accepted catalog" {
+    var buf: [2048]u8 = undefined;
+    const bytes = testCatalog(&buf, &catalog_test_entries);
+
+    const Case = struct { label: []const u8, tools: []const ToolSummary };
+    const cases = [_]Case{
+        .{ .label = "method", .tools = &.{
+            .{ .name = "alpha", .method = "PUT", .path = "/tools/alpha", .max_input_bytes = 64 },
+            matching_tool_summaries[1],
+        } },
+        .{ .label = "path", .tools = &.{
+            .{ .name = "alpha", .method = "POST", .path = "/tools/other", .max_input_bytes = 64 },
+            matching_tool_summaries[1],
+        } },
+        .{ .label = "byte bound", .tools = &.{
+            .{ .name = "alpha", .method = "POST", .path = "/tools/alpha", .max_input_bytes = 65 },
+            matching_tool_summaries[1],
+        } },
+        .{ .label = "missing name", .tools = matching_tool_summaries[0..1] },
+        .{ .label = "extra name", .tools = &.{
+            matching_tool_summaries[0],
+            matching_tool_summaries[1],
+            .{ .name = "gamma", .method = "POST", .path = "/tools/gamma", .max_input_bytes = 1 },
+        } },
+        .{ .label = "renamed", .tools = &.{
+            .{ .name = "alpha2", .method = "POST", .path = "/tools/alpha", .max_input_bytes = 64 },
+            matching_tool_summaries[1],
+        } },
+        // Equal counts, and every contract name is found in the catalog: only
+        // the reverse direction sees that beta is not in the contract.
+        .{ .label = "repeated name", .tools = &.{ matching_tool_summaries[0], matching_tool_summaries[0] } },
+        .{ .label = "no tools", .tools = &.{} },
+    };
+    for (cases) |case| {
+        const validated = toolTestContract(case.tools);
+        const result = promote(&validated, acceptedTestAssessment(), [_]u8{0} ** 32, bytes);
+        std.testing.expectError(error.ToolCatalogContractMismatch, result) catch |err| {
+            std.debug.print("case '{s}' was not refused as a mismatch\n", .{case.label});
+            return err;
+        };
+    }
+}
+
+test "promotion refuses a contract listing tools when no catalog was accepted" {
+    const validated = toolTestContract(&matching_tool_summaries);
+    try std.testing.expectError(
+        error.ToolCatalogMissing,
+        promote(&validated, acceptedTestAssessment(), [_]u8{0} ** 32, null),
+    );
+
+    // No tools and no catalog is an ordinary handler, promoted with none.
+    const plain = toolTestContract(&.{});
+    var promoted = (try promote(&plain, acceptedTestAssessment(), [_]u8{0} ** 32, null)) orelse
+        return error.TestUnexpectedResult;
+    defer promoted.deinit();
+    try std.testing.expect(promoted.tool_catalog == null);
+}
+
+test "promotion refuses an accepted catalog it cannot decode or compile" {
+    const validated = toolTestContract(&.{
+        .{ .name = "echo", .method = "POST", .path = "/tools/echo", .max_input_bytes = 4096 },
+        .{ .name = "lookup", .method = "GET", .path = "/tools/lookup", .max_input_bytes = 1048576 },
+    });
+
+    // The kernel sample carries `{"type":"object"}`, which is not closed and
+    // so is outside the subset. The kernel does not check the subset; this does.
+    var buf: [2048]u8 = undefined;
+    try std.testing.expectError(
+        error.ToolSchemaNotCompilable,
+        promote(&validated, acceptedTestAssessment(), [_]u8{0} ** 32, catalog_test_support.sample(&buf)),
+    );
+
+    try std.testing.expectError(
+        error.AcceptedToolCatalogUndecodable,
+        promote(&validated, acceptedTestAssessment(), [_]u8{0} ** 32, "not a catalog"),
+    );
+}
+
+test "promotion reads no catalog for an assessment short of acceptance" {
+    const validated = toolTestContract(&matching_tool_summaries);
+    var refused = acceptedTestAssessment();
+    refused.semantic = .integrity_verified;
+    refused.grade = null;
+    try std.testing.expect((try promote(&validated, refused, [_]u8{0} ** 32, "not a catalog")) == null);
+}
+
+test "fromHandlerContract lowers the tool list with an uppercase method" {
+    const allocator = std.testing.allocator;
+    var hc = zq.handler_contract.emptyContract(try allocator.dupe(u8, "tool.ts"));
+    defer hc.deinit(allocator);
+    var entry = zq.handler_contract.ToolEntry{
+        .name = try allocator.dupe(u8, "ping"),
+        .route = try allocator.dupe(u8, "post /tools/ping"),
+        .description = try allocator.dupe(u8, "Ping."),
+        .input_schema_name = try allocator.dupe(u8, "In"),
+        .input_schema_json = try allocator.dupe(u8, closed_test_schema),
+        .output_schema_name = try allocator.dupe(u8, "Out"),
+        .output_schema_json = try allocator.dupe(u8, closed_test_schema),
+        .max_input_bytes = 256,
+    };
+    hc.tools.append(allocator, entry) catch |err| {
+        entry.deinit(allocator);
+        return err;
+    };
+
+    var raw = try fromHandlerContract(allocator, &hc);
+    defer raw.deinit();
+    const tools = raw.rawView().tools;
+    try std.testing.expectEqual(@as(usize, 1), tools.len);
+    try std.testing.expectEqualStrings("ping", tools[0].name);
+    try std.testing.expectEqualStrings("POST", tools[0].method);
+    try std.testing.expectEqualStrings("/tools/ping", tools[0].path);
+    try std.testing.expectEqual(@as(u32, 256), tools[0].max_input_bytes);
 }

@@ -53,6 +53,11 @@ pub const Inputs = struct {
     /// artifact. Null means this deployment configures no application
     /// invariant.
     invariant_spec: ?[]const u8 = null,
+    /// Exact canonical `ZTCAT1` tool catalog section loaded with the artifact.
+    /// Null means the handler has no tool catalog. The graph member is rebuilt
+    /// from these bytes, never from the producer's list, so a changed byte
+    /// fails at artifact binding.
+    tool_catalog: ?[]const u8 = null,
 };
 
 pub const Error = error{
@@ -127,6 +132,10 @@ fn graphInputs(inputs: Inputs) artifact_graph.Inputs {
         // linked adapter no longer matches the artifact's fails to reproduce
         // the member and the artifact is refused rather than served.
         .invariant_adapter_digest = invariant_adapter.linkedDigest(),
+        .tool_catalog_digest = if (inputs.tool_catalog) |bytes|
+            pcc.tool_catalog.digest(bytes)
+        else
+            null,
     });
 }
 
@@ -205,6 +214,7 @@ pub fn accept(
         .runtime_policy = if (inputs.policy_section) |bytes| .{ .bytes = bytes } else null,
         .invariant_spec = inputs.invariant_spec,
         .observed_invariant_operations = observed_operations,
+        .tool_catalog = inputs.tool_catalog,
     }, policy);
 }
 
