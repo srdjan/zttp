@@ -301,6 +301,17 @@ cross-call read and a dispatch the grants cannot cover. The C5 checks that
 T5a owns passed, including both named probes and a deployed binary answering
 real signed requests; the evidence is in section 12 of the design note.
 
+T5b result, 2026-09-23. The declaration moves to version 2 with an optional
+capability ceiling. It binds as graph member `declaration = 20` in the canonical
+form `ZTDCL1`, which `docs/consumer-contract.md` section 4.7 specifies (P4). The
+build refuses a handler outside the ceiling with a named reason, the contract
+(version 21) reports the applied ceiling, and every module export call is refused
+at runtime outside the accepted ceiling (P15). A deployed binary served under its
+ceiling and refused to start after one declaration byte changed. The evidence,
+thirteen probes, and three known gaps are in section 13.1 of the design note. One
+older fallback was found and left for an owner decision: a self-contained binary
+whose payload CRC fails starts as a plain runtime.
+
 **T6. Credential injection.** Depends on T1a, T1b, and T5. Owned files:
 `packages/runtime/src/runtime_http.zig`, `packages/modules/src/net/fetch.zig` and
 its module spec, and `runtime_config.zig`. The runtime resolves a

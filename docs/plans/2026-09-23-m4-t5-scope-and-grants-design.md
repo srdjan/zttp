@@ -318,7 +318,61 @@ decoder with a checker stage and three reason codes, following T3.
 | U1 | `e94d37d3` | declaration version 2, `capability_profiles.zig`, `ZTDCL1` encoder and kernel decoder, `reason_too_long` |
 | U2 | `b4d59264` | build enforcement of the ceiling (five named reasons, `error.CeilingBreached`, counted by `check`), contract version 21 `ceiling` report |
 | U3a | `8f1c4b33` | kernel: graph member `declaration = 20`, stage `declaration`, codes 2201..2203 |
-| U3b | this commit | section 10 (payload format 6), graph input, activation, runtime ceiling enforcement in the outermost export wrapper |
-| U4 | pending | C5 P15 evidence, consumer-contract text, full gate |
+| U3b | `68cfbeee` | section 10 (payload format 6), graph input, activation, runtime ceiling enforcement in the outermost export wrapper |
+| U4 | this record | P15 and P4 evidence, consumer-contract sections 4.3, 4.5, 4.7 and status, full gate |
 
 U2 note: the ceiling refusal is also called on the transpiler-fallback build path, but no test forces that path, the same gap the required-absent refusal has there. A handler with file imports and a declaration is refused before the ceiling check (T4), so a helper module cannot carry an excluded import past it.
+
+### 13.1 T5b evidence
+
+Every verdict below comes from an unfiltered build step with its exit status read
+directly, in main, after the agent worktree was removed. Each mutation was confirmed
+present before the build, the compile line said `success`, and the file was restored with
+`/bin/cp -f` and compared with `cmp`.
+
+**Probes.** Each unit had its implementer's probes and one more run in main:
+
+| Unit | Mutation | Failing tests |
+|---|---|---|
+| U1 | kernel exclude order `!= .lt` to `== .eq` | `every refusal case decodes to its exact error` (case 34) |
+| U1 | loader v2 emptiness check disabled | `declaration refuses each rule with its named reason and entry` |
+| U1, main | loader `reason_too_long` check disabled | the same table, "expected refusal reason_too_long" |
+| U2 | capability loop skipped | three `ceiling:` tests, including the census |
+| U2 | `refuseCeilingBreach` removed from the contract build path | three build-path tests and the project test in `build_command.zig` |
+| U2, main | `module_excluded_by_declaration` branch skipped | three `contract_types` tests and `a module the declaration excludes refuses the build` |
+| U3a | digest comparison always true | three `checker` tests, including the census |
+| U3a | member-without-bytes check disabled | `a declaration member with no declaration bytes rejects and names the member` |
+| U3a, main | decode check skipped | `undecodable declaration bytes reject before the digest is compared` and the census |
+| U3b | `declaration_digest` dropped from the graph inputs | four end-to-end build tests |
+| U3b | `checkCapabilityCeiling` returns at once | the unit, resolver, server, and zruntime ceiling tests |
+| U3b | the check removed from the export wrapper | the resolver, server, and zruntime ceiling tests |
+| U3b, main | excluded-module branch of the runtime check skipped | the unit, resolver, and server ceiling tests |
+
+**Real project, real CLI.** A project whose `declaration.json` selects `boundary` and
+imports `zttp:fetch` was refused by `zttp build` with exit 1 and
+`Declaration ceiling 'boundary' refused ...: capability_outside_profile runtime_callback`.
+The same project with a handler that calls only `zttp:crypto.sha256` built. A declared
+handler that imports a local file is refused before the ceiling is checked, because that
+build path runs no flow check (T4).
+
+**Deployed binary.** The built binary, with ceiling `boundary` and `exclude:
+["zttp:sql"]`, was started from an empty directory. It logged `Proof accepted`, and a
+request returned 200 with the SHA-256 of `abc`. Its payload holds the `ZTDCL1` section.
+One byte of the shipped exclude entry was changed (`zttp:sql` to `zttp:sqm`, which still
+decodes) and the payload CRC-32 was recomputed, as a deliberate attacker would. The binary
+then refused to serve: `attestation: the loaded executable graph does not match the signed
+root; refusing to serve`, `error.ExecutableGraphMismatch`.
+
+**Found, not changed.** With the byte changed but the CRC left stale, the binary did not
+reach acceptance. `self_extract` returns no payload on a CRC mismatch, and the binary then
+starts as a plain `zttp-runtime`. From an empty directory that exits with `NoHandler`. From
+the project directory it discovered `zttp.json` and served the project source with no
+proof and no ceiling. That fallback is older than T5 and is outside this unit; it is
+recorded here for an owner decision, not closed.
+
+**Known gaps.** `zttp dev` and `zttp-runtime --watch` load no declaration, so the
+development server enforces no ceiling at runtime. The ceiling refusal on the
+transpiler-fallback build path has no test that forces that path. No server-level test
+covers the category half of the runtime check, because every profile admits the
+capabilities of the modules a test handler can call there; the unit and resolver tests
+cover it.

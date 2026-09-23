@@ -42,8 +42,10 @@ The declared data-label path of section 9.2 is implemented for the M4 release bo
 the declaration file (`packages/zts/src/declaration.zig`) reaches every flow check of the
 handler through `--declaration`, `-Ddeclaration`, or the `declaration` key in
 `zttp.json`, the flow checker enforces its classifications (P9), and the contract (version
-21) carries the P8 status of each entry. The declaration does not yet bind as a graph
-member; that is M4 T5.
+21) carries the P8 status of each entry. The declaration binds as its own graph member,
+`declaration = 20`, in the canonical form `ZTDCL1` of section 4.7 (P4). Version 2 of the
+declaration adds a capability ceiling, which the build and the runtime enforce and the
+contract reports (P15, section 4.3).
 
 Nothing else in this document is implemented. The declaration document, the admissibility
 stage, spec-driven generation, and the published vocabulary envelope are obligations
@@ -256,6 +258,33 @@ vocabulary-refusal bucket.
 Version 1 names three ceilings rather than one default. A declaration selects one and MAY
 narrow it by module. P15 binds the producer to enforce the selected ceiling.
 
+As implemented for the M4 release boundary
+([T5 design note](plans/2026-09-23-m4-t5-scope-and-grants-design.md), section 13), a
+version 2 declaration selects the ceiling with a `ceiling` object:
+`{ "profile": "boundary", "exclude": ["zttp:sql"] }`. `profile` names one row below and
+`exclude` lists up to 64 more `zttp:` modules, possibly none. The ceiling is enforced three
+times:
+
+- At build, the handler is refused with `error.CeilingBreached` and a named reason when its
+  capability matrix holds a category the profile does not admit
+  (`capability_outside_profile`), when it imports a module the profile or the declaration
+  excludes (`module_excluded_by_profile`, `module_excluded_by_declaration`), when the
+  profile requires `read_only` and the contract does not prove it (`read_only_required`),
+  or when the build produced no capability matrix (`capabilities_unknown`). `zts check`
+  counts every breach. These are build errors, not diagnostic codes.
+- At acceptance, the ceiling is part of the `ZTDCL1` bytes that graph member
+  `declaration` binds (section 4.7), so a changed ceiling in a shipped binary refuses to
+  start.
+- At runtime, every virtual-module export call is refused, after the tool grant check and
+  before the export runs, when the accepted ceiling excludes its module or does not admit a
+  capability the module requires. A handler that passed the build check cannot reach such a
+  call; the runtime check is a second line.
+
+The contract (version 21) reports the ceiling that was applied under `ceiling`: the
+profile, its categories, the sorted union of the profile's and the declaration's excluded
+modules, and whether `read_only` is required. The development server loads no declaration
+yet, so `zttp dev` enforces no ceiling at runtime.
+
 <!-- BEGIN GENERATED: capability profiles. Edit packages/zts/src/capability_profiles.zig, then run `zig build vocab-envelope-write`. -->
 
 | Profile | Categories | Excluded modules | Requires `read_only` | What it is for |
@@ -381,8 +410,10 @@ Version 1 of that content, as implemented for the M4 release boundary
 
 - The declaration is an authored JSON file named by zttp.json's `declaration` key or a
   `--declaration` flag, with `version: 1` and a `classifications` array that must not be
-  empty. An unknown field, a duplicate key, or any entry breaking a rule below refuses the
-  whole file with a named reason and the entry's index (`packages/zts/src/declaration.zig`).
+  empty. Version 2 makes `classifications` optional and adds the `ceiling` of section 4.3;
+  a version 2 file carries at least one of the two. An unknown field, a duplicate key, or
+  any entry breaking a rule below refuses the whole file with a named reason and the entry's
+  index (`packages/zts/src/declaration.zig`).
 - Every entry carries `source`, `path`, `label`, `required`, and `reason`, with no defaults.
 - The source selector is `fetch:<host>`, a lowercase host that a `fetch` or
   `fetchWithRetry` URL names, or `service:<name>`, a service that `serviceCall` names.
@@ -455,6 +486,55 @@ requires exactly one `tool_catalog` graph member with ordinal 0 carrying it
 inside the closed tool schema subset, because that needs an allocating parser; the runtime
 compiles every schema from the accepted bytes and refuses to start when one does not
 compile.
+
+### 4.7 Canonical declaration form (P4)
+
+The declaration of sections 4.3 and 4.5 is bound in its canonical form, `ZTDCL1`, never as
+authored bytes, so whitespace, key order, and entry order cannot change the digest. The
+build writes the value the loader accepted (`encodeCanonical` in
+`packages/zts/src/declaration.zig`), ships it as payload section 10, and binds it as graph
+member `declaration = 20`. A build with no declaration ships no section and no member.
+
+Integers are little-endian, and every string is a u32 byte-length prefix followed by the
+bytes. Every field is always written, so there are no defaults and no omissions.
+
+```text
+magic                 8 bytes  "ZTDCL1\0\0"
+schema                u16      1
+classification_count  u16      0..256
+classification, count times, strictly increasing by (kind, name bytes, path bytes):
+  source_kind  u8      0 fetch, 1 service
+  source_name  string  1..253 bytes: the host or service name, without the "fetch:" or
+                       "service:" prefix
+  path         string  1..1040 bytes: 1..16 segments [A-Za-z_][A-Za-z0-9_]*, each at
+                       most 64 bytes, joined by "."
+  label        u8      0 secret, 1 credential
+  required     u8      0 or 1
+  reason       string  1..1024 bytes, UTF-8, as authored
+ceiling_present       u8       0 or 1
+ceiling, when present:
+  profile        u8      0 boundary, 1 adapter, 2 ledger (the row order of section 4.3)
+  exclude_count  u16     0..64
+  exclude, count times, strictly increasing by bytes:
+                 string  6..64 bytes of [a-z0-9_:-], starting "zttp:"
+trailing bytes: refused
+```
+
+A declaration with no classifications and no ceiling is refused. Strict increase refuses
+two entries with the same source and path and a repeated exclude entry. The document's
+`version` is not written: a version 1 file and a version 2 file with the same
+classifications and no ceiling give the same bytes. The loader refuses a `reason` longer
+than 1024 bytes (`reason_too_long`), so every document it accepts encodes. The exclude list
+holds the declaration's own entries as written, not the union with the profile's list; the
+contract's `ceiling` report carries the union.
+
+The digest is SHA-256 over the ASCII domain `zttp-declaration-v1` followed by the `ZTDCL1`
+bytes. The acceptance kernel decodes the bytes itself
+(`packages/proof-checker/src/declaration.zig`), checks every bound and order rule above
+again, recomputes the digest, and requires exactly one `declaration` graph member with
+ordinal 0 carrying it. It refuses at stage `declaration` with `declaration_undecodable`,
+`declaration_digest_mismatch`, or `declaration_member_missing`. The kernel does not
+re-check the host or service grammar of a source name.
 
 ---
 
