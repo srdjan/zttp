@@ -1,7 +1,7 @@
 # M4 T3 design note: canonical catalog encoding and artifact binding
 
-Status: proposed on 2026-09-23. It is not accepted. Section 7 holds the
-questions the owner must answer before code starts. Check C3 of the
+Status: accepted by the owner on 2026-09-23, with the recommended answer to
+each question in section 7 and the file extension in section 6. Check C3 of the
 [M4 release contract](2026-09-22-m4-release-contract.md) is written against
 the approach this note names.
 
@@ -225,3 +225,25 @@ These are recommended and are not questions unless the owner objects: the
 binary `ZTCAT1` layout and its bounds (section 3), canonical schema JSON
 from `tool_schema.canonicalize`, a section and member only for a non-empty
 catalog, three new reason codes, and the file extension in section 6.
+
+## 8. Decisions
+
+The owner answered on 2026-09-23. Q1: the catalog stays compiler-derived and is
+canonicalized as `ZTCAT1`; the authored declaration file and its loader move
+to T4 and T5. Q2: the catalog binds as graph member `tool_catalog = 19` only,
+with no certificate identity field and no certificate schema change. Q3: the
+runtime lowers the accepted catalog, cross-checks it against the contract, and
+validates tool-route inputs and JSON outputs on the request path. Q4: `zttp
+dev` runs the same validation on the producer's catalog and makes no
+acceptance claim. The recommended defaults at the end of section 7 stand.
+
+## 9. Progress
+
+| Unit | Commit | Content |
+|---|---|---|
+| U1 | pending | `tool_schema.canonicalize` |
+| U2 | pending | kernel: member 19, zero-copy `ZTCAT1` decoder, checker stage, reason codes |
+| U3 | pending | tools: `ZTCAT1` encoder from `ToolEntry` |
+| U4 | pending | runtime: section, graph member, activation inputs, lowering, cross-check |
+| U5 | pending | request path: input and output validation, dev mode |
+| U6 | pending | envelope, canonical-form spec in the consumer contract, C3 probes, full gate |
