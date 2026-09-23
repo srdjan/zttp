@@ -78,6 +78,7 @@ const applyEmbeddedCapabilityPolicy = runtime_config_mod.applyEmbeddedCapability
 
 const handler_instance = @import("handler_instance.zig");
 const HandlerInstance = handler_instance.HandlerInstance;
+const OutboundIo = @import("outbound_io.zig").OutboundIo;
 const AotOverrideFn = handler_instance.AotOverrideFn;
 const setAotOverrideForTest = handler_instance.setAotOverrideForTest;
 
@@ -4184,6 +4185,175 @@ test "fetchSync times out instead of hanging when upstream accepts and goes sile
     try std.testing.expectEqualStrings("TimedOut", obj.get("error").?.string);
     // 200ms deadline; anything near a second means the watchdog never fired.
     try std.testing.expect(elapsed_ms < 2000);
+}
+
+/// Runs one `fetchSync` of `target_url` on its own thread, under a ceiling. A
+/// fetch that outlives the ceiling is exactly the unbounded wait these tests
+/// exist to catch, and its thread cannot be stopped, so the process exits
+/// instead of hanging the step.
+const CeilingFetch = struct {
+    rt: *HandlerInstance,
+    allocator: std.mem.Allocator,
+    body: ?anyerror![]u8 = null,
+    done: std.Io.Event = .unset,
+    io: std.Io,
+
+    const ceiling_ms: i64 = 5_000;
+
+    fn run(self: *CeilingFetch) void {
+        const request = HttpRequestOwned{
+            .method = "GET",
+            .url = "/",
+            .headers = .empty,
+            .body = null,
+        };
+        if (self.rt.executeHandler(request.asView())) |response| {
+            var owned = response;
+            defer owned.deinit();
+            self.body = self.allocator.dupe(u8, owned.body);
+        } else |err| {
+            self.body = err;
+        }
+        self.done.set(self.io);
+    }
+
+    /// Returns the handler's JSON body and the elapsed milliseconds.
+    fn fetch(allocator: std.mem.Allocator, target_url: []const u8, timeout_ms: u32) !struct { body: []u8, elapsed_ms: i64 } {
+        const rt = try HandlerInstance.init(allocator, .{
+            .outbound_http_enabled = true,
+            .outbound_allow_host = "127.0.0.1",
+            .outbound_timeout_ms = timeout_ms,
+            .dev_capability_policy = .{ .egress_scopes = (zq.endpoint.ScopeSet{}).with(.loopback) },
+        });
+        defer rt.deinit();
+        const handler_code = try std.fmt.allocPrint(
+            allocator,
+            \\function handler(req) {{
+            \\  const resp = fetchSync("{s}");
+            \\  const data = resp.json();
+            \\  return Response.json({{ status: resp.status, error: data.error, details: data.details }});
+            \\}}
+        ,
+            .{target_url},
+        );
+        defer allocator.free(handler_code);
+        try rt.loadHandler(handler_code, "<fetch-ceiling>");
+
+        var clock_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+        defer clock_backend.deinit();
+        const io = clock_backend.io();
+
+        var job: CeilingFetch = .{ .rt = rt, .allocator = allocator, .io = io };
+        const started = std.Io.Clock.awake.now(io);
+        const thread = try std.Thread.spawn(.{}, run, .{&job});
+        const ceiling = std.Io.Clock.Timestamp.fromNow(io, .{ .raw = .fromMilliseconds(ceiling_ms), .clock = .awake });
+        while (!job.done.isSet()) {
+            job.done.waitTimeout(io, .{ .deadline = ceiling }) catch {};
+            if (!job.done.isSet() and ceiling.durationFromNow(io).raw.nanoseconds <= 0) {
+                std.debug.print("fetch of {s} outlived its {d} ms ceiling: the outbound deadline did not fire\n", .{ target_url, ceiling_ms });
+                std.process.exit(1);
+            }
+        }
+        thread.join();
+        const elapsed_ms = started.untilNow(io, .awake).toMilliseconds();
+        return .{ .body = try job.body.?, .elapsed_ms = elapsed_ms };
+    }
+};
+
+fn expectFetchTimedOut(allocator: std.mem.Allocator, body: []const u8, details: []const u8) !void {
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, body, .{});
+    defer parsed.deinit();
+    const obj = parsed.value.object;
+    try std.testing.expectEqual(@as(i64, 599), obj.get("status").?.integer);
+    try std.testing.expectEqualStrings("TimedOut", obj.get("error").?.string);
+    try std.testing.expectEqualStrings(details, obj.get("details").?.string);
+}
+
+test "a TLS handshake the peer never answers ends at the outbound deadline" {
+    // The kernel completes the TCP handshake from the listen backlog, and
+    // nothing ever reads the ClientHello: the stall sits inside std's TLS
+    // setup, before the caller has a stream of its own.
+    const allocator = std.testing.allocator;
+    var backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    defer backend.deinit();
+    const io = backend.io();
+    const loopback = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
+    var listener = try loopback.listen(io, .{ .reuse_address = true });
+    defer listener.deinit(io);
+
+    const target_url = try std.fmt.allocPrint(allocator, "https://127.0.0.1:{d}/", .{listener.socket.address.getPort()});
+    defer allocator.free(target_url);
+    const result = try CeilingFetch.fetch(allocator, target_url, 200);
+    defer allocator.free(result.body);
+    try expectFetchTimedOut(allocator, result.body, "TlsInitializationFailed");
+    try std.testing.expect(result.elapsed_ms < 2000);
+}
+
+/// A non-blocking connect to `port` that is still pending after 100 ms, or
+/// null when it completed. Completed descriptors are kept in `held` so the
+/// listen queue stays full.
+fn pendingConnect(port: u16, held: *std.ArrayList(std.posix.fd_t), allocator: std.mem.Allocator) !?std.posix.fd_t {
+    const posix = std.posix;
+    const rc = posix.system.socket(posix.AF.INET, posix.SOCK.STREAM, 0);
+    if (posix.errno(rc) != .SUCCESS) return error.SocketFailed;
+    const fd: posix.fd_t = @intCast(rc);
+    const flags: usize = @intCast(posix.system.fcntl(fd, posix.F.GETFL, @as(usize, 0)));
+    _ = posix.system.fcntl(fd, posix.F.SETFL, flags | (1 << @bitOffsetOf(posix.O, "NONBLOCK")));
+    var addr: posix.sockaddr.in = .{ .port = std.mem.nativeToBig(u16, port), .addr = std.mem.nativeToBig(u32, 0x7f000001) };
+    switch (posix.errno(posix.system.connect(fd, @ptrCast(&addr), @sizeOf(posix.sockaddr.in)))) {
+        .SUCCESS => {},
+        .INPROGRESS => {
+            var fds = [_]posix.pollfd{.{ .fd = fd, .events = posix.POLL.OUT, .revents = 0 }};
+            if (posix.system.poll(&fds, fds.len, 100) == 0) return fd;
+        },
+        else => {},
+    }
+    try held.append(allocator, fd);
+    return null;
+}
+
+test "a connect the peer never answers ends at the outbound deadline" {
+    // A listener that never accepts, with a backlog of one, stops answering
+    // SYNs once its queue is full. Fill it until a raw connect stays pending;
+    // the fetch's own connect is then the one that has no answer.
+    const allocator = std.testing.allocator;
+    var backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    defer backend.deinit();
+    const io = backend.io();
+    const loopback = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
+    var listener = try loopback.listen(io, .{ .reuse_address = true, .kernel_backlog = 1 });
+    defer listener.deinit(io);
+    const port = listener.socket.address.getPort();
+
+    var held: std.ArrayList(std.posix.fd_t) = .empty;
+    defer {
+        for (held.items) |fd| _ = std.posix.system.close(fd);
+        held.deinit(allocator);
+    }
+    const probe_fd = for (0..16) |_| {
+        if (try pendingConnect(port, &held, allocator)) |fd| break fd;
+    } else {
+        // Linux can answer an overflowing queue with SYN cookies. This case
+        // is then unobserved here, and the skip count says so.
+        std.debug.print("listen queue never filled on this host; the unanswered-connect case did not run\n", .{});
+        return error.SkipZigTest;
+    };
+    try held.append(allocator, probe_fd);
+
+    const target_url = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}/", .{port});
+    defer allocator.free(target_url);
+    const result = try CeilingFetch.fetch(allocator, target_url, 200);
+    defer allocator.free(result.body);
+    try expectFetchTimedOut(allocator, result.body, "Timeout");
+    try std.testing.expect(result.elapsed_ms < 2000);
+}
+
+test "a fetch backend refuses a connect that has no deadline" {
+    const allocator = std.testing.allocator;
+    var backend = OutboundIo.init(allocator);
+    defer backend.deinit();
+    const address = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 9);
+    try std.testing.expectError(error.OptionUnsupported, address.connect(backend.io(), .{ .mode = .stream }));
 }
 
 fn writeCachedTeardownFixture(allocator: std.mem.Allocator, buffer: []u8) ![]const u8 {

@@ -1,6 +1,6 @@
 # M4: release contract for scoped tool routes
 
-Status: accepted by the owner on 2026-09-22. T1a is complete; T1b is next.
+Status: accepted by the owner on 2026-09-22. T1a and T1b are complete; T2 is next.
 Baseline: local `main` at `176d81ca`. Roadmap row:
 [M4 in the roadmap](../roadmap.md) (`docs/roadmap.md:20`). This document
 reconciles proposal A, the
@@ -187,6 +187,28 @@ address, a vendored patch of the std HTTP client, or a different outbound
 client. The std connection constructors are private, so the client cannot take
 a stream that zttp connected itself. Until T1b lands, the connect and the TLS
 handshake of an outbound fetch have no deadline. Completion: check C1b.
+
+T1b decisions and result, 2026-09-23. The owner accepted the
+[design note](2026-09-23-m4-t1b-connect-deadline-design.md), its extension of
+the owned files to `outbound_io.zig`, `fetch_deadline.zig`, and
+`handler_instance.zig`, one budget for connect, handshake, and exchange, and DNS
+out of scope. `OutboundIo` wraps `std.Io.Threaded` and replaces two vtable
+entries: the connect is non-blocking and waits with `poll` until the fetch
+deadline, then arms the watchdog on the new socket before std starts the TLS
+handshake; the close joins an armed watchdog before its fd closes. A connect with
+no fetch bound is refused. All four outbound backends use it: the handler
+instance, each `zttp:io` worker, and the invariant CLI. `HostName.connect` tries
+every resolved address at once, so the first connect that succeeds claims the
+watchdog through an atomic flag. Three new tests in `test-zruntime` pass: a TLS
+handshake the peer never answers, a connect the peer never answers, and a
+connect with no deadline. Each fetch test runs under a 5 second ceiling and
+exits the process when the ceiling passes. On this macOS host the unanswered
+connect case ran; on a host where the listen queue never fills it reports a
+skip. An infinite `poll` timeout made the unanswered-connect test hit its
+ceiling, and removing the arm made the handshake test hit its ceiling. Unfiltered
+`test-zruntime` (415 passed, 1 skipped), `test-server` (412 passed, 2 skipped),
+and `zig build test` (188 of 188 steps, 8544 passed, 6 skipped) passed on the
+restored tree. Linux is not measured.
 
 **T2. Canonical catalog and schema subset.** Depends on nothing. Owned files:
 `packages/zts/src/contract_builder.zig`, `contract_types.zig` (`ApiSchemaInfo` at

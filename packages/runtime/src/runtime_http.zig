@@ -61,11 +61,6 @@ fn stepDeadlinePassed(rt: *HandlerInstance) bool {
     return unixMillis() >= deadline_ms;
 }
 
-fn outboundTimeout(timeout_ms: u32) std.Io.Timeout {
-    const duration = std.Io.Duration.fromMilliseconds(@intCast(timeout_ms));
-    return .{ .duration = .{ .raw = duration, .clock = .awake } };
-}
-
 const natives = @import("runtime_natives.zig");
 pub const getStringData = natives.getStringData;
 // Context-aware string accessor that flattens concat ropes into the request
@@ -931,6 +926,7 @@ fn readResponseBody(response: *std.http.Client.Response, allocator: std.mem.Allo
 /// CLI can arm the same one without importing this module; see that file for
 /// why std cannot bound the exchange itself.
 const FetchDeadline = @import("fetch_deadline.zig").FetchDeadline;
+const OutboundIo = @import("outbound_io.zig").OutboundIo;
 
 fn fetchSyncResult(rt: *HandlerInstance, args: []const zq.JSValue) !zq.JSValue {
     if (!rt.config.outbound_http_enabled) {
@@ -963,9 +959,10 @@ fn fetchSyncResult(rt: *HandlerInstance, args: []const zq.JSValue) !zq.JSValue {
     };
     defer options.deinit(rt.allocator);
 
+    const backend = &rt.outbound_io_backend.?;
     var client = std.http.Client{
         .allocator = rt.allocator,
-        .io = rt.outbound_io_backend.?.io(),
+        .io = backend.io(),
     };
     defer client.deinit();
 
@@ -975,8 +972,6 @@ fn fetchSyncResult(rt: *HandlerInstance, args: []const zq.JSValue) !zq.JSValue {
     bootstrapClientTls(&client, protocol) catch {
         return createFetchErrorResponse(rt, "ConnectFailed", "CertificateBundleLoadFailure");
     };
-    const timeout_ms = effectiveOutboundTimeoutMs(rt);
-    const timeout = outboundTimeout(timeout_ms);
     const port: u16 = uri.port orelse switch (protocol) {
         .plain => 80,
         .tls => 443,
@@ -987,6 +982,15 @@ fn fetchSyncResult(rt: *HandlerInstance, args: []const zq.JSValue) !zq.JSValue {
         .denied => |details| return createFetchErrorResponse(rt, "AddressScopeNotAllowed", details),
         .unresolved => |details| return createFetchErrorResponse(rt, "ConnectFailed", details),
     }
+
+    // One budget for connect, handshake, and exchange, starting after name
+    // resolution. The backend arms the watchdog when the connect succeeds.
+    var deadline: FetchDeadline = .{ .timeout_ms = effectiveOutboundTimeoutMs(rt), .io = client.io };
+    backend.beginFetch(&deadline) catch |err| return createFetchErrorResponse(rt, "DeadlineUnavailable", @errorName(err));
+    // Declared after the client's deinit defer, so the watchdog is joined
+    // before the client closes any connection.
+    defer backend.endFetch();
+
     const connection = client.connectTcpOptions(.{
         // Connect to the address that passed, name the destination for TLS.
         .host = target.hostName(),
@@ -994,10 +998,13 @@ fn fetchSyncResult(rt: *HandlerInstance, args: []const zq.JSValue) !zq.JSValue {
         .protocol = protocol,
         .proxied_host = host,
         .proxied_port = port,
-        .timeout = timeout,
     }) catch |err| {
-        return createFetchErrorResponse(rt, "ConnectFailed", @errorName(err));
+        return createFetchErrorResponse(rt, deadline.connectFailCode(err), @errorName(err));
     };
+    if (!deadline.isArmed()) {
+        client.connection_pool.release(connection, client.io);
+        return createFetchErrorResponse(rt, "DeadlineUnavailable", "connection has no watchdog");
+    }
 
     var req = client.request(options.method, uri, .{
         .redirect_behavior = .unhandled,
@@ -1011,15 +1018,6 @@ fn fetchSyncResult(rt: *HandlerInstance, args: []const zq.JSValue) !zq.JSValue {
         return createFetchErrorResponse(rt, "RequestInitFailed", @errorName(err));
     };
     defer req.deinit();
-
-    var deadline: FetchDeadline = .{
-        .stream = connection.stream_reader.stream,
-        .timeout_ms = timeout_ms,
-        .io = client.io,
-    };
-    deadline.arm() catch |err| return createFetchErrorResponse(rt, "DeadlineUnavailable", @errorName(err));
-    // Declared after req's deinit defer so disarm joins the watchdog first.
-    defer deadline.disarm();
 
     if (options.body) |payload| {
         req.transfer_encoding = .{ .content_length = payload.len };
@@ -1966,8 +1964,8 @@ fn doFetchWorkerInner(
 ) !zq.modules.io.FetchResult {
     const uri = try std.Uri.parse(desc.url);
 
-    // Thread-local I/O backend
-    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    // Thread-local I/O backend: one fetch per worker, so one watchdog.
+    var io_backend = OutboundIo.init(allocator);
     defer io_backend.deinit();
 
     var client = std.http.Client{
@@ -1997,8 +1995,6 @@ fn doFetchWorkerInner(
     var host_buf: [std.Io.net.HostName.max_len]u8 = undefined;
     const host = try resolveHostSafe(uri, &host_buf);
 
-    const timeout = outboundTimeout(config.outbound_timeout_ms);
-
     const port: u16 = uri.port orelse switch (protocol) {
         .plain => 80,
         .tls => 443,
@@ -2019,6 +2015,20 @@ fn doFetchWorkerInner(
             .error_details = try allocator.dupe(u8, details),
         },
     }
+
+    // One budget for connect, handshake, and exchange, starting after name
+    // resolution. The backend arms the watchdog when the connect succeeds.
+    var deadline: FetchDeadline = .{ .timeout_ms = config.outbound_timeout_ms, .io = client.io };
+    io_backend.beginFetch(&deadline) catch |err| return zq.modules.io.FetchResult{
+        .status = 599,
+        .ok = false,
+        .error_code = try allocator.dupe(u8, "DeadlineUnavailable"),
+        .error_details = try allocator.dupe(u8, @errorName(err)),
+    };
+    // Declared after the client's deinit defer, so the watchdog is joined
+    // before the client closes any connection.
+    defer io_backend.endFetch();
+
     const connection = client.connectTcpOptions(.{
         // Connect to the address that passed, name the destination for TLS.
         .host = target.hostName(),
@@ -2026,15 +2036,23 @@ fn doFetchWorkerInner(
         .protocol = protocol,
         .proxied_host = host,
         .proxied_port = port,
-        .timeout = timeout,
     }) catch |err| {
         return zq.modules.io.FetchResult{
             .status = 599,
             .ok = false,
-            .error_code = try allocator.dupe(u8, "ConnectFailed"),
+            .error_code = try allocator.dupe(u8, deadline.connectFailCode(err)),
             .error_details = try allocator.dupe(u8, @errorName(err)),
         };
     };
+    if (!deadline.isArmed()) {
+        client.connection_pool.release(connection, client.io);
+        return zq.modules.io.FetchResult{
+            .status = 599,
+            .ok = false,
+            .error_code = try allocator.dupe(u8, "DeadlineUnavailable"),
+            .error_details = try allocator.dupe(u8, "connection has no watchdog"),
+        };
+    }
 
     var req = client.request(desc.method, uri, .{
         .redirect_behavior = .unhandled,
@@ -2053,20 +2071,6 @@ fn doFetchWorkerInner(
         };
     };
     defer req.deinit();
-
-    var deadline: FetchDeadline = .{
-        .stream = connection.stream_reader.stream,
-        .timeout_ms = config.outbound_timeout_ms,
-        .io = client.io,
-    };
-    deadline.arm() catch |err| return zq.modules.io.FetchResult{
-        .status = 599,
-        .ok = false,
-        .error_code = try allocator.dupe(u8, "DeadlineUnavailable"),
-        .error_details = try allocator.dupe(u8, @errorName(err)),
-    };
-    // Declared after req's deinit defer so disarm joins the watchdog first.
-    defer deadline.disarm();
 
     if (desc.body) |payload| {
         req.transfer_encoding = .{ .content_length = payload.len };
@@ -2327,9 +2331,10 @@ fn httpRequestResultJsonAlloc(rt: *HandlerInstance, args: []const zq.JSValue) ![
         }
     }
 
+    const backend = &rt.outbound_io_backend.?;
     var client = std.http.Client{
         .allocator = a,
-        .io = rt.outbound_io_backend.?.io(),
+        .io = backend.io(),
     };
     defer client.deinit();
 
@@ -2339,8 +2344,6 @@ fn httpRequestResultJsonAlloc(rt: *HandlerInstance, args: []const zq.JSValue) ![
     bootstrapClientTls(&client, protocol) catch {
         return try httpRequestErrorJsonAlloc(a, "ConnectFailed", "CertificateBundleLoadFailure");
     };
-    const timeout_ms = effectiveOutboundTimeoutMs(rt);
-    const timeout = outboundTimeout(timeout_ms);
     const port: u16 = uri.port orelse switch (protocol) {
         .plain => 80,
         .tls => 443,
@@ -2351,6 +2354,15 @@ fn httpRequestResultJsonAlloc(rt: *HandlerInstance, args: []const zq.JSValue) ![
         .denied => |details| return try httpRequestErrorJsonAlloc(a, "AddressScopeNotAllowed", details),
         .unresolved => |details| return try httpRequestErrorJsonAlloc(a, "ConnectFailed", details),
     }
+
+    // One budget for connect, handshake, and exchange, starting after name
+    // resolution. The backend arms the watchdog when the connect succeeds.
+    var deadline: FetchDeadline = .{ .timeout_ms = effectiveOutboundTimeoutMs(rt), .io = client.io };
+    backend.beginFetch(&deadline) catch |err| return try httpRequestErrorJsonAlloc(a, "DeadlineUnavailable", @errorName(err));
+    // Declared after the client's deinit defer, so the watchdog is joined
+    // before the client closes any connection.
+    defer backend.endFetch();
+
     const connection = client.connectTcpOptions(.{
         // Connect to the address that passed, name the destination for TLS.
         .host = target.hostName(),
@@ -2358,10 +2370,13 @@ fn httpRequestResultJsonAlloc(rt: *HandlerInstance, args: []const zq.JSValue) ![
         .protocol = protocol,
         .proxied_host = host,
         .proxied_port = port,
-        .timeout = timeout,
     }) catch |err| {
-        return try httpRequestErrorJsonAlloc(a, "ConnectFailed", @errorName(err));
+        return try httpRequestErrorJsonAlloc(a, deadline.connectFailCode(err), @errorName(err));
     };
+    if (!deadline.isArmed()) {
+        client.connection_pool.release(connection, client.io);
+        return try httpRequestErrorJsonAlloc(a, "DeadlineUnavailable", "connection has no watchdog");
+    }
 
     var req = client.request(method, uri, .{
         .redirect_behavior = .unhandled,
@@ -2375,15 +2390,6 @@ fn httpRequestResultJsonAlloc(rt: *HandlerInstance, args: []const zq.JSValue) ![
         return try httpRequestErrorJsonAlloc(a, "RequestInitFailed", @errorName(err));
     };
     defer req.deinit();
-
-    var deadline: FetchDeadline = .{
-        .stream = connection.stream_reader.stream,
-        .timeout_ms = timeout_ms,
-        .io = client.io,
-    };
-    deadline.arm() catch |err| return try httpRequestErrorJsonAlloc(a, "DeadlineUnavailable", @errorName(err));
-    // Declared after req's deinit defer so disarm joins the watchdog first.
-    defer deadline.disarm();
 
     if (body) |payload| {
         req.transfer_encoding = .{ .content_length = payload.len };
@@ -2485,14 +2491,6 @@ pub fn httpRequestErrorJsonAlloc(a: std.mem.Allocator, err_code: []const u8, det
 // ---------------------------------------------------------------------------
 
 const testing = std.testing;
-
-test "no outbound timeout value maps to an unbounded wait" {
-    // 0 once meant "no timeout". Startup now refuses it, and no value that
-    // reaches this helper may select `.none`.
-    for ([_]u32{ 0, 1, 1500, std.math.maxInt(u32) }) |timeout_ms| {
-        try testing.expect(std.meta.activeTag(outboundTimeout(timeout_ms)) != .none);
-    }
-}
 
 test "header splitting copies every pair and reports the count" {
     const Hdr = struct { key: []const u8, value: []const u8 };

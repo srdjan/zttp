@@ -1,8 +1,10 @@
 # M4 T1b design note: bounded connect and TLS handshake
 
-Status: proposed on 2026-09-23. It answers the design-note condition of T1b in
-the [M4 release contract](2026-09-22-m4-release-contract.md) and names the
-approach that check C1b is written against. No code is changed by this note.
+Status: accepted and implemented on 2026-09-23. The owner accepted the file
+extension, one shared budget, and DNS out of scope (section 6). The result is
+recorded under T1b in the [M4 release contract](2026-09-22-m4-release-contract.md).
+This note answers the design-note condition of T1b and names the approach that
+check C1b is written against.
 
 All `std/` citations are to the Zig 0.16.0 library at
 `~/.zvm/0.16.0/lib/std`. Probe programs ran on macOS (Darwin 25.6.0) from a

@@ -914,7 +914,7 @@ fn printServeHelp() void {
         \\  --static <DIR>        Serve static files from directory
         \\  --outbound-http       Enable native outbound HTTP bridge
         \\  --outbound-host <H>   Restrict outbound bridge to exact host H (host only, not port)
-        \\  --outbound-timeout-ms Outbound exchange deadline in ms, greater than 0
+        \\  --outbound-timeout-ms Outbound fetch deadline in ms, greater than 0
         \\  --outbound-max-response <SIZE>
         \\  --sqlite <FILE>       SQLite database path for zttp:sql
         \\  --trace <FILE>        Record handler I/O traces to JSONL file

@@ -57,6 +57,7 @@ const bytecode_cache = zq.bytecode_cache;
 
 // HTTP protocol types (shared with server layer)
 const http_types = @import("http_types.zig");
+const OutboundIo = @import("outbound_io.zig").OutboundIo;
 const queue_callbacks = @import("queue_runtime_callbacks.zig");
 const invariant_adapter = @import("invariant_adapter.zig");
 const HttpRequestView = http_types.HttpRequestView;
@@ -133,7 +134,7 @@ pub const HandlerInstance = struct {
     /// rebuilds this runtime when it falls behind. Defaults to 0 so existing
     /// initializers need not set it.
     pool_generation: u64 = 0,
-    outbound_io_backend: ?std.Io.Threaded,
+    outbound_io_backend: ?OutboundIo,
     owns_resources: bool,
     active_request_id: std.atomic.Value(u64),
     last_request_body_len: usize,
@@ -318,7 +319,7 @@ pub const HandlerInstance = struct {
             .config = config,
             .policy_generation = null,
             .outbound_io_backend = if (config.outbound_http_enabled)
-                std.Io.Threaded.init(allocator, .{ .environ = .empty })
+                OutboundIo.init(allocator)
             else
                 null,
             .owns_resources = true,
@@ -397,7 +398,7 @@ pub const HandlerInstance = struct {
             .config = config,
             .policy_generation = retained_policy,
             .outbound_io_backend = if (config.outbound_http_enabled)
-                std.Io.Threaded.init(allocator, .{ .environ = .empty })
+                OutboundIo.init(allocator)
             else
                 null,
             .owns_resources = false,
