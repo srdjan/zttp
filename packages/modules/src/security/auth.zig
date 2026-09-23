@@ -106,16 +106,7 @@ fn jwtVerifyImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const sdk.JS
         validateCallerAlgorithm(alg) catch return sdk.resultErr(handle, "unsupported alg");
     }
 
-    const first_dot = std.mem.indexOfScalar(u8, token_str, '.') orelse
-        return sdk.resultErr(handle, "invalid token format");
-    const rest = token_str[first_dot + 1 ..];
-    const second_dot = std.mem.indexOfScalar(u8, rest, '.') orelse
-        return sdk.resultErr(handle, "invalid token format");
-
-    const header_b64 = token_str[0..first_dot];
-    const payload_b64 = rest[0..second_dot];
-    const signature_b64 = rest[second_dot + 1 ..];
-    const signing_input = token_str[0 .. first_dot + 1 + second_dot];
+    const parts = splitToken(token_str) orelse return sdk.resultErr(handle, "invalid token format");
 
     const allocator = sdk.getAllocator(handle);
 
@@ -124,31 +115,25 @@ fn jwtVerifyImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const sdk.JS
     // that supplied a different `alg` (e.g. "none", "HS512", or omitted),
     // because downstream code never reads the header. Per RFC 7519 §5.1 and
     // RFC 8725 §3, the verifier MUST reject any algorithm it did not expect.
-    validateHs256Header(allocator, header_b64) catch |err| return sdk.resultErr(handle, switch (err) {
-        error.HeaderTooLong => "jwt header too long",
-        error.InvalidBase64 => "invalid header encoding",
-        error.InvalidJson => "invalid header JSON",
-        error.MissingAlg => "missing alg header",
-        error.UnsupportedAlg => "unsupported alg",
-    });
+    validateHs256Header(allocator, parts.header_b64) catch |err| return switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        error.HeaderTooLong => sdk.resultErr(handle, "jwt header too long"),
+        error.InvalidBase64 => sdk.resultErr(handle, "invalid header encoding"),
+        error.InvalidJson => sdk.resultErr(handle, "invalid header JSON"),
+        error.MissingAlg => sdk.resultErr(handle, "missing alg header"),
+        error.UnsupportedAlg => sdk.resultErr(handle, "unsupported alg"),
+    };
 
     var expected_mac: sdk.HmacSha256Mac = undefined;
-    try sdk.hmacSha256(handle, signing_input, secret, &expected_mac);
+    try sdk.hmacSha256(handle, parts.signing_input, secret, &expected_mac);
 
-    const sig_clean = trimTrailingPadding(signature_b64);
-    const sig_decoded_len = base64url.Decoder.calcSizeForSlice(sig_clean) catch
-        return sdk.resultErr(handle, "invalid signature encoding");
-    if (sig_decoded_len != MAC_LEN)
-        return sdk.resultErr(handle, "invalid signature length");
+    checkHs256Signature(parts.signature_b64, &expected_mac) catch |err| return sdk.resultErr(handle, switch (err) {
+        error.InvalidEncoding => "invalid signature encoding",
+        error.InvalidLength => "invalid signature length",
+        error.Mismatch => "invalid signature",
+    });
 
-    var sig_decoded: [MAC_LEN]u8 = undefined;
-    base64url.Decoder.decode(&sig_decoded, sig_clean) catch
-        return sdk.resultErr(handle, "invalid signature encoding");
-
-    if (!constTimeEqlSlice(&sig_decoded, &expected_mac))
-        return sdk.resultErr(handle, "invalid signature");
-
-    const payload_bytes = decodeBase64url(allocator, payload_b64) catch
+    const payload_bytes = decodeBase64url(allocator, parts.payload_b64) catch
         return sdk.resultErr(handle, "invalid payload encoding");
     defer allocator.free(payload_bytes);
 
@@ -159,20 +144,251 @@ fn jwtVerifyImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const sdk.JS
 
     // A present-but-non-numeric (or non-finite) exp/nbf must be rejected, not
     // silently treated as unconstrained: otherwise `{"exp":"9"}` bypasses
-    // expiry. Only a wholly-absent claim skips the check. lossyCast clamps the
-    // in-range conversion so a huge value cannot panic.
+    // expiry. Only a wholly-absent claim skips the check.
     if (sdk.objectGet(handle, claims_val, "exp")) |exp_val| {
         const exp_f = sdk.extractFloat(exp_val) orelse return sdk.resultErr(handle, "invalid exp claim");
-        if (!std.math.isFinite(exp_f)) return sdk.resultErr(handle, "invalid exp claim");
-        if (isExpired(now, std.math.lossyCast(i64, exp_f))) return sdk.resultErr(handle, "token expired");
+        checkExp(now, exp_f) catch |err| return sdk.resultErr(handle, switch (err) {
+            error.InvalidTimeClaim => "invalid exp claim",
+            error.Expired => "token expired",
+        });
     }
     if (sdk.objectGet(handle, claims_val, "nbf")) |nbf_val| {
         const nbf_f = sdk.extractFloat(nbf_val) orelse return sdk.resultErr(handle, "invalid nbf claim");
-        if (!std.math.isFinite(nbf_f)) return sdk.resultErr(handle, "invalid nbf claim");
-        if (now < std.math.lossyCast(i64, nbf_f)) return sdk.resultErr(handle, "token not yet valid");
+        checkNbf(now, nbf_f) catch |err| return sdk.resultErr(handle, switch (err) {
+            error.InvalidTimeClaim => "invalid nbf claim",
+            error.NotYetValid => "token not yet valid",
+        });
     }
 
     return sdk.resultOk(handle, claims_val);
+}
+
+// ---------------------------------------------------------------------------
+// Shared HS256 pieces. `jwtVerifyImpl` (the handler export) and `verifyHs256`
+// (the pure verifier the runtime calls before a tool handler runs) share the
+// token split, the header check, the signature check, and the time checks.
+// They differ in the claims parse: `jwtVerify` hands the payload to the JS
+// JSON parser and returns the claims object without requiring any claim,
+// while `verifyHs256` parses with `std.json`, refuses duplicate keys, and
+// requires `sub` and the tenant claim. Requiring those in `jwtVerify` would
+// change what the export accepts, so the claims step stays separate.
+// ---------------------------------------------------------------------------
+
+/// The dot-separated segments of a compact JWS, plus the signing input
+/// (`header.payload`) the MAC covers. The signature segment is everything
+/// after the second dot; `verifyHs256` additionally refuses a further dot.
+pub const TokenParts = struct {
+    header_b64: []const u8,
+    payload_b64: []const u8,
+    signature_b64: []const u8,
+    signing_input: []const u8,
+};
+
+pub fn splitToken(token: []const u8) ?TokenParts {
+    const first_dot = std.mem.indexOfScalar(u8, token, '.') orelse return null;
+    const rest = token[first_dot + 1 ..];
+    const second_dot = std.mem.indexOfScalar(u8, rest, '.') orelse return null;
+    return .{
+        .header_b64 = token[0..first_dot],
+        .payload_b64 = rest[0..second_dot],
+        .signature_b64 = rest[second_dot + 1 ..],
+        .signing_input = token[0 .. first_dot + 1 + second_dot],
+    };
+}
+
+pub const SignatureError = error{ InvalidEncoding, InvalidLength, Mismatch };
+
+/// Decode the base64url signature segment and compare it in constant time
+/// with the MAC the caller computed over the signing input.
+pub fn checkHs256Signature(signature_b64: []const u8, expected_mac: *const [MAC_LEN]u8) SignatureError!void {
+    const sig_clean = trimTrailingPadding(signature_b64);
+    const sig_decoded_len = base64url.Decoder.calcSizeForSlice(sig_clean) catch return error.InvalidEncoding;
+    if (sig_decoded_len != MAC_LEN) return error.InvalidLength;
+
+    var sig_decoded: [MAC_LEN]u8 = undefined;
+    base64url.Decoder.decode(&sig_decoded, sig_clean) catch return error.InvalidEncoding;
+
+    if (!constTimeEqlSlice(&sig_decoded, expected_mac)) return error.Mismatch;
+}
+
+/// A present `exp` must be a finite number, and the token is expired from
+/// the `exp` second on. lossyCast clamps the in-range conversion so a huge
+/// value cannot panic.
+pub fn checkExp(now_s: i64, exp: f64) error{ InvalidTimeClaim, Expired }!void {
+    if (!std.math.isFinite(exp)) return error.InvalidTimeClaim;
+    if (isExpired(now_s, std.math.lossyCast(i64, exp))) return error.Expired;
+}
+
+/// A present `nbf` must be a finite number, and the token is not valid
+/// before the `nbf` second.
+pub fn checkNbf(now_s: i64, nbf: f64) error{ InvalidTimeClaim, NotYetValid }!void {
+    if (!std.math.isFinite(nbf)) return error.InvalidTimeClaim;
+    if (now_s < std.math.lossyCast(i64, nbf)) return error.NotYetValid;
+}
+
+// ---------------------------------------------------------------------------
+// verifyHs256 - the pure verifier.
+//
+// It reaches no capability itself. The HMAC comes from the caller through
+// `Hs256Mac`: the runtime supplies std's HMAC-SHA256, and module code
+// supplies `moduleMac(handle)`, which routes through the capability-checked
+// `sdk.hmacSha256`. This keeps the file free of direct crypto, as
+// `scripts/check-capability-helpers.sh` requires of every virtual module.
+// The clock is the `now_s` argument for the same reason.
+// ---------------------------------------------------------------------------
+
+pub const VerifyRefusal = enum {
+    malformed,
+    unsupported_alg,
+    bad_signature,
+    expired,
+    not_yet_valid,
+    missing_sub,
+    missing_tenant,
+    claim_not_string,
+    invalid_time_claim,
+};
+
+/// The verified identity. `arena` owns both strings; `deinit` releases them.
+pub const Claims = struct {
+    arena: std.heap.ArenaAllocator,
+    subject: []const u8,
+    tenant: []const u8,
+
+    pub fn deinit(self: *Claims) void {
+        self.arena.deinit();
+        self.* = undefined;
+    }
+};
+
+pub const VerifyResult = union(enum) {
+    ok: Claims,
+    refused: VerifyRefusal,
+};
+
+pub const MacError = error{MacUnavailable};
+
+/// A caller-supplied HMAC-SHA256. `compute` receives `context` unchanged.
+pub const Hs256Mac = struct {
+    context: ?*anyopaque,
+    compute: *const fn (context: ?*anyopaque, message: []const u8, key: []const u8, out: *[MAC_LEN]u8) MacError!void,
+};
+
+/// The HMAC a virtual module supplies: `sdk.hmacSha256` on `handle`, which
+/// checks the `crypto` capability first.
+pub fn moduleMac(handle: *sdk.ModuleHandle) Hs256Mac {
+    return .{ .context = @ptrCast(handle), .compute = moduleMacCompute };
+}
+
+fn moduleMacCompute(context: ?*anyopaque, message: []const u8, key: []const u8, out: *[MAC_LEN]u8) MacError!void {
+    const handle: *sdk.ModuleHandle = @ptrCast(context orelse return error.MacUnavailable);
+    sdk.hmacSha256(handle, message, key, out) catch return error.MacUnavailable;
+}
+
+pub const VerifyError = std.mem.Allocator.Error || MacError;
+
+/// Verify a compact HS256 JWT with `key` at `now_s` (Unix seconds) and
+/// extract `sub` and the claim that `tenant_claim` names. Every token defect
+/// is a `.refused` value; only allocation failure and an unavailable MAC are
+/// errors.
+pub fn verifyHs256(
+    allocator: std.mem.Allocator,
+    token: []const u8,
+    key: []const u8,
+    tenant_claim: []const u8,
+    now_s: i64,
+    mac: Hs256Mac,
+) VerifyError!VerifyResult {
+    const parts = splitToken(token) orelse return refuse(.malformed);
+    if (std.mem.indexOfScalar(u8, parts.signature_b64, '.') != null) return refuse(.malformed);
+
+    validateHs256Header(allocator, parts.header_b64) catch |err| return switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        error.HeaderTooLong, error.InvalidBase64, error.InvalidJson => refuse(.malformed),
+        error.MissingAlg, error.UnsupportedAlg => refuse(.unsupported_alg),
+    };
+
+    var expected_mac: [MAC_LEN]u8 = undefined;
+    try mac.compute(mac.context, parts.signing_input, key, &expected_mac);
+    checkHs256Signature(parts.signature_b64, &expected_mac) catch return refuse(.bad_signature);
+
+    const payload_bytes = decodeBase64url(allocator, parts.payload_b64) catch |err| return switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        error.InvalidBase64 => refuse(.malformed),
+    };
+    defer allocator.free(payload_bytes);
+
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, payload_bytes, .{
+        .duplicate_field_behavior = .@"error",
+    }) catch |err| return switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        else => refuse(.malformed),
+    };
+    defer parsed.deinit();
+
+    const claims = switch (parsed.value) {
+        .object => |o| o,
+        else => return refuse(.malformed),
+    };
+
+    if (claims.get("exp")) |exp_val| {
+        const exp_f = jsonNumber(exp_val) orelse return refuse(.invalid_time_claim);
+        checkExp(now_s, exp_f) catch |err| return refuse(switch (err) {
+            error.InvalidTimeClaim => .invalid_time_claim,
+            error.Expired => .expired,
+        });
+    }
+    if (claims.get("nbf")) |nbf_val| {
+        const nbf_f = jsonNumber(nbf_val) orelse return refuse(.invalid_time_claim);
+        checkNbf(now_s, nbf_f) catch |err| return refuse(switch (err) {
+            error.InvalidTimeClaim => .invalid_time_claim,
+            error.NotYetValid => .not_yet_valid,
+        });
+    }
+
+    const subject = switch (requiredString(claims, "sub")) {
+        .value => |s| s,
+        .absent => return refuse(.missing_sub),
+        .not_string => return refuse(.claim_not_string),
+    };
+    const tenant = switch (requiredString(claims, tenant_claim)) {
+        .value => |s| s,
+        .absent => return refuse(.missing_tenant),
+        .not_string => return refuse(.claim_not_string),
+    };
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    errdefer arena.deinit();
+    const owned_subject = try arena.allocator().dupe(u8, subject);
+    const owned_tenant = try arena.allocator().dupe(u8, tenant);
+    return .{ .ok = .{ .arena = arena, .subject = owned_subject, .tenant = owned_tenant } };
+}
+
+fn refuse(reason: VerifyRefusal) VerifyResult {
+    return .{ .refused = reason };
+}
+
+/// A JSON number as f64, or null for any other value. `std.json` keeps an
+/// integer beyond i64 as `number_string`; it is still a number.
+fn jsonNumber(value: std.json.Value) ?f64 {
+    return switch (value) {
+        .integer => |i| @floatFromInt(i),
+        .float => |f| f,
+        .number_string => |s| std.fmt.parseFloat(f64, s) catch null,
+        else => null,
+    };
+}
+
+const RequiredString = union(enum) { value: []const u8, absent, not_string };
+
+/// A claim that must be a non-empty string. An empty string counts as
+/// absent: an empty subject or tenant names no one.
+fn requiredString(claims: std.json.ObjectMap, name: []const u8) RequiredString {
+    const value = claims.get(name) orelse return .absent;
+    return switch (value) {
+        .string => |s| if (s.len == 0) .absent else .{ .value = s },
+        else => .not_string,
+    };
 }
 
 const HEADER_HS256_B64 = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9";
@@ -274,7 +490,7 @@ fn checkedJoinLen(a: usize, b: usize, c: usize) ?usize {
     return std.math.add(usize, ab, c) catch null;
 }
 
-const JwtHeaderError = error{
+pub const JwtHeaderError = error{
     HeaderTooLong,
     InvalidBase64,
     InvalidJson,
@@ -296,19 +512,24 @@ const MAX_JWT_HEADER_LEN = 1024;
 /// with the verifier failing to enforce the expected `alg`. See RFC 7519
 /// §5.1 ("the `alg` Header Parameter") and RFC 8725 §3 ("Perform Algorithm
 /// Verification").
-fn validateHs256Header(allocator: std.mem.Allocator, header_b64: []const u8) JwtHeaderError!void {
+///
+/// Allocation failure is `error.OutOfMemory`, never a header verdict, so a
+/// caller cannot mistake an exhausted allocator for a malformed token.
+pub fn validateHs256Header(allocator: std.mem.Allocator, header_b64: []const u8) (JwtHeaderError || std.mem.Allocator.Error)!void {
     if (header_b64.len > MAX_JWT_HEADER_LEN) return error.HeaderTooLong;
 
     const clean = trimTrailingPadding(header_b64);
     const decoded_len = base64url.Decoder.calcSizeForSlice(clean) catch return error.InvalidBase64;
     if (decoded_len > MAX_JWT_HEADER_LEN) return error.HeaderTooLong;
 
-    const decoded = allocator.alloc(u8, decoded_len) catch return error.InvalidBase64;
+    const decoded = try allocator.alloc(u8, decoded_len);
     defer allocator.free(decoded);
     base64url.Decoder.decode(decoded, clean) catch return error.InvalidBase64;
 
-    var parsed = std.json.parseFromSlice(std.json.Value, allocator, decoded, .{}) catch
-        return error.InvalidJson;
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, decoded, .{}) catch |err| return switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        else => error.InvalidJson,
+    };
     defer parsed.deinit();
 
     const obj = switch (parsed.value) {
@@ -514,4 +735,226 @@ test "validateHs256Header is case-sensitive on alg value" {
     const header = try headerForTest(allocator, "{\"alg\":\"hs256\"}");
     defer allocator.free(header);
     try testing.expectError(error.UnsupportedAlg, validateHs256Header(allocator, header));
+}
+
+// ---------------------------------------------------------------------------
+// verifyHs256. Tokens are signed in the test through `moduleMac`, which
+// routes through `sdk.hmacSha256`; the sdk test shim computes a real
+// HMAC-SHA256, which the RFC 4231 known-answer test below pins, so a token
+// signed with a different key really carries a different signature.
+// ---------------------------------------------------------------------------
+
+const test_handle: *sdk.ModuleHandle = @ptrFromInt(8);
+const test_key = "test-key-0123456789";
+const test_now: i64 = 1_700_000_000;
+
+/// Build `base64url(header).base64url(payload).base64url(hmac)` signed with
+/// `key`.
+fn signForTest(allocator: std.mem.Allocator, header_json: []const u8, payload_json: []const u8, key: []const u8) ![]u8 {
+    const header_b64 = try encodeBase64url(allocator, header_json);
+    defer allocator.free(header_b64);
+    const payload_b64 = try encodeBase64url(allocator, payload_json);
+    defer allocator.free(payload_b64);
+    const signing_input = try std.mem.concat(allocator, u8, &.{ header_b64, ".", payload_b64 });
+    defer allocator.free(signing_input);
+
+    var mac: [MAC_LEN]u8 = undefined;
+    const m = moduleMac(test_handle);
+    try m.compute(m.context, signing_input, key, &mac);
+    const sig_b64 = try encodeBase64url(allocator, &mac);
+    defer allocator.free(sig_b64);
+    return std.mem.concat(allocator, u8, &.{ signing_input, ".", sig_b64 });
+}
+
+const hs256_header = "{\"alg\":\"HS256\",\"typ\":\"JWT\"}";
+
+fn verifyForTest(allocator: std.mem.Allocator, token: []const u8) VerifyError!VerifyResult {
+    return verifyHs256(allocator, token, test_key, "tid", test_now, moduleMac(test_handle));
+}
+
+fn expectRefused(expected: VerifyRefusal, token: []const u8) !void {
+    var result = try verifyForTest(testing.allocator, token);
+    switch (result) {
+        .ok => |*claims| {
+            claims.deinit();
+            std.debug.print("expected refusal {s}, got ok\n", .{@tagName(expected)});
+            return error.TestUnexpectedResult;
+        },
+        .refused => |reason| try testing.expectEqual(expected, reason),
+    }
+}
+
+fn expectPayloadRefused(expected: VerifyRefusal, payload_json: []const u8) !void {
+    const token = try signForTest(testing.allocator, hs256_header, payload_json, test_key);
+    defer testing.allocator.free(token);
+    try expectRefused(expected, token);
+}
+
+/// One token per refusal. The switch is exhaustive, so a new member does not
+/// compile until it has a case.
+fn refusalCase(allocator: std.mem.Allocator, reason: VerifyRefusal) ![]u8 {
+    return switch (reason) {
+        .malformed => allocator.dupe(u8, "only.two"),
+        .unsupported_alg => signForTest(allocator, "{\"alg\":\"none\"}", "{\"sub\":\"u1\",\"tid\":\"t1\"}", test_key),
+        .bad_signature => signForTest(allocator, hs256_header, "{\"sub\":\"u1\",\"tid\":\"t1\"}", "another-key"),
+        .expired => signForTest(allocator, hs256_header, "{\"sub\":\"u1\",\"tid\":\"t1\",\"exp\":1700000000}", test_key),
+        .not_yet_valid => signForTest(allocator, hs256_header, "{\"sub\":\"u1\",\"tid\":\"t1\",\"nbf\":1700000001}", test_key),
+        .missing_sub => signForTest(allocator, hs256_header, "{\"tid\":\"t1\"}", test_key),
+        .missing_tenant => signForTest(allocator, hs256_header, "{\"sub\":\"u1\"}", test_key),
+        .claim_not_string => signForTest(allocator, hs256_header, "{\"sub\":42,\"tid\":\"t1\"}", test_key),
+        .invalid_time_claim => signForTest(allocator, hs256_header, "{\"sub\":\"u1\",\"tid\":\"t1\",\"exp\":\"9999999999\"}", test_key),
+    };
+}
+
+test "test shim HMAC-SHA256 matches RFC 4231 test case 2" {
+    var mac: [MAC_LEN]u8 = undefined;
+    const m = moduleMac(test_handle);
+    try m.compute(m.context, "what do ya want for nothing?", "Jefe", &mac);
+    const hex = std.fmt.bytesToHex(mac, .lower);
+    try testing.expectEqualStrings("5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843", &hex);
+}
+
+test "verifyHs256 accepts a valid token and returns subject and tenant" {
+    const token = try signForTest(testing.allocator, hs256_header, "{\"sub\":\"user-7\",\"tid\":\"acme\",\"exp\":1700000001,\"nbf\":1700000000}", test_key);
+    defer testing.allocator.free(token);
+    var result = try verifyForTest(testing.allocator, token);
+    switch (result) {
+        .ok => |*claims| {
+            defer claims.deinit();
+            try testing.expectEqualStrings("user-7", claims.subject);
+            try testing.expectEqualStrings("acme", claims.tenant);
+        },
+        .refused => |reason| {
+            std.debug.print("unexpected refusal {s}\n", .{@tagName(reason)});
+            return error.TestUnexpectedResult;
+        },
+    }
+}
+
+test "verifyHs256 reads the tenant from the claim the caller names" {
+    const token = try signForTest(testing.allocator, hs256_header, "{\"sub\":\"u1\",\"tid\":\"wrong\",\"org\":\"right\"}", test_key);
+    defer testing.allocator.free(token);
+    var result = try verifyHs256(testing.allocator, token, test_key, "org", test_now, moduleMac(test_handle));
+    switch (result) {
+        .ok => |*claims| {
+            defer claims.deinit();
+            try testing.expectEqualStrings("right", claims.tenant);
+        },
+        .refused => return error.TestUnexpectedResult,
+    }
+}
+
+test "verifyHs256 census: every refusal is produced by its case" {
+    var seen: usize = 0;
+    for (std.meta.tags(VerifyRefusal)) |reason| {
+        const token = try refusalCase(testing.allocator, reason);
+        defer testing.allocator.free(token);
+        try expectRefused(reason, token);
+        seen += 1;
+    }
+    try testing.expectEqual(@as(usize, 9), seen);
+}
+
+test "verifyHs256 refuses a token that is not exactly three parts as malformed" {
+    try expectRefused(.malformed, "");
+    try expectRefused(.malformed, "abc");
+    try expectRefused(.malformed, "a.b");
+    const token = try signForTest(testing.allocator, hs256_header, "{\"sub\":\"u1\",\"tid\":\"t1\"}", test_key);
+    defer testing.allocator.free(token);
+    const four = try std.mem.concat(testing.allocator, u8, &.{ token, ".x" });
+    defer testing.allocator.free(four);
+    try expectRefused(.malformed, four);
+}
+
+test "verifyHs256 refuses a bad header encoding or header JSON as malformed" {
+    try expectRefused(.malformed, "!!!!.e30.AAAA");
+    const token = try signForTest(testing.allocator, "{not json", "{\"sub\":\"u1\",\"tid\":\"t1\"}", test_key);
+    defer testing.allocator.free(token);
+    try expectRefused(.malformed, token);
+}
+
+test "verifyHs256 refuses alg none, alg HS512, and a missing alg as unsupported_alg" {
+    const headers = [_][]const u8{ "{\"alg\":\"none\"}", "{\"alg\":\"HS512\"}", "{\"typ\":\"JWT\"}" };
+    for (headers) |header| {
+        const token = try signForTest(testing.allocator, header, "{\"sub\":\"u1\",\"tid\":\"t1\"}", test_key);
+        defer testing.allocator.free(token);
+        try expectRefused(.unsupported_alg, token);
+    }
+}
+
+test "verifyHs256 refuses a token signed with a different key as bad_signature" {
+    const token = try signForTest(testing.allocator, hs256_header, "{\"sub\":\"u1\",\"tid\":\"t1\"}", "not-the-test-key");
+    defer testing.allocator.free(token);
+    try expectRefused(.bad_signature, token);
+}
+
+test "verifyHs256 refuses a truncated or undecodable signature as bad_signature" {
+    const token = try signForTest(testing.allocator, hs256_header, "{\"sub\":\"u1\",\"tid\":\"t1\"}", test_key);
+    defer testing.allocator.free(token);
+    try expectRefused(.bad_signature, token[0 .. token.len - 4]);
+    const last_dot = std.mem.lastIndexOfScalar(u8, token, '.') orelse return error.TestUnexpectedResult;
+    const bad = try std.mem.concat(testing.allocator, u8, &.{ token[0 .. last_dot + 1], "!!!!" });
+    defer testing.allocator.free(bad);
+    try expectRefused(.bad_signature, bad);
+}
+
+test "verifyHs256 refuses a duplicate sub key as malformed" {
+    try expectPayloadRefused(.malformed, "{\"sub\":\"u1\",\"sub\":\"admin\",\"tid\":\"t1\"}");
+}
+
+test "verifyHs256 refuses a payload that is not a JSON object as malformed" {
+    try expectPayloadRefused(.malformed, "[\"sub\"]");
+    try expectPayloadRefused(.malformed, "{\"sub\":");
+}
+
+test "verifyHs256 refuses at the exp second and before the nbf second" {
+    try expectPayloadRefused(.expired, "{\"sub\":\"u1\",\"tid\":\"t1\",\"exp\":1700000000}");
+    try expectPayloadRefused(.expired, "{\"sub\":\"u1\",\"tid\":\"t1\",\"exp\":1.0}");
+    try expectPayloadRefused(.not_yet_valid, "{\"sub\":\"u1\",\"tid\":\"t1\",\"nbf\":1700000001}");
+}
+
+test "verifyHs256 refuses a non-numeric or non-finite exp or nbf as invalid_time_claim" {
+    try expectPayloadRefused(.invalid_time_claim, "{\"sub\":\"u1\",\"tid\":\"t1\",\"exp\":\"9999999999\"}");
+    try expectPayloadRefused(.invalid_time_claim, "{\"sub\":\"u1\",\"tid\":\"t1\",\"exp\":null}");
+    try expectPayloadRefused(.invalid_time_claim, "{\"sub\":\"u1\",\"tid\":\"t1\",\"exp\":1e999}");
+    try expectPayloadRefused(.invalid_time_claim, "{\"sub\":\"u1\",\"tid\":\"t1\",\"nbf\":true}");
+}
+
+test "verifyHs256 refuses an absent or empty sub and tenant" {
+    try expectPayloadRefused(.missing_sub, "{\"tid\":\"t1\"}");
+    try expectPayloadRefused(.missing_sub, "{\"sub\":\"\",\"tid\":\"t1\"}");
+    try expectPayloadRefused(.missing_tenant, "{\"sub\":\"u1\"}");
+    try expectPayloadRefused(.missing_tenant, "{\"sub\":\"u1\",\"tid\":\"\"}");
+}
+
+test "verifyHs256 refuses a non-string sub or tenant as claim_not_string" {
+    try expectPayloadRefused(.claim_not_string, "{\"sub\":42,\"tid\":\"t1\"}");
+    try expectPayloadRefused(.claim_not_string, "{\"sub\":\"u1\",\"tid\":[\"t1\"]}");
+}
+
+test "verifyHs256 propagates a MAC failure as an error, not a verdict" {
+    const Failing = struct {
+        fn compute(_: ?*anyopaque, _: []const u8, _: []const u8, _: *[MAC_LEN]u8) MacError!void {
+            return error.MacUnavailable;
+        }
+    };
+    const token = try signForTest(testing.allocator, hs256_header, "{\"sub\":\"u1\",\"tid\":\"t1\"}", test_key);
+    defer testing.allocator.free(token);
+    try testing.expectError(error.MacUnavailable, verifyHs256(testing.allocator, token, test_key, "tid", test_now, .{ .context = null, .compute = Failing.compute }));
+}
+
+fn verifyUnderAllocationFailure(allocator: std.mem.Allocator, token: []const u8) !void {
+    var result = try verifyForTest(allocator, token);
+    switch (result) {
+        .ok => |*claims| claims.deinit(),
+        // A refusal here would mean an allocation failure was reported as a
+        // token verdict.
+        .refused => return error.TestUnexpectedResult,
+    }
+}
+
+test "verifyHs256 reports every allocation failure as OutOfMemory without leaking" {
+    const token = try signForTest(testing.allocator, hs256_header, "{\"sub\":\"user-7\",\"tid\":\"acme\",\"exp\":1700000001}", test_key);
+    defer testing.allocator.free(token);
+    try testing.checkAllAllocationFailures(testing.allocator, verifyUnderAllocationFailure, .{token});
 }

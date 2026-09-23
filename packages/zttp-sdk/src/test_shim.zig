@@ -157,8 +157,11 @@ pub export fn zttpSdkSha256WithHandle(_: *sdk.ModuleHandle, data_ptr: [*]const u
     return true;
 }
 
-pub export fn zttpSdkHmacSha256WithHandle(_: *sdk.ModuleHandle, _: [*]const u8, _: usize, _: [*]const u8, _: usize, out: [*]u8) bool {
-    @memset(out[0..32], 0);
+// A real HMAC-SHA256, like the real SHA-256 above, so module tests can sign
+// and verify tokens: a zero MAC would make every key produce the same
+// signature and a wrong-key test would pass vacuously.
+pub export fn zttpSdkHmacSha256WithHandle(_: *sdk.ModuleHandle, data_ptr: [*]const u8, data_len: usize, key_ptr: [*]const u8, key_len: usize, out: [*]u8) bool {
+    std.crypto.auth.hmac.sha2.HmacSha256.create(out[0..32], data_ptr[0..data_len], key_ptr[0..key_len]);
     return true;
 }
 
