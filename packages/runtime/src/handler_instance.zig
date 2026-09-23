@@ -1463,6 +1463,14 @@ pub const HandlerInstance = struct {
             null;
         defer self.ctx.active_tool_grant = null;
 
+        // The generation's accepted capability ceiling (M4 T5b) holds for
+        // exactly this call too, and is cleared the same way on every exit.
+        self.ctx.active_capability_ceiling = if (request.capability_ceiling) |ceiling|
+            .{ .categories = ceiling.categories, .excluded_modules = ceiling.excluded_modules }
+        else
+            null;
+        defer self.ctx.active_capability_ceiling = null;
+
         var tracked = false;
         if (builtin.mode == .Debug and request_id != 0) {
             const prev = self.active_request_id.swap(request_id, .acq_rel);

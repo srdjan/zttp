@@ -83,6 +83,10 @@ pub const Inputs = struct {
     /// section, as `pcc.tool_catalog.digest` computes it. Absent when the
     /// handler has no tool catalog: the member is absent, not zero.
     tool_catalog_digest: ?[32]u8 = null,
+    /// Domain-separated digest of the exact canonical `ZTDCL1` declaration
+    /// section, as `pcc.declaration.digest` computes it. Absent when the
+    /// handler has no declaration: the member is absent, not zero.
+    declaration_digest: ?[32]u8 = null,
 };
 
 /// The identity half of the commitment: which modules the handler imports, and
@@ -139,6 +143,8 @@ pub const ArtifactInputs = struct {
     invariant_adapter_digest: ?[32]u8 = null,
     /// See `Inputs.tool_catalog_digest`.
     tool_catalog_digest: ?[32]u8 = null,
+    /// See `Inputs.declaration_digest`.
+    declaration_digest: ?[32]u8 = null,
 };
 
 /// Project the artifact onto the graph inputs.
@@ -161,6 +167,7 @@ pub fn fromArtifact(inputs: ArtifactInputs) Inputs {
         .invariant_spec_digest = inputs.invariant_spec_digest,
         .invariant_adapter_digest = inputs.invariant_adapter_digest,
         .tool_catalog_digest = inputs.tool_catalog_digest,
+        .declaration_digest = inputs.declaration_digest,
     };
 }
 
@@ -283,6 +290,9 @@ pub fn build(
     if (inputs.tool_catalog_digest) |digest| {
         try collector.add(.tool_catalog, 0, digest);
     }
+    if (inputs.declaration_digest) |digest| {
+        try collector.add(.declaration, 0, digest);
+    }
 
     const members = out[0..collector.count];
     std.mem.sort(Member, members, {}, struct {
@@ -397,6 +407,7 @@ fn sampleInputs(main: []const u8, deps: []const []const u8) Inputs {
         .invariant_spec_digest = [_]u8{0xF6} ** 32,
         .invariant_adapter_digest = [_]u8{0xF8} ** 32,
         .tool_catalog_digest = [_]u8{0x7C} ** 32,
+        .declaration_digest = [_]u8{0xDC} ** 32,
     };
 }
 
@@ -424,8 +435,6 @@ test "the inventory covers every executable and authority-bearing member" {
         // are named rather than skipped by a wildcard, so a member kind that
         // stops being produced for any other reason fails here.
         if (kind == .source_profile_frontend or kind == .residual_plan) continue;
-        // produced from U3b of M4 T5b
-        if (kind == .declaration) continue;
         try testing.expect(seen.contains(kind));
     }
 
@@ -560,6 +569,11 @@ test "mutating any member class moves the root" {
                 i.tool_catalog_digest = [_]u8{0x7D} ** 32;
             }
         }.f },
+        .{ .name = "declaration", .apply = struct {
+            fn f(i: *Inputs) void {
+                i.declaration_digest = [_]u8{0xDD} ** 32;
+            }
+        }.f },
     };
 
     for (mutations) |mutation| {
@@ -688,4 +702,34 @@ test "an artifact without a tool catalog omits the member and still has every re
         try testing.expectEqualSlices(u8, &([_]u8{0x7C} ** 32), &member.digest);
     }
     try testing.expectEqual(@as(usize, 1), catalog_members);
+}
+
+test "an artifact without a declaration omits the member and still has every required kind" {
+    // A handler with no declaration has no section and no member. The member
+    // is not required, so its absence is not a missing required kind.
+    const allocator = testing.allocator;
+    var main_buf: [4096]u8 = undefined;
+    const main = try test_support.moduleBlob(allocator, 0x10, &main_buf);
+
+    var inputs = sampleInputs(main, &.{});
+    inputs.declaration_digest = null;
+    const out = try allocator.alloc(Member, max_members);
+    defer allocator.free(out);
+    const members = try build(allocator, inputs, out);
+    for (members) |member| {
+        try testing.expect(member.kind != .declaration);
+    }
+    try graph.checkRequiredKinds(members);
+
+    inputs.declaration_digest = [_]u8{0xDC} ** 32;
+    const with_out = try allocator.alloc(Member, max_members);
+    defer allocator.free(with_out);
+    var declaration_members: usize = 0;
+    for (try build(allocator, inputs, with_out)) |member| {
+        if (member.kind != .declaration) continue;
+        declaration_members += 1;
+        try testing.expectEqual(@as(u32, 0), member.ordinal);
+        try testing.expectEqualSlices(u8, &([_]u8{0xDC} ** 32), &member.digest);
+    }
+    try testing.expectEqual(@as(usize, 1), declaration_members);
 }

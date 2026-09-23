@@ -57,6 +57,11 @@ pub const RuntimeConfig = struct {
     /// for the runtime generation. It is handed to acceptance and lowered only
     /// from there. Null when the handler has no tool catalog.
     tool_catalog_section: ?[]const u8 = null,
+    /// Exact `ZTDCL1` declaration section loaded with the artifact, borrowed
+    /// for the runtime generation. It is handed to acceptance, and the
+    /// accepted ceiling is lowered only from there. Null when the handler has
+    /// no declaration.
+    declaration_section: ?[]const u8 = null,
     invariant_coverage_accepted: bool = false,
     /// Where a tool handler finds its bearer-token key and tenant claim (M4
     /// T5): zttp.json's `auth` names for `zttp dev` and `serve`. A deployed

@@ -788,6 +788,9 @@ const ConnectionPool = struct {
                 .tenant = if (tool_claims) |claims| claims.tenant else null,
                 .strip_authorization = tool_route != null,
                 .tool_grant = if (tool_route) |tool| tool_auth_mod.grantFor(tool) else null,
+                // Every request, tool or not, runs under the generation's
+                // accepted capability ceiling (M4 T5b), when it has one.
+                .capability_ceiling = self.server.activeCapabilityCeiling(),
             }, &fault_location) catch |err| {
                 const status: u16 = if (err == error.PoolExhausted) 503 else if (err == error.RequestTimeout) 504 else if (err == error.HandlerNotImplemented) 501 else 500;
                 var fault_buf: [256]u8 = undefined;
@@ -1491,6 +1494,12 @@ pub const Server = struct {
     /// decision Q4). Null for a deployment, which validates only the catalog its
     /// certificate promoted. Replaced with the contract, under `contract_lock`.
     dev_tool_catalog: ?contract_runtime.AcceptedCatalog = null,
+    /// The capability ceiling `zttp dev` checks module calls against: the one
+    /// the producer's contract reports, lowered with the same code as an
+    /// accepted one and claiming nothing (M4 T5b). Null for a deployment,
+    /// which checks only the ceiling its certificate promoted. Replaced with
+    /// the contract, under `contract_lock`.
+    dev_capability_ceiling: ?contract_runtime.AcceptedCeiling = null,
     /// The HS256 key and tenant claim tool requests are verified against (M4
     /// T5), loaded in `start`. A server whose active tool catalog is non-null
     /// refuses to start without it; a request that matches a tool while it is
@@ -1649,6 +1658,22 @@ pub const Server = struct {
         return null;
     }
 
+    /// The capability ceiling every handler call of this generation runs
+    /// under: the accepted one when a certificate promoted this generation,
+    /// else the dev one, else none. The view borrows from the generation, so
+    /// a request holds it only while it holds the generation.
+    pub fn activeCapabilityCeiling(self: *const Self) ?http_types.CapabilityCeiling {
+        if (self.proof_checked) |*promoted| {
+            if (promoted.capability_ceiling) |*ceiling| {
+                return .{ .categories = ceiling.categories, .excluded_modules = ceiling.excluded_modules };
+            }
+        }
+        if (self.dev_capability_ceiling) |*ceiling| {
+            return .{ .categories = ceiling.categories, .excluded_modules = ceiling.excluded_modules };
+        }
+        return null;
+    }
+
     /// Where this server reads the identity source names. A deployed artifact
     /// reads them from its own contract, which the executable graph binds, and
     /// ignores anything else; dev and `serve` read zttp.json's `auth`.
@@ -1693,6 +1718,8 @@ pub const Server = struct {
         self.proof_checked = null;
         if (self.dev_tool_catalog) |*catalog| catalog.deinit();
         self.dev_tool_catalog = null;
+        if (self.dev_capability_ceiling) |*ceiling| ceiling.deinit();
+        self.dev_capability_ceiling = null;
     }
 
     pub fn generationIsGuarded(self: *const Self) bool {
@@ -1710,15 +1737,17 @@ pub const Server = struct {
     /// Replace the runtime contract and reconfigure the proof cache.
     /// Called by live reload after a handler swap with a new contract.
     pub fn updateContract(self: *Self, new_contract: ValidatedRuntimeContract) void {
-        self.updateContractWithTools(new_contract, null);
+        self.updateContractWithTools(new_contract, null, null);
     }
 
-    /// Swap the contract and, in dev, the producer's tool catalog together, so no
-    /// request sees the new contract without the catalog that belongs to it.
+    /// Swap the contract and, in dev, the producer's tool catalog and capability
+    /// ceiling together, so no request sees the new contract without the
+    /// catalog and the ceiling that belong to it.
     pub fn updateContractWithTools(
         self: *Self,
         new_contract: ValidatedRuntimeContract,
         dev_tool_catalog: ?contract_runtime.AcceptedCatalog,
+        dev_capability_ceiling: ?contract_runtime.AcceptedCeiling,
     ) void {
         // Exclusive: wait for any in-flight request readers to drain before
         // freeing+rebuilding the contract/proof_cache they may be reading.
@@ -1733,6 +1762,7 @@ pub const Server = struct {
         // unbounded reuse, and the durable-workflow guarantees all go with it.
         self.clearProofChecked();
         self.dev_tool_catalog = dev_tool_catalog;
+        self.dev_capability_ceiling = dev_capability_ceiling;
         if (self.pool) |*pool| {
             pool.setDurableWorkflowProperties(.{});
         }
@@ -2006,6 +2036,7 @@ pub const Server = struct {
                 .absent,
             .invariant_spec = self.config.runtime_config.invariant_section,
             .tool_catalog = self.config.runtime_config.tool_catalog_section,
+            .declaration = self.config.runtime_config.declaration_section,
         }, pcc.policy.production);
 
         self.proof_checked = contract_runtime.promote(
@@ -2013,6 +2044,7 @@ pub const Server = struct {
             assessment,
             policy_digest,
             self.config.runtime_config.tool_catalog_section,
+            self.config.runtime_config.declaration_section,
         ) catch |err| {
             if (!builtin.is_test) {
                 switch (err) {
@@ -2031,6 +2063,14 @@ pub const Server = struct {
                     ),
                     error.ToolCatalogMissing => std.log.err(
                         "activation: the contract lists tools but the artifact carries no accepted tool catalog; refusing to serve",
+                        .{},
+                    ),
+                    error.AcceptedDeclarationUndecodable => std.log.err(
+                        "activation: the accepted declaration does not decode; refusing to serve",
+                        .{},
+                    ),
+                    error.DeclarationProfileUnknown => std.log.err(
+                        "activation: the accepted declaration names a ceiling profile this runtime does not hold; refusing to serve",
                         .{},
                     ),
                 }
@@ -2105,6 +2145,7 @@ pub const Server = struct {
             .identity = self.observedArtifactIdentity(),
             .invariant_spec = self.config.runtime_config.invariant_section,
             .tool_catalog = self.config.runtime_config.tool_catalog_section,
+            .declaration = self.config.runtime_config.declaration_section,
         }) catch |err| {
             if (!builtin.is_test) {
                 std.log.err(
@@ -4550,7 +4591,7 @@ test "a live swap drops the promotion the replaced artifact earned" {
         .development_only = false,
         .rejection = null,
         .work_spent = 1,
-    }, [_]u8{0} ** 32, null);
+    }, [_]u8{0} ** 32, null, null);
     try std.testing.expect(server.proof_checked != null);
 
     // The certificate described the artifact that is being replaced, so the
@@ -4586,7 +4627,7 @@ test "promotion refuses anything short of acceptance" {
             .recertifiable = true,
         },
         .work_spent = 1,
-    }, [_]u8{0} ** 32, null)) == null);
+    }, [_]u8{0} ** 32, null, null)) == null);
 
     // Accepted, but with no grade to report. An acceptance that cannot say how
     // strong it is does not get to drive anything.
@@ -4597,7 +4638,7 @@ test "promotion refuses anything short of acceptance" {
         .development_only = false,
         .rejection = null,
         .work_spent = 1,
-    }, [_]u8{0} ** 32, null)) == null);
+    }, [_]u8{0} ** 32, null, null)) == null);
 
     // Integrity alone is not acceptance.
     try std.testing.expect((try contract_runtime.promote(&validated, .{
@@ -4607,7 +4648,7 @@ test "promotion refuses anything short of acceptance" {
         .development_only = false,
         .rejection = null,
         .work_spent = 1,
-    }, [_]u8{0} ** 32, null)) == null);
+    }, [_]u8{0} ** 32, null, null)) == null);
 }
 
 test "self-extract runtime policy binding rejects a widened policy" {
@@ -5091,6 +5132,76 @@ test "a tool handler's routerMatch dispatch runs under any grant" {
         &buf,
     );
     try expectResponse(response, "HTTP/1.1 200", "{\"ok\":true}");
+}
+
+/// Serve one plain GET through the real request path with `ceiling`, lowered
+/// from `ZTDCL1` bytes with the code a deployment uses, installed as the
+/// generation's capability ceiling, and return the start of the response.
+fn serveUnderCeiling(ceiling_bytes: ?[]const u8, handler_code: []const u8, out: []u8) ![]const u8 {
+    const allocator = std.testing.allocator;
+    var srv = try Server.init(allocator, .{
+        .handler = .{ .inline_code = handler_code },
+        .log_requests = false,
+        .pool_size = 1,
+        .max_body_size = 4096,
+    });
+    defer srv.deinit();
+    srv.pool = try HandlerPool.init(allocator, .{}, handler_code, "<ceiling-test>", 1, 0);
+    if (ceiling_bytes) |bytes| {
+        srv.dev_capability_ceiling = (try contract_runtime.lowerAcceptedCeiling(allocator, bytes)) orelse
+            return error.TestExpectedCeiling;
+    }
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    var pool = ConnectionPool{
+        .workers = &[_]std.Thread{},
+        .queue = ConnectionPool.BoundedQueue.init(),
+        .running = std.atomic.Value(bool).init(true),
+        .server = &srv,
+        .allocator = allocator,
+    };
+
+    const fds = try createUnixSocketPair();
+    defer std.Io.Threaded.closeFd(fds[0]);
+    defer std.Io.Threaded.closeFd(fds[1]);
+    try writeAllFd(fds[1], "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+
+    var pending: ConnectionPool.PendingRequestBytes = .{};
+    defer pending.deinit(pool.allocator);
+    _ = try pool.handleSingleRequestSync(fds[0], 0, arena.allocator(), &pending);
+
+    const n = try std.posix.read(fds[1], out);
+    return out[0..n];
+}
+
+test "a request under a ceiling that excludes the module its handler calls fails, and succeeds with no ceiling" {
+    const handler_code =
+        \\import { uuid } from "zttp:id";
+        \\function handler(req) {
+        \\  return Response.text(String(uuid().length));
+        \\}
+    ;
+    // A `boundary` ceiling that excludes `zttp:id` by name. The profile admits
+    // `random` and `clock`, so only the exclusion can refuse the call.
+    var decl_buf: [256]u8 = undefined;
+    var w = pcc.declaration.test_support.Writer{ .buf = &decl_buf };
+    pcc.declaration.test_support.writeDeclaration(&w, &.{}, .{ .profile = 0, .exclude = &.{"zttp:id"} });
+
+    var denied_buf: [1024]u8 = undefined;
+    const denied = try serveUnderCeiling(w.bytes(), handler_code, &denied_buf);
+    try std.testing.expect(std.mem.startsWith(u8, denied, "HTTP/1.1 500"));
+
+    // A `boundary` ceiling that does not exclude it: the call runs.
+    var open_buf: [256]u8 = undefined;
+    var open = pcc.declaration.test_support.Writer{ .buf = &open_buf };
+    pcc.declaration.test_support.writeDeclaration(&open, &.{}, .{ .profile = 0 });
+    var inside_buf: [1024]u8 = undefined;
+    try expectResponse(try serveUnderCeiling(open.bytes(), handler_code, &inside_buf), "HTTP/1.1 200", "36");
+
+    // No ceiling at all: the call runs.
+    var none_buf: [1024]u8 = undefined;
+    try expectResponse(try serveUnderCeiling(null, handler_code, &none_buf), "HTTP/1.1 200", "36");
 }
 
 fn startToolServer(runtime_config: engine.RuntimeConfig) !void {

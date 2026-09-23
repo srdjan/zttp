@@ -172,7 +172,108 @@ pub const PromoteError = std.mem.Allocator.Error || error{
     ToolCatalogContractMismatch,
     /// The contract lists tools and no catalog section was accepted.
     ToolCatalogMissing,
+    /// The accepted declaration section does not decode. Acceptance already
+    /// decoded it, so this is an invariant violation, and it refuses rather
+    /// than serves without the ceiling.
+    AcceptedDeclarationUndecodable,
+    /// The accepted declaration names a ceiling profile the runtime profile
+    /// table does not hold. The kernel's profile enum and the table are pinned
+    /// together, so this is an invariant violation too.
+    DeclarationProfileUnknown,
 };
+
+/// The capability ceiling lowered from an accepted declaration (M4 T5b design
+/// note, section 8): the profile's categories as a bit set, and the union of
+/// the profile's excluded modules and the declaration's own, each string
+/// owned. Every request of the generation borrows it through
+/// `zts.module_binding.CapabilityCeiling`; the module call wrapper refuses an
+/// export outside it.
+pub const AcceptedCeiling = struct {
+    allocator: std.mem.Allocator,
+    /// The profile row the declaration named. Never owned.
+    profile: *const zq.capability_profiles.Profile,
+    /// Bit `@intFromEnum(capability)` set for each category the profile admits.
+    categories: u32,
+    /// Sorted by bytes and unique. The slice and each string are owned.
+    excluded_modules: []const []const u8,
+
+    pub fn deinit(self: *AcceptedCeiling) void {
+        for (self.excluded_modules) |module| self.allocator.free(module);
+        self.allocator.free(self.excluded_modules);
+        self.* = undefined;
+    }
+
+    /// The borrowed view the engine checks against. Valid while `self` lives.
+    pub fn view(self: *const AcceptedCeiling) zq.module_binding.CapabilityCeiling {
+        return .{ .categories = self.categories, .excluded_modules = self.excluded_modules };
+    }
+};
+
+/// Build a ceiling from a profile row and the declaration's own exclusions.
+fn buildCeiling(
+    allocator: std.mem.Allocator,
+    profile: *const zq.capability_profiles.Profile,
+    declared: []const []const u8,
+) std.mem.Allocator.Error!AcceptedCeiling {
+    var modules: std.ArrayList([]const u8) = .empty;
+    errdefer {
+        for (modules.items) |module| allocator.free(module);
+        modules.deinit(allocator);
+    }
+    for ([_][]const []const u8{ profile.excluded_modules, declared }) |list| {
+        for (list) |module| {
+            if (containsString(modules.items, module)) continue;
+            try modules.ensureUnusedCapacity(allocator, 1);
+            modules.appendAssumeCapacity(try allocator.dupe(u8, module));
+        }
+    }
+    std.mem.sort([]const u8, modules.items, {}, struct {
+        fn lt(_: void, a: []const u8, b: []const u8) bool {
+            return std.mem.order(u8, a, b) == .lt;
+        }
+    }.lt);
+    const owned = try modules.toOwnedSlice(allocator);
+    return .{
+        .allocator = allocator,
+        .profile = profile,
+        .categories = zq.module_binding.CapabilityCeiling.categoryMask(profile.categories),
+        .excluded_modules = owned,
+    };
+}
+
+fn containsString(list: []const []const u8, item: []const u8) bool {
+    for (list) |entry| {
+        if (std.mem.eql(u8, entry, item)) return true;
+    }
+    return false;
+}
+
+/// Lower the ceiling from the accepted `ZTDCL1` section. Null when the
+/// declaration carries classifications and no ceiling. The kernel accepted
+/// these bytes, so a decode failure here refuses to start rather than serving
+/// the generation without its ceiling.
+pub fn lowerAcceptedCeiling(allocator: std.mem.Allocator, bytes: []const u8) PromoteError!?AcceptedCeiling {
+    const decoded = pcc.declaration.decode(bytes) catch return error.AcceptedDeclarationUndecodable;
+    const ceiling = decoded.ceiling orelse return null;
+    const index: usize = @intFromEnum(ceiling.profile);
+    if (index >= zq.capability_profiles.profiles.len) return error.DeclarationProfileUnknown;
+    const profile = &zq.capability_profiles.profiles[index];
+
+    var declared: std.ArrayList([]const u8) = .empty;
+    defer declared.deinit(allocator);
+    var excludes = ceiling.excludes();
+    while (excludes.next() catch return error.AcceptedDeclarationUndecodable) |module| {
+        try declared.append(allocator, module);
+    }
+    return try buildCeiling(allocator, profile, declared.items);
+}
+
+/// The dev-mode ceiling: the producer's contract report lowered with the same
+/// code as an accepted one, so `zttp dev` refuses a module call the way a
+/// deployment would. It carries no acceptance claim.
+pub fn lowerProducerCeiling(allocator: std.mem.Allocator, report: *const zq.handler_contract.CeilingReport) std.mem.Allocator.Error!AcceptedCeiling {
+    return buildCeiling(allocator, report.profile, report.exclude);
+}
 
 /// How aggressively the runtime pool may reuse a warmed handler runtime.
 pub const PoolingPolicy = enum {
@@ -261,6 +362,10 @@ pub const ProofCheckedContract = struct {
     /// The tool catalog lowered from the accepted section bytes. Null when the
     /// artifact carries no catalog. Owned: release it with `deinit`.
     tool_catalog: ?AcceptedCatalog = null,
+    /// The capability ceiling lowered from the accepted declaration section.
+    /// Null when the artifact carries no declaration, or one without a
+    /// ceiling. Owned: release it with `deinit`.
+    capability_ceiling: ?AcceptedCeiling = null,
     /// Construction gate, the same one `ValidatedRuntimeContract` uses: the
     /// field's type names a file-private opaque, so no struct literal outside
     /// this file can produce one. `promote` is the only way in.
@@ -269,6 +374,8 @@ pub const ProofCheckedContract = struct {
     pub fn deinit(self: *ProofCheckedContract) void {
         if (self.tool_catalog) |*catalog| catalog.deinit();
         self.tool_catalog = null;
+        if (self.capability_ceiling) |*ceiling| ceiling.deinit();
+        self.capability_ceiling = null;
     }
 };
 
@@ -284,11 +391,18 @@ pub const ProofCheckedContract = struct {
 /// lowered into an `AcceptedCatalog` and cross-checked against the contract's
 /// tool list; an error return is a refusal to start, never a promotion
 /// without the catalog.
+///
+/// `declaration_section` is the exact `ZTDCL1` section that was handed to the
+/// acceptance run, or null when the artifact carries none. When it carries a
+/// ceiling, the ceiling is lowered into an `AcceptedCeiling`; a section that
+/// does not lower is a refusal to start, never a promotion without the
+/// ceiling.
 pub fn promote(
     validated: *const ValidatedRuntimeContract,
     assessment: pcc.Assessment,
     runtime_policy_digest: [32]u8,
     tool_catalog_section: ?[]const u8,
+    declaration_section: ?[]const u8,
 ) PromoteError!?ProofCheckedContract {
     if (!assessment.accepted()) return null;
     const grade = assessment.grade orelse return null;
@@ -308,6 +422,12 @@ pub fn promote(
         return error.ToolCatalogMissing;
     }
 
+    var capability_ceiling: ?AcceptedCeiling = null;
+    errdefer if (capability_ceiling) |*ceiling| ceiling.deinit();
+    if (declaration_section) |bytes| {
+        capability_ceiling = try lowerAcceptedCeiling(validated.view().allocator, bytes);
+    }
+
     return .{
         .properties = acceptedProperties(validated.properties(), assessment.properties),
         .durable_workflow = acceptedWorkflowProperties(
@@ -321,6 +441,7 @@ pub fn promote(
         .invariants = InvariantStatus.fromVerdicts(assessment.invariants),
         .runtime_policy_digest = runtime_policy_digest,
         .tool_catalog = tool_catalog,
+        .capability_ceiling = capability_ceiling,
         ._proof = validation_proof,
     };
 }
@@ -1877,7 +1998,7 @@ test "promotion exposes only properties that cleared the policy" {
     };
 
     const digest = [_]u8{0xab} ** 32;
-    const promoted = (try promote(&validated, assessment, digest, null)) orelse return error.TestUnexpectedResult;
+    const promoted = (try promote(&validated, assessment, digest, null, null)) orelse return error.TestUnexpectedResult;
     try std.testing.expect(promoted.properties.no_secret_leakage);
     try std.testing.expect(promoted.properties.result_safe);
     try std.testing.expect(!promoted.properties.read_only);
@@ -1898,11 +2019,11 @@ test "promotion exposes only properties that cleared the policy" {
     // it becomes no promotion.
     var uncovered = assessment;
     uncovered.guards = .{ .required = 2, .covered = 1 };
-    try std.testing.expect((try promote(&validated, uncovered, digest, null)) == null);
+    try std.testing.expect((try promote(&validated, uncovered, digest, null, null)) == null);
 
     var covered = assessment;
     covered.guards = .{ .required = 2, .covered = 2, .kinds = 0x01 };
-    const guarded = (try promote(&validated, covered, digest, null)) orelse return error.TestUnexpectedResult;
+    const guarded = (try promote(&validated, covered, digest, null, null)) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(u32, 2), guarded.guards.required);
     // Guard coverage is beside the properties, never inside them: the same
     // property set comes back.
@@ -1916,7 +2037,7 @@ test "promotion exposes only properties that cleared the policy" {
         .writes = 1,
         .kind_bits = 1,
     };
-    const invariant_contract = (try promote(&validated, invariant_covered, digest, null)) orelse
+    const invariant_contract = (try promote(&validated, invariant_covered, digest, null, null)) orelse
         return error.TestUnexpectedResult;
     try std.testing.expect(invariant_contract.invariants.coverageReady());
     try std.testing.expectEqual(@as(u32, 1), invariant_contract.invariants.reads);
@@ -1953,7 +2074,7 @@ test "a read-only generation is coverage ready and reports vacuous write applica
         .writes = 0,
         .kind_bits = 0b11,
     };
-    const promoted = (try promote(&validated, assessment, [_]u8{0xcd} ** 32, null)) orelse
+    const promoted = (try promote(&validated, assessment, [_]u8{0xcd} ** 32, null, null)) orelse
         return error.TestUnexpectedResult;
 
     // Vacuity is a report, never a relabelling. Coverage readiness reads
@@ -2296,7 +2417,7 @@ test "promotion lowers the accepted tool catalog and compiles every schema" {
     const bytes = testCatalog(&buf, &catalog_test_entries);
     const validated = toolTestContract(&matching_tool_summaries);
 
-    var promoted = (try promote(&validated, acceptedTestAssessment(), [_]u8{0} ** 32, bytes)) orelse
+    var promoted = (try promote(&validated, acceptedTestAssessment(), [_]u8{0} ** 32, bytes, null)) orelse
         return error.TestUnexpectedResult;
     defer promoted.deinit();
 
@@ -2347,7 +2468,7 @@ test "promotion refuses a contract tool list that disagrees with the accepted ca
     };
     for (cases) |case| {
         const validated = toolTestContract(case.tools);
-        const result = promote(&validated, acceptedTestAssessment(), [_]u8{0} ** 32, bytes);
+        const result = promote(&validated, acceptedTestAssessment(), [_]u8{0} ** 32, bytes, null);
         std.testing.expectError(error.ToolCatalogContractMismatch, result) catch |err| {
             std.debug.print("case '{s}' was not refused as a mismatch\n", .{case.label});
             return err;
@@ -2364,7 +2485,7 @@ test "promotion refuses a contract whose scope bindings disagree with the accept
     const alpha = ToolSummary{ .name = "alpha", .method = "POST", .path = "/tools/alpha", .max_input_bytes = 64, .scope_tenant = "tenant_id" };
 
     const agreeing = toolTestContract(&.{alpha});
-    var promoted = (try promote(&agreeing, acceptedTestAssessment(), [_]u8{0} ** 32, bytes)) orelse
+    var promoted = (try promote(&agreeing, acceptedTestAssessment(), [_]u8{0} ** 32, bytes, null)) orelse
         return error.TestUnexpectedResult;
     defer promoted.deinit();
     const tool = promoted.tool_catalog.?.find("alpha") orelse return error.TestUnexpectedResult;
@@ -2384,7 +2505,7 @@ test "promotion refuses a contract whose scope bindings disagree with the accept
     };
     for (cases) |case| {
         const validated = toolTestContract(&.{case.tool});
-        std.testing.expectError(error.ToolCatalogContractMismatch, promote(&validated, acceptedTestAssessment(), [_]u8{0} ** 32, bytes)) catch |err| {
+        std.testing.expectError(error.ToolCatalogContractMismatch, promote(&validated, acceptedTestAssessment(), [_]u8{0} ** 32, bytes, null)) catch |err| {
             std.debug.print("case '{s}' was not refused as a mismatch\n", .{case.label});
             return err;
         };
@@ -2485,12 +2606,12 @@ test "promotion refuses a contract listing tools when no catalog was accepted" {
     const validated = toolTestContract(&matching_tool_summaries);
     try std.testing.expectError(
         error.ToolCatalogMissing,
-        promote(&validated, acceptedTestAssessment(), [_]u8{0} ** 32, null),
+        promote(&validated, acceptedTestAssessment(), [_]u8{0} ** 32, null, null),
     );
 
     // No tools and no catalog is an ordinary handler, promoted with none.
     const plain = toolTestContract(&.{});
-    var promoted = (try promote(&plain, acceptedTestAssessment(), [_]u8{0} ** 32, null)) orelse
+    var promoted = (try promote(&plain, acceptedTestAssessment(), [_]u8{0} ** 32, null, null)) orelse
         return error.TestUnexpectedResult;
     defer promoted.deinit();
     try std.testing.expect(promoted.tool_catalog == null);
@@ -2507,13 +2628,44 @@ test "promotion refuses an accepted catalog it cannot decode or compile" {
     var buf: [2048]u8 = undefined;
     try std.testing.expectError(
         error.ToolSchemaNotCompilable,
-        promote(&validated, acceptedTestAssessment(), [_]u8{0} ** 32, catalog_test_support.sample(&buf)),
+        promote(&validated, acceptedTestAssessment(), [_]u8{0} ** 32, catalog_test_support.sample(&buf), null),
     );
 
     try std.testing.expectError(
         error.AcceptedToolCatalogUndecodable,
-        promote(&validated, acceptedTestAssessment(), [_]u8{0} ** 32, "not a catalog"),
+        promote(&validated, acceptedTestAssessment(), [_]u8{0} ** 32, "not a catalog", null),
     );
+}
+
+test "the accepted ceiling is the profile's categories and the union of both exclusion lists" {
+    const allocator = std.testing.allocator;
+    const writer = pcc.declaration.test_support;
+
+    // `adapter` excludes cache and ratelimit; the declaration repeats cache
+    // and adds fetch. The union holds each module once, sorted.
+    var buf: [256]u8 = undefined;
+    var w = writer.Writer{ .buf = &buf };
+    writer.writeDeclaration(&w, &.{}, .{ .profile = 1, .exclude = &.{ "zttp:cache", "zttp:fetch" } });
+    var ceiling = (try lowerAcceptedCeiling(allocator, w.bytes())) orelse return error.TestExpectedCeiling;
+    defer ceiling.deinit();
+    try std.testing.expectEqualStrings("adapter", ceiling.profile.name);
+    try std.testing.expectEqual(@as(usize, 3), ceiling.excluded_modules.len);
+    try std.testing.expectEqualStrings("zttp:cache", ceiling.excluded_modules[0]);
+    try std.testing.expectEqualStrings("zttp:fetch", ceiling.excluded_modules[1]);
+    try std.testing.expectEqualStrings("zttp:ratelimit", ceiling.excluded_modules[2]);
+    const view = ceiling.view();
+    for (zq.capability_profiles.profiles[1].categories) |category| try std.testing.expect(view.admits(category));
+    try std.testing.expect(!view.admits(.sqlite));
+    try std.testing.expect(!view.admits(.filesystem));
+
+    // Classifications and no ceiling: nothing to lower.
+    var plain_buf: [512]u8 = undefined;
+    var plain = writer.Writer{ .buf = &plain_buf };
+    writer.writeDeclaration(&plain, &writer.sample_classifications, null);
+    try std.testing.expect((try lowerAcceptedCeiling(allocator, plain.bytes())) == null);
+
+    // Bytes that do not decode refuse rather than lower to no ceiling.
+    try std.testing.expectError(error.AcceptedDeclarationUndecodable, lowerAcceptedCeiling(allocator, "ZTDCL1"));
 }
 
 test "promotion reads no catalog for an assessment short of acceptance" {
@@ -2521,7 +2673,7 @@ test "promotion reads no catalog for an assessment short of acceptance" {
     var refused = acceptedTestAssessment();
     refused.semantic = .integrity_verified;
     refused.grade = null;
-    try std.testing.expect((try promote(&validated, refused, [_]u8{0} ** 32, "not a catalog")) == null);
+    try std.testing.expect((try promote(&validated, refused, [_]u8{0} ** 32, "not a catalog", null)) == null);
 }
 
 test "fromHandlerContract lowers the tool list with an uppercase method" {

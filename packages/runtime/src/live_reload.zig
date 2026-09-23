@@ -62,6 +62,13 @@ fn readConfiguredPolicySource(
     return try zts.file_io.readFile(allocator, path, 1024 * 1024);
 }
 
+/// The dev capability ceiling for `hc`: its ceiling report lowered with the
+/// deployment's code, or null when the contract reports none.
+fn devCeilingFor(allocator: std.mem.Allocator, hc: *const HandlerContract) !?contract_runtime.AcceptedCeiling {
+    const report = if (hc.ceiling) |*r| r else return null;
+    return try contract_runtime.lowerProducerCeiling(allocator, report);
+}
+
 fn shouldSkipContract(config: *const LiveReloadConfig) bool {
     return !config.prove and config.policy_path == null;
 }
@@ -595,13 +602,23 @@ pub const LiveReloadState = struct {
                 printReload("Failed to lower the tool catalog: {}.\n", .{err});
                 return;
             };
+            // The producer's ceiling report, lowered with the deployment's code
+            // (M4 T5b). The live-reload compile passes no declaration today, so
+            // the report is null and dev installs no ceiling.
+            var dev_ceiling = devCeilingFor(self.allocator, hc) catch |err| {
+                if (dev_tool_catalog) |*catalog| catalog.deinit();
+                validated.deinit();
+                printReload("Failed to lower the capability ceiling: {}.\n", .{err});
+                return;
+            };
             self.server.setDevCapabilityPolicy(hc, configured_policy) catch |err| {
+                if (dev_ceiling) |*ceiling| ceiling.deinit();
                 if (dev_tool_catalog) |*catalog| catalog.deinit();
                 validated.deinit();
                 printReload("Failed to install runtime policy generation: {}.\n", .{err});
                 return;
             };
-            self.server.updateContractWithTools(validated, dev_tool_catalog);
+            self.server.updateContractWithTools(validated, dev_tool_catalog, dev_ceiling);
             self.warnToolAuthMissing();
         }
     }
@@ -932,6 +949,7 @@ pub const LiveReloadState = struct {
         var validated_contract: ?contract_runtime.ValidatedRuntimeContract = null;
         var dev_policy: ?RuntimePolicy = null;
         var dev_tool_catalog: ?contract_runtime.AcceptedCatalog = null;
+        var dev_ceiling: ?contract_runtime.AcceptedCeiling = null;
         if (runtime_contract) |hc| {
             const raw = contract_runtime.fromHandlerContract(self.allocator, hc) catch |err| {
                 printReload("Failed to build runtime contract: {}. Keeping previous handler active.\n", .{err});
@@ -952,6 +970,12 @@ pub const LiveReloadState = struct {
                 printReload("Failed to lower the tool catalog: {}. Keeping previous handler active.\n", .{err});
                 return false;
             };
+            dev_ceiling = devCeilingFor(self.allocator, hc) catch |err| {
+                if (dev_tool_catalog) |*catalog| catalog.deinit();
+                if (validated_contract) |*validated| validated.deinit();
+                printReload("Failed to lower the capability ceiling: {}. Keeping previous handler active.\n", .{err});
+                return false;
+            };
             dev_policy = self.server.stageDevCapabilityPolicy(hc, configured_policy);
         }
 
@@ -963,6 +987,7 @@ pub const LiveReloadState = struct {
         const invalidated = pool.reloadHandlerWithPolicy(new_code, self.handler_path, dev_policy) catch |err| {
             if (validated_contract) |*validated| validated.deinit();
             if (dev_tool_catalog) |*catalog| catalog.deinit();
+            if (dev_ceiling) |*ceiling| ceiling.deinit();
             printReload("Failed to install handler generation: {}. Keeping previous handler active.\n", .{err});
             return false;
         };
@@ -970,7 +995,7 @@ pub const LiveReloadState = struct {
         self.rotateGenerations(new_code);
 
         if (validated_contract) |validated| {
-            self.server.updateContractWithTools(validated, dev_tool_catalog);
+            self.server.updateContractWithTools(validated, dev_tool_catalog, dev_ceiling);
             self.warnToolAuthMissing();
             if (self.server.proof_cache != null) {
                 printProve("Proof cache: enabled (deterministic + read_only)\n", .{});

@@ -317,8 +317,8 @@ decoder with a checker stage and three reason codes, following T3.
 |---|---|---|
 | U1 | `e94d37d3` | declaration version 2, `capability_profiles.zig`, `ZTDCL1` encoder and kernel decoder, `reason_too_long` |
 | U2 | `b4d59264` | build enforcement of the ceiling (five named reasons, `error.CeilingBreached`, counted by `check`), contract version 21 `ceiling` report |
-| U3a | this commit | kernel: graph member `declaration = 20`, stage `declaration`, codes 2201..2203 |
-| U3b | pending | section 10 (payload format 6), graph input, activation, runtime ceiling enforcement |
+| U3a | `8f1c4b33` | kernel: graph member `declaration = 20`, stage `declaration`, codes 2201..2203 |
+| U3b | this commit | section 10 (payload format 6), graph input, activation, runtime ceiling enforcement in the outermost export wrapper |
 | U4 | pending | C5 P15 evidence, consumer-contract text, full gate |
 
 U2 note: the ceiling refusal is also called on the transpiler-fallback build path, but no test forces that path, the same gap the required-absent refusal has there. A handler with file imports and a declaration is refused before the ceiling check (T4), so a helper module cannot carry an excluded import past it.

@@ -190,8 +190,16 @@ fn isFetchExport(comptime binding: mb.ModuleBinding, comptime func_binding: mb.F
 fn wrappedExportFn(comptime binding: mb.ModuleBinding, comptime func_binding: mb.FunctionBinding) object.NativeFn {
     // Every export, with or without declared capabilities, runs inside the
     // active tool's grant (M4 T5 design note, section 6). The grant check is
-    // outermost so a denied export pushes no scope and bumps no meter.
-    return comptime mb.wrapNativeFnWithToolGrant(capabilityWrappedExportFn(binding, func_binding), binding.specifier, func_binding.name);
+    // outermost so a denied export pushes no scope and bumps no meter. The
+    // accepted capability ceiling (M4 T5b) is checked in the same wrapper,
+    // right after the grant, against the list `capabilityWrappedExportFn`
+    // pushes: the binding's module-level `required_capabilities`.
+    return comptime mb.wrapNativeFnWithToolGrant(
+        capabilityWrappedExportFn(binding, func_binding),
+        binding.specifier,
+        func_binding.name,
+        binding.required_capabilities,
+    );
 }
 
 fn capabilityWrappedExportFn(comptime binding: mb.ModuleBinding, comptime func_binding: mb.FunctionBinding) object.NativeFn {
@@ -349,4 +357,55 @@ test "every export, capability-free or not, runs inside the active tool grant" {
     ctx.active_tool_grant = .{ .context = @ptrCast(&lacks), .allows = Grant.allowsOnly };
     try std.testing.expectError(error.ToolGrantDenied, wrapped(ctx, value.JSValue.undefined_val, &.{}));
     ctx.active_tool_grant = null;
+}
+
+test "an export wrapper refuses under a ceiling that lacks its capability and runs under one that holds it" {
+    const allocator = std.testing.allocator;
+    var gc_state = try gc.GC.init(allocator, .{});
+    defer gc_state.deinit();
+    const ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    // The real `zttp:crypto` binding and one of its exports, wrapped exactly
+    // as the resolver installs it.
+    const binding = comptime builtin_modules.fromSpecifier("zttp:crypto").?.*;
+    const fb = comptime blk: {
+        for (binding.exports) |exp| {
+            if (std.mem.eql(u8, exp.name, "sha256")) break :blk exp;
+        }
+        @compileError("zttp:crypto has no sha256 export");
+    };
+    comptime std.debug.assert(binding.required_capabilities.len > 0);
+    const wrapped = comptime wrappedExportFn(binding, fb);
+
+    // A ceiling that admits every category the binding requires: the export
+    // runs. A string argument is enough for the call to return a value.
+    const arg_ptr = try ctx.createStringPtr("abc");
+    defer @import("../../string.zig").freeString(allocator, arg_ptr);
+    const arg = value.JSValue.fromPtr(arg_ptr);
+    const holds = context.CapabilityCeiling{
+        .categories = context.CapabilityCeiling.categoryMask(binding.required_capabilities),
+        .excluded_modules = &.{},
+    };
+    ctx.active_capability_ceiling = holds;
+    const digest = try wrapped(ctx, value.JSValue.undefined_val, &.{arg});
+    try std.testing.expect(digest.isString());
+    @import("../../string.zig").freeString(allocator, digest.toPtr(@import("../../string.zig").JSString));
+    const calls_after_run = ctx.cost_meter.total();
+    try std.testing.expect(calls_after_run > 0);
+
+    // A ceiling without one of those categories: the named denial, before the
+    // export runs or the meter moves.
+    ctx.active_capability_ceiling = .{
+        .categories = holds.categories & ~context.CapabilityCeiling.categoryMask(binding.required_capabilities[0..1]),
+        .excluded_modules = &.{},
+    };
+    try std.testing.expectError(error.CapabilityCeilingDenied, wrapped(ctx, value.JSValue.undefined_val, &.{arg}));
+    try std.testing.expectEqual(calls_after_run, ctx.cost_meter.total());
+
+    // A ceiling that holds every category but excludes the module by name.
+    const excluded = [_][]const u8{"zttp:crypto"};
+    ctx.active_capability_ceiling = .{ .categories = holds.categories, .excluded_modules = &excluded };
+    try std.testing.expectError(error.CapabilityCeilingDenied, wrapped(ctx, value.JSValue.undefined_val, &.{arg}));
+    ctx.active_capability_ceiling = null;
 }

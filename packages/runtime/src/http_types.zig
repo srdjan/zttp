@@ -30,6 +30,19 @@ pub const HttpRequestView = struct {
     strip_authorization: bool = false,
     /// The served tool's export grant, held for the duration of the call.
     tool_grant: ?ToolGrant = null,
+    /// The accepted capability ceiling of the served generation (M4 T5b),
+    /// held for the duration of the call. Null when the generation has none.
+    capability_ceiling: ?CapabilityCeiling = null,
+};
+
+/// The accepted capability ceiling, as the server hands it to the runtime. The
+/// same shape as the engine's `CapabilityCeiling`, restated so this file stays
+/// free of the engine: bit `@intFromEnum(capability)` of `categories` admits
+/// that category, and `excluded_modules` are refused by name. Both borrow from
+/// the generation, which the caller keeps alive for the call.
+pub const CapabilityCeiling = struct {
+    categories: u32,
+    excluded_modules: []const []const u8,
 };
 
 /// A tool's export grant, as the server hands it to the runtime. The same

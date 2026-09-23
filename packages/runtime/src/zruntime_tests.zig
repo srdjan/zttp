@@ -784,6 +784,54 @@ test "built-in module import runs under capability wrapper context" {
     try std.testing.expectEqualStrings("{\"uuidLen\":36,\"nanoLen\":4}", response.body);
 }
 
+test "the capability ceiling holds for one call and is cleared after it and after a failing call" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const rt = try HandlerInstance.init(allocator, .{});
+    defer rt.deinit();
+
+    const handler_code =
+        \\import { uuid } from "zttp:id";
+        \\function handler(req) {
+        \\  return Response.text(String(uuid().length));
+        \\}
+    ;
+    try rt.loadHandler(handler_code, "<capability-ceiling>");
+
+    var request = try makeTestRequest(allocator, "GET", "/", null);
+    defer request.deinit(allocator);
+
+    // A ceiling that admits every category and excludes nothing: the call
+    // runs, and the ceiling does not outlive it.
+    var view = request.asView();
+    view.capability_ceiling = .{ .categories = std.math.maxInt(u32), .excluded_modules = &.{} };
+    var response = try rt.executeHandler(view);
+    defer response.deinit();
+    try std.testing.expectEqualStrings("36", response.body);
+    try std.testing.expect(rt.ctx.active_capability_ceiling == null);
+
+    // A ceiling that excludes the module: the call is refused inside the
+    // handler, the request fails, and the ceiling is cleared on that path too.
+    const excluded = [_][]const u8{"zttp:id"};
+    view.capability_ceiling = .{ .categories = std.math.maxInt(u32), .excluded_modules = &excluded };
+    if (rt.executeHandler(view)) |unexpected| {
+        var owned = unexpected;
+        defer owned.deinit();
+        std.debug.print("expected a refused call, got status {d}: {s}\n", .{ owned.status, owned.body });
+        return error.TestUnexpectedResult;
+    } else |err| {
+        try std.testing.expectEqual(error.HandlerError, err);
+    }
+    try std.testing.expect(rt.ctx.active_capability_ceiling == null);
+
+    // With no ceiling the same runtime serves the call again.
+    view.capability_ceiling = null;
+    var again = try rt.executeHandler(view);
+    defer again.deinit();
+    try std.testing.expectEqualStrings("36", again.body);
+}
+
 test "durable run reuses completed response for duplicate key" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

@@ -58,6 +58,10 @@ pub const Inputs = struct {
     /// from these bytes, never from the producer's list, so a changed byte
     /// fails at artifact binding.
     tool_catalog: ?[]const u8 = null,
+    /// Exact canonical `ZTDCL1` declaration section loaded with the artifact.
+    /// Null means the handler has no declaration. The graph member is rebuilt
+    /// from these bytes, so a changed byte fails at artifact binding.
+    declaration: ?[]const u8 = null,
 };
 
 pub const Error = error{
@@ -134,6 +138,10 @@ fn graphInputs(inputs: Inputs) artifact_graph.Inputs {
         .invariant_adapter_digest = invariant_adapter.linkedDigest(),
         .tool_catalog_digest = if (inputs.tool_catalog) |bytes|
             pcc.tool_catalog.digest(bytes)
+        else
+            null,
+        .declaration_digest = if (inputs.declaration) |bytes|
+            pcc.declaration.digest(bytes)
         else
             null,
     });
@@ -215,6 +223,7 @@ pub fn accept(
         .invariant_spec = inputs.invariant_spec,
         .observed_invariant_operations = observed_operations,
         .tool_catalog = inputs.tool_catalog,
+        .declaration = inputs.declaration,
     }, policy);
 }
 

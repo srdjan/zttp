@@ -654,6 +654,10 @@ const ArtifactTailInput = struct {
     /// only source of entries for a contract category the compiler could not
     /// enumerate; without it such a category ships denying everything.
     configured_policy: ?*const zts.HandlerPolicy = null,
+    /// The consumer declaration the compile enforced, when the project has
+    /// one. Its canonical `ZTDCL1` form ships as section 10 and binds as the
+    /// `declaration` graph member. Borrowed.
+    declaration: ?*const zts.declaration.Declaration = null,
 };
 
 const ArtifactTailCapabilities = struct {
@@ -784,6 +788,24 @@ fn writeArtifactTail(
         null;
     defer if (tool_catalog_section) |bytes| allocator.free(bytes);
 
+    // The canonical declaration, encoded once from the declaration the compile
+    // enforced. The same bytes are shipped as section 10 and hashed into the
+    // `declaration` graph member. A declaration with only classifications ships
+    // too: the section carries both halves. No declaration, no section.
+    const declaration_section: ?[]u8 = if (input.declaration) |decl|
+        zts.declaration.encodeCanonical(allocator, decl) catch |err| {
+            if (!builtin.is_test) {
+                std.log.err(
+                    "failed to encode the declaration ({s}); refusing to write an artifact whose declaration the consumer could not read",
+                    .{@errorName(err)},
+                );
+            }
+            return err;
+        }
+    else
+        null;
+    defer if (declaration_section) |bytes| allocator.free(bytes);
+
     const artifact_sections = artifact_graph.ArtifactInputs{
         .bytecode = input.bytecode,
         .dep_bytecodes = input.dep_bytecodes,
@@ -803,6 +825,10 @@ fn writeArtifactTail(
         .invariant_adapter_digest = invariant_adapter.linkedDigest(),
         .tool_catalog_digest = if (tool_catalog_section) |bytes|
             pcc.tool_catalog.digest(bytes)
+        else
+            null,
+        .declaration_digest = if (declaration_section) |bytes|
+            pcc.declaration.digest(bytes)
         else
             null,
     };
@@ -899,6 +925,7 @@ fn writeArtifactTail(
             .certificate = if (certificate) |value| value.bytes else null,
             .invariant_section = input.invariant_spec,
             .tool_catalog_section = tool_catalog_section,
+            .declaration_section = declaration_section,
         },
     );
 }
@@ -1159,6 +1186,7 @@ fn runBuild(
         .proof_evidence = if (compiled.proof_evidence) |*evidence| evidence else null,
         .configured_policy = request.policy,
         .invariant_spec = request.invariant_spec,
+        .declaration = request.declaration,
     });
 
     caps.codesign(caps.context, allocator, output_path);
@@ -2570,6 +2598,7 @@ const LoadedArtifact = struct {
                 .frontend_grammar_hash = if (view.source_identity.frontend) |f| f.grammar_hash else null,
             },
             .tool_catalog = self.payload.tool_catalog_section,
+            .declaration = self.payload.declaration_section,
         };
     }
 
@@ -2597,10 +2626,21 @@ const LoadedArtifact = struct {
 /// Compile `source`, run the production artifact tail over it, and load the
 /// payload it would have written.
 fn loadArtifactForSource(allocator: std.mem.Allocator, source: []const u8) !LoadedArtifact {
+    return loadDeclaredArtifactForSource(allocator, source, null);
+}
+
+/// `loadArtifactForSource` with a consumer declaration, which the compile
+/// enforces and the tail ships as section 10.
+fn loadDeclaredArtifactForSource(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    declaration: ?*const zts.declaration.Declaration,
+) !LoadedArtifact {
     var compiled = try precompile.compileHandler(allocator, source, "handler.ts", .{
         .emit_verify = true,
         .emit_contract = true,
         .emit_proof_evidence = true,
+        .declaration = declaration,
     });
     defer compiled.deinit(allocator);
     const evidence = compiled.proof_evidence orelse return error.TestUnexpectedResult;
@@ -2616,6 +2656,7 @@ fn loadArtifactForSource(allocator: std.mem.Allocator, source: []const u8) !Load
         .dep_bytecodes = compiled.dep_bytecodes orelse &.{},
         .contract = &contract,
         .proof_evidence = &evidence,
+        .declaration = declaration,
     }, capture.capabilities());
 
     var payload = (try self_extract.parse(allocator, capture.serialized orelse return error.TestUnexpectedResult)) orelse
@@ -2673,6 +2714,7 @@ test "a real compile of a tool handler reaches acceptance and promotes the catal
         assessment,
         artifact.payload.policy_section_sha256,
         section,
+        null,
     )) orelse return error.TestUnexpectedResult;
     defer promoted.deinit();
     const catalog = promoted.tool_catalog orelse return error.TestUnexpectedResult;
@@ -2760,13 +2802,13 @@ test "a contract tool list that disagrees with the accepted catalog refuses to s
     defer disagreeing.deinit();
     try std.testing.expectError(
         error.ToolCatalogContractMismatch,
-        contract_runtime.promote(&disagreeing, assessment, artifact.payload.policy_section_sha256, section),
+        contract_runtime.promote(&disagreeing, assessment, artifact.payload.policy_section_sha256, section, null),
     );
 
     // And the contract names tools while no catalog section was accepted.
     try std.testing.expectError(
         error.ToolCatalogMissing,
-        contract_runtime.promote(&artifact.contract, assessment, artifact.payload.policy_section_sha256, null),
+        contract_runtime.promote(&artifact.contract, assessment, artifact.payload.policy_section_sha256, null, null),
     );
 }
 
@@ -2791,9 +2833,164 @@ test "a handler with no tool catalog ships no section and no member, and promote
         assessment,
         artifact.payload.policy_section_sha256,
         null,
+        null,
     )) orelse return error.TestUnexpectedResult;
     defer promoted.deinit();
     try std.testing.expect(promoted.tool_catalog == null);
+
+    // No declaration either: no section, no member, no ceiling.
+    try std.testing.expect(artifact.payload.declaration_section == null);
+    try std.testing.expectEqual(@as(usize, 0), (try artifact.certificateMembers(.declaration, &member_buf)).len);
+    try std.testing.expect(promoted.capability_ceiling == null);
+}
+
+// ---------------------------------------------------------------------------
+// Declaration: from a real compile, through the artifact, to promotion (M4 T5b)
+// ---------------------------------------------------------------------------
+
+const declared_fixture_source =
+    \\export function handler(req: Request): Proof<Response, "deterministic" | "read_only" | "state_isolated" | "no_secret_leakage" | "result_safe"> {
+    \\  return Response.text("ok");
+    \\}
+;
+
+/// A `boundary` ceiling that also excludes `zttp:sql`, which the profile does
+/// not exclude by itself.
+const declared_fixture_declaration =
+    \\{"version":2,"ceiling":{"profile":"boundary","exclude":["zttp:sql"]}}
+;
+
+fn parseTestDeclaration(allocator: std.mem.Allocator, json: []const u8) !zts.declaration.Declaration {
+    return precompile.parseDeclarationBytes(allocator, json, "test declaration", null);
+}
+
+test "a real compile of a declared handler reaches acceptance and promotes the ceiling it shipped" {
+    const allocator = std.testing.allocator;
+    var declaration = try parseTestDeclaration(allocator, declared_fixture_declaration);
+    defer declaration.deinit();
+    var artifact = try loadDeclaredArtifactForSource(allocator, declared_fixture_source, &declaration);
+    defer artifact.deinit();
+
+    // The producer shipped the canonical bytes and committed the member to
+    // them.
+    const section = artifact.payload.declaration_section orelse return error.TestUnexpectedResult;
+    const expected = try zts.declaration.encodeCanonical(allocator, &declaration);
+    defer allocator.free(expected);
+    try std.testing.expectEqualSlices(u8, expected, section);
+    var member_buf: [4]artifact_graph.Member = undefined;
+    const members = try artifact.certificateMembers(.declaration, &member_buf);
+    try std.testing.expectEqual(@as(usize, 1), members.len);
+    try std.testing.expectEqual(@as(u32, 0), members[0].ordinal);
+    try std.testing.expectEqualSlices(u8, &pcc.declaration.digest(section), &members[0].digest);
+
+    // The startup rebuild folds the root the certificate names.
+    const inputs = artifact.activationInputs();
+    const observed = (try proof_activation.observedRoot(allocator, inputs)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualSlices(u8, &(try artifact.executableRoot()), &observed);
+
+    const assessment = try proof_activation.accept(allocator, inputs, pcc.policy.production);
+    try expectAccepted(assessment);
+
+    var promoted = (try contract_runtime.promote(
+        &artifact.contract,
+        assessment,
+        artifact.payload.policy_section_sha256,
+        null,
+        section,
+    )) orelse return error.TestUnexpectedResult;
+    defer promoted.deinit();
+    const ceiling = promoted.capability_ceiling orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("boundary", ceiling.profile.name);
+    try std.testing.expectEqual(@as(usize, 3), ceiling.excluded_modules.len);
+    try std.testing.expectEqualStrings("zttp:cache", ceiling.excluded_modules[0]);
+    try std.testing.expectEqualStrings("zttp:ratelimit", ceiling.excluded_modules[1]);
+    try std.testing.expectEqualStrings("zttp:sql", ceiling.excluded_modules[2]);
+    const view = ceiling.view();
+    try std.testing.expect(view.admits(.env));
+    try std.testing.expect(view.admits(.crypto));
+    try std.testing.expect(!view.admits(.network));
+    try std.testing.expect(!view.admits(.sqlite));
+}
+
+test "a declaration with classifications and no ceiling ships its section and promotes no ceiling" {
+    const allocator = std.testing.allocator;
+    var declaration = try parseTestDeclaration(allocator,
+        \\{"version":1,"classifications":[
+        \\ {"source":"fetch:billing.example.com","path":"card.token","label":"credential","required":false,"reason":"Card token."}]}
+    );
+    defer declaration.deinit();
+    var artifact = try loadDeclaredArtifactForSource(allocator, declared_fixture_source, &declaration);
+    defer artifact.deinit();
+
+    const section = artifact.payload.declaration_section orelse return error.TestUnexpectedResult;
+    var member_buf: [4]artifact_graph.Member = undefined;
+    try std.testing.expectEqual(@as(usize, 1), (try artifact.certificateMembers(.declaration, &member_buf)).len);
+
+    const assessment = try proof_activation.accept(allocator, artifact.activationInputs(), pcc.policy.production);
+    try expectAccepted(assessment);
+    var promoted = (try contract_runtime.promote(
+        &artifact.contract,
+        assessment,
+        artifact.payload.policy_section_sha256,
+        null,
+        section,
+    )) orelse return error.TestUnexpectedResult;
+    defer promoted.deinit();
+    try std.testing.expect(promoted.capability_ceiling == null);
+}
+
+test "one changed declaration byte in a copy of an accepted declared artifact is refused at artifact binding" {
+    const allocator = std.testing.allocator;
+    var declaration = try parseTestDeclaration(allocator, declared_fixture_declaration);
+    defer declaration.deinit();
+    var artifact = try loadDeclaredArtifactForSource(allocator, declared_fixture_source, &declaration);
+    defer artifact.deinit();
+    const section = artifact.payload.declaration_section orelse return error.TestUnexpectedResult;
+
+    // A byte inside the excluded specifier, so the tampered copy still
+    // decodes: the refusal is the member binding, not a decode failure.
+    const tampered = try allocator.dupe(u8, section);
+    defer allocator.free(tampered);
+    const at = std.mem.indexOf(u8, tampered, "zttp:sql") orelse return error.TestUnexpectedResult;
+    tampered[at + "zttp:".len] = 't';
+    _ = try pcc.declaration.decode(tampered);
+
+    var inputs = artifact.activationInputs();
+    inputs.declaration = tampered;
+    const assessment = try proof_activation.accept(allocator, inputs, pcc.policy.production);
+    try expectRefusedAt(assessment, .artifact_binding, .graph_member_digest_mismatch);
+}
+
+test "a declared artifact whose declaration section was deleted is refused at artifact binding" {
+    const allocator = std.testing.allocator;
+    var declaration = try parseTestDeclaration(allocator, declared_fixture_declaration);
+    defer declaration.deinit();
+    var artifact = try loadDeclaredArtifactForSource(allocator, declared_fixture_source, &declaration);
+    defer artifact.deinit();
+
+    var inputs = artifact.activationInputs();
+    inputs.declaration = null;
+    const assessment = try proof_activation.accept(allocator, inputs, pcc.policy.production);
+    // The certificate's graph still names member 20; the loaded sections no
+    // longer produce it.
+    try expectRefusedAt(assessment, .artifact_binding, .graph_member_missing);
+}
+
+test "a declaration section that does not lower refuses to start" {
+    const allocator = std.testing.allocator;
+    var declaration = try parseTestDeclaration(allocator, declared_fixture_declaration);
+    defer declaration.deinit();
+    var artifact = try loadDeclaredArtifactForSource(allocator, declared_fixture_source, &declaration);
+    defer artifact.deinit();
+    const assessment = try proof_activation.accept(allocator, artifact.activationInputs(), pcc.policy.production);
+    try expectAccepted(assessment);
+
+    // Promotion lowers only what acceptance was handed. Bytes that do not
+    // decode are a refusal, never a generation without its ceiling.
+    try std.testing.expectError(
+        error.AcceptedDeclarationUndecodable,
+        contract_runtime.promote(&artifact.contract, assessment, artifact.payload.policy_section_sha256, null, "not a declaration"),
+    );
 }
 
 test "a handler that does not always return is not accepted" {

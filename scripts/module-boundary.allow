@@ -33,6 +33,10 @@ runtime builtins
 runtime bytecode
 runtime bytes
 runtime bytecode_cache
+# The accepted declaration names its ceiling profile by wire index (M4 T5b);
+# the runtime lowers that index to the same profile row the build enforced,
+# so the runtime ceiling and the build ceiling cannot use two tables.
+runtime capability_profiles
 runtime compat
 runtime contract_diff
 runtime counterexample

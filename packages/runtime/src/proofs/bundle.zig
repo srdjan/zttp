@@ -359,6 +359,7 @@ fn verifySemantics(
         .provenance = if (payload.attestation_jws != null) .unchecked else .absent,
         .invariant_spec = payload.invariant_section,
         .tool_catalog = payload.tool_catalog_section,
+        .declaration = payload.declaration_section,
     }, pcc.policy.production);
 
     if (assessment.rejection) |rejection| {
