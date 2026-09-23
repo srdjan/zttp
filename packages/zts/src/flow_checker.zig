@@ -170,90 +170,67 @@ pub const FlowProperties = struct {
 };
 
 // ---------------------------------------------------------------------------
-// External data labels
+// Declared classifications (M4 T4, producer obligations P8 and P9)
 // ---------------------------------------------------------------------------
 
-/// An externally declared label binding: a field name, its classification,
-/// and a human-readable reason shown in diagnostics.
-pub const ExternalLabel = struct {
-    field: []const u8, // e.g. "User.email" or just "email"
-    label: DataLabel,
-    reason: []const u8,
+const declaration = @import("zts-base").declaration;
+pub const Declaration = declaration.Declaration;
+
+/// What the analysis established about one declared classification (P8). The
+/// order is the order of strength: a status only ever moves up.
+pub const EntryStatus = enum(u2) {
+    /// The analysis never produced a value from the entry's source, or never
+    /// reached the path or an aggregate above it.
+    absent = 0,
+    /// The entry applied only through an aggregate that contains the path, a
+    /// computed read, or a fetch whose source could not be named.
+    indeterminate = 1,
+    /// An expression was evaluated at the entry's exact path, or below it.
+    matched = 2,
 };
 
-/// Map a JSON label string to the corresponding DataLabel enum value.
-/// Returns null for unrecognized strings.
-pub fn parseDataLabel(s: []const u8) ?DataLabel {
-    const map = .{
-        .{ "secret", DataLabel.secret },
-        .{ "credential", DataLabel.credential },
-        .{ "user_input", DataLabel.user_input },
-        .{ "config", DataLabel.config },
-        .{ "internal", DataLabel.internal },
-        .{ "external", DataLabel.external },
-        .{ "validated", DataLabel.validated },
-        .{ "nondeterministic", DataLabel.nondeterministic },
-    };
-    inline for (map) |entry| {
-        if (std.mem.eql(u8, s, entry[0])) return entry[1];
+/// Where a value came from, when it came from a declared source. Only a const
+/// binding keeps one, so an alias is tracked and a reassigned name is not.
+/// One declared source: a fetch host or a service name.
+const DeclaredSource = struct {
+    kind: declaration.SourceKind,
+    name: []const u8,
+};
+
+fn findSource(sources: []const DeclaredSource, kind: declaration.SourceKind, name: []const u8) ?u16 {
+    for (sources, 0..) |source, i| {
+        if (source.kind == kind and std.mem.eql(u8, source.name, name)) return @intCast(i);
     }
     return null;
 }
 
-/// Parse external label declarations from JSON bytes.
-/// Expected format: { "labels": [ { "field": "...", "label": "...", "reason": "..." }, ... ] }
-/// Returns owned slice; caller must free with the same allocator.
-pub fn parseExternalLabels(allocator: std.mem.Allocator, json_bytes: []const u8) ![]const ExternalLabel {
-    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, json_bytes, .{});
-    defer parsed.deinit();
+const Origin = struct {
+    /// Index of the source among `origin_sources`, or null for a fetch whose
+    /// URL is not a literal: every fetch entry then applies by path.
+    source: ?u16,
+    kind: declaration.SourceKind,
+    part: enum { response, body },
+    /// Path segments from the body root, borrowed from the atom table.
+    depth: u8 = 0,
+    segments: [max_origin_depth][]const u8 = undefined,
 
-    if (parsed.value != .object) return error.InvalidExternalLabels;
-    const root = parsed.value.object;
-    const labels_val = root.get("labels") orelse return error.InvalidExternalLabels;
-    if (labels_val != .array) return error.InvalidExternalLabels;
+    /// Deeper than any declared path can be: relations are decided by the
+    /// first `max_origin_depth` segments, so the rest need not be kept.
+    const max_origin_depth = 17;
 
-    const items = labels_val.array.items;
-    var result = try allocator.alloc(ExternalLabel, items.len);
-    var count: usize = 0;
-    errdefer {
-        for (result[0..count]) |entry| {
-            allocator.free(entry.field);
-            allocator.free(entry.reason);
+    fn path(self: *const Origin) []const []const u8 {
+        return self.segments[0..self.depth];
+    }
+
+    fn child(self: Origin, segment: []const u8) Origin {
+        var out = self;
+        if (out.depth < max_origin_depth) {
+            out.segments[out.depth] = segment;
+            out.depth += 1;
         }
-        allocator.free(result);
+        return out;
     }
-
-    for (items) |item| {
-        if (item != .object) continue;
-        const obj = item.object;
-
-        const field_val = obj.get("field") orelse continue;
-        const label_val = obj.get("label") orelse continue;
-        const reason_val = obj.get("reason") orelse continue;
-
-        if (field_val != .string or label_val != .string or reason_val != .string) continue;
-
-        const data_label = parseDataLabel(label_val.string) orelse continue;
-
-        // Dupe strings so they outlive the parsed JSON tree
-        const field_dupe = try allocator.dupe(u8, field_val.string);
-        errdefer allocator.free(field_dupe);
-        const reason_dupe = try allocator.dupe(u8, reason_val.string);
-
-        result[count] = .{
-            .field = field_dupe,
-            .label = data_label,
-            .reason = reason_dupe,
-        };
-        count += 1;
-    }
-
-    // Shrink to actual count
-    if (count < result.len) {
-        result = try allocator.realloc(result, count);
-    }
-    return result;
-}
+};
 
 // ---------------------------------------------------------------------------
 // FlowChecker
@@ -347,11 +324,23 @@ pub const FlowChecker = struct {
     /// Snapshotted alongside `working_constraints` on diagnostics.
     working_io_calls: std.ArrayListUnmanaged(counterexample.TrackedIoCall),
 
-    /// External label overrides: property name -> LabelSet (additive, merged via OR).
-    /// Both qualified ("User.email") and short ("email") forms are registered.
-    external_labels: std.StringHashMapUnmanaged(LabelSet),
-    /// External label reasons: property name -> human-readable reason for diagnostics.
-    external_reasons: std.StringHashMapUnmanaged([]const u8),
+    /// The consumer's declared classifications (M4 T4). Borrowed; must outlive
+    /// the checker. Null means none were declared.
+    declaration: ?*const Declaration = null,
+    /// One status per classification, in the declaration's order (P8).
+    entry_status: []EntryStatus = &.{},
+    /// Distinct declared sources, their names borrowed from the declaration.
+    /// An origin names its source by index.
+    origin_sources: std.ArrayListUnmanaged(DeclaredSource) = .empty,
+    /// The origin of each const binding whose initializer had one.
+    binding_origins: std.AutoHashMapUnmanaged(u32, Origin) = .empty,
+    /// The last classification that contributed each label, for the reason a
+    /// leak diagnostic names.
+    last_declared_secret: ?u32 = null,
+    last_declared_credential: ?u32 = null,
+    /// Nonzero while the object of a member read is evaluated: an aggregate
+    /// read only to reach one of its members is not forwarded (P8).
+    member_object_depth: u8 = 0,
     /// Dynamically formatted diagnostic messages that need freeing.
     allocated_messages: std.ArrayListUnmanaged([]const u8),
 
@@ -386,8 +375,6 @@ pub const FlowChecker = struct {
             .env_fn_slot = null,
             .working_constraints = .empty,
             .working_io_calls = .empty,
-            .external_labels = .empty,
-            .external_reasons = .empty,
             .allocated_messages = .empty,
             .properties = .{},
             .allocation_failed = false,
@@ -428,19 +415,9 @@ pub const FlowChecker = struct {
         }
         self.allocated_messages.deinit(self.allocator);
 
-        // Free duped key strings and reason strings from external labels
-        var label_iter = self.external_labels.iterator();
-        while (label_iter.next()) |entry| {
-            self.allocator.free(entry.key_ptr.*);
-        }
-        self.external_labels.deinit(self.allocator);
-
-        var reason_iter = self.external_reasons.iterator();
-        while (reason_iter.next()) |entry| {
-            self.allocator.free(entry.key_ptr.*);
-            self.allocator.free(entry.value_ptr.*);
-        }
-        self.external_reasons.deinit(self.allocator);
+        if (self.entry_status.len > 0) self.allocator.free(self.entry_status);
+        self.origin_sources.deinit(self.allocator);
+        self.binding_origins.deinit(self.allocator);
     }
 
     /// Run the flow analysis on the given handler function node.
@@ -807,53 +784,29 @@ pub const FlowChecker = struct {
         return self.properties;
     }
 
-    /// Populate external label maps from parsed ExternalLabel declarations.
-    /// For qualified field names like "User.email", both the full name and the
-    /// short form ("email") are registered. Labels are additive: if multiple
-    /// declarations target the same field, their LabelSets are merged via OR.
-    pub fn setExternalLabels(self: *FlowChecker, labels: []const ExternalLabel) void {
-        for (labels) |ext| {
-            self.registerExternalField(ext.field, ext.label, ext.reason);
-
-            // Also register short form: everything after the last dot
-            if (std.mem.lastIndexOfScalar(u8, ext.field, '.')) |dot_pos| {
-                const short = ext.field[dot_pos + 1 ..];
-                if (short.len > 0) {
-                    self.registerExternalField(short, ext.label, ext.reason);
-                }
+    /// Install the consumer's declared classifications (M4 T4). Borrowed: the
+    /// declaration must outlive the checker. Every entry starts `absent`.
+    pub fn setDeclaration(self: *FlowChecker, decl: *const Declaration) std.mem.Allocator.Error!void {
+        const statuses = try self.allocator.alloc(EntryStatus, decl.classifications.len);
+        errdefer self.allocator.free(statuses);
+        @memset(statuses, .absent);
+        var sources: std.ArrayListUnmanaged(DeclaredSource) = .empty;
+        errdefer sources.deinit(self.allocator);
+        for (decl.classifications) |entry| {
+            if (findSource(sources.items, entry.source_kind, entry.source_name) == null) {
+                try sources.append(self.allocator, .{ .kind = entry.source_kind, .name = entry.source_name });
             }
         }
+        if (self.entry_status.len > 0) self.allocator.free(self.entry_status);
+        self.origin_sources.deinit(self.allocator);
+        self.entry_status = statuses;
+        self.origin_sources = sources;
+        self.declaration = decl;
     }
 
-    fn registerExternalField(self: *FlowChecker, name: []const u8, label: DataLabel, reason: []const u8) void {
-        const label_set = LabelSet.fromLabel(label);
-
-        if (self.external_labels.getEntry(name)) |entry| {
-            // Merge into existing entry - no new key allocation needed
-            entry.value_ptr.* = LabelSet.merge(entry.value_ptr.*, label_set);
-        } else {
-            const duped_key = self.allocator.dupe(u8, name) catch {
-                self.markAllocationFailure();
-                return;
-            };
-            self.external_labels.put(self.allocator, duped_key, label_set) catch {
-                self.allocator.free(duped_key);
-                self.markAllocationFailure();
-                return;
-            };
-        }
-
-        if (self.external_reasons.get(name) == null) {
-            const reason_key = self.allocator.dupe(u8, name) catch return;
-            const reason_val = self.allocator.dupe(u8, reason) catch {
-                self.allocator.free(reason_key);
-                return;
-            };
-            self.external_reasons.put(self.allocator, reason_key, reason_val) catch {
-                self.allocator.free(reason_key);
-                self.allocator.free(reason_val);
-            };
-        }
+    /// The P8 status of each classification, in the declaration's order.
+    pub fn classificationStatuses(self: *const FlowChecker) []const EntryStatus {
+        return self.entry_status;
     }
 
     pub fn formatDiagnostics(self: *const FlowChecker, source: stripper.SourceView, writer: anytype) !void {
@@ -1029,6 +982,8 @@ pub const FlowChecker = struct {
         if (target_tag == .identifier) {
             const binding = self.ir_view.getBinding(asgn.target) orelse return;
             const key = packBindingKey(binding.scope_id, binding.slot);
+            // Only a const holds an origin, but a written name never keeps one.
+            _ = self.binding_origins.remove(key);
             if (asgn.op) |_| {
                 // Compound assignment (+=, etc): merge with existing
                 const existing = self.binding_labels.get(key) orelse LabelSet.empty;
@@ -1047,6 +1002,9 @@ pub const FlowChecker = struct {
             const key = packBindingKey(binding.scope_id, binding.slot);
             const existing = self.binding_labels.get(key) orelse LabelSet.empty;
             self.binding_labels.put(self.allocator, key, LabelSet.merge(existing, labels)) catch self.markAllocationFailure();
+            // The object now holds labels its origin does not explain, and a
+            // precise member read would subtract them with the declared ones.
+            _ = self.binding_origins.remove(key);
         }
     }
 
@@ -1097,6 +1055,8 @@ pub const FlowChecker = struct {
         const key = packBindingKey(binding.scope_id, binding.slot);
         const existing = self.binding_labels.get(key) orelse LabelSet.empty;
         self.binding_labels.put(self.allocator, key, LabelSet.merge(existing, arg_labels)) catch self.markAllocationFailure();
+        // As for a member assignment: labels the origin does not explain.
+        _ = self.binding_origins.remove(key);
     }
 
     /// Record a defining value node for a binding so the response-sink check
@@ -1154,10 +1114,23 @@ pub const FlowChecker = struct {
             .var_decl => {
                 const vd = self.ir_view.getVarDecl(node) orelse return;
                 if (vd.init != null_node) {
+                    // A const keeps its initializer's origin, so an alias of a
+                    // body or a field is read precisely (M4 T4). A let or var
+                    // can be reassigned, so it keeps only the labels. Binding
+                    // an aggregate is not forwarding it: its later uses decide
+                    // the P8 status, so the initializer is read as a member
+                    // object would be.
+                    const init_origin: ?Origin = if (vd.kind == .@"const") self.originOf(vd.init) else null;
+                    if (init_origin != null) self.member_object_depth += 1;
                     const labels = self.inferLabels(vd.init);
+                    if (init_origin != null) self.member_object_depth -= 1;
                     if (!labels.isEmpty()) {
                         const key = packBindingKey(vd.binding.scope_id, vd.binding.slot);
                         self.binding_labels.put(self.allocator, key, labels) catch self.markAllocationFailure();
+                    }
+                    if (init_origin) |origin| {
+                        const key = packBindingKey(vd.binding.scope_id, vd.binding.slot);
+                        self.binding_origins.put(self.allocator, key, origin) catch self.markAllocationFailure();
                     }
                     self.recordBindingValue(vd.binding, vd.init);
                     self.trackModuleCallInit(vd);
@@ -1288,12 +1261,20 @@ pub const FlowChecker = struct {
             .identifier => {
                 const binding = self.ir_view.getBinding(node) orelse return LabelSet.empty;
                 const key = packBindingKey(binding.scope_id, binding.slot);
+                // A use of a name with an origin is where an aggregate is
+                // forwarded or a field is read (P8). Its labels are already on
+                // the binding; this only records the status.
+                if (self.binding_origins.get(key)) |origin| _ = self.declaredLabels(origin, true);
                 return self.binding_labels.get(key) orelse LabelSet.empty;
             },
 
             .call => {
                 const call_data = self.ir_view.getCall(node) orelse return LabelSet.empty;
-                return self.inferCallLabels(call_data);
+                const labels = self.inferCallLabels(call_data);
+                // A response or body from a declared source carries the
+                // declared labels of everything it contains (M4 T4).
+                if (self.originOf(node)) |origin| return LabelSet.merge(labels, self.declaredLabels(origin, true));
+                return labels;
             },
 
             .binary_op => {
@@ -1311,7 +1292,19 @@ pub const FlowChecker = struct {
 
             .member_access, .optional_chain => {
                 const member = self.ir_view.getMember(node) orelse return LabelSet.empty;
+                // A member read on a value from a declared source is precise:
+                // it drops the declared labels the aggregate held and takes
+                // those of its own path, so a sibling field is not labelled.
+                const object_origin = self.originOf(member.object);
+                if (object_origin != null) self.member_object_depth += 1;
                 var labels = self.inferLabels(member.object);
+                if (object_origin != null) self.member_object_depth -= 1;
+                if (object_origin) |origin| {
+                    const inherited = self.declaredLabels(origin, false);
+                    if (inherited.secret) labels.secret = false;
+                    if (inherited.credential) labels.credential = false;
+                    if (self.originOf(node)) |child| labels = LabelSet.merge(labels, self.declaredLabels(child, true));
+                }
 
                 // req.headers.authorization carries credential label
                 if (self.isReqProperty(member.object, "headers")) {
@@ -1332,11 +1325,6 @@ pub const FlowChecker = struct {
                             labels = LabelSet.merge(labels, result_labels);
                         }
                     }
-                }
-
-                // External labels: merge if the property name matches a declared field
-                if (self.external_labels.get(prop_name)) |ext_labels| {
-                    labels = LabelSet.merge(labels, ext_labels);
                 }
 
                 return labels;
@@ -1519,6 +1507,160 @@ pub const FlowChecker = struct {
     }
 
     /// Infer labels for a function call expression.
+    // -----------------------------------------------------------------
+    // Declared classifications (M4 T4)
+    // -----------------------------------------------------------------
+
+    /// The origin of an expression's value when it comes from a declared
+    /// source, or null. Only these shapes carry one: a const binding whose
+    /// initializer had one, a `fetch`/`fetchWithRetry`/`serviceCall` call, a
+    /// `.json()` call or `.body` read on such a response, and a member read on
+    /// a body value. Anything else - a call argument, a spread, an array, a
+    /// computed read - drops the origin and keeps the labels, which is the safe
+    /// direction.
+    fn originOf(self: *FlowChecker, node: NodeIndex) ?Origin {
+        if (self.declaration == null or node == null_node) return null;
+        const tag = self.ir_view.getTag(node) orelse return null;
+        switch (tag) {
+            .identifier => {
+                const binding = self.ir_view.getBinding(node) orelse return null;
+                return self.binding_origins.get(packBindingKey(binding.scope_id, binding.slot));
+            },
+            .call, .method_call => {
+                const call_data = self.ir_view.getCall(node) orelse return null;
+                return self.callOrigin(call_data);
+            },
+            .member_access, .optional_chain => {
+                const member = self.ir_view.getMember(node) orelse return null;
+                const parent = self.originOf(member.object) orelse return null;
+                const name = self.resolveAtomName(member.property) orelse return null;
+                return switch (parent.part) {
+                    .body => parent.child(name),
+                    // `resp.body` is the whole body as text: the body root.
+                    .response => if (std.mem.eql(u8, name, "body")) bodyRoot(parent) else null,
+                };
+            },
+            // exhaustive: every other expression either is not a value from a
+            // declared source or computes a new one; its labels still carry
+            // whatever declared labels flowed into it.
+            else => return null,
+        }
+    }
+
+    fn bodyRoot(response: Origin) Origin {
+        return .{ .source = response.source, .kind = response.kind, .part = .body };
+    }
+
+    fn callOrigin(self: *FlowChecker, call_data: Node.CallExpr) ?Origin {
+        const callee_tag = self.ir_view.getTag(call_data.callee) orelse return null;
+        if (callee_tag == .identifier) {
+            const binding = self.ir_view.getBinding(call_data.callee) orelse return null;
+            const meta = self.module_fn_meta.get(binding.slot) orelse return null;
+            if (std.mem.eql(u8, meta.module, "fetch") and
+                (std.mem.eql(u8, meta.func, "fetch") or std.mem.eql(u8, meta.func, "fetchWithRetry")))
+            {
+                return switch (self.literalUrlHost(call_data)) {
+                    // A URL this cannot name the host of could be any declared host.
+                    .unknown => self.anySource(.fetch),
+                    .undeclared => null,
+                    .declared => |index| .{ .source = index, .kind = .fetch, .part = .response },
+                };
+            }
+            if (std.mem.eql(u8, meta.module, "service") and std.mem.eql(u8, meta.func, "serviceCall")) {
+                const name = self.literalArg(call_data, 0) orelse return self.anySource(.service);
+                const index = findSource(self.origin_sources.items, .service, name) orelse return null;
+                return .{ .source = index, .kind = .service, .part = .response };
+            }
+            return null;
+        }
+        // `resp.json()` or `resp.text()` on a response from a declared source:
+        // the body root. `text()` is the whole body as a string, so it carries
+        // every declared field the body does.
+        if (callee_tag == .member_access or callee_tag == .optional_chain) {
+            const member = self.ir_view.getMember(call_data.callee) orelse return null;
+            const name = self.resolveAtomName(member.property) orelse return null;
+            if (!std.mem.eql(u8, name, "json") and !std.mem.eql(u8, name, "text")) return null;
+            const response = self.originOf(member.object) orelse return null;
+            if (response.part != .response) return null;
+            return bodyRoot(response);
+        }
+        return null;
+    }
+
+    /// A response whose source cannot be named: every entry of that kind then
+    /// applies by path, and none can be `matched`. Null when no entry has that
+    /// kind, so an undeclared kind costs nothing.
+    fn anySource(self: *const FlowChecker, kind: declaration.SourceKind) ?Origin {
+        for (self.origin_sources.items) |source| {
+            if (source.kind == kind) return .{ .source = null, .kind = kind, .part = .response };
+        }
+        return null;
+    }
+
+    fn literalArg(self: *const FlowChecker, call_data: Node.CallExpr, index: usize) ?[]const u8 {
+        if (call_data.args_count <= index) return null;
+        const arg = self.ir_view.getListIndex(call_data.args_start, @intCast(index));
+        if (self.ir_view.getTag(arg) != .lit_string) return null;
+        const str_idx = self.ir_view.getStringIdx(arg) orelse return null;
+        return self.ir_view.getString(str_idx);
+    }
+
+    /// Which declared host a fetch URL names: `unknown` when the URL is not a
+    /// literal or has no host, `undeclared` for a literal host no entry names. Hosts in a declaration are lowercase,
+    /// so a literal that differs only in case must still match: the host
+    /// component is compared without regard to case.
+    fn literalUrlHost(self: *FlowChecker, call_data: Node.CallExpr) UrlHost {
+        const url = self.literalArg(call_data, 0) orelse return .unknown;
+        const uri = std.Uri.parse(url) catch return .unknown;
+        const host_component = uri.host orelse return .unknown;
+        const host = switch (host_component) {
+            .raw => |raw| raw,
+            .percent_encoded => |encoded| encoded,
+        };
+        for (self.origin_sources.items, 0..) |source, i| {
+            if (source.kind == .fetch and std.ascii.eqlIgnoreCase(source.name, host)) return .{ .declared = @intCast(i) };
+        }
+        return .undeclared;
+    }
+
+    const UrlHost = union(enum) { unknown, undeclared, declared: u16 };
+
+    /// The declared labels a value with `origin` carries, and the P8 status it
+    /// earns each entry. An entry applies at its exact path, below it, and at
+    /// any aggregate above it - forwarding the aggregate forwards the field
+    /// (P9 condition a) - and never at a sibling. Matching is by whole path
+    /// from the source root (P9 condition b).
+    fn declaredLabels(self: *FlowChecker, origin: Origin, mark: bool) LabelSet {
+        const decl = self.declaration orelse return LabelSet.empty;
+        const observed: []const []const u8 = if (origin.part == .body) origin.path() else &.{};
+        var labels = LabelSet.empty;
+        for (decl.classifications, 0..) |entry, i| {
+            if (entry.source_kind != origin.kind) continue;
+            if (origin.source) |index| {
+                if (!std.mem.eql(u8, self.origin_sources.items[index].name, entry.source_name)) continue;
+            }
+            const status: EntryStatus = switch (declaration.relation(entry.path, observed)) {
+                .unrelated => continue,
+                .exact, .observed_extends_declared => if (origin.source == null) .indeterminate else .matched,
+                // An aggregate read only as the object of a member read is not
+                // forwarded, so it earns nothing; the member read decides.
+                .observed_is_prefix => if (self.member_object_depth > 0) .absent else .indeterminate,
+            };
+            labels = LabelSet.merge(labels, switch (entry.label) {
+                .secret => LabelSet{ .secret = true },
+                .credential => LabelSet{ .credential = true },
+            });
+            if (!mark) continue;
+            if (@intFromEnum(status) > @intFromEnum(self.entry_status[i])) self.entry_status[i] = status;
+            const index: u32 = @intCast(i);
+            switch (entry.label) {
+                .secret => self.last_declared_secret = index,
+                .credential => self.last_declared_credential = index,
+            }
+        }
+        return labels;
+    }
+
     fn inferCallLabels(self: *FlowChecker, call_data: Node.CallExpr) LabelSet {
         const callee_tag = self.ir_view.getTag(call_data.callee) orelse return LabelSet.empty;
 
@@ -2463,26 +2605,29 @@ pub const FlowChecker = struct {
         }
     }
 
-    /// Find the first external reason matching the given label.
-    /// Iterates all external_reasons entries whose corresponding LabelSet
-    /// includes the target label. Returns null if no external label contributed.
-    fn findExternalReason(self: *const FlowChecker, label: DataLabel) ?[]const u8 {
-        var iter = self.external_reasons.iterator();
-        while (iter.next()) |entry| {
-            if (self.external_labels.get(entry.key_ptr.*)) |ext_ls| {
-                if (ext_ls.has(label)) return entry.value_ptr.*;
-            }
-        }
-        return null;
-    }
-
-    /// Return a diagnostic message, appending the external reason if one exists.
-    /// When no external reason applies, the original literal is returned as-is
-    /// (no allocation). When a reason exists, a new string is allocated and
-    /// tracked in allocated_messages for cleanup.
+    /// Return a diagnostic message naming the declared classification behind
+    /// a secret or credential label, when one contributed (M4 T4). The entry
+    /// named is the last one whose label the analysis applied; with no
+    /// declaration, or for any other label, the literal comes back unchanged
+    /// and nothing is allocated.
     fn messageWithReason(self: *FlowChecker, base: []const u8, label: DataLabel) []const u8 {
-        const reason = self.findExternalReason(label) orelse return base;
-        const formatted = std.fmt.allocPrint(self.allocator, "{s} ({s})", .{ base, reason }) catch return base;
+        const decl = self.declaration orelse return base;
+        const index = switch (label) {
+            .secret => self.last_declared_secret,
+            .credential => self.last_declared_credential,
+            // exhaustive: a declaration can assign only secret and credential,
+            // so no other label has a declared entry to name.
+            else => null,
+        } orelse return base;
+        const entry = decl.classifications[index];
+        const formatted = std.fmt.allocPrint(self.allocator, "{s} (declared {s}: {s}:{s} {s} - {s})", .{
+            base,
+            @tagName(entry.label),
+            @tagName(entry.source_kind),
+            entry.source_name,
+            entry.path_text,
+            entry.reason,
+        }) catch return base;
         self.allocated_messages.append(self.allocator, formatted) catch {
             self.allocator.free(formatted);
             return base;
@@ -3586,97 +3731,6 @@ test "FlowProperties defaults to all proven" {
     try std.testing.expect(props.no_credential_leakage);
     try std.testing.expect(props.input_validated);
     try std.testing.expect(props.pii_contained);
-}
-
-test "parseDataLabel maps all known strings" {
-    try std.testing.expectEqual(DataLabel.secret, parseDataLabel("secret").?);
-    try std.testing.expectEqual(DataLabel.credential, parseDataLabel("credential").?);
-    try std.testing.expectEqual(DataLabel.user_input, parseDataLabel("user_input").?);
-    try std.testing.expectEqual(DataLabel.config, parseDataLabel("config").?);
-    try std.testing.expectEqual(DataLabel.internal, parseDataLabel("internal").?);
-    try std.testing.expectEqual(DataLabel.external, parseDataLabel("external").?);
-    try std.testing.expectEqual(DataLabel.validated, parseDataLabel("validated").?);
-    try std.testing.expect(parseDataLabel("unknown_label") == null);
-    try std.testing.expect(parseDataLabel("") == null);
-}
-
-test "parseExternalLabels with valid JSON" {
-    const json =
-        \\{
-        \\  "labels": [
-        \\    { "field": "User.email", "label": "secret", "reason": "PII field" },
-        \\    { "field": "token", "label": "credential", "reason": "auth token" }
-        \\  ]
-        \\}
-    ;
-    const labels = try parseExternalLabels(std.testing.allocator, json);
-    defer {
-        for (labels) |l| {
-            std.testing.allocator.free(l.field);
-            std.testing.allocator.free(l.reason);
-        }
-        std.testing.allocator.free(labels);
-    }
-
-    try std.testing.expectEqual(@as(usize, 2), labels.len);
-    try std.testing.expectEqualStrings("User.email", labels[0].field);
-    try std.testing.expectEqual(DataLabel.secret, labels[0].label);
-    try std.testing.expectEqualStrings("PII field", labels[0].reason);
-    try std.testing.expectEqualStrings("token", labels[1].field);
-    try std.testing.expectEqual(DataLabel.credential, labels[1].label);
-    try std.testing.expectEqualStrings("auth token", labels[1].reason);
-}
-
-test "parseExternalLabels with empty labels array" {
-    const json =
-        \\{ "labels": [] }
-    ;
-    const labels = try parseExternalLabels(std.testing.allocator, json);
-    defer std.testing.allocator.free(labels);
-
-    try std.testing.expectEqual(@as(usize, 0), labels.len);
-}
-
-test "setExternalLabels registers short form from qualified name" {
-    // We cannot construct a full FlowChecker without a valid IrView,
-    // so test the external label maps directly via a minimal instance.
-    // The IrView is only used by check/walkStmt, not by setExternalLabels.
-    var checker = FlowChecker.init(std.testing.allocator, undefined, null);
-    defer {
-        // Clean up only the maps we populated (skip ir_view-dependent deinit)
-        var li = checker.external_labels.iterator();
-        while (li.next()) |entry| checker.allocator.free(entry.key_ptr.*);
-        checker.external_labels.deinit(checker.allocator);
-        var ri = checker.external_reasons.iterator();
-        while (ri.next()) |entry| {
-            checker.allocator.free(entry.key_ptr.*);
-            checker.allocator.free(entry.value_ptr.*);
-        }
-        checker.external_reasons.deinit(checker.allocator);
-    }
-
-    const ext = [_]ExternalLabel{
-        .{ .field = "User.email", .label = .secret, .reason = "PII field" },
-        .{ .field = "plainField", .label = .credential, .reason = "token data" },
-    };
-    checker.setExternalLabels(&ext);
-
-    // Qualified name registered
-    const email_labels = checker.external_labels.get("User.email").?;
-    try std.testing.expect(email_labels.has(.secret));
-
-    // Short form also registered
-    const short_labels = checker.external_labels.get("email").?;
-    try std.testing.expect(short_labels.has(.secret));
-
-    // Non-qualified name registered directly (no dot, no short form duplication)
-    const plain_labels = checker.external_labels.get("plainField").?;
-    try std.testing.expect(plain_labels.has(.credential));
-
-    // Reasons registered
-    try std.testing.expectEqualStrings("PII field", checker.external_reasons.get("User.email").?);
-    try std.testing.expectEqualStrings("PII field", checker.external_reasons.get("email").?);
-    try std.testing.expectEqualStrings("token data", checker.external_reasons.get("plainField").?);
 }
 
 test "propertyTagForKind: every DiagnosticKind maps to the expected PropertyTag" {
@@ -5306,4 +5360,268 @@ fn collectFlowDiagnosticKinds(
             return error.FlowDiagnosticOffersUnperformableRepair;
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Declared classifications (M4 T4): P8 statuses and P9 enforcement
+// ---------------------------------------------------------------------------
+
+const declared_test_json =
+    \\{"version":1,"classifications":[
+    \\ {"source":"fetch:api.example.com","path":"customer.tax_id","label":"secret","required":true,"reason":"Tax identifier."},
+    \\ {"source":"service:billing","path":"card.token","label":"credential","required":false,"reason":"Payment token."}]}
+;
+
+const DeclaredRun = struct {
+    no_secret_leakage: bool,
+    no_credential_leakage: bool,
+    statuses: [2]EntryStatus,
+    /// Whether some diagnostic names the declared tax-id entry.
+    reason_named: bool,
+};
+
+/// Parse `source`, install the test declaration (unless `with_declaration` is
+/// false), run the flow checker, and report what it established.
+fn runDeclared(source: []const u8, with_declaration: bool) !DeclaredRun {
+    const allocator = std.testing.allocator;
+    var parsed = try declaration.parse(allocator, declared_test_json);
+    var decl = switch (parsed) {
+        .ok => |d| d,
+        .refused => return error.TestDeclarationRefused,
+    };
+    defer decl.deinit();
+    _ = &parsed;
+
+    var parser = try @import("zts-engine").parser.JsParser.init(allocator, source);
+    var atoms = atom_table.AtomTable.init(allocator);
+    defer atoms.deinit();
+    parser.setAtomTable(&atoms);
+    defer parser.deinit();
+    const root = try parser.parse();
+    const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    const handler_fn = @import("handler_verifier.zig").findHandlerFunction(ir_view, root) orelse
+        return error.HandlerNotFound;
+
+    var checker = FlowChecker.init(allocator, ir_view, &atoms);
+    defer checker.deinit();
+    if (with_declaration) try checker.setDeclaration(&decl);
+    _ = try checker.check(handler_fn);
+
+    var run = DeclaredRun{
+        .no_secret_leakage = checker.getProperties().no_secret_leakage,
+        .no_credential_leakage = checker.getProperties().no_credential_leakage,
+        .statuses = .{ .absent, .absent },
+        .reason_named = false,
+    };
+    if (with_declaration) @memcpy(&run.statuses, checker.classificationStatuses());
+    for (checker.getDiagnostics()) |diag| {
+        if (std.mem.indexOf(u8, diag.message, "fetch:api.example.com customer.tax_id") != null) run.reason_named = true;
+    }
+    return run;
+}
+
+fn declaredHandler(comptime body: []const u8) []const u8 {
+    return
+    \\import { fetch } from "zttp:fetch";
+    \\import { validateJson } from "zttp:validate";
+    \\function handler(req) {
+    \\  const r = fetch("https://api.example.com/customers/1");
+    \\  const body = r.json();
+    \\
+    ++ body ++
+        \\
+        \\}
+    ;
+}
+
+test "AE4: a declared secret is refused on every path to the response" {
+    const cases = [_][]const u8{
+        // The field itself.
+        declaredHandler("  return Response.json({ t: body.customer.tax_id });"),
+        // Through a const alias of the aggregate.
+        declaredHandler("  const c = body.customer;\n  return Response.json({ t: c.tax_id });"),
+        // A part of the field.
+        declaredHandler("  return Response.json({ t: body.customer.tax_id.last4 });"),
+        // A projection into a new object.
+        declaredHandler("  const p = { id: body.customer.tax_id };\n  return Response.json(p);"),
+        // Validation does not remove it.
+        declaredHandler("  const v = validateJson(\"Customer\", r.body);\n  if (v.ok) { return Response.json(v.value); }\n  return Response.json({});"),
+        // Serialization does not remove it.
+        declaredHandler("  return Response.text(JSON.stringify(body.customer));"),
+        // The whole-body text.
+        declaredHandler("  return Response.text(r.text());"),
+        // Through a helper that reads the field from the aggregate.
+        declaredHandler("  const pick = (c) => c.tax_id;\n  return Response.json({ t: pick(body.customer) });"),
+        // P9 (a): the whole aggregate, the whole body, the whole response.
+        declaredHandler("  return Response.json(body.customer);"),
+        declaredHandler("  return Response.json(body);"),
+        declaredHandler("  return Response.json({ r: r });"),
+        // A computed read.
+        declaredHandler("  return Response.json({ t: body.customer[\"tax_id\"] });"),
+        // A later write into the aggregate does not let a read launder it.
+        declaredHandler("  const c = body.customer;\n  c.name = c.tax_id;\n  return Response.json({ n: c.name });"),
+    };
+    for (cases, 0..) |source, i| {
+        const run = try runDeclared(source, true);
+        if (run.no_secret_leakage) {
+            std.debug.print("case {d} was admitted:\n{s}\n", .{ i, source });
+            return error.TestExpectedRefusal;
+        }
+    }
+}
+
+test "the same reads are admitted for a sibling field, a local object, and another host" {
+    const cases = [_][]const u8{
+        // A sibling of the declared field.
+        declaredHandler("  return Response.json({ n: body.customer.name });"),
+        declaredHandler("  const c = body.customer;\n  return Response.json({ n: c.name });"),
+        // P9 (b): the same last segment under another parent, same source.
+        declaredHandler("  return Response.json({ t: body.other.tax_id });"),
+        // P9 (b): a local object with the same short name.
+        declaredHandler("  const local = { tax_id: \"x\" };\n  return Response.json({ t: local.tax_id });"),
+        // Response metadata is not the body.
+        declaredHandler("  return Response.json({ s: r.status });"),
+        // Another host, same path.
+        \\import { fetch } from "zttp:fetch";
+        \\function handler(req) {
+        \\  const r = fetch("https://other.example.com/customers/1");
+        \\  const body = r.json();
+        \\  return Response.json({ t: body.customer.tax_id });
+        \\}
+        ,
+    };
+    for (cases, 0..) |source, i| {
+        const run = try runDeclared(source, true);
+        if (!run.no_secret_leakage) {
+            std.debug.print("case {d} was refused:\n{s}\n", .{ i, source });
+            return error.TestExpectedAdmission;
+        }
+    }
+    // Without a declaration the declared read is admitted too: the refusals
+    // above come from the declaration and nothing else.
+    const undeclared = try runDeclared(declaredHandler("  return Response.json({ t: body.customer.tax_id });"), false);
+    try std.testing.expect(undeclared.no_secret_leakage);
+}
+
+test "a fetch whose host cannot be named applies every fetch entry, indeterminate" {
+    const source =
+        \\import { fetch } from "zttp:fetch";
+        \\function handler(req) {
+        \\  const r = fetch(["https://", req.url].join(""));
+        \\  const body = r.json();
+        \\  return Response.json({ t: body.customer.tax_id });
+        \\}
+    ;
+    const run = try runDeclared(source, true);
+    try std.testing.expect(!run.no_secret_leakage);
+    try std.testing.expectEqual(EntryStatus.indeterminate, run.statuses[0]);
+}
+
+test "a literal host matches without regard to case" {
+    const source =
+        \\import { fetch } from "zttp:fetch";
+        \\function handler(req) {
+        \\  const r = fetch("https://API.Example.COM/customers/1");
+        \\  return Response.json({ t: r.json().customer.tax_id });
+        \\}
+    ;
+    const run = try runDeclared(source, true);
+    try std.testing.expect(!run.no_secret_leakage);
+    try std.testing.expectEqual(EntryStatus.matched, run.statuses[0]);
+}
+
+test "a declared credential from a service is refused and a sibling admitted" {
+    const refused =
+        \\import { serviceCall } from "zttp:service";
+        \\function handler(req) {
+        \\  const s = serviceCall("billing", "GET /card", {});
+        \\  const b = s.json();
+        \\  return Response.json({ t: b.card.token });
+        \\}
+    ;
+    const run = try runDeclared(refused, true);
+    try std.testing.expect(!run.no_credential_leakage);
+    try std.testing.expectEqual(EntryStatus.matched, run.statuses[1]);
+
+    const sibling =
+        \\import { serviceCall } from "zttp:service";
+        \\function handler(req) {
+        \\  const s = serviceCall("billing", "GET /card", {});
+        \\  return Response.json({ l: s.json().card.last4 });
+        \\}
+    ;
+    try std.testing.expect((try runDeclared(sibling, true)).no_credential_leakage);
+}
+
+test "P8: each classification reports matched, indeterminate, or absent" {
+    const Case = struct { source: []const u8, status: EntryStatus };
+    const cases = [_]Case{
+        .{ .source = declaredHandler("  return Response.json({ t: body.customer.tax_id });"), .status = .matched },
+        // Reached only as an aggregate that is forwarded.
+        .{ .source = declaredHandler("  return Response.json(body.customer);"), .status = .indeterminate },
+        // The whole body, forwarded by name.
+        .{ .source = declaredHandler("  return Response.json(body);"), .status = .indeterminate },
+        // A computed read below the source root.
+        .{ .source = declaredHandler("  const k = \"tax_id\";\n  return Response.json({ t: body.customer[k] });"), .status = .indeterminate },
+        // Reading only a sibling reaches no aggregate above the field.
+        .{ .source = declaredHandler("  return Response.json({ n: body.customer.name });"), .status = .absent },
+        // The source is never read.
+        .{ .source = "function handler(req) { return Response.json({ ok: true }); }", .status = .absent },
+    };
+    for (cases, 0..) |case, i| {
+        const run = try runDeclared(case.source, true);
+        if (run.statuses[0] != case.status) {
+            std.debug.print("case {d}: expected {s}, got {s}\n", .{ i, @tagName(case.status), @tagName(run.statuses[0]) });
+            return error.TestUnexpectedStatus;
+        }
+    }
+    // Census: every status is driven by a case above.
+    for (std.meta.tags(EntryStatus)) |status| {
+        var seen = false;
+        for (cases) |case| {
+            if (case.status == status) seen = true;
+        }
+        try std.testing.expect(seen);
+    }
+}
+
+test "a leak diagnostic names the declared entry behind it" {
+    const run = try runDeclared(declaredHandler("  return Response.json({ t: body.customer.tax_id });"), true);
+    try std.testing.expect(run.reason_named);
+}
+
+test "AE18: a declared secret round-tripped through the cache is not proven clean" {
+    const source =
+        \\import { fetch } from "zttp:fetch";
+        \\import { cacheSet, cacheGet } from "zttp:cache";
+        \\function handler(req) {
+        \\  const r = fetch("https://api.example.com/customers/1");
+        \\  cacheSet("customers", "tax", r.json().customer.tax_id, 60);
+        \\  return Response.json({ t: cacheGet("customers", "tax") });
+        \\}
+    ;
+    try std.testing.expect(!(try runDeclared(source, true)).no_secret_leakage);
+}
+
+test "AE19: mask keeps a declared label under a runtime bound and declassifies under a literal" {
+    const runtime_bound =
+        \\import { fetch } from "zttp:fetch";
+        \\import { mask } from "zttp:text";
+        \\function handler(req) {
+        \\  const r = fetch("https://api.example.com/customers/1");
+        \\  const n = req.url.length;
+        \\  return Response.json({ t: mask(r.json().customer.tax_id, n) });
+        \\}
+    ;
+    try std.testing.expect(!(try runDeclared(runtime_bound, true)).no_secret_leakage);
+
+    const literal_bound =
+        \\import { fetch } from "zttp:fetch";
+        \\import { mask } from "zttp:text";
+        \\function handler(req) {
+        \\  const r = fetch("https://api.example.com/customers/1");
+        \\  return Response.json({ t: mask(r.json().customer.tax_id, 4) });
+        \\}
+    ;
+    try std.testing.expect((try runDeclared(literal_bound, true)).no_secret_leakage);
 }

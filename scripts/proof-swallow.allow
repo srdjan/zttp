@@ -22,11 +22,11 @@ packages/zts/src/contract_builder.zig extractSchemaJson catch-return
 # same node. No analysis result reads this string.
 packages/zts/src/flow_checker.zig messageWithReason catch-return
 
-# The label half of this function fails closed through markAllocationFailure.
-# The `catch return` entries are the human-readable `external_reasons` strings
-# that annotate a diagnostic; losing one costs the explanation, not the label
-# that decides whether the diagnostic fires.
-packages/zts/src/flow_checker.zig registerExternalField catch-return
+# A fetch URL that std.Uri cannot parse is answered `.unknown`, which makes the
+# response come from "any declared fetch host": every fetch classification then
+# applies by path and reports indeterminate. The swallow widens the labels a
+# value carries; it cannot remove one.
+packages/zts/src/flow_checker.zig literalUrlHost catch-return
 
 # `ensureHealthy` is the checker's poison check, not an error being dropped:
 # the pool has already recorded a failure, and returning early stops work that
