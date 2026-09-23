@@ -348,3 +348,21 @@ The owner answered on 2026-09-23. Q1: the literal `toolCatalog({...})` call in
 applies. Q3: `maxLength` and `minLength` count Unicode scalar values. Q4: the
 maximum nesting depth is 8 and the `maxInputBytes` ceiling is 1 MiB (1048576).
 The recommended defaults at the end of section 8 stand.
+
+The owner decided two more points on 2026-09-23. Both surface changes of T2
+(the `zttp:tool` module moves the module registry hash, and the new diagnostic
+code moves the policy hash) make every recorded DeepSeek cassette stale,
+because the expert tool results embed both hashes. The owner authorized one
+DeepSeek corpus re-record after all T2 surface changes land. Until then, units
+are committed on `main` with only the two `expert_codegen_record` replay tests
+red, and each commit message says so.
+
+## 10. Progress
+
+| Unit | Commit | Content |
+|---|---|---|
+| U1 | `bc8134ef` | `tool_schema.zig`: subset check, compile, streaming validate |
+| U2 | `a7965fd2` | inert `zttp:tool` module and the `tool_catalog` category |
+| U3 | `86ca93c0` | `ToolEntry`, contract version 19, write and project |
+| U4 | pending | builder extraction, build rules, per-route export walk, diagnostic code and seed |
+| U5 | pending | tool fixture golden, B8.2 type test, census, corpus re-record |
