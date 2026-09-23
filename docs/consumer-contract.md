@@ -376,6 +376,61 @@ know which labels it may name. They are expressed in the serialization P4 requir
 they are the reason P4 has to land before P8 and P9 can be tested rather than merely
 stated.
 
+### 4.6 Tool catalog (tool profile)
+
+A handler under the tool profile of the M4 release boundary publishes a tool catalog. It
+differs from the five sections above in one way: the consumer does not author it. The
+compiler derives it from the handler's literal `toolCatalog({...})` declaration, and the
+build refuses a catalog it cannot read with ZTS513. The catalog is still carried under P4's
+rules - canonical, specified here, and bound by digest as its own executable-graph member,
+`tool_catalog = 19` - so a consumer can recompute the digest without the producer's code.
+
+The canonical form is `ZTCAT1`. Integers are little-endian, and every string is UTF-8 with
+a u32 byte-length prefix. Every field is always written, so there are no defaults and no
+omissions.
+
+```text
+magic            8 bytes  "ZTCAT1\0\0"
+schema           u16      1
+entry_count      u16      1..64
+entry, entry_count times, strictly increasing by name bytes:
+  name             string  1..64 bytes
+  method           string  1..16 bytes, uppercase ASCII A-Z
+  path             string  1..512 bytes, starts with "/"
+  description      string  1..4096 bytes
+  input_name       string  1..64 bytes
+  input_schema     string  canonical schema JSON, 1..65536 bytes
+  output_name      string  1..64 bytes
+  output_schema    string  canonical schema JSON, 1..65536 bytes
+  max_input_bytes  u32     1..1048576
+  export_count     u16     0..256
+  export, export_count times, strictly increasing by (module, name):
+    module           string  1..64 bytes
+    name             string  1..64 bytes
+trailing bytes: refused
+```
+
+Strict increase refuses a duplicate name and a duplicate export. No two entries share a
+(method, path) route. A schema is written in canonical schema JSON: no whitespace; strings
+JSON-escaped (`"`, `\`, and bytes below 0x20, with `\u00XX` for those without a short
+escape) and every other byte written as it is; keys per node in the order `type`, `title`,
+`description`, then for an object `additionalProperties`, `properties`, `required`, for a
+string `minLength`, `maxLength`, `format`, `enum`, for a number or integer `minimum`,
+`maximum`, `enum`, and for an array `items`, `maxItems`, `minItems`; `title`,
+`description`, `format`, `minimum`, `maximum`, and `enum` only when declared, `minLength`
+and `minItems` only when not 0, and `required` always; properties, required names, and
+string enum members sorted by bytes, number enum members sorted ascending; and a number that
+is a whole value below 2^53 in magnitude written as an integer, any other in the shortest
+decimal form that reads back to the same double.
+
+The digest is SHA-256 over the ASCII domain `zttp-tool-catalog-v1` followed by the
+`ZTCAT1` bytes. The acceptance kernel decodes the bytes itself, recomputes the digest, and
+requires exactly one `tool_catalog` graph member with ordinal 0 carrying it
+(`packages/proof-checker/src/tool_catalog.zig`). The kernel does not check that a schema is
+inside the closed tool schema subset, because that needs an allocating parser; the runtime
+compiles every schema from the accepted bytes and refuses to start when one does not
+compile.
+
 ---
 
 ## 5. Generation modes
