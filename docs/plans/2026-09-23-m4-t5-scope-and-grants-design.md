@@ -260,3 +260,61 @@ and extension modules follow the same wrapper. AE15 needs no separate check
 either: no instruction in a prompt or body reaches the subject, tenant, grant,
 or catalog, all of which come from the verifier, the build, and the accepted
 artifact.
+
+## 13. T5b plan
+
+Section 8 stands. These details fill it in.
+
+**Declaration version 2.** `classifications` becomes optional, and when it is
+present it must not be empty (C4). A new optional `ceiling` holds `profile`,
+one of `boundary`, `adapter`, `ledger`, and `exclude`, a list of `zttp:`
+module specifiers, possibly empty. A version 2 document must carry at least one
+of the two sections. Version 1 documents stay valid and mean "no ceiling".
+
+**Profiles move.** The profile table leaves `packages/tools/src/vocab_envelope.zig`
+for a zts-base file, `capability_profiles.zig`, so the compiler can enforce what
+the envelope publishes; the envelope reads it from there.
+
+**`ZTDCL1`.** Integers little-endian, strings with a u32 length prefix, every
+field written:
+
+```text
+magic                 8 bytes  "ZTDCL1\0\0"
+schema                u16      1
+classification_count  u16      0..256
+classification, count times, strictly increasing by (kind, name, path):
+  source_kind  u8      0 fetch, 1 service
+  source_name  string  1..253
+  path         string  1..1040 (1..16 segments of up to 64 bytes and dots)
+  label        u8      0 secret, 1 credential
+  required     u8      0 or 1
+  reason       string  1..1024
+ceiling_present       u8       0 or 1
+ceiling, when present:
+  profile        u8      0 boundary, 1 adapter, 2 ledger
+  exclude_count  u16     0..64
+  exclude, count times, strictly increasing: string 6..64, starts "zttp:"
+trailing bytes: refused
+```
+
+A document with no classifications and no ceiling cannot be encoded. The
+digest is SHA-256 over the domain `zttp-declaration-v1` and the bytes.
+
+**Enforcement.** At build: every capability in the handler's matrix is in the
+profile's categories, no imported module is excluded by the profile or by the
+declaration, and a profile that requires `read_only` refuses a handler whose
+contract does not prove it. A breach is a build error with a named reason, not
+a ZTS code. The contract reports the applied ceiling (contract version 21). At
+runtime, the module wrapper refuses a call whose required capability is outside
+the accepted ceiling, the same way T5a refuses an export outside a tool grant.
+
+**Binding.** `ZTDCL1` ships as payload section 10 (payload format version 6)
+and binds as graph member `declaration = 20`, decoded by a zero-copy kernel
+decoder with a checker stage and three reason codes, following T3.
+
+| Unit | Commit | Content |
+|---|---|---|
+| U1 | pending | declaration version 2, `capability_profiles.zig`, `ZTDCL1` encoder and kernel decoder |
+| U2 | pending | build enforcement of the ceiling, contract version 21 report |
+| U3 | pending | runtime ceiling enforcement, section 10, member 20, checker stage |
+| U4 | pending | C5 P15 evidence, consumer-contract text, full gate |
