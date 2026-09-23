@@ -1,6 +1,6 @@
 # M4: release contract for scoped tool routes
 
-Status: accepted by the owner on 2026-09-22. T1a, T1b, and T2 are complete; T3 is in progress under its [design note](2026-09-23-m4-t3-catalog-binding-design.md).
+Status: accepted by the owner on 2026-09-22. T1a, T1b, T2, and T3 are complete; T4 is next.
 Baseline: local `main` at `176d81ca`. Roadmap row:
 [M4 in the roadmap](../roadmap.md) (`docs/roadmap.md:20`). This document
 reconciles proposal A, the
@@ -246,6 +246,18 @@ This unit meets P4 for the sections M4 uses. It adds `tool_catalog = 19` to
 envelope (decision 5). The runtime lowers the catalog from
 the accepted artifact, not from producer output. A search of
 `contract_runtime.zig` finds no tool catalog today. Completion: check C3.
+
+T3 decisions and result, 2026-09-23. The owner accepted the
+[design note](2026-09-23-m4-t3-catalog-binding-design.md): the catalog stays
+compiler-derived and binds as canonical `ZTCAT1` bytes under graph member
+`tool_catalog = 19` only, with no certificate identity field; the authored
+declaration file and its loader move to T4 and T5; the runtime lowers the
+accepted catalog, cross-checks it against the contract, and validates tool
+inputs and 2xx outputs on the request path; `zttp dev` runs the same
+validation on the producer's catalog with no acceptance claim. The payload
+format moves to version 5 for the new section. Check C3 passed, including a
+deployed binary serving and refusing real requests; the evidence is in section
+10 of the design note.
 
 **T4. Declared-label carriage.** Depends on T3. Owned files:
 `packages/zts/src/flow_checker.zig`, `packages/tools/src/precompile.zig`, and the

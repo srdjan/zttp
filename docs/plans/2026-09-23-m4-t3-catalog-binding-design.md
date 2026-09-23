@@ -1,7 +1,7 @@
 # M4 T3 design note: canonical catalog encoding and artifact binding
 
-Status: accepted by the owner on 2026-09-23, with the recommended answer to
-each question in section 7 and the file extension in section 6. Check C3 of the
+Status: implemented on 2026-09-23. Accepted by the owner on 2026-09-23, with the
+recommended answer to each question in section 7 and the file extension in section 6. Check C3 of the
 [M4 release contract](2026-09-22-m4-release-contract.md) is written against
 the approach this note names.
 
@@ -241,9 +241,44 @@ acceptance claim. The recommended defaults at the end of section 7 stand.
 
 | Unit | Commit | Content |
 |---|---|---|
-| U1 | pending | `tool_schema.canonicalize` |
-| U2 | pending | kernel: member 19, zero-copy `ZTCAT1` decoder, checker stage, reason codes |
-| U3 | pending | tools: `ZTCAT1` encoder from `ToolEntry` |
-| U4 | pending | runtime: section, graph member, activation inputs, lowering, cross-check |
-| U5 | pending | request path: input and output validation, dev mode |
-| U6 | pending | envelope, canonical-form spec in the consumer contract, C3 probes, full gate |
+| U1 | `0395453f` | `tool_schema.canonicalize` |
+| U2 | `5a7f3093` | kernel: member 19, zero-copy `ZTCAT1` decoder, checker stage, reason codes, envelope counts |
+| U3 | `723b1081` | tools: `ZTCAT1` encoder from `ToolEntry` |
+| U4 | `854515f4` | runtime: section 9, graph member, activation inputs, lowering, cross-check |
+| U5 | `1105318e` | request path: input and output validation, dev mode |
+| U6 | `2c6053f6` | the `ZTCAT1` canonical form in the consumer contract (section 4.6) |
+
+## 10. Implementation notes and C3 evidence
+
+Three points differ from sections 3 to 5, each found while building. The
+compiled schema tree kept no `title` or `description`, so canonicalization
+records them as annotations beside the tree and writes them back: they are
+what a model is told about a field. Dev mode lowers the producer's catalog by
+encoding it with the build's own encoder and lowering it with the accepted
+path's code, so both modes run one validator. A 2xx tool body larger than 1 MiB
+is refused rather than passed, because an output the check never read is not
+one it admitted.
+
+C3, measured on `main`. Positive: a real compile of the tool fixture is
+accepted with one `tool_catalog` member whose digest is the shipped section's,
+and `promote` lowers `ping`, `POST`, `/tools/ping`, 256. A deployed binary of
+the same fixture (`zttp deploy`, run on a local port) logged "Proof accepted"
+and answered `{}` with 200, `{"x":1}` with 400 `unknown_field`, a 302-byte body
+with 413 `too_large`, an absent body with 400 `invalid_json`, and an unknown
+route with 404. Negative: one changed catalog byte in a copy of an accepted
+artifact is refused at artifact binding (`graph_member_digest_mismatch`), a
+deleted catalog section is refused (`graph_member_missing`), a changed runtime
+policy member is refused (B8.8), and a contract tool list that disagrees with
+the accepted catalog refuses to start (AE11). Census: all 18 `DecodeError`
+members and all three `tool_catalog_*` reason codes are observed. Mutation
+probes, each on a genuine compile and restored byte for byte: a duplicate name
+let through by the decoder, the kernel's digest comparison, the catalog digest
+in the runtime's graph inputs, the shipped section, the promote cross-check,
+the canonical schema in the encoder, the property sort in `canonicalize`, and
+the request-path input and output checks; each failed a named test.
+
+One measurement hazard was found and is recorded in the session memory: while
+an agent worktree existed, the shared zig cache served stale compiles of a
+path-dependency package to `main`, so a probe there passed without testing
+anything. Every probe above was rerun after the worktree was removed, with the
+compile line showing `success`.
