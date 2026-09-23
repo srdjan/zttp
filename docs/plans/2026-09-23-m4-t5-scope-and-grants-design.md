@@ -1,7 +1,7 @@
 # M4 T5 design note: subject scope and tool-local grants
 
-Status: proposed on 2026-09-23. It is not accepted. Section 9 holds the
-questions the owner must answer before code starts. Check C5 of the
+Status: accepted by the owner on 2026-09-23, with the recommended answer to
+each question in section 9. T5a is in progress; T5b follows. Check C5 of the
 [M4 release contract](2026-09-22-m4-release-contract.md) is written against
 the approach this note names.
 
@@ -192,3 +192,23 @@ as trusted strings with no `user_input` label, the `authorization` header
 removed from a tool handler's Request, `ZTCAT1` schema 2 for the scope list, the
 cross-call list following decision 6's wording with a `.unknown` census test,
 and a declaration version 2 that keeps version 1 valid.
+
+## 10. Decisions
+
+The owner answered on 2026-09-23. Q1: T5 splits into T5a (identity, scope,
+grants, cross-call refusal) and T5b (ceiling and binding). Q2: a catalog
+`scope` field binds input fields to the verified identity, and the runtime
+compares them before the handler. Q3: grants are export-level per tool, from
+the proven reachable-export set; resource allow lists stay per handler. Q4: the
+key comes from the environment variable zttp.json's `auth.keyEnv` names, and a
+tool handler refuses to start without it. The recommended defaults at the end of
+section 9 stand.
+
+## 11. Progress (T5a)
+
+| Unit | Commit | Content |
+|---|---|---|
+| U1 | pending | pure `auth.verifyHs256` with a closed refusal enum; `jwtVerify` wraps it |
+| U2 | pending | catalog `scope` field, `ZTCAT1` schema 2, `cross_call_read` refusal, `AcceptedTool` keeps scope and exports |
+| U3 | pending | runtime: `auth` config, 401 verification, `req.subject`/`req.tenant`, header removal, 403 scope comparison, per-tool export grants |
+| U4 | pending | AE2, AE3, AE15, B8.1, B8.7 end to end, census, probes, docs |

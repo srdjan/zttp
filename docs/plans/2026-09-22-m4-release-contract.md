@@ -1,6 +1,6 @@
 # M4: release contract for scoped tool routes
 
-Status: accepted by the owner on 2026-09-22. T1a, T1b, T2, T3, and T4 are complete; T5 is next.
+Status: accepted by the owner on 2026-09-22. T1a, T1b, T2, T3, and T4 are complete; T5 is in progress under its [design note](2026-09-23-m4-t5-scope-and-grants-design.md), split into T5a and T5b.
 Baseline: local `main` at `176d81ca`. Roadmap row:
 [M4 in the roadmap](../roadmap.md) (`docs/roadmap.md:20`). This document
 reconciles proposal A, the
