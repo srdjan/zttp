@@ -84,6 +84,12 @@ pub const ClassificationReport = contract_types.ClassificationReport;
 pub const ClassificationLabel = contract_types.ClassificationLabel;
 pub const ClassificationStatus = contract_types.ClassificationStatus;
 pub const firstRequiredAbsent = contract_types.firstRequiredAbsent;
+pub const CeilingReport = contract_types.CeilingReport;
+pub const CeilingBreachReason = contract_types.CeilingBreachReason;
+pub const CeilingBreach = contract_types.CeilingBreach;
+pub const CeilingBreaches = contract_types.CeilingBreaches;
+pub const ceilingBreaches = contract_types.ceilingBreaches;
+pub const firstCeilingBreach = contract_types.firstCeilingBreach;
 pub const CapabilityMatrix = contract_types.CapabilityMatrix;
 // `computeCapabilityMatrix` is NOT re-exported: it resolves specifiers
 // through the linked module registry, so it lives in `builtin_modules.zig`
@@ -1250,7 +1256,7 @@ test "writeContractJson minimal" {
     output = aw.toArrayList();
 
     // Should be valid-looking JSON with expected fields
-    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"version\": 20") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"version\": 21") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"handler.ts\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"modules\": []") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"serviceCalls\": []") != null);
@@ -2099,11 +2105,121 @@ test "a contract with no declaration writes an empty classifications array" {
     defer out.deinit();
     try writeContractJson(&contract, &out.writer);
     try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"classifications\": [],") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"version\": 20,") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"version\": 21,") != null);
+}
+
+test "a contract with no ceiling writes ceiling null and reads it back as null" {
+    const allocator = std.testing.allocator;
+    var contract = contract_types.emptyContract(try allocator.dupe(u8, "plain.ts"));
+    defer contract.deinit(allocator);
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    defer out.deinit();
+    try writeContractJson(&contract, &out.writer);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"ceiling\": null,") != null);
+    var parsed = try parseFromJson(allocator, out.written());
+    defer parsed.deinit(allocator);
+    try std.testing.expectEqual(@as(?CeilingReport, null), parsed.ceiling);
+}
+
+test "the ceiling report round-trips through contract.json, version 1 and version 2" {
+    const allocator = std.testing.allocator;
+    const capability_profiles = @import("zts-base").capability_profiles;
+    var contract = contract_types.emptyContract(try allocator.dupe(u8, "ceiling.ts"));
+    defer contract.deinit(allocator);
+    // The parser recomputes the matrix hash, so the original carries the hash
+    // of its empty matrix and the rewritten bytes can be compared whole.
+    contract.capabilities = .{ .hash = module_authorization.capabilityHash(&.{}) };
+    contract.ceiling = try CeilingReport.fromCeiling(allocator, .{
+        .profile = capability_profiles.findProfile("ledger").?,
+        .exclude = &.{ "zttp:fetch", "zttp:sql" },
+    });
+
+    var v1: std.Io.Writer.Allocating = .init(allocator);
+    defer v1.deinit();
+    try writeContractJson(&contract, &v1.writer);
+    const expected =
+        "\"ceiling\": { \"profile\": \"ledger\", \"categories\": [\"env\", \"clock\", \"random\", \"crypto\", \"stderr\", \"policy_check\", \"sqlite\"], " ++
+        "\"excludedModules\": [\"zttp:cache\", \"zttp:fetch\", \"zttp:ratelimit\", \"zttp:sql\"], \"requiresReadOnly\": false },";
+    try std.testing.expect(std.mem.indexOf(u8, v1.written(), expected) != null);
+
+    var parsed = try parseFromJson(allocator, v1.written());
+    defer parsed.deinit(allocator);
+    const report = parsed.ceiling orelse return error.TestMissingCeiling;
+    try std.testing.expectEqualStrings("ledger", report.profile.name);
+    try std.testing.expectEqual(@as(usize, 1), report.exclude.len);
+    try std.testing.expectEqualStrings("zttp:fetch", report.exclude[0]);
+
+    var again: std.Io.Writer.Allocating = .init(allocator);
+    defer again.deinit();
+    try writeContractJson(&parsed, &again.writer);
+    try std.testing.expectEqualStrings(v1.written(), again.written());
+
+    var v2: std.Io.Writer.Allocating = .init(allocator);
+    defer v2.deinit();
+    try contract_json_writer.writeContractJsonV2(&contract, &v2.writer);
+    try std.testing.expect(std.mem.indexOf(u8, v2.written(), "\"excluded_modules\": [") != null);
+    try std.testing.expect(std.mem.indexOf(u8, v2.written(), "\"requires_read_only\": false") != null);
+    var parsed_v2 = try parseFromJson(allocator, v2.written());
+    defer parsed_v2.deinit(allocator);
+    var from_v2: std.Io.Writer.Allocating = .init(allocator);
+    defer from_v2.deinit();
+    try writeContractJson(&parsed_v2, &from_v2.writer);
+    // A version 2 document keeps its version, so compare the ceiling line.
+    try std.testing.expectEqualStrings(ceilingLine(v1.written()), ceilingLine(from_v2.written()));
+}
+
+/// The `ceiling` entry as written, from its key to the end of its line.
+fn ceilingLine(json: []const u8) []const u8 {
+    const start = std.mem.indexOf(u8, json, "\"ceiling\"") orelse return "";
+    const end = std.mem.indexOfScalarPos(u8, json, start, '\n') orelse json.len;
+    return json[start..end];
+}
+
+fn ceilingJson(comptime body: []const u8) []const u8 {
+    return "{\"version\": 21, \"handler\": {\"path\": \"ceiling.ts\"}, \"ceiling\": " ++ body ++ "}";
+}
+
+test "ceiling projection refuses a report the build could not have written" {
+    const boundary_categories = "[\"env\", \"clock\", \"random\", \"crypto\", \"stderr\", \"policy_check\"]";
+    const cases = [_][]const u8{
+        // An unknown profile, and a missing field of each kind.
+        ceilingJson("{\"profile\": \"store\", \"categories\": [], \"excludedModules\": [], \"requiresReadOnly\": false}"),
+        ceilingJson("{\"categories\": " ++ boundary_categories ++ ", \"excludedModules\": [\"zttp:cache\", \"zttp:ratelimit\"], \"requiresReadOnly\": true}"),
+        ceilingJson("{\"profile\": \"boundary\", \"excludedModules\": [\"zttp:cache\", \"zttp:ratelimit\"], \"requiresReadOnly\": true}"),
+        ceilingJson("{\"profile\": \"boundary\", \"categories\": " ++ boundary_categories ++ ", \"requiresReadOnly\": true}"),
+        ceilingJson("{\"profile\": \"boundary\", \"categories\": " ++ boundary_categories ++ ", \"excludedModules\": [\"zttp:cache\", \"zttp:ratelimit\"]}"),
+        // Categories and requiresReadOnly that differ from the profile.
+        ceilingJson("{\"profile\": \"boundary\", \"categories\": [\"env\", \"network\"], \"excludedModules\": [\"zttp:cache\", \"zttp:ratelimit\"], \"requiresReadOnly\": true}"),
+        ceilingJson("{\"profile\": \"boundary\", \"categories\": " ++ boundary_categories ++ ", \"excludedModules\": [\"zttp:cache\", \"zttp:ratelimit\"], \"requiresReadOnly\": false}"),
+        // A profile exclusion left out, an unsorted list, a repeat, and a non-module.
+        ceilingJson("{\"profile\": \"boundary\", \"categories\": " ++ boundary_categories ++ ", \"excludedModules\": [\"zttp:cache\"], \"requiresReadOnly\": true}"),
+        ceilingJson("{\"profile\": \"boundary\", \"categories\": " ++ boundary_categories ++ ", \"excludedModules\": [\"zttp:ratelimit\", \"zttp:cache\"], \"requiresReadOnly\": true}"),
+        ceilingJson("{\"profile\": \"boundary\", \"categories\": " ++ boundary_categories ++ ", \"excludedModules\": [\"zttp:cache\", \"zttp:cache\", \"zttp:ratelimit\"], \"requiresReadOnly\": true}"),
+        ceilingJson("{\"profile\": \"boundary\", \"categories\": " ++ boundary_categories ++ ", \"excludedModules\": [\"fetch\", \"zttp:cache\", \"zttp:ratelimit\"], \"requiresReadOnly\": true}"),
+    };
+    for (cases, 0..) |json, i| {
+        const result = parseFromJson(std.testing.allocator, json);
+        if (result) |parsed| {
+            var owned = parsed;
+            owned.deinit(std.testing.allocator);
+            std.debug.print("case {d} was accepted: {s}\n", .{ i, json });
+            return error.TestExpectedRefusal;
+        } else |err| try std.testing.expectEqual(error.InvalidCeilingReport, err);
+    }
+
+    // Control: the same shape as the build writes it is accepted.
+    var accepted = try parseFromJson(std.testing.allocator, ceilingJson(
+        "{\"profile\": \"boundary\", \"categories\": " ++ boundary_categories ++ ", \"excludedModules\": [\"zttp:cache\", \"zttp:fetch\", \"zttp:ratelimit\"], \"requiresReadOnly\": true}",
+    ));
+    defer accepted.deinit(std.testing.allocator);
+    const report = accepted.ceiling orelse return error.TestMissingCeiling;
+    try std.testing.expectEqualStrings("boundary", report.profile.name);
+    try std.testing.expectEqual(@as(usize, 1), report.exclude.len);
+    try std.testing.expectEqualStrings("zttp:fetch", report.exclude[0]);
 }
 
 fn classificationJson(comptime row: []const u8) []const u8 {
-    return "{\"version\": 20, \"handler\": {\"path\": \"declared.ts\"}, \"classifications\": [" ++ row ++ "]}";
+    return "{\"version\": 21, \"handler\": {\"path\": \"declared.ts\"}, \"classifications\": [" ++ row ++ "]}";
 }
 
 test "classification projection refuses a report the build could not have written" {

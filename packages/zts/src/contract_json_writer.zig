@@ -343,6 +343,33 @@ fn writeContractJsonVersion(
     }
     try writer.writeAll("],\n");
 
+    // ceiling (the M4 T5b applied ceiling): the profile, its categories, the
+    // sorted union of the profile's and the declaration's exclusions, and
+    // whether the profile requires read_only. Null when the build enforced no
+    // ceiling, so a reader can tell "no ceiling" from a key it does not know.
+    if (contract.ceiling) |*report| {
+        try writer.writeAll("  \"ceiling\": { \"profile\": ");
+        try writeJsonString(writer, report.profile.name);
+        try writer.writeAll(", \"categories\": [");
+        for (report.profile.categories, 0..) |cap, i| {
+            if (i > 0) try writer.writeAll(", ");
+            try writeJsonString(writer, @tagName(cap));
+        }
+        try writer.writeAll("], \"" ++ comptime contractKey(json_version, "excludedModules") ++ "\": [");
+        var excluded = report.excludedModules();
+        var first = true;
+        while (excluded.next()) |m| {
+            if (!first) try writer.writeAll(", ");
+            first = false;
+            try writeJsonString(writer, m);
+        }
+        try writer.print("], \"" ++ comptime contractKey(json_version, "requiresReadOnly") ++ "\": {s} }},\n", .{
+            if (report.profile.requires_read_only) "true" else "false",
+        });
+    } else {
+        try writer.writeAll("  \"ceiling\": null,\n");
+    }
+
     // cache
     try writer.writeAll("  \"cache\": {\n");
     try writer.writeAll("    \"namespaces\": [");

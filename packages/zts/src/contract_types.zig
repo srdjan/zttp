@@ -13,6 +13,9 @@ const std = @import("std");
 // adapter and the engine into every consumer of a contract.
 const module_binding = @import("zts-base").module_authorization;
 const profile_identity = @import("zts-base").profile_identity;
+// The consumer declaration and the profile table its ceiling names (M4 T5b).
+const declaration = @import("zts-base").declaration;
+const capability_profiles = @import("zts-base").capability_profiles;
 
 fn dupeOptionalString(allocator: std.mem.Allocator, s: ?[]const u8) !?[]const u8 {
     return if (s) |v| try allocator.dupe(u8, v) else null;
@@ -1711,6 +1714,223 @@ pub fn firstRequiredAbsent(items: []const ClassificationReport) ?usize {
     return null;
 }
 
+/// The applied capability ceiling (M4 T5b, P15's report): the profile a
+/// version 2 declaration selects, and the modules that declaration excludes
+/// beyond the profile's own list. The contract writes it as `ceiling`, with the
+/// profile's categories, the sorted union of both exclusion lists, and whether
+/// the profile requires `read_only`.
+pub const CeilingReport = struct {
+    /// A row of `capability_profiles.profiles`. Never owned.
+    profile: *const capability_profiles.Profile,
+    /// The declaration's own exclusions that the profile does not already
+    /// exclude, sorted by bytes and unique. Each string and the slice are
+    /// owned. A declaration exclusion the profile also makes is not kept: the
+    /// profile reason comes first in the check order, so it cannot change a
+    /// verdict, and the written union is the same.
+    exclude: []const []const u8,
+
+    pub fn deinit(self: *CeilingReport, allocator: std.mem.Allocator) void {
+        for (self.exclude) |m| allocator.free(m);
+        allocator.free(self.exclude);
+        self.exclude = &.{};
+    }
+
+    /// The report for a declaration's ceiling. The caller owns the result.
+    pub fn fromCeiling(allocator: std.mem.Allocator, ceiling: declaration.Ceiling) std.mem.Allocator.Error!CeilingReport {
+        var list: std.ArrayList([]const u8) = .empty;
+        errdefer {
+            for (list.items) |m| allocator.free(m);
+            list.deinit(allocator);
+        }
+        for (ceiling.exclude) |m| {
+            if (containsModule(ceiling.profile.excluded_modules, m)) continue;
+            try list.ensureUnusedCapacity(allocator, 1);
+            list.appendAssumeCapacity(try allocator.dupe(u8, m));
+        }
+        std.mem.sort([]const u8, list.items, {}, lessThanBytes);
+        return .{ .profile = ceiling.profile, .exclude = try list.toOwnedSlice(allocator) };
+    }
+
+    /// The ceiling this report applies, borrowing the report's strings.
+    pub fn asCeiling(self: *const CeilingReport) declaration.Ceiling {
+        return .{ .profile = self.profile, .exclude = self.exclude };
+    }
+
+    /// The sorted union of the profile's exclusions and the declaration's,
+    /// without duplicates, as an iterator over borrowed strings. Both lists
+    /// are sorted by bytes (a test pins the profile table), so a merge gives
+    /// the union without an allocation.
+    pub fn excludedModules(self: *const CeilingReport) ExcludedModules {
+        return .{ .a = self.profile.excluded_modules, .b = self.exclude };
+    }
+
+    pub const ExcludedModules = struct {
+        a: []const []const u8,
+        b: []const []const u8,
+        i: usize = 0,
+        j: usize = 0,
+
+        pub fn next(self: *ExcludedModules) ?[]const u8 {
+            if (self.i < self.a.len and self.j < self.b.len) {
+                const x = self.a[self.i];
+                const y = self.b[self.j];
+                switch (std.mem.order(u8, x, y)) {
+                    .lt => {
+                        self.i += 1;
+                        return x;
+                    },
+                    .gt => {
+                        self.j += 1;
+                        return y;
+                    },
+                    .eq => {
+                        self.i += 1;
+                        self.j += 1;
+                        return x;
+                    },
+                }
+            }
+            if (self.i < self.a.len) {
+                self.i += 1;
+                return self.a[self.i - 1];
+            }
+            if (self.j < self.b.len) {
+                self.j += 1;
+                return self.b[self.j - 1];
+            }
+            return null;
+        }
+    };
+
+    pub fn dupe(self: CeilingReport, allocator: std.mem.Allocator) std.mem.Allocator.Error!CeilingReport {
+        return fromCeiling(allocator, self.asCeiling());
+    }
+};
+
+fn lessThanBytes(_: void, a: []const u8, b: []const u8) bool {
+    return std.mem.lessThan(u8, a, b);
+}
+
+fn containsModule(list: []const []const u8, module: []const u8) bool {
+    for (list) |m| {
+        if (std.mem.eql(u8, m, module)) return true;
+    }
+    return false;
+}
+
+/// Why a handler is outside its declaration's ceiling. The set is closed; a
+/// breach is a build error with this name, not a ZTS diagnostic.
+pub const CeilingBreachReason = enum {
+    /// The contract has no capability matrix, so the ceiling cannot be shown
+    /// to hold. The check fails closed.
+    capabilities_unknown,
+    /// A capability in the matrix is not in the profile's categories.
+    capability_outside_profile,
+    /// An imported module is in the profile's excluded list.
+    module_excluded_by_profile,
+    /// An imported module is in the declaration's exclude list.
+    module_excluded_by_declaration,
+    /// The profile requires `read_only` and the contract does not prove it.
+    read_only_required,
+};
+
+/// One breach of a ceiling, with the capability or the module it names.
+/// Module names borrow the contract's strings.
+pub const CeilingBreach = union(CeilingBreachReason) {
+    capabilities_unknown,
+    capability_outside_profile: module_binding.ModuleCapability,
+    module_excluded_by_profile: []const u8,
+    module_excluded_by_declaration: []const u8,
+    read_only_required,
+
+    pub fn reason(self: CeilingBreach) CeilingBreachReason {
+        return std.meta.activeTag(self);
+    }
+
+    /// The capability or module the breach names, or an empty string for a
+    /// reason that names neither.
+    pub fn subject(self: CeilingBreach) []const u8 {
+        return switch (self) {
+            .capabilities_unknown, .read_only_required => "",
+            .capability_outside_profile => |cap| @tagName(cap),
+            .module_excluded_by_profile, .module_excluded_by_declaration => |m| m,
+        };
+    }
+};
+
+/// Every breach of `ceiling` by `contract`, in a fixed order:
+///
+/// 1. The capability matrix: `capabilities_unknown` when the contract has no
+///    matrix, otherwise one `capability_outside_profile` per capability outside
+///    the profile's categories, in matrix order.
+/// 2. The imported modules, in contract order: `module_excluded_by_profile`
+///    when the profile excludes the module, else
+///    `module_excluded_by_declaration` when the declaration excludes it. A
+///    module excluded by both reports the profile reason once.
+/// 3. `read_only_required`, when the profile requires `read_only` and the
+///    contract has no properties or does not prove it.
+///
+/// The build refuses on the first breach and `check` counts all of them, both
+/// through this one iterator. It reads the contract only and allocates nothing.
+pub const CeilingBreaches = struct {
+    contract: *const HandlerContract,
+    ceiling: declaration.Ceiling,
+    phase: enum { capabilities, modules, read_only, done } = .capabilities,
+    index: usize = 0,
+
+    pub fn next(self: *CeilingBreaches) ?CeilingBreach {
+        const profile = self.ceiling.profile;
+        while (true) switch (self.phase) {
+            .capabilities => {
+                const matrix = if (self.contract.capabilities) |*m| m else {
+                    self.phase = .modules;
+                    self.index = 0;
+                    return .capabilities_unknown;
+                };
+                const caps = matrix.slice();
+                while (self.index < caps.len) {
+                    const cap = caps[self.index];
+                    self.index += 1;
+                    if (std.mem.indexOfScalar(module_binding.ModuleCapability, profile.categories, cap) == null) {
+                        return .{ .capability_outside_profile = cap };
+                    }
+                }
+                self.phase = .modules;
+                self.index = 0;
+            },
+            .modules => {
+                const modules = self.contract.modules.items;
+                while (self.index < modules.len) {
+                    const m = modules[self.index];
+                    self.index += 1;
+                    if (containsModule(profile.excluded_modules, m)) return .{ .module_excluded_by_profile = m };
+                    if (containsModule(self.ceiling.exclude, m)) return .{ .module_excluded_by_declaration = m };
+                }
+                self.phase = .read_only;
+            },
+            .read_only => {
+                self.phase = .done;
+                if (profile.requires_read_only) {
+                    const proven = if (self.contract.properties) |props| props.read_only else false;
+                    if (!proven) return .read_only_required;
+                }
+            },
+            .done => return null,
+        };
+    }
+};
+
+pub fn ceilingBreaches(contract: *const HandlerContract, ceiling: *const declaration.Ceiling) CeilingBreaches {
+    return .{ .contract = contract, .ceiling = ceiling.* };
+}
+
+/// The first breach of `ceiling` by `contract` in the order `CeilingBreaches`
+/// documents, or null when the handler is inside the ceiling.
+pub fn firstCeilingBreach(contract: *const HandlerContract, ceiling: *const declaration.Ceiling) ?CeilingBreach {
+    var it = ceilingBreaches(contract, ceiling);
+    return it.next();
+}
+
 /// Aggregate of module capabilities required by a handler's imports.
 /// Stable SHA-256 hash over the canonically-ordered tag names lets the
 /// runtime detect drift between the embedded contract and the linked
@@ -1970,7 +2190,7 @@ pub const HoleSummary = struct {
 };
 
 pub const HandlerContract = struct {
-    version: u32 = 20,
+    version: u32 = 21,
     handler: HandlerLoc,
     routes: std.ArrayList(RouteInfo),
     modules: std.ArrayList([]const u8), // each entry owned
@@ -2002,6 +2222,10 @@ pub const HandlerContract = struct {
     /// declaration's canonical order, with the status the flow check reached.
     /// Empty when the build had no declaration. Owned.
     classifications: std.ArrayList(ClassificationReport) = .empty,
+    /// The applied ceiling (M4 T5b): the profile and exclusions of the
+    /// declaration the build enforced. Null when the build had no declaration
+    /// or the declaration has no ceiling. Owned.
+    ceiling: ?CeilingReport = null,
     cache: CacheInfo,
     sql: SqlInfo,
     durable: DurableInfo,
@@ -2147,6 +2371,8 @@ pub const HandlerContract = struct {
             report.deinit(allocator);
         }
         self.classifications.deinit(allocator);
+        if (self.ceiling) |*report| report.deinit(allocator);
+        self.ceiling = null;
         for (self.cache.namespaces.items) |s| {
             allocator.free(s);
         }
@@ -2192,3 +2418,172 @@ pub const HandlerContract = struct {
         self.sagas.deinit(allocator);
     }
 };
+
+// The declaration ceiling check (M4 T5b). Each test builds a contract by hand
+// and reads the verdict through `firstCeilingBreach` and `ceilingBreaches`.
+
+const CeilingFixture = struct {
+    contract: HandlerContract,
+
+    fn init(
+        caps: ?[]const module_binding.ModuleCapability,
+        modules: []const []const u8,
+        read_only: ?bool,
+    ) std.mem.Allocator.Error!CeilingFixture {
+        var contract = emptyContract("handler.ts");
+        try contract.modules.appendSlice(std.testing.allocator, modules);
+        if (caps) |list| {
+            var matrix = CapabilityMatrix.empty;
+            for (list) |cap| {
+                matrix.items[matrix.len] = cap;
+                matrix.len += 1;
+            }
+            contract.capabilities = matrix;
+        }
+        if (read_only) |value| contract.properties = .{
+            .pure = false,
+            .read_only = value,
+            .stateless = value,
+            .retry_safe = value,
+            .deterministic = true,
+            .has_egress = false,
+        };
+        return .{ .contract = contract };
+    }
+
+    /// The module strings are static, so only the list is freed.
+    fn deinit(self: *CeilingFixture) void {
+        self.contract.modules.deinit(std.testing.allocator);
+    }
+};
+
+fn testCeiling(comptime profile_name: []const u8, exclude: []const []const u8) declaration.Ceiling {
+    return .{ .profile = capability_profiles.findProfile(profile_name).?, .exclude = exclude };
+}
+
+test "ceiling: a capability outside the profile is capability_outside_profile" {
+    var f = try CeilingFixture.init(&.{ .clock, .network }, &.{"zttp:fetch"}, true);
+    defer f.deinit();
+    const ceiling = testCeiling("boundary", &.{});
+    const breach = firstCeilingBreach(&f.contract, &ceiling) orelse return error.TestExpectedBreach;
+    try std.testing.expectEqual(CeilingBreachReason.capability_outside_profile, breach.reason());
+    try std.testing.expectEqualStrings("network", breach.subject());
+}
+
+test "ceiling: a module the profile excludes is module_excluded_by_profile" {
+    var f = try CeilingFixture.init(&.{ .clock, .policy_check }, &.{"zttp:cache"}, true);
+    defer f.deinit();
+    const ceiling = testCeiling("adapter", &.{});
+    const breach = firstCeilingBreach(&f.contract, &ceiling) orelse return error.TestExpectedBreach;
+    try std.testing.expectEqual(CeilingBreachReason.module_excluded_by_profile, breach.reason());
+    try std.testing.expectEqualStrings("zttp:cache", breach.subject());
+}
+
+test "ceiling: a module the declaration excludes is module_excluded_by_declaration" {
+    var f = try CeilingFixture.init(&.{.crypto}, &.{"zttp:crypto"}, true);
+    defer f.deinit();
+    const ceiling = testCeiling("boundary", &.{"zttp:crypto"});
+    const breach = firstCeilingBreach(&f.contract, &ceiling) orelse return error.TestExpectedBreach;
+    try std.testing.expectEqual(CeilingBreachReason.module_excluded_by_declaration, breach.reason());
+    try std.testing.expectEqualStrings("zttp:crypto", breach.subject());
+}
+
+test "ceiling: a profile that requires read_only refuses a handler without it" {
+    var not_read_only = try CeilingFixture.init(&.{.clock}, &.{}, false);
+    defer not_read_only.deinit();
+    var no_properties = try CeilingFixture.init(&.{.clock}, &.{}, null);
+    defer no_properties.deinit();
+    const ceiling = testCeiling("boundary", &.{});
+    for ([_]*const HandlerContract{ &not_read_only.contract, &no_properties.contract }) |contract| {
+        const breach = firstCeilingBreach(contract, &ceiling) orelse return error.TestExpectedBreach;
+        try std.testing.expectEqual(CeilingBreachReason.read_only_required, breach.reason());
+        try std.testing.expectEqualStrings("", breach.subject());
+    }
+    // A profile that does not require it admits the same handler.
+    const adapter = testCeiling("adapter", &.{});
+    try std.testing.expectEqual(@as(?CeilingBreach, null), firstCeilingBreach(&not_read_only.contract, &adapter));
+}
+
+test "ceiling: a contract with no capability matrix is capabilities_unknown" {
+    var f = try CeilingFixture.init(null, &.{}, true);
+    defer f.deinit();
+    const ceiling = testCeiling("adapter", &.{});
+    const breach = firstCeilingBreach(&f.contract, &ceiling) orelse return error.TestExpectedBreach;
+    try std.testing.expectEqual(CeilingBreachReason.capabilities_unknown, breach.reason());
+}
+
+test "ceiling: a handler that uses every category of its profile passes" {
+    for (&capability_profiles.profiles) |*profile| {
+        var f = try CeilingFixture.init(profile.categories, &.{ "zttp:crypto", "zttp:env" }, true);
+        defer f.deinit();
+        const ceiling: declaration.Ceiling = .{ .profile = profile, .exclude = &.{"zttp:fetch"} };
+        try std.testing.expectEqual(@as(?CeilingBreach, null), firstCeilingBreach(&f.contract, &ceiling));
+    }
+}
+
+test "ceiling: a module both the profile and the declaration exclude reports the profile reason once" {
+    var f = try CeilingFixture.init(&.{.clock}, &.{"zttp:cache"}, true);
+    defer f.deinit();
+    const ceiling = testCeiling("boundary", &.{"zttp:cache"});
+    var it = ceilingBreaches(&f.contract, &ceiling);
+    const breach = it.next() orelse return error.TestExpectedBreach;
+    try std.testing.expectEqual(CeilingBreachReason.module_excluded_by_profile, breach.reason());
+    try std.testing.expectEqual(@as(?CeilingBreach, null), it.next());
+}
+
+test "ceiling: the iterator reports every breach in the documented order" {
+    var f = try CeilingFixture.init(&.{ .clock, .network, .sqlite }, &.{ "zttp:fetch", "zttp:cache", "zttp:sql" }, false);
+    defer f.deinit();
+    const ceiling = testCeiling("boundary", &.{"zttp:fetch"});
+    var it = ceilingBreaches(&f.contract, &ceiling);
+    const want = [_]struct { reason: CeilingBreachReason, subject: []const u8 }{
+        .{ .reason = .capability_outside_profile, .subject = "network" },
+        .{ .reason = .capability_outside_profile, .subject = "sqlite" },
+        .{ .reason = .module_excluded_by_declaration, .subject = "zttp:fetch" },
+        .{ .reason = .module_excluded_by_profile, .subject = "zttp:cache" },
+        .{ .reason = .read_only_required, .subject = "" },
+    };
+    for (want) |w| {
+        const breach = it.next() orelse return error.TestExpectedBreach;
+        try std.testing.expectEqual(w.reason, breach.reason());
+        try std.testing.expectEqualStrings(w.subject, breach.subject());
+    }
+    try std.testing.expectEqual(@as(?CeilingBreach, null), it.next());
+}
+
+test "ceiling census: every breach reason is produced by the check" {
+    for (std.enums.values(CeilingBreachReason)) |reason| {
+        var f = switch (reason) {
+            .capabilities_unknown => try CeilingFixture.init(null, &.{}, true),
+            .capability_outside_profile => try CeilingFixture.init(&.{.filesystem}, &.{}, true),
+            .module_excluded_by_profile => try CeilingFixture.init(&.{.clock}, &.{"zttp:ratelimit"}, true),
+            .module_excluded_by_declaration => try CeilingFixture.init(&.{.env}, &.{"zttp:env"}, true),
+            .read_only_required => try CeilingFixture.init(&.{.stderr}, &.{}, false),
+        };
+        defer f.deinit();
+        const ceiling = testCeiling("boundary", &.{"zttp:env"});
+        const breach = firstCeilingBreach(&f.contract, &ceiling) orelse return error.TestExpectedBreach;
+        try std.testing.expectEqual(reason, breach.reason());
+    }
+}
+
+test "ceiling report: excludedModules is the sorted union without duplicates" {
+    const ceiling = testCeiling("adapter", &.{ "zttp:cache", "zttp:fetch", "zttp:zz" });
+    var report = try CeilingReport.fromCeiling(std.testing.allocator, ceiling);
+    defer report.deinit(std.testing.allocator);
+    // The profile's own exclusion is not kept as a declaration exclusion.
+    try std.testing.expectEqual(@as(usize, 2), report.exclude.len);
+    var it = report.excludedModules();
+    for ([_][]const u8{ "zttp:cache", "zttp:fetch", "zttp:ratelimit", "zttp:zz" }) |want| {
+        try std.testing.expectEqualStrings(want, it.next() orelse return error.TestExpectedModule);
+    }
+    try std.testing.expectEqual(@as(?[]const u8, null), it.next());
+}
+
+test "ceiling report: every profile's excluded list is sorted and unique, as the merge needs" {
+    for (capability_profiles.profiles) |profile| {
+        for (profile.excluded_modules[1..], 1..) |m, i| {
+            try std.testing.expect(std.mem.order(u8, profile.excluded_modules[i - 1], m) == .lt);
+        }
+    }
+}

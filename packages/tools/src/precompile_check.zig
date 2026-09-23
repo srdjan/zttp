@@ -62,7 +62,7 @@ pub const CheckResult = struct {
     proof_trace_json: ?[]u8 = null,
 
     pub fn totalErrors(self: *const CheckResult) u32 {
-        return self.parse_errors + self.bool_errors + self.type_errors + self.strict_errors + self.verify_errors + self.flow_errors + self.canonical_errors + self.policy_errors + self.specErrors() + self.classificationErrors();
+        return self.parse_errors + self.bool_errors + self.type_errors + self.strict_errors + self.verify_errors + self.flow_errors + self.canonical_errors + self.policy_errors + self.specErrors() + self.classificationErrors() + self.ceilingErrors();
     }
 
     /// Declared classifications the check must refuse (M4 T4): a required
@@ -76,6 +76,20 @@ pub const CheckResult = struct {
             n += 1;
             rest = rest[index + 1 ..];
         }
+        return n;
+    }
+
+    /// Breaches of the declaration's ceiling the check must refuse (M4 T5b),
+    /// every one of them. The build refuses on the first through the same
+    /// iterator, `handler_contract.ceilingBreaches`. The contract's ceiling
+    /// report is filled from the declaration by the same contract build.
+    pub fn ceilingErrors(self: *const CheckResult) u32 {
+        const contract = if (self.contract) |*c| c else return 0;
+        const report = if (contract.ceiling) |*r| r else return 0;
+        const ceiling = report.asCeiling();
+        var it = handler_contract.ceilingBreaches(contract, &ceiling);
+        var n: u32 = 0;
+        while (it.next()) |_| n += 1;
         return n;
     }
 
@@ -592,6 +606,18 @@ pub fn formatProofCard(writer: anytype, r: *const CheckResult, filename: []const
                     if (refused) "  error: a required entry the analysis never saw" else "",
                 }) catch return;
             }
+        }
+        // The applied ceiling (M4 T5b): each breach is an error line.
+        if (contract.ceiling) |*report| {
+            writer.print("\n  Declaration ceiling '{s}':\n", .{report.profile.name}) catch return;
+            const ceiling = report.asCeiling();
+            var it = handler_contract.ceilingBreaches(contract, &ceiling);
+            var any = false;
+            while (it.next()) |breach| {
+                any = true;
+                writer.print("    error: {s} {s}\n", .{ @tagName(breach.reason()), breach.subject() }) catch return;
+            }
+            if (!any) writer.print("    inside the ceiling\n", .{}) catch return;
         }
     }
 

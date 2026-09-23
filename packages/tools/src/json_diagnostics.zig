@@ -481,6 +481,25 @@ fn writeSpecAndCapsulesJson(
         }
         try writer.writeByte(']');
     }
+    // The applied ceiling (M4 T5b), only when the declaration has one, so the
+    // envelope of a check without one stays byte-identical. Every breach is
+    // listed; each one counts as a check error.
+    if (c.ceiling) |*report| {
+        try writer.writeAll(",\"ceiling\":{\"profile\":");
+        try writeJsonString(writer, report.profile.name);
+        try writer.writeAll(",\"breaches\":[");
+        const ceiling = report.asCeiling();
+        var it = handler_contract.ceilingBreaches(c, &ceiling);
+        var first = true;
+        while (it.next()) |breach| {
+            if (!first) try writer.writeByte(',');
+            first = false;
+            try writer.print("{{\"reason\":\"{s}\",\"subject\":", .{@tagName(breach.reason())});
+            try writeJsonString(writer, breach.subject());
+            try writer.writeByte('}');
+        }
+        try writer.writeAll("]}");
+    }
 }
 
 /// Emit the `holes` array: every `hole()` call site with the type the

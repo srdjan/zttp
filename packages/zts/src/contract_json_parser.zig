@@ -14,6 +14,7 @@ const json_wire = @import("zts-base").json_wire;
 const module_binding = @import("zts-base").module_authorization;
 const json_utils = @import("zts-base").json_utils;
 const tool_schema = @import("zts-base").tool_schema;
+const capability_profiles = @import("zts-base").capability_profiles;
 
 const HandlerContract = handler_contract.HandlerContract;
 const RouteInfo = handler_contract.RouteInfo;
@@ -164,6 +165,13 @@ const ClassificationWire = struct {
     label: WireString = .{ .bytes = "" },
     required: ?bool = null,
     status: WireString = .{ .bytes = "" },
+};
+
+const CeilingWire = struct {
+    profile: ?WireString = null,
+    categories: ?[]const WireString = null,
+    excludedModules: ?[]const WireString = null,
+    requiresReadOnly: ?bool = null,
 };
 
 const SqlQueryWire = struct {
@@ -487,6 +495,7 @@ const ContractWire = struct {
     tools: []const ToolWire = &.{},
     toolAuth: ?ToolAuthWire = null,
     classifications: []const ClassificationWire = &.{},
+    ceiling: ?CeilingWire = null,
     cache: struct {
         namespaces: []const WireString = &.{},
         dynamic: bool = false,
@@ -727,6 +736,7 @@ fn projectContract(
     try projectTools(allocator, wire.tools, &contract);
     try projectToolAuth(allocator, wire.toolAuth, &contract);
     try projectClassifications(allocator, wire.classifications, &contract);
+    try projectCeiling(allocator, wire.ceiling, &contract);
     contract.cache.namespaces = try projectStringList(allocator, wire.cache.namespaces);
     contract.cache.dynamic = wire.cache.dynamic;
     try projectSql(allocator, &wire.sql, &contract);
@@ -1052,6 +1062,48 @@ fn projectToolAuth(
     errdefer allocator.free(tenant_claim);
     if (key_env.len == 0 or tenant_claim.len == 0) return error.InvalidToolAuth;
     contract.tool_auth = .{ .key_env = key_env, .tenant_claim = tenant_claim };
+}
+
+/// Project the applied ceiling (M4 T5b). The build derives every field but the
+/// declaration's exclusions from the profile, so a report whose categories or
+/// `requiresReadOnly` differ from the named profile, whose `excludedModules`
+/// is not strictly increasing, names something that is not a `zttp:` module,
+/// or leaves out a module the profile excludes, is refused: the build could
+/// not have written it. The declaration's own exclusions are the entries the
+/// profile does not already make.
+fn projectCeiling(
+    allocator: std.mem.Allocator,
+    wire: ?CeilingWire,
+    contract: *HandlerContract,
+) !void {
+    const ceiling = wire orelse return;
+    const profile_name = ceiling.profile orelse return error.InvalidCeilingReport;
+    const profile = capability_profiles.findProfile(profile_name.bytes) orelse return error.InvalidCeilingReport;
+    const categories = ceiling.categories orelse return error.InvalidCeilingReport;
+    const excluded = ceiling.excludedModules orelse return error.InvalidCeilingReport;
+    const requires_read_only = ceiling.requiresReadOnly orelse return error.InvalidCeilingReport;
+    if (requires_read_only != profile.requires_read_only) return error.InvalidCeilingReport;
+    if (categories.len != profile.categories.len) return error.InvalidCeilingReport;
+    for (categories, profile.categories) |name, cap| {
+        if (!std.mem.eql(u8, name.bytes, @tagName(cap))) return error.InvalidCeilingReport;
+    }
+    for (excluded, 0..) |entry, i| {
+        const m = entry.bytes;
+        if (!std.mem.startsWith(u8, m, "zttp:") or m.len <= "zttp:".len) return error.InvalidCeilingReport;
+        if (std.mem.indexOfScalar(u8, m, '\\') != null) return error.InvalidCeilingReport;
+        if (i > 0 and std.mem.order(u8, excluded[i - 1].bytes, m) != .lt) return error.InvalidCeilingReport;
+    }
+    for (profile.excluded_modules) |m| {
+        var found = false;
+        for (excluded) |entry| {
+            if (std.mem.eql(u8, entry.bytes, m)) found = true;
+        }
+        if (!found) return error.InvalidCeilingReport;
+    }
+    const own = try allocator.alloc([]const u8, excluded.len);
+    defer allocator.free(own);
+    for (excluded, own) |entry, *slot| slot.* = entry.bytes;
+    contract.ceiling = try contract_types.CeilingReport.fromCeiling(allocator, .{ .profile = profile, .exclude = own });
 }
 
 /// Project the P8 report (M4 T4). The value sets are closed: a label other than
@@ -2032,7 +2084,7 @@ test "parseFromJson compatibility matrix preserves duplicate trailing and overfl
         version: u32,
     }{
         .{ .json = "{\"version\":1,\"version\":23} trailing", .version = 23 },
-        .{ .json = "{\"version\":99999999999999999999}", .version = 20 },
+        .{ .json = "{\"version\":99999999999999999999}", .version = 21 },
     };
     for (cases) |case| {
         var contract = try parseFromJson(std.testing.allocator, case.json);
@@ -2055,7 +2107,7 @@ test "parseFromJson keeps raw structural keys and appends repeated collections" 
     var contract = try parseFromJson(std.testing.allocator, json);
     defer contract.deinit(std.testing.allocator);
 
-    try std.testing.expectEqual(@as(u32, 20), contract.version);
+    try std.testing.expectEqual(@as(u32, 21), contract.version);
     try std.testing.expectEqual(@as(usize, 2), contract.modules.items.len);
     try std.testing.expectEqualStrings("zttp:env", contract.modules.items[0]);
     try std.testing.expectEqualStrings("zttp:cache", contract.modules.items[1]);

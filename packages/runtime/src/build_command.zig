@@ -3483,6 +3483,47 @@ test "a project build carries the zttp.json declaration and refuses a required e
     try std.testing.expectEqual(@as(usize, 1), control.tail_calls);
 }
 
+test "a project build carries the zttp.json ceiling and refuses a handler outside it" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    // `boundary` admits no `network`, and the handler imports `zttp:fetch`.
+    try writeDeclaredProject(&tmp,
+        \\{"version":2,"ceiling":{"profile":"boundary","exclude":[]}}
+    );
+
+    const handler_path = try tmp.dir.realPathFileAlloc(std.testing.io, "src/handler.ts", allocator);
+    defer allocator.free(handler_path);
+    var context = try discoverExplicitCompileContext(allocator, handler_path);
+    defer context.deinit(allocator);
+    const declaration = context.declarationPtr() orelse return error.TestExpectedDeclaration;
+    try std.testing.expectEqualStrings("boundary", (declaration.ceiling orelse return error.TestExpectedCeiling).profile.name);
+
+    var probe = BuildProbe{};
+    var caps = probe.capabilities();
+    caps.read_source = readSourceCapability;
+    caps.compile = compileCapability;
+    try std.testing.expectError(error.CeilingBreached, runBuild(allocator, .{
+        .handler_path = handler_path,
+        .output_path = "out",
+        .declaration = context.declarationPtr(),
+        .attest_requested = false,
+    }, caps));
+    try std.testing.expectEqual(@as(usize, 0), probe.tail_calls);
+
+    // Control: the same build without the declaration reaches the tail.
+    var control = BuildProbe{};
+    var control_caps = control.capabilities();
+    control_caps.read_source = readSourceCapability;
+    control_caps.compile = compileCapability;
+    _ = try runBuild(allocator, .{
+        .handler_path = handler_path,
+        .output_path = "out",
+        .attest_requested = false,
+    }, control_caps);
+    try std.testing.expectEqual(@as(usize, 1), control.tail_calls);
+}
+
 test "a project whose declaration the loader refuses does not build" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});

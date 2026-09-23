@@ -1109,6 +1109,53 @@ pub fn refuseRequiredAbsent(contract: *const HandlerContract, filename: []const 
     return error.RequiredClassificationAbsent;
 }
 
+/// Write the declaration's ceiling into the contract (M4 T5b, the P15
+/// report). A declaration without a ceiling leaves `ceiling` null.
+fn fillCeilingReport(
+    allocator: std.mem.Allocator,
+    contract: *HandlerContract,
+    decl: *const zts.declaration.Declaration,
+) !void {
+    if (contract.ceiling) |*prior| prior.deinit(allocator);
+    contract.ceiling = null;
+    const ceiling = decl.ceiling orelse return;
+    contract.ceiling = try handler_contract.CeilingReport.fromCeiling(allocator, ceiling);
+}
+
+/// Refuse a build whose handler is outside its declaration's ceiling (M4 T5b,
+/// design note section 13): a capability outside the profile, an imported
+/// module the profile or the declaration excludes, or a missing `read_only`
+/// the profile requires. It reads the declaration's ceiling, not the contract's
+/// report, so a contract that lost its report cannot pass. A build error with
+/// the reason named, not a ZTS diagnostic, so the policy hash does not move.
+/// Call it after the last write to the properties it reads.
+pub fn refuseCeilingBreach(
+    contract: *const HandlerContract,
+    decl: ?*const zts.declaration.Declaration,
+    filename: []const u8,
+) !void {
+    const d = decl orelse return;
+    const ceiling = d.ceiling orelse return;
+    const breach = handler_contract.firstCeilingBreach(contract, &ceiling) orelse return;
+    if (!builtin.is_test) {
+        debugPrint(
+            "Declaration ceiling '{s}' refused {s}: {s} {s}\n  {s}\n",
+            .{ ceiling.profile.name, filename, @tagName(breach.reason()), breach.subject(), ceilingBreachHint(breach.reason()) },
+        );
+    }
+    return error.CeilingBreached;
+}
+
+fn ceilingBreachHint(reason: handler_contract.CeilingBreachReason) []const u8 {
+    return switch (reason) {
+        .capabilities_unknown => "The build produced no capability matrix, so the ceiling cannot be shown to hold.",
+        .capability_outside_profile => "Remove the import that needs this capability, or select a profile that admits it.",
+        .module_excluded_by_profile => "The profile refuses this module by name; remove the import or select another profile.",
+        .module_excluded_by_declaration => "The declaration's \"exclude\" list names this module; remove the import or the entry.",
+        .read_only_required => "The profile requires read_only; remove the call that writes state or egresses.",
+    };
+}
+
 pub fn runCheckOnly(
     allocator: std.mem.Allocator,
     handler_path: []const u8,
@@ -1966,7 +2013,8 @@ pub const CompileOptions = struct {
     /// The consumer's declared classifications (M4 T4). Borrowed; it must
     /// outlive the call. The flow check enforces it, the contract carries its
     /// P8 report, and a required entry the analysis never saw refuses the build
-    /// with `error.RequiredClassificationAbsent`.
+    /// with `error.RequiredClassificationAbsent`. A handler outside the
+    /// declaration's ceiling refuses the build with `error.CeilingBreached`.
     declaration: ?*const zts.declaration.Declaration = null,
 };
 
@@ -2440,6 +2488,7 @@ pub fn compileHandler(
                 null;
             errdefer if (contract) |*built| built.deinit(allocator);
             if (contract) |*built| try refuseRequiredAbsent(built, filename);
+            if (contract) |*built| try refuseCeilingBreach(built, opts.declaration, filename);
 
             return .{
                 .bytecode = bytecode_data,
@@ -2500,6 +2549,9 @@ pub fn compileHandler(
             props.result_safe = result_safe;
             props.optional_safe = optional_safe;
         }
+        // After the last write to the properties: `read_only` is final once
+        // `buildContractWithPolicy` returns, and nothing below writes it.
+        try refuseCeilingBreach(&contract.?, opts.declaration, filename);
     }
 
     // Generate exhaustive test cases from path analysis.
@@ -3104,7 +3156,10 @@ fn buildContractWithPolicy(
                 zts.property_diagnostics.collectFlowViolations(allocator, vout, flow_diags, ir_view);
             }
 
-            if (declaration) |decl| try fillClassificationReport(allocator, &contract, decl, flow);
+            if (declaration) |decl| {
+                try fillClassificationReport(allocator, &contract, decl, flow);
+                try fillCeilingReport(allocator, &contract, decl);
+            }
 
             if (fresh and !builtin.is_test and flow_errors == 0) {
                 debugPrint("Flow analysis passed\n", .{});
@@ -3113,6 +3168,7 @@ fn buildContractWithPolicy(
             // No handler function: the flow check never ran, so every entry
             // is absent and a required one refuses the build.
             try fillClassificationReport(allocator, &contract, decl, null);
+            try fillCeilingReport(allocator, &contract, decl);
         }
     }
 
@@ -6895,6 +6951,155 @@ test "a required entry on a host the handler never fetches refuses the build and
     try std.testing.expectEqual(handler_contract.ClassificationStatus.absent, entry.status);
     try std.testing.expectEqual(@as(u32, 1), result.classificationErrors());
     try std.testing.expect(result.totalErrors() >= 1);
+}
+
+// The declaration ceiling (M4 T5b U2): a breach refuses the build with
+// `error.CeilingBreached` and counts as a check error.
+
+const ceiling_plain_handler =
+    \\function handler(req: Request): Response {
+    \\  return Response.json({ ok: true });
+    \\}
+    \\
+;
+
+const ceiling_log_handler =
+    \\import { logInfo } from "zttp:log";
+    \\function handler(req: Request): Response {
+    \\  logInfo("served", { path: "/" });
+    \\  return Response.json({ ok: true });
+    \\}
+    \\
+;
+
+const boundary_ceiling_declaration =
+    \\{"version":2,"ceiling":{"profile":"boundary","exclude":[]}}
+;
+
+/// The breach reasons `check` reports for a handler, in check order.
+fn checkCeilingReasons(result: *const CheckResult, out: []handler_contract.CeilingBreachReason) ![]handler_contract.CeilingBreachReason {
+    const contract = if (result.contract) |*c| c else return error.TestMissingContract;
+    const report = if (contract.ceiling) |*r| r else return error.TestMissingCeiling;
+    const ceiling = report.asCeiling();
+    var it = handler_contract.ceilingBreaches(contract, &ceiling);
+    var n: usize = 0;
+    while (it.next()) |breach| {
+        out[n] = breach.reason();
+        n += 1;
+    }
+    return out[0..n];
+}
+
+test "a boundary ceiling refuses a handler that imports zttp:fetch and fails the check" {
+    const allocator = std.testing.allocator;
+    var fixture = try DeclaredFixture.init(declared_sibling_handler, boundary_ceiling_declaration);
+    defer fixture.deinit();
+
+    try std.testing.expectError(
+        error.CeilingBreached,
+        compileHandler(allocator, declared_sibling_handler, fixture.handler_path, .{ .declaration = &fixture.declaration }),
+    );
+
+    var result = try runCheckOnlyWithOptions(allocator, fixture.handler_path, .{
+        .json_mode = true,
+        .declaration = &fixture.declaration,
+    });
+    defer result.deinit(allocator);
+    var buf: [8]handler_contract.CeilingBreachReason = undefined;
+    const reasons = try checkCeilingReasons(&result, &buf);
+    // `zttp:fetch` needs `runtime_callback` and `network`, neither inside
+    // `boundary`, and its egress also costs `read_only`.
+    try std.testing.expectEqualSlices(handler_contract.CeilingBreachReason, &.{ .capability_outside_profile, .capability_outside_profile, .read_only_required }, reasons);
+    try std.testing.expectEqual(@as(u32, 3), result.ceilingErrors());
+    try std.testing.expect(result.totalErrors() >= 3);
+
+    // Control: the same handler without the declaration builds.
+    var undeclared = try compileHandler(allocator, declared_sibling_handler, fixture.handler_path, .{});
+    defer undeclared.deinit(allocator);
+    try std.testing.expectEqual(@as(?handler_contract.CeilingReport, null), undeclared.contract.?.ceiling);
+}
+
+test "a module the declaration excludes refuses the build" {
+    const allocator = std.testing.allocator;
+    const declaration_json =
+        \\{"version":2,"ceiling":{"profile":"adapter","exclude":["zttp:fetch"]}}
+    ;
+    var fixture = try DeclaredFixture.init(declared_sibling_handler, declaration_json);
+    defer fixture.deinit();
+
+    try std.testing.expectError(
+        error.CeilingBreached,
+        compileHandler(allocator, declared_sibling_handler, fixture.handler_path, .{ .declaration = &fixture.declaration }),
+    );
+
+    var result = try runCheckOnlyWithOptions(allocator, fixture.handler_path, .{
+        .json_mode = true,
+        .declaration = &fixture.declaration,
+    });
+    defer result.deinit(allocator);
+    var buf: [8]handler_contract.CeilingBreachReason = undefined;
+    const reasons = try checkCeilingReasons(&result, &buf);
+    try std.testing.expectEqualSlices(handler_contract.CeilingBreachReason, &.{.module_excluded_by_declaration}, reasons);
+    try std.testing.expectEqual(@as(u32, 1), result.ceilingErrors());
+}
+
+test "a handler inside its ceiling builds and its contract carries the ceiling report" {
+    const allocator = std.testing.allocator;
+    var fixture = try DeclaredFixture.init(ceiling_plain_handler, boundary_ceiling_declaration);
+    defer fixture.deinit();
+
+    var compiled = try compileHandler(allocator, ceiling_plain_handler, fixture.handler_path, .{ .declaration = &fixture.declaration });
+    defer compiled.deinit(allocator);
+    const contract = &compiled.contract.?;
+    const report = contract.ceiling orelse return error.TestMissingCeiling;
+    try std.testing.expectEqualStrings("boundary", report.profile.name);
+    try std.testing.expect(contract.properties.?.read_only);
+
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    defer out.deinit();
+    try writeContractJson(contract, &out.writer);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"ceiling\": { \"profile\": \"boundary\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"excludedModules\": [\"zttp:cache\", \"zttp:ratelimit\"], \"requiresReadOnly\": true") != null);
+
+    var result = try runCheckOnlyWithOptions(allocator, fixture.handler_path, .{
+        .json_mode = true,
+        .declaration = &fixture.declaration,
+    });
+    defer result.deinit(allocator);
+    try std.testing.expectEqual(@as(u32, 0), result.ceilingErrors());
+}
+
+test "a boundary ceiling refuses a handler inside its categories that is not read_only" {
+    const allocator = std.testing.allocator;
+    var fixture = try DeclaredFixture.init(ceiling_log_handler, boundary_ceiling_declaration);
+    defer fixture.deinit();
+
+    try std.testing.expectError(
+        error.CeilingBreached,
+        compileHandler(allocator, ceiling_log_handler, fixture.handler_path, .{ .declaration = &fixture.declaration }),
+    );
+
+    var result = try runCheckOnlyWithOptions(allocator, fixture.handler_path, .{
+        .json_mode = true,
+        .declaration = &fixture.declaration,
+    });
+    defer result.deinit(allocator);
+    // `zttp:log` needs only `clock` and `stderr`, both inside `boundary`, and
+    // `logInfo` writes, so read_only is the one breach.
+    var buf: [8]handler_contract.CeilingBreachReason = undefined;
+    const reasons = try checkCeilingReasons(&result, &buf);
+    try std.testing.expectEqualSlices(handler_contract.CeilingBreachReason, &.{.read_only_required}, reasons);
+    try std.testing.expectEqual(@as(u32, 1), result.ceilingErrors());
+
+    // Control: `adapter` does not require read_only and admits the handler.
+    const adapter_json =
+        \\{"version":2,"ceiling":{"profile":"adapter","exclude":[]}}
+    ;
+    var adapter = try DeclaredFixture.init(ceiling_log_handler, adapter_json);
+    defer adapter.deinit();
+    var compiled = try compileHandler(allocator, ceiling_log_handler, adapter.handler_path, .{ .declaration = &adapter.declaration });
+    defer compiled.deinit(allocator);
+    try std.testing.expectEqualStrings("adapter", compiled.contract.?.ceiling.?.profile.name);
 }
 
 test "the build enforces a declared secret and reports it matched" {

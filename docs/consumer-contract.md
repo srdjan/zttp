@@ -42,7 +42,7 @@ The declared data-label path of section 9.2 is implemented for the M4 release bo
 the declaration file (`packages/zts/src/declaration.zig`) reaches every flow check of the
 handler through `--declaration`, `-Ddeclaration`, or the `declaration` key in
 `zttp.json`, the flow checker enforces its classifications (P9), and the contract (version
-20) carries the P8 status of each entry. The declaration does not yet bind as a graph
+21) carries the P8 status of each entry. The declaration does not yet bind as a graph
 member; that is M4 T5.
 
 Nothing else in this document is implemented. The declaration document, the admissibility
@@ -534,7 +534,7 @@ Pinned identities, each compared by equality:
 | Certificate schema | 4 | `packages/proof-checker/src/proof_system.zig` |
 | Proof system | `zttp_pcc_v3` = 3 | `packages/proof-checker/src/proof_system.zig` |
 | Semantics epoch | 1 | `packages/proof-checker/src/proof_system.zig` |
-| Handler contract version | 20 | `packages/zts/src/contract_types.zig` |
+| Handler contract version | 21 | `packages/zts/src/contract_types.zig` |
 | Agent protocol schema | 2 | [Agent Protocol v2](internals/agent-protocol-v2.md) |
 
 ### 6.1 The vocabulary envelope

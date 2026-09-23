@@ -45,7 +45,7 @@ Every precompilation extracts a contract from the handler's IR. Add
 
 ```json
 {
-  "version": 20,
+  "version": 21,
   "modules": ["zttp:auth", "zttp:cache", "zttp:scope"],
   "functions": {
     "zttp:auth": ["jwtVerify", "parseBearer"],
@@ -558,7 +558,13 @@ required.
   each entry (`matched`, `indeterminate`, or `absent`) in its
   `classifications` section. A required entry that the analysis never
   saw stops the build. The loader refuses a malformed file with a named
-  reason and the entry index.
+  reason and the entry index. A version 2 declaration can also select a
+  capability `ceiling` (`boundary`, `adapter`, or `ledger`, with an
+  optional `exclude` list of modules). The build stops with a named
+  reason when a capability of the handler is outside the profile, when
+  an imported module is excluded, or when the profile requires
+  `read_only` and the handler does not prove it. The contract records
+  the applied ceiling in its `ceiling` section, or `null`.
 - `-Dfault-severity=<path>`: overrides fault severity classification at
   the route level. A route declared "critical" elevates all failable
   calls within it to critical severity for fault coverage diagnostics.

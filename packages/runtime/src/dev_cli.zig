@@ -349,10 +349,12 @@ fn cmdCompile(ctx: cli_help.Ctx) anyerror!void {
 
 /// The declaration errors a build reports with its own message (M4 T4): a
 /// refused or unreadable declaration, a required entry the analysis never saw,
-/// and a handler whose build path cannot enforce a declaration.
+/// a handler outside the declaration's ceiling (M4 T5b), and a handler whose
+/// build path cannot enforce a declaration.
 fn isDeclarationBuildError(err: anyerror) bool {
     return err == error.DeclarationContextFailed or
         err == error.RequiredClassificationAbsent or
+        err == error.CeilingBreached or
         err == error.DeclarationNotEnforced;
 }
 
@@ -439,6 +441,7 @@ fn cmdDeploy(ctx: cli_help.Ctx) anyerror!void {
             error.PolicyViolation,
             error.DeclarationContextFailed,
             error.RequiredClassificationAbsent,
+            error.CeilingBreached,
             error.DeclarationNotEnforced,
             => std.process.exit(1),
             else => return err,
