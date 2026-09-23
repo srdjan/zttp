@@ -1010,7 +1010,53 @@ pub const FlowChecker = struct {
                 else => {},
             }
         }
+        return self.requestEscapesScan(req_key);
+    }
+
+    /// True when the request object can reach code the assignment scan above
+    /// cannot read: passed to a function from another file, a global such as
+    /// `Object.assign`, or a method, or copied into another binding. Only a
+    /// built-in module export (native, which writes no JS field) and a
+    /// function declared in this file (whose assignments the scan already
+    /// read) may receive it. Over counting only keeps a label.
+    fn requestEscapesScan(self: *const FlowChecker, req_key: u32) bool {
+        const node_count = self.ir_view.nodeCount();
+        for (0..node_count) |idx_usize| {
+            const idx: NodeIndex = @intCast(idx_usize);
+            const tag = self.ir_view.getTag(idx) orelse continue;
+            switch (tag) {
+                .var_decl => {
+                    const decl = self.ir_view.getVarDecl(idx) orelse return true;
+                    if (self.isBindingKey(decl.init, req_key)) return true;
+                },
+                .call, .method_call => {
+                    const call_data = self.ir_view.getCall(idx) orelse return true;
+                    var passes_req = false;
+                    for (0..call_data.args_count) |k| {
+                        if (self.isBindingKey(self.ir_view.getListIndex(call_data.args_start, @intCast(k)), req_key)) passes_req = true;
+                    }
+                    if (passes_req and !self.calleeCannotWriteRequest(call_data.callee)) return true;
+                },
+                // exhaustive: only a declaration or a call can hand the
+                // request object to code this scan does not read.
+                else => {},
+            }
+        }
         return false;
+    }
+
+    fn isBindingKey(self: *const FlowChecker, node: NodeIndex, key: u32) bool {
+        if (node == null_node or self.ir_view.getTag(node) != .identifier) return false;
+        const binding = self.ir_view.getBinding(node) orelse return false;
+        return packBindingKey(binding.scope_id, binding.slot) == key;
+    }
+
+    /// A built-in module export or a function declared in this file.
+    fn calleeCannotWriteRequest(self: *const FlowChecker, callee: NodeIndex) bool {
+        if (self.ir_view.getTag(callee) != .identifier) return false;
+        const binding = self.ir_view.getBinding(callee) orelse return false;
+        if (self.module_fn_meta.contains(binding.slot)) return true;
+        return self.user_fn_decls.contains(packBindingKey(binding.scope_id, binding.slot));
     }
 
     /// The labels of a `req.subject` / `req.tenant` read. They come from the
@@ -5810,4 +5856,56 @@ test "AE19: mask keeps a declared label under a runtime bound and declassifies u
         \\}
     ;
     try std.testing.expect((try runDeclared(literal_bound, true)).no_secret_leakage);
+}
+
+test "FlowChecker keeps user_input on identity reads when the request escapes the write scan" {
+    const allocator = std.testing.allocator;
+    const escaping = [_][]const u8{
+        // A function from another file could write req.subject.
+        \\import { fetch } from "zttp:fetch";
+        \\import { stamp } from "./stamp.ts";
+        \\function handler(req) {
+        \\  stamp(req);
+        \\  fetch("https://api.example.com/v1", { body: req.subject });
+        \\  return Response.json({});
+        \\}
+        ,
+        // A method call receives it: the callee is not a name the scan resolves.
+        \\import { fetch } from "zttp:fetch";
+        \\const box = { take: (r) => r.method };
+        \\function handler(req) {
+        \\  box.take(req);
+        \\  fetch("https://api.example.com/v1", { body: req.subject });
+        \\  return Response.json({});
+        \\}
+        ,
+        // An alias the scan cannot follow.
+        \\import { fetch } from "zttp:fetch";
+        \\function handler(req) {
+        \\  const r = req;
+        \\  fetch("https://api.example.com/v1", { body: req.subject });
+        \\  return Response.json({});
+        \\}
+        ,
+    };
+    for (escaping, 0..) |source, i| {
+        if (try runInputValidated(allocator, source)) {
+            std.debug.print("case {d} kept identity reads clean:\n{s}\n", .{ i, source });
+            return error.TestExpectedUserInput;
+        }
+    }
+    // A built-in module export and a function declared in this file may
+    // receive the request: the read stays clean.
+    try std.testing.expect(try runInputValidated(allocator,
+        \\import { fetch } from "zttp:fetch";
+        \\import { routerMatch } from "zttp:router";
+        \\function show(r) { return r.method; }
+        \\const routes = { "POST /a": show };
+        \\function handler(req) {
+        \\  routerMatch(routes, req);
+        \\  show(req);
+        \\  fetch("https://api.example.com/v1", { body: req.subject });
+        \\  return Response.json({});
+        \\}
+    ));
 }

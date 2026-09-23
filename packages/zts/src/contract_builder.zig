@@ -699,7 +699,7 @@ pub const ContractBuilder = struct {
         // `toolCatalog` is under the tool profile; its catalog either lands in
         // `contract.tools` whole or is refused with one diagnostic per rule it
         // breaks, and then `contract.tools` stays empty.
-        try self.buildToolCatalog(&contract, root);
+        try self.buildToolCatalog(&contract, root, handler_fn);
 
         return contract;
     }
@@ -1484,7 +1484,7 @@ pub const ContractBuilder = struct {
 
     /// Read the `toolCatalog` literal against the build rules of the T2 design
     /// note, section 5. On any refusal the catalog contributes no entry.
-    fn buildToolCatalog(self: *ContractBuilder, contract: *HandlerContract, root: NodeIndex) !void {
+    fn buildToolCatalog(self: *ContractBuilder, contract: *HandlerContract, root: NodeIndex, handler_fn: ?NodeIndex) !void {
         const calls = self.tool_catalog_calls.items;
         if (calls.len == 0) return;
         if (calls.len > 1) return self.refuseToolCatalog(contract, .catalog_repeated, "toolCatalog", calls[1], null);
@@ -1530,6 +1530,12 @@ pub const ContractBuilder = struct {
                 defer self.allocator.free(subject);
                 try self.refuseToolCatalog(contract, .route_untooled, subject, route.key_node, null);
             }
+        }
+
+        // The shared dispatch runs for every tool, under every tool's grant, so
+        // it may reach only what the runtime allows every tool: `routerMatch`.
+        if (contract.spec_diagnostics.items.len == diagnostics_before) {
+            if (handler_fn) |hf| try self.checkToolDispatch(contract, hf);
         }
 
         if (contract.spec_diagnostics.items.len != diagnostics_before) return;
@@ -1927,6 +1933,28 @@ pub const ContractBuilder = struct {
         try self.walkToolExports(&walk, fn_node);
         std.mem.sort(contract_types.ToolExport, walk.exports.items, {}, contract_types.ToolExport.lessThan);
         return walk;
+    }
+
+    /// Walk the handler function without entering any route function: every
+    /// route function is marked seen first, so the walk stops at it. What
+    /// remains is the shared dispatch, which runs under every tool's grant and
+    /// so may reach only `routerMatch`.
+    fn checkToolDispatch(self: *ContractBuilder, contract: *HandlerContract, handler_fn: NodeIndex) !void {
+        var walk: ExportWalk = .{};
+        defer walk.deinit(self.allocator);
+        for (self.route_functions.items) |route| {
+            if (route.fn_node) |fn_node| try walk.seen.put(self.allocator, fn_node, {});
+        }
+        try self.walkToolExports(&walk, handler_fn);
+        if (walk.incomplete) {
+            return self.refuseToolCatalog(contract, .exports_unanalyzable, "handler", handler_fn, "the dispatch outside the route functions");
+        }
+        for (walk.exports.items) |exp| {
+            if (std.mem.eql(u8, exp.module, "zttp:router") and std.mem.eql(u8, exp.name, "routerMatch")) continue;
+            const detail = try std.fmt.allocPrint(self.allocator, "{s}.{s}", .{ exp.module, exp.name });
+            defer self.allocator.free(detail);
+            try self.refuseToolCatalog(contract, .dispatch_reaches_export, "handler", handler_fn, detail);
+        }
     }
 
     fn walkToolExports(self: *ContractBuilder, walk: *ExportWalk, node: NodeIndex) std.mem.Allocator.Error!void {
@@ -6420,6 +6448,7 @@ const tool_refusal_cases = [_]ToolRefusalCase{
     .{ .reason = .cross_call_read, .source = "import { cacheGet } from \"zttp:cache\";\n" ++ toolSource("function c(req) { cacheGet(\"n\", \"k\"); return Response.json({}); }", "\"POST /a\": c", toolCatalogOf(tool_test_entry)) },
     // Reached through a helper, and from a module the rule covers whole.
     .{ .reason = .cross_call_read, .source = "import { sqlExec } from \"zttp:sql\";\n" ++ toolSource("function write() { return sqlExec(\"x\", {}); }\nfunction c(req) { write(); return Response.json({}); }", "\"POST /a\": c", toolCatalogOf(tool_test_entry)) },
+    .{ .reason = .dispatch_reaches_export, .source = "import { sha256 } from \"zttp:crypto\";\n" ++ tool_test_head ++ "\nconst routes = { \"POST /a\": a };\n" ++ toolCatalogOf(tool_test_entry) ++ "\nfunction handler(req) {\n  sha256(\"x\");\n  const found = routerMatch(routes, req);\n  if (found !== undefined) return found.handler(req);\n  return Response.json({}, { status: 404 });\n}\n" },
 };
 
 /// An input schema with a required string (`tenant_id`, `user_id`), an optional

@@ -1547,6 +1547,10 @@ pub const ToolCatalogRefusal = enum {
     /// (decision 6): a `zttp:cache` read, any `zttp:sql` export,
     /// `queue.receive`, or `durable.waitSignal`.
     cross_call_read,
+    /// The handler's shared dispatch, outside every route function, reaches a
+    /// module export other than `routerMatch`. At runtime no tool's grant
+    /// holds it, so every tool request would fail on it.
+    dispatch_reaches_export,
 
     pub fn sentence(self: ToolCatalogRefusal) []const u8 {
         return switch (self) {
@@ -1571,6 +1575,7 @@ pub const ToolCatalogRefusal = enum {
             .scope_unknown_key => "scope may hold only tenant and subject",
             .scope_field_invalid => "a scope value must name a required top-level string property of the input schema",
             .cross_call_read => "a tool route may not reach an export that reads state a separate call wrote: zttp:cache reads, zttp:sql, queue.receive, or durable.waitSignal",
+            .dispatch_reaches_export => "the handler's dispatch outside the route functions may call only routerMatch: no tool's grant holds any other export",
         };
     }
 };
