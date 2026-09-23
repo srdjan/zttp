@@ -552,6 +552,14 @@ const capsule_meta = [_]struct {
         .help = "Call the helper by name so the compiler can see its body, or drop the Effects<...> declaration this call cannot support.",
         .repair = null,
     },
+    .{
+        .name = "tool_catalog_refused",
+        .code = "ZTS513",
+        .description = "The handler's toolCatalog declaration breaks a build rule of the tool profile, so the handler publishes no tool. The diagnostic names the rule: a non-literal catalog or entry, a missing, unknown, or repeated field, a duplicate name or route, a route the routerMatch table does not hold or a table route with no entry, a schema that is unknown, registered twice, or outside the closed tool schema subset, or an invalid maxInputBytes.",
+        .example = "toolCatalog({ lookup: { route: \"POST /lookup\", description: \"d\", input: \"In\", output: \"Out\" } }); // maxInputBytes is missing",
+        .help = "Call toolCatalog once at module scope with an object literal. Give each entry route, description, input, output, and maxInputBytes as literals; name a routerMatch key and two schemas registered once with a literal schemaCompile; and give every route in the table an entry.",
+        .repair = null,
+    },
 };
 
 // ---------------------------------------------------------------------------

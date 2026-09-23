@@ -11,7 +11,7 @@ pub const version = "step-6-v2";
 // hash after review found it outside: emptying it changed no published number
 // while both false-fire gates silently fell to zero iterations. The declared
 // range itself did not change when this value did.
-pub const content_hash = "2e967103c1f8b9884f7f7d1a9cbee2a47438f5e1701c62f6947aa8c73495e0ed";
+pub const content_hash = "2bf150077afbd5c068dfc63969613a60edf960534a3b2505f4975fde16c7c0f1";
 
 pub const Action = enum {
     answer,

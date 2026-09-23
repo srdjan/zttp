@@ -41,8 +41,10 @@ fi
 # Pinned 2026-08-16 after the declared export-boundary rule joined the
 # compiler-owned policy registry. ZTS061 adds one verifier rule and makes the
 # policy identity cover that cross-module contract requirement.
+# Moved 2026-09-23: ZTS513 (tool_catalog_refused) joins the policy registry
+# for the M4 T2 tool catalog.
 EXPECTED_PROFILE="zts-model-1"
-EXPECTED_POLICY_HASH="97aec67e484acda2ee3c13bf9fa8cd9de9becd8ea24cd51509092f2ca0068bc7"
+EXPECTED_POLICY_HASH="48bbab99b50d05ddf1d94e7d8a0d9a9577f990726755c9d25a591964925d7ed3"
 # TSX is separately identified, and its hash binds the core grammar it lowers
 # into, so the declaration cut moves both hashes even though TSX syntax did not.
 EXPECTED_GRAMMAR_HASH="8c555c6dfe5afb98cf73d034a548dd5f18db5a6b540f334a43f0ac871f4d73be"

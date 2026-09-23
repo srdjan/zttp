@@ -966,6 +966,9 @@ pub const SpecDiagnostic = struct {
         /// ceiling or budget check needs an over-approximation; discharging
         /// against a lower bound would certify a program nobody analysed.
         effect_row_lower_bound,
+        /// ZTS513: the handler's `toolCatalog` declaration is refused. The
+        /// reason is a `ToolCatalogRefusal` tag, carried in `spec_name`.
+        tool_catalog_refused,
 
         pub fn code(self: Kind) []const u8 {
             return switch (self) {
@@ -983,6 +986,7 @@ pub const SpecDiagnostic = struct {
                 .saga_step_missing_compensate => "ZTS510",
                 .effect_ceiling_not_literal => "ZTS511",
                 .effect_row_lower_bound => "ZTS512",
+                .tool_catalog_refused => "ZTS513",
             };
         }
 
@@ -1488,6 +1492,70 @@ pub const EmittedAffordance = struct {
         allocator.free(self.rel);
         allocator.free(self.method);
         allocator.free(self.href);
+    }
+};
+
+/// Why the build refuses a `toolCatalog` declaration (ZTS513). One member per
+/// build rule of the M4 T2 design note, section 5. A refused catalog puts no
+/// entry in `HandlerContract.tools`.
+pub const ToolCatalogRefusal = enum {
+    /// The argument is not an object literal of literal keys.
+    catalog_not_literal,
+    /// `toolCatalog` is called somewhere other than a module-scope statement.
+    catalog_not_module_scope,
+    /// `toolCatalog` is called more than once.
+    catalog_repeated,
+    /// An entry is not an object literal, or a field is not a literal of its type.
+    entry_not_literal,
+    /// An entry lacks `route`, `description`, `input`, `output`, or `maxInputBytes`.
+    entry_field_missing,
+    /// An entry has a field outside those five.
+    entry_field_unknown,
+    /// Two entries have the same name.
+    duplicate_name,
+    /// Two entries name the same route.
+    duplicate_route,
+    /// The `routerMatch` table is not a literal, so its routes are unknown.
+    route_table_dynamic,
+    /// An entry names a route the `routerMatch` table does not hold.
+    route_unknown,
+    /// A route in the table has no catalog entry: a tool handler is tool-only.
+    route_untooled,
+    /// An entry names a schema no literal `schemaCompile` registers.
+    schema_unknown,
+    /// An entry names a schema that `schemaCompile` registers more than once.
+    schema_registered_twice,
+    /// A named schema is outside the closed tool schema subset.
+    schema_not_in_subset,
+    /// An entry names the same field twice.
+    entry_field_repeated,
+    /// `maxInputBytes` is not a positive integer literal at most 1 MiB.
+    max_input_bytes_invalid,
+    /// The walk that lists a route's reachable exports met a node it cannot
+    /// read. The catalog would claim less authority than the code has, so the
+    /// build refuses rather than under-report.
+    exports_unanalyzable,
+
+    pub fn sentence(self: ToolCatalogRefusal) []const u8 {
+        return switch (self) {
+            .catalog_not_literal => "the toolCatalog argument must be an object literal whose keys are literal tool names",
+            .catalog_not_module_scope => "call toolCatalog as a statement at module scope, not inside a function or expression",
+            .catalog_repeated => "call toolCatalog once; a handler has one catalog",
+            .entry_not_literal => "each entry must be an object literal whose fields are literals: strings for route, description, input, and output, and an integer for maxInputBytes",
+            .entry_field_missing => "each entry needs route, description, input, output, and maxInputBytes",
+            .entry_field_unknown => "an entry may hold only route, description, input, output, and maxInputBytes",
+            .duplicate_name => "two entries have the same tool name",
+            .duplicate_route => "two entries name the same route",
+            .route_table_dynamic => "the routerMatch table must be an object literal so every tool route is known at build time",
+            .route_unknown => "the entry names a route that the routerMatch table does not hold",
+            .route_untooled => "every route of a tool handler needs a catalog entry",
+            .schema_unknown => "the entry names a schema that no literal schemaCompile(name, schema) registers",
+            .schema_registered_twice => "the entry names a schema that schemaCompile registers more than once",
+            .schema_not_in_subset => "the schema is outside the closed tool schema subset",
+            .entry_field_repeated => "an entry names the same field twice",
+            .max_input_bytes_invalid => "maxInputBytes must be a positive integer literal no larger than 1048576",
+            .exports_unanalyzable => "the build cannot list every module export this route reaches, so it cannot bound the tool's authority",
+        };
     }
 };
 

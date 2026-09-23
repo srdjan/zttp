@@ -633,6 +633,40 @@ const clean_saga_compensated =
     \\
 ;
 
+const clean_tool_catalog =
+    \\import { toolCatalog } from "zttp:tool";
+    \\import { routerMatch } from "zttp:router";
+    \\import { schemaCompile } from "zttp:validate";
+    \\
+    \\schemaCompile("PingInput", "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{}}");
+    \\schemaCompile("PingOutput", "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"ok\":{\"type\":\"boolean\"}}}");
+    \\
+    \\toolCatalog({
+    \\  ping: {
+    \\    route: "POST /tools/ping",
+    \\    description: "Answer that the service is up.",
+    \\    input: "PingInput",
+    \\    output: "PingOutput",
+    \\    maxInputBytes: 256
+    \\  }
+    \\});
+    \\
+    \\function ping(req: Request): Response {
+    \\  return Response.json({ ok: true });
+    \\}
+    \\
+    \\const routes = { "POST /tools/ping": ping };
+    \\
+    \\function handler(req: Request): Proof<Response, "deterministic" | "read_only"> {
+    \\  const found = routerMatch(routes, req);
+    \\  if (found !== undefined) {
+    \\    return found.handler(req);
+    \\  }
+    \\  return Response.json({ error: "not found" }, { status: 404 });
+    \\}
+    \\
+;
+
 const clean_dict_entries =
     \\import { dictEntries, dictFromEntries } from "zttp:collections";
     \\
@@ -2420,6 +2454,78 @@ pub const seeds = [_]DefectSeed{
         \\
         ,
         .ask = "Fix the ZTS510 compiler error in handler.ts",
+    },
+    .{
+        .id = "tool-catalog-missing-byte-bound",
+        .code = "ZTS513",
+        .class = .model_retry,
+        .seed_source = clean_tool_catalog,
+        .bad_draft =
+        \\import { toolCatalog } from "zttp:tool";
+        \\import { routerMatch } from "zttp:router";
+        \\import { schemaCompile } from "zttp:validate";
+        \\
+        \\schemaCompile("PingInput", "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{}}");
+        \\schemaCompile("PingOutput", "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"ok\":{\"type\":\"boolean\"}}}");
+        \\
+        \\toolCatalog({
+        \\  ping: {
+        \\    route: "POST /tools/ping",
+        \\    description: "Answer that the service is up.",
+        \\    input: "PingInput",
+        \\    output: "PingOutput"
+        \\  }
+        \\});
+        \\
+        \\function ping(req: Request): Response {
+        \\  return Response.json({ ok: true });
+        \\}
+        \\
+        \\const routes = { "POST /tools/ping": ping };
+        \\
+        \\function handler(req: Request): Proof<Response, "deterministic" | "read_only"> {
+        \\  const found = routerMatch(routes, req);
+        \\  if (found !== undefined) {
+        \\    return found.handler(req);
+        \\  }
+        \\  return Response.json({ error: "not found" }, { status: 404 });
+        \\}
+        \\
+        ,
+        .good_draft =
+        \\import { toolCatalog } from "zttp:tool";
+        \\import { routerMatch } from "zttp:router";
+        \\import { schemaCompile } from "zttp:validate";
+        \\
+        \\schemaCompile("PingInput", "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{}}");
+        \\schemaCompile("PingOutput", "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"ok\":{\"type\":\"boolean\"}}}");
+        \\
+        \\toolCatalog({
+        \\  ping: {
+        \\    route: "POST /tools/ping",
+        \\    description: "Report that the service is up.",
+        \\    input: "PingInput",
+        \\    output: "PingOutput",
+        \\    maxInputBytes: 256
+        \\  }
+        \\});
+        \\
+        \\function ping(req: Request): Response {
+        \\  return Response.json({ ok: true });
+        \\}
+        \\
+        \\const routes = { "POST /tools/ping": ping };
+        \\
+        \\function handler(req: Request): Proof<Response, "deterministic" | "read_only"> {
+        \\  const found = routerMatch(routes, req);
+        \\  if (found !== undefined) {
+        \\    return found.handler(req);
+        \\  }
+        \\  return Response.json({ error: "not found" }, { status: 404 });
+        \\}
+        \\
+        ,
+        .ask = "Fix the ZTS513 compiler error in handler.ts",
     },
     .{
         .id = "dict-entry-round-trip",

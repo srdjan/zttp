@@ -648,6 +648,7 @@ fn specDiagnosticMessage(diag: zts.SpecDiagnostic) []const u8 {
         .saga_step_missing_compensate => "a non-last saga step has no compensate, leaving a partial-rollback hole",
         .effect_ceiling_not_literal => "Effects<...> names its capabilities with something other than a closed union of string literals, so no ceiling was read",
         .effect_row_lower_bound => "function calls through a value the compiler cannot resolve, so its effect row is a lower bound and cannot discharge a ceiling",
+        .tool_catalog_refused => "the toolCatalog declaration is refused, so the handler publishes no tool",
     };
 }
 

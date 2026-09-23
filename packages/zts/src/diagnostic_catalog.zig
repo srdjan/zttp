@@ -312,6 +312,7 @@ pub fn specCode(kind: SpecKind) []const u8 {
         .saga_step_missing_compensate => "ZTS510",
         .effect_ceiling_not_literal => "ZTS511",
         .effect_row_lower_bound => "ZTS512",
+        .tool_catalog_refused => "ZTS513",
     };
 }
 
@@ -482,6 +483,7 @@ fn specMetadata(kind: SpecKind) Metadata {
         .helper_budget_exceeded,
         .effect_ceiling_not_literal,
         .effect_row_lower_bound,
+        .tool_catalog_refused,
         => true,
         else => false,
     };
@@ -495,6 +497,7 @@ fn specMetadata(kind: SpecKind) Metadata {
             .helper_budget_exceeded,
             .effect_ceiling_not_literal,
             .effect_row_lower_bound,
+            .tool_catalog_refused,
             => .capability_control,
             .workflow_call_in_step, .saga_step_missing_compensate => .workflow_durability,
             else => .proof_contract,

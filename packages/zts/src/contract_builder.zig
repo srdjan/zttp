@@ -29,6 +29,7 @@ fn snippetForVaryingRead(object_name: []const u8, property_name: []const u8) []c
 }
 
 const json_utils = @import("zts-base").json_utils;
+const tool_schema = @import("zts-base").tool_schema;
 const ir = @import("zts-engine").parser.ir;
 const object = @import("zts-engine").object;
 const atom_table = @import("zts-engine").atom_table;
@@ -185,6 +186,13 @@ pub const ContractBuilder = struct {
     api_jwt_auth: bool,
     api_schemas_dynamic: bool,
     api_routes_dynamic: bool,
+
+    // Tool catalog (M4 T2). Every `toolCatalog` call node, the function each
+    // `routerMatch` route resolves to, and the schema names `schemaCompile`
+    // registered more than once. Read in Phase 4f.
+    tool_catalog_calls: std.ArrayList(NodeIndex) = .empty,
+    route_functions: std.ArrayList(RouteFunction) = .empty,
+    api_schema_repeated: std.ArrayList([]const u8) = .empty,
 
     // Partner extension tracking: the per-specifier extracted facts. The
     // bindings themselves live in `facts.extension_bindings`.
@@ -355,7 +363,20 @@ pub const ContractBuilder = struct {
             route.deinit(self.allocator);
         }
         self.api_routes.deinit(self.allocator);
+        self.tool_catalog_calls.deinit(self.allocator);
+        self.route_functions.deinit(self.allocator);
+        for (self.api_schema_repeated.items) |name| self.allocator.free(name);
+        self.api_schema_repeated.deinit(self.allocator);
     }
+
+    /// One `routerMatch` route: the method and path of its key, borrowed from
+    /// the atom table, and the function the value resolves to, if any.
+    const RouteFunction = struct {
+        method: []const u8,
+        path: []const u8,
+        fn_node: ?NodeIndex,
+        key_node: NodeIndex,
+    };
 
     /// Build the contract from the IR. Single-pass walk over all nodes.
     /// The returned HandlerContract owns all its string data.
@@ -673,6 +694,12 @@ pub const ContractBuilder = struct {
         // affordance-link proofs in system_linker.zig - it needs no
         // cross-handler resolution and belongs here, not there.
         try self.emitSagaCompensationDiagnostics(&contract);
+
+        // Phase 4f: the tool catalog (ZTS513). A handler that calls
+        // `toolCatalog` is under the tool profile; its catalog either lands in
+        // `contract.tools` whole or is refused with one diagnostic per rule it
+        // breaks, and then `contract.tools` stays empty.
+        try self.buildToolCatalog(&contract, root);
 
         return contract;
     }
@@ -1442,6 +1469,524 @@ pub const ContractBuilder = struct {
     }
 
     // -----------------------------------------------------------------
+    // Phase 4f: Tool catalog (M4 T2, ZTS513)
+    // -----------------------------------------------------------------
+
+    const catalog_fields = [_][]const u8{ "route", "description", "input", "output", "maxInputBytes" };
+    const field_route = 0;
+    const field_description = 1;
+    const field_input = 2;
+    const field_output = 3;
+    const field_max_input_bytes = 4;
+
+    /// Read the `toolCatalog` literal against the build rules of the T2 design
+    /// note, section 5. On any refusal the catalog contributes no entry.
+    fn buildToolCatalog(self: *ContractBuilder, contract: *HandlerContract, root: NodeIndex) !void {
+        const calls = self.tool_catalog_calls.items;
+        if (calls.len == 0) return;
+        if (calls.len > 1) return self.refuseToolCatalog(contract, .catalog_repeated, "toolCatalog", calls[1], null);
+
+        const call_idx = calls[0];
+        if (!self.isModuleScopeStatement(root, call_idx)) {
+            return self.refuseToolCatalog(contract, .catalog_not_module_scope, "toolCatalog", call_idx, null);
+        }
+        const call = self.ir_view.getCall(call_idx) orelse
+            return self.refuseToolCatalog(contract, .catalog_not_literal, "toolCatalog", call_idx, null);
+        if (call.args_count != 1) return self.refuseToolCatalog(contract, .catalog_not_literal, "toolCatalog", call_idx, null);
+        const obj_node = self.resolveObjectLiteralNode(self.ir_view.getListIndex(call.args_start, 0)) orelse
+            return self.refuseToolCatalog(contract, .catalog_not_literal, "toolCatalog", call_idx, null);
+        const obj = self.ir_view.getObject(obj_node) orelse
+            return self.refuseToolCatalog(contract, .catalog_not_literal, "toolCatalog", call_idx, null);
+
+        var state: CatalogState = .{};
+        defer state.deinit(self.allocator);
+        const diagnostics_before = contract.spec_diagnostics.items.len;
+
+        var i: u16 = 0;
+        while (i < obj.properties_count) : (i += 1) {
+            const prop_idx = self.ir_view.getListIndex(obj.properties_start, i);
+            const prop = self.literalProperty(prop_idx) orelse {
+                try self.refuseToolCatalog(contract, .catalog_not_literal, "toolCatalog", prop_idx, null);
+                continue;
+            };
+            const name = self.getObjectPropertyKey(prop.key) orelse {
+                try self.refuseToolCatalog(contract, .catalog_not_literal, "toolCatalog", prop_idx, null);
+                continue;
+            };
+            try self.readToolEntry(contract, &state, name, prop_idx, prop.value);
+        }
+
+        // Rule 8: a tool handler is tool-only. Checked only for a catalog with
+        // no other refusal: an entry refused for another reason claims no route,
+        // and reporting its route as untooled as well would be a cascade, not a
+        // second defect. A dynamic table was already reported per entry.
+        if (!self.api_routes_dynamic and contract.spec_diagnostics.items.len == diagnostics_before) {
+            for (self.route_functions.items, 0..) |route, route_index| {
+                if (std.mem.indexOfScalar(usize, state.claimed_routes.items, route_index) != null) continue;
+                const subject = try std.fmt.allocPrint(self.allocator, "{s} {s}", .{ route.method, route.path });
+                defer self.allocator.free(subject);
+                try self.refuseToolCatalog(contract, .route_untooled, subject, route.key_node, null);
+            }
+        }
+
+        if (contract.spec_diagnostics.items.len != diagnostics_before) return;
+        try contract.tools.ensureTotalCapacity(self.allocator, state.entries.items.len);
+        for (state.entries.items) |entry| contract.tools.appendAssumeCapacity(entry);
+        state.entries.clearRetainingCapacity();
+    }
+
+    const CatalogState = struct {
+        entries: std.ArrayList(contract_types.ToolEntry) = .empty,
+        /// Borrowed from the atom table.
+        names: std.ArrayList([]const u8) = .empty,
+        /// Indices into `route_functions`.
+        claimed_routes: std.ArrayList(usize) = .empty,
+
+        fn deinit(state: *CatalogState, allocator: std.mem.Allocator) void {
+            for (state.entries.items) |*entry| entry.deinit(allocator);
+            state.entries.deinit(allocator);
+            state.names.deinit(allocator);
+            state.claimed_routes.deinit(allocator);
+        }
+    };
+
+    fn literalProperty(self: *const ContractBuilder, prop_idx: NodeIndex) ?Node.PropertyExpr {
+        if (self.ir_view.getTag(prop_idx) != .object_property) return null;
+        return self.ir_view.getProperty(prop_idx);
+    }
+
+    fn readToolEntry(
+        self: *ContractBuilder,
+        contract: *HandlerContract,
+        state: *CatalogState,
+        name: []const u8,
+        prop_idx: NodeIndex,
+        value_idx: NodeIndex,
+    ) !void {
+        if (json_utils.containsString(state.names.items, name)) {
+            return self.refuseToolCatalog(contract, .duplicate_name, name, prop_idx, null);
+        }
+        try state.names.append(self.allocator, name);
+
+        const entry_node = self.resolveObjectLiteralNode(value_idx) orelse
+            return self.refuseToolCatalog(contract, .entry_not_literal, name, value_idx, null);
+        const entry_obj = self.ir_view.getObject(entry_node) orelse
+            return self.refuseToolCatalog(contract, .entry_not_literal, name, value_idx, null);
+
+        var fields = [_]NodeIndex{null_node} ** catalog_fields.len;
+        var readable = true;
+        var j: u16 = 0;
+        while (j < entry_obj.properties_count) : (j += 1) {
+            const field_idx = self.ir_view.getListIndex(entry_obj.properties_start, j);
+            const field = self.literalProperty(field_idx) orelse {
+                try self.refuseToolCatalog(contract, .entry_not_literal, name, field_idx, null);
+                readable = false;
+                continue;
+            };
+            const key = self.getObjectPropertyKey(field.key) orelse {
+                try self.refuseToolCatalog(contract, .entry_not_literal, name, field_idx, null);
+                readable = false;
+                continue;
+            };
+            const slot = for (catalog_fields, 0..) |known, k| {
+                if (std.mem.eql(u8, known, key)) break k;
+            } else {
+                try self.refuseToolCatalog(contract, .entry_field_unknown, name, field_idx, key);
+                readable = false;
+                continue;
+            };
+            if (fields[slot] != null_node) {
+                try self.refuseToolCatalog(contract, .entry_field_repeated, name, field_idx, key);
+                readable = false;
+                continue;
+            }
+            fields[slot] = field.value;
+        }
+        for (fields, catalog_fields) |field, field_name| {
+            if (field != null_node) continue;
+            try self.refuseToolCatalog(contract, .entry_field_missing, name, entry_node, field_name);
+            readable = false;
+        }
+        if (!readable) return;
+
+        const route_key = (try self.catalogString(contract, name, fields[field_route], "route")) orelse return;
+        const description = (try self.catalogString(contract, name, fields[field_description], "description")) orelse return;
+        const input_name = (try self.catalogString(contract, name, fields[field_input], "input")) orelse return;
+        const output_name = (try self.catalogString(contract, name, fields[field_output], "output")) orelse return;
+        if (description.len == 0) return self.refuseToolCatalog(contract, .entry_not_literal, name, fields[field_description], "description is empty");
+
+        const max_input_bytes = self.getLiteralNumber(fields[field_max_input_bytes]) orelse
+            return self.refuseToolCatalog(contract, .max_input_bytes_invalid, name, fields[field_max_input_bytes], null);
+        if (max_input_bytes <= 0 or max_input_bytes > tool_schema.max_input_bytes_ceiling) {
+            return self.refuseToolCatalog(contract, .max_input_bytes_invalid, name, fields[field_max_input_bytes], null);
+        }
+
+        if (self.api_routes_dynamic) {
+            return self.refuseToolCatalog(contract, .route_table_dynamic, name, fields[field_route], route_key);
+        }
+        const route_index = self.findRouteFunction(route_key) orelse
+            return self.refuseToolCatalog(contract, .route_unknown, name, fields[field_route], route_key);
+        if (std.mem.indexOfScalar(usize, state.claimed_routes.items, route_index) != null) {
+            return self.refuseToolCatalog(contract, .duplicate_route, name, fields[field_route], route_key);
+        }
+        try state.claimed_routes.append(self.allocator, route_index);
+
+        const input_json = try self.catalogSchema(contract, name, fields[field_input], input_name);
+        const output_json = try self.catalogSchema(contract, name, fields[field_output], output_name);
+        const input_schema = input_json orelse return;
+        const output_schema = output_json orelse return;
+
+        // A resolved route always has a function: an unresolved value sets
+        // `api_routes_dynamic`, which returned above.
+        const fn_node = self.route_functions.items[route_index].fn_node orelse
+            return self.refuseToolCatalog(contract, .route_table_dynamic, name, fields[field_route], route_key);
+        var walk = try self.collectToolExports(fn_node);
+        defer walk.deinit(self.allocator);
+        if (walk.incomplete) {
+            return self.refuseToolCatalog(contract, .exports_unanalyzable, name, fields[field_route], route_key);
+        }
+
+        var entry = contract_types.ToolEntry{
+            .name = &.{},
+            .route = &.{},
+            .description = &.{},
+            .input_schema_name = &.{},
+            .input_schema_json = &.{},
+            .output_schema_name = &.{},
+            .output_schema_json = &.{},
+            .max_input_bytes = @intCast(max_input_bytes),
+        };
+        errdefer entry.deinit(self.allocator);
+        entry.name = try self.allocator.dupe(u8, name);
+        entry.route = try self.allocator.dupe(u8, route_key);
+        entry.description = try self.allocator.dupe(u8, description);
+        entry.input_schema_name = try self.allocator.dupe(u8, input_name);
+        entry.input_schema_json = try self.allocator.dupe(u8, input_schema);
+        entry.output_schema_name = try self.allocator.dupe(u8, output_name);
+        entry.output_schema_json = try self.allocator.dupe(u8, output_schema);
+        entry.reachable_exports = walk.exports;
+        walk.exports = .empty;
+        try state.entries.append(self.allocator, entry);
+    }
+
+    /// A string-literal catalog field, or null after refusing it.
+    fn catalogString(
+        self: *ContractBuilder,
+        contract: *HandlerContract,
+        name: []const u8,
+        node: NodeIndex,
+        field_name: []const u8,
+    ) !?[]const u8 {
+        if (self.getLiteralString(node)) |s| return s;
+        try self.refuseToolCatalog(contract, .entry_not_literal, name, node, field_name);
+        return null;
+    }
+
+    /// The schema text a catalog field names, or null after refusing it.
+    fn catalogSchema(
+        self: *ContractBuilder,
+        contract: *HandlerContract,
+        name: []const u8,
+        node: NodeIndex,
+        schema_name: []const u8,
+    ) !?[]const u8 {
+        if (json_utils.containsString(self.api_schema_repeated.items, schema_name)) {
+            try self.refuseToolCatalog(contract, .schema_registered_twice, name, node, schema_name);
+            return null;
+        }
+        // The builder's schema list moved into the contract before Phase 4f.
+        const schema_json = for (contract.api.schemas.items) |schema| {
+            if (std.mem.eql(u8, schema.name, schema_name)) break schema.schema_json;
+        } else {
+            try self.refuseToolCatalog(contract, .schema_unknown, name, node, schema_name);
+            return null;
+        };
+        const verdict = try tool_schema.checkSubset(self.allocator, schema_json);
+        defer verdict.deinit(self.allocator);
+        switch (verdict) {
+            .ok => return schema_json,
+            .refused => |r| {
+                const detail = try std.fmt.allocPrint(self.allocator, "{s}: {s} at \"{s}\"", .{ schema_name, @tagName(r.reason), r.path });
+                defer self.allocator.free(detail);
+                try self.refuseToolCatalog(contract, .schema_not_in_subset, name, node, detail);
+                return null;
+            },
+        }
+    }
+
+    fn findRouteFunction(self: *const ContractBuilder, route_key: []const u8) ?usize {
+        const parsed = parseRouteKey(route_key) orelse return null;
+        for (self.route_functions.items, 0..) |route, index| {
+            if (std.ascii.eqlIgnoreCase(route.method, parsed.method) and std.mem.eql(u8, route.path, parsed.path)) return index;
+        }
+        return null;
+    }
+
+    fn isModuleScopeStatement(self: *const ContractBuilder, root: NodeIndex, call_idx: NodeIndex) bool {
+        const block = self.ir_view.getBlock(root) orelse return false;
+        for (0..block.stmts_count) |k| {
+            const stmt = self.ir_view.getListIndex(block.stmts_start, @intCast(k));
+            if (self.ir_view.getTag(stmt) != .expr_stmt) continue;
+            if (self.ir_view.getOptValue(stmt)) |value| {
+                if (value == call_idx) return true;
+            }
+        }
+        return false;
+    }
+
+    /// Append one ZTS513 diagnostic. `subject` names the entry (or the call),
+    /// and `detail`, when set, names the field, route, or schema at fault.
+    fn refuseToolCatalog(
+        self: *ContractBuilder,
+        contract: *HandlerContract,
+        reason: contract_types.ToolCatalogRefusal,
+        subject: []const u8,
+        node: NodeIndex,
+        detail: ?[]const u8,
+    ) !void {
+        const line = if (self.ir_view.getLoc(node)) |loc| loc.line else 0;
+        const spec_name = try self.allocator.dupe(u8, @tagName(reason));
+        errdefer self.allocator.free(spec_name);
+        const suggestion = if (detail) |d|
+            try std.fmt.allocPrint(self.allocator, "tool \"{s}\" (line {d}): {s} ({s})", .{ subject, line, reason.sentence(), d })
+        else
+            try std.fmt.allocPrint(self.allocator, "tool \"{s}\" (line {d}): {s}", .{ subject, line, reason.sentence() });
+        errdefer self.allocator.free(suggestion);
+        try contract.spec_diagnostics.append(self.allocator, .{
+            .kind = .tool_catalog_refused,
+            .spec_name = spec_name,
+            .suggestion = suggestion,
+        });
+    }
+
+    const ExportWalk = struct {
+        exports: std.ArrayList(contract_types.ToolExport) = .empty,
+        seen: std.AutoHashMapUnmanaged(NodeIndex, void) = .empty,
+        /// Set when the walk met a node it cannot read. The export list is then
+        /// a lower bound, not the set, and the caller refuses the tool.
+        incomplete: bool = false,
+
+        fn deinit(walk: *ExportWalk, allocator: std.mem.Allocator) void {
+            for (walk.exports.items) |*e| e.deinit(allocator);
+            walk.exports.deinit(allocator);
+            walk.seen.deinit(allocator);
+        }
+    };
+
+    /// Every module export the route function can reach. Reach is by mention:
+    /// an import named anywhere in a reachable body counts, called or not, and
+    /// a module-scope declaration named anywhere is walked in turn. That
+    /// over-approximates the call graph, which is the safe direction for a list
+    /// that becomes a grant: a callback passed by name, a function held in a
+    /// const, or an export handed around as a value is still counted.
+    fn collectToolExports(self: *ContractBuilder, fn_node: NodeIndex) !ExportWalk {
+        var walk: ExportWalk = .{};
+        errdefer walk.deinit(self.allocator);
+        try self.walkToolExports(&walk, fn_node);
+        std.mem.sort(contract_types.ToolExport, walk.exports.items, {}, contract_types.ToolExport.lessThan);
+        return walk;
+    }
+
+    fn walkToolExports(self: *ContractBuilder, walk: *ExportWalk, node: NodeIndex) std.mem.Allocator.Error!void {
+        if (node == null_node) return;
+        const gop = try walk.seen.getOrPut(self.allocator, node);
+        if (gop.found_existing) return;
+        const tag = self.ir_view.getTag(node) orelse {
+            walk.incomplete = true;
+            return;
+        };
+        switch (tag) {
+            .identifier => try self.reachToolIdentifier(walk, node),
+            .program, .block => {
+                const block = self.ir_view.getBlock(node) orelse return self.markIncomplete(walk);
+                for (0..block.stmts_count) |k| try self.walkToolExports(walk, self.ir_view.getListIndex(block.stmts_start, @intCast(k)));
+            },
+            .if_stmt => {
+                const stmt = self.ir_view.getIfStmt(node) orelse return self.markIncomplete(walk);
+                try self.walkToolExports(walk, stmt.condition);
+                try self.walkToolExports(walk, stmt.then_branch);
+                try self.walkToolExports(walk, stmt.else_branch);
+            },
+            .for_of_stmt => {
+                const stmt = self.ir_view.getForIter(node) orelse return self.markIncomplete(walk);
+                try self.walkToolExports(walk, stmt.iterable);
+                try self.walkToolExports(walk, stmt.body);
+            },
+            .return_stmt, .expr_stmt, .object_spread => {
+                if (self.ir_view.getOptValue(node)) |value| try self.walkToolExports(walk, value);
+            },
+            .var_decl, .function_decl => {
+                const decl = self.ir_view.getVarDecl(node) orelse return self.markIncomplete(walk);
+                try self.walkToolExports(walk, decl.init);
+            },
+            .export_decl => {
+                const decl = self.ir_view.getExportDecl(node) orelse return self.markIncomplete(walk);
+                try self.walkToolExports(walk, decl.declaration);
+            },
+            .assert_stmt => {
+                const stmt = self.ir_view.getAssertStmt(node) orelse return self.markIncomplete(walk);
+                try self.walkToolExports(walk, stmt.condition);
+                try self.walkToolExports(walk, stmt.error_expr);
+            },
+            .binary_op => {
+                const bin = self.ir_view.getBinary(node) orelse return self.markIncomplete(walk);
+                try self.walkToolExports(walk, bin.left);
+                try self.walkToolExports(walk, bin.right);
+            },
+            .unary_op, .spread => {
+                const un = self.ir_view.getUnary(node) orelse return self.markIncomplete(walk);
+                try self.walkToolExports(walk, un.operand);
+            },
+            .ternary => {
+                const ternary = self.ir_view.getTernary(node) orelse return self.markIncomplete(walk);
+                try self.walkToolExports(walk, ternary.condition);
+                try self.walkToolExports(walk, ternary.then_branch);
+                try self.walkToolExports(walk, ternary.else_branch);
+            },
+            .call, .method_call => {
+                const call = self.ir_view.getCall(node) orelse return self.markIncomplete(walk);
+                try self.walkToolExports(walk, call.callee);
+                for (0..call.args_count) |k| try self.walkToolExports(walk, self.ir_view.getListIndex(call.args_start, @intCast(k)));
+            },
+            .member_access, .optional_chain, .computed_access => {
+                const member = self.ir_view.getMember(node) orelse return self.markIncomplete(walk);
+                try self.walkToolExports(walk, member.object);
+                try self.walkToolExports(walk, member.computed);
+            },
+            .assignment => {
+                const assign = self.ir_view.getAssignment(node) orelse return self.markIncomplete(walk);
+                try self.walkToolExports(walk, assign.target);
+                try self.walkToolExports(walk, assign.value);
+            },
+            .array_literal => {
+                const arr = self.ir_view.getArray(node) orelse return self.markIncomplete(walk);
+                for (0..arr.elements_count) |k| try self.walkToolExports(walk, self.ir_view.getListIndex(arr.elements_start, @intCast(k)));
+            },
+            .object_literal => {
+                const obj = self.ir_view.getObject(node) orelse return self.markIncomplete(walk);
+                for (0..obj.properties_count) |k| try self.walkToolExports(walk, self.ir_view.getListIndex(obj.properties_start, @intCast(k)));
+            },
+            .object_property => {
+                // The key is a name, not a reference; only the value can reach.
+                const prop = self.ir_view.getProperty(node) orelse return self.markIncomplete(walk);
+                try self.walkToolExports(walk, prop.value);
+            },
+            .match_expr => {
+                const match = self.ir_view.getMatchExpr(node) orelse return self.markIncomplete(walk);
+                try self.walkToolExports(walk, match.discriminant);
+                for (0..match.arms_count) |k| try self.walkToolExports(walk, self.ir_view.getListIndex(match.arms_start, @intCast(k)));
+            },
+            .match_arm => {
+                // A pattern binds names and tests literals; it references nothing.
+                const arm = self.ir_view.getMatchArm(node) orelse return self.markIncomplete(walk);
+                try self.walkToolExports(walk, arm.body);
+            },
+            .function_expr, .arrow_function => {
+                const func = self.ir_view.getFunction(node) orelse return self.markIncomplete(walk);
+                try self.walkToolExports(walk, func.body);
+            },
+            // Leaves: literals and jumps reference nothing.
+            .lit_int,
+            .lit_float,
+            .lit_string,
+            .lit_bool,
+            .lit_null,
+            .lit_undefined,
+            .break_stmt,
+            .continue_stmt,
+            .match_pattern,
+            .match_type_test,
+            => {},
+            // Every other tag in the IR alphabet, named rather than left to an
+            // `else`. The profile refuses most of them before this runs; one it
+            // admits and this walk cannot read must refuse the tool, never pass
+            // it with a shorter export list.
+            .object_method,
+            .object_getter,
+            .object_setter,
+            .await_expr,
+            .yield_expr,
+            .sequence_expr,
+            .comma_expr,
+            .for_stmt,
+            .for_in_stmt,
+            .while_stmt,
+            .do_while_stmt,
+            .switch_stmt,
+            .case_clause,
+            .throw_stmt,
+            .try_stmt,
+            .labeled_stmt,
+            .array_pattern,
+            .pattern_element,
+            .pattern_rest,
+            .pattern_default,
+            .import_decl,
+            .import_specifier,
+            .import_default,
+            .import_namespace,
+            .export_specifier,
+            .export_default,
+            .export_all,
+            .param_list,
+            .arg_list,
+            .stmt_list,
+            => walk.incomplete = true,
+        }
+    }
+
+    fn markIncomplete(_: *const ContractBuilder, walk: *ExportWalk) void {
+        walk.incomplete = true;
+    }
+
+    fn reachToolIdentifier(self: *ContractBuilder, walk: *ExportWalk, node: NodeIndex) std.mem.Allocator.Error!void {
+        const binding = self.ir_view.getBinding(node) orelse return self.markIncomplete(walk);
+        // `imports` is the unfiltered index: `generic_bindings` holds only the
+        // exports that carry contract extractions, so `sha256` is not in it.
+        for (self.factsRef().imports.items) |record| {
+            if (record.slot != binding.slot) continue;
+            return self.addToolExport(walk, record.module_specifier, record.imported_name);
+        }
+        switch (binding.kind) {
+            // A local, a parameter, or a captured variable: its value comes from
+            // an expression inside a body this walk already reads.
+            .local, .argument, .upvalue => {},
+            // A builtin global such as `Response` or `requestJson`: no module
+            // export.
+            .undeclared_global => {},
+            .global => {
+                const decl_init = self.findModuleScopeInit(binding.slot) orelse return self.markIncomplete(walk);
+                try self.walkToolExports(walk, decl_init);
+            },
+        }
+    }
+
+    fn addToolExport(self: *ContractBuilder, walk: *ExportWalk, module: []const u8, name: []const u8) !void {
+        for (walk.exports.items) |e| {
+            if (std.mem.eql(u8, e.module, module) and std.mem.eql(u8, e.name, name)) return;
+        }
+        const owned_module = try self.allocator.dupe(u8, module);
+        errdefer self.allocator.free(owned_module);
+        const owned_name = try self.allocator.dupe(u8, name);
+        errdefer self.allocator.free(owned_name);
+        try walk.exports.append(self.allocator, .{ .module = owned_module, .name = owned_name });
+    }
+
+    /// The initializer of the module-scope declaration bound to a global slot.
+    fn findModuleScopeInit(self: *const ContractBuilder, slot: u16) ?NodeIndex {
+        const node_count = self.ir_view.nodeCount();
+        for (0..node_count) |idx_usize| {
+            const idx: NodeIndex = @intCast(idx_usize);
+            const tag = self.ir_view.getTag(idx) orelse continue;
+            if (tag != .var_decl and tag != .function_decl) continue;
+            const decl = self.ir_view.getVarDecl(idx) orelse continue;
+            if (decl.binding.kind != .global or decl.binding.slot != slot) continue;
+            return decl.init;
+        }
+        return null;
+    }
+
+    // -----------------------------------------------------------------
     // Phase 1: Import scanning
     // -----------------------------------------------------------------
 
@@ -1508,6 +2053,8 @@ pub const ContractBuilder = struct {
                             .route_pattern => try self.extractApiRoutesFromCall(call),
                             .service_call => try self.extractServiceCall(call),
                             .workflow_call => try self.extractWorkflowCall(call),
+                            // Read in Phase 4f, once every route and schema is known.
+                            .tool_catalog => try self.tool_catalog_calls.append(self.allocator, idx),
                             // Generic: extract literal from arg N into category bucket
                             else => {
                                 if (self.getCategoryTarget(ext.category)) |target| {
@@ -2865,6 +3412,13 @@ pub const ContractBuilder = struct {
     fn upsertApiSchema(self: *ContractBuilder, name: []const u8, schema_json: []const u8) !void {
         for (self.api_schemas.items) |*schema| {
             if (std.mem.eql(u8, schema.name, name)) {
+                // Ordinary handlers keep last-wins. The tool catalog refuses a
+                // schema it names that was registered twice (Phase 4f).
+                if (!json_utils.containsString(self.api_schema_repeated.items, name)) {
+                    const owned = try self.allocator.dupe(u8, name);
+                    errdefer self.allocator.free(owned);
+                    try self.api_schema_repeated.append(self.allocator, owned);
+                }
                 self.allocator.free(schema.schema_json);
                 schema.schema_json = schema_json;
                 return;
@@ -3306,11 +3860,18 @@ pub const ContractBuilder = struct {
             errdefer route.deinit(self.allocator);
             try self.appendPathParams(&route);
 
-            if (self.resolveFunctionNode(prop.value)) |fn_node| {
+            const route_fn = self.resolveFunctionNode(prop.value);
+            if (route_fn) |fn_node| {
                 try self.populateApiRouteFacts(&route, fn_node);
             } else {
                 self.api_routes_dynamic = true;
             }
+            try self.route_functions.append(self.allocator, .{
+                .method = parsed.method,
+                .path = parsed.path,
+                .fn_node = route_fn,
+                .key_node = prop.key,
+            });
 
             try self.api_routes.append(self.allocator, route);
         }
@@ -5643,4 +6204,211 @@ test "missing manifest registry skips partner imports" {
 
     try std.testing.expect(!containsString(builder.owned_facts.modules.items, "zttp-ext:unknown"));
     try std.testing.expectEqual(@as(usize, 0), builder.owned_facts.functions.items.len);
+}
+
+// ---------------------------------------------------------------------------
+// Tool catalog (M4 T2, ZTS513)
+// ---------------------------------------------------------------------------
+
+const tool_test_head =
+    \\import { toolCatalog } from "zttp:tool";
+    \\import { routerMatch } from "zttp:router";
+    \\import { schemaCompile } from "zttp:validate";
+    \\schemaCompile("In", "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"id\":{\"type\":\"string\",\"maxLength\":8}}}");
+    \\schemaCompile("Out", "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{}}");
+    \\function a(req) { return Response.json({}); }
+    \\
+;
+
+const tool_test_handler =
+    \\function handler(req) {
+    \\  const found = routerMatch(routes, req);
+    \\  if (found !== undefined) return found.handler(req);
+    \\  return Response.json({}, { status: 404 });
+    \\}
+    \\
+;
+
+const tool_test_entry =
+    \\ta: { route: "POST /a", description: "d", input: "In", output: "Out", maxInputBytes: 64 }
+;
+
+fn toolSource(comptime extra: []const u8, comptime routes: []const u8, comptime catalog: []const u8) []const u8 {
+    return tool_test_head ++ extra ++ "\nconst routes = { " ++ routes ++ " };\n" ++ catalog ++ "\n" ++ tool_test_handler;
+}
+
+fn toolCatalogOf(comptime entries: []const u8) []const u8 {
+    return "toolCatalog({ " ++ entries ++ " });";
+}
+
+const ToolRefusalCase = struct {
+    reason: contract_types.ToolCatalogRefusal,
+    source: []const u8,
+};
+
+const tool_refusal_cases = [_]ToolRefusalCase{
+    .{ .reason = .catalog_not_literal, .source = toolSource("", "\"POST /a\": a", "toolCatalog(1);") },
+    .{ .reason = .catalog_not_module_scope, .source = toolSource("function setup() { " ++ toolCatalogOf(tool_test_entry) ++ " }", "\"POST /a\": a", "") },
+    .{ .reason = .catalog_repeated, .source = toolSource("", "\"POST /a\": a", toolCatalogOf(tool_test_entry) ++ "\n" ++ toolCatalogOf(tool_test_entry)) },
+    .{ .reason = .entry_not_literal, .source = toolSource("", "\"POST /a\": a", toolCatalogOf("ta: 5")) },
+    .{ .reason = .entry_not_literal, .source = toolSource("", "\"POST /a\": a", toolCatalogOf("ta: { route: 7, description: \"d\", input: \"In\", output: \"Out\", maxInputBytes: 64 }")) },
+    .{ .reason = .entry_field_missing, .source = toolSource("", "\"POST /a\": a", toolCatalogOf("ta: { route: \"POST /a\", description: \"d\", input: \"In\", output: \"Out\" }")) },
+    .{ .reason = .entry_field_unknown, .source = toolSource("", "\"POST /a\": a", toolCatalogOf("ta: { route: \"POST /a\", description: \"d\", input: \"In\", output: \"Out\", maxInputBytes: 64, scope: \"all\" }")) },
+    .{ .reason = .entry_field_repeated, .source = toolSource("", "\"POST /a\": a", toolCatalogOf("ta: { route: \"POST /a\", route: \"POST /a\", description: \"d\", input: \"In\", output: \"Out\", maxInputBytes: 64 }")) },
+    .{ .reason = .duplicate_name, .source = toolSource("", "\"POST /a\": a", toolCatalogOf(tool_test_entry ++ ", " ++ tool_test_entry)) },
+    .{ .reason = .duplicate_route, .source = toolSource("", "\"POST /a\": a", toolCatalogOf(tool_test_entry ++ ", tb: { route: \"POST /a\", description: \"d\", input: \"In\", output: \"Out\", maxInputBytes: 64 }")) },
+    .{ .reason = .route_table_dynamic, .source = tool_test_head ++ "function makeRoutes() { return { \"POST /a\": a }; }\nconst routes = makeRoutes();\n" ++ toolCatalogOf(tool_test_entry) ++ "\n" ++ tool_test_handler },
+    .{ .reason = .route_unknown, .source = toolSource("", "\"POST /a\": a", toolCatalogOf(tool_test_entry ++ ", tb: { route: \"POST /zzz\", description: \"d\", input: \"In\", output: \"Out\", maxInputBytes: 64 }")) },
+    .{ .reason = .route_untooled, .source = toolSource("", "\"POST /a\": a, \"GET /b\": a", toolCatalogOf(tool_test_entry)) },
+    .{ .reason = .schema_unknown, .source = toolSource("", "\"POST /a\": a", toolCatalogOf("ta: { route: \"POST /a\", description: \"d\", input: \"Nope\", output: \"Out\", maxInputBytes: 64 }")) },
+    .{ .reason = .schema_registered_twice, .source = toolSource("schemaCompile(\"In\", \"{\\\"type\\\":\\\"object\\\",\\\"additionalProperties\\\":false,\\\"properties\\\":{}}\");", "\"POST /a\": a", toolCatalogOf(tool_test_entry)) },
+    .{ .reason = .schema_not_in_subset, .source = toolSource("schemaCompile(\"Open\", \"{\\\"type\\\":\\\"object\\\",\\\"properties\\\":{}}\");", "\"POST /a\": a", toolCatalogOf("ta: { route: \"POST /a\", description: \"d\", input: \"Open\", output: \"Out\", maxInputBytes: 64 }")) },
+    .{ .reason = .max_input_bytes_invalid, .source = toolSource("", "\"POST /a\": a", toolCatalogOf("ta: { route: \"POST /a\", description: \"d\", input: \"In\", output: \"Out\", maxInputBytes: 0 }")) },
+    .{ .reason = .max_input_bytes_invalid, .source = toolSource("", "\"POST /a\": a", toolCatalogOf("ta: { route: \"POST /a\", description: \"d\", input: \"In\", output: \"Out\", maxInputBytes: 1048577 }")) },
+};
+
+/// Refusal members no handler source can reach, each with the mechanism that
+/// makes it unreachable. The census accepts a member only with a case or a row.
+const tool_refusal_unreached = [_]struct { reason: contract_types.ToolCatalogRefusal, mechanism: []const u8 }{
+    .{
+        .reason = .exports_unanalyzable,
+        .mechanism = "the walk names every IR tag and reads each one the profile admits; the tags that set it are refused by the parser or the strict checker before contract building, so it exists to refuse an IR tag added later",
+    },
+};
+
+fn expectToolRefusal(case: ToolRefusalCase) !void {
+    var contract = try buildTestContract(case.source);
+    defer contract.deinit(std.testing.allocator);
+    var seen = false;
+    var refusals: usize = 0;
+    for (contract.spec_diagnostics.items) |d| {
+        if (d.kind != .tool_catalog_refused) continue;
+        refusals += 1;
+        if (std.mem.eql(u8, d.spec_name, @tagName(case.reason))) seen = true;
+    }
+    // Each case carries one defect, so exactly one refusal: a second is a
+    // cascade the author would read as a second problem.
+    if (!seen or refusals != 1) {
+        std.debug.print("expected ZTS513 {s}; got:\n", .{@tagName(case.reason)});
+        for (contract.spec_diagnostics.items) |d| std.debug.print("  {s} {s}\n", .{ d.kind.code(), d.spec_name });
+        return error.TestExpectedRefusal;
+    }
+    try std.testing.expectEqual(@as(usize, 0), contract.tools.items.len);
+}
+
+test "a tool catalog is refused for each build rule it breaks" {
+    for (tool_refusal_cases) |case| try expectToolRefusal(case);
+}
+
+test "every tool catalog refusal is driven by a case or names why none can reach it" {
+    for (std.meta.tags(contract_types.ToolCatalogRefusal)) |reason| {
+        var covered = false;
+        for (tool_refusal_cases) |case| {
+            if (case.reason == reason) covered = true;
+        }
+        for (tool_refusal_unreached) |row| {
+            if (row.reason == reason) {
+                if (covered) return error.TestStaleUnreachedRow;
+                covered = true;
+            }
+        }
+        if (!covered) {
+            std.debug.print("ToolCatalogRefusal.{s} has no case\n", .{@tagName(reason)});
+            return error.TestCensusGap;
+        }
+    }
+}
+
+test "a well-formed tool catalog lands in the contract with its schemas" {
+    var contract = try buildTestContract(toolSource("", "\"POST /a\": a", toolCatalogOf(tool_test_entry)));
+    defer contract.deinit(std.testing.allocator);
+    for (contract.spec_diagnostics.items) |d| try std.testing.expect(d.kind != .tool_catalog_refused);
+    try std.testing.expectEqual(@as(usize, 1), contract.tools.items.len);
+    const tool = contract.tools.items[0];
+    try std.testing.expectEqualStrings("ta", tool.name);
+    try std.testing.expectEqualStrings("POST /a", tool.route);
+    try std.testing.expectEqualStrings("d", tool.description);
+    try std.testing.expectEqualStrings("In", tool.input_schema_name);
+    try std.testing.expectEqualStrings("Out", tool.output_schema_name);
+    try std.testing.expectEqual(@as(u32, 64), tool.max_input_bytes);
+    try std.testing.expect(std.mem.indexOf(u8, tool.input_schema_json, "\"maxLength\":8") != null);
+}
+
+test "a handler without toolCatalog is not under the tool profile" {
+    const source =
+        \\import { routerMatch } from "zttp:router";
+        \\function a(req) { return Response.json({}); }
+        \\const routes = { "POST /a": a, "GET /b": a };
+        \\
+    ++ tool_test_handler;
+    var contract = try buildTestContract(source);
+    defer contract.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 0), contract.tools.items.len);
+    for (contract.spec_diagnostics.items) |d| try std.testing.expect(d.kind != .tool_catalog_refused);
+}
+
+const reach_source =
+    \\import { toolCatalog } from "zttp:tool";
+    \\import { routerMatch } from "zttp:router";
+    \\import { schemaCompile } from "zttp:validate";
+    \\import { sha256 } from "zttp:crypto";
+    \\import { escapeHtml, slugify, mask, truncate } from "zttp:text";
+    \\import { urlEncode } from "zttp:url";
+    \\import { formatIso } from "zttp:time";
+    \\schemaCompile("In", "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{}}");
+    \\function helperB(s) { return escapeHtml(s); }
+    \\const toSlug = (s) => slugify(s);
+    \\function makeFormatter() { return (n) => formatIso(n); }
+    \\function direct(req) { return Response.text(sha256("x")); }
+    \\function viaHelper(req) { return Response.text(helperB("x")); }
+    \\function viaArrow(req) { return Response.text(["x"].map((s) => urlEncode(s)).join("")); }
+    \\function viaConst(req) { return Response.text(toSlug("x")); }
+    \\function viaReturned(req) { const f = makeFormatter(); return Response.text(f(0)); }
+    \\function viaValue(req) { return Response.text(["x"].map(mask).join("")); }
+    \\function unused(req) { return Response.text(truncate("x", 1)); }
+    \\const routes = {
+    \\  "POST /direct": direct, "POST /helper": viaHelper, "POST /arrow": viaArrow,
+    \\  "POST /const": viaConst, "POST /returned": viaReturned, "POST /value": viaValue
+    \\};
+    \\toolCatalog({
+    \\  direct: { route: "POST /direct", description: "d", input: "In", output: "In", maxInputBytes: 64 },
+    \\  helper: { route: "POST /helper", description: "d", input: "In", output: "In", maxInputBytes: 64 },
+    \\  arrow: { route: "POST /arrow", description: "d", input: "In", output: "In", maxInputBytes: 64 },
+    \\  constFn: { route: "POST /const", description: "d", input: "In", output: "In", maxInputBytes: 64 },
+    \\  returned: { route: "POST /returned", description: "d", input: "In", output: "In", maxInputBytes: 64 },
+    \\  value: { route: "POST /value", description: "d", input: "In", output: "In", maxInputBytes: 64 }
+    \\});
+    \\
+++ tool_test_handler;
+
+test "each tool lists exactly the exports its own route reaches" {
+    var contract = try buildTestContract(reach_source);
+    defer contract.deinit(std.testing.allocator);
+    for (contract.spec_diagnostics.items) |d| {
+        if (d.kind == .tool_catalog_refused) {
+            std.debug.print("unexpected ZTS513: {s}\n", .{d.suggestion orelse d.spec_name});
+            return error.TestUnexpectedRefusal;
+        }
+    }
+    const expected = [_]struct { tool: []const u8, module: []const u8, name: []const u8 }{
+        .{ .tool = "direct", .module = "zttp:crypto", .name = "sha256" },
+        .{ .tool = "helper", .module = "zttp:text", .name = "escapeHtml" },
+        .{ .tool = "arrow", .module = "zttp:url", .name = "urlEncode" },
+        .{ .tool = "constFn", .module = "zttp:text", .name = "slugify" },
+        .{ .tool = "returned", .module = "zttp:time", .name = "formatIso" },
+        .{ .tool = "value", .module = "zttp:text", .name = "mask" },
+    };
+    try std.testing.expectEqual(expected.len, contract.tools.items.len);
+    for (expected, contract.tools.items) |want, tool| {
+        try std.testing.expectEqualStrings(want.tool, tool.name);
+        // Exactly one export: the route's own, and never another tool's or the
+        // unrouted `truncate`.
+        if (tool.reachable_exports.items.len != 1) {
+            std.debug.print("tool {s} reaches {d} exports\n", .{ tool.name, tool.reachable_exports.items.len });
+            for (tool.reachable_exports.items) |e| std.debug.print("  {s}.{s}\n", .{ e.module, e.name });
+            return error.TestUnexpectedExports;
+        }
+        try std.testing.expectEqualStrings(want.module, tool.reachable_exports.items[0].module);
+        try std.testing.expectEqualStrings(want.name, tool.reachable_exports.items[0].name);
+    }
 }
