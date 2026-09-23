@@ -35,7 +35,11 @@ for pair in \
   "plain_ts.ts:plain_ts" \
   "jsx.tsx:jsx" \
   "modules_all.ts:modules_all" \
-  "durable_approval.ts:durable_approval"
+  "durable_approval.ts:durable_approval" \
+  "tool_catalog.ts:tool_catalog" \
+  "tool_catalog_refused.ts:tool_catalog_refused" \
+  "tool_nominal_forged.ts:tool_nominal_forged" \
+  "tool_nominal_branded.ts:tool_nominal_branded"
 do
   src="${pair%%:*}"
   base="${pair##*:}"

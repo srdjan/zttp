@@ -1169,6 +1169,23 @@ pub fn build(b: *std.Build) void {
     addExpertGolden(b, contract_golden_step, zts_exe, &.{
         "check", contract_fixtures ++ "/durable_approval.ts", "--json", "--contract",
     }, contract_fixtures ++ "/durable_approval.contract.golden.json", 1);
+    // M4 T2: a clean tool catalog proves clean; the refused one pins its ZTS513
+    // diagnostic, so a change to the catalog rules moves a byte here.
+    addExpertGolden(b, contract_golden_step, zts_exe, &.{
+        "check", contract_fixtures ++ "/tool_catalog.ts", "--json", "--contract",
+    }, contract_fixtures ++ "/tool_catalog.contract.golden.json", 0);
+    addExpertGolden(b, contract_golden_step, zts_exe, &.{
+        "check", contract_fixtures ++ "/tool_catalog_refused.ts", "--json", "--contract",
+    }, contract_fixtures ++ "/tool_catalog_refused.contract.golden.json", 1);
+    // B8.2: a tool input arrives structurally typed, so passing a field where a
+    // nominal type is required is refused (ZTS203); an explicit annotation in
+    // the handler, the developer's reviewed act, brands it.
+    addExpertGolden(b, contract_golden_step, zts_exe, &.{
+        "check", contract_fixtures ++ "/tool_nominal_forged.ts", "--json", "--contract",
+    }, contract_fixtures ++ "/tool_nominal_forged.contract.golden.json", 1);
+    addExpertGolden(b, contract_golden_step, zts_exe, &.{
+        "check", contract_fixtures ++ "/tool_nominal_branded.ts", "--json", "--contract",
+    }, contract_fixtures ++ "/tool_nominal_branded.contract.golden.json", 0);
     addExpertGolden(b, contract_golden_step, zts_exe, &.{ "features", "--json" }, contract_fixtures ++ "/features.golden.json", 0);
     addExpertGolden(b, contract_golden_step, zts_exe, &.{ "modules", "--json" }, contract_fixtures ++ "/modules.golden.json", 0);
     addExpertGolden(b, contract_golden_step, zts_exe, &.{ "restrictions", "--json" }, contract_fixtures ++ "/restrictions.golden.json", 0);
