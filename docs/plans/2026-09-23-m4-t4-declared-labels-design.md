@@ -1,7 +1,7 @@
 # M4 T4 design note: declared-label carriage
 
-Status: proposed on 2026-09-23. It is not accepted. Section 8 holds the
-questions the owner must answer before code starts. Check C4 of the
+Status: accepted by the owner on 2026-09-23, with the recommended answer to
+each question in section 8. Check C4 of the
 [M4 release contract](2026-09-22-m4-release-contract.md) is written against
 the approach this note names.
 
@@ -218,3 +218,23 @@ source grammar (`fetch:<host>`, `service:<name>`), the path grammar with no
 array segments in version 1, origin tracking with the aggregate rule and the
 precise member read, a dynamic-URL fetch treated as any fetch source, and the
 contract carrying the P8 report at version 20.
+
+## 9. Decisions
+
+The owner answered on 2026-09-23. Q1: a declaration may assign `secret` and
+`credential` only. Q2: a required entry the analysis never saw is a build error
+with a named reason; T4 adds no ZTS code and moves no policy hash. Q3: T4
+defines the canonical form and enforces at build; the declaration binds as one
+graph member in T5, when the capability ceiling joins it. Q4: the old
+`--data-labels` path is deleted; the declaration comes from zttp.json's
+`declaration` key and a `--declaration` flag. The recommended defaults at the
+end of section 8 stand.
+
+## 10. Progress
+
+| Unit | Commit | Content |
+|---|---|---|
+| U1 | pending | declaration loader, refusal enum, canonical form, zttp.json key |
+| U2 | pending | flow checker origins, aggregate rule, precise member read, P8 statuses; old external-label API deleted |
+| U3 | pending | carriers into the check and build paths, `--declaration`, required-absent build error, contract version 20 report |
+| U4 | pending | consumer-contract text, C4 probes and census, full gate |
