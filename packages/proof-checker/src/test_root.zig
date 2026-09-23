@@ -7,6 +7,7 @@
 comptime {
     _ = @import("capability_policy.zig");
     _ = @import("certificate.zig");
+    _ = @import("declaration.zig");
     _ = @import("checker.zig");
     _ = @import("executable_graph.zig");
     _ = @import("limits.zig");

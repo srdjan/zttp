@@ -127,6 +127,8 @@ pub const route_match = base.route_match;
 pub const tool_schema = base.tool_schema;
 /// The consumer declaration loader and its closed refusal set (M4 T4).
 pub const declaration = base.declaration;
+/// The capability profiles a declaration ceiling names (M4 T5b).
+pub const capability_profiles = base.capability_profiles;
 pub const type_map = base.type_map;
 pub const type_pool = compiler.type_pool;
 pub const type_key = compiler.type_key;

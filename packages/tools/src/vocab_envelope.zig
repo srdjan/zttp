@@ -22,6 +22,7 @@ const pcc = @import("zttp_proof_checker");
 
 const mb = zts.module_binding;
 const builtin_modules = zts.builtin_modules;
+const capability_profiles = zts.capability_profiles;
 const agent_identity = @import("agent_identity.zig");
 
 /// The contract version this envelope describes. A consumer matches it by
@@ -116,8 +117,8 @@ fn NamedRowMembers(comptime rows: anytype) type {
 /// A surface that is data is imported and compared as a value, following
 /// `invariant_drift_gate.zig`. The two alphabets that are not values here, the
 /// goal-driveable property set owned by `packages/pi` and the profile table, are
-/// handled separately: `pi` is not importable from `tools`, and profiles have no
-/// declaration yet.
+/// handled separately: `pi` is not importable from `tools`, and the profile
+/// table is a list of rows rather than an alphabet of names.
 pub fn typedAlphabets() []const Alphabet {
     const list = struct {
         const value = [_]Alphabet{
@@ -359,52 +360,11 @@ test "derived counts match what the contract prose states" {
 // Capability profiles
 // ============================================================================
 
-/// A named ceiling from section 4.3. The declaration is here rather than in the
-/// document because a gate cannot check prose: while the profile table lived
-/// only in Markdown it was the one alphabet with no source to compare against,
-/// and it shipped twice with an error nobody could have caught mechanically.
-/// The `adapter` row named `network` without `runtime_callback`, so it could not
-/// reach a wrapped system at all, which is the arrangement section 9 exists for.
-pub const Profile = struct {
-    name: []const u8,
-    /// Capability categories the profile admits.
-    categories: []const mb.ModuleCapability,
-    /// Modules refused by name despite falling inside `categories`. A category
-    /// list alone does not deliver the no-store property: `zttp:cache` needs
-    /// only `clock` and `policy_check`, and `cacheGet` returns a value a
-    /// separate request wrote.
-    excluded_modules: []const []const u8,
-    /// Whether the profile requires the handler to carry `read_only`. This
-    /// bounds effects and is a different question from retained storage.
-    requires_read_only: bool,
-    /// What the profile is for. Prose, but it belongs beside the declaration
-    /// rather than in the document, or the two drift the way the counts did.
-    purpose: []const u8,
-};
-
-pub const profiles = [_]Profile{
-    .{
-        .name = "boundary",
-        .categories = &.{ .env, .clock, .random, .crypto, .stderr, .policy_check },
-        .excluded_modules = &.{ "zttp:cache", "zttp:ratelimit" },
-        .requires_read_only = true,
-        .purpose = "The no-store handler of section 8",
-    },
-    .{
-        .name = "adapter",
-        .categories = &.{ .env, .clock, .random, .crypto, .stderr, .policy_check, .network, .runtime_callback },
-        .excluded_modules = &.{ "zttp:cache", "zttp:ratelimit" },
-        .requires_read_only = false,
-        .purpose = "The proven adapter of section 9",
-    },
-    .{
-        .name = "ledger",
-        .categories = &.{ .env, .clock, .random, .crypto, .stderr, .policy_check, .sqlite },
-        .excluded_modules = &.{ "zttp:cache", "zttp:ratelimit", "zttp:sql" },
-        .requires_read_only = false,
-        .purpose = "A declaration naming an application invariant, which has nowhere else to live",
-    },
-};
+/// The profile table is declared in `packages/zts/src/capability_profiles.zig`,
+/// in `zts-base`, so the compiler can enforce the same rows this envelope
+/// publishes (M4 T5b). These names read it; there is no second copy.
+pub const Profile = capability_profiles.Profile;
+pub const profiles = capability_profiles.profiles;
 
 /// Pinned identities, each compared by equality.
 pub const Identities = struct {
@@ -955,7 +915,7 @@ pub const alphabet_region_begin =
     "<!-- BEGIN GENERATED: alphabet counts. Edit the Zig declarations, then run `zig build vocab-envelope-write`. -->\n";
 pub const alphabet_region_end = "<!-- END GENERATED: alphabet counts -->";
 pub const profile_region_begin =
-    "<!-- BEGIN GENERATED: capability profiles. Edit packages/tools/src/vocab_envelope.zig, then run `zig build vocab-envelope-write`. -->\n";
+    "<!-- BEGIN GENERATED: capability profiles. Edit packages/zts/src/capability_profiles.zig, then run `zig build vocab-envelope-write`. -->\n";
 pub const profile_region_end = "<!-- END GENERATED: capability profiles -->";
 
 /// Render the section 6 alphabet table. Counts come from the same derivation the
@@ -998,7 +958,7 @@ pub fn renderAlphabetTable(allocator: std.mem.Allocator, w: *std.Io.Writer) !voi
     );
 
     try w.print(
-        "| Capability profiles | {d} | `packages/tools/src/vocab_envelope.zig` |\n",
+        "| Capability profiles | {d} | `packages/zts/src/capability_profiles.zig` |\n",
         .{profiles.len},
     );
     try w.writeAll("\n");

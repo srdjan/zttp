@@ -256,7 +256,7 @@ vocabulary-refusal bucket.
 Version 1 names three ceilings rather than one default. A declaration selects one and MAY
 narrow it by module. P15 binds the producer to enforce the selected ceiling.
 
-<!-- BEGIN GENERATED: capability profiles. Edit packages/tools/src/vocab_envelope.zig, then run `zig build vocab-envelope-write`. -->
+<!-- BEGIN GENERATED: capability profiles. Edit packages/zts/src/capability_profiles.zig, then run `zig build vocab-envelope-write`. -->
 
 | Profile | Categories | Excluded modules | Requires `read_only` | What it is for |
 |---|---|---|---|---|
@@ -509,7 +509,7 @@ stated so a drift gate can check them and a reader can fail the document against
 | Virtual modules, effective for this build | 28 | `packages/zts/src/builtin_modules.zig` |
 | Residual guard families, enabled | 3 | `packages/proof-checker/src/residual.zig` |
 | Goal-driveable properties | 5 | `packages/pi/src/property_goals.zig` |
-| Capability profiles | 3 | `packages/tools/src/vocab_envelope.zig` |
+| Capability profiles | 3 | `packages/zts/src/capability_profiles.zig` |
 
 <!-- END GENERATED: alphabet counts -->
 

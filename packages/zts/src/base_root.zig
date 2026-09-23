@@ -1,8 +1,8 @@
 //! `zts-base` - the bottom of the zts module graph.
 //!
 //! Vocabulary and pure helpers that every other tier names and that name
-//! nothing themselves. Each file here imports `std` and nothing else in this
-//! package, which is what makes the tier a leaf: `zts-contracts`, `zts` and
+//! nothing themselves. Each file here imports `std` and, at most, another file
+//! of this tier, which is what makes the tier a leaf: `zts-contracts`, `zts` and
 //! `zts-compiler` may all depend on it without any of them depending on each
 //! other through it.
 //!
@@ -66,6 +66,10 @@ pub const tool_schema = @import("tool_schema.zig");
 /// The consumer declaration loader: classifications that assign `secret` or
 /// `credential` to a member of an outside source's value, and the closed
 /// refusal set (M4 T4).
+/// The capability profiles: the named ceilings a declaration may select, and
+/// the table the vocabulary envelope publishes (M4 T5b).
+pub const capability_profiles = @import("capability_profiles.zig");
+
 pub const declaration = @import("declaration.zig");
 
 /// The type annotations the TypeScript stripper records as it removes them.

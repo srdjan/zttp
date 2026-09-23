@@ -82,6 +82,9 @@ runtime witness_corpus
 # tools
 tools builtin_modules
 tools bytecode_cache
+# The vocabulary envelope publishes the capability profile table, which moved
+# to zts-base so the compiler can enforce it (M4 T5b).
+tools capability_profiles
 tools contract_diff
 tools declaration
 tools file_io

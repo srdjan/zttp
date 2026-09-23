@@ -1,5 +1,6 @@
 //! The consumer declaration: an authored JSON file that assigns a flow label to
-//! a named member of a value an outside source returns (M4 T4).
+//! a named member of a value an outside source returns (M4 T4), and, from
+//! version 2, the capability ceiling the handler must stay inside (M4 T5b).
 //!
 //! Version 1 has one section, `classifications`. Each entry names a source, a
 //! dot-separated path inside the value that source returns, the label that
@@ -12,20 +13,40 @@
 //!       "label": "secret", "required": true, "reason": "Tax identifier." } ] }
 //! ```
 //!
+//! Version 2 makes `classifications` optional and adds an optional `ceiling`.
+//! The ceiling names one capability profile from `capability_profiles.zig` and
+//! a list of modules to exclude beyond the ones the profile already excludes.
+//! A version 2 document carries at least one of the two sections, and a
+//! `classifications` list that is present is not empty:
+//!
+//! ```json
+//! { "version": 2,
+//!   "ceiling": { "profile": "boundary", "exclude": ["zttp:fetch"] } }
+//! ```
+//!
+//! Version 1 documents stay valid and mean "no ceiling". A `ceiling` key in a
+//! version 1 document is an unknown field.
+//!
 //! The loader is closed. Every field is mandatory and has no default, and a
 //! document that breaks a rule is refused with exactly one member of `Refusal`
 //! rather than with a Zig error, so a caller can name the rule. Allocation
 //! failure is the only Zig error `parse` returns.
 //!
 //! The canonical form is the accepted `Declaration`: its classifications are
-//! sorted by (source kind, source name bytes, path bytes), and no two entries
-//! share a source and a path, so two documents that list the same entries in a
-//! different order load to the same value.
+//! sorted by (source kind, source name bytes, path bytes), no two entries share
+//! a source and a path, and the ceiling's exclude list is sorted by bytes. Two
+//! documents that list the same entries in a different order therefore load to
+//! the same value. `encodeCanonical` writes that value as `ZTDCL1` bytes, the
+//! layout the acceptance kernel decodes in
+//! `packages/proof-checker/src/declaration.zig`.
 //!
-//! This file is in the `zts-base` tier and imports `std` only. See
-//! docs/plans/2026-09-23-m4-t4-declared-labels-design.md, sections 3 and 9.
+//! This file is in the `zts-base` tier and imports `std` and
+//! `capability_profiles.zig`, a file of the same tier. See
+//! docs/plans/2026-09-23-m4-t4-declared-labels-design.md, sections 3 and 9, and
+//! docs/plans/2026-09-23-m4-t5-scope-and-grants-design.md, sections 8 and 13.
 
 const std = @import("std");
+const capability_profiles = @import("capability_profiles.zig");
 
 /// The largest document `parse` reads. Checked before parsing.
 pub const max_document_bytes: usize = 65536;
@@ -41,6 +62,16 @@ pub const max_host_bytes: usize = 253;
 pub const max_host_label_bytes: usize = 63;
 /// The most bytes a `service:` name may have.
 pub const max_service_name_bytes: usize = 64;
+/// The most modules one ceiling may exclude.
+pub const max_exclude: usize = 64;
+/// The fewest bytes an excluded module specifier may have: `zttp:` and one
+/// more byte.
+pub const min_exclude_bytes: usize = 6;
+/// The most bytes an excluded module specifier may have.
+pub const max_exclude_bytes: usize = 64;
+/// The most bytes a `reason` may have. `ZTDCL1` carries the same bound, so
+/// the loader refuses a longer one as `reason_too_long`.
+pub const max_reason_bytes: usize = 1024;
 
 /// The labels a declaration may assign. Owner decision Q1: `secret` and
 /// `credential` only. The other flow labels are refused as `label_unsupported`.
@@ -63,11 +94,25 @@ pub const Classification = struct {
     reason: []const u8,
 };
 
+/// The capability ceiling a version 2 declaration selects.
+pub const Ceiling = struct {
+    /// A row of `capability_profiles.profiles`. Never owned.
+    profile: *const capability_profiles.Profile,
+    /// `zttp:` module specifiers excluded beyond the profile's own list,
+    /// sorted by bytes and unique. Owned by the declaration's arena. May be
+    /// empty.
+    exclude: []const []const u8,
+};
+
 pub const Declaration = struct {
     /// Owns every string and slice below. The input bytes are not borrowed.
     arena: *std.heap.ArenaAllocator,
-    /// Sorted by (source_kind, source_name bytes, path_text bytes).
+    /// Sorted by (source_kind, source_name bytes, path_text bytes). Empty only
+    /// for a version 2 document that carries a ceiling and no classifications.
     classifications: []const Classification,
+    /// Null for a version 1 document and for a version 2 document without a
+    /// `ceiling` section.
+    ceiling: ?Ceiling = null,
 
     pub fn deinit(self: *Declaration) void {
         const child = self.arena.child_allocator;
@@ -89,7 +134,7 @@ pub const Refusal = enum {
     missing_field,
     /// A value has the wrong JSON type, including `null`.
     wrong_type,
-    /// `version` is a number other than the integer 1.
+    /// `version` is a number other than the integer 1 or 2.
     unsupported_version,
     /// `classifications` is an empty array.
     classifications_empty,
@@ -107,6 +152,18 @@ pub const Refusal = enum {
     duplicate_entry,
     /// The input is larger than `max_document_bytes`.
     document_too_large,
+    /// `ceiling.profile` names no row of `capability_profiles.profiles`.
+    ceiling_profile_unknown,
+    /// `ceiling.exclude` has more than `max_exclude` entries, or an entry that
+    /// is not a `zttp:` specifier of 6 to 64 bytes of `[a-z0-9_:-]`.
+    ceiling_exclude_invalid,
+    /// `ceiling.exclude` names the same module twice.
+    ceiling_exclude_duplicate,
+    /// A version 2 document has neither `classifications` nor `ceiling`.
+    declaration_empty,
+    /// `reason` is longer than `max_reason_bytes`, the bound `ZTDCL1` carries.
+    /// Refused here so that every accepted document encodes.
+    reason_too_long,
 };
 
 pub const ParseResult = union(enum) {
@@ -120,7 +177,11 @@ pub const ParseResult = union(enum) {
 };
 
 const entry_fields = [_][]const u8{ "source", "path", "label", "required", "reason" };
-const top_fields = [_][]const u8{ "version", "classifications" };
+/// Every top-level key any version names. A key outside this set is refused
+/// before the version is read; `ceiling` in a version 1 document is refused
+/// after it.
+const top_fields = [_][]const u8{ "version", "classifications", "ceiling" };
+const ceiling_fields = [_][]const u8{ "profile", "exclude" };
 
 /// Parse and validate a declaration document. The result owns copies of every
 /// string it keeps; `bytes` may be freed or overwritten after this returns.
@@ -142,17 +203,32 @@ pub fn parse(allocator: std.mem.Allocator, bytes: []const u8) std.mem.Allocator.
     if (root != .object) return refuse(.wrong_type, null);
     const top = root.object;
     if (hasUnknownKey(top, &top_fields)) return refuse(.unknown_field, null);
-    const version = top.get("version") orelse return refuse(.missing_field, null);
-    const list_value = top.get("classifications") orelse return refuse(.missing_field, null);
-    switch (version) {
-        .integer => |v| if (v != 1) return refuse(.unsupported_version, null),
+    const version_value = top.get("version") orelse return refuse(.missing_field, null);
+    const version: u8 = switch (version_value) {
+        .integer => |v| switch (v) {
+            1 => 1,
+            2 => 2,
+            else => return refuse(.unsupported_version, null),
+        },
         .float, .number_string => return refuse(.unsupported_version, null),
         else => return refuse(.wrong_type, null),
+    };
+    const list_value = top.get("classifications");
+    const ceiling_value = top.get("ceiling");
+    if (version == 1) {
+        if (ceiling_value != null) return refuse(.unknown_field, null);
+        if (list_value == null) return refuse(.missing_field, null);
+    } else if (list_value == null and ceiling_value == null) {
+        return refuse(.declaration_empty, null);
     }
-    if (list_value != .array) return refuse(.wrong_type, null);
-    const items = list_value.array.items;
-    if (items.len == 0) return refuse(.classifications_empty, null);
-    if (items.len > max_classifications) return refuse(.too_many_classifications, null);
+
+    const items: []const std.json.Value = if (list_value) |value| blk: {
+        if (value != .array) return refuse(.wrong_type, null);
+        const list = value.array.items;
+        if (list.len == 0) return refuse(.classifications_empty, null);
+        if (list.len > max_classifications) return refuse(.too_many_classifications, null);
+        break :blk list;
+    } else &.{};
 
     const arena = try allocator.create(std.heap.ArenaAllocator);
     arena.* = std.heap.ArenaAllocator.init(allocator);
@@ -182,8 +258,142 @@ pub fn parse(allocator: std.mem.Allocator, bytes: []const u8) std.mem.Allocator.
 
     std.mem.sort(Classification, out, {}, lessThan);
     declaration.classifications = out;
+
+    if (ceiling_value) |value| {
+        switch (try checkCeiling(owned, value)) {
+            .refused => |reason| return refuse(reason, null),
+            .ok => |ceiling| declaration.ceiling = ceiling,
+        }
+    }
     accepted = true;
     return .{ .ok = declaration };
+}
+
+const CeilingCheck = union(enum) { ok: Ceiling, refused: Refusal };
+
+/// Validate a `ceiling` object and copy its exclude list, sorted, into `owned`.
+fn checkCeiling(owned: std.mem.Allocator, value: std.json.Value) std.mem.Allocator.Error!CeilingCheck {
+    if (value != .object) return .{ .refused = .wrong_type };
+    const object = value.object;
+    if (hasUnknownKey(object, &ceiling_fields)) return .{ .refused = .unknown_field };
+    const profile_value = object.get("profile") orelse return .{ .refused = .missing_field };
+    const exclude_value = object.get("exclude") orelse return .{ .refused = .missing_field };
+    if (profile_value != .string or exclude_value != .array) return .{ .refused = .wrong_type };
+    const items = exclude_value.array.items;
+    for (items) |item| {
+        if (item != .string) return .{ .refused = .wrong_type };
+    }
+    const profile = capability_profiles.findProfile(profile_value.string) orelse
+        return .{ .refused = .ceiling_profile_unknown };
+    if (items.len > max_exclude) return .{ .refused = .ceiling_exclude_invalid };
+    for (items, 0..) |item, index| {
+        if (!isValidExclude(item.string)) return .{ .refused = .ceiling_exclude_invalid };
+        for (items[0..index]) |previous| {
+            if (std.mem.eql(u8, previous.string, item.string)) {
+                return .{ .refused = .ceiling_exclude_duplicate };
+            }
+        }
+    }
+
+    const exclude = try owned.alloc([]const u8, items.len);
+    for (items, 0..) |item, index| exclude[index] = try owned.dupe(u8, item.string);
+    std.mem.sort([]const u8, exclude, {}, bytesLessThan);
+    return .{ .ok = .{ .profile = profile, .exclude = exclude } };
+}
+
+fn bytesLessThan(_: void, a: []const u8, b: []const u8) bool {
+    return std.mem.order(u8, a, b) == .lt;
+}
+
+/// A `zttp:` module specifier of `min_exclude_bytes` to `max_exclude_bytes`
+/// bytes, every byte in `[a-z0-9_:-]`. The module need not exist in this build:
+/// excluding a module the build does not carry is harmless.
+fn isValidExclude(text: []const u8) bool {
+    if (text.len < min_exclude_bytes or text.len > max_exclude_bytes) return false;
+    if (!std.mem.startsWith(u8, text, "zttp:")) return false;
+    for (text) |c| {
+        const ok = (c >= 'a' and c <= 'z') or (c >= '0' and c <= '9') or
+            c == '_' or c == ':' or c == '-';
+        if (!ok) return false;
+    }
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// Canonical encoding: ZTDCL1
+
+/// The `ZTDCL1` magic, schema, and digest domain. The acceptance kernel's
+/// decoder in `packages/proof-checker/src/declaration.zig` holds the same
+/// values; the round-trip test in `packages/tools/src/declaration_encoding_test.zig`
+/// fails when the two disagree.
+pub const canonical_magic = "ZTDCL1\x00\x00";
+pub const canonical_schema: u16 = 1;
+pub const digest_domain = "zttp-declaration-v1";
+
+pub const EncodeError = std.mem.Allocator.Error || error{
+    /// The declaration has no classifications and no ceiling. `parse` refuses
+    /// such a document as `declaration_empty`, so only a hand-built value
+    /// reaches this.
+    DeclarationEmpty,
+    /// A reason is longer than `max_reason_bytes`. `parse` refuses such a
+    /// document as `reason_too_long`, so only a hand-built value reaches this.
+    ReasonTooLong,
+};
+
+/// Write `decl` as `ZTDCL1` bytes: integers little-endian, strings with a u32
+/// length prefix, every field written. The layout is in
+/// docs/plans/2026-09-23-m4-t5-scope-and-grants-design.md section 13. The
+/// classifications are written in the order `parse` sorted them and the
+/// exclude list in the order `parse` sorted it. The profile is written as its
+/// index in `capability_profiles.profiles`. Caller frees the result.
+pub fn encodeCanonical(allocator: std.mem.Allocator, decl: *const Declaration) EncodeError![]u8 {
+    if (decl.classifications.len == 0 and decl.ceiling == null) return error.DeclarationEmpty;
+    for (decl.classifications) |c| {
+        if (c.reason.len > max_reason_bytes) return error.ReasonTooLong;
+    }
+
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    try out.appendSlice(allocator, canonical_magic);
+    try appendInt(&out, allocator, u16, canonical_schema);
+    try appendInt(&out, allocator, u16, @intCast(decl.classifications.len));
+    for (decl.classifications) |c| {
+        try out.append(allocator, @intFromEnum(c.source_kind));
+        try appendString(&out, allocator, c.source_name);
+        try appendString(&out, allocator, c.path_text);
+        try out.append(allocator, @intFromEnum(c.label));
+        try out.append(allocator, @intFromBool(c.required));
+        try appendString(&out, allocator, c.reason);
+    }
+    if (decl.ceiling) |ceiling| {
+        try out.append(allocator, 1);
+        try out.append(allocator, capability_profiles.indexOf(ceiling.profile));
+        try appendInt(&out, allocator, u16, @intCast(ceiling.exclude.len));
+        for (ceiling.exclude) |module| try appendString(&out, allocator, module);
+    } else {
+        try out.append(allocator, 0);
+    }
+    return out.toOwnedSlice(allocator);
+}
+
+fn appendInt(out: *std.ArrayList(u8), allocator: std.mem.Allocator, comptime T: type, value: T) std.mem.Allocator.Error!void {
+    var buf: [@sizeOf(T)]u8 = undefined;
+    std.mem.writeInt(T, &buf, value, .little);
+    try out.appendSlice(allocator, &buf);
+}
+
+fn appendString(out: *std.ArrayList(u8), allocator: std.mem.Allocator, text: []const u8) std.mem.Allocator.Error!void {
+    try appendInt(out, allocator, u32, @intCast(text.len));
+    try out.appendSlice(allocator, text);
+}
+
+/// Domain-separated SHA-256 over `ZTDCL1` bytes: the digest a graph member
+/// carries for them.
+pub fn digest(bytes: []const u8) [32]u8 {
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    hasher.update(digest_domain);
+    hasher.update(bytes);
+    return hasher.finalResult();
 }
 
 fn refuse(reason: Refusal, entry: ?u32) ParseResult {
@@ -237,6 +447,7 @@ fn checkEntry(item: std.json.Value) EntryCheck {
     if (std.mem.trim(u8, reason.string, &std.ascii.whitespace).len == 0) {
         return .{ .refused = .reason_empty };
     }
+    if (reason.string.len > max_reason_bytes) return .{ .refused = .reason_too_long };
     return .{ .ok = .{
         .source_kind = parsed_source.kind,
         .source_name = parsed_source.name,
@@ -514,6 +725,28 @@ fn afterGood(comptime fields: []const u8) []const u8 {
     return "{\"version\":1,\"classifications\":[{" ++ good_fields ++ "},{" ++ fields ++ "}]}";
 }
 
+/// A version 2 document whose only section is `"ceiling":` followed by `value`.
+fn v2Ceiling(comptime value: []const u8) []const u8 {
+    return "{\"version\":2,\"ceiling\":" ++ value ++ "}";
+}
+
+/// A version 2 ceiling whose exclude list has `count` distinct, valid entries.
+fn buildExcludes(allocator: std.mem.Allocator, count: usize) std.mem.Allocator.Error![]u8 {
+    var list: std.ArrayList(u8) = .empty;
+    errdefer list.deinit(allocator);
+    try list.appendSlice(allocator, "{\"version\":2,\"ceiling\":{\"profile\":\"adapter\",\"exclude\":[");
+    for (0..count) |i| {
+        if (i != 0) try list.append(allocator, ',');
+        try list.print(allocator, "\"zttp:m{d}\"", .{i});
+    }
+    try list.appendSlice(allocator, "]}}");
+    return list.toOwnedSlice(allocator);
+}
+
+fn buildOverExclude(allocator: std.mem.Allocator) std.mem.Allocator.Error![]u8 {
+    return buildExcludes(allocator, max_exclude + 1);
+}
+
 const refusal_cases = [_]RefusalCase{
     .{ .name = "not json", .bytes = "{\"version\":1,", .reason = .invalid_json, .entry = null },
     .{ .name = "trailing garbage", .bytes = oneEntry(good_fields) ++ " x", .reason = .invalid_json, .entry = null },
@@ -539,7 +772,7 @@ const refusal_cases = [_]RefusalCase{
     .{ .name = "reason null", .bytes = oneEntry(
         \\"source":"fetch:a.example","path":"a","label":"secret","required":true,"reason":null
     ), .reason = .wrong_type, .entry = 0 },
-    .{ .name = "version 2", .bytes = "{\"version\":2,\"classifications\":[{" ++ good_fields ++ "}]}", .reason = .unsupported_version, .entry = null },
+    .{ .name = "version 3", .bytes = "{\"version\":3,\"classifications\":[{" ++ good_fields ++ "}]}", .reason = .unsupported_version, .entry = null },
     .{ .name = "version 1.0", .bytes = "{\"version\":1.0,\"classifications\":[{" ++ good_fields ++ "}]}", .reason = .unsupported_version, .entry = null },
     .{ .name = "empty list", .bytes = "{\"version\":1,\"classifications\":[]}", .reason = .classifications_empty, .entry = null },
     .{ .name = "no prefix", .bytes = oneEntry(
@@ -611,9 +844,38 @@ const refusal_cases = [_]RefusalCase{
     .{ .name = "reason whitespace", .bytes = afterGood(
         \\"source":"fetch:a.example","path":"a","label":"secret","required":true,"reason":" \t\n"
     ), .reason = .reason_empty, .entry = 1 },
+    .{ .name = "reason 1025 bytes", .bytes = afterGood(
+        \\"source":"fetch:a.example","path":"a","label":"secret","required":true,"reason":"
+    ++ "r" ** 1025 ++ "\""), .reason = .reason_too_long, .entry = 1 },
     .{ .name = "same source and path", .bytes = afterGood(
         \\"source":"fetch:api.example.com","path":"a.b","label":"credential","required":false,"reason":"again"
     ), .reason = .duplicate_entry, .entry = 1 },
+    // Version 2 and the ceiling.
+    .{ .name = "v1 with a ceiling", .bytes = "{\"version\":1,\"classifications\":[{" ++ good_fields ++ "}],\"ceiling\":{\"profile\":\"boundary\",\"exclude\":[]}}", .reason = .unknown_field, .entry = null },
+    .{ .name = "v1 with only a ceiling", .bytes = "{\"version\":1,\"ceiling\":{\"profile\":\"boundary\",\"exclude\":[]}}", .reason = .unknown_field, .entry = null },
+    .{ .name = "v2 with neither section", .bytes = "{\"version\":2}", .reason = .declaration_empty, .entry = null },
+    .{ .name = "v2 with an empty list", .bytes = "{\"version\":2,\"classifications\":[]}", .reason = .classifications_empty, .entry = null },
+    .{ .name = "v2 empty list beside a ceiling", .bytes = "{\"version\":2,\"classifications\":[],\"ceiling\":{\"profile\":\"boundary\",\"exclude\":[]}}", .reason = .classifications_empty, .entry = null },
+    .{ .name = "v2 classifications null", .bytes = "{\"version\":2,\"classifications\":null}", .reason = .wrong_type, .entry = null },
+    .{ .name = "ceiling not object", .bytes = v2Ceiling("\"boundary\""), .reason = .wrong_type, .entry = null },
+    .{ .name = "ceiling null", .bytes = v2Ceiling("null"), .reason = .wrong_type, .entry = null },
+    .{ .name = "ceiling unknown key", .bytes = v2Ceiling("{\"profile\":\"boundary\",\"exclude\":[],\"note\":1}"), .reason = .unknown_field, .entry = null },
+    .{ .name = "ceiling duplicate key", .bytes = v2Ceiling("{\"profile\":\"boundary\",\"profile\":\"adapter\",\"exclude\":[]}"), .reason = .duplicate_key, .entry = null },
+    .{ .name = "ceiling missing exclude", .bytes = v2Ceiling("{\"profile\":\"boundary\"}"), .reason = .missing_field, .entry = null },
+    .{ .name = "ceiling missing profile", .bytes = v2Ceiling("{\"exclude\":[]}"), .reason = .missing_field, .entry = null },
+    .{ .name = "profile number", .bytes = v2Ceiling("{\"profile\":0,\"exclude\":[]}"), .reason = .wrong_type, .entry = null },
+    .{ .name = "exclude string", .bytes = v2Ceiling("{\"profile\":\"boundary\",\"exclude\":\"zttp:fetch\"}"), .reason = .wrong_type, .entry = null },
+    .{ .name = "exclude entry number", .bytes = v2Ceiling("{\"profile\":\"boundary\",\"exclude\":[1]}"), .reason = .wrong_type, .entry = null },
+    .{ .name = "profile unknown", .bytes = v2Ceiling("{\"profile\":\"store\",\"exclude\":[]}"), .reason = .ceiling_profile_unknown, .entry = null },
+    .{ .name = "profile wrong case", .bytes = v2Ceiling("{\"profile\":\"Boundary\",\"exclude\":[]}"), .reason = .ceiling_profile_unknown, .entry = null },
+    .{ .name = "exclude no prefix", .bytes = v2Ceiling("{\"profile\":\"boundary\",\"exclude\":[\"fetch\"]}"), .reason = .ceiling_exclude_invalid, .entry = null },
+    .{ .name = "exclude extension prefix", .bytes = v2Ceiling("{\"profile\":\"boundary\",\"exclude\":[\"zttp-ext:foo\"]}"), .reason = .ceiling_exclude_invalid, .entry = null },
+    .{ .name = "exclude prefix only", .bytes = v2Ceiling("{\"profile\":\"boundary\",\"exclude\":[\"zttp:\"]}"), .reason = .ceiling_exclude_invalid, .entry = null },
+    .{ .name = "exclude uppercase", .bytes = v2Ceiling("{\"profile\":\"boundary\",\"exclude\":[\"zttp:Fetch\"]}"), .reason = .ceiling_exclude_invalid, .entry = null },
+    .{ .name = "exclude with slash", .bytes = v2Ceiling("{\"profile\":\"boundary\",\"exclude\":[\"zttp:a/b\"]}"), .reason = .ceiling_exclude_invalid, .entry = null },
+    .{ .name = "exclude 65 bytes", .bytes = v2Ceiling("{\"profile\":\"boundary\",\"exclude\":[\"zttp:" ++ "a" ** 60 ++ "\"]}"), .reason = .ceiling_exclude_invalid, .entry = null },
+    .{ .name = "exclude 65 entries", .bytes = "", .reason = .ceiling_exclude_invalid, .entry = null, .build = buildOverExclude },
+    .{ .name = "exclude repeats", .bytes = v2Ceiling("{\"profile\":\"boundary\",\"exclude\":[\"zttp:fetch\",\"zttp:sql\",\"zttp:fetch\"]}"), .reason = .ceiling_exclude_duplicate, .entry = null },
     .{ .name = "one byte over the cap", .bytes = "", .reason = .document_too_large, .entry = null, .build = buildOversize },
     .{ .name = "257 entries", .bytes = "", .reason = .too_many_classifications, .entry = null, .build = buildOverCount },
 };
@@ -692,4 +954,201 @@ fn parseAndRelease(allocator: std.mem.Allocator, bytes: []const u8) !void {
 
 test "declaration parse reports every allocation failure and leaks nothing" {
     try testing.checkAllAllocationFailures(testing.allocator, parseAndRelease, .{@as([]const u8, two_entries)});
+}
+
+test "declaration version 2 accepts a ceiling alone, sorts its exclude list, and owns it" {
+    const buffer = try testing.allocator.dupe(u8,
+        \\{"version":2,"ceiling":{"profile":"adapter","exclude":["zttp:sql","zttp:fetch"]}}
+    );
+    defer testing.allocator.free(buffer);
+    var result = try parse(testing.allocator, buffer);
+    try testing.expect(result == .ok);
+    var decl = &result.ok;
+    defer decl.deinit();
+    @memset(buffer, 'X');
+
+    try testing.expectEqual(@as(usize, 0), decl.classifications.len);
+    const ceiling = decl.ceiling orelse return error.TestMissingCeiling;
+    try testing.expectEqualStrings("adapter", ceiling.profile.name);
+    try testing.expectEqual(capability_profiles.findProfile("adapter").?, ceiling.profile);
+    try testing.expectEqual(@as(usize, 2), ceiling.exclude.len);
+    try testing.expectEqualStrings("zttp:fetch", ceiling.exclude[0]);
+    try testing.expectEqualStrings("zttp:sql", ceiling.exclude[1]);
+}
+
+test "declaration version 2 accepts classifications alone, a ceiling with an empty exclude list, and both" {
+    {
+        var result = try parse(testing.allocator, "{\"version\":2,\"classifications\":[{" ++ good_fields ++ "}]}");
+        try testing.expect(result == .ok);
+        defer result.ok.deinit();
+        try testing.expectEqual(@as(usize, 1), result.ok.classifications.len);
+        try testing.expect(result.ok.ceiling == null);
+    }
+    {
+        var result = try parse(testing.allocator, v2Ceiling("{\"profile\":\"ledger\",\"exclude\":[]}"));
+        try testing.expect(result == .ok);
+        defer result.ok.deinit();
+        const ceiling = result.ok.ceiling orelse return error.TestMissingCeiling;
+        try testing.expectEqualStrings("ledger", ceiling.profile.name);
+        try testing.expectEqual(@as(usize, 0), ceiling.exclude.len);
+    }
+    {
+        // An exclude entry the profile already excludes is accepted.
+        var result = try parse(testing.allocator,
+            \\{"version":2,"classifications":[{"source":"fetch:a.example","path":"a","label":"secret","required":true,"reason":"r"}],
+            \\ "ceiling":{"profile":"boundary","exclude":["zttp:cache"]}}
+        );
+        try testing.expect(result == .ok);
+        defer result.ok.deinit();
+        try testing.expectEqual(@as(usize, 1), result.ok.classifications.len);
+        const ceiling = result.ok.ceiling orelse return error.TestMissingCeiling;
+        try testing.expectEqualStrings("zttp:cache", ceiling.exclude[0]);
+    }
+}
+
+test "declaration accepts a reason of exactly max_reason_bytes and it encodes" {
+    var decl = try parseOk("{\"version\":1,\"classifications\":[{\"source\":\"fetch:a.example\",\"path\":\"a\",\"label\":\"secret\",\"required\":true,\"reason\":\"" ++ "r" ** max_reason_bytes ++ "\"}]}");
+    defer decl.deinit();
+    try testing.expectEqual(max_reason_bytes, decl.classifications[0].reason.len);
+    const bytes = try encodeCanonical(testing.allocator, &decl);
+    testing.allocator.free(bytes);
+}
+
+test "declaration version 1 carries no ceiling" {
+    var result = try parse(testing.allocator, two_entries);
+    try testing.expect(result == .ok);
+    defer result.ok.deinit();
+    try testing.expect(result.ok.ceiling == null);
+}
+
+test "declaration accepts exactly 64 exclude entries and a 64-byte specifier" {
+    const bytes = try buildExcludes(testing.allocator, max_exclude);
+    defer testing.allocator.free(bytes);
+    var result = try parse(testing.allocator, bytes);
+    try testing.expect(result == .ok);
+    defer result.ok.deinit();
+    const ceiling = result.ok.ceiling orelse return error.TestMissingCeiling;
+    try testing.expectEqual(max_exclude, ceiling.exclude.len);
+
+    var long = try parse(testing.allocator, v2Ceiling("{\"profile\":\"boundary\",\"exclude\":[\"zttp:" ++ "a" ** 59 ++ "\",\"zttp:a\"]}"));
+    try testing.expect(long == .ok);
+    defer long.ok.deinit();
+    const long_ceiling = long.ok.ceiling orelse return error.TestMissingCeiling;
+    try testing.expectEqual(max_exclude_bytes, long_ceiling.exclude[1].len);
+}
+
+test "declaration version 2 parse reports every allocation failure and leaks nothing" {
+    const doc =
+        \\{"version":2,"classifications":[{"source":"fetch:a.example","path":"a","label":"secret","required":true,"reason":"r"}],
+        \\ "ceiling":{"profile":"boundary","exclude":["zttp:sql","zttp:fetch"]}}
+    ;
+    try testing.checkAllAllocationFailures(testing.allocator, parseAndRelease, .{@as([]const u8, doc)});
+}
+
+fn parseOk(bytes: []const u8) !Declaration {
+    const result = try parse(testing.allocator, bytes);
+    return switch (result) {
+        .ok => |d| d,
+        .refused => |r| {
+            std.debug.print("refused: {s}\n", .{@tagName(r.reason)});
+            return error.TestUnexpectedResult;
+        },
+    };
+}
+
+test "encodeCanonical writes the ZTDCL1 layout field by field" {
+    var decl = try parseOk(
+        \\{"version":2,"classifications":[{"source":"service:billing","path":"card.token","label":"credential","required":false,"reason":"Tok."}],
+        \\ "ceiling":{"profile":"ledger","exclude":["zttp:x"]}}
+    );
+    defer decl.deinit();
+    const bytes = try encodeCanonical(testing.allocator, &decl);
+    defer testing.allocator.free(bytes);
+
+    const expected = "ZTDCL1\x00\x00" ++ "\x01\x00" ++ "\x01\x00" ++
+        "\x01" ++ "\x07\x00\x00\x00billing" ++ "\x0a\x00\x00\x00card.token" ++
+        "\x01" ++ "\x00" ++ "\x04\x00\x00\x00Tok." ++
+        "\x01" ++ "\x02" ++ "\x01\x00" ++ "\x06\x00\x00\x00zttp:x";
+    try testing.expectEqualSlices(u8, expected, bytes);
+}
+
+test "encodeCanonical writes ceiling_present 0 and no ceiling for a version 1 document" {
+    var decl = try parseOk(
+        \\{"version":1,"classifications":[{"source":"fetch:a.example","path":"a","label":"secret","required":true,"reason":"r"}]}
+    );
+    defer decl.deinit();
+    const bytes = try encodeCanonical(testing.allocator, &decl);
+    defer testing.allocator.free(bytes);
+    const expected = "ZTDCL1\x00\x00" ++ "\x01\x00" ++ "\x01\x00" ++
+        "\x00" ++ "\x09\x00\x00\x00a.example" ++ "\x01\x00\x00\x00a" ++
+        "\x00" ++ "\x01" ++ "\x01\x00\x00\x00r" ++ "\x00";
+    try testing.expectEqualSlices(u8, expected, bytes);
+}
+
+test "encodeCanonical writes each profile as its index: boundary 0, adapter 1, ledger 2" {
+    const names = [_][]const u8{ "boundary", "adapter", "ledger" };
+    for (names, 0..) |name, index| {
+        var buf: [128]u8 = undefined;
+        const doc = try std.fmt.bufPrint(&buf, "{{\"version\":2,\"ceiling\":{{\"profile\":\"{s}\",\"exclude\":[]}}}}", .{name});
+        var decl = try parseOk(doc);
+        defer decl.deinit();
+        const bytes = try encodeCanonical(testing.allocator, &decl);
+        defer testing.allocator.free(bytes);
+        // magic, schema, count 0, ceiling_present 1, profile, exclude_count 0.
+        try testing.expectEqual(@as(usize, 8 + 2 + 2 + 1 + 1 + 2), bytes.len);
+        try testing.expectEqual(@as(u8, 1), bytes[12]);
+        try testing.expectEqual(@as(u8, @intCast(index)), bytes[13]);
+    }
+}
+
+test "encodeCanonical refuses an empty declaration and a reason over the ZTDCL1 bound" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const empty = Declaration{ .arena = &arena, .classifications = &.{} };
+    try testing.expectError(error.DeclarationEmpty, encodeCanonical(testing.allocator, &empty));
+
+    var decl = try parseOk("{\"version\":1,\"classifications\":[{\"source\":\"fetch:a.example\",\"path\":\"a\",\"label\":\"secret\",\"required\":true,\"reason\":\"r\"}]}");
+    defer decl.deinit();
+    const entries = try decl.arena.allocator().dupe(Classification, decl.classifications);
+    entries[0].reason = "r" ** (max_reason_bytes + 1);
+    decl.classifications = entries;
+    try testing.expectError(error.ReasonTooLong, encodeCanonical(testing.allocator, &decl));
+}
+
+test "two documents that differ only in order encode to the same bytes and digest" {
+    var a = try parseOk(
+        \\{"version":2,"ceiling":{"profile":"boundary","exclude":["zttp:sql","zttp:fetch"]},
+        \\ "classifications":[
+        \\ {"source":"service:billing","path":"card.token","label":"credential","required":false,"reason":"Tok."},
+        \\ {"source":"fetch:api.example.com","path":"customer.tax_id","label":"secret","required":true,"reason":"Tax."}]}
+    );
+    defer a.deinit();
+    var b = try parseOk(
+        \\{"classifications":[
+        \\ {"reason":"Tax.","required":true,"label":"secret","path":"customer.tax_id","source":"fetch:api.example.com"},
+        \\ {"source":"service:billing","path":"card.token","label":"credential","required":false,"reason":"Tok."}],
+        \\ "ceiling":{"exclude":["zttp:fetch","zttp:sql"],"profile":"boundary"},"version":2}
+    );
+    defer b.deinit();
+    const ea = try encodeCanonical(testing.allocator, &a);
+    defer testing.allocator.free(ea);
+    const eb = try encodeCanonical(testing.allocator, &b);
+    defer testing.allocator.free(eb);
+    try testing.expectEqualSlices(u8, ea, eb);
+    try testing.expectEqualSlices(u8, &digest(ea), &digest(eb));
+
+    var plain: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(ea, &plain, .{});
+    try testing.expect(!std.mem.eql(u8, &plain, &digest(ea)));
+}
+
+fn encodeAndRelease(allocator: std.mem.Allocator, decl: *const Declaration) !void {
+    const bytes = try encodeCanonical(allocator, decl);
+    allocator.free(bytes);
+}
+
+test "encodeCanonical reports every allocation failure and leaks nothing" {
+    var decl = try parseOk(two_entries);
+    defer decl.deinit();
+    try testing.checkAllAllocationFailures(testing.allocator, encodeAndRelease, .{@as(*const Declaration, &decl)});
 }

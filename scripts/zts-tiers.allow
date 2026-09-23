@@ -29,6 +29,7 @@
 
 # zts-base
 zts-base base_root.zig
+zts-base capability_profiles.zig
 zts-base compat.zig
 zts-base declaration.zig
 zts-base endpoint.zig

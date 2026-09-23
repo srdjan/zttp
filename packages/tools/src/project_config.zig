@@ -8,6 +8,8 @@ pub const tool_catalog_encoding = @import("tool_catalog_encoding.zig");
 test {
     _ = invariant_config;
     _ = tool_catalog_encoding;
+    // The ZTDCL1 round trip between the zts encoder and the kernel decoder.
+    _ = @import("declaration_encoding_test.zig");
     // Re-exported but never referenced by analyzed code, so only this anchor
     // makes `zig build test-project-config` collect its tests.
     _ = invariant_author;

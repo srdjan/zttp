@@ -13,6 +13,7 @@
 pub const capability_policy = @import("capability_policy.zig");
 pub const certificate = @import("certificate.zig");
 pub const checker = @import("checker.zig");
+pub const declaration = @import("declaration.zig");
 pub const executable_graph = @import("executable_graph.zig");
 pub const limits = @import("limits.zig");
 pub const invariant = @import("invariant.zig");

@@ -298,7 +298,8 @@ trailing bytes: refused
 ```
 
 A document with no classifications and no ceiling cannot be encoded. The
-digest is SHA-256 over the domain `zttp-declaration-v1` and the bytes.
+loader refuses a reason longer than 1024 bytes as `reason_too_long`, so every
+document it accepts encodes. The digest is SHA-256 over the domain `zttp-declaration-v1` and the bytes.
 
 **Enforcement.** At build: every capability in the handler's matrix is in the
 profile's categories, no imported module is excluded by the profile or by the
@@ -314,7 +315,7 @@ decoder with a checker stage and three reason codes, following T3.
 
 | Unit | Commit | Content |
 |---|---|---|
-| U1 | pending | declaration version 2, `capability_profiles.zig`, `ZTDCL1` encoder and kernel decoder |
+| U1 | this commit | declaration version 2, `capability_profiles.zig`, `ZTDCL1` encoder and kernel decoder, `reason_too_long` |
 | U2 | pending | build enforcement of the ceiling, contract version 21 report |
 | U3 | pending | runtime ceiling enforcement, section 10, member 20, checker stage |
 | U4 | pending | C5 P15 evidence, consumer-contract text, full gate |
