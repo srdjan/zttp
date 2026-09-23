@@ -1,6 +1,6 @@
 # M4: release contract for scoped tool routes
 
-Status: accepted by the owner on 2026-09-22. T1a, T1b, T2, T3, and T4 are complete; T5 is in progress under its [design note](2026-09-23-m4-t5-scope-and-grants-design.md), split into T5a and T5b.
+Status: accepted by the owner on 2026-09-22. T1a, T1b, T2, T3, T4, and T5a are complete; T5b is next, under the T5 [design note](2026-09-23-m4-t5-scope-and-grants-design.md).
 Baseline: local `main` at `176d81ca`. Roadmap row:
 [M4 in the roadmap](../roadmap.md) (`docs/roadmap.md:20`). This document
 reconciles proposal A, the
@@ -284,6 +284,22 @@ runtime dispatch path in `contract_runtime.zig`, plus a runtime caller of the
 and tenant from its claims (decision 4). Each tool route receives only its own
 grants, and the build refuses a tool route that reaches a cross-call read
 (decision 6). This unit meets P15. Completion: check C5.
+
+T5 decisions, 2026-09-23. The owner accepted the
+[design note](2026-09-23-m4-t5-scope-and-grants-design.md) and split T5 into
+T5a (identity, scope, grants, cross-call refusal) and T5b (the declaration's
+capability ceiling and its graph binding, which meets P15 and P4). A catalog
+`scope` field binds input fields to the verified identity and the runtime
+compares them; grants are export-level per tool; the key comes from the
+environment variable zttp.json's `auth.keyEnv` names.
+
+T5a result, 2026-09-23. A tool request is verified before input validation
+(401 naming the reason), scoped after it (403), and served with `req.subject`
+and `req.tenant` and without its authorization header; each module export
+call checks the active tool's proven reachable-export set; the build refuses a
+cross-call read and a dispatch the grants cannot cover. The C5 checks that
+T5a owns passed, including both named probes and a deployed binary answering
+real signed requests; the evidence is in section 12 of the design note.
 
 **T6. Credential injection.** Depends on T1a, T1b, and T5. Owned files:
 `packages/runtime/src/runtime_http.zig`, `packages/modules/src/net/fetch.zig` and

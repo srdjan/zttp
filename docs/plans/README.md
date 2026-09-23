@@ -6,8 +6,8 @@ index when a plan starts, closes, or moves to the archive.
 
 | Document | Role and status | Work authority |
 |---|---|---|
-| [M4: release contract for scoped tool routes](2026-09-22-m4-release-contract.md) | Accepted 2026-09-22; T1a, T1b, T2, T3, and T4 complete, T5 next | Owner accepted the contract on 2026-09-22 |
-| [M4 T5: subject scope and tool-local grants](2026-09-23-m4-t5-scope-and-grants-design.md) | Accepted 2026-09-23; T5a in progress | Owner accepted the design and answered its four questions |
+| [M4: release contract for scoped tool routes](2026-09-22-m4-release-contract.md) | Accepted 2026-09-22; T1a to T5a complete, T5b next | Owner accepted the contract on 2026-09-22 |
+| [M4 T5: subject scope and tool-local grants](2026-09-23-m4-t5-scope-and-grants-design.md) | Accepted 2026-09-23; T5a implemented, T5b next | Owner accepted the design and answered its four questions |
 | [M4 T4: declared-label carriage](2026-09-23-m4-t4-declared-labels-design.md) | Implemented 2026-09-23 | Owner accepted the design and answered its four questions |
 | [M4 T3: catalog encoding and artifact binding](2026-09-23-m4-t3-catalog-binding-design.md) | Implemented 2026-09-23 | Owner accepted the design and answered its four questions |
 | [M4 T2: tool catalog and schema subset](2026-09-23-m4-t2-tool-catalog-design.md) | Implemented 2026-09-23 | Owner accepted the design and answered its four questions |

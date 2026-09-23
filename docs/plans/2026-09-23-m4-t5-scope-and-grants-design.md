@@ -1,7 +1,7 @@
 # M4 T5 design note: subject scope and tool-local grants
 
 Status: accepted by the owner on 2026-09-23, with the recommended answer to
-each question in section 9. T5a is in progress; T5b follows. Check C5 of the
+each question in section 9. T5a is implemented; T5b follows. Check C5 of the
 [M4 release contract](2026-09-22-m4-release-contract.md) is written against
 the approach this note names.
 
@@ -208,7 +208,55 @@ section 9 stand.
 
 | Unit | Commit | Content |
 |---|---|---|
-| U1 | pending | pure `auth.verifyHs256` with a closed refusal enum; `jwtVerify` wraps it |
-| U2 | pending | catalog `scope` field, `ZTCAT1` schema 2, `cross_call_read` refusal, `AcceptedTool` keeps scope and exports |
-| U3 | pending | runtime: `auth` config, 401 verification, `req.subject`/`req.tenant`, header removal, 403 scope comparison, per-tool export grants |
-| U4 | pending | AE2, AE3, AE15, B8.1, B8.7 end to end, census, probes, docs |
+| U1 | `f55886d1` | pure `auth.verifyHs256` with a closed refusal enum; `jwtVerify` shares its checks |
+| U2 | `f67c685a` | catalog `scope` field, `ZTCAT1` schema 2, `cross_call_read` refusal, `AcceptedTool` keeps scope and exports |
+| U3 | `77436adc` | runtime: `auth` config, 401 verification, `req.subject`/`req.tenant`, header removal, 403 scope comparison, per-tool export grants |
+| U4 | `f3a007ba` and this record | dispatch refusal, identity escape closed, T5a evidence |
+
+## 12. T5a implementation notes and evidence
+
+Five points differ from sections 4 to 7, each found while building. The
+verifier takes the HMAC as a parameter, because the capability-audit gate
+forbids direct crypto in `packages/modules`; the module passes the checked SDK
+HMAC and the runtime passes std's. The auth names reach a deployed binary in a
+`toolAuth` object in the contract, which the graph already binds, so the
+tenant claim cannot be changed after acceptance and no payload format changed.
+The shared dispatch of a tool handler calls `routerMatch` before any route
+runs, so the runtime allows `routerMatch` under every grant and the build
+refuses a dispatch that reaches any other export (`dispatch_reaches_export`),
+which would otherwise fail every tool request at runtime. A dev catalog that
+arrives after start answers 503 until a key is loaded, so no tool request is
+served unverified. And the flow checker keeps `user_input` on `req.subject`
+and `req.tenant` when the request object reaches code its write scan cannot
+read: a function from another file, a method, or another binding.
+
+T5a checks, measured on `main`: `zig build test`, `test-zruntime`,
+`test-server`, `test-capability-audit`, `test-module-boundary`,
+`test-proof-swallow`, and `test-runtime-purity` pass, and the policy hash did
+not move. Through the real request path: a valid token gives 200 with
+`req.subject` and `req.tenant` and no authorization header; every verifier
+refusal and a missing token give 401 naming the reason (a census over all ten);
+AE3, a scoped tool given another tenant's identifier, gives 403 and its own
+gives 200; B8.7 and AE11, a call outside the tool's grant, fails while the same
+call inside it succeeds; a tool handler without auth, or without its key,
+refuses to start. A deployed binary (`zttp deploy`, run on a local port with
+tokens signed by `openssl`) refused to start without its key, then answered
+401 for a missing token, a bad signature, an expired token, and a missing
+tenant claim, 403 for another tenant, and 200 with the verified subject and
+tenant for its own. Decision 6: a tool reaching `cacheGet`, or `sqlExec`
+through a helper, is refused, a tool reaching `cacheSet` is admitted, and a
+census ties the refusal list to every export that declares `.unknown`.
+Mutation probes, each on a genuine compile in `main` and restored: the scope
+comparison (AE3 failed, as C5 requires), the cross-call refusal (the cache
+case failed, as C5 requires), the grant check, token verification, header
+removal, the scope field check, the kernel's scope bound, the signature and
+exp checks, the dispatch check, and the escape scan; each failed a named test.
+
+AE2's unknown-name and unadvertised-built-in halves hold through T3 and this
+unit: a request outside the catalog is 404 before any JS value, and a built-in
+outside the tool's reach fails at the grant. Its extension-only and evaluation
+halves need no new check: the tool profile compiles no model-supplied source,
+and extension modules follow the same wrapper. AE15 needs no separate check
+either: no instruction in a prompt or body reaches the subject, tenant, grant,
+or catalog, all of which come from the verifier, the build, and the accepted
+artifact.
