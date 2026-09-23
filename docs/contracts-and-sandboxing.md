@@ -45,7 +45,7 @@ Every precompilation extracts a contract from the handler's IR. Add
 
 ```json
 {
-  "version": 19,
+  "version": 20,
   "modules": ["zttp:auth", "zttp:cache", "zttp:scope"],
   "functions": {
     "zttp:auth": ["jwtVerify", "parseBearer"],
@@ -549,9 +549,16 @@ required.
 - `-Dexpect-properties=<path>`: verifies handler-derived properties
   (`state_isolated`, `injection_safe`, `read_only`, etc.) match
   external expectations. Build fails on mismatches.
-- `-Ddata-labels=<path>`: merges externally declared data-sensitivity
-  labels (`secret`, `credential`, etc.) with the flow checker's
-  heuristic labels. Violations of declared labels become build errors.
+- `-Ddeclaration=<path>`: gives the consumer declaration to the flow
+  check (`--declaration` on `zts compile` and `zts check`, or the
+  `declaration` key in `zttp.json`). Each classification assigns
+  `secret` or `credential` to a path in the value that a `fetch:<host>`
+  or `service:<name>` source returns. A declared value that reaches a
+  sink fails with ZTS400 to ZTS403. The contract records the status of
+  each entry (`matched`, `indeterminate`, or `absent`) in its
+  `classifications` section. A required entry that the analysis never
+  saw stops the build. The loader refuses a malformed file with a named
+  reason and the entry index.
 - `-Dfault-severity=<path>`: overrides fault severity classification at
   the route level. A route declared "critical" elevates all failable
   calls within it to critical severity for fault coverage diagnostics.

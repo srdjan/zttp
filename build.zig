@@ -108,9 +108,9 @@ pub fn build(b: *std.Build) void {
     // External enrichment flags (optional, for cross-referencing with code generators)
     const manifest_path = b.option([]const u8, "manifest", "External manifest JSON for cross-referencing against handler contract");
     const expect_properties_path = b.option([]const u8, "expect-properties", "Expected handler properties JSON for build-time verification");
-    const data_labels_path = b.option([]const u8, "data-labels", "External data label declarations JSON for flow checker enrichment");
+    const declaration_path = b.option([]const u8, "declaration", "Consumer declaration JSON whose classifications the flow check enforces (M4 T4)");
     const fault_severity_path = b.option([]const u8, "fault-severity", "External fault severity overrides JSON for coverage analysis");
-    const generator_pack_path = b.option([]const u8, "generator-pack", "Generator integration pack JSON for external manifest/property/data-label/replay/report wiring");
+    const generator_pack_path = b.option([]const u8, "generator-pack", "Generator integration pack JSON for external manifest/property/replay/report wiring");
     const report_format = b.option([]const u8, "report", "Emit structured build report (values: json)");
 
     // zts tests.
@@ -936,8 +936,8 @@ pub fn build(b: *std.Build) void {
             run_precompile.addArg("--expect-properties");
             run_precompile.addArg(ep);
         }
-        if (data_labels_path) |dl| {
-            run_precompile.addArg("--data-labels");
+        if (declaration_path) |dl| {
+            run_precompile.addArg("--declaration");
             run_precompile.addArg(dl);
         }
         if (fault_severity_path) |fs| {

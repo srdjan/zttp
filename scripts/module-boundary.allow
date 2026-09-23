@@ -36,6 +36,9 @@ runtime bytecode_cache
 runtime compat
 runtime contract_diff
 runtime counterexample
+# The build and deploy paths carry the zttp.json consumer declaration into the
+# flow check (M4 T4); the runtime names its type, the loader runs in tools.
+runtime declaration
 # The one endpoint rule. The runtime compares what the compiler recorded, so
 # both must canonicalize `scheme://host:port` identically; a second copy in the
 # runtime is the drift this row exists to avoid.

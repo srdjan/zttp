@@ -79,6 +79,10 @@ pub const WorkflowCallInfo = contract_types.WorkflowCallInfo;
 pub const EmittedAffordance = contract_types.EmittedAffordance;
 pub const ToolEntry = contract_types.ToolEntry;
 pub const ToolExport = contract_types.ToolExport;
+pub const ClassificationReport = contract_types.ClassificationReport;
+pub const ClassificationLabel = contract_types.ClassificationLabel;
+pub const ClassificationStatus = contract_types.ClassificationStatus;
+pub const firstRequiredAbsent = contract_types.firstRequiredAbsent;
 pub const CapabilityMatrix = contract_types.CapabilityMatrix;
 // `computeCapabilityMatrix` is NOT re-exported: it resolves specifiers
 // through the linked module registry, so it lives in `builtin_modules.zig`
@@ -1245,7 +1249,7 @@ test "writeContractJson minimal" {
     output = aw.toArrayList();
 
     // Should be valid-looking JSON with expected fields
-    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"version\": 19") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"version\": 20") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"handler.ts\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"modules\": []") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"serviceCalls\": []") != null);
@@ -1985,4 +1989,116 @@ test "tool catalog projection refuses a catalog the build could not have written
             return error.TestExpectedRefusal;
         } else |err| try std.testing.expectEqual(error.InvalidToolCatalog, err);
     }
+}
+
+fn classificationFixture(allocator: std.mem.Allocator) !HandlerContract {
+    var contract = contract_types.emptyContract(try allocator.dupe(u8, "declared.ts"));
+    errdefer contract.deinit(allocator);
+    const rows = [_]struct { source: []const u8, path: []const u8, label: ClassificationLabel, required: bool, status: ClassificationStatus }{
+        .{ .source = "fetch:api.example.com", .path = "customer.tax_id", .label = .secret, .required = true, .status = .matched },
+        .{ .source = "fetch:api.example.com", .path = "customer.card", .label = .secret, .required = false, .status = .indeterminate },
+        .{ .source = "service:billing", .path = "card.token", .label = .credential, .required = false, .status = .absent },
+    };
+    for (rows) |row| {
+        const source = try allocator.dupe(u8, row.source);
+        errdefer allocator.free(source);
+        const path = try allocator.dupe(u8, row.path);
+        errdefer allocator.free(path);
+        try contract.classifications.append(allocator, .{
+            .source = source,
+            .path = path,
+            .label = row.label,
+            .required = row.required,
+            .status = row.status,
+        });
+    }
+    return contract;
+}
+
+test "classification report survives a v1 and a v2 round trip" {
+    const allocator = std.testing.allocator;
+    var original = try classificationFixture(allocator);
+    defer original.deinit(allocator);
+
+    inline for (.{ writeContractJson, writeContractJsonV2 }) |write| {
+        var out: std.Io.Writer.Allocating = .init(allocator);
+        defer out.deinit();
+        try write(&original, &out.writer);
+        var parsed = try parseFromJson(allocator, out.written());
+        defer parsed.deinit(allocator);
+        try std.testing.expectEqual(original.classifications.items.len, parsed.classifications.items.len);
+        for (original.classifications.items, parsed.classifications.items) |want, got| {
+            try std.testing.expectEqualStrings(want.source, got.source);
+            try std.testing.expectEqualStrings(want.path, got.path);
+            try std.testing.expectEqual(want.label, got.label);
+            try std.testing.expectEqual(want.required, got.required);
+            try std.testing.expectEqual(want.status, got.status);
+        }
+
+        // Written again, the parsed contract gives the same classifications
+        // section. The comparison is scoped to it: a contract carrying no
+        // capability matrix gains the empty-set hash on a trip, which is a
+        // property of that section, not of this one.
+        var again: std.Io.Writer.Allocating = .init(allocator);
+        defer again.deinit();
+        try write(&parsed, &again.writer);
+        // Floor: the section exists and holds the fixture's rows.
+        try std.testing.expect(std.mem.indexOf(u8, classificationsSection(out.written()), "customer") != null);
+        try std.testing.expectEqualStrings(classificationsSection(out.written()), classificationsSection(again.written()));
+    }
+}
+
+test "a contract with no declaration writes an empty classifications array" {
+    const allocator = std.testing.allocator;
+    var contract = contract_types.emptyContract(try allocator.dupe(u8, "plain.ts"));
+    defer contract.deinit(allocator);
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    defer out.deinit();
+    try writeContractJson(&contract, &out.writer);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"classifications\": [],") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"version\": 20,") != null);
+}
+
+fn classificationJson(comptime row: []const u8) []const u8 {
+    return "{\"version\": 20, \"handler\": {\"path\": \"declared.ts\"}, \"classifications\": [" ++ row ++ "]}";
+}
+
+test "classification projection refuses a report the build could not have written" {
+    const cases = [_][]const u8{
+        // A status and a label outside the closed sets.
+        classificationJson("{\"source\": \"fetch:h\", \"path\": \"a\", \"label\": \"secret\", \"required\": true, \"status\": \"seen\"}"),
+        classificationJson("{\"source\": \"fetch:h\", \"path\": \"a\", \"label\": \"validated\", \"required\": true, \"status\": \"matched\"}"),
+        // Missing status, label, and required.
+        classificationJson("{\"source\": \"fetch:h\", \"path\": \"a\", \"label\": \"secret\", \"required\": true}"),
+        classificationJson("{\"source\": \"fetch:h\", \"path\": \"a\", \"required\": true, \"status\": \"matched\"}"),
+        classificationJson("{\"source\": \"fetch:h\", \"path\": \"a\", \"label\": \"secret\", \"status\": \"matched\"}"),
+        // A source that names no source kind, a bare prefix, and an empty path.
+        classificationJson("{\"source\": \"api.example.com\", \"path\": \"a\", \"label\": \"secret\", \"required\": true, \"status\": \"matched\"}"),
+        classificationJson("{\"source\": \"fetch:\", \"path\": \"a\", \"label\": \"secret\", \"required\": true, \"status\": \"matched\"}"),
+        classificationJson("{\"source\": \"service:billing\", \"path\": \"\", \"label\": \"secret\", \"required\": true, \"status\": \"matched\"}"),
+    };
+    for (cases, 0..) |json, i| {
+        const result = parseFromJson(std.testing.allocator, json);
+        if (result) |parsed| {
+            var owned = parsed;
+            owned.deinit(std.testing.allocator);
+            std.debug.print("case {d} was accepted: {s}\n", .{ i, json });
+            return error.TestExpectedRefusal;
+        } else |err| try std.testing.expectEqual(error.InvalidClassificationReport, err);
+    }
+
+    // Control: the same shape with closed values is accepted.
+    var accepted = try parseFromJson(std.testing.allocator, classificationJson(
+        "{\"source\": \"fetch:h\", \"path\": \"a\", \"label\": \"secret\", \"required\": true, \"status\": \"absent\"}",
+    ));
+    defer accepted.deinit(std.testing.allocator);
+    try std.testing.expectEqual(ClassificationStatus.absent, accepted.classifications.items[0].status);
+    try std.testing.expectEqual(@as(?usize, 0), firstRequiredAbsent(accepted.classifications.items));
+}
+
+/// The `classifications` array as written, from its key to its closing bracket.
+fn classificationsSection(json: []const u8) []const u8 {
+    const start = std.mem.indexOf(u8, json, "\"classifications\"") orelse return "";
+    const end = std.mem.indexOfPos(u8, json, start, "]") orelse return json[start..];
+    return json[start .. end + 1];
 }

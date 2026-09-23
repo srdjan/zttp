@@ -339,12 +339,21 @@ fn cmdCompile(ctx: cli_help.Ctx) anyerror!void {
             printNoProjectConfigDiagnostic(ctx.command);
             std.process.exit(1);
         }
-        if (err == error.MissingArgument) {
+        if (err == error.MissingArgument or isDeclarationBuildError(err)) {
             std.process.exit(1);
         }
         return err;
     };
     return;
+}
+
+/// The declaration errors a build reports with its own message (M4 T4): a
+/// refused or unreadable declaration, a required entry the analysis never saw,
+/// and a handler whose build path cannot enforce a declaration.
+fn isDeclarationBuildError(err: anyerror) bool {
+    return err == error.DeclarationContextFailed or
+        err == error.RequiredClassificationAbsent or
+        err == error.DeclarationNotEnforced;
 }
 
 fn cmdBuild(ctx: cli_help.Ctx) anyerror!void {
@@ -356,7 +365,8 @@ fn cmdBuild(ctx: cli_help.Ctx) anyerror!void {
         if (err == error.MissingArgument or
             err == error.UnknownOption or
             err == error.PolicyContextFailed or
-            err == error.PolicyViolation)
+            err == error.PolicyViolation or
+            isDeclarationBuildError(err))
         {
             std.process.exit(1);
         }
@@ -427,6 +437,9 @@ fn cmdDeploy(ctx: cli_help.Ctx) anyerror!void {
             error.AccessDenied,
             error.PolicyContextFailed,
             error.PolicyViolation,
+            error.DeclarationContextFailed,
+            error.RequiredClassificationAbsent,
+            error.DeclarationNotEnforced,
             => std.process.exit(1),
             else => return err,
         }

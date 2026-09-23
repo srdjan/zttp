@@ -38,6 +38,9 @@ pub const BuildReport = struct {
     manifest_alignment: ?ManifestAlignmentSection = null,
     property_expectations: ?PropertyExpectationsSection = null,
     integration: ?IntegrationSection = null,
+    /// The P8 report (M4 T4), borrowed from the contract. Empty, and not
+    /// written, when the build had no declaration.
+    classifications: []const handler_contract.ClassificationReport = &.{},
 };
 
 pub const VerificationSection = struct {
@@ -99,7 +102,8 @@ pub const IntegrationSection = struct {
     sql_schema: bool = false,
     manifest: bool = false,
     property_expectations: bool = false,
-    data_labels: bool = false,
+    /// A consumer declaration was given (M4 T4).
+    declaration: bool = false,
     replay: bool = false,
     fault_severity: bool = false,
 };
@@ -189,6 +193,7 @@ pub fn buildReport(
         .manifest_alignment = manifest_alignment_section,
         .property_expectations = property_expectations_section,
         .integration = integration_section,
+        .classifications = contract.classifications.items,
     };
 }
 
@@ -346,10 +351,30 @@ pub fn writeReportJson(writer: anytype, report: *const BuildReport) !void {
         try writer.print("    \"sqlSchema\": {s},\n", .{if (integration.sql_schema) "true" else "false"});
         try writer.print("    \"manifest\": {s},\n", .{if (integration.manifest) "true" else "false"});
         try writer.print("    \"propertyExpectations\": {s},\n", .{if (integration.property_expectations) "true" else "false"});
-        try writer.print("    \"dataLabels\": {s},\n", .{if (integration.data_labels) "true" else "false"});
+        try writer.print("    \"declaration\": {s},\n", .{if (integration.declaration) "true" else "false"});
         try writer.print("    \"replay\": {s},\n", .{if (integration.replay) "true" else "false"});
         try writer.print("    \"faultSeverity\": {s}\n", .{if (integration.fault_severity) "true" else "false"});
         try writer.writeAll("  }");
+    }
+
+    // classifications (optional): the P8 report, one entry per declared
+    // classification with the status the flow check reached.
+    if (report.classifications.len > 0) {
+        try writer.writeAll(",\n");
+        try writer.writeAll("  \"classifications\": [");
+        for (report.classifications, 0..) |entry, i| {
+            if (i > 0) try writer.writeAll(",");
+            try writer.writeAll("\n    { \"source\": ");
+            try writeJsonString(writer, entry.source);
+            try writer.writeAll(", \"path\": ");
+            try writeJsonString(writer, entry.path);
+            try writer.print(", \"label\": \"{s}\", \"required\": {s}, \"status\": \"{s}\" }}", .{
+                @tagName(entry.label),
+                if (entry.required) "true" else "false",
+                @tagName(entry.status),
+            });
+        }
+        try writer.writeAll("\n  ]");
     }
 
     try writer.writeAll("\n}\n");

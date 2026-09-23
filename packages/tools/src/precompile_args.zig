@@ -39,7 +39,7 @@ pub const PrecompileOptions = struct {
     generate_tests: bool = false,
     manifest_path: ?[]const u8 = null,
     expect_properties_path: ?[]const u8 = null,
-    data_labels_path: ?[]const u8 = null,
+    declaration_path: ?[]const u8 = null,
     fault_severity_path: ?[]const u8 = null,
     generator_pack_path: ?[]const u8 = null,
     report_format: ?[]const u8 = null,
@@ -115,8 +115,8 @@ pub fn parsePrecompileArgSlice(argv: []const []const u8) !PrecompileOptions {
             opts.expect_properties_path = try takeArg(&index, argv, "Missing path after --expect-properties");
             continue;
         }
-        if (std.mem.eql(u8, arg, "--data-labels")) {
-            opts.data_labels_path = try takeArg(&index, argv, "Missing path after --data-labels");
+        if (std.mem.eql(u8, arg, "--declaration")) {
+            opts.declaration_path = try takeArg(&index, argv, "Missing path after --declaration");
             continue;
         }
         if (std.mem.eql(u8, arg, "--fault-severity")) {
@@ -143,6 +143,13 @@ pub fn parsePrecompileArgSlice(argv: []const []const u8) !PrecompileOptions {
             _ = try takeArg(&index, argv, "Missing path after --module-manifest");
             continue;
         }
+        // A flag this parser does not know is refused by name. Taking it as the
+        // handler or output path hid a removed or misspelled flag, such as the
+        // deleted `--data-labels`, behind an unrelated error or none.
+        if (std.mem.startsWith(u8, arg, "--")) {
+            errPrint("Unknown flag: {s}\n", .{arg});
+            return error.UnknownFlag;
+        }
         if (handler_path == null) {
             handler_path = arg;
             continue;
@@ -155,7 +162,7 @@ pub fn parsePrecompileArgSlice(argv: []const []const u8) !PrecompileOptions {
         return error.InvalidArgument;
     }
 
-    const usage = "Usage: precompile [--aot] [--verify] [--contract] [--openapi] [--sdk ts] [--sql-schema path] [--system path] [--prove spec] [--policy policy.json] [--module-manifest path] <handler.ts> <output.zig>\n";
+    const usage = "Usage: precompile [--aot] [--verify] [--contract] [--openapi] [--sdk ts] [--sql-schema path] [--system path] [--prove spec] [--policy policy.json] [--declaration declaration.json] [--module-manifest path] <handler.ts> <output.zig>\n";
     opts.handler_path = handler_path orelse {
         errPrint(usage, .{});
         errPrint("\nCompiles a TypeScript/JavaScript handler to bytecode.\n", .{});
@@ -253,6 +260,25 @@ test "parsePrecompileArgSlice consumes module manifest flags" {
     const opts = try parsePrecompileArgSlice(&argv);
     try std.testing.expectEqualStrings("handler.ts", opts.handler_path);
     try std.testing.expectEqualStrings("embedded_handler.zig", opts.output_path);
+}
+
+test "parsePrecompileArgSlice captures the declaration path" {
+    const argv = [_][]const u8{ "--declaration", "declaration.json", "handler.ts", "out.zig" };
+    const opts = try parsePrecompileArgSlice(&argv);
+    try std.testing.expectEqualStrings("declaration.json", opts.declaration_path.?);
+    try std.testing.expectEqualStrings("handler.ts", opts.handler_path);
+}
+
+test "parsePrecompileArgSlice refuses the deleted --data-labels flag as unknown" {
+    // Every position: before the paths, between them, and after them.
+    const shapes = [_][]const []const u8{
+        &.{ "--data-labels", "labels.json", "handler.ts", "out.zig" },
+        &.{ "handler.ts", "--data-labels", "labels.json", "out.zig" },
+        &.{ "handler.ts", "out.zig", "--data-labels", "labels.json" },
+    };
+    for (shapes) |argv| {
+        try std.testing.expectError(error.UnknownFlag, parsePrecompileArgSlice(argv));
+    }
 }
 
 test "parsePrecompileArgSlice rejects missing module manifest path" {

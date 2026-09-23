@@ -62,7 +62,21 @@ pub const CheckResult = struct {
     proof_trace_json: ?[]u8 = null,
 
     pub fn totalErrors(self: *const CheckResult) u32 {
-        return self.parse_errors + self.bool_errors + self.type_errors + self.strict_errors + self.verify_errors + self.flow_errors + self.canonical_errors + self.policy_errors + self.specErrors();
+        return self.parse_errors + self.bool_errors + self.type_errors + self.strict_errors + self.verify_errors + self.flow_errors + self.canonical_errors + self.policy_errors + self.specErrors() + self.classificationErrors();
+    }
+
+    /// Declared classifications the check must refuse (M4 T4): a required
+    /// entry the analysis never saw. The build refuses the same entries through
+    /// the same predicate, `handler_contract.firstRequiredAbsent`.
+    pub fn classificationErrors(self: *const CheckResult) u32 {
+        const contract = if (self.contract) |*c| c else return 0;
+        var n: u32 = 0;
+        var rest = contract.classifications.items;
+        while (handler_contract.firstRequiredAbsent(rest)) |index| {
+            n += 1;
+            rest = rest[index + 1 ..];
+        }
+        return n;
     }
 
     pub fn totalWarnings(self: *const CheckResult) u32 {
@@ -558,6 +572,25 @@ pub fn formatProofCard(writer: anytype, r: *const CheckResult, filename: []const
                 if (d.suggestion) |suggestion| {
                     writer.print("      help: {s}\n", .{suggestion}) catch return;
                 }
+            }
+        }
+    }
+
+    // The P8 report (M4 T4): every declared classification and its status. A
+    // required entry the analysis never saw is an error line naming it.
+    if (r.contract) |*contract| {
+        if (contract.classifications.items.len > 0) {
+            writer.print("\n  Declared classifications:\n", .{}) catch return;
+            for (contract.classifications.items) |entry| {
+                const refused = entry.required and entry.status == .absent;
+                writer.print("    {s} {s} {s} ({s}, {s}){s}\n", .{
+                    @tagName(entry.status),
+                    entry.source,
+                    entry.path,
+                    @tagName(entry.label),
+                    if (entry.required) "required" else "optional",
+                    if (refused) "  error: a required entry the analysis never saw" else "",
+                }) catch return;
             }
         }
     }

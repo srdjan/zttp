@@ -172,6 +172,7 @@ pub fn compileCommand(allocator: std.mem.Allocator, argv: []const []const u8) !v
         .system_path = compile_context.system_path,
         .policy = compile_context.policyPtr(),
         .invariant_spec = compile_context.invariant_spec,
+        .declaration = compile_context.declarationPtr(),
         .protected_ledger_path = compile_context.ledger_path,
         .attest_requested = opts.attest_requested,
     });
@@ -183,6 +184,9 @@ const ProjectCompileContext = struct {
     policy: ?zts.HandlerPolicy = null,
     invariant_spec: ?[]u8 = null,
     ledger_path: ?[]u8 = null,
+    /// The consumer declaration zttp.json names (M4 T4), validated. It lives as
+    /// long as the context, which outlives the build that borrows it.
+    declaration: ?zts.declaration.Declaration = null,
 
     fn init(
         allocator: std.mem.Allocator,
@@ -201,6 +205,27 @@ const ProjectCompileContext = struct {
             );
             return error.InvariantContextFailed;
         };
+
+        const declaration_bytes = project.readDeclaration(allocator) catch |err| {
+            std.debug.print(
+                "Configured declaration '{s}' could not be loaded: {s}\n",
+                .{ project.declaration orelse "", @errorName(err) },
+            );
+            return error.DeclarationContextFailed;
+        };
+        defer if (declaration_bytes) |bytes| allocator.free(bytes);
+        if (declaration_bytes) |bytes| {
+            context.declaration = precompile.parseDeclarationBytes(
+                allocator,
+                bytes,
+                project.declaration orelse "zttp.json declaration",
+                null,
+            ) catch |err| switch (err) {
+                // parseDeclarationBytes printed the reason tag and the entry.
+                error.DeclarationRefused => return error.DeclarationContextFailed,
+                else => return err,
+            };
+        }
 
         const policy_source = project.readPolicySource(allocator) catch |err| {
             std.debug.print(
@@ -230,11 +255,16 @@ const ProjectCompileContext = struct {
         if (self.policy) |*policy| policy.deinit(allocator);
         if (self.invariant_spec) |bytes| allocator.free(bytes);
         if (self.ledger_path) |path| allocator.free(path);
+        if (self.declaration) |*decl| decl.deinit();
         self.* = .{};
     }
 
     fn policyPtr(self: *const ProjectCompileContext) ?*const zts.HandlerPolicy {
         return if (self.policy) |*policy| policy else null;
+    }
+
+    fn declarationPtr(self: *const ProjectCompileContext) ?*const zts.declaration.Declaration {
+        return if (self.declaration) |*decl| decl else null;
     }
 };
 
@@ -419,6 +449,7 @@ pub fn buildCommand(allocator: std.mem.Allocator, argv: []const []const u8) !voi
         .system_path = artifact.compile_context.system_path,
         .policy = artifact.compile_context.policyPtr(),
         .invariant_spec = artifact.compile_context.invariant_spec,
+        .declaration = artifact.compile_context.declarationPtr(),
         .protected_ledger_path = artifact.compile_context.ledger_path,
         .attest_requested = opts.attest_requested,
     });
@@ -532,6 +563,7 @@ pub fn localDeployCommand(allocator: std.mem.Allocator, argv: []const []const u8
         .system_path = artifact.compile_context.system_path,
         .policy = artifact.compile_context.policyPtr(),
         .invariant_spec = artifact.compile_context.invariant_spec,
+        .declaration = artifact.compile_context.declarationPtr(),
         .protected_ledger_path = artifact.compile_context.ledger_path,
         .ledger_service_name = artifact.project_name,
         .attest_requested = opts.attest_requested,
@@ -913,6 +945,8 @@ pub const BuildRequest = struct {
     policy: ?*const zts.HandlerPolicy = null,
     /// Canonical application invariant bytes loaded from project config.
     invariant_spec: ?[]const u8 = null,
+    /// The consumer declaration from project config (M4 T4). Borrowed.
+    declaration: ?*const zts.declaration.Declaration = null,
     protected_ledger_path: ?[]const u8 = null,
     /// Service name to record in the proof ledger entry. Null when the
     /// build is not part of a named project (`compile`/`build` paths);
@@ -967,6 +1001,7 @@ const BuildCompileInput = struct {
     sql_schema_path: ?[]const u8,
     system_path: ?[]const u8,
     policy: ?*const zts.HandlerPolicy,
+    declaration: ?*const zts.declaration.Declaration = null,
 };
 
 fn compileCapability(
@@ -981,6 +1016,7 @@ fn compileCapability(
         .sql_schema_path = input.sql_schema_path,
         .system_path = input.system_path,
         .policy = if (input.policy) |policy| policy.* else null,
+        .declaration = input.declaration,
     });
 }
 
@@ -1053,6 +1089,7 @@ fn runBuild(
         .sql_schema_path = request.sql_schema_path,
         .system_path = request.system_path,
         .policy = request.policy,
+        .declaration = request.declaration,
     }) catch |err| {
         // precompile already prints per-error lines to stderr; only surface
         // the remediation hint so the dev knows where to look.
@@ -3358,4 +3395,78 @@ test "project build compiler enforces configured capability policy" {
         .system_path = null,
         .policy = &policy,
     }));
+}
+
+const declared_project_handler =
+    \\import { fetch } from "zttp:fetch";
+    \\function handler(req: Request): Response {
+    \\  const r = fetch("https://api.example.com/customers/1");
+    \\  return Response.json({ n: r.json().customer.name });
+    \\}
+    \\
+;
+
+/// A project whose zttp.json names `declaration.json`, holding `declaration`.
+fn writeDeclaredProject(tmp: *std.testing.TmpDir, declaration: []const u8) !void {
+    try tmp.dir.createDirPath(std.testing.io, "src");
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "zttp.json",
+        .data = "{\"entry\":\"src/handler.ts\",\"declaration\":\"declaration.json\"}",
+    });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "declaration.json", .data = declaration });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "src/handler.ts", .data = declared_project_handler });
+}
+
+test "a project build carries the zttp.json declaration and refuses a required entry never seen" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try writeDeclaredProject(&tmp,
+        \\{"version":1,"classifications":[
+        \\ {"source":"fetch:billing.example.com","path":"card.token","label":"credential","required":true,"reason":"Card token."}]}
+    );
+
+    const handler_path = try tmp.dir.realPathFileAlloc(std.testing.io, "src/handler.ts", allocator);
+    defer allocator.free(handler_path);
+    var context = try discoverExplicitCompileContext(allocator, handler_path);
+    defer context.deinit(allocator);
+    const declaration = context.declarationPtr() orelse return error.TestExpectedDeclaration;
+    try std.testing.expectEqual(@as(usize, 1), declaration.classifications.len);
+
+    // The real reader and compiler; the tail, signer, and ledger are probes,
+    // and none of them may run.
+    var probe = BuildProbe{};
+    var caps = probe.capabilities();
+    caps.read_source = readSourceCapability;
+    caps.compile = compileCapability;
+    try std.testing.expectError(error.RequiredClassificationAbsent, runBuild(allocator, .{
+        .handler_path = handler_path,
+        .output_path = "out",
+        .declaration = context.declarationPtr(),
+        .attest_requested = false,
+    }, caps));
+    try std.testing.expectEqual(@as(usize, 0), probe.tail_calls);
+
+    // Control: the same build without the declaration reaches the tail.
+    var control = BuildProbe{};
+    var control_caps = control.capabilities();
+    control_caps.read_source = readSourceCapability;
+    control_caps.compile = compileCapability;
+    _ = try runBuild(allocator, .{
+        .handler_path = handler_path,
+        .output_path = "out",
+        .attest_requested = false,
+    }, control_caps);
+    try std.testing.expectEqual(@as(usize, 1), control.tail_calls);
+}
+
+test "a project whose declaration the loader refuses does not build" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try writeDeclaredProject(&tmp, "{\"version\":1,\"classifications\":[]}");
+
+    const handler_path = try tmp.dir.realPathFileAlloc(std.testing.io, "src/handler.ts", allocator);
+    defer allocator.free(handler_path);
+    try std.testing.expectError(error.DeclarationContextFailed, discoverExplicitCompileContext(allocator, handler_path));
 }

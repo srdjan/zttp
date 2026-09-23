@@ -372,10 +372,21 @@ fn runDevPreflight(allocator: std.mem.Allocator, argv: []const []const u8, comma
     );
     defer if (policy_source) |source| allocator.free(source);
 
+    // The consumer declaration zttp.json names (M4 T4). A refused or unreadable
+    // one stops the preflight; the loader printed the file and the reason.
+    var declaration = zts_cli.loadCheckDeclaration(allocator, null, explicit_path) catch |err| {
+        if (!builtin.is_test) {
+            std.debug.print("zttp {s} preflight failed: the configured declaration could not be loaded ({s})\n", .{ command, @errorName(err) });
+        }
+        return error.CheckFailed;
+    };
+    defer if (declaration) |*decl| decl.deinit();
+
     var check = precompile.runCheckOnlyWithOptions(allocator, target, .{
         .sql_schema_path = sqlite_path,
         .system_path = system_path,
         .policy_source = policy_source,
+        .declaration = if (declaration) |*decl| decl else null,
     }) catch |err| {
         if (!builtin.is_test) {
             std.debug.print("zttp {s} preflight could not run for {s}: {}\n", .{ command, target, err });

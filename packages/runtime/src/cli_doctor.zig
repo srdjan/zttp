@@ -224,8 +224,10 @@ pub fn printCheckStageFailures(check: *const precompile.CheckResult, prefix: []c
     if (check.verify_errors > 0) std.debug.print("{s}verify   {d} error(s)\n", .{ prefix, check.verify_errors });
     if (check.flow_errors > 0) std.debug.print("{s}flow     {d} error(s)\n", .{ prefix, check.flow_errors });
     if (check.policy_errors > 0) std.debug.print("{s}policy   {d} error(s)\n", .{ prefix, check.policy_errors });
+    const declared_errors = check.classificationErrors();
+    if (declared_errors > 0) std.debug.print("{s}declared {d} required classification(s) never seen\n", .{ prefix, declared_errors });
     const spec_errors = check.totalErrors() -|
-        (check.parse_errors + check.bool_errors + check.type_errors + check.strict_errors + check.verify_errors + check.flow_errors + check.policy_errors);
+        (check.parse_errors + check.bool_errors + check.type_errors + check.strict_errors + check.verify_errors + check.flow_errors + check.policy_errors + declared_errors);
     if (spec_errors > 0) std.debug.print("{s}spec     {d} error(s)\n", .{ prefix, spec_errors });
 }
 

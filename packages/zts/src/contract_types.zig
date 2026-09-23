@@ -1613,6 +1613,58 @@ pub const ToolEntry = struct {
     }
 };
 
+/// The label a declared classification assigns (M4 T4). The declaration loader
+/// admits these two only, so the set is closed here too.
+pub const ClassificationLabel = enum {
+    secret,
+    credential,
+
+    pub fn fromText(text: []const u8) ?ClassificationLabel {
+        return std.meta.stringToEnum(ClassificationLabel, text);
+    }
+};
+
+/// What the flow analysis established about one declared classification (P8).
+/// The contract spelling of `flow_checker.EntryStatus`.
+pub const ClassificationStatus = enum {
+    matched,
+    indeterminate,
+    absent,
+
+    pub fn fromText(text: []const u8) ?ClassificationStatus {
+        return std.meta.stringToEnum(ClassificationStatus, text);
+    }
+};
+
+/// One entry of the P8 report: a declared classification and its status after
+/// the flow check. The contract carries one per declaration entry, in the
+/// declaration's canonical order. Every string is owned.
+pub const ClassificationReport = struct {
+    /// `fetch:<host>` or `service:<name>`, as the declaration spells it.
+    source: []const u8,
+    /// The dot-separated path inside the source's value.
+    path: []const u8,
+    label: ClassificationLabel,
+    /// A required entry whose status is `absent` refuses the build.
+    required: bool,
+    status: ClassificationStatus,
+
+    pub fn deinit(self: *ClassificationReport, allocator: std.mem.Allocator) void {
+        allocator.free(self.source);
+        allocator.free(self.path);
+    }
+};
+
+/// The first classification the build must refuse: a required entry the
+/// analysis never saw. Null when there is none. Both the build and `check`
+/// decide through this one function.
+pub fn firstRequiredAbsent(items: []const ClassificationReport) ?usize {
+    for (items, 0..) |item, index| {
+        if (item.required and item.status == .absent) return index;
+    }
+    return null;
+}
+
 /// Aggregate of module capabilities required by a handler's imports.
 /// Stable SHA-256 hash over the canonically-ordered tag names lets the
 /// runtime detect drift between the embedded contract and the linked
@@ -1872,7 +1924,7 @@ pub const HoleSummary = struct {
 };
 
 pub const HandlerContract = struct {
-    version: u32 = 19,
+    version: u32 = 20,
     handler: HandlerLoc,
     routes: std.ArrayList(RouteInfo),
     modules: std.ArrayList([]const u8), // each entry owned
@@ -1895,6 +1947,10 @@ pub const HandlerContract = struct {
     /// The tool catalog (M4 T2): one entry per `toolCatalog` key, in source
     /// order. Empty when the handler is not under the tool profile. Owned.
     tools: std.ArrayList(ToolEntry) = .empty,
+    /// The P8 report (M4 T4): one entry per declared classification, in the
+    /// declaration's canonical order, with the status the flow check reached.
+    /// Empty when the build had no declaration. Owned.
+    classifications: std.ArrayList(ClassificationReport) = .empty,
     cache: CacheInfo,
     sql: SqlInfo,
     durable: DurableInfo,
@@ -2034,6 +2090,10 @@ pub const HandlerContract = struct {
             tool.deinit(allocator);
         }
         self.tools.deinit(allocator);
+        for (self.classifications.items) |*report| {
+            report.deinit(allocator);
+        }
+        self.classifications.deinit(allocator);
         for (self.cache.namespaces.items) |s| {
             allocator.free(s);
         }

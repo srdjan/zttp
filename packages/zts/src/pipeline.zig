@@ -300,6 +300,9 @@ pub const CheckOptions = struct {
     /// Cross-file helper return labels. Empty means every such call is treated
     /// as untraceable, which is the conservative direction, not the neutral one.
     imported_fn_labels: []const ImportedFnLabels = &.{},
+    /// The consumer's declared classifications (M4 T4). Borrowed: it must
+    /// outlive the returned `CheckedModule`, whose flow checker reads it.
+    declaration: ?*const @import("zts-base").declaration.Declaration = null,
 };
 
 pub fn check(
@@ -333,6 +336,7 @@ pub fn check(
     for (opts.imported_fn_labels) |entry| {
         flow.setFileFunctionLabels(entry.slot, entry.labels);
     }
+    if (opts.declaration) |decl| try flow.setDeclaration(decl);
     const flow_errors = try flow.check(handler_func);
 
     return .{

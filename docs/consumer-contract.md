@@ -38,12 +38,11 @@ contract. The acceptance policy is a compile-time value with two presets and no 
 format. One of eight consumer obligation properties is re-derived by the acceptance
 kernel; the other seven are disclosed.
 
-The declared data-label path described in section 9.2 is **not wired**. `-Ddata-labels` is
-declared in `build.zig`, parsed into `precompile_args.zig`, and recorded in the build
-report as a boolean. It does not reach the flow checker: `parseExternalLabels` and
-`setExternalLabels` in `packages/zts/src/flow_checker.zig` have no production caller, and
-no `CompileOptions` field carries the labels. The mechanism is wanted, not present: P9
-states it as an obligation with the conditions its implementation must meet.
+The declared data-label path described in section 9.2 is in progress (M4 T4). The old
+`-Ddata-labels` path is deleted. The declaration file (`packages/zts/src/declaration.zig`)
+reaches every flow check of the handler through `--declaration`, `-Ddeclaration`, or the
+`declaration` key in `zttp.json`, and the contract (version 20) carries the P8 status of
+each entry. Section 9.2 is not yet revised to match.
 
 Nothing else in this document is implemented. The declaration document, the admissibility
 stage, spec-driven generation, and the published vocabulary envelope are obligations
@@ -528,7 +527,7 @@ Pinned identities, each compared by equality:
 | Certificate schema | 4 | `packages/proof-checker/src/proof_system.zig` |
 | Proof system | `zttp_pcc_v3` = 3 | `packages/proof-checker/src/proof_system.zig` |
 | Semantics epoch | 1 | `packages/proof-checker/src/proof_system.zig` |
-| Handler contract version | 19 | `packages/zts/src/contract_types.zig` |
+| Handler contract version | 20 | `packages/zts/src/contract_types.zig` |
 | Agent protocol schema | 2 | [Agent Protocol v2](internals/agent-protocol-v2.md) |
 
 ### 6.1 The vocabulary envelope
@@ -674,11 +673,9 @@ declaring the response field `ssn` as `secret` gets it enforced from that point,
 value cannot reach a response body, a log, or an outbound request without failing the
 build.
 
-**That path is not wired today, so the Conditional tier of 9.1 is specified rather than
-enforced.** `-Ddata-labels` is declared in `build.zig`, parsed into `precompile_args.zig`,
-and recorded in the build report as a boolean. It stops there. `parseExternalLabels` and
-`setExternalLabels` have no production caller, `ExternalLabel` appears in no file but
-`packages/zts/src/flow_checker.zig`, and no `CompileOptions` field carries the labels.
+**The rest of this section describes the mechanism before M4 T4.** That mechanism and its
+`-Ddata-labels` flag are deleted. Its replacement is the declaration file, which M4 T4
+carries into every flow check; the text below is revised in a later unit.
 
 P9 binds the producer to close that, and it is not satisfied by wiring the option alone.
 The binding consults external labels for named member access, so computed access and

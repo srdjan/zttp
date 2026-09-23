@@ -147,6 +147,14 @@ const ToolWire = struct {
     reachableExports: []const ToolExportWire = &.{},
 };
 
+const ClassificationWire = struct {
+    source: WireString = .{ .bytes = "" },
+    path: WireString = .{ .bytes = "" },
+    label: WireString = .{ .bytes = "" },
+    required: ?bool = null,
+    status: WireString = .{ .bytes = "" },
+};
+
 const SqlQueryWire = struct {
     name: WireString = .{ .bytes = "" },
     statement: WireString = .{ .bytes = "" },
@@ -466,6 +474,7 @@ const ContractWire = struct {
     affordances: []const AffordanceWire = &.{},
     affordancesDynamic: bool = false,
     tools: []const ToolWire = &.{},
+    classifications: []const ClassificationWire = &.{},
     cache: struct {
         namespaces: []const WireString = &.{},
         dynamic: bool = false,
@@ -704,6 +713,7 @@ fn projectContract(
     try projectAffordances(allocator, wire.affordances, &contract);
     contract.affordances_dynamic = wire.affordancesDynamic;
     try projectTools(allocator, wire.tools, &contract);
+    try projectClassifications(allocator, wire.classifications, &contract);
     contract.cache.namespaces = try projectStringList(allocator, wire.cache.namespaces);
     contract.cache.dynamic = wire.cache.dynamic;
     try projectSql(allocator, &wire.sql, &contract);
@@ -1001,6 +1011,46 @@ fn projectTools(
             }
         }
         contract.tools.appendAssumeCapacity(entry);
+    }
+}
+
+/// Project the P8 report (M4 T4). The value sets are closed: a label other than
+/// `secret` or `credential`, a status other than `matched`, `indeterminate`, or
+/// `absent`, a missing `required`, a source that names neither a `fetch:` nor a
+/// `service:` source, or an empty path is refused rather than read as a default,
+/// because a report the build could not have written must not pass for one.
+fn projectClassifications(
+    allocator: std.mem.Allocator,
+    wires: []const ClassificationWire,
+    contract: *HandlerContract,
+) !void {
+    try contract.classifications.ensureTotalCapacity(allocator, wires.len);
+    for (wires) |wire| {
+        const label = contract_types.ClassificationLabel.fromText(wire.label.bytes) orelse
+            return error.InvalidClassificationReport;
+        const status = contract_types.ClassificationStatus.fromText(wire.status.bytes) orelse
+            return error.InvalidClassificationReport;
+        const required = wire.required orelse return error.InvalidClassificationReport;
+        const source = decodeWireString(allocator, wire.source) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.InvalidClassificationReport,
+        };
+        errdefer allocator.free(source);
+        const path = decodeWireString(allocator, wire.path) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.InvalidClassificationReport,
+        };
+        errdefer allocator.free(path);
+        const named_source = (std.mem.startsWith(u8, source, "fetch:") and source.len > "fetch:".len) or
+            (std.mem.startsWith(u8, source, "service:") and source.len > "service:".len);
+        if (!named_source or path.len == 0) return error.InvalidClassificationReport;
+        contract.classifications.appendAssumeCapacity(.{
+            .source = source,
+            .path = path,
+            .label = label,
+            .required = required,
+            .status = status,
+        });
     }
 }
 
@@ -1942,7 +1992,7 @@ test "parseFromJson compatibility matrix preserves duplicate trailing and overfl
         version: u32,
     }{
         .{ .json = "{\"version\":1,\"version\":23} trailing", .version = 23 },
-        .{ .json = "{\"version\":99999999999999999999}", .version = 19 },
+        .{ .json = "{\"version\":99999999999999999999}", .version = 20 },
     };
     for (cases) |case| {
         var contract = try parseFromJson(std.testing.allocator, case.json);
@@ -1965,7 +2015,7 @@ test "parseFromJson keeps raw structural keys and appends repeated collections" 
     var contract = try parseFromJson(std.testing.allocator, json);
     defer contract.deinit(std.testing.allocator);
 
-    try std.testing.expectEqual(@as(u32, 19), contract.version);
+    try std.testing.expectEqual(@as(u32, 20), contract.version);
     try std.testing.expectEqual(@as(usize, 2), contract.modules.items.len);
     try std.testing.expectEqualStrings("zttp:env", contract.modules.items[0]);
     try std.testing.expectEqualStrings("zttp:cache", contract.modules.items[1]);

@@ -369,6 +369,7 @@ fn buildContractForServiceContext(
         null,
         null,
         null,
+        null,
     );
 }
 
@@ -424,7 +425,6 @@ const ResolvedGeneratorPack = struct {
     sql_schema_path: ?[]const u8 = null,
     manifest_path: ?[]const u8 = null,
     expect_properties_path: ?[]const u8 = null,
-    data_labels_path: ?[]const u8 = null,
     replay_trace_path: ?[]const u8 = null,
     fault_severity_path: ?[]const u8 = null,
     report_format: ?[]const u8 = null,
@@ -434,7 +434,6 @@ const ResolvedGeneratorPack = struct {
             self.sql_schema_path,
             self.manifest_path,
             self.expect_properties_path,
-            self.data_labels_path,
             self.replay_trace_path,
             self.fault_severity_path,
             self.report_format,
@@ -474,6 +473,11 @@ fn collectImportedFnLabels(
     allocator: std.mem.Allocator,
     facts: *const zts.pipeline.ModuleFacts,
     handler_path: []const u8,
+    /// The consumer declaration (M4 T4). Installed in each helper walk, so a
+    /// declared field a helper reads and returns keeps its label.
+    declaration: ?*const zts.declaration.Declaration,
+    /// One status per classification, raised to what any helper walk saw.
+    seen: []handler_contract.ClassificationStatus,
 ) std.ArrayList(zts.pipeline.ImportedFnLabels) {
     var out: std.ArrayList(zts.pipeline.ImportedFnLabels) = .empty;
     // Browser analysis receives one source buffer and has no filesystem. Keep
@@ -491,7 +495,7 @@ fn collectImportedFnLabels(
         const path = std.fs.path.resolve(allocator, &.{ base_dir, rec.module_specifier }) catch continue;
         defer allocator.free(path);
 
-        const labels = importedFunctionLabels(allocator, path, rec.imported_name) orelse continue;
+        const labels = importedFunctionLabels(allocator, path, rec.imported_name, declaration, seen) orelse continue;
         out.append(allocator, .{ .slot = rec.slot, .labels = labels }) catch return out;
     }
     return out;
@@ -503,6 +507,8 @@ fn importedFunctionLabels(
     allocator: std.mem.Allocator,
     path: []const u8,
     name: []const u8,
+    declaration: ?*const zts.declaration.Declaration,
+    seen: []handler_contract.ClassificationStatus,
 ) ?zts.module_binding.LabelSet {
     const source = readFilePosix(allocator, path, 10 * 1024 * 1024) catch return null;
     defer allocator.free(source);
@@ -523,7 +529,48 @@ fn importedFunctionLabels(
     const view = zts.IrView.fromIRStore(&parser.nodes, &parser.constants);
     var flow = zts.FlowChecker.init(allocator, view, &atoms);
     defer flow.deinit();
-    return flow.exportedReturnLabels(name);
+    // Without the declaration a helper that reads a declared field would hand
+    // the handler a value carrying none of its declared labels. A failed
+    // install drops the entry, which leaves the call untraceable.
+    if (declaration) |decl| flow.setDeclaration(decl) catch return null;
+    const labels = flow.exportedReturnLabels(name);
+    if (declaration) |decl| {
+        const statuses = flow.classificationStatuses();
+        if (statuses.len == decl.classifications.len and seen.len == statuses.len) {
+            for (statuses, seen) |status, *slot| {
+                const observed: handler_contract.ClassificationStatus = switch (status) {
+                    .absent => .absent,
+                    .indeterminate => .indeterminate,
+                    .matched => .matched,
+                };
+                slot.* = strongerStatus(slot.*, observed);
+            }
+        }
+    }
+    return labels;
+}
+
+/// The stronger of two P8 statuses: matched over indeterminate over absent.
+fn strongerStatus(a: handler_contract.ClassificationStatus, b: handler_contract.ClassificationStatus) handler_contract.ClassificationStatus {
+    const rank = struct {
+        fn of(s: handler_contract.ClassificationStatus) u2 {
+            return switch (s) {
+                .absent => 0,
+                .indeterminate => 1,
+                .matched => 2,
+            };
+        }
+    }.of;
+    return if (rank(b) > rank(a)) b else a;
+}
+
+/// Raise each entry of the contract's P8 report to what an imported helper's
+/// walk saw. `seen` is empty when there was no declaration.
+fn mergeImportedClassificationStatus(contract: *HandlerContract, seen: []const handler_contract.ClassificationStatus) void {
+    if (seen.len != contract.classifications.items.len) return;
+    for (contract.classifications.items, seen) |*report, observed| {
+        report.status = strongerStatus(report.status, observed);
+    }
 }
 
 fn resolveGeneratorPack(
@@ -546,7 +593,13 @@ fn resolveGeneratorPack(
     result.sql_schema_path = try dupJsonValue(allocator, obj, "sqlSchema", base_dir);
     result.manifest_path = try dupJsonValue(allocator, obj, "manifest", base_dir);
     result.expect_properties_path = try dupJsonValue(allocator, obj, "expectProperties", base_dir);
-    result.data_labels_path = try dupJsonValue(allocator, obj, "dataLabels", base_dir);
+    // The `dataLabels` key fed a deleted mechanism (M4 T4). A pack that still
+    // names it expects labels to be enforced, so it is refused rather than
+    // read and ignored; the declaration replaces it (`--declaration`).
+    if (obj.get("dataLabels") != null) {
+        if (!builtin.is_test) debugPrint("Generator pack '{s}' names \"dataLabels\", which is removed; pass the consumer declaration with --declaration\n", .{path});
+        return error.InvalidGeneratorPack;
+    }
     result.replay_trace_path = try dupJsonValue(allocator, obj, "replay", base_dir);
     result.fault_severity_path = try dupJsonValue(allocator, obj, "faultSeverity", base_dir);
     result.report_format = try dupJsonValue(allocator, obj, "report", null);
@@ -605,7 +658,6 @@ pub fn runCompileWithArgs(allocator: std.mem.Allocator, argv: []const []const u8
         if (opts.sql_schema_path == null) opts.sql_schema_path = generator_pack.?.sql_schema_path;
         if (opts.manifest_path == null) opts.manifest_path = generator_pack.?.manifest_path;
         if (opts.expect_properties_path == null) opts.expect_properties_path = generator_pack.?.expect_properties_path;
-        if (opts.data_labels_path == null) opts.data_labels_path = generator_pack.?.data_labels_path;
         if (opts.replay_trace_path == null) opts.replay_trace_path = generator_pack.?.replay_trace_path;
         if (opts.fault_severity_path == null) opts.fault_severity_path = generator_pack.?.fault_severity_path;
         if (opts.report_format == null) opts.report_format = generator_pack.?.report_format;
@@ -649,6 +701,14 @@ pub fn runCompileWithArgs(allocator: std.mem.Allocator, argv: []const []const u8
         };
     }
 
+    // The consumer declaration (M4 T4). Loaded before compilation and kept
+    // alive until the build ends: the flow checker borrows it.
+    var declaration: ?zts.declaration.Declaration = null;
+    defer if (declaration) |*decl| decl.deinit();
+    if (opts.declaration_path) |path| {
+        declaration = try loadDeclarationFile(allocator, path, null);
+    }
+
     debugPrint("Compiling handler: {s} ({d} bytes)\n", .{ handler_path_final, source.len });
 
     // Compile the handler to bytecode (+ optional AOT analysis + optional verification + optional contract)
@@ -665,6 +725,7 @@ pub fn runCompileWithArgs(allocator: std.mem.Allocator, argv: []const []const u8
         .manifest_registry = registry_ptr,
         .build_time = opts.build_time,
         .git_commit = opts.git_commit,
+        .declaration = if (declaration) |*decl| decl else null,
     }) catch |err| {
         debugPrint("Compilation failed: {}\n", .{err});
         return err;
@@ -901,7 +962,7 @@ pub fn runCompileWithArgs(allocator: std.mem.Allocator, argv: []const []const u8
                 .sql_schema = opts.sql_schema_path != null,
                 .manifest = opts.manifest_path != null,
                 .property_expectations = opts.expect_properties_path != null,
-                .data_labels = opts.data_labels_path != null,
+                .declaration = opts.declaration_path != null,
                 .replay = opts.replay_trace_path != null,
                 .fault_severity = opts.fault_severity_path != null,
             };
@@ -932,7 +993,121 @@ pub const CheckOptions = struct {
     /// does not abort. Null means no policy, which is what a project that
     /// declares none has, and the POL rules stay silent.
     policy_source: ?[]const u8 = null,
+    /// The consumer's declared classifications (M4 T4), already loaded with
+    /// `loadDeclarationFile` or `parseDeclarationBytes`. Borrowed for the call.
+    /// The flow check enforces it, the contract carries its P8 report, and a
+    /// required entry the analysis never saw counts as a check error.
+    declaration: ?*const zts.declaration.Declaration = null,
 };
+
+/// Why a declaration was refused, for a caller that reports it itself.
+pub const DeclarationRefusal = struct {
+    reason: zts.declaration.Refusal,
+    /// Zero-based entry index in the document, when the refusal is about one.
+    entry: ?u32,
+};
+
+/// Validate declaration bytes. A refusal prints the reason tag and the entry
+/// index, names `origin` (the file or config key the bytes came from), fills
+/// `refusal_out` when given, and returns `error.DeclarationRefused`: a refused
+/// declaration stops the build or the check, it is never skipped. The caller
+/// owns the returned declaration.
+pub fn parseDeclarationBytes(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    origin: []const u8,
+    refusal_out: ?*DeclarationRefusal,
+) !zts.declaration.Declaration {
+    const result = try zts.declaration.parse(allocator, bytes);
+    switch (result) {
+        .ok => |decl| return decl,
+        .refused => |refused| {
+            if (refusal_out) |out| out.* = .{ .reason = refused.reason, .entry = refused.entry };
+            if (!builtin.is_test) {
+                if (refused.entry) |entry| {
+                    debugPrint("Declaration '{s}' refused: {s} at classification entry {d}\n", .{ origin, @tagName(refused.reason), entry });
+                } else {
+                    debugPrint("Declaration '{s}' refused: {s}\n", .{ origin, @tagName(refused.reason) });
+                }
+            }
+            return error.DeclarationRefused;
+        },
+    }
+}
+
+/// Read a declaration file, bounded by the loader's own document cap, and
+/// validate it with `parseDeclarationBytes`.
+pub fn loadDeclarationFile(
+    allocator: std.mem.Allocator,
+    path: []const u8,
+    refusal_out: ?*DeclarationRefusal,
+) !zts.declaration.Declaration {
+    const bytes = readFilePosix(allocator, path, zts.declaration.max_document_bytes) catch |err| {
+        if (!builtin.is_test) debugPrint("Declaration '{s}' could not be read: {s}\n", .{ path, @errorName(err) });
+        return err;
+    };
+    defer allocator.free(bytes);
+    return parseDeclarationBytes(allocator, bytes, path, refusal_out);
+}
+
+/// Fill the contract's P8 report from the declaration and the flow checker that
+/// ran with it. An entry is `absent` unless that checker ran with this very
+/// declaration installed and reported a status for it, so a flow check that
+/// never received the declaration cannot make a required entry look seen.
+fn fillClassificationReport(
+    allocator: std.mem.Allocator,
+    contract: *HandlerContract,
+    decl: *const zts.declaration.Declaration,
+    flow: ?*const zts.FlowChecker,
+) !void {
+    for (contract.classifications.items) |*report| report.deinit(allocator);
+    contract.classifications.clearRetainingCapacity();
+    try contract.classifications.ensureTotalCapacity(allocator, decl.classifications.len);
+    for (decl.classifications, 0..) |entry, index| {
+        const status: handler_contract.ClassificationStatus = blk: {
+            const checker = flow orelse break :blk .absent;
+            const installed = checker.declaration orelse break :blk .absent;
+            if (installed != decl) break :blk .absent;
+            const statuses = checker.classificationStatuses();
+            if (statuses.len != decl.classifications.len) break :blk .absent;
+            break :blk switch (statuses[index]) {
+                .absent => .absent,
+                .indeterminate => .indeterminate,
+                .matched => .matched,
+            };
+        };
+        const source = try std.fmt.allocPrint(allocator, "{s}:{s}", .{ @tagName(entry.source_kind), entry.source_name });
+        errdefer allocator.free(source);
+        const path = try allocator.dupe(u8, entry.path_text);
+        contract.classifications.appendAssumeCapacity(.{
+            .source = source,
+            .path = path,
+            .label = switch (entry.label) {
+                .secret => .secret,
+                .credential => .credential,
+            },
+            .required = entry.required,
+            .status = status,
+        });
+    }
+}
+
+/// Refuse a build whose declaration names a required field the analysis never
+/// saw (design note section 5, owner decision Q2): it would enforce nothing.
+/// A build error with the entry named, not a ZTS diagnostic, so the policy hash
+/// does not move.
+pub fn refuseRequiredAbsent(contract: *const HandlerContract, filename: []const u8) !void {
+    const index = handler_contract.firstRequiredAbsent(contract.classifications.items) orelse return;
+    const report = contract.classifications.items[index];
+    if (!builtin.is_test) {
+        debugPrint(
+            "Declared classification is required but the analysis never saw it in {s}: source {s}, path {s}\n" ++
+                "  A required entry must name a field the handler reads from that source; fix the path or mark it \"required\": false.\n",
+            .{ filename, report.source, report.path },
+        );
+    }
+    return error.RequiredClassificationAbsent;
+}
 
 pub fn runCheckOnly(
     allocator: std.mem.Allocator,
@@ -1446,17 +1621,27 @@ fn runCheckOnPreparedSource(
     var verify_info: ?VerificationInfo = null;
     var checked_opt: ?zts.pipeline.CheckedModule = null;
     defer if (checked_opt) |*c| c.deinit();
+    // What the walks of imported helpers saw of each declared classification,
+    // merged into the handler's P8 report after the contract is built. A field
+    // read only inside a helper was seen, and must not report `absent`.
+    const imported_seen: []handler_contract.ClassificationStatus = if (opts.declaration) |decl|
+        try allocator.alloc(handler_contract.ClassificationStatus, decl.classifications.len)
+    else
+        &.{};
+    defer allocator.free(imported_seen);
+    @memset(imported_seen, .absent);
     if (zts.findHandlerFunction(ir_view, root)) |hf| {
         // Return labels for helpers imported from sibling files. Without them
         // the flow checker has no body to walk for such a call and has to
         // treat its value as untraceable, which costs every property the
         // value's sink decides.
-        var imported_labels = collectImportedFnLabels(allocator, &module_facts, handler_path);
+        var imported_labels = collectImportedFnLabels(allocator, &module_facts, handler_path, opts.declaration, imported_seen);
         defer imported_labels.deinit(allocator);
 
         var checked = try zts.pipeline.check(allocator, &resolved, hf, .{
             .module_facts = &module_facts,
             .imported_fn_labels = imported_labels.items,
+            .declaration = opts.declaration,
         });
         result.verify_ran = true;
         result.verify_errors = @intCast(checked.verifier_error_count);
@@ -1555,7 +1740,9 @@ fn runCheckOnPreparedSource(
         flow_in,
         null,
         &resolved,
+        opts.declaration,
     );
+    if (result.contract) |*contract_ref| mergeImportedClassificationStatus(contract_ref, imported_seen);
 
     // Stage 8b: capability policy. Reported, not thrown.
     //
@@ -1776,6 +1963,11 @@ pub const CompileOptions = struct {
     /// of the witness arrays, and only a caller producing a certificate needs
     /// them.
     emit_proof_evidence: bool = false,
+    /// The consumer's declared classifications (M4 T4). Borrowed; it must
+    /// outlive the call. The flow check enforces it, the contract carries its
+    /// P8 report, and a required entry the analysis never saw refuses the build
+    /// with `error.RequiredClassificationAbsent`.
+    declaration: ?*const zts.declaration.Declaration = null,
 };
 
 test "formatIsoTimestamp produces ISO-8601 UTC" {
@@ -1881,6 +2073,13 @@ pub fn compileHandler(
     const stc_ptr: ?*const ServiceTypeContext = if (service_type_context) |*ctx| ctx else null;
 
     if (has_file_imports) {
+        // The multi-module build path runs no flow check, so it cannot enforce
+        // a declaration or report its entries. Refuse rather than build an
+        // artifact whose declaration was silently ignored.
+        if (opts.declaration != null) {
+            if (!builtin.is_test) debugPrint("A consumer declaration cannot be enforced on {s}: the build path for a handler with file imports runs no flow check\n", .{filename});
+            return error.DeclarationNotEnforced;
+        }
         if (!builtin.is_test) debugPrint("File imports detected, building module graph...\n", .{});
         return compileMultiModule(
             allocator,
@@ -2218,7 +2417,7 @@ pub fn compileHandler(
             // Build contract if requested or needed for policy validation.
             // This is an early-return path (transpiler fallback); violations_out
             // is null here because PathGenerator hasn't run yet.
-            const contract = if (needs_contract)
+            var contract: ?HandlerContract = if (needs_contract)
                 try buildContractWithPolicy(
                     allocator,
                     &js_parser,
@@ -2235,9 +2434,12 @@ pub fn compileHandler(
                     null,
                     manifest_registry,
                     &resolved,
+                    opts.declaration,
                 )
             else
                 null;
+            errdefer if (contract) |*built| built.deinit(allocator);
+            if (contract) |*built| try refuseRequiredAbsent(built, filename);
 
             return .{
                 .bytecode = bytecode_data,
@@ -2288,7 +2490,9 @@ pub fn compileHandler(
             null,
             manifest_registry,
             &resolved,
+            opts.declaration,
         );
+        try refuseRequiredAbsent(&contract.?, filename);
 
         // Inject verification-derived properties (Checks 2, 6, 7)
         if (contract.?.properties) |*props| {
@@ -2804,6 +3008,10 @@ fn buildContractWithPolicy(
     /// Contract extraction then builds on the checker that already ran instead
     /// of constructing a second identical one and re-checking the same root.
     resolved: ?*zts.pipeline.ResolvedModule,
+    /// The consumer's declared classifications (M4 T4). A fresh flow check
+    /// installs it; a precomputed one must already carry it. Either way the
+    /// contract's P8 report is filled from it.
+    declaration: ?*const zts.declaration.Declaration,
 ) !HandlerContract {
     const contract_view = zts.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
     const parsed = zts.pipeline.ParsedModule.fromExisting(contract_view, root, atoms);
@@ -2847,6 +3055,7 @@ fn buildContractWithPolicy(
             const flow_errors: u32 = if (precomputed_flow) |_| 0 else blk: {
                 owned_flow = zts.FlowChecker.init(allocator, ir_view, atoms);
                 owned_flow.?.facts = &module_facts;
+                if (declaration) |decl| try owned_flow.?.setDeclaration(decl);
                 break :blk try owned_flow.?.check(hf);
             };
 
@@ -2895,9 +3104,15 @@ fn buildContractWithPolicy(
                 zts.property_diagnostics.collectFlowViolations(allocator, vout, flow_diags, ir_view);
             }
 
+            if (declaration) |decl| try fillClassificationReport(allocator, &contract, decl, flow);
+
             if (fresh and !builtin.is_test and flow_errors == 0) {
                 debugPrint("Flow analysis passed\n", .{});
             }
+        } else if (declaration) |decl| {
+            // No handler function: the flow check never ran, so every entry
+            // is absent and a required one refuses the build.
+            try fillClassificationReport(allocator, &contract, decl, null);
         }
     }
 
@@ -3755,6 +3970,7 @@ fn buildTestContractForSource(
         null,
         null,
         sql_schema_path,
+        null,
         null,
         null,
         null,
@@ -5992,7 +6208,6 @@ test "resolveGeneratorPack parses integration paths" {
         \\  "sqlSchema": "schema.sql",
         \\  "manifest": "governance-manifest.json",
         \\  "expectProperties": "handler-properties.expected.json",
-        \\  "dataLabels": "data-labels.json",
         \\  "replay": "simulation-traces.jsonl",
         \\  "faultSeverity": "fault-severity.json",
         \\  "report": "json"
@@ -6011,6 +6226,16 @@ test "resolveGeneratorPack parses integration paths" {
     try std.testing.expect(std.mem.endsWith(u8, pack.sql_schema_path.?, "/schema.sql"));
     try std.testing.expect(std.mem.endsWith(u8, pack.manifest_path.?, "/governance-manifest.json"));
     try std.testing.expectEqualStrings("json", pack.report_format.?);
+}
+
+test "resolveGeneratorPack refuses the removed dataLabels key" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "pack.json", .data = "{\"dataLabels\": \"data-labels.json\"}" });
+    const allocator = std.testing.allocator;
+    const pack_path = try tmp.dir.realPathFileAlloc(std.testing.io, "pack.json", allocator);
+    defer allocator.free(pack_path);
+    try std.testing.expectError(error.InvalidGeneratorPack, resolveGeneratorPack(allocator, pack_path));
 }
 
 test "writeSdkArtifact writes client sibling file" {
@@ -6535,4 +6760,266 @@ test "a named intersection member is checked, like the inline spelling" {
     // return to the fail-open visible.
     try std.testing.expectEqual(@as(u32, 1), inlined.type_errors);
     try std.testing.expectEqual(@as(u32, 1), named.type_errors);
+}
+
+// ---------------------------------------------------------------------------
+// The consumer declaration carried into the check and the build (M4 T4 U3)
+// ---------------------------------------------------------------------------
+
+const declared_leak_handler =
+    \\import { fetch } from "zttp:fetch";
+    \\function handler(req: Request): Response {
+    \\  const r = fetch("https://api.example.com/customers/1");
+    \\  const body = r.json();
+    \\  return Response.json({ t: body.customer.tax_id });
+    \\}
+    \\
+;
+
+const declared_sibling_handler =
+    \\import { fetch } from "zttp:fetch";
+    \\function handler(req: Request): Response {
+    \\  const r = fetch("https://api.example.com/customers/1");
+    \\  const body = r.json();
+    \\  return Response.json({ n: body.customer.name });
+    \\}
+    \\
+;
+
+const tax_id_declaration =
+    \\{"version":1,"classifications":[
+    \\ {"source":"fetch:api.example.com","path":"customer.tax_id","label":"secret","required":true,"reason":"Tax identifier."}]}
+;
+
+/// A declaration and a handler written to a temporary directory, the
+/// declaration loaded from its file exactly as `--declaration` loads it.
+const DeclaredFixture = struct {
+    tmp: std.testing.TmpDir,
+    handler_path: [:0]u8,
+    declaration: zts.declaration.Declaration,
+
+    fn init(handler_source: []const u8, declaration_json: []const u8) !DeclaredFixture {
+        const allocator = std.testing.allocator;
+        var tmp = std.testing.tmpDir(.{});
+        errdefer tmp.cleanup();
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "handler.ts", .data = handler_source });
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "declaration.json", .data = declaration_json });
+        const handler_path = try tmp.dir.realPathFileAlloc(std.testing.io, "handler.ts", allocator);
+        errdefer allocator.free(handler_path);
+        const declaration_path = try tmp.dir.realPathFileAlloc(std.testing.io, "declaration.json", allocator);
+        defer allocator.free(declaration_path);
+        const declaration = try loadDeclarationFile(allocator, declaration_path, null);
+        return .{ .tmp = tmp, .handler_path = handler_path, .declaration = declaration };
+    }
+
+    fn deinit(self: *DeclaredFixture) void {
+        self.declaration.deinit();
+        std.testing.allocator.free(self.handler_path);
+        self.tmp.cleanup();
+    }
+};
+
+test "check with a declaration refuses a declared secret with ZTS400 and reports it matched" {
+    const allocator = std.testing.allocator;
+    var fixture = try DeclaredFixture.init(declared_leak_handler, tax_id_declaration);
+    defer fixture.deinit();
+
+    var result = try runCheckOnlyWithOptions(allocator, fixture.handler_path, .{
+        .json_mode = true,
+        .declaration = &fixture.declaration,
+    });
+    defer result.deinit(allocator);
+
+    var saw_zts400 = false;
+    for (result.json_diagnostics.items) |d| {
+        if (std.mem.eql(u8, d.code, "ZTS400")) saw_zts400 = true;
+    }
+    try std.testing.expect(saw_zts400);
+    const contract = &result.contract.?;
+    try std.testing.expect(!contract.properties.?.no_secret_leakage);
+    try std.testing.expectEqual(@as(usize, 1), contract.classifications.items.len);
+    const entry = contract.classifications.items[0];
+    try std.testing.expectEqualStrings("fetch:api.example.com", entry.source);
+    try std.testing.expectEqualStrings("customer.tax_id", entry.path);
+    try std.testing.expect(entry.required);
+    try std.testing.expectEqual(handler_contract.ClassificationStatus.matched, entry.status);
+    try std.testing.expectEqual(@as(u32, 0), result.classificationErrors());
+
+    // `zts check --json` carries the report in the proof object.
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    defer out.deinit();
+    try json_diag.writeErrorJson(&out.writer, contract, result.json_diagnostics.items, null, null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(),
+        \\"classifications":[{"source":"fetch:api.example.com","path":"customer.tax_id","label":"secret","required":true,"status":"matched"}]
+    ) != null);
+}
+
+test "check without a declaration admits the same read and writes no classifications key" {
+    const allocator = std.testing.allocator;
+    var fixture = try DeclaredFixture.init(declared_leak_handler, tax_id_declaration);
+    defer fixture.deinit();
+
+    var result = try runCheckOnlyWithOptions(allocator, fixture.handler_path, .{ .json_mode = true });
+    defer result.deinit(allocator);
+    const contract = &result.contract.?;
+    try std.testing.expect(contract.properties.?.no_secret_leakage);
+    try std.testing.expectEqual(@as(usize, 0), contract.classifications.items.len);
+
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    defer out.deinit();
+    try json_diag.writeErrorJson(&out.writer, contract, result.json_diagnostics.items, null, null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "classifications") == null);
+}
+
+test "a required entry on a host the handler never fetches refuses the build and fails the check" {
+    const allocator = std.testing.allocator;
+    const declaration_json =
+        \\{"version":1,"classifications":[
+        \\ {"source":"fetch:billing.example.com","path":"card.token","label":"credential","required":true,"reason":"Card token."}]}
+    ;
+    var fixture = try DeclaredFixture.init(declared_sibling_handler, declaration_json);
+    defer fixture.deinit();
+
+    try std.testing.expectError(
+        error.RequiredClassificationAbsent,
+        compileHandler(allocator, declared_sibling_handler, fixture.handler_path, .{ .declaration = &fixture.declaration }),
+    );
+
+    var result = try runCheckOnlyWithOptions(allocator, fixture.handler_path, .{
+        .json_mode = true,
+        .declaration = &fixture.declaration,
+    });
+    defer result.deinit(allocator);
+    const entry = result.contract.?.classifications.items[0];
+    try std.testing.expectEqualStrings("fetch:billing.example.com", entry.source);
+    try std.testing.expectEqual(handler_contract.ClassificationStatus.absent, entry.status);
+    try std.testing.expectEqual(@as(u32, 1), result.classificationErrors());
+    try std.testing.expect(result.totalErrors() >= 1);
+}
+
+test "the build enforces a declared secret and reports it matched" {
+    const allocator = std.testing.allocator;
+    var fixture = try DeclaredFixture.init(declared_leak_handler, tax_id_declaration);
+    defer fixture.deinit();
+
+    var compiled = try compileHandler(allocator, declared_leak_handler, fixture.handler_path, .{ .declaration = &fixture.declaration });
+    defer compiled.deinit(allocator);
+    const contract = &compiled.contract.?;
+    try std.testing.expect(!contract.properties.?.no_secret_leakage);
+    try std.testing.expectEqual(handler_contract.ClassificationStatus.matched, contract.classifications.items[0].status);
+
+    // Control: the same build without the declaration proves the property.
+    var undeclared = try compileHandler(allocator, declared_leak_handler, fixture.handler_path, .{});
+    defer undeclared.deinit(allocator);
+    try std.testing.expect(undeclared.contract.?.properties.?.no_secret_leakage);
+    try std.testing.expectEqual(@as(usize, 0), undeclared.contract.?.classifications.items.len);
+}
+
+test "an optional entry the analysis never saw passes the build and reports absent" {
+    const allocator = std.testing.allocator;
+    const declaration_json =
+        \\{"version":1,"classifications":[
+        \\ {"source":"fetch:api.example.com","path":"customer.tax_id","label":"secret","required":false,"reason":"Tax identifier."}]}
+    ;
+    var fixture = try DeclaredFixture.init(declared_sibling_handler, declaration_json);
+    defer fixture.deinit();
+
+    var compiled = try compileHandler(allocator, declared_sibling_handler, fixture.handler_path, .{ .declaration = &fixture.declaration });
+    defer compiled.deinit(allocator);
+    const contract = &compiled.contract.?;
+    try std.testing.expect(contract.properties.?.no_secret_leakage);
+    try std.testing.expectEqual(@as(usize, 1), contract.classifications.items.len);
+    try std.testing.expect(!contract.classifications.items[0].required);
+    try std.testing.expectEqual(handler_contract.ClassificationStatus.absent, contract.classifications.items[0].status);
+
+    // The contract written for the artifact carries the report.
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    defer out.deinit();
+    try writeContractJson(contract, &out.writer);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"status\": \"absent\"") != null);
+}
+
+test "a declaration file the loader refuses names the reason and the entry" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const Case = struct { json: []const u8, reason: zts.declaration.Refusal, entry: ?u32 };
+    const cases = [_]Case{
+        .{
+            .json =
+            \\{"version":1,"classifications":[
+            \\ {"source":"fetch:api.example.com","path":"customer.tax_id","label":"validated","required":true,"reason":"r"}]}
+            ,
+            .reason = .label_unsupported,
+            .entry = 0,
+        },
+        // C4: an empty label file must fail.
+        .{ .json = "{\"version\":1,\"classifications\":[]}", .reason = .classifications_empty, .entry = null },
+    };
+    for (cases) |case| {
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "declaration.json", .data = case.json });
+        const path = try tmp.dir.realPathFileAlloc(std.testing.io, "declaration.json", allocator);
+        defer allocator.free(path);
+        var refusal: DeclarationRefusal = undefined;
+        try std.testing.expectError(error.DeclarationRefused, loadDeclarationFile(allocator, path, &refusal));
+        try std.testing.expectEqual(case.reason, refusal.reason);
+        try std.testing.expectEqual(case.entry, refusal.entry);
+    }
+}
+
+test "check follows a declared field through an imported helper and reports it matched" {
+    const allocator = std.testing.allocator;
+    const handler_source =
+        \\import { taxId } from "./dep.ts";
+        \\function handler(req: Request): Response {
+        \\  return Response.json({ t: taxId() });
+        \\}
+        \\
+    ;
+    var fixture = try DeclaredFixture.init(handler_source, tax_id_declaration);
+    defer fixture.deinit();
+    try fixture.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "dep.ts", .data =
+        \\import { fetch } from "zttp:fetch";
+        \\export function taxId(): string {
+        \\  const r = fetch("https://api.example.com/customers/1");
+        \\  return r.json().customer.tax_id;
+        \\}
+        \\
+    });
+
+    var result = try runCheckOnlyWithOptions(allocator, fixture.handler_path, .{
+        .json_mode = true,
+        .declaration = &fixture.declaration,
+    });
+    defer result.deinit(allocator);
+    const contract = &result.contract.?;
+    try std.testing.expect(!contract.properties.?.no_secret_leakage);
+    try std.testing.expectEqual(handler_contract.ClassificationStatus.matched, contract.classifications.items[0].status);
+    try std.testing.expectEqual(@as(u32, 0), result.classificationErrors());
+}
+
+test "a declaration cannot ride the multi-module build path, which runs no flow check" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const entry_source =
+        \\import { name } from "./dep.ts";
+        \\function handler(req: Request): Response {
+        \\  return Response.text(name());
+        \\}
+        \\
+    ;
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "entry.ts", .data = entry_source });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "dep.ts", .data = "export function name(): string {\n  return \"x\";\n}\n" });
+    const entry_path = try tmp.dir.realPathFileAlloc(std.testing.io, "entry.ts", allocator);
+    defer allocator.free(entry_path);
+
+    var fixture = try DeclaredFixture.init(declared_leak_handler, tax_id_declaration);
+    defer fixture.deinit();
+
+    try std.testing.expectError(
+        error.DeclarationNotEnforced,
+        compileHandler(allocator, entry_source, entry_path, .{ .declaration = &fixture.declaration }),
+    );
 }

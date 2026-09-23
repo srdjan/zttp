@@ -297,6 +297,26 @@ fn writeContractJsonVersion(
     }
     try writer.writeAll("],\n");
 
+    // classifications (the M4 T4 P8 report: one entry per declared
+    // classification with the status the flow check reached)
+    try writer.writeAll("  \"classifications\": [");
+    for (contract.classifications.items, 0..) |report, i| {
+        if (i > 0) try writer.writeAll(",");
+        try writer.writeAll("\n    { \"source\": ");
+        try writeJsonString(writer, report.source);
+        try writer.writeAll(", \"path\": ");
+        try writeJsonString(writer, report.path);
+        try writer.print(", \"label\": \"{s}\", \"required\": {s}, \"status\": \"{s}\" }}", .{
+            @tagName(report.label),
+            if (report.required) "true" else "false",
+            @tagName(report.status),
+        });
+    }
+    if (contract.classifications.items.len > 0) {
+        try writer.writeAll("\n  ");
+    }
+    try writer.writeAll("],\n");
+
     // cache
     try writer.writeAll("  \"cache\": {\n");
     try writer.writeAll("    \"namespaces\": [");

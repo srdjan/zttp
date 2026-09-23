@@ -174,10 +174,17 @@ fn runCheckCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void
     var emit_types = false;
     var json_mode = false;
     var require_export_capsules = false;
+    var explicit_declaration_path: ?[]const u8 = null;
 
     var i: usize = 0;
     while (i < argv.len) : (i += 1) {
         const arg = argv[i];
+        if (std.mem.eql(u8, arg, "--declaration")) {
+            i += 1;
+            if (i >= argv.len) return error.MissingArgument;
+            explicit_declaration_path = argv[i];
+            continue;
+        }
         if (std.mem.eql(u8, arg, "--sql-schema")) {
             i += 1;
             if (i >= argv.len) return error.MissingArgument;
@@ -244,11 +251,22 @@ fn runCheckCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void
     };
     defer if (policy_source) |src| allocator.free(src);
 
+    var declaration = loadCheckDeclaration(
+        allocator,
+        explicit_declaration_path,
+        if (handler_path) |path| path else null,
+    ) catch {
+        // The loader already named the file and the reason on stderr.
+        std.process.exit(1);
+    };
+    defer if (declaration) |*decl| decl.deinit();
+
     var result = precompile.runCheckOnlyWithOptions(allocator, target, .{
         .sql_schema_path = sql_schema_path,
         .json_mode = json_mode,
         .system_path = system_path,
         .policy_source = policy_source,
+        .declaration = if (declaration) |*decl| decl else null,
     }) catch |err| switch (err) {
         error.MissingSqlSchema => {
             if (json_mode) try writeMissingSqlSchemaJson(allocator, target);
@@ -591,6 +609,31 @@ fn defaultProjectEntry(allocator: std.mem.Allocator) ![]u8 {
 /// One walk backs both this and the schema resolver: a third hand-written copy
 /// here let `check` and `edit-simulate` drift into different verdicts for the
 /// same handler.
+/// Load the consumer declaration for a check (M4 T4). An explicit
+/// `--declaration` path wins; otherwise the `declaration` key of the nearest
+/// zttp.json above `start_path` (or cwd) is used. Null when neither names one.
+/// A declaration that cannot be read, or that the loader refuses, is an error:
+/// the check does not run without the declaration the project names.
+pub fn loadCheckDeclaration(
+    allocator: std.mem.Allocator,
+    explicit_path: ?[]const u8,
+    start_path: ?[]const u8,
+) !?zts.declaration.Declaration {
+    if (explicit_path) |path| return try precompile.loadDeclarationFile(allocator, path, null);
+
+    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    var project = try project_config_mod.discover(allocator, io_backend.io(), start_path);
+    defer if (project) |*p| p.deinit(allocator);
+    const cfg = if (project) |*p| p else return null;
+    const bytes = cfg.readDeclaration(allocator) catch |err| {
+        std.debug.print("Configured declaration '{s}' could not be read: {s}\n", .{ cfg.declaration orelse "", @errorName(err) });
+        return err;
+    } orelse return null;
+    defer allocator.free(bytes);
+    return try precompile.parseDeclarationBytes(allocator, bytes, cfg.declaration orelse "zttp.json declaration", null);
+}
+
 pub fn discoverProjectSystemPath(allocator: std.mem.Allocator, start_path: ?[]const u8) !?[]u8 {
     var paths = try edit_simulate.discoverProjectPaths(allocator, start_path);
     if (paths.sqlite) |p| allocator.free(p);
@@ -651,6 +694,8 @@ fn printCheckHelp() void {
         \\  --types          Emit zttp.d.ts type definitions for IDE autocomplete
         \\  --sql-schema P   SQLite schema file for query validation
         \\  --system P       system.json for internal serviceCall typing
+        \\  --declaration P  Consumer declaration JSON whose classifications the
+        \\                   flow check enforces; wins over zttp.json "declaration"
         \\  --require-export-capsules
         \\                   Docs mode: warn (ZTS508) when an exported helper
         \\                   carries no Proof<...> capsule

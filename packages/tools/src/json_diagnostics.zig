@@ -462,6 +462,25 @@ fn writeSpecAndCapsulesJson(
     try writeEffectCapsulesJson(writer, c.function_effect_capsules.items);
     try writer.writeAll(",\"holes\":");
     try writeHolesJson(writer, c.holes.items);
+    // The P8 report (M4 T4), only when a declaration was given: a declaration
+    // always has at least one entry, so an empty list means none was, and the
+    // envelope of a check without one stays byte-identical.
+    if (c.classifications.items.len > 0) {
+        try writer.writeAll(",\"classifications\":[");
+        for (c.classifications.items, 0..) |entry, i| {
+            if (i > 0) try writer.writeByte(',');
+            try writer.writeAll("{\"source\":");
+            try writeJsonString(writer, entry.source);
+            try writer.writeAll(",\"path\":");
+            try writeJsonString(writer, entry.path);
+            try writer.print(",\"label\":\"{s}\",\"required\":{s},\"status\":\"{s}\"}}", .{
+                @tagName(entry.label),
+                if (entry.required) "true" else "false",
+                @tagName(entry.status),
+            });
+        }
+        try writer.writeByte(']');
+    }
 }
 
 /// Emit the `holes` array: every `hole()` call site with the type the

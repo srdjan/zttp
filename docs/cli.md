@@ -371,7 +371,7 @@ These commands are listed by `zttp help --all` from the shared `zts`
 command registry:
 
 ```bash
-zttp check [handler.ts] [--json] [--contract] [--types]
+zttp check [handler.ts] [--json] [--contract] [--types] [--declaration path]
 zttp prove <old-contract.json> <new-contract.json>
 zttp prove-behavior <before.ts> <after.ts> [--json] [--sql-schema path]
 zttp mock <tests.jsonl> [--port <port>]
