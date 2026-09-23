@@ -1,7 +1,7 @@
 # M4 T2 design note: canonical tool catalog and closed schema subset
 
-Status: proposed on 2026-09-23. It is not accepted. Section 8 holds the
-questions the owner must answer before code starts. This note answers the
+Status: accepted by the owner on 2026-09-23, with the recommended answer to
+each question in section 8 and the file extension in section 7. This note answers the
 condition that proposal A puts on T2 (`A:275-277`): define the closed schema
 subset before choosing whether to extend `zttp:validate` or add a catalog
 validator. Check C2 of the
@@ -340,3 +340,11 @@ schema source (4.2 A), a new validator in zts with `zttp:validate` unchanged
 (4.3 A), the per-route walk that refuses unresolved calls (4.4 A), no `null` in
 version 1, one diagnostic code with a reason enum, and the file extension in
 section 7.
+
+## 9. Decisions
+
+The owner answered on 2026-09-23. Q1: the literal `toolCatalog({...})` call in
+`zttp:tool`. Q2: a handler under the tool profile is tool-only, so build rule 8
+applies. Q3: `maxLength` and `minLength` count Unicode scalar values. Q4: the
+maximum nesting depth is 8 and the `maxInputBytes` ceiling is 1 MiB (1048576).
+The recommended defaults at the end of section 8 stand.

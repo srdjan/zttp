@@ -1,6 +1,6 @@
 # M4: release contract for scoped tool routes
 
-Status: accepted by the owner on 2026-09-22. T1a and T1b are complete; T2 is next.
+Status: accepted by the owner on 2026-09-22. T1a and T1b are complete; T2 is in progress under its [design note](2026-09-23-m4-t2-tool-catalog-design.md).
 Baseline: local `main` at `176d81ca`. Roadmap row:
 [M4 in the roadmap](../roadmap.md) (`docs/roadmap.md:20`). This document
 reconciles proposal A, the
