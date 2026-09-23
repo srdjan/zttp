@@ -376,6 +376,25 @@ know which labels it may name. They are expressed in the serialization P4 requir
 they are the reason P4 has to land before P8 and P9 can be tested rather than merely
 stated.
 
+Version 1 of that content, as implemented for the M4 release boundary
+([T4 design note](plans/2026-09-23-m4-t4-declared-labels-design.md)):
+
+- The declaration is an authored JSON file named by zttp.json's `declaration` key or a
+  `--declaration` flag, with `version: 1` and a `classifications` array that must not be
+  empty. An unknown field, a duplicate key, or any entry breaking a rule below refuses the
+  whole file with a named reason and the entry's index (`packages/zts/src/declaration.zig`).
+- Every entry carries `source`, `path`, `label`, `required`, and `reason`, with no defaults.
+- The source selector is `fetch:<host>`, a lowercase host that a `fetch` or
+  `fetchWithRetry` URL names, or `service:<name>`, a service that `serviceCall` names.
+- The path is 1 to 16 dot-separated identifier segments from the root of the response
+  body. Version 1 has no wildcards and no array indexes.
+- The label is `secret` or `credential`. No other label may be declared: declaring
+  `validated` or `internal` would weaken a value rather than protect it.
+- An entry applies at its exact path, below it, and at any aggregate above it, and never at
+  a sibling; a fetch whose host is not a literal is treated as any declared host.
+- After the flow check each entry reports `matched`, `indeterminate`, or `absent`, in the
+  contract and in `zts check --json`. A `required` entry that is `absent` fails the build.
+
 ### 4.6 Tool catalog (tool profile)
 
 A handler under the tool profile of the M4 release boundary publishes a tool catalog. It
