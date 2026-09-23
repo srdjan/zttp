@@ -42,6 +42,7 @@ zts-base module_specifier.zig
 zts-base profile_identity.zig
 zts-base route_match.zig
 zts-base status_text.zig
+zts-base tool_schema.zig
 zts-base type_map.zig
 
 # zts-contracts

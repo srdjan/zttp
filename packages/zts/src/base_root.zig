@@ -59,6 +59,10 @@ pub const guard_catalog = @import("guard_catalog.zig");
 /// Whether a request path matches a route pattern, parameter segments included.
 pub const route_match = @import("route_match.zig");
 
+/// The closed schema subset a tool catalog entry admits, and the streaming
+/// validator that checks a tool input against it.
+pub const tool_schema = @import("tool_schema.zig");
+
 /// The type annotations the TypeScript stripper records as it removes them.
 pub const type_map = @import("type_map.zig");
 
