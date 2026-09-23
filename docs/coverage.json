@@ -1,5 +1,5 @@
 {
-  "runId": "af447edd3366-1789913662636-8712",
+  "runId": "84d0f42be5d7-1790167494043-98407",
   "complete": true,
   "publishable": true,
   "publicationMode": true,
@@ -25,24 +25,25 @@
   "securityProbeHash": "331b2826a8e9c8496720c24b05ff0a5923073a469010e951885214f9109c7792",
   "thresholdHash": "7c8a65863f5fe1e294fb71ded1ca6e26ea28a224281055e34f63b4511507c343",
   "manifestHash": "cf8730c51a044eab4d21a9202e1433f7388621795785c9f97453ef690982fd07",
-  "resultRunHash": "cefbdeb7f06674decf9a346481e28b572edf4ea9bd093a70b4296ed42ef04311",
+  "resultRunHash": "15b3e80108668c6be6164ff2528b04f8e996641ffb7697089a81117d251ae3f2",
   "promptPersonaHash": "5ae842d6cd259973f4dabb373887b0c067fbbd0adbc8b1b3b43a7d6146bb2cb4",
   "providerNeutralCatalogHash": "b190e14269c9c021d71467bcdbc174141df2e7c5df5bbe5be3cb9e55092b354f",
   "providerSerializedCatalogHash": "fe8d3a3bb01106b66571e8e500bf4f5d85aed40fa4449543599275e9e6af6a99",
   "schemaHash": "102ec8a15eb173122acd11fd4d2612b7c48cbbc5b6c5145923df4751e298b6df",
-  "metaHash": "7a4c893bf5d6603d9c52279bedc62adee4af48128818a24dffb02bebffbd7a5d",
+  "metaHash": "9de5daa30d726feeb489b48cc15559dbc18299efdf1bb77cf66efdeba26feecb",
   "grammarHash": "8c555c6dfe5afb98cf73d034a548dd5f18db5a6b540f334a43f0ac871f4d73be",
   "semanticsHash": "83b822bd0dee8e5f9a9231501f0f95b34fa48a0f08c671ade7a8bee822b877b8",
-  "diagnosticHash": "031990482d6f29025ef9f626e5daed74a8e4224f257b255f38a504e763c021bf",
-  "policyHash": "97aec67e484acda2ee3c13bf9fa8cd9de9becd8ea24cd51509092f2ca0068bc7",
-  "sourceCommit": "af447edd336688cb811b21ca033ef5d0668f3e4c",
+  "diagnosticHash": "868f8aeb02f2d4e8f4c2460fb36767b9e50d48b5ac0414f8d984427d8d9f7e06",
+  "policyHash": "48bbab99b50d05ddf1d94e7d8a0d9a9577f990726755c9d25a591964925d7ed3",
+  "sourceCommit": "84d0f42be5d788c1f72396fc9311ff88a90fc1dc",
   "sourceDirty": false,
-  "rulesTotal": 59,
-  "rulesTripped": 3,
+  "rulesTotal": 60,
+  "rulesTripped": 4,
   "tripped": [
     "ZTS400",
     "ZTS500",
-    "ZTS501"
+    "ZTS509",
+    "ZTS625"
   ],
   "untripped": [
     "ZTS302",
@@ -53,6 +54,7 @@
     "ZTS308",
     "ZTS309",
     "ZTS310",
+    "ZTS501",
     "ZTS502",
     "ZTS600",
     "ZTS629",
@@ -74,7 +76,6 @@
     "ZTS616",
     "ZTS620",
     "ZTS622",
-    "ZTS625",
     "ZTS626",
     "ZTS627",
     "ZTS628",
@@ -86,10 +87,10 @@
     "ZTS506",
     "ZTS508",
     "ZTS607",
-    "ZTS509",
     "ZTS510",
     "ZTS511",
     "ZTS512",
+    "ZTS513",
     "POL001",
     "POL003",
     "POL005",
@@ -104,14 +105,14 @@
   ],
   "offRegistry": [
     "ZTS001",
+    "ZTS002",
     "ZTS056",
-    "ZTS200",
     "ZTS203"
   ],
-  "recorded": "2026-09-20",
+  "recorded": "2026-09-23",
   "seedSuite": {
-    "seedsTotal": 61,
-    "verifiedRules": 58,
+    "seedsTotal": 62,
+    "verifiedRules": 59,
     "verified": [
       "POL001",
       "POL003",
@@ -145,6 +146,7 @@
       "ZTS510",
       "ZTS511",
       "ZTS512",
+      "ZTS513",
       "ZTS600",
       "ZTS601",
       "ZTS602",
@@ -185,11 +187,13 @@
     "distinctSets": 1,
     "smallestSet": 3,
     "largestSet": 3,
-    "unionCount": 3,
+    "unionCount": 5,
     "union": [
       "ZTS400",
       "ZTS500",
-      "ZTS501"
+      "ZTS501",
+      "ZTS509",
+      "ZTS625"
     ]
   }
 }
