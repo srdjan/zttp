@@ -96,6 +96,7 @@ tools service_types
 tools spec_discharge
 tools sqlite
 tools system_linker
+tools tool_schema
 tools trace
 tools witness_corpus
 

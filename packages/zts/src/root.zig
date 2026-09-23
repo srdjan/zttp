@@ -122,6 +122,9 @@ pub const identifier = base.identifier;
 /// The supported guard surface mirrored for the compiler.
 pub const guard_catalog = base.guard_catalog;
 pub const route_match = base.route_match;
+/// The closed tool schema subset, its canonical form, and the streaming
+/// validator (M4 T2 and T3).
+pub const tool_schema = base.tool_schema;
 pub const type_map = base.type_map;
 pub const type_pool = compiler.type_pool;
 pub const type_key = compiler.type_key;

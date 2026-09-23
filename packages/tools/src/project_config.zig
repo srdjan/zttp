@@ -3,9 +3,11 @@ const std = @import("std");
 const zts = @import("zts");
 pub const invariant_config = @import("invariant_config.zig");
 pub const invariant_author = @import("invariant_author.zig");
+pub const tool_catalog_encoding = @import("tool_catalog_encoding.zig");
 
 test {
     _ = invariant_config;
+    _ = tool_catalog_encoding;
     // Re-exported but never referenced by analyzed code, so only this anchor
     // makes `zig build test-project-config` collect its tests.
     _ = invariant_author;
