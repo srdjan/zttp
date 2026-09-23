@@ -174,6 +174,7 @@ pub fn compileCommand(allocator: std.mem.Allocator, argv: []const []const u8) !v
         .invariant_spec = compile_context.invariant_spec,
         .declaration = compile_context.declarationPtr(),
         .protected_ledger_path = compile_context.ledger_path,
+        .tool_auth = compile_context.tool_auth,
         .attest_requested = opts.attest_requested,
     });
 }
@@ -187,6 +188,10 @@ const ProjectCompileContext = struct {
     /// The consumer declaration zttp.json names (M4 T4), validated. It lives as
     /// long as the context, which outlives the build that borrows it.
     declaration: ?zts.declaration.Declaration = null,
+    /// zttp.json's `auth` names (M4 T5), owned. The build writes them into
+    /// the contract, which the executable graph binds, so a deployed artifact
+    /// reads the names it was built with and nothing else.
+    tool_auth: ?zts.handler_contract.ToolAuth = null,
 
     fn init(
         allocator: std.mem.Allocator,
@@ -198,6 +203,10 @@ const ProjectCompileContext = struct {
         context.sql_schema_path = try project.resolvedSqlitePath(allocator);
         context.system_path = try project.resolvedSystemPath(allocator);
         context.ledger_path = try project.resolvedLedgerPath(allocator);
+        if (project.auth) |auth| {
+            const names = zts.handler_contract.ToolAuth{ .key_env = auth.key_env, .tenant_claim = auth.tenant_claim };
+            context.tool_auth = try names.dupe(allocator);
+        }
         context.invariant_spec = project.readInvariantSpec(allocator) catch |err| {
             std.debug.print(
                 "Configured invariant specification '{s}' could not be loaded: {s}\n",
@@ -256,6 +265,7 @@ const ProjectCompileContext = struct {
         if (self.invariant_spec) |bytes| allocator.free(bytes);
         if (self.ledger_path) |path| allocator.free(path);
         if (self.declaration) |*decl| decl.deinit();
+        if (self.tool_auth) |*auth| auth.deinit(allocator);
         self.* = .{};
     }
 
@@ -451,6 +461,7 @@ pub fn buildCommand(allocator: std.mem.Allocator, argv: []const []const u8) !voi
         .invariant_spec = artifact.compile_context.invariant_spec,
         .declaration = artifact.compile_context.declarationPtr(),
         .protected_ledger_path = artifact.compile_context.ledger_path,
+        .tool_auth = artifact.compile_context.tool_auth,
         .attest_requested = opts.attest_requested,
     });
 
@@ -565,6 +576,7 @@ pub fn localDeployCommand(allocator: std.mem.Allocator, argv: []const []const u8
         .invariant_spec = artifact.compile_context.invariant_spec,
         .declaration = artifact.compile_context.declarationPtr(),
         .protected_ledger_path = artifact.compile_context.ledger_path,
+        .tool_auth = artifact.compile_context.tool_auth,
         .ledger_service_name = artifact.project_name,
         .attest_requested = opts.attest_requested,
     });
@@ -947,6 +959,8 @@ pub const BuildRequest = struct {
     invariant_spec: ?[]const u8 = null,
     /// The consumer declaration from project config (M4 T4). Borrowed.
     declaration: ?*const zts.declaration.Declaration = null,
+    /// zttp.json's `auth` names (M4 T5), written into the contract. Borrowed.
+    tool_auth: ?zts.handler_contract.ToolAuth = null,
     protected_ledger_path: ?[]const u8 = null,
     /// Service name to record in the proof ledger entry. Null when the
     /// build is not part of a named project (`compile`/`build` paths);
@@ -1113,6 +1127,15 @@ fn runBuild(
     if (compiled.bytecode.len == 0) {
         std.log.err("No bytecode generated", .{});
         return error.NoBytecode;
+    }
+
+    // The identity source names (M4 T5) ride in the contract, so the graph
+    // member that binds the contract binds them too. Names only, never a key.
+    if (request.tool_auth) |auth| {
+        if (compiled.contract) |*contract| {
+            if (contract.tool_auth) |*prior| prior.deinit(allocator);
+            contract.tool_auth = try auth.dupe(allocator);
+        }
     }
 
     // The compile subcommand splices bytecode onto the runtime binary, not

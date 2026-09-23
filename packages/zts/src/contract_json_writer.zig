@@ -312,6 +312,17 @@ fn writeContractJsonVersion(
     }
     try writer.writeAll("],\n");
 
+    // toolAuth (M4 T5): the names of the key variable and the tenant claim,
+    // written only when the project configures `auth`, so a contract without
+    // it keeps its earlier bytes. Never the key.
+    if (contract.tool_auth) |auth| {
+        try writer.writeAll("  \"" ++ comptime contractKey(json_version, "toolAuth") ++ "\": { \"" ++ contractKey(json_version, "keyEnv") ++ "\": ");
+        try writeJsonString(writer, auth.key_env);
+        try writer.writeAll(", \"" ++ comptime contractKey(json_version, "tenantClaim") ++ "\": ");
+        try writeJsonString(writer, auth.tenant_claim);
+        try writer.writeAll(" },\n");
+    }
+
     // classifications (the M4 T4 P8 report: one entry per declared
     // classification with the status the flow check reached)
     try writer.writeAll("  \"classifications\": [");

@@ -142,6 +142,11 @@ const ToolScopeWire = struct {
     subject: ?WireString = null,
 };
 
+const ToolAuthWire = struct {
+    keyEnv: ?WireString = null,
+    tenantClaim: ?WireString = null,
+};
+
 const ToolWire = struct {
     scope: ?ToolScopeWire = null,
     name: WireString = .{ .bytes = "" },
@@ -480,6 +485,7 @@ const ContractWire = struct {
     affordances: []const AffordanceWire = &.{},
     affordancesDynamic: bool = false,
     tools: []const ToolWire = &.{},
+    toolAuth: ?ToolAuthWire = null,
     classifications: []const ClassificationWire = &.{},
     cache: struct {
         namespaces: []const WireString = &.{},
@@ -719,6 +725,7 @@ fn projectContract(
     try projectAffordances(allocator, wire.affordances, &contract);
     contract.affordances_dynamic = wire.affordancesDynamic;
     try projectTools(allocator, wire.tools, &contract);
+    try projectToolAuth(allocator, wire.toolAuth, &contract);
     try projectClassifications(allocator, wire.classifications, &contract);
     contract.cache.namespaces = try projectStringList(allocator, wire.cache.namespaces);
     contract.cache.dynamic = wire.cache.dynamic;
@@ -1027,6 +1034,24 @@ fn projectTools(
         }
         contract.tools.appendAssumeCapacity(entry);
     }
+}
+
+/// Project the tool handler's identity source (M4 T5). The build writes both
+/// names or neither, and never an empty one, so anything else is refused.
+fn projectToolAuth(
+    allocator: std.mem.Allocator,
+    wire: ?ToolAuthWire,
+    contract: *HandlerContract,
+) !void {
+    const auth = wire orelse return;
+    const key_env_wire = auth.keyEnv orelse return error.InvalidToolAuth;
+    const tenant_claim_wire = auth.tenantClaim orelse return error.InvalidToolAuth;
+    const key_env = try decodeWireString(allocator, key_env_wire);
+    errdefer allocator.free(key_env);
+    const tenant_claim = try decodeWireString(allocator, tenant_claim_wire);
+    errdefer allocator.free(tenant_claim);
+    if (key_env.len == 0 or tenant_claim.len == 0) return error.InvalidToolAuth;
+    contract.tool_auth = .{ .key_env = key_env, .tenant_claim = tenant_claim };
 }
 
 /// Project the P8 report (M4 T4). The value sets are closed: a label other than

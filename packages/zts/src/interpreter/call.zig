@@ -79,8 +79,13 @@ pub fn doCall(self: *Interpreter, argc: u8, is_method: bool) InterpreterError!vo
                 break :blk native_data.func(self.ctx, this_val, args[0..argc]) catch |err| {
                     if (err == error.DurableSuspended) return error.DurableSuspended;
                     if (err == error.DurableStepTimedOut) return error.DurableStepTimedOut;
-                    const func_name = if (native_data.name.toPredefinedName()) |name| name else "<native>";
-                    std.log.err("Native function '{s}' error: {}", .{ func_name, err });
+                    // A tool grant denial (M4 T5) is logged and recorded where it
+                    // is decided, in `checkToolGrant`; naming it again here would
+                    // only repeat it without the module and export.
+                    if (err != error.ToolGrantDenied) {
+                        const func_name = if (native_data.name.toPredefinedName()) |name| name else "<native>";
+                        std.log.err("Native function '{s}' error: {}", .{ func_name, err });
+                    }
                     self.ctx.throwException(value.JSValue.exception_val);
                     return error.NativeFunctionError;
                 };

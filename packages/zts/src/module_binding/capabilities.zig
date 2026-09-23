@@ -10,6 +10,7 @@
 //! Split out of module_binding.zig, which re-exports every name here.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const build_options = @import("build_options");
 const object = @import("../object.zig");
 const value = @import("../value.zig");
@@ -72,6 +73,50 @@ pub fn wrapNativeFnWithCapabilities(
             defer popActiveModuleContext(token);
             ctx.cost_meter.bump(comptime cost_meter.classForSpecifier(specifier));
             return user_fn(ctx_ptr, this, args);
+        }
+    }.call;
+}
+
+/// The named denial a module call gets when the tool the request is served for
+/// does not hold the export in its grant.
+pub const ToolGrantError = error{ToolGrantDenied};
+
+/// Refuse `specifier`.`export_name` when the active tool's grant lacks it.
+/// No active grant - any handler not serving a tool request - allows the call.
+/// A denial is recorded in the security event stream, naming the module and
+/// the export (both compile-time identities, never request data).
+pub fn checkToolGrant(ctx: *const context.Context, specifier: []const u8, export_name: []const u8) ToolGrantError!void {
+    const grant = ctx.active_tool_grant orelse return;
+    if (grant.allows(grant.context, specifier, export_name)) return;
+    if (!builtin.is_test) std.log.err(
+        "tool grant: {s}.{s} is outside the served tool's reachable exports; call refused",
+        .{ specifier, export_name },
+    );
+    security_events.emitGlobal(security_events.SecurityEvent.initPolicyDenied(
+        specifier,
+        "call",
+        "export",
+        export_name,
+        "tool_grant",
+        ctx.policy_generation,
+    ));
+    return error.ToolGrantDenied;
+}
+
+/// Wrap an export so it runs only inside the active tool's grant (M4 T5
+/// design note, section 6). It is the outermost wrapper of every virtual
+/// module export, so the check runs before any capability scope is pushed and
+/// before the export does anything.
+pub fn wrapNativeFnWithToolGrant(
+    comptime inner: object.NativeFn,
+    comptime specifier: []const u8,
+    comptime export_name: []const u8,
+) object.NativeFn {
+    return struct {
+        fn call(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+            const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+            try checkToolGrant(ctx, specifier, export_name);
+            return inner(ctx_ptr, this, args);
         }
     }.call;
 }

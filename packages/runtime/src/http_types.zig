@@ -22,6 +22,23 @@ pub const HttpRequestView = struct {
     query_params: []const QueryParam = &.{},
     headers: std.ArrayListUnmanaged(HttpHeader),
     body: ?[]const u8,
+    /// The verified subject and tenant of a tool request (M4 T5), borrowed
+    /// from the claims the server verified. Null on every other request.
+    subject: ?[]const u8 = null,
+    tenant: ?[]const u8 = null,
+    /// True on a tool request: the handler's Request omits `authorization`.
+    strip_authorization: bool = false,
+    /// The served tool's export grant, held for the duration of the call.
+    tool_grant: ?ToolGrant = null,
+};
+
+/// A tool's export grant, as the server hands it to the runtime. The same
+/// shape as the engine's `ToolGrant`, restated so this file stays free of the
+/// engine: `allows(context, module, name)` answers for the tool `context`
+/// points at, which the caller keeps alive for the call.
+pub const ToolGrant = struct {
+    context: *const anyopaque,
+    allows: *const fn (context: *const anyopaque, module: []const u8, name: []const u8) bool,
 };
 
 pub const HttpRequestOwned = struct {

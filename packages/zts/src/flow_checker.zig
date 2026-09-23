@@ -311,6 +311,11 @@ pub const FlowChecker = struct {
     defended_paths: std.ArrayListUnmanaged(DefendedPath),
     /// Handler request parameter binding key (packed scope_id + slot).
     req_binding_key: ?u32,
+    /// Whether `req.subject` and `req.tenant` still hold what the runtime
+    /// verified (M4 T5). False once any assignment in the program could write
+    /// either field or rebind the request, so a read then keeps the request's
+    /// `user_input` label: a handler cannot launder input through them.
+    req_identity_trusted: bool = false,
     /// Slot of the `env` function import (for smart label refinement).
     env_fn_slot: ?u16,
     /// Shared import index, injected by the orchestrator when one exists.
@@ -960,6 +965,79 @@ pub const FlowChecker = struct {
         self.req_binding_key = key;
         // Request parameter carries user_input label
         self.binding_labels.put(self.allocator, key, .{ .user_input = true }) catch self.markAllocationFailure();
+        self.req_identity_trusted = !self.programMayWriteReqIdentity(key);
+    }
+
+    /// Identity fields a tool request carries from the verifier (M4 T5).
+    fn isReqIdentityField(name: []const u8) bool {
+        return std.mem.eql(u8, name, "subject") or std.mem.eql(u8, name, "tenant");
+    }
+
+    /// True when any assignment anywhere in the program could write
+    /// `subject` or `tenant` on the request, or rebind the request parameter.
+    /// The scan is by property name over every assignment, not only those
+    /// rooted at `req`, so an alias (`const r = req; r.subject = x`) or a
+    /// helper that writes its parameter is caught too; a computed write whose
+    /// key is not a literal could name either field and counts as well. Over
+    /// counting only keeps a label, so the direction is safe.
+    fn programMayWriteReqIdentity(self: *const FlowChecker, req_key: u32) bool {
+        const node_count = self.ir_view.nodeCount();
+        for (0..node_count) |idx_usize| {
+            const idx: NodeIndex = @intCast(idx_usize);
+            const tag = self.ir_view.getTag(idx) orelse continue;
+            if (tag != .assignment) continue;
+            const asgn = self.ir_view.getAssignment(idx) orelse return true;
+            const target_tag = self.ir_view.getTag(asgn.target) orelse return true;
+            switch (target_tag) {
+                .identifier => {
+                    const binding = self.ir_view.getBinding(asgn.target) orelse return true;
+                    if (packBindingKey(binding.scope_id, binding.slot) == req_key) return true;
+                },
+                .member_access, .optional_chain => {
+                    const member = self.ir_view.getMember(asgn.target) orelse return true;
+                    const name = self.resolveAtomName(member.property) orelse return true;
+                    if (isReqIdentityField(name)) return true;
+                },
+                .computed_access => {
+                    const member = self.ir_view.getMember(asgn.target) orelse return true;
+                    if (self.ir_view.getTag(member.computed) != .lit_string) return true;
+                    const str_idx = self.ir_view.getStringIdx(member.computed) orelse return true;
+                    const key = self.ir_view.getString(str_idx) orelse return true;
+                    if (isReqIdentityField(key)) return true;
+                },
+                // exhaustive: any other target shape binds nothing a read of
+                // `req.subject` could observe - a call result or a literal.
+                else => {},
+            }
+        }
+        return false;
+    }
+
+    /// The labels of a `req.subject` / `req.tenant` read. They come from the
+    /// runtime's verifier, not the caller, so the request's `user_input` label
+    /// does not reach them - unless the program could have written them, in
+    /// which case the read keeps every label the request carries. Any other
+    /// label the request picked up (a secret assigned onto it) is kept either
+    /// way.
+    fn reqIdentityLabels(self: *const FlowChecker, req_labels: LabelSet) LabelSet {
+        var labels = req_labels;
+        if (self.req_identity_trusted) labels.user_input = false;
+        return labels;
+    }
+
+    /// True for `req.subject` / `req.tenant` (dot or optional-chain form) on
+    /// the handler's request parameter.
+    fn isReqIdentityMember(self: *const FlowChecker, member_object: NodeIndex, property: u16) bool {
+        if (!self.isReqBinding(member_object)) return false;
+        const name = self.resolveAtomName(property) orelse return false;
+        return isReqIdentityField(name);
+    }
+
+    fn isReqBinding(self: *const FlowChecker, node: NodeIndex) bool {
+        if (self.ir_view.getTag(node) != .identifier) return false;
+        const binding = self.ir_view.getBinding(node) orelse return false;
+        const req_key = self.req_binding_key orelse return false;
+        return packBindingKey(binding.scope_id, binding.slot) == req_key;
     }
 
     /// Unwrap a function parameter node to its binding slot. Handles both
@@ -1306,6 +1384,13 @@ pub const FlowChecker = struct {
                     if (self.originOf(node)) |child| labels = LabelSet.merge(labels, self.declaredLabels(child, true));
                 }
 
+                // req.subject / req.tenant come from the runtime's verifier
+                // (M4 T5), so the request's user_input label does not reach
+                // them.
+                if (self.isReqIdentityMember(member.object, member.property)) {
+                    return self.reqIdentityLabels(labels);
+                }
+
                 // req.headers.authorization carries credential label
                 if (self.isReqProperty(member.object, "headers")) {
                     const prop_name = self.resolveAtomName(member.property) orelse return labels;
@@ -1333,6 +1418,15 @@ pub const FlowChecker = struct {
             .computed_access => {
                 const member = self.ir_view.getMember(node) orelse return LabelSet.empty;
                 const labels = self.inferLabels(member.object);
+                // req["subject"] / req["tenant"]: the computed spelling of the
+                // verified identity read, with the same labels.
+                if (self.isReqBinding(member.object) and self.ir_view.getTag(member.computed) == .lit_string) {
+                    if (self.ir_view.getStringIdx(member.computed)) |str_idx| {
+                        if (self.ir_view.getString(str_idx)) |key| {
+                            if (isReqIdentityField(key)) return self.reqIdentityLabels(labels);
+                        }
+                    }
+                }
                 // req.headers["authorization"] is the dominant header-read idiom
                 // and carries the credential label, mirroring the dot-access form.
                 if (self.isReqProperty(member.object, "headers")) {
@@ -4167,6 +4261,98 @@ fn runInputValidated(allocator: std.mem.Allocator, source: []const u8) !bool {
     defer checker.deinit();
     _ = try checker.check(handler_fn);
     return checker.getProperties().input_validated;
+}
+
+// ---------------------------------------------------------------------------
+// Verified identity reads (M4 T5): `req.subject` and `req.tenant` come from
+// the runtime's verifier, so they carry no `user_input`, while `req.body`
+// still does. The egress body is the sink that distinguishes the two: it
+// clears `input_validated` for unvalidated user input and for nothing else.
+// ---------------------------------------------------------------------------
+
+test "FlowChecker gives req.subject and req.tenant no user_input label" {
+    const allocator = std.testing.allocator;
+    try std.testing.expect(try runInputValidated(allocator,
+        \\import { fetch } from "zttp:fetch";
+        \\function handler(req) {
+        \\  fetch("https://api.example.com/v1", { body: req.subject });
+        \\  fetch("https://api.example.com/v1", { body: req.tenant });
+        \\  return Response.json({ s: req.subject });
+        \\}
+    ));
+    try std.testing.expect(try runInputValidated(allocator,
+        \\import { fetch } from "zttp:fetch";
+        \\function handler(req) {
+        \\  fetch("https://api.example.com/v1", { body: req["tenant"] });
+        \\  return Response.json({ t: req["subject"] });
+        \\}
+    ));
+    // The request body in the same position still carries user_input.
+    try std.testing.expect(!try runInputValidated(allocator,
+        \\import { fetch } from "zttp:fetch";
+        \\function handler(req) {
+        \\  fetch("https://api.example.com/v1", { body: req.body });
+        \\  return Response.json({ s: req.subject });
+        \\}
+    ));
+}
+
+test "FlowChecker keeps user_input on an identity field the program could write" {
+    const allocator = std.testing.allocator;
+    const cases = [_][]const u8{
+        // A direct write launders the body into the field.
+        \\import { fetch } from "zttp:fetch";
+        \\function handler(req) {
+        \\  req.subject = req.body;
+        \\  fetch("https://api.example.com/v1", { body: req.subject });
+        \\  return Response.json({ ok: true });
+        \\}
+        ,
+        // Through an alias of the same object.
+        \\import { fetch } from "zttp:fetch";
+        \\function handler(req) {
+        \\  const r = req;
+        \\  r.tenant = req.body;
+        \\  fetch("https://api.example.com/v1", { body: req.tenant });
+        \\  return Response.json({ ok: true });
+        \\}
+        ,
+        // Through a computed key the checker cannot read.
+        \\import { fetch } from "zttp:fetch";
+        \\function handler(req) {
+        \\  const k = req.body;
+        \\  req[k] = req.body;
+        \\  fetch("https://api.example.com/v1", { body: req.subject });
+        \\  return Response.json({ ok: true });
+        \\}
+        ,
+        // Through a helper that writes its parameter.
+        \\import { fetch } from "zttp:fetch";
+        \\function stamp(r, v) { r.subject = v; return r; }
+        \\function handler(req) {
+        \\  stamp(req, req.body);
+        \\  fetch("https://api.example.com/v1", { body: req.subject });
+        \\  return Response.json({ ok: true });
+        \\}
+        ,
+    };
+    for (cases) |source| {
+        if (try runInputValidated(allocator, source)) {
+            std.debug.print("identity write not caught:\n{s}\n", .{source});
+            return error.TestIdentityLaundered;
+        }
+    }
+}
+
+test "FlowChecker keeps a secret assigned onto the request on its identity reads" {
+    // Only user_input is discharged; a secret the request picked up stays.
+    try std.testing.expect(!try runNoSecretLeakage(std.testing.allocator,
+        \\import { env } from "zttp:env";
+        \\function handler(req) {
+        \\  req.extra = env("SECRET_KEY");
+        \\  return Response.json({ s: req.subject });
+        \\}
+    ));
 }
 
 test "FlowChecker flags a credential in a hoisted egress options object" {

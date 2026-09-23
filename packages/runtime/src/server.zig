@@ -23,6 +23,7 @@ const HttpHeader = http_types.HttpHeader;
 const QueryParam = http_types.QueryParam;
 
 const contract_runtime = @import("contract_runtime.zig");
+const tool_auth_mod = @import("tool_auth.zig");
 const fault_explain = @import("fault_explain.zig");
 const incident_log = @import("incident_log.zig");
 const RuntimeContract = contract_runtime.RuntimeContract;
@@ -686,9 +687,38 @@ const ConnectionPool = struct {
         // value exists. A deployment checks only the catalog its certificate
         // promoted; `zttp dev` checks the producer's with the same code.
         var tool_route: ?*const contract_runtime.AcceptedTool = null;
+        // The verified identity of a tool request (M4 T5). Its arena lives in
+        // the request allocator, so it is released with the request.
+        var tool_claims: ?tool_auth_mod.Claims = null;
+        defer if (tool_claims) |*claims| claims.deinit();
         if (self.server.activeToolCatalog()) |catalog| {
             if (catalog.match(request.method, request.path)) |tool| {
                 tool_route = tool;
+
+                // Identity first (M4 T5): before input validation and before
+                // any JS value exists. A server with no key serves no tool.
+                const auth = if (self.server.tool_auth) |*loaded| loaded else {
+                    access_status = 503;
+                    self.sendStatusSync(fd, 503, "tool handler requires auth: no key is loaded", keep_alive) catch {};
+                    return outcome_if_alive;
+                };
+                const now_s = @divFloor(unixMillisNow(), std.time.ms_per_s);
+                const identity = tool_auth_mod.verifyRequest(req_allocator, auth, request.headers.items, now_s) catch {
+                    access_status = 500;
+                    self.sendErrorSync(fd, 500, "Internal Server Error") catch {};
+                    return .close;
+                };
+                switch (identity) {
+                    .ok => |claims| tool_claims = claims,
+                    .refused => |refusal| {
+                        var message_buf: [64]u8 = undefined;
+                        const message = std.fmt.bufPrint(&message_buf, "tool auth refused: {s}", .{refusal.name()}) catch "tool auth refused";
+                        access_status = 401;
+                        self.sendStatusSync(fd, 401, message, keep_alive) catch {};
+                        return outcome_if_alive;
+                    },
+                }
+
                 const verdict = contract_runtime.validateToolInput(req_allocator, tool, request.body orelse "") catch {
                     access_status = 500;
                     self.sendErrorSync(fd, 500, "Internal Server Error") catch {};
@@ -704,6 +734,20 @@ const ConnectionPool = struct {
                         }) catch "tool input refused";
                         access_status = status;
                         self.sendStatusSync(fd, status, message, keep_alive) catch {};
+                        return outcome_if_alive;
+                    },
+                }
+
+                // Scope (M4 T5, AE3): a field the entry binds must name the
+                // verified caller, compared by the platform before the handler.
+                const claims = tool_claims.?;
+                switch (tool_auth_mod.checkScope(req_allocator, tool, request.body orelse "", claims.subject, claims.tenant)) {
+                    .ok => {},
+                    .tenant, .subject => |field| {
+                        var message_buf: [64]u8 = undefined;
+                        const message = std.fmt.bufPrint(&message_buf, "tool scope refused: {s}", .{@tagName(field)}) catch "tool scope refused";
+                        access_status = 403;
+                        self.sendStatusSync(fd, 403, message, keep_alive) catch {};
                         return outcome_if_alive;
                     },
                 }
@@ -740,6 +784,10 @@ const ConnectionPool = struct {
                 .query_params = request.query_params,
                 .headers = request.headers,
                 .body = request.body,
+                .subject = if (tool_claims) |claims| claims.subject else null,
+                .tenant = if (tool_claims) |claims| claims.tenant else null,
+                .strip_authorization = tool_route != null,
+                .tool_grant = if (tool_route) |tool| tool_auth_mod.grantFor(tool) else null,
             }, &fault_location) catch |err| {
                 const status: u16 = if (err == error.PoolExhausted) 503 else if (err == error.RequestTimeout) 504 else if (err == error.HandlerNotImplemented) 501 else 500;
                 var fault_buf: [256]u8 = undefined;
@@ -1443,6 +1491,11 @@ pub const Server = struct {
     /// decision Q4). Null for a deployment, which validates only the catalog its
     /// certificate promoted. Replaced with the contract, under `contract_lock`.
     dev_tool_catalog: ?contract_runtime.AcceptedCatalog = null,
+    /// The HS256 key and tenant claim tool requests are verified against (M4
+    /// T5), loaded in `start`. A server whose active tool catalog is non-null
+    /// refuses to start without it; a request that matches a tool while it is
+    /// null is refused, never served unverified.
+    tool_auth: ?tool_auth_mod.KeyState = null,
     /// Guards `contract`/`proof_cache` against the live-reload watcher thread
     /// freeing+rebuilding them (`updateContract`) while worker threads read
     /// them mid-request. Only engaged when `reload_active` is set, so the
@@ -1559,6 +1612,7 @@ pub const Server = struct {
         if (self.proof_cache) |*pc| pc.deinit();
         self.clearProofChecked();
         if (self.contract) |*c| c.deinit();
+        if (self.tool_auth) |*auth| auth.deinit();
         if (self.attestation_headers) |*ah| ah.deinit(self.allocator);
         if (self.well_known_doc) |*wkd| wkd.deinit(self.allocator);
         if (self.security_logger) |logger| logger.deinit();
@@ -1593,6 +1647,45 @@ pub const Server = struct {
         }
         if (self.dev_tool_catalog) |*catalog| return catalog;
         return null;
+    }
+
+    /// Where this server reads the identity source names. A deployed artifact
+    /// reads them from its own contract, which the executable graph binds, and
+    /// ignores anything else; dev and `serve` read zttp.json's `auth`.
+    fn toolAuthNames(self: *const Self) ?tool_auth_mod.ToolAuthNames {
+        return switch (self.config.handler) {
+            .appended_payload => if (self.contract) |*contract| contract.view().tool_auth else null,
+            else => self.config.runtime_config.tool_auth,
+        };
+    }
+
+    /// Load the tool key from the environment (M4 T5 design note, section 4).
+    /// A server whose active tool catalog is non-null refuses to start without
+    /// `auth` or with its variable unset or empty. One without a catalog loads
+    /// the key when it can, so a dev catalog installed later finds it, and
+    /// otherwise starts: a tool request it then meets is refused. The key is
+    /// never logged.
+    pub fn loadToolAuth(self: *Self) !void {
+        if (self.tool_auth) |*auth| auth.deinit();
+        self.tool_auth = null;
+        const names = self.toolAuthNames();
+        self.tool_auth = tool_auth_mod.load(self.allocator, names) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.ToolAuthNotConfigured, error.ToolAuthKeyMissing => {
+                if (self.activeToolCatalog() == null) return;
+                if (!builtin.is_test) switch (err) {
+                    error.ToolAuthNotConfigured => std.log.err(
+                        "tool handler requires auth: zttp.json has no \"auth\" object naming the key variable and tenant claim; refusing to serve",
+                        .{},
+                    ),
+                    else => std.log.err(
+                        "tool handler requires auth: environment variable {s} is unset or empty; refusing to serve",
+                        .{names.?.key_env},
+                    ),
+                };
+                return err;
+            },
+        };
     }
 
     fn clearProofChecked(self: *Self) void {
@@ -2256,6 +2349,11 @@ pub const Server = struct {
         // the pool exists, so a refusal is a refusal to serve rather than a
         // handler that is already warm when somebody reads the log line.
         try self.acceptEmbeddedCertificate();
+
+        // Tool identity (M4 T5): a handler serving tools needs the key before
+        // it serves anything. Checked after acceptance, which is what installs
+        // a deployment's catalog.
+        try self.loadToolAuth();
 
         // Initialize runtime pool with embedded bytecode (must be set before prewarm)
         // Wire the server-level request timeout into the runtime config so the
@@ -4610,7 +4708,7 @@ test "attested appended payload requires a parsed runtime policy hash" {
 }
 
 // ---------------------------------------------------------------------------
-// Tool routes on the request path (M4 T3 U5)
+// Tool routes on the request path (M4 T3 U5, M4 T5 U3)
 // ---------------------------------------------------------------------------
 
 const tool_test_input_schema =
@@ -4620,7 +4718,25 @@ const tool_test_output_schema =
     \\{"type":"object","additionalProperties":false,"required":["ok"],"properties":{"ok":{"type":"boolean"}}}
 ;
 
-fn toolTestCatalog(allocator: std.mem.Allocator) !contract_runtime.AcceptedCatalog {
+/// The environment variable the tool tests name as `auth.keyEnv`, and the key
+/// they export under it.
+const tool_test_key_env = "ZTTP_SERVER_TOOL_TEST_KEY";
+const tool_test_key = "server-tool-test-key-0123456789";
+const tool_test_tenant_claim = "tenant";
+
+extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+extern "c" fn unsetenv(name: [*:0]const u8) c_int;
+
+/// One tool entry for a test catalog. `exports` is the grant, sorted by module
+/// then name as the catalog stores it.
+const ToolTestSpec = struct {
+    input_schema: []const u8 = tool_test_input_schema,
+    output_schema: []const u8 = tool_test_output_schema,
+    scope_tenant: ?[]const u8 = null,
+    exports: []const [2][]const u8 = &.{},
+};
+
+fn toolTestCatalogFor(allocator: std.mem.Allocator, spec: ToolTestSpec) !contract_runtime.AcceptedCatalog {
     var entry = contract_runtime.ToolEntry{
         .name = &.{},
         .route = &.{},
@@ -4636,26 +4752,42 @@ fn toolTestCatalog(allocator: std.mem.Allocator) !contract_runtime.AcceptedCatal
     entry.route = try allocator.dupe(u8, "POST /tools/lookup");
     entry.description = try allocator.dupe(u8, "Look up one order.");
     entry.input_schema_name = try allocator.dupe(u8, "In");
-    entry.input_schema_json = try allocator.dupe(u8, tool_test_input_schema);
+    entry.input_schema_json = try allocator.dupe(u8, spec.input_schema);
     entry.output_schema_name = try allocator.dupe(u8, "Out");
-    entry.output_schema_json = try allocator.dupe(u8, tool_test_output_schema);
+    entry.output_schema_json = try allocator.dupe(u8, spec.output_schema);
+    if (spec.scope_tenant) |field| entry.scope_tenant = try allocator.dupe(u8, field);
+    for (spec.exports) |pair| {
+        const module = try allocator.dupe(u8, pair[0]);
+        errdefer allocator.free(module);
+        const name = try allocator.dupe(u8, pair[1]);
+        errdefer allocator.free(name);
+        try entry.reachable_exports.append(allocator, .{ .module = module, .name = name });
+    }
     const catalog = try contract_runtime.lowerProducerToolCatalog(allocator, &.{entry});
     return catalog orelse error.TestExpectedCatalog;
 }
 
-/// Serve one raw request through the real request path with the tool catalog
-/// installed, and return the start of the response.
-fn serveToolRequest(handler_code: []const u8, raw_request: []const u8, out: []u8) ![]const u8 {
+fn toolTestCatalog(allocator: std.mem.Allocator) !contract_runtime.AcceptedCatalog {
+    return toolTestCatalogFor(allocator, .{});
+}
+
+/// Serve one raw request through the real request path, with the tool
+/// catalog `spec` describes installed as the dev catalog and the test key
+/// loaded the way `start` loads it, and return the start of the response.
+fn serveToolRequestWith(spec: ToolTestSpec, handler_code: []const u8, raw_request: []const u8, out: []u8) ![]const u8 {
     const allocator = std.testing.allocator;
     var srv = try Server.init(allocator, .{
         .handler = .{ .inline_code = handler_code },
         .log_requests = false,
         .pool_size = 1,
         .max_body_size = 4096,
+        .runtime_config = .{ .tool_auth = .{ .key_env = tool_test_key_env, .tenant_claim = tool_test_tenant_claim } },
     });
     defer srv.deinit();
     srv.pool = try HandlerPool.init(allocator, .{}, handler_code, "<tool-test>", 1, 0);
-    srv.dev_tool_catalog = try toolTestCatalog(allocator);
+    srv.dev_tool_catalog = try toolTestCatalogFor(allocator, spec);
+    _ = setenv(tool_test_key_env, tool_test_key, 1);
+    try srv.loadToolAuth();
 
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
@@ -4680,62 +4812,307 @@ fn serveToolRequest(handler_code: []const u8, raw_request: []const u8, out: []u8
     return out[0..n];
 }
 
-fn toolPost(comptime body: []const u8) []const u8 {
-    return std.fmt.comptimePrint("POST /tools/lookup HTTP/1.1\r\nHost: t\r\nContent-Length: {d}\r\n\r\n{s}", .{ body.len, body });
+fn serveToolRequest(handler_code: []const u8, raw_request: []const u8, out: []u8) ![]const u8 {
+    return serveToolRequestWith(.{}, handler_code, raw_request, out);
 }
+
+/// Builds tool requests and HS256 tokens for the tests. Everything it returns
+/// lives until `deinit`.
+const ToolRequests = struct {
+    arena: std.heap.ArenaAllocator,
+
+    fn init() ToolRequests {
+        return .{ .arena = std.heap.ArenaAllocator.init(std.testing.allocator) };
+    }
+
+    fn deinit(self: *ToolRequests) void {
+        self.arena.deinit();
+    }
+
+    fn b64(self: *ToolRequests, bytes: []const u8) ![]const u8 {
+        const encoder = std.base64.url_safe_no_pad.Encoder;
+        const out = try self.arena.allocator().alloc(u8, encoder.calcSize(bytes.len));
+        return encoder.encode(out, bytes);
+    }
+
+    /// A compact JWS over `header_json` and `payload_json`, signed with `key`.
+    fn tokenWith(self: *ToolRequests, header_json: []const u8, payload_json: []const u8, key: []const u8) ![]const u8 {
+        const a = self.arena.allocator();
+        const signing_input = try std.fmt.allocPrint(a, "{s}.{s}", .{ try self.b64(header_json), try self.b64(payload_json) });
+        var mac: [std.crypto.auth.hmac.sha2.HmacSha256.mac_length]u8 = undefined;
+        std.crypto.auth.hmac.sha2.HmacSha256.create(&mac, signing_input, key);
+        return std.fmt.allocPrint(a, "{s}.{s}", .{ signing_input, try self.b64(&mac) });
+    }
+
+    fn token(self: *ToolRequests, payload_json: []const u8) ![]const u8 {
+        return self.tokenWith("{\"alg\":\"HS256\",\"typ\":\"JWT\"}", payload_json, tool_test_key);
+    }
+
+    fn bearer(self: *ToolRequests, payload_json: []const u8) ![]const u8 {
+        return std.fmt.allocPrint(self.arena.allocator(), "Bearer {s}", .{try self.token(payload_json)});
+    }
+
+    /// A POST to the test tool route with `authorization` as the header value,
+    /// or no header when it is null.
+    fn postWith(self: *ToolRequests, authorization: ?[]const u8, body: []const u8) ![]const u8 {
+        const a = self.arena.allocator();
+        const auth_line = if (authorization) |value|
+            try std.fmt.allocPrint(a, "Authorization: {s}\r\n", .{value})
+        else
+            "";
+        return std.fmt.allocPrint(a, "POST /tools/lookup HTTP/1.1\r\nHost: t\r\n{s}Content-Length: {d}\r\n\r\n{s}", .{ auth_line, body.len, body });
+    }
+
+    /// A POST carrying a valid token for subject `user-1` in tenant `acme`.
+    fn post(self: *ToolRequests, body: []const u8) ![]const u8 {
+        return self.postWith(try self.bearer(valid_claims), body);
+    }
+};
+
+const valid_claims = "{\"sub\":\"user-1\",\"tenant\":\"acme\",\"exp\":4102444800}";
 
 const tool_ok_handler = "function handler(req) { return Response.json({ ok: true }); }";
 
+fn expectResponse(response: []const u8, status: []const u8, needle: []const u8) !void {
+    if (!std.mem.startsWith(u8, response, status) or std.mem.indexOf(u8, response, needle) == null) {
+        std.debug.print("expected {s} with {s}, got:\n{s}\n", .{ status, needle, response });
+        return error.TestUnexpectedResponse;
+    }
+}
+
 test "a valid tool input reaches the handler and its matching output is sent" {
+    var reqs = ToolRequests.init();
+    defer reqs.deinit();
     var buf: [1024]u8 = undefined;
-    const response = try serveToolRequest(tool_ok_handler, toolPost("{\"id\":\"a1\"}"), &buf);
-    try std.testing.expect(std.mem.startsWith(u8, response, "HTTP/1.1 200"));
-    try std.testing.expect(std.mem.indexOf(u8, response, "{\"ok\":true}") != null);
+    const response = try serveToolRequest(tool_ok_handler, try reqs.post("{\"id\":\"a1\"}"), &buf);
+    try expectResponse(response, "HTTP/1.1 200", "{\"ok\":true}");
 }
 
 test "tool inputs the schema refuses are answered before the handler runs" {
+    var reqs = ToolRequests.init();
+    defer reqs.deinit();
     // The handler would answer 200 to anything; every case below must be
     // refused by the gate, never reach it.
     const cases = [_]struct { request: []const u8, status: []const u8, reason: []const u8 }{
-        .{ .request = toolPost("{\"id\":\"a\",\"id\":\"b\"}"), .status = "HTTP/1.1 400", .reason = "duplicate_key" },
-        .{ .request = toolPost("{\"id\":\"a\",\"extra\":1}"), .status = "HTTP/1.1 400", .reason = "unknown_field" },
-        .{ .request = toolPost("{}"), .status = "HTTP/1.1 400", .reason = "missing_required" },
-        .{ .request = toolPost("{\"id\":\"123456789\"}"), .status = "HTTP/1.1 400", .reason = "string_too_long" },
-        .{ .request = toolPost("{\"id\":"), .status = "HTTP/1.1 400", .reason = "invalid_json" },
-        .{ .request = "POST /tools/lookup HTTP/1.1\r\nHost: t\r\nContent-Length: 0\r\n\r\n", .status = "HTTP/1.1 400", .reason = "invalid_json" },
-        .{ .request = toolPost("{\"id\":\"a\",                                                                  \"id\":\"b\"}"), .status = "HTTP/1.1 413", .reason = "too_large" },
+        .{ .request = try reqs.post("{\"id\":\"a\",\"id\":\"b\"}"), .status = "HTTP/1.1 400", .reason = "duplicate_key" },
+        .{ .request = try reqs.post("{\"id\":\"a\",\"extra\":1}"), .status = "HTTP/1.1 400", .reason = "unknown_field" },
+        .{ .request = try reqs.post("{}"), .status = "HTTP/1.1 400", .reason = "missing_required" },
+        .{ .request = try reqs.post("{\"id\":\"123456789\"}"), .status = "HTTP/1.1 400", .reason = "string_too_long" },
+        .{ .request = try reqs.post("{\"id\":"), .status = "HTTP/1.1 400", .reason = "invalid_json" },
+        .{ .request = try reqs.post(""), .status = "HTTP/1.1 400", .reason = "invalid_json" },
+        .{ .request = try reqs.post("{\"id\":\"a\",                                                                  \"id\":\"b\"}"), .status = "HTTP/1.1 413", .reason = "too_large" },
     };
     for (cases) |case| {
         var buf: [1024]u8 = undefined;
         const response = try serveToolRequest(tool_ok_handler, case.request, &buf);
-        if (!std.mem.startsWith(u8, response, case.status) or std.mem.indexOf(u8, response, case.reason) == null) {
-            std.debug.print("expected {s} {s}, got:\n{s}\n", .{ case.status, case.reason, response });
-            return error.TestUnexpectedResponse;
-        }
+        try expectResponse(response, case.status, case.reason);
     }
 }
 
 test "a tool's 2xx body that breaks its output schema is refused with 500" {
+    var reqs = ToolRequests.init();
+    defer reqs.deinit();
     var buf: [1024]u8 = undefined;
     const response = try serveToolRequest(
         "function handler(req) { return Response.json({ ok: \"yes\" }); }",
-        toolPost("{\"id\":\"a1\"}"),
+        try reqs.post("{\"id\":\"a1\"}"),
         &buf,
     );
-    try std.testing.expect(std.mem.startsWith(u8, response, "HTTP/1.1 500"));
-    try std.testing.expect(std.mem.indexOf(u8, response, "tool output refused: type_mismatch") != null);
+    try expectResponse(response, "HTTP/1.1 500", "tool output refused: type_mismatch");
 }
 
 test "a tool's non-2xx answer and a non-tool route pass the gate untouched" {
+    var reqs = ToolRequests.init();
+    defer reqs.deinit();
     var buf: [1024]u8 = undefined;
     const not_found = try serveToolRequest(
         "function handler(req) { return Response.json({ error: \"none\" }, { status: 404 }); }",
-        toolPost("{\"id\":\"a1\"}"),
+        try reqs.post("{\"id\":\"a1\"}"),
         &buf,
     );
     try std.testing.expect(std.mem.startsWith(u8, not_found, "HTTP/1.1 404"));
 
+    // A route outside the catalog needs no token.
     var buf2: [1024]u8 = undefined;
     const other = try serveToolRequest(tool_ok_handler, "GET /health-check HTTP/1.1\r\nHost: t\r\n\r\n", &buf2);
     try std.testing.expect(std.mem.startsWith(u8, other, "HTTP/1.1 200"));
+}
+
+const identity_output_schema =
+    \\{"type":"object","additionalProperties":false,"required":["s","t","a"],"properties":{"s":{"type":"string","maxLength":64},"t":{"type":"string","maxLength":64},"a":{"type":"string","maxLength":64}}}
+;
+
+test "a verified tool request carries req.subject and req.tenant and no authorization header" {
+    var reqs = ToolRequests.init();
+    defer reqs.deinit();
+    var buf: [1024]u8 = undefined;
+    const response = try serveToolRequestWith(
+        .{ .output_schema = identity_output_schema },
+        "function handler(req) { return Response.json({ s: req.subject, t: req.tenant, a: req.headers.authorization ?? \"absent\" }); }",
+        try reqs.post("{\"id\":\"a1\"}"),
+        &buf,
+    );
+    try expectResponse(response, "HTTP/1.1 200", "\"s\":\"user-1\"");
+    try expectResponse(response, "HTTP/1.1 200", "\"t\":\"acme\"");
+    try expectResponse(response, "HTTP/1.1 200", "\"a\":\"absent\"");
+}
+
+/// One 401 case: the Authorization value (null for none) and the reason the
+/// response must name.
+const AuthRefusalCase = struct { authorization: ?[]const u8, reason: []const u8 };
+
+fn authRefusalCases(reqs: *ToolRequests) ![]const AuthRefusalCase {
+    const hs256 = "{\"alg\":\"HS256\",\"typ\":\"JWT\"}";
+    const cases = [_]AuthRefusalCase{
+        .{ .authorization = null, .reason = "missing_token" },
+        .{ .authorization = try std.fmt.allocPrint(reqs.arena.allocator(), "Basic {s}", .{try reqs.token(valid_claims)}), .reason = "missing_token" },
+        .{ .authorization = try std.fmt.allocPrint(reqs.arena.allocator(), "Bearer  {s}", .{try reqs.token(valid_claims)}), .reason = "missing_token" },
+        .{ .authorization = "Bearer not-a-token", .reason = "malformed" },
+        .{ .authorization = try std.fmt.allocPrint(reqs.arena.allocator(), "Bearer {s}", .{try reqs.tokenWith("{\"alg\":\"none\",\"typ\":\"JWT\"}", valid_claims, tool_test_key)}), .reason = "unsupported_alg" },
+        .{ .authorization = try std.fmt.allocPrint(reqs.arena.allocator(), "Bearer {s}", .{try reqs.tokenWith(hs256, valid_claims, "some-other-key")}), .reason = "bad_signature" },
+        .{ .authorization = try reqs.bearer("{\"sub\":\"user-1\",\"tenant\":\"acme\",\"exp\":1000}"), .reason = "expired" },
+        .{ .authorization = try reqs.bearer("{\"sub\":\"user-1\",\"tenant\":\"acme\",\"nbf\":4102444800}"), .reason = "not_yet_valid" },
+        .{ .authorization = try reqs.bearer("{\"tenant\":\"acme\",\"exp\":4102444800}"), .reason = "missing_sub" },
+        .{ .authorization = try reqs.bearer("{\"sub\":\"user-1\",\"exp\":4102444800}"), .reason = "missing_tenant" },
+        .{ .authorization = try reqs.bearer("{\"sub\":7,\"tenant\":\"acme\",\"exp\":4102444800}"), .reason = "claim_not_string" },
+        .{ .authorization = try reqs.bearer("{\"sub\":\"user-1\",\"tenant\":\"acme\",\"exp\":\"soon\"}"), .reason = "invalid_time_claim" },
+    };
+    return reqs.arena.allocator().dupe(AuthRefusalCase, &cases);
+}
+
+test "every tool auth refusal is a 401 naming its reason, before the handler runs" {
+    var reqs = ToolRequests.init();
+    defer reqs.deinit();
+    for (try authRefusalCases(&reqs)) |case| {
+        var buf: [1024]u8 = undefined;
+        const response = try serveToolRequest(tool_ok_handler, try reqs.postWith(case.authorization, "{\"id\":\"a1\"}"), &buf);
+        var needle_buf: [64]u8 = undefined;
+        const needle = try std.fmt.bufPrint(&needle_buf, "tool auth refused: {s}", .{case.reason});
+        try expectResponse(response, "HTTP/1.1 401", needle);
+    }
+}
+
+test "the tool auth refusal census observes every reason through the request path" {
+    // Floor, then census: every verifier refusal and `missing_token` must
+    // have a case above, and each case's reason must be observed on the wire.
+    var reqs = ToolRequests.init();
+    defer reqs.deinit();
+    const cases = try authRefusalCases(&reqs);
+    var observed = std.EnumSet(tool_auth_mod.VerifyRefusal).initEmpty();
+    var missing_token_observed = false;
+    for (cases) |case| {
+        var buf: [1024]u8 = undefined;
+        const response = try serveToolRequest(tool_ok_handler, try reqs.postWith(case.authorization, "{\"id\":\"a1\"}"), &buf);
+        const marker = "tool auth refused: ";
+        const at = std.mem.indexOf(u8, response, marker) orelse return error.TestNoRefusal;
+        const rest = response[at + marker.len ..];
+        const end = std.mem.indexOfAny(u8, rest, "\r\n") orelse rest.len;
+        const reason = rest[0..end];
+        try std.testing.expectEqualStrings(case.reason, reason);
+        if (std.mem.eql(u8, reason, "missing_token")) {
+            missing_token_observed = true;
+        } else {
+            const tag = std.meta.stringToEnum(tool_auth_mod.VerifyRefusal, reason) orelse return error.TestUnknownReason;
+            observed.insert(tag);
+        }
+    }
+    try std.testing.expect(missing_token_observed);
+    for (std.enums.values(tool_auth_mod.VerifyRefusal)) |tag| {
+        if (!observed.contains(tag)) {
+            std.debug.print("refusal {s} was never observed through the request path\n", .{@tagName(tag)});
+            return error.TestRefusalNotCensused;
+        }
+    }
+}
+
+const scoped_input_schema =
+    \\{"type":"object","additionalProperties":false,"required":["tenant_id"],"properties":{"tenant_id":{"type":"string","maxLength":16}}}
+;
+
+test "a scoped tool refuses another tenant's identifier with 403 and serves its own (AE3)" {
+    var reqs = ToolRequests.init();
+    defer reqs.deinit();
+    const spec = ToolTestSpec{ .input_schema = scoped_input_schema, .scope_tenant = "tenant_id" };
+
+    var buf: [1024]u8 = undefined;
+    const other = try serveToolRequestWith(spec, tool_ok_handler, try reqs.post("{\"tenant_id\":\"globex\"}"), &buf);
+    try expectResponse(other, "HTTP/1.1 403", "tool scope refused: tenant");
+
+    var buf2: [1024]u8 = undefined;
+    const own = try serveToolRequestWith(spec, tool_ok_handler, try reqs.post("{\"tenant_id\":\"acme\"}"), &buf2);
+    try expectResponse(own, "HTTP/1.1 200", "{\"ok\":true}");
+}
+
+const grant_probe_handler =
+    \\import { sha256 } from "zttp:crypto";
+    \\function handler(req) {
+    \\  const digest = sha256("probe");
+    \\  return Response.json({ ok: digest !== undefined });
+    \\}
+;
+
+test "a tool handler cannot call an export outside its tool's grant (B8.7)" {
+    var reqs = ToolRequests.init();
+    defer reqs.deinit();
+
+    // The grant lacks zttp:crypto.sha256: the call is refused and the request
+    // fails the way a capability denial fails it.
+    var buf: [1024]u8 = undefined;
+    const denied = try serveToolRequestWith(.{}, grant_probe_handler, try reqs.post("{\"id\":\"a1\"}"), &buf);
+    try std.testing.expect(std.mem.startsWith(u8, denied, "HTTP/1.1 500"));
+
+    // The same handler with the export in the grant succeeds.
+    var buf2: [1024]u8 = undefined;
+    const granted = try serveToolRequestWith(
+        .{ .exports = &.{.{ "zttp:crypto", "sha256" }} },
+        grant_probe_handler,
+        try reqs.post("{\"id\":\"a1\"}"),
+        &buf2,
+    );
+    try expectResponse(granted, "HTTP/1.1 200", "{\"ok\":true}");
+}
+
+test "a tool handler's routerMatch dispatch runs under any grant" {
+    var reqs = ToolRequests.init();
+    defer reqs.deinit();
+    var buf: [1024]u8 = undefined;
+    const response = try serveToolRequestWith(
+        .{},
+        \\import { routerMatch } from "zttp:router";
+        \\function lookup(req) { return Response.json({ ok: true }); }
+        \\const routes = { "POST /tools/lookup": lookup };
+        \\function handler(req) {
+        \\  const found = routerMatch(routes, req);
+        \\  if (found !== undefined) return found.handler(req);
+        \\  return Response.json({ ok: false }, { status: 404 });
+        \\}
+    ,
+        try reqs.post("{\"id\":\"a1\"}"),
+        &buf,
+    );
+    try expectResponse(response, "HTTP/1.1 200", "{\"ok\":true}");
+}
+
+fn startToolServer(runtime_config: engine.RuntimeConfig) !void {
+    const allocator = std.testing.allocator;
+    var srv = try Server.init(allocator, .{
+        .handler = .{ .inline_code = tool_ok_handler },
+        .log_requests = false,
+        .pool_size = 1,
+        .runtime_config = runtime_config,
+    });
+    defer srv.deinit();
+    srv.dev_tool_catalog = try toolTestCatalog(allocator);
+    try srv.start();
+}
+
+test "a tool handler refuses to start without auth or without its key" {
+    try std.testing.expectError(error.ToolAuthNotConfigured, startToolServer(.{}));
+
+    const unset_env = "ZTTP_SERVER_TOOL_TEST_UNSET_KEY";
+    _ = unsetenv(unset_env);
+    try std.testing.expectError(
+        error.ToolAuthKeyMissing,
+        startToolServer(.{ .tool_auth = .{ .key_env = unset_env, .tenant_claim = tool_test_tenant_claim } }),
+    );
 }

@@ -1454,6 +1454,15 @@ pub const HandlerInstance = struct {
         }
         const handler_obj = self.cached_handler_obj orelse return error.NoHandler;
 
+        // The served tool's export grant (M4 T5) holds for exactly this call.
+        // The defer clears it on every exit, error paths included, so a pooled
+        // runtime never carries one request's grant into the next.
+        self.ctx.active_tool_grant = if (request.tool_grant) |grant|
+            .{ .context = grant.context, .allows = grant.allows }
+        else
+            null;
+        defer self.ctx.active_tool_grant = null;
+
         var tracked = false;
         if (builtin.mode == .Debug and request_id != 0) {
             const prev = self.active_request_id.swap(request_id, .acq_rel);
@@ -1807,9 +1816,16 @@ pub const HandlerInstance = struct {
             req_obj.setSlot(shapes.request.body_slot, zq.JSValue.undefined_val);
         }
 
-        // Headers
+        // Verified identity (M4 T5): set only on a tool request, from claims the
+        // runtime verified before this object existed.
+        req_obj.setSlot(shapes.request.subject_slot, try self.optionalString(request.subject));
+        req_obj.setSlot(shapes.request.tenant_slot, try self.optionalString(request.tenant));
+
+        // Headers. A tool request omits `authorization`, so the handler cannot
+        // decode the claims the runtime already verified.
         const headers_obj = try self.ctx.createObjectWithClass(shapes.request_headers.class_idx, self.headers_prototype);
         for (request.headers.items) |header| {
+            if (request.strip_authorization and std.ascii.eqlIgnoreCase(header.key, "authorization")) continue;
             const key_atom = headerKeyToAtom(header.key) orelse
                 try self.ctx.atoms.intern(header.key);
             const value_str = try self.ctx.createString(header.value);
@@ -1858,8 +1874,16 @@ pub const HandlerInstance = struct {
             try self.ctx.setPropertyChecked(req_obj, zq.Atom.body, body_str);
         }
 
+        if (request.subject) |subject| {
+            try self.ctx.setPropertyChecked(req_obj, try self.ctx.atoms.intern("subject"), try self.ctx.createString(subject));
+        }
+        if (request.tenant) |tenant| {
+            try self.ctx.setPropertyChecked(req_obj, try self.ctx.atoms.intern("tenant"), try self.ctx.createString(tenant));
+        }
+
         const headers_obj = try self.ctx.createObject(self.headers_prototype);
         for (request.headers.items) |header| {
+            if (request.strip_authorization and std.ascii.eqlIgnoreCase(header.key, "authorization")) continue;
             const key_atom = headerKeyToAtom(header.key) orelse
                 try self.ctx.atoms.intern(header.key);
             const value_str = try self.ctx.createString(header.value);
@@ -1868,6 +1892,11 @@ pub const HandlerInstance = struct {
         try self.ctx.setPropertyChecked(req_obj, zq.Atom.headers, headers_obj.toValue());
 
         return req_obj.toValue();
+    }
+
+    fn optionalString(self: *Self, str: ?[]const u8) !zq.JSValue {
+        const s = str orelse return zq.JSValue.undefined_val;
+        return self.ctx.createString(s);
     }
 
     pub fn createString(self: *Self, str: []const u8) !zq.JSValue {

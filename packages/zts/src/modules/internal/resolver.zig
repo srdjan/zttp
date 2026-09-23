@@ -188,6 +188,13 @@ fn isFetchExport(comptime binding: mb.ModuleBinding, comptime func_binding: mb.F
 }
 
 fn wrappedExportFn(comptime binding: mb.ModuleBinding, comptime func_binding: mb.FunctionBinding) object.NativeFn {
+    // Every export, with or without declared capabilities, runs inside the
+    // active tool's grant (M4 T5 design note, section 6). The grant check is
+    // outermost so a denied export pushes no scope and bumps no meter.
+    return comptime mb.wrapNativeFnWithToolGrant(capabilityWrappedExportFn(binding, func_binding), binding.specifier, func_binding.name);
+}
+
+fn capabilityWrappedExportFn(comptime binding: mb.ModuleBinding, comptime func_binding: mb.FunctionBinding) object.NativeFn {
     // Both branches install the active module scope so `sdk.requireCapability`
     // sees the binding's declared `required_capabilities`. Skipping the wrap on
     // the `module_func` path would silently leave every sandbox SDK call with
@@ -282,7 +289,7 @@ test "wrappedExportFn propagates required_capabilities through module_func" {
     try std.testing.expectEqual(@as(u32, 1), ctx.cost_meter.count(.other));
 }
 
-test "wrappedExportFn leaves func path unwrapped when no capabilities declared" {
+test "a capability-free func export gets no capability scope wrapper" {
     const native = struct {
         fn run(_: *anyopaque, _: value.JSValue, _: []const value.JSValue) anyerror!value.JSValue {
             return value.JSValue.true_val;
@@ -300,7 +307,46 @@ test "wrappedExportFn leaves func path unwrapped when no capabilities declared" 
         .exports = &.{fb},
     };
 
+    // The capability layer adds nothing: the pointer is literally the original.
+    // Only the tool grant check (M4 T5) wraps it, which the next test covers.
+    const scoped = comptime capabilityWrappedExportFn(binding, fb);
+    try std.testing.expectEqual(@as(object.NativeFn, native), scoped);
+}
+
+test "every export, capability-free or not, runs inside the active tool grant" {
+    const allocator = std.testing.allocator;
+    var gc_state = try gc.GC.init(allocator, .{});
+    defer gc_state.deinit();
+    const ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const native = struct {
+        fn run(_: *anyopaque, _: value.JSValue, _: []const value.JSValue) anyerror!value.JSValue {
+            return value.JSValue.true_val;
+        }
+    }.run;
+    const fb = mb.FunctionBinding{ .name = "bare", .func = native, .arg_count = 0 };
+    const binding = mb.ModuleBinding{ .specifier = "zttp:test-bare", .name = "test-bare", .exports = &.{fb} };
     const wrapped = comptime wrappedExportFn(binding, fb);
-    // No wrapping means the wrapped pointer is literally the original.
-    try std.testing.expectEqual(@as(object.NativeFn, native), wrapped);
+
+    const Grant = struct {
+        fn allowsOnly(context_ptr: *const anyopaque, module: []const u8, name: []const u8) bool {
+            const allowed: *const [2][]const u8 = @ptrCast(@alignCast(context_ptr));
+            return std.mem.eql(u8, allowed[0], module) and std.mem.eql(u8, allowed[1], name);
+        }
+    };
+
+    // No grant: the call runs.
+    try std.testing.expect((try wrapped(ctx, value.JSValue.undefined_val, &.{})).isTrue());
+
+    // A grant that holds the export: the call runs.
+    const holds = [2][]const u8{ "zttp:test-bare", "bare" };
+    ctx.active_tool_grant = .{ .context = @ptrCast(&holds), .allows = Grant.allowsOnly };
+    try std.testing.expect((try wrapped(ctx, value.JSValue.undefined_val, &.{})).isTrue());
+
+    // A grant that lacks it: the named denial, before the export runs.
+    const lacks = [2][]const u8{ "zttp:test-bare", "other" };
+    ctx.active_tool_grant = .{ .context = @ptrCast(&lacks), .allows = Grant.allowsOnly };
+    try std.testing.expectError(error.ToolGrantDenied, wrapped(ctx, value.JSValue.undefined_val, &.{}));
+    ctx.active_tool_grant = null;
 }

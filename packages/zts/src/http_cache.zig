@@ -20,6 +20,10 @@ pub const HttpRequestShape = struct {
     query_slot: u16,
     body_slot: u16,
     headers_slot: u16,
+    /// The verified caller identity a tool request carries (M4 T5). Written
+    /// `undefined` on every other request.
+    subject_slot: u16,
+    tenant_slot: u16,
 };
 
 pub const HttpResponseShape = struct {
@@ -116,6 +120,8 @@ pub const HttpCache = struct {
         const query_slot = try addProp(pool, &req_class, .query);
         const body_slot = try addProp(pool, &req_class, .body);
         const headers_slot = try addProp(pool, &req_class, .headers);
+        const subject_slot = try addProp(pool, &req_class, try atoms.intern("subject"));
+        const tenant_slot = try addProp(pool, &req_class, try atoms.intern("tenant"));
 
         var resp_class = pool.getEmptyClass();
         const resp_body_slot = try addProp(pool, &resp_class, .body);
@@ -149,6 +155,8 @@ pub const HttpCache = struct {
                 .query_slot = query_slot,
                 .body_slot = body_slot,
                 .headers_slot = headers_slot,
+                .subject_slot = subject_slot,
+                .tenant_slot = tenant_slot,
             },
             .response = .{
                 .class_idx = resp_class,

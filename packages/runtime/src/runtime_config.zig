@@ -31,6 +31,14 @@ pub const CostCeilings = struct {
     }
 };
 
+/// The environment variable that holds the HS256 key and the claim that names
+/// the tenant. Names only; the key is read from the process environment at
+/// startup and never stored here.
+pub const ToolAuthNames = struct {
+    key_env: []const u8,
+    tenant_claim: []const u8,
+};
+
 pub const RuntimeConfig = struct {
     memory_limit: usize = 0,
     nursery_size: usize = 64 * 1024,
@@ -50,6 +58,11 @@ pub const RuntimeConfig = struct {
     /// from there. Null when the handler has no tool catalog.
     tool_catalog_section: ?[]const u8 = null,
     invariant_coverage_accepted: bool = false,
+    /// Where a tool handler finds its bearer-token key and tenant claim (M4
+    /// T5): zttp.json's `auth` names for `zttp dev` and `serve`. A deployed
+    /// artifact ignores this and reads the names from its own contract, which
+    /// the executable graph binds. Borrowed.
+    tool_auth: ?ToolAuthNames = null,
     trace_file_path: ?[]const u8 = null,
     /// Opt-in JSONL sink for runtime soundness incidents (`--incident-log`).
     /// `incident_log_path` is the CLI-supplied path; the server opens it once at

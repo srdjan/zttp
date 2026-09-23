@@ -146,6 +146,11 @@ pub fn populateHandlerAbiTypes(env: *TypeEnv, pool: *TypePool, allocator: std.me
 /// `object` says "a record whose keys I do not know", and `unknown` would say
 /// "I do not know what this is at all".
 ///
+/// `subject` and `tenant` are the caller identity the runtime verified from a
+/// bearer token before a tool handler runs (M4 T5 design note, section 4).
+/// Both are `string`: a tool request always carries them, set from verified
+/// claims and never from request bytes.
+///
 /// `params` is not set by the runtime. A router handler assigns it
 /// (`req.params = found.params`) and then reads it, which is the shipped
 /// idiom; declaring it is what keeps both halves of that idiom typed.
@@ -166,6 +171,8 @@ fn populateRequestType(env: *TypeEnv, pool: *TypePool, allocator: std.mem.Alloca
         addField(pool, allocator, "body", optional_string),
         addField(pool, allocator, "headers", object_ref),
         addField(pool, allocator, "params", object_ref),
+        addField(pool, allocator, "subject", pool.idx_string),
+        addField(pool, allocator, "tenant", pool.idx_string),
         addField(pool, allocator, "text", text_fn),
         addField(pool, allocator, "json", json_fn),
     });
@@ -334,7 +341,7 @@ test "populateHandlerAbiTypes registers a nominal Request with the runtime's fie
     // Every field the runtime sets, and the two prototype methods. A missing
     // one reads as nothing at the call site, which is what the whole type
     // exists to stop.
-    const expected = [_][]const u8{ "url", "method", "path", "query", "body", "headers", "params", "text", "json" };
+    const expected = [_][]const u8{ "url", "method", "path", "query", "body", "headers", "params", "subject", "tenant", "text", "json" };
     const fields = pool.getRecordFields(request);
     try std.testing.expectEqual(expected.len, fields.len);
     for (expected, fields) |name, field| {
@@ -378,6 +385,27 @@ test "a request field reads its declared type, and body may be absent" {
     try std.testing.expectEqual(type_pool_mod.TypeTag.t_ref, pool.getTag(headers).?);
     try std.testing.expectEqualStrings("object", pool.getRefName(headers));
     try std.testing.expect(headers != pool.idx_unknown);
+}
+
+test "the verified identity fields of a Request read as strings" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+    var env = TypeEnv.init(allocator, &pool);
+    defer env.deinit();
+
+    populateHandlerAbiTypes(&env, &pool, allocator);
+    const request = requestType(&env);
+
+    var seen: usize = 0;
+    for (pool.getRecordFields(request)) |field| {
+        const name = pool.getName(field.name_start, field.name_len);
+        if (std.mem.eql(u8, name, "subject") or std.mem.eql(u8, name, "tenant")) {
+            try std.testing.expectEqual(pool.idx_string, field.type_idx);
+            seen += 1;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 2), seen);
 }
 
 test "the Request brand refuses what is not one" {

@@ -28,6 +28,7 @@ test {
     // on macOS. Compile coverage of the instance itself is unaffected either
     // way, because `edge_server.zig` below imports `handler_instance.zig`.
     _ = @import("server.zig");
+    _ = @import("tool_auth.zig");
     _ = @import("edge_server.zig");
     _ = @import("runtime_features.zig").studio;
     _ = @import("proof_adapter.zig");

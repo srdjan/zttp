@@ -64,6 +64,9 @@ pub const security_events = @import("security_events.zig");
 pub const wasm = @import("wasm/root.zig");
 pub const sqlite = @import("sqlite.zig");
 pub const modules = @import("modules/root.zig");
+/// The pure HS256 bearer verifier (M4 T5). The runtime calls it before a tool
+/// handler runs; `zttp:auth`'s `jwtVerify` wraps the same function.
+pub const jwt_auth = @import("zttp-modules").security.auth;
 
 test {
     std.testing.refAllDecls(@This());

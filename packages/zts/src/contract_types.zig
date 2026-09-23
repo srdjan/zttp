@@ -1635,6 +1635,25 @@ pub const ToolEntry = struct {
     }
 };
 
+/// Where a tool handler's runtime finds the key and the tenant (M4 T5 design
+/// note, section 4): the environment variable that holds the HS256 key, and
+/// the claim that names the tenant. Both strings are owned and non-empty.
+pub const ToolAuth = struct {
+    key_env: []const u8,
+    tenant_claim: []const u8,
+
+    pub fn deinit(self: *ToolAuth, allocator: std.mem.Allocator) void {
+        allocator.free(self.key_env);
+        allocator.free(self.tenant_claim);
+    }
+
+    pub fn dupe(self: ToolAuth, allocator: std.mem.Allocator) std.mem.Allocator.Error!ToolAuth {
+        const key_env = try allocator.dupe(u8, self.key_env);
+        errdefer allocator.free(key_env);
+        return .{ .key_env = key_env, .tenant_claim = try allocator.dupe(u8, self.tenant_claim) };
+    }
+};
+
 /// The label a declared classification assigns (M4 T4). The declaration loader
 /// admits these two only, so the set is closed here too.
 pub const ClassificationLabel = enum {
@@ -1969,6 +1988,11 @@ pub const HandlerContract = struct {
     /// The tool catalog (M4 T2): one entry per `toolCatalog` key, in source
     /// order. Empty when the handler is not under the tool profile. Owned.
     tools: std.ArrayList(ToolEntry) = .empty,
+    /// The identity source a tool handler's runtime verifies callers against
+    /// (M4 T5): the names from zttp.json's `auth` object, set by the build.
+    /// Names only - the key never enters the contract. Null when the project
+    /// configures no `auth`. Owned.
+    tool_auth: ?ToolAuth = null,
     /// The P8 report (M4 T4): one entry per declared classification, in the
     /// declaration's canonical order, with the status the flow check reached.
     /// Empty when the build had no declaration. Owned.
@@ -2112,6 +2136,8 @@ pub const HandlerContract = struct {
             tool.deinit(allocator);
         }
         self.tools.deinit(allocator);
+        if (self.tool_auth) |*auth| auth.deinit(allocator);
+        self.tool_auth = null;
         for (self.classifications.items) |*report| {
             report.deinit(allocator);
         }

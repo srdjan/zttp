@@ -565,6 +565,17 @@ pub const LiveReloadState = struct {
         self.current_contract = new_contract;
     }
 
+    /// A dev catalog can arrive after the server started, so the startup refusal
+    /// (M4 T5) cannot see it. Say so here; the request path refuses every tool
+    /// request until the key is configured.
+    fn warnToolAuthMissing(self: *LiveReloadState) void {
+        if (self.server.activeToolCatalog() == null or self.server.tool_auth != null) return;
+        printReload(
+            "tool handler requires auth: set zttp.json \"auth\" and export its keyEnv variable, then restart. Tool requests answer 503 until then.\n",
+            .{},
+        );
+    }
+
     fn installRuntimeContract(self: *LiveReloadState, configured_policy: ?*const HandlerPolicy) void {
         if (self.current_contract) |*hc| {
             const raw = contract_runtime.fromHandlerContract(self.allocator, hc) catch |err| {
@@ -591,6 +602,7 @@ pub const LiveReloadState = struct {
                 return;
             };
             self.server.updateContractWithTools(validated, dev_tool_catalog);
+            self.warnToolAuthMissing();
         }
     }
 
@@ -959,6 +971,7 @@ pub const LiveReloadState = struct {
 
         if (validated_contract) |validated| {
             self.server.updateContractWithTools(validated, dev_tool_catalog);
+            self.warnToolAuthMissing();
             if (self.server.proof_cache != null) {
                 printProve("Proof cache: enabled (deterministic + read_only)\n", .{});
             }

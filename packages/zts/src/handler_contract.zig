@@ -79,6 +79,7 @@ pub const WorkflowCallInfo = contract_types.WorkflowCallInfo;
 pub const EmittedAffordance = contract_types.EmittedAffordance;
 pub const ToolEntry = contract_types.ToolEntry;
 pub const ToolExport = contract_types.ToolExport;
+pub const ToolAuth = contract_types.ToolAuth;
 pub const ClassificationReport = contract_types.ClassificationReport;
 pub const ClassificationLabel = contract_types.ClassificationLabel;
 pub const ClassificationStatus = contract_types.ClassificationStatus;
@@ -1901,6 +1902,36 @@ test "tool catalog survives a v1 and a v2 round trip byte for byte" {
         try std.testing.expectEqual(@as(usize, 1), parsed.tools.items.len);
         try expectToolEntriesEqual(original.tools.items[0], parsed.tools.items[0]);
     }
+}
+
+test "the tool auth names survive a v1 and a v2 round trip, and their absence writes nothing" {
+    const allocator = std.testing.allocator;
+    var original = try toolCatalogFixture(allocator);
+    defer original.deinit(allocator);
+
+    var without: std.Io.Writer.Allocating = .init(allocator);
+    defer without.deinit();
+    try writeContractJson(&original, &without.writer);
+    try std.testing.expect(std.mem.indexOf(u8, without.written(), "toolAuth") == null);
+
+    const auth = ToolAuth{ .key_env = "ZTTP_TOOL_KEY", .tenant_claim = "org" };
+    original.tool_auth = try auth.dupe(allocator);
+    inline for (.{ writeContractJson, writeContractJsonV2 }) |write| {
+        var out: std.Io.Writer.Allocating = .init(allocator);
+        defer out.deinit();
+        try write(&original, &out.writer);
+        var parsed = try parseFromJson(allocator, out.written());
+        defer parsed.deinit(allocator);
+        const got = parsed.tool_auth orelse return error.TestExpectedToolAuth;
+        try std.testing.expectEqualStrings("ZTTP_TOOL_KEY", got.key_env);
+        try std.testing.expectEqualStrings("org", got.tenant_claim);
+    }
+
+    // Half an auth object, or an empty name, is not something the build writes.
+    const partial = "{\"version\": 19, \"handler\": {\"path\": \"t.ts\"}, \"toolAuth\": {\"keyEnv\": \"K\"}}";
+    try std.testing.expectError(error.InvalidToolAuth, parseFromJson(allocator, partial));
+    const empty = "{\"version\": 19, \"handler\": {\"path\": \"t.ts\"}, \"toolAuth\": {\"keyEnv\": \"K\", \"tenantClaim\": \"\"}}";
+    try std.testing.expectError(error.InvalidToolAuth, parseFromJson(allocator, empty));
 }
 
 test "tool schema bytes and validator verdicts agree after a round trip" {

@@ -90,6 +90,16 @@ pub const CallFrame = struct {
 
 /// Maximum number of virtual module state slots.
 /// Sized to accommodate all built-in and extension module state slots.
+/// The export grant of the tool a request is being served for (M4 T5 design
+/// note, section 6). The runtime owns what `context` points at and supplies
+/// `allows`, so the engine never names a runtime type: the module call wrapper
+/// asks it, before an export runs, whether the active tool may call
+/// `module`.`name`.
+pub const ToolGrant = struct {
+    context: *const anyopaque,
+    allows: *const fn (context: *const anyopaque, module: []const u8, name: []const u8) bool,
+};
+
 pub const MAX_MODULE_STATE_SLOTS = 16;
 
 /// Host callback for invoking a JS function the engine holds: JSX function
@@ -215,6 +225,11 @@ pub const Context = struct {
     /// Authorization scope for the native module call executing in this
     /// Context. Nested wrappers restore the previous borrowed scope.
     active_module_scope: ?module_authorization.ActiveModuleScope,
+    /// The export grant of the tool the current request is served for. Null for
+    /// a handler that is not serving a tool request, which leaves every module
+    /// call as it was. The runtime sets it for the duration of one handler call
+    /// and clears it on every exit path.
+    active_tool_grant: ?ToolGrant = null,
     /// Structured I/O collector installed by parallel/race while their
     /// thunks execute. The Context owns the stack, not the worker thread.
     parallel_collection: parallel_collection.State,
@@ -604,6 +619,7 @@ pub const Context = struct {
         // quarantined Context before module-state destructors run so teardown
         // cannot inherit authority from the failed call.
         self.active_module_scope = null;
+        self.active_tool_grant = null;
         self.parallel_collection.clear();
 
         // Clean up per-module state (caches, registries) before destroying objects

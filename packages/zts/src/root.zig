@@ -306,6 +306,24 @@ pub const SourceIdentity = handler_contract.SourceIdentity;
 /// this - sixteen call sites across the runtime, the tools and the expert agent
 /// reached `handler_contract` for it before it had a curated name.
 pub const HandlerProperties = handler_contract.HandlerProperties;
+
+/// The HS256 bearer verifier a tool handler's runtime runs before any JS value
+/// exists (M4 T5 design note, section 4). One function and its closed refusal
+/// enum; the caller supplies the HMAC and the clock, so nothing here reaches a
+/// capability.
+pub const Hs256 = struct {
+    pub const verify = engine.jwt_auth.verifyHs256;
+    pub const Mac = engine.jwt_auth.Hs256Mac;
+    pub const MacError = engine.jwt_auth.MacError;
+    pub const VerifyError = engine.jwt_auth.VerifyError;
+    pub const Refusal = engine.jwt_auth.VerifyRefusal;
+    pub const Claims = engine.jwt_auth.Claims;
+    pub const Result = engine.jwt_auth.VerifyResult;
+};
+
+/// The export grant of the tool a request is served for, as the engine reads
+/// it from the context (M4 T5 design note, section 6).
+pub const ToolGrant = context.ToolGrant;
 pub const ContractProof = struct {
     pub const Level = contract_diff.ProofLevel;
 

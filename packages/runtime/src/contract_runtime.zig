@@ -572,6 +572,9 @@ pub const RuntimeContract = struct {
     /// The contract's tool list, kept for the startup cross-check against the
     /// accepted catalog. Empty for a handler with no tool catalog.
     tools: []const ToolSummary = &.{},
+    /// The identity source names the build wrote into the contract (M4 T5).
+    /// Null when the project configured no `auth`. Owned.
+    tool_auth: ?runtime_config.ToolAuthNames = null,
     allocator: std.mem.Allocator,
 
     pub fn hasCapability(self: *const RuntimeContract, cap: ModuleCapability) bool {
@@ -591,6 +594,10 @@ pub const RuntimeContract = struct {
         self.allocator.free(self.modules);
         if (self.cost_envelope) |*envelope| envelope.deinit(self.allocator);
         freeToolSummaries(self.allocator, self.tools);
+        if (self.tool_auth) |auth| {
+            self.allocator.free(auth.key_env);
+            self.allocator.free(auth.tenant_claim);
+        }
     }
 
     /// Check if a request method+path matches any proven route.
@@ -929,6 +936,12 @@ pub fn fromHandlerContract(allocator: std.mem.Allocator, hc: *const HandlerContr
     const tools_out = try tools.toOwnedSlice(allocator);
     errdefer freeToolSummaries(allocator, tools_out);
 
+    const tool_auth: ?runtime_config.ToolAuthNames = if (hc.tool_auth) |auth| blk: {
+        const key_env = try allocator.dupe(u8, auth.key_env);
+        errdefer allocator.free(key_env);
+        break :blk .{ .key_env = key_env, .tenant_claim = try allocator.dupe(u8, auth.tenant_claim) };
+    } else null;
+
     return .{ .inner = .{
         .env_vars = env_vars_out,
         .env_dynamic = hc.env.dynamic,
@@ -949,6 +962,7 @@ pub fn fromHandlerContract(allocator: std.mem.Allocator, hc: *const HandlerContr
         .modules = modules_out,
         .cost_envelope = cost_envelope_out,
         .tools = tools_out,
+        .tool_auth = tool_auth,
         .allocator = allocator,
     } };
 }

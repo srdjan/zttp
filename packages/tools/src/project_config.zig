@@ -13,6 +13,18 @@ test {
     _ = invariant_author;
 }
 
+/// zttp.json's `auth` object (M4 T5 design note, section 4). Both strings are
+/// owned and non-empty.
+pub const AuthConfig = struct {
+    key_env: []const u8,
+    tenant_claim: []const u8,
+
+    pub fn deinit(self: *AuthConfig, allocator: std.mem.Allocator) void {
+        allocator.free(self.key_env);
+        allocator.free(self.tenant_claim);
+    }
+};
+
 pub const ProjectConfig = struct {
     root_dir: []const u8,
     manifest_path: []const u8,
@@ -33,6 +45,11 @@ pub const ProjectConfig = struct {
     system: ?[]const u8 = null,
     outbound_http: bool = false,
     outbound_hosts: []const []const u8 = &.{},
+    /// The identity source a tool handler verifies callers against (M4 T5):
+    /// `auth.keyEnv` names the environment variable that holds the HS256 key,
+    /// and `auth.tenantClaim` names the claim that carries the tenant. Names
+    /// only; the key itself never appears in zttp.json.
+    auth: ?AuthConfig = null,
 
     pub fn deinit(self: *ProjectConfig, allocator: std.mem.Allocator) void {
         allocator.free(self.root_dir);
@@ -49,6 +66,7 @@ pub const ProjectConfig = struct {
         if (self.system) |path| allocator.free(path);
         for (self.outbound_hosts) |host| allocator.free(host);
         allocator.free(self.outbound_hosts);
+        if (self.auth) |*auth| auth.deinit(allocator);
     }
 
     pub fn resolvePath(self: *const ProjectConfig, allocator: std.mem.Allocator, path: []const u8) ![]u8 {
@@ -195,6 +213,7 @@ pub fn loadAbsolute(
         .outbound_hosts = try dupStringArrayField(allocator, obj, "outboundHosts"),
     };
     errdefer config.deinit(allocator);
+    config.auth = try parseAuthField(allocator, obj);
 
     if ((config.invariants == null) != (config.ledger == null)) return error.IncompleteInvariantConfig;
     // Every project-aware command rejects an unreadable or unsupported
@@ -319,6 +338,25 @@ fn dupStringArrayField(
         items_initialized = i + 1;
     }
     return items;
+}
+
+/// Read the `auth` object: exactly `keyEnv` and `tenantClaim`, both non-empty
+/// strings. A missing key, an unknown key, or any other shape is refused rather
+/// than defaulted - an identity source read half right is not one.
+fn parseAuthField(allocator: std.mem.Allocator, obj: std.json.ObjectMap) !?AuthConfig {
+    const value = obj.get("auth") orelse return null;
+    if (value != .object) return error.InvalidAuthConfig;
+    var it = value.object.iterator();
+    while (it.next()) |entry| {
+        const known = std.mem.eql(u8, entry.key_ptr.*, "keyEnv") or std.mem.eql(u8, entry.key_ptr.*, "tenantClaim");
+        if (!known) return error.InvalidAuthConfig;
+        if (entry.value_ptr.* != .string or entry.value_ptr.string.len == 0) return error.InvalidAuthConfig;
+    }
+    const key_env = value.object.get("keyEnv") orelse return error.InvalidAuthConfig;
+    const tenant_claim = value.object.get("tenantClaim") orelse return error.InvalidAuthConfig;
+    const owned_key_env = try allocator.dupe(u8, key_env.string);
+    errdefer allocator.free(owned_key_env);
+    return .{ .key_env = owned_key_env, .tenant_claim = try allocator.dupe(u8, tenant_claim.string) };
 }
 
 fn parseBoolField(obj: std.json.ObjectMap, key: []const u8, default_value: bool) !bool {
@@ -520,4 +558,39 @@ test "project config declaration read fails for a missing or oversized file" {
     @memset(big, ' ');
     try tmp.dir.writeFile(io, .{ .sub_path = "declaration.json", .data = big });
     try std.testing.expectError(error.FileTooBig, config.readDeclaration(a));
+}
+
+test "project config reads the auth names and refuses any other auth shape" {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+
+    {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        try tmp.dir.writeFile(io, .{ .sub_path = "zttp.json", .data = "{\"auth\":{\"keyEnv\":\"TOOL_KEY\",\"tenantClaim\":\"org\"}}" });
+        const manifest = try tmp.dir.realPathFileAlloc(io, "zttp.json", a);
+        defer a.free(manifest);
+        var config = (try discover(a, io, manifest)).?;
+        defer config.deinit(a);
+        const auth = config.auth orelse return error.TestExpectedAuth;
+        try std.testing.expectEqualStrings("TOOL_KEY", auth.key_env);
+        try std.testing.expectEqualStrings("org", auth.tenant_claim);
+    }
+
+    const refused = [_][]const u8{
+        "{\"auth\":\"TOOL_KEY\"}",
+        "{\"auth\":{\"keyEnv\":\"TOOL_KEY\"}}",
+        "{\"auth\":{\"tenantClaim\":\"org\"}}",
+        "{\"auth\":{\"keyEnv\":\"TOOL_KEY\",\"tenantClaim\":\"org\",\"key\":\"secret\"}}",
+        "{\"auth\":{\"keyEnv\":\"\",\"tenantClaim\":\"org\"}}",
+        "{\"auth\":{\"keyEnv\":\"TOOL_KEY\",\"tenantClaim\":7}}",
+    };
+    for (refused) |body| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        try tmp.dir.writeFile(io, .{ .sub_path = "zttp.json", .data = body });
+        const manifest = try tmp.dir.realPathFileAlloc(io, "zttp.json", a);
+        defer a.free(manifest);
+        try std.testing.expectError(error.InvalidAuthConfig, discover(a, io, manifest));
+    }
 }
