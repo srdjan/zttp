@@ -15,5 +15,6 @@ comptime {
     _ = @import("proof_system.zig");
     _ = @import("residual.zig");
     _ = @import("root.zig");
+    _ = @import("tool_catalog.zig");
     _ = @import("verdict.zig");
 }

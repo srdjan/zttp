@@ -19,6 +19,7 @@ pub const invariant = @import("invariant.zig");
 pub const policy = @import("policy.zig");
 pub const proof_system = @import("proof_system.zig");
 pub const residual = @import("residual.zig");
+pub const tool_catalog = @import("tool_catalog.zig");
 pub const verdict = @import("verdict.zig");
 
 pub const Assessment = verdict.Assessment;

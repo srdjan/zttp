@@ -15,6 +15,7 @@ const limits_mod = @import("limits.zig");
 const policy_mod = @import("policy.zig");
 const ps = @import("proof_system.zig");
 const residual = @import("residual.zig");
+const tool_catalog = @import("tool_catalog.zig");
 const verdict = @import("verdict.zig");
 
 const Assessment = verdict.Assessment;
@@ -151,6 +152,10 @@ pub const Inputs = struct {
     invariant_spec: ?[]const u8 = null,
     /// Ledger calls decoded independently from final bytecode by the loader.
     observed_invariant_operations: []const invariant.ObservedOperation = &.{},
+    /// Exact canonical `ZTCAT1` tool catalog bytes supplied by the deployment
+    /// artifact, when the handler has a tool catalog. The checker decodes and
+    /// hashes them itself and requires the one graph member that names them.
+    tool_catalog: ?[]const u8 = null,
 };
 
 pub const RuntimeCapabilityPolicyInput = struct {
@@ -256,6 +261,7 @@ pub fn check(inputs: Inputs, policy: Policy) Assessment {
         .active_ranges = .{ .bytes = inputs.scratch[range_start..] },
         .invariant_spec = inputs.invariant_spec,
         .observed_invariant_operations = inputs.observed_invariant_operations,
+        .tool_catalog = inputs.tool_catalog,
     };
 
     const outcome = session.run() catch |err| {
@@ -332,6 +338,7 @@ const Session = struct {
     invariant_nodes: BitSet,
     invariant_spec: ?[]const u8,
     observed_invariant_operations: []const invariant.ObservedOperation,
+    tool_catalog: ?[]const u8,
 
     const SessionError = cert_mod.DecodeError;
 
@@ -369,6 +376,8 @@ const Session = struct {
             .covered => |covered| covered,
         };
 
+        if (try self.checkToolCatalog()) |rejection| return rejection;
+
         const guards = switch (try self.checkGuardCoverage()) {
             .rejected => |outcome| return outcome,
             .covered => |verdicts| verdicts,
@@ -378,6 +387,57 @@ const Session = struct {
         outcome.guards = guards;
         outcome.invariants = invariants;
         return outcome;
+    }
+
+    /// Relate the supplied `ZTCAT1` bytes to the one `tool_catalog` graph
+    /// member. The member's digest is already bound to the executable root;
+    /// this stage is what ties it to bytes the kernel decoded itself.
+    ///
+    /// Bytes with no member, and a member with no bytes, are both refused: a
+    /// catalog the graph does not commit to is not accepted, and a commitment
+    /// to a catalog nobody supplied cannot be checked.
+    fn checkToolCatalog(self: *Session) SessionError!?Outcome {
+        const bytes = self.tool_catalog orelse {
+            var graph_index: u32 = 0;
+            while (graph_index < self.certificate.graph.len()) : (graph_index += 1) {
+                try self.budget.spend(1);
+                const member = try self.certificate.graph.get(graph_index);
+                if (member.kind == .tool_catalog) {
+                    return reject(.tool_catalog, .tool_catalog_member_missing, memberSubject(member));
+                }
+            }
+            return null;
+        };
+
+        _ = tool_catalog.decode(bytes) catch
+            return reject(.tool_catalog, .tool_catalog_undecodable, .none);
+        const catalog_digest = tool_catalog.digest(bytes);
+
+        var members: u32 = 0;
+        var graph_index: u32 = 0;
+        while (graph_index < self.certificate.graph.len()) : (graph_index += 1) {
+            try self.budget.spend(1);
+            const member = try self.certificate.graph.get(graph_index);
+            if (member.kind != .tool_catalog) continue;
+            members += 1;
+            // The graph refuses a duplicate (kind, ordinal) at binding, so a
+            // second catalog member carries a nonzero ordinal and is refused
+            // here rather than counted.
+            if (member.ordinal != 0 or !std.mem.eql(u8, &member.digest, &catalog_digest)) {
+                return .{ .state = .integrity_verified, .rejection = .{
+                    .stage = .tool_catalog,
+                    .code = .tool_catalog_digest_mismatch,
+                    .subject = memberSubject(member),
+                    .expected = .{ .digest = member.digest },
+                    .actual = .{ .digest = catalog_digest },
+                    .recertifiable = true,
+                } };
+            }
+        }
+        if (members != 1) {
+            return reject(.tool_catalog, .tool_catalog_member_missing, .none);
+        }
+        return null;
     }
 
     const InvariantOutcome = union(enum) {
@@ -3118,4 +3178,179 @@ test "scratchBytes covers three bits per node at the configured bound" {
     const needed = scratchBytes(.{ .max_ir_nodes = 64, .max_witnesses = 4 });
     try testing.expectEqual(@as(usize, 184), needed);
     try testing.expect(scratchBytes(.{}) > 0);
+}
+
+/// The minimal accepted artifact plus `extra` tool catalog members, one per
+/// ordinal from zero, each carrying the digest of `catalog`.
+fn CatalogFixture(comptime extra: usize) type {
+    return struct {
+        const Self = @This();
+
+        base: test_support.Fixture,
+        members: [9 + extra]graph.Member,
+        catalog_buf: [1024]u8 = undefined,
+        catalog_len: usize = 0,
+        buffer: [8192]u8 = undefined,
+        len: usize = 0,
+
+        fn catalog(self: *const Self) []const u8 {
+            return self.catalog_buf[0..self.catalog_len];
+        }
+
+        fn encode(self: *Self) !void {
+            for (&self.members) |*member| {
+                if (member.kind == .proof_certificate) member.digest = [_]u8{0} ** 32;
+            }
+            std.mem.sort(graph.Member, &self.members, {}, struct {
+                fn lessThan(_: void, a: graph.Member, b: graph.Member) bool {
+                    return graph.Member.order(a, b) == .lt;
+                }
+            }.lessThan);
+            var built = self.base.parts();
+            built.graph = &self.members;
+            built.identity.executable_root = [_]u8{0} ** 32;
+            const provisional = try cert_mod.encode(built, &self.buffer);
+            var budget = Budget.init(.{});
+            const decoded = try cert_mod.decode(provisional, .{}, &budget);
+            const certificate_digest = try cert_mod.commitmentDigest(provisional, decoded);
+            for (&self.members) |*member| {
+                if (member.kind == .proof_certificate) member.digest = certificate_digest;
+            }
+            built.identity.executable_root = try graph.computeRoot(&self.members);
+            self.len = (try cert_mod.encode(built, &self.buffer)).len;
+        }
+
+        fn inputs(self: *Self) Inputs {
+            return .{
+                .certificate = self.buffer[0..self.len],
+                .observed_graph = &self.members,
+                .scratch = &self.base.scratch,
+                .tool_catalog = self.catalog(),
+            };
+        }
+
+        fn build() !Self {
+            var self = Self{ .base = try test_support.build(), .members = undefined };
+            self.catalog_len = tool_catalog.test_support.sample(&self.catalog_buf).len;
+            const catalog_digest = tool_catalog.digest(self.catalog());
+            @memcpy(self.members[0..9], &self.base.members);
+            for (0..extra) |ordinal| {
+                self.members[9 + ordinal] = .{ .kind = .tool_catalog, .ordinal = @intCast(ordinal), .digest = catalog_digest };
+            }
+            try self.encode();
+            return self;
+        }
+    };
+}
+
+fn expectRejected(result: Assessment, code: verdict.ReasonCode) !void {
+    const rejection = result.rejection orelse {
+        std.debug.print("expected {s}, accepted\n", .{code.text()});
+        return error.TestUnexpectedResult;
+    };
+    if (rejection.code != code) {
+        std.debug.print("expected {s}, got {s} / {s}\n", .{ code.text(), rejection.stage.name(), rejection.code.text() });
+        return error.TestUnexpectedResult;
+    }
+}
+
+test "a tool catalog matching its graph member is accepted" {
+    var fixture = try CatalogFixture(1).build();
+    const result = check(fixture.inputs(), policy_mod.production);
+    if (result.rejection) |rejection| {
+        std.debug.print("unexpected rejection: {s} / {s}\n", .{ rejection.stage.name(), rejection.code.text() });
+        return error.TestUnexpectedResult;
+    }
+    try testing.expect(result.accepted());
+}
+
+test "one mutated catalog byte rejects with tool_catalog_digest_mismatch" {
+    var fixture = try CatalogFixture(1).build();
+    var tampered: [1024]u8 = undefined;
+    const original = fixture.catalog();
+    @memcpy(tampered[0..original.len], original);
+    // A byte inside the first description: the bytes still decode, so only the
+    // digest can refuse them.
+    const at = std.mem.indexOf(u8, original, "Echo the input").?;
+    tampered[at] = 'e';
+    var inputs = fixture.inputs();
+    inputs.tool_catalog = tampered[0..original.len];
+    const result = check(inputs, policy_mod.production);
+    try expectRejected(result, .tool_catalog_digest_mismatch);
+    try testing.expectEqual(verdict.Stage.tool_catalog, result.rejection.?.stage);
+}
+
+test "a graph member naming another catalog digest rejects" {
+    var fixture = try CatalogFixture(1).build();
+    for (&fixture.members) |*member| {
+        if (member.kind == .tool_catalog) member.digest[0] +%= 1;
+    }
+    try fixture.encode();
+    try expectRejected(check(fixture.inputs(), policy_mod.production), .tool_catalog_digest_mismatch);
+}
+
+test "a second tool catalog member rejects" {
+    var fixture = try CatalogFixture(2).build();
+    try expectRejected(check(fixture.inputs(), policy_mod.production), .tool_catalog_digest_mismatch);
+}
+
+test "catalog bytes with no graph member reject" {
+    var fixture = try test_support.build();
+    var buf: [1024]u8 = undefined;
+    var inputs = fixture.inputs();
+    inputs.tool_catalog = tool_catalog.test_support.sample(&buf);
+    try expectRejected(check(inputs, policy_mod.production), .tool_catalog_member_missing);
+}
+
+test "a tool catalog member with no catalog bytes rejects" {
+    var fixture = try CatalogFixture(1).build();
+    var inputs = fixture.inputs();
+    inputs.tool_catalog = null;
+    try expectRejected(check(inputs, policy_mod.production), .tool_catalog_member_missing);
+}
+
+test "undecodable catalog bytes reject before the digest is compared" {
+    var fixture = try CatalogFixture(1).build();
+    var inputs = fixture.inputs();
+    inputs.tool_catalog = "ZTCAT1\x00\x00\x01\x00\x00\x00";
+    try expectRejected(check(inputs, policy_mod.production), .tool_catalog_undecodable);
+}
+
+test "every tool catalog reason code is observed" {
+    var seen = std.EnumSet(verdict.ReasonCode).initEmpty();
+
+    var matching = try CatalogFixture(1).build();
+    var buf: [1024]u8 = undefined;
+
+    var mutated = matching.inputs();
+    var tampered: [1024]u8 = undefined;
+    const original = matching.catalog();
+    @memcpy(tampered[0..original.len], original);
+    tampered[std.mem.indexOf(u8, original, "Echo the input").?] = 'e';
+    mutated.tool_catalog = tampered[0..original.len];
+
+    var no_bytes = matching.inputs();
+    no_bytes.tool_catalog = null;
+
+    var undecodable = matching.inputs();
+    undecodable.tool_catalog = "not a catalog";
+
+    var plain = try test_support.build();
+    var no_member = plain.inputs();
+    no_member.tool_catalog = tool_catalog.test_support.sample(&buf);
+
+    for ([_]Inputs{ mutated, no_bytes, undecodable, no_member }) |inputs| {
+        const result = check(inputs, policy_mod.production);
+        if (result.rejection) |rejection| seen.insert(rejection.code);
+    }
+
+    inline for (@typeInfo(verdict.ReasonCode).@"enum".fields) |field| {
+        if (comptime std.mem.startsWith(u8, field.name, "tool_catalog_")) {
+            const code: verdict.ReasonCode = @enumFromInt(field.value);
+            if (!seen.contains(code)) {
+                std.debug.print("{s} is never observed\n", .{field.name});
+                return error.TestUnexpectedResult;
+            }
+        }
+    }
 }

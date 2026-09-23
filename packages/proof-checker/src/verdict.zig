@@ -127,6 +127,8 @@ pub const Stage = enum(u8) {
     guard_coverage = 10,
     /// Application invariant specification and protected-operation coverage.
     invariant_coverage = 11,
+    /// Tool catalog decoding and its executable-graph member.
+    tool_catalog = 12,
 
     pub fn name(self: Stage) []const u8 {
         return switch (self) {
@@ -141,6 +143,7 @@ pub const Stage = enum(u8) {
             .policy => "policy",
             .guard_coverage => "guard_coverage",
             .invariant_coverage => "invariant_coverage",
+            .tool_catalog => "tool_catalog",
         };
     }
 };
@@ -263,6 +266,11 @@ pub const ReasonCode = enum(u16) {
     invariant_impl_identity_mismatch = 2015,
     invariant_translation_missing = 2016,
     invariant_observed_mismatch = 2017,
+
+    // tool catalog
+    tool_catalog_undecodable = 2101,
+    tool_catalog_digest_mismatch = 2102,
+    tool_catalog_member_missing = 2103,
 
     pub fn text(self: ReasonCode) []const u8 {
         return @tagName(self);

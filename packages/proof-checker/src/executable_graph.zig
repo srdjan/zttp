@@ -57,6 +57,9 @@ pub const MemberKind = enum(u16) {
     invariant_spec = 17,
     /// Identity of the authoritative protected-ledger native adapter.
     invariant_ledger_adapter = 18,
+    /// Canonical `ZTCAT1` tool catalog bytes. Present only for a tool-profile
+    /// handler; the kernel decodes the bytes and recomputes this digest.
+    tool_catalog = 19,
 
     pub fn fromWire(value: u16) ?MemberKind {
         return switch (value) {
@@ -78,6 +81,7 @@ pub const MemberKind = enum(u16) {
             16 => .residual_plan,
             17 => .invariant_spec,
             18 => .invariant_ledger_adapter,
+            19 => .tool_catalog,
             else => null,
         };
     }
@@ -113,6 +117,9 @@ pub const MemberKind = enum(u16) {
             .residual_plan,
             .invariant_spec,
             .invariant_ledger_adapter,
+            // Present only for a tool-profile handler. A handler with no tools
+            // has no catalog, as a handler with no invariant has no spec.
+            .tool_catalog,
             => false,
         };
     }
@@ -320,7 +327,7 @@ test "required kinds must all be present" {
 
 test "member kind wire decoding is closed" {
     try testing.expectEqual(@as(?MemberKind, null), MemberKind.fromWire(0));
-    try testing.expectEqual(@as(?MemberKind, null), MemberKind.fromWire(19));
+    try testing.expectEqual(@as(?MemberKind, null), MemberKind.fromWire(20));
     inline for (@typeInfo(MemberKind).@"enum".fields) |field| {
         const kind: MemberKind = @enumFromInt(field.value);
         try testing.expectEqual(@as(?MemberKind, kind), MemberKind.fromWire(field.value));

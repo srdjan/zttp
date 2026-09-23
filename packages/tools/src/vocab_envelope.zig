@@ -326,14 +326,14 @@ test "derived counts match what the contract prose states" {
         .{ .key = "handler_property_bool_fields", .n = 19 },
         .{ .key = "consumer_obligation_properties", .n = 8 },
         .{ .key = "assurance_grades", .n = 5 },
-        .{ .key = "acceptance_stages", .n = 11 },
-        .{ .key = "reason_codes", .n = 89 },
+        .{ .key = "acceptance_stages", .n = 12 },
+        .{ .key = "reason_codes", .n = 92 },
         .{ .key = "evidence_edge_kinds", .n = 6 },
         .{ .key = "residual_guard_kinds", .n = 5 },
         .{ .key = "residual_guard_families", .n = 4 },
         .{ .key = "invariant_kinds", .n = 2 },
         .{ .key = "account_matcher_tags", .n = 2 },
-        .{ .key = "executable_graph_member_kinds", .n = 18 },
+        .{ .key = "executable_graph_member_kinds", .n = 19 },
     };
     // Census, not spot check: every expectation must find its alphabet, and
     // every alphabet must be covered by an expectation. Counting matches alone

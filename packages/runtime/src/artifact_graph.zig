@@ -413,6 +413,8 @@ test "the inventory covers every executable and authority-bearing member" {
         // are named rather than skipped by a wildcard, so a member kind that
         // stops being produced for any other reason fails here.
         if (kind == .source_profile_frontend or kind == .residual_plan) continue;
+        // produced from U4 of M4 T3
+        if (kind == .tool_catalog) continue;
         try testing.expect(seen.contains(kind));
     }
 

@@ -82,7 +82,8 @@
       { "name": "solver", "ordinal": 8 },
       { "name": "policy", "ordinal": 9 },
       { "name": "guard_coverage", "ordinal": 10 },
-      { "name": "invariant_coverage", "ordinal": 11 }
+      { "name": "invariant_coverage", "ordinal": 11 },
+      { "name": "tool_catalog", "ordinal": 12 }
     ] },
     "reason_codes": { "source": "packages/proof-checker/src/verdict.zig", "members": [
       { "name": "certificate_too_large", "ordinal": 1001 },
@@ -173,7 +174,10 @@
       { "name": "invariant_sink_mismatch", "ordinal": 2014 },
       { "name": "invariant_impl_identity_mismatch", "ordinal": 2015 },
       { "name": "invariant_translation_missing", "ordinal": 2016 },
-      { "name": "invariant_observed_mismatch", "ordinal": 2017 }
+      { "name": "invariant_observed_mismatch", "ordinal": 2017 },
+      { "name": "tool_catalog_undecodable", "ordinal": 2101 },
+      { "name": "tool_catalog_digest_mismatch", "ordinal": 2102 },
+      { "name": "tool_catalog_member_missing", "ordinal": 2103 }
     ] },
     "evidence_edge_kinds": { "source": "packages/proof-checker/src/certificate.zig", "members": [
       { "name": "proved", "ordinal": 1 },
@@ -222,7 +226,8 @@
       { "name": "proof_certificate", "ordinal": 15 },
       { "name": "residual_plan", "ordinal": 16 },
       { "name": "invariant_spec", "ordinal": 17 },
-      { "name": "invariant_ledger_adapter", "ordinal": 18 }
+      { "name": "invariant_ledger_adapter", "ordinal": 18 },
+      { "name": "tool_catalog", "ordinal": 19 }
     ] }
 ,
     "virtual_modules_base": { "source": "packages/zts/src/builtin_modules.zig", "members": [
