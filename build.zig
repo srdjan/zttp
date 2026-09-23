@@ -1858,6 +1858,18 @@ fn addExpertRun(
 ) void {
     const run = b.addRunArtifact(zts_exe);
     run.addArgs(args);
+    // A handler argument is a plain string in argv, so the run step does not
+    // see it as an input and reuses a cached result after the handler is
+    // edited: measured by breaking a fixture and watching the step still pass.
+    // Declare each one as a file input so the edit reruns the command. A
+    // golden that tests the missing-file path passes a handler that does not
+    // exist on purpose; there is nothing to track for it.
+    for (args) |arg| {
+        if (!std.mem.endsWith(u8, arg, ".ts") and !std.mem.endsWith(u8, arg, ".tsx")) continue;
+        if (std.fs.path.isAbsolute(arg)) continue;
+        b.build_root.handle.access(b.graph.io, arg, .{}) catch continue;
+        run.addFileInput(b.path(arg));
+    }
     run.expectExitCode(expected_exit);
     // Zig 0.16's run-step still fails non-zero commands that write to stderr
     // unless a stderr check exists. Matching the empty string keeps the
@@ -1869,10 +1881,8 @@ fn addExpertRun(
         const expected = b.build_root.handle.readFileAlloc(b.graph.io, rel, b.allocator, .unlimited) catch |err| {
             std.debug.panic("missing expert golden fixture {s}: {s}", .{ rel, @errorName(err) });
         };
-        // Declare the fixture as an input so editing it invalidates the run
-        // step's cache. Without this the step reports success from a cached
-        // result and the gate silently stops comparing: verified by tampering
-        // with a golden and watching the check still pass.
+        // The golden text is embedded in the step, so editing a golden
+        // invalidates the cache. The handler source is declared above.
         run.expectStdOutEqual(expected);
     }
     step.dependOn(&run.step);
