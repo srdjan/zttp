@@ -9,6 +9,7 @@ const std = @import("std");
 
 const capability_policy = @import("capability_policy.zig");
 const cert_mod = @import("certificate.zig");
+const declaration = @import("declaration.zig");
 const graph = @import("executable_graph.zig");
 const invariant = @import("invariant.zig");
 const limits_mod = @import("limits.zig");
@@ -156,6 +157,11 @@ pub const Inputs = struct {
     /// artifact, when the handler has a tool catalog. The checker decodes and
     /// hashes them itself and requires the one graph member that names them.
     tool_catalog: ?[]const u8 = null,
+    /// Exact canonical `ZTDCL1` declaration bytes supplied by the deployment
+    /// artifact, when the handler carries a declaration. The checker decodes
+    /// and hashes them itself and requires the one graph member that names
+    /// them.
+    declaration: ?[]const u8 = null,
 };
 
 pub const RuntimeCapabilityPolicyInput = struct {
@@ -262,6 +268,7 @@ pub fn check(inputs: Inputs, policy: Policy) Assessment {
         .invariant_spec = inputs.invariant_spec,
         .observed_invariant_operations = inputs.observed_invariant_operations,
         .tool_catalog = inputs.tool_catalog,
+        .declaration = inputs.declaration,
     };
 
     const outcome = session.run() catch |err| {
@@ -339,6 +346,7 @@ const Session = struct {
     invariant_spec: ?[]const u8,
     observed_invariant_operations: []const invariant.ObservedOperation,
     tool_catalog: ?[]const u8,
+    declaration: ?[]const u8,
 
     const SessionError = cert_mod.DecodeError;
 
@@ -377,6 +385,7 @@ const Session = struct {
         };
 
         if (try self.checkToolCatalog()) |rejection| return rejection;
+        if (try self.checkDeclaration()) |rejection| return rejection;
 
         const guards = switch (try self.checkGuardCoverage()) {
             .rejected => |outcome| return outcome,
@@ -436,6 +445,58 @@ const Session = struct {
         }
         if (members != 1) {
             return reject(.tool_catalog, .tool_catalog_member_missing, .none);
+        }
+        return null;
+    }
+
+    /// Relate the supplied `ZTDCL1` bytes to the one `declaration` graph
+    /// member, as `checkToolCatalog` does for the catalog. The member's
+    /// digest is already bound to the executable root; this stage ties it to
+    /// bytes the kernel decoded itself.
+    ///
+    /// Bytes with no member, and a member with no bytes, are both refused: a
+    /// declaration the graph does not commit to is not accepted, and a
+    /// commitment to a declaration nobody supplied cannot be checked.
+    fn checkDeclaration(self: *Session) SessionError!?Outcome {
+        const bytes = self.declaration orelse {
+            var graph_index: u32 = 0;
+            while (graph_index < self.certificate.graph.len()) : (graph_index += 1) {
+                try self.budget.spend(1);
+                const member = try self.certificate.graph.get(graph_index);
+                if (member.kind == .declaration) {
+                    return reject(.declaration, .declaration_member_missing, memberSubject(member));
+                }
+            }
+            return null;
+        };
+
+        _ = declaration.decode(bytes) catch
+            return reject(.declaration, .declaration_undecodable, .none);
+        const declaration_digest = declaration.digest(bytes);
+
+        var members: u32 = 0;
+        var graph_index: u32 = 0;
+        while (graph_index < self.certificate.graph.len()) : (graph_index += 1) {
+            try self.budget.spend(1);
+            const member = try self.certificate.graph.get(graph_index);
+            if (member.kind != .declaration) continue;
+            members += 1;
+            // The graph refuses a duplicate (kind, ordinal) at binding, so a
+            // second declaration member carries a nonzero ordinal and is
+            // refused here rather than counted.
+            if (member.ordinal != 0 or !std.mem.eql(u8, &member.digest, &declaration_digest)) {
+                return .{ .state = .integrity_verified, .rejection = .{
+                    .stage = .declaration,
+                    .code = .declaration_digest_mismatch,
+                    .subject = memberSubject(member),
+                    .expected = .{ .digest = member.digest },
+                    .actual = .{ .digest = declaration_digest },
+                    .recertifiable = true,
+                } };
+            }
+        }
+        if (members != 1) {
+            return reject(.declaration, .declaration_member_missing, .none);
         }
         return null;
     }
@@ -3183,18 +3244,38 @@ test "scratchBytes covers three bits per node at the configured bound" {
 /// The minimal accepted artifact plus `extra` tool catalog members, one per
 /// ordinal from zero, each carrying the digest of `catalog`.
 fn CatalogFixture(comptime extra: usize) type {
+    return BindingFixture(extra, 0);
+}
+
+/// The minimal accepted artifact plus `extra` declaration members, one per
+/// ordinal from zero, each carrying the digest of `declarationBytes`.
+fn DeclarationFixture(comptime extra: usize) type {
+    return BindingFixture(0, extra);
+}
+
+/// The minimal accepted artifact plus `catalogs` tool catalog members and
+/// `declarations` declaration members, one per ordinal from zero within each
+/// kind. `inputs` supplies the catalog bytes when `catalogs` is not zero, and
+/// the declaration bytes when `declarations` is not zero.
+fn BindingFixture(comptime catalogs: usize, comptime declarations: usize) type {
     return struct {
         const Self = @This();
 
         base: test_support.Fixture,
-        members: [9 + extra]graph.Member,
+        members: [9 + catalogs + declarations]graph.Member,
         catalog_buf: [1024]u8 = undefined,
         catalog_len: usize = 0,
+        declaration_buf: [1024]u8 = undefined,
+        declaration_len: usize = 0,
         buffer: [8192]u8 = undefined,
         len: usize = 0,
 
         fn catalog(self: *const Self) []const u8 {
             return self.catalog_buf[0..self.catalog_len];
+        }
+
+        fn declarationBytes(self: *const Self) []const u8 {
+            return self.declaration_buf[0..self.declaration_len];
         }
 
         fn encode(self: *Self) !void {
@@ -3225,17 +3306,23 @@ fn CatalogFixture(comptime extra: usize) type {
                 .certificate = self.buffer[0..self.len],
                 .observed_graph = &self.members,
                 .scratch = &self.base.scratch,
-                .tool_catalog = self.catalog(),
+                .tool_catalog = if (catalogs == 0) null else self.catalog(),
+                .declaration = if (declarations == 0) null else self.declarationBytes(),
             };
         }
 
         fn build() !Self {
             var self = Self{ .base = try test_support.build(), .members = undefined };
             self.catalog_len = tool_catalog.test_support.sample(&self.catalog_buf).len;
+            self.declaration_len = declaration.test_support.sample(&self.declaration_buf).len;
             const catalog_digest = tool_catalog.digest(self.catalog());
+            const declaration_digest = declaration.digest(self.declarationBytes());
             @memcpy(self.members[0..9], &self.base.members);
-            for (0..extra) |ordinal| {
+            for (0..catalogs) |ordinal| {
                 self.members[9 + ordinal] = .{ .kind = .tool_catalog, .ordinal = @intCast(ordinal), .digest = catalog_digest };
+            }
+            for (0..declarations) |ordinal| {
+                self.members[9 + catalogs + ordinal] = .{ .kind = .declaration, .ordinal = @intCast(ordinal), .digest = declaration_digest };
             }
             try self.encode();
             return self;
@@ -3353,4 +3440,140 @@ test "every tool catalog reason code is observed" {
             }
         }
     }
+}
+
+test "an artifact with no declaration and no declaration member passes the declaration stage" {
+    var fixture = try test_support.build();
+    const result = check(fixture.inputs(), policy_mod.production);
+    if (result.rejection) |rejection| {
+        std.debug.print("unexpected rejection: {s} / {s}\n", .{ rejection.stage.name(), rejection.code.text() });
+        return error.TestUnexpectedResult;
+    }
+    try testing.expect(result.accepted());
+}
+
+test "a declaration matching its graph member is accepted" {
+    var fixture = try DeclarationFixture(1).build();
+    const result = check(fixture.inputs(), policy_mod.production);
+    if (result.rejection) |rejection| {
+        std.debug.print("unexpected rejection: {s} / {s}\n", .{ rejection.stage.name(), rejection.code.text() });
+        return error.TestUnexpectedResult;
+    }
+    try testing.expect(result.accepted());
+}
+
+test "a tool catalog and a declaration each matching their member are accepted" {
+    var fixture = try BindingFixture(1, 1).build();
+    const result = check(fixture.inputs(), policy_mod.production);
+    if (result.rejection) |rejection| {
+        std.debug.print("unexpected rejection: {s} / {s}\n", .{ rejection.stage.name(), rejection.code.text() });
+        return error.TestUnexpectedResult;
+    }
+    try testing.expect(result.accepted());
+}
+
+/// The fixture's declaration with one byte of a reason changed. The bytes
+/// still decode, so only the digest can refuse them.
+fn tamperedDeclaration(original: []const u8, out: *[1024]u8) []const u8 {
+    @memcpy(out[0..original.len], original);
+    const at = std.mem.indexOf(u8, original, "Payment token.").?;
+    out[at] = 'p';
+    return out[0..original.len];
+}
+
+test "one mutated declaration byte rejects with declaration_digest_mismatch" {
+    var fixture = try DeclarationFixture(1).build();
+    var tampered: [1024]u8 = undefined;
+    var inputs = fixture.inputs();
+    inputs.declaration = tamperedDeclaration(fixture.declarationBytes(), &tampered);
+    _ = try declaration.decode(inputs.declaration.?);
+    const result = check(inputs, policy_mod.production);
+    try expectRejected(result, .declaration_digest_mismatch);
+    try testing.expectEqual(verdict.Stage.declaration, result.rejection.?.stage);
+}
+
+test "a graph member naming another declaration digest rejects" {
+    var fixture = try DeclarationFixture(1).build();
+    for (&fixture.members) |*member| {
+        if (member.kind == .declaration) member.digest[0] +%= 1;
+    }
+    try fixture.encode();
+    try expectRejected(check(fixture.inputs(), policy_mod.production), .declaration_digest_mismatch);
+}
+
+test "a second declaration member rejects" {
+    var fixture = try DeclarationFixture(2).build();
+    try expectRejected(check(fixture.inputs(), policy_mod.production), .declaration_digest_mismatch);
+}
+
+test "declaration bytes with no graph member reject" {
+    var fixture = try test_support.build();
+    var buf: [1024]u8 = undefined;
+    var inputs = fixture.inputs();
+    inputs.declaration = declaration.test_support.sample(&buf);
+    const result = check(inputs, policy_mod.production);
+    try expectRejected(result, .declaration_member_missing);
+    try testing.expectEqual(verdict.Stage.declaration, result.rejection.?.stage);
+}
+
+test "a declaration member with no declaration bytes rejects and names the member" {
+    var fixture = try DeclarationFixture(1).build();
+    var inputs = fixture.inputs();
+    inputs.declaration = null;
+    const result = check(inputs, policy_mod.production);
+    try expectRejected(result, .declaration_member_missing);
+    try testing.expectEqual(verdict.Stage.declaration, result.rejection.?.stage);
+    try testing.expectEqual(verdict.Subject{ .graph_member = .{
+        .kind = @intFromEnum(graph.MemberKind.declaration),
+        .ordinal = 0,
+    } }, result.rejection.?.subject);
+}
+
+test "undecodable declaration bytes reject before the digest is compared" {
+    var fixture = try DeclarationFixture(1).build();
+    var inputs = fixture.inputs();
+    inputs.declaration = "ZTDCL1\x00\x00\x01\x00\x00\x00\x00";
+    try expectRejected(check(inputs, policy_mod.production), .declaration_undecodable);
+}
+
+test "every declaration reason code is observed" {
+    var seen = std.EnumSet(verdict.ReasonCode).initEmpty();
+
+    var matching = try DeclarationFixture(1).build();
+    var buf: [1024]u8 = undefined;
+
+    var mutated = matching.inputs();
+    var tampered: [1024]u8 = undefined;
+    mutated.declaration = tamperedDeclaration(matching.declarationBytes(), &tampered);
+
+    var no_bytes = matching.inputs();
+    no_bytes.declaration = null;
+
+    var undecodable = matching.inputs();
+    undecodable.declaration = "not a declaration";
+
+    var plain = try test_support.build();
+    var no_member = plain.inputs();
+    no_member.declaration = declaration.test_support.sample(&buf);
+
+    for ([_]Inputs{ mutated, no_bytes, undecodable, no_member }) |inputs| {
+        const result = check(inputs, policy_mod.production);
+        if (result.rejection) |rejection| {
+            try testing.expectEqual(verdict.Stage.declaration, rejection.stage);
+            seen.insert(rejection.code);
+        }
+    }
+
+    var codes: usize = 0;
+    inline for (@typeInfo(verdict.ReasonCode).@"enum".fields) |field| {
+        if (comptime std.mem.startsWith(u8, field.name, "declaration_")) {
+            codes += 1;
+            const code: verdict.ReasonCode = @enumFromInt(field.value);
+            if (!seen.contains(code)) {
+                std.debug.print("{s} is never observed\n", .{field.name});
+                return error.TestUnexpectedResult;
+            }
+        }
+    }
+    try testing.expectEqual(@as(usize, 3), codes);
 }

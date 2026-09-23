@@ -60,6 +60,10 @@ pub const MemberKind = enum(u16) {
     /// Canonical `ZTCAT1` tool catalog bytes. Present only for a tool-profile
     /// handler; the kernel decodes the bytes and recomputes this digest.
     tool_catalog = 19,
+    /// Canonical `ZTDCL1` declaration bytes. Present only when the handler
+    /// carries a declaration; the kernel decodes the bytes and recomputes this
+    /// digest.
+    declaration = 20,
 
     pub fn fromWire(value: u16) ?MemberKind {
         return switch (value) {
@@ -82,6 +86,7 @@ pub const MemberKind = enum(u16) {
             17 => .invariant_spec,
             18 => .invariant_ledger_adapter,
             19 => .tool_catalog,
+            20 => .declaration,
             else => null,
         };
     }
@@ -120,6 +125,9 @@ pub const MemberKind = enum(u16) {
             // Present only for a tool-profile handler. A handler with no tools
             // has no catalog, as a handler with no invariant has no spec.
             .tool_catalog,
+            // Present only when the handler carries a declaration. A handler
+            // with none has no member, as a handler with no tools has no catalog.
+            .declaration,
             => false,
         };
     }
@@ -327,7 +335,7 @@ test "required kinds must all be present" {
 
 test "member kind wire decoding is closed" {
     try testing.expectEqual(@as(?MemberKind, null), MemberKind.fromWire(0));
-    try testing.expectEqual(@as(?MemberKind, null), MemberKind.fromWire(20));
+    try testing.expectEqual(@as(?MemberKind, null), MemberKind.fromWire(21));
     inline for (@typeInfo(MemberKind).@"enum".fields) |field| {
         const kind: MemberKind = @enumFromInt(field.value);
         try testing.expectEqual(@as(?MemberKind, kind), MemberKind.fromWire(field.value));

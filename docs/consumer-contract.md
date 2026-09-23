@@ -497,14 +497,14 @@ stated so a drift gate can check them and a reader can fail the document against
 | Handler property boolean fields | 19 | `packages/zts/src/contract_types.zig` |
 | Consumer obligation properties | 8 | `packages/proof-checker/src/proof_system.zig` |
 | Assurance grades | 5 | `packages/proof-checker/src/verdict.zig` |
-| Acceptance stages | 12 | `packages/proof-checker/src/verdict.zig` |
-| Reason codes | 92 | `packages/proof-checker/src/verdict.zig` |
+| Acceptance stages | 13 | `packages/proof-checker/src/verdict.zig` |
+| Reason codes | 95 | `packages/proof-checker/src/verdict.zig` |
 | Evidence edge kinds | 6 | `packages/proof-checker/src/certificate.zig` |
 | Residual guard kinds | 5 | `packages/proof-checker/src/residual.zig` |
 | Residual guard families, catalogued | 4 | `packages/proof-checker/src/residual.zig` |
 | Invariant kinds | 2 | `packages/proof-checker/src/invariant.zig` |
 | Account matcher tags | 2 | `packages/proof-checker/src/invariant.zig` |
-| Executable-graph member kinds | 19 | `packages/proof-checker/src/executable_graph.zig` |
+| Executable-graph member kinds | 20 | `packages/proof-checker/src/executable_graph.zig` |
 | Virtual modules, in-tree base | 28 | `packages/zts/src/builtin_modules.zig` |
 | Virtual modules, effective for this build | 28 | `packages/zts/src/builtin_modules.zig` |
 | Residual guard families, enabled | 3 | `packages/proof-checker/src/residual.zig` |
