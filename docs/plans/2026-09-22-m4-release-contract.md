@@ -1,6 +1,6 @@
 # M4: release contract for scoped tool routes
 
-Status: accepted by the owner on 2026-09-22. T1a and T1b are complete; T2 is in progress under its [design note](2026-09-23-m4-t2-tool-catalog-design.md).
+Status: accepted by the owner on 2026-09-22. T1a, T1b, and T2 are complete; T3 is next.
 Baseline: local `main` at `176d81ca`. Roadmap row:
 [M4 in the roadmap](../roadmap.md) (`docs/roadmap.md:20`). This document
 reconciles proposal A, the
@@ -218,6 +218,24 @@ One catalog entry per tool route carries its name, description, bounded input an
 output schemas, and reachable module exports (`A:252-255`). It rejects duplicate
 names, dynamic schemas, unknown fields, and duplicate JSON keys before object
 construction (`A:268-280`). Completion: check C2.
+
+T2 decisions and result, 2026-09-23. The owner accepted the
+[design note](2026-09-23-m4-t2-tool-catalog-design.md): a literal
+`toolCatalog({...})` declaration in a new inert `zttp:tool` module, tool-only
+handlers, `maxLength` in Unicode scalar values, nesting depth 8, and a 1 MiB
+input ceiling. `packages/zts/src/tool_schema.zig` holds the closed subset check
+and a streaming validator that refuses a duplicate or unknown key when it reads
+the key; `zttp:validate` is unchanged. The contract carries `ToolEntry` at
+version 19, and the builder refuses a broken catalog with ZTS513 and a closed
+reason tag. Each entry lists the exports its route reaches, counted by mention,
+which over-approximates calls. The owner authorized one DeepSeek corpus
+re-record, because the new module and rule moved both hashes the cassettes
+embed; it replays 19/19. Check C2 passed: `test-zts`, `test-modules`,
+`test-precompile`, and `test-contract-golden` unfiltered, mutation probes on
+every named check, and a census over all three refusal enums. The full local
+gate (`scripts/verify.sh`) and `test-zruntime` passed at `9f2f4b22`. Two
+existing defects were fixed on the way: a partner manifest export name freed
+twice, and a golden check that reran from cache after its fixture changed.
 
 **T3. Declaration encoding and artifact binding.** Depends on T2. Owned files:
 a declaration loader under `packages/tools/src/` that follows

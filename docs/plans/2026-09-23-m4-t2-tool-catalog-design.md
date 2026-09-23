@@ -1,6 +1,6 @@
 # M4 T2 design note: canonical tool catalog and closed schema subset
 
-Status: accepted by the owner on 2026-09-23, with the recommended answer to
+Status: implemented on 2026-09-23. Accepted by the owner on 2026-09-23, with the recommended answer to
 each question in section 8 and the file extension in section 7. This note answers the
 condition that proposal A puts on T2 (`A:275-277`): define the closed schema
 subset before choosing whether to extend `zttp:validate` or add a catalog
@@ -368,7 +368,7 @@ red, and each commit message says so.
 | U5 | `a289d768` | tool fixtures and B8.2 in the contract goldens |
 | fix | `c928f4ba` | a partner manifest export name freed twice on a late parse error |
 | fix | `e7b71599` | a golden check reran from cache after its handler fixture changed |
-| U5 | pending | DeepSeek corpus re-record, then coverage and convergence republish |
+| U5 | `84d0f42b`, `515560ed`, `9f2f4b22` | DeepSeek corpus re-record (19/19 replay), coverage and convergence republished |
 
 ## 11. Implementation notes
 

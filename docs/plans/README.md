@@ -6,8 +6,8 @@ index when a plan starts, closes, or moves to the archive.
 
 | Document | Role and status | Work authority |
 |---|---|---|
-| [M4: release contract for scoped tool routes](2026-09-22-m4-release-contract.md) | Accepted 2026-09-22; T1a and T1b complete, T2 next | Owner accepted the contract on 2026-09-22 |
-| [M4 T2: tool catalog and schema subset](2026-09-23-m4-t2-tool-catalog-design.md) | Accepted 2026-09-23; in progress | Owner accepted the design and answered its four questions |
+| [M4: release contract for scoped tool routes](2026-09-22-m4-release-contract.md) | Accepted 2026-09-22; T1a, T1b, and T2 complete, T3 next | Owner accepted the contract on 2026-09-22 |
+| [M4 T2: tool catalog and schema subset](2026-09-23-m4-t2-tool-catalog-design.md) | Implemented 2026-09-23 | Owner accepted the design and answered its four questions |
 | [M4 T1b: connect and handshake deadline](2026-09-23-m4-t1b-connect-deadline-design.md) | Implemented 2026-09-23 | Owner accepted the design and answered its three questions |
 | [M3: provable-set reach measurement](2026-09-21-0955-feat-provable-set-reach-plan.md) | Complete, 2026-09-21 | User approved pilot and full DeepSeek runs; [8/8 reached](../provable-reach.md#first-full-measurement) |
 | [D1: type system](2026-07-30-014-d1-type-system-design.md) | Retained design reference; language phases complete | No new work scheduled |
