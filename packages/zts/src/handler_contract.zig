@@ -1851,6 +1851,7 @@ fn toolCatalogFixture(allocator: std.mem.Allocator) !HandlerContract {
     entry.input_schema_json = try allocator.dupe(u8, tool_input_schema);
     entry.output_schema_name = try allocator.dupe(u8, "LookupOrderOutput");
     entry.output_schema_json = try allocator.dupe(u8, tool_output_schema);
+    entry.scope_tenant = try allocator.dupe(u8, "id");
     const exports = [_][2][]const u8{ .{ "zttp:fetch", "fetch" }, .{ "zttp:validate", "validateJson" } };
     for (exports) |pair| {
         const module = try allocator.dupe(u8, pair[0]);
@@ -1872,11 +1873,18 @@ fn expectToolEntriesEqual(want: contract_types.ToolEntry, got: contract_types.To
     try std.testing.expectEqualStrings(want.output_schema_name, got.output_schema_name);
     try std.testing.expectEqualStrings(want.output_schema_json, got.output_schema_json);
     try std.testing.expectEqual(want.max_input_bytes, got.max_input_bytes);
+    try expectOptionalStringEqual(want.scope_tenant, got.scope_tenant);
+    try expectOptionalStringEqual(want.scope_subject, got.scope_subject);
     try std.testing.expectEqual(want.reachable_exports.items.len, got.reachable_exports.items.len);
     for (want.reachable_exports.items, got.reachable_exports.items) |w, g| {
         try std.testing.expectEqualStrings(w.module, g.module);
         try std.testing.expectEqualStrings(w.name, g.name);
     }
+}
+
+fn expectOptionalStringEqual(want: ?[]const u8, got: ?[]const u8) !void {
+    const w = want orelse return std.testing.expect(got == null);
+    try std.testing.expectEqualStrings(w, got orelse return error.TestExpectedEqual);
 }
 
 test "tool catalog survives a v1 and a v2 round trip byte for byte" {
@@ -1979,6 +1987,10 @@ test "tool catalog projection refuses a catalog the build could not have written
         toolCatalogJson(toolJson("a", "POST /a", ok_bytes, good_schema_field, "{\"module\": \"zttp:validate\", \"name\": \"validateJson\"}, {\"module\": \"zttp:fetch\", \"name\": \"fetch\"}")),
         toolCatalogJson(toolJson("a", "POST /a", ok_bytes, good_schema_field, "{\"module\": \"zttp:fetch\", \"name\": \"fetch\"}, {\"module\": \"zttp:fetch\", \"name\": \"fetch\"}")),
         toolCatalogJson(toolJson("a", "POST /a", ok_bytes, good_schema_field, "{\"module\": \"zttp:fetch\", \"name\": \"\"}")),
+        // A scope that binds nothing, and one that binds an empty field name.
+        toolCatalogJson(toolJson("a", "POST /a", "\"maxInputBytes\": 16, \"scope\": {}, ", good_schema_field, "")),
+        toolCatalogJson(toolJson("a", "POST /a", "\"maxInputBytes\": 16, \"scope\": {\"tenant\": \"\"}, ", good_schema_field, "")),
+        toolCatalogJson(toolJson("a", "POST /a", "\"maxInputBytes\": 16, \"scope\": {\"tenant\": \"id\", \"subject\": \"\"}, ", good_schema_field, "")),
     };
     for (cases, 0..) |json, i| {
         const result = parseFromJson(std.testing.allocator, json);

@@ -137,7 +137,13 @@ const ToolExportWire = struct {
     name: WireString = .{ .bytes = "" },
 };
 
+const ToolScopeWire = struct {
+    tenant: ?WireString = null,
+    subject: ?WireString = null,
+};
+
 const ToolWire = struct {
+    scope: ?ToolScopeWire = null,
     name: WireString = .{ .bytes = "" },
     route: WireString = .{ .bytes = "" },
     description: WireString = .{ .bytes = "" },
@@ -989,6 +995,15 @@ fn projectTools(
         entry.input_schema_json = try decodeWireString(allocator, wire.inputSchema.json);
         entry.output_schema_name = try decodeWireString(allocator, wire.outputSchema.name);
         entry.output_schema_json = try decodeWireString(allocator, wire.outputSchema.json);
+        if (wire.scope) |scope| {
+            if (scope.tenant) |field| entry.scope_tenant = try decodeWireString(allocator, field);
+            if (scope.subject) |field| entry.scope_subject = try decodeWireString(allocator, field);
+            // The build writes `scope` only when it binds a field, and never
+            // an empty name.
+            if (entry.scope_tenant == null and entry.scope_subject == null) return error.InvalidToolCatalog;
+        }
+        if (entry.scope_tenant) |field| if (field.len == 0) return error.InvalidToolCatalog;
+        if (entry.scope_subject) |field| if (field.len == 0) return error.InvalidToolCatalog;
         try entry.reachable_exports.ensureTotalCapacity(allocator, wire.reachableExports.len);
         for (wire.reachableExports) |exp| {
             const module = try decodeWireString(allocator, exp.module);

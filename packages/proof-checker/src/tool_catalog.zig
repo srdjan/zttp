@@ -14,7 +14,7 @@
 //!
 //! ```text
 //! magic            8 bytes  "ZTCAT1\0\0"
-//! schema           u16      1
+//! schema           u16      2
 //! entry_count      u16      1..64
 //! entry, entry_count times, strictly increasing by name bytes:
 //!   name             string  1..64
@@ -26,6 +26,8 @@
 //!   output_name      string  1..64
 //!   output_schema    string  1..65536
 //!   max_input_bytes  u32     1..1048576
+//!   scope_tenant     string  0, or 1..64: the input field bound to the tenant
+//!   scope_subject    string  0, or 1..64: the input field bound to the subject
 //!   export_count     u16     0..256
 //!   export, export_count times, strictly increasing by (module, name):
 //!     module           string  1..64
@@ -33,12 +35,19 @@
 //! trailing bytes: refused
 //! ```
 //!
-//! No two entries share a (method, path) route.
+//! No two entries share a (method, path) route. A scope field of length 0 is
+//! absent; it is the only string in the layout that may be empty. The kernel
+//! checks a scope field's length and encoding only: that it names a required
+//! string property of the input schema is a build rule, and the runtime finds
+//! the field in the compiled schema it validates with.
+//!
+//! Schema 2 (M4 T5) added the two scope fields. Schema 1 is refused: no
+//! artifact carrying it exists outside tests.
 
 const std = @import("std");
 
 pub const magic = "ZTCAT1\x00\x00";
-pub const schema_version: u16 = 1;
+pub const schema_version: u16 = 2;
 pub const header_size: usize = magic.len + 2 + 2;
 
 pub const digest_domain = "zttp-tool-catalog-v1";
@@ -53,6 +62,7 @@ pub const max_schema_name_bytes: u32 = 64;
 pub const max_schema_bytes: u32 = 65536;
 pub const min_max_input_bytes: u32 = 1;
 pub const max_max_input_bytes: u32 = 1048576;
+pub const max_scope_field_bytes: u32 = 64;
 pub const max_exports: u16 = 256;
 pub const max_export_field_bytes: u32 = 64;
 
@@ -70,6 +80,8 @@ pub const DecodeError = error{
     SchemaNameLength,
     SchemaLength,
     MaxInputBytesOutOfRange,
+    /// A scope field longer than `max_scope_field_bytes`.
+    ScopeFieldLength,
     ExportCountOutOfRange,
     ExportFieldLength,
     /// Names must be strictly increasing by byte order, which also refuses a
@@ -105,6 +117,10 @@ pub const Entry = struct {
     output_name: []const u8,
     output_schema: []const u8,
     max_input_bytes: u32,
+    /// The input field bound to the verified tenant, or null.
+    scope_tenant: ?[]const u8,
+    /// The input field bound to the verified subject, or null.
+    scope_subject: ?[]const u8,
     exports: ExportIterator,
 };
 
@@ -143,6 +159,12 @@ const Reader = struct {
         const out = self.bytes[self.pos..][0..len];
         self.pos += len;
         return out;
+    }
+
+    /// A length-prefixed string where length 0 means absent.
+    fn optionalString(self: *Reader, max: u32, length_error: DecodeError) DecodeError!?[]const u8 {
+        const out = try self.string(0, max, length_error);
+        return if (out.len == 0) null else out;
     }
 };
 
@@ -191,6 +213,8 @@ fn readEntry(reader: *Reader) DecodeError!Entry {
     if (max_input_bytes < min_max_input_bytes or max_input_bytes > max_max_input_bytes) {
         return error.MaxInputBytesOutOfRange;
     }
+    const scope_tenant = try reader.optionalString(max_scope_field_bytes, error.ScopeFieldLength);
+    const scope_subject = try reader.optionalString(max_scope_field_bytes, error.ScopeFieldLength);
     const export_count = try reader.int(u16);
     if (export_count > max_exports) return error.ExportCountOutOfRange;
 
@@ -210,6 +234,8 @@ fn readEntry(reader: *Reader) DecodeError!Entry {
         .output_name = output_name,
         .output_schema = output_schema,
         .max_input_bytes = max_input_bytes,
+        .scope_tenant = scope_tenant,
+        .scope_subject = scope_subject,
         .exports = exports,
     };
 }
@@ -231,6 +257,8 @@ fn validateEntry(entry: Entry) DecodeError!void {
     try validUtf8(entry.input_schema);
     try validUtf8(entry.output_name);
     try validUtf8(entry.output_schema);
+    if (entry.scope_tenant) |field| try validUtf8(field);
+    if (entry.scope_subject) |field| try validUtf8(field);
 
     var exports = entry.exports;
     var previous: ?Export = null;
@@ -336,6 +364,8 @@ pub const test_support = struct {
         output_name: []const u8 = "EchoOutput",
         output_schema: []const u8 = "{\"type\":\"object\"}",
         max_input_bytes: u32 = 4096,
+        scope_tenant: ?[]const u8 = null,
+        scope_subject: ?[]const u8 = null,
         exports: []const SampleExport = &.{},
     };
 
@@ -349,6 +379,8 @@ pub const test_support = struct {
         w.string(entry.output_name);
         w.string(entry.output_schema);
         w.int(u32, entry.max_input_bytes);
+        w.string(entry.scope_tenant orelse "");
+        w.string(entry.scope_subject orelse "");
         w.int(u16, @intCast(entry.exports.len));
         for (entry.exports) |item| {
             w.string(item.module);
@@ -382,6 +414,7 @@ pub const test_support = struct {
             .output_name = "LookupOutput",
             .output_schema = "{\"type\":\"number\"}",
             .max_input_bytes = 1048576,
+            .scope_tenant = "tenant_id",
         },
     };
 
@@ -412,6 +445,8 @@ test "a valid two-entry catalog decodes and iterates every field" {
     try testing.expectEqualStrings("EchoOutput", echo.output_name);
     try testing.expectEqualStrings("{\"type\":\"object\"}", echo.output_schema);
     try testing.expectEqual(@as(u32, 4096), echo.max_input_bytes);
+    try testing.expectEqual(@as(?[]const u8, null), echo.scope_tenant);
+    try testing.expectEqual(@as(?[]const u8, null), echo.scope_subject);
     var exports = echo.exports;
     const first = (try exports.next()).?;
     try testing.expectEqualStrings("zttp:json", first.module);
@@ -431,6 +466,8 @@ test "a valid two-entry catalog decodes and iterates every field" {
     try testing.expectEqualStrings("LookupOutput", lookup.output_name);
     try testing.expectEqualStrings("{\"type\":\"number\"}", lookup.output_schema);
     try testing.expectEqual(@as(u32, 1048576), lookup.max_input_bytes);
+    try testing.expectEqualStrings("tenant_id", lookup.scope_tenant orelse return error.TestMissingScope);
+    try testing.expectEqual(@as(?[]const u8, null), lookup.scope_subject);
     var no_exports = lookup.exports;
     try testing.expectEqual(@as(?Export, null), try no_exports.next());
 
@@ -483,9 +520,10 @@ fn badMagic(w: *test_support.Writer) void {
     test_support.writeEntry(w, test_support.sample_entries[0]);
 }
 
+/// Schema 1, the layout before the scope fields, is refused outright.
 fn unsupportedSchema(w: *test_support.Writer) void {
     w.raw(magic);
-    w.int(u16, 2);
+    w.int(u16, 1);
     w.int(u16, 1);
     test_support.writeEntry(w, test_support.sample_entries[0]);
 }
@@ -533,8 +571,26 @@ fn tooManyExports(w: *test_support.Writer) void {
     const fields = [_][]const u8{ "echo", "POST", "/x", "d", "I", "{}", "O", "{}" };
     for (fields) |value| w.string(value);
     w.int(u32, 1);
+    w.string("");
+    w.string("");
     w.int(u16, max_exports + 1);
 }
+
+/// A scope field that claims one byte more than the bound, without carrying
+/// it. The length bound fires before the body is required.
+fn scopeTooLong(w: *test_support.Writer) void {
+    w.raw(magic);
+    w.int(u16, schema_version);
+    w.int(u16, 1);
+    const fields = [_][]const u8{ "echo", "POST", "/x", "d", "I", "{}", "O", "{}" };
+    for (fields) |value| w.string(value);
+    w.int(u32, 1);
+    w.string("");
+    w.int(u32, max_scope_field_bytes + 1);
+}
+
+const scope_65 = "s" ** (max_scope_field_bytes + 1);
+const scope_64 = "s" ** max_scope_field_bytes;
 
 const e = test_support.sample_entries;
 
@@ -560,6 +616,10 @@ const cases = [_]Case{
     .{ .expected = error.SchemaLength, .custom = schemaTooLong },
     .{ .expected = error.MaxInputBytesOutOfRange, .entries = &.{.{ .name = "a", .path = "/x", .max_input_bytes = 0 }} },
     .{ .expected = error.MaxInputBytesOutOfRange, .entries = &.{.{ .name = "a", .path = "/x", .max_input_bytes = max_max_input_bytes + 1 }} },
+    .{ .expected = error.ScopeFieldLength, .entries = &.{.{ .name = "a", .path = "/x", .scope_tenant = scope_65 }} },
+    .{ .expected = error.ScopeFieldLength, .entries = &.{.{ .name = "a", .path = "/x", .scope_subject = scope_65 }} },
+    .{ .expected = error.ScopeFieldLength, .custom = scopeTooLong },
+    .{ .expected = error.InvalidUtf8, .entries = &.{.{ .name = "a", .path = "/x", .scope_subject = "\xff" }} },
     .{ .expected = error.ExportCountOutOfRange, .custom = tooManyExports },
     .{ .expected = error.ExportFieldLength, .entries = &.{.{ .name = "a", .path = "/x", .exports = &.{.{ .module = "", .name = "f" }} }} },
     .{ .expected = error.ExportFieldLength, .entries = &.{.{ .name = "a", .path = "/x", .exports = &.{.{ .module = "m", .name = "" }} }} },
@@ -610,6 +670,17 @@ test "every decode error is driven by a refusal case" {
             return error.TestUnexpectedResult;
         }
     }
+}
+
+test "a scope field at its bound decodes and carries both bindings" {
+    var buf: [1024]u8 = undefined;
+    var w = test_support.Writer{ .buf = &buf };
+    test_support.writeCatalog(&w, &.{.{ .name = "a", .path = "/x", .scope_tenant = scope_64, .scope_subject = "user_id" }});
+    const catalog = try decode(w.bytes());
+    var it = catalog.entries();
+    const entry = (try it.next()).?;
+    try testing.expectEqualStrings(scope_64, entry.scope_tenant orelse return error.TestMissingScope);
+    try testing.expectEqualStrings("user_id", entry.scope_subject orelse return error.TestMissingScope);
 }
 
 test "a catalog at the entry and export bounds decodes" {

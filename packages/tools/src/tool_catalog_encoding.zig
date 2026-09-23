@@ -15,7 +15,13 @@ const ToolEntry = zts.handler_contract.ToolEntry;
 const tool_schema = zts.tool_schema;
 
 pub const magic = "ZTCAT1\x00\x00";
-pub const schema_version: u16 = 1;
+/// Schema 2 (M4 T5) carries each entry's scope fields. The kernel decoder
+/// accepts this one schema only.
+pub const schema_version: u16 = 2;
+
+comptime {
+    if (schema_version != pcc.tool_catalog.schema_version) @compileError("ZTCAT1 encoder and kernel decoder disagree on the schema");
+}
 
 pub const EncodeError = std.mem.Allocator.Error || error{
     /// A route key is not `METHOD /path`.
@@ -61,6 +67,13 @@ pub fn encode(allocator: std.mem.Allocator, tools: []const ToolEntry) EncodeErro
         try appendString(allocator, &out, tool.output_schema_name);
         try appendCanonicalSchema(allocator, &out, tool.output_schema_json);
         try appendInt(allocator, &out, u32, tool.max_input_bytes);
+        // Length 0 is absent. An empty field name the contract carried would
+        // encode as absent and drop a binding, so it is refused instead.
+        for ([_]?[]const u8{ tool.scope_tenant, tool.scope_subject }) |scope_field| {
+            const field = scope_field orelse "";
+            if (scope_field != null and field.len == 0) return error.CatalogRefused;
+            try appendString(allocator, &out, field);
+        }
         try appendInt(allocator, &out, u16, std.math.cast(u16, tool.reachable_exports.items.len) orelse return error.CatalogRefused);
         for (tool.reachable_exports.items) |exp| {
             try appendString(allocator, &out, exp.module);
@@ -201,6 +214,31 @@ test "the encoding does not depend on source order or schema spelling" {
     defer allocator.free(b);
     try testing.expectEqualSlices(u8, a, b);
     try testing.expectEqualSlices(u8, &pcc.tool_catalog.digest(a), &pcc.tool_catalog.digest(b));
+}
+
+test "scope fields are encoded after the byte bound and decode as written" {
+    const allocator = testing.allocator;
+    var tools = [_]ToolEntry{
+        try testEntry(allocator, "scoped", "POST /s", &.{}),
+        try testEntry(allocator, "plain", "POST /p", &.{}),
+    };
+    defer for (&tools) |*t| t.deinit(allocator);
+    tools[0].scope_tenant = try allocator.dupe(u8, "id");
+
+    const bytes = (try encode(allocator, &tools)) orelse return error.TestExpectedBytes;
+    defer allocator.free(bytes);
+    const catalog = try pcc.tool_catalog.decode(bytes);
+    var it = catalog.entries();
+    const plain = (try it.next()) orelse return error.TestMissingEntry;
+    try testing.expectEqualStrings("plain", plain.name);
+    try testing.expect(plain.scope_tenant == null and plain.scope_subject == null);
+    const scoped = (try it.next()) orelse return error.TestMissingEntry;
+    try testing.expectEqualStrings("id", scoped.scope_tenant orelse return error.TestMissingScope);
+    try testing.expect(scoped.scope_subject == null);
+
+    // An empty bound field cannot pass for an absent one.
+    tools[1].scope_subject = try allocator.dupe(u8, "");
+    try testing.expectError(error.CatalogRefused, encode(allocator, &tools));
 }
 
 test "a catalog the kernel would refuse is not encoded" {

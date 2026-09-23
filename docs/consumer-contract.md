@@ -406,11 +406,12 @@ rules - canonical, specified here, and bound by digest as its own executable-gra
 
 The canonical form is `ZTCAT1`. Integers are little-endian, and every string is UTF-8 with
 a u32 byte-length prefix. Every field is always written, so there are no defaults and no
-omissions.
+omissions. The two scope fields are the only strings that may be empty: length 0 means that
+the entry binds no input field to that identity.
 
 ```text
 magic            8 bytes  "ZTCAT1\0\0"
-schema           u16      1
+schema           u16      2
 entry_count      u16      1..64
 entry, entry_count times, strictly increasing by name bytes:
   name             string  1..64 bytes
@@ -422,6 +423,8 @@ entry, entry_count times, strictly increasing by name bytes:
   output_name      string  1..64 bytes
   output_schema    string  canonical schema JSON, 1..65536 bytes
   max_input_bytes  u32     1..1048576
+  scope_tenant     string  0 (absent) or 1..64 bytes: the input field bound to the tenant
+  scope_subject    string  0 (absent) or 1..64 bytes: the input field bound to the subject
   export_count     u16     0..256
   export, export_count times, strictly increasing by (module, name):
     module           string  1..64 bytes
@@ -430,7 +433,10 @@ trailing bytes: refused
 ```
 
 Strict increase refuses a duplicate name and a duplicate export. No two entries share a
-(method, path) route. A schema is written in canonical schema JSON: no whitespace; strings
+(method, path) route. Schema 2 added the scope fields, which carry the entry's `scope`
+binding (M4 T5); the kernel accepts schema 2 only. The build admits a scope field only when
+it names a required top-level string property of the input schema; the kernel checks its
+length and encoding. A schema is written in canonical schema JSON: no whitespace; strings
 JSON-escaped (`"`, `\`, and bytes below 0x20, with `\u00XX` for those without a short
 escape) and every other byte written as it is; keys per node in the order `type`, `title`,
 `description`, then for an object `additionalProperties`, `properties`, `required`, for a

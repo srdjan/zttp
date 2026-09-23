@@ -59,17 +59,43 @@ pub const ToolSummary = struct {
     method: []const u8,
     path: []const u8,
     max_input_bytes: u32,
+    scope_tenant: ?[]const u8 = null,
+    scope_subject: ?[]const u8 = null,
+};
+
+/// One module export a tool may call. Borrows from `AcceptedCatalog.bytes`.
+pub const Export = struct {
+    module: []const u8,
+    name: []const u8,
 };
 
 /// One tool from the accepted `ZTCAT1` catalog, with both schemas compiled.
-/// The string fields borrow from `AcceptedCatalog.bytes`.
+/// The string fields borrow from `AcceptedCatalog.bytes`; `exports` is owned by
+/// the catalog.
 pub const AcceptedTool = struct {
     name: []const u8,
     method: []const u8,
     path: []const u8,
     max_input_bytes: u32,
+    /// The input field bound to the verified tenant, or null.
+    scope_tenant: ?[]const u8 = null,
+    /// The input field bound to the verified subject, or null.
+    scope_subject: ?[]const u8 = null,
+    /// The tool's grant (M4 T5 design note, section 6): the reachable exports
+    /// the build proved for its route, in catalog order.
+    exports: []const Export = &.{},
     input: zq.tool_schema.CompiledToolSchema,
     output: zq.tool_schema.CompiledToolSchema,
+
+    /// Whether this tool's grant holds `module`.`name`. Nothing outside the
+    /// proven set is allowed, so a helper shared by two tools can do in each
+    /// only what that tool's own set allows.
+    pub fn allowsExport(self: *const AcceptedTool, module: []const u8, name: []const u8) bool {
+        for (self.exports) |exp| {
+            if (std.mem.eql(u8, exp.module, module) and std.mem.eql(u8, exp.name, name)) return true;
+        }
+        return false;
+    }
 };
 
 /// The tool catalog lowered from the section bytes that passed acceptance,
@@ -84,6 +110,7 @@ pub const AcceptedCatalog = struct {
         for (self.entries) |*entry| {
             entry.input.deinit();
             entry.output.deinit();
+            self.allocator.free(entry.exports);
         }
         self.allocator.free(self.entries);
         self.allocator.free(self.bytes);
@@ -321,6 +348,7 @@ fn lowerAcceptedCatalog(allocator: std.mem.Allocator, bytes: []const u8) Promote
         for (entries[0..filled]) |*entry| {
             entry.input.deinit();
             entry.output.deinit();
+            allocator.free(entry.exports);
         }
         allocator.free(entries);
     }
@@ -328,6 +356,8 @@ fn lowerAcceptedCatalog(allocator: std.mem.Allocator, bytes: []const u8) Promote
     var iterator = catalog.entries();
     while (iterator.next() catch return error.AcceptedToolCatalogUndecodable) |entry| {
         if (filled >= entries.len) return error.AcceptedToolCatalogUndecodable;
+        const exports = try lowerAcceptedExports(allocator, entry.exports);
+        errdefer allocator.free(exports);
         var input = try compileAcceptedSchema(allocator, entry.input_schema);
         errdefer input.deinit();
         const output = try compileAcceptedSchema(allocator, entry.output_schema);
@@ -336,6 +366,9 @@ fn lowerAcceptedCatalog(allocator: std.mem.Allocator, bytes: []const u8) Promote
             .method = entry.method,
             .path = entry.path,
             .max_input_bytes = entry.max_input_bytes,
+            .scope_tenant = entry.scope_tenant,
+            .scope_subject = entry.scope_subject,
+            .exports = exports,
             .input = input,
             .output = output,
         };
@@ -346,6 +379,21 @@ fn lowerAcceptedCatalog(allocator: std.mem.Allocator, bytes: []const u8) Promote
     return .{ .allocator = allocator, .bytes = owned, .entries = entries };
 }
 
+/// The entry's export list as slices into the accepted bytes the iterator
+/// walks. The decoder already bounded the count and validated every export.
+fn lowerAcceptedExports(allocator: std.mem.Allocator, iterator: pcc.tool_catalog.ExportIterator) PromoteError![]Export {
+    const exports = try allocator.alloc(Export, iterator.remaining);
+    errdefer allocator.free(exports);
+    var walk = iterator;
+    var index: usize = 0;
+    while (walk.next() catch return error.AcceptedToolCatalogUndecodable) |exp| : (index += 1) {
+        if (index >= exports.len) return error.AcceptedToolCatalogUndecodable;
+        exports[index] = .{ .module = exp.module, .name = exp.name };
+    }
+    if (index != exports.len) return error.AcceptedToolCatalogUndecodable;
+    return exports;
+}
+
 fn compileAcceptedSchema(allocator: std.mem.Allocator, schema: []const u8) PromoteError!zq.tool_schema.CompiledToolSchema {
     return zq.tool_schema.compile(allocator, schema) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
@@ -354,8 +402,8 @@ fn compileAcceptedSchema(allocator: std.mem.Allocator, schema: []const u8) Promo
 }
 
 /// The accepted catalog wins, and a disagreement is a refusal rather than a
-/// merge: the same set of names, and for each the same method, path, and
-/// input byte bound.
+/// merge: the same set of names, and for each the same method, path, input
+/// byte bound, and scope bindings.
 fn crossCheckToolCatalog(catalog: *const AcceptedCatalog, contract_tools: []const ToolSummary) PromoteError!void {
     // Both directions: the contract is producer output and may repeat a name,
     // so one direction plus equal counts would let [a, a] stand for [a, b].
@@ -369,11 +417,19 @@ fn crossCheckToolCatalog(catalog: *const AcceptedCatalog, contract_tools: []cons
         const entry = catalog.find(tool.name) orelse return error.ToolCatalogContractMismatch;
         if (!std.mem.eql(u8, entry.method, tool.method) or
             !std.mem.eql(u8, entry.path, tool.path) or
-            entry.max_input_bytes != tool.max_input_bytes)
+            entry.max_input_bytes != tool.max_input_bytes or
+            !optionalStringsEqual(entry.scope_tenant, tool.scope_tenant) or
+            !optionalStringsEqual(entry.scope_subject, tool.scope_subject))
         {
             return error.ToolCatalogContractMismatch;
         }
     }
+}
+
+fn optionalStringsEqual(a: ?[]const u8, b: ?[]const u8) bool {
+    const left = a orelse return b == null;
+    const right = b orelse return false;
+    return std.mem.eql(u8, left, right);
 }
 
 pub const NativeAdapterAssumption = enum {
@@ -830,11 +886,17 @@ pub fn fromHandlerContract(allocator: std.mem.Allocator, hc: *const HandlerContr
         const method = try std.ascii.allocUpperString(allocator, tool.route[0..space]);
         errdefer allocator.free(method);
         const path = try allocator.dupe(u8, tool.route[space + 1 ..]);
+        errdefer allocator.free(path);
+        const scope_tenant = if (tool.scope_tenant) |field| try allocator.dupe(u8, field) else null;
+        errdefer if (scope_tenant) |field| allocator.free(field);
+        const scope_subject = if (tool.scope_subject) |field| try allocator.dupe(u8, field) else null;
         tools.appendAssumeCapacity(.{
             .name = name,
             .method = method,
             .path = path,
             .max_input_bytes = tool.max_input_bytes,
+            .scope_tenant = scope_tenant,
+            .scope_subject = scope_subject,
         });
     }
 
@@ -896,6 +958,8 @@ fn freeToolSummaryItems(allocator: std.mem.Allocator, tools: []const ToolSummary
         allocator.free(tool.name);
         allocator.free(tool.method);
         allocator.free(tool.path);
+        if (tool.scope_tenant) |field| allocator.free(field);
+        if (tool.scope_subject) |field| allocator.free(field);
     }
 }
 
@@ -2275,6 +2339,132 @@ test "promotion refuses a contract tool list that disagrees with the accepted ca
             return err;
         };
     }
+}
+
+test "promotion refuses a contract whose scope bindings disagree with the accepted catalog" {
+    const scoped_entries = [_]catalog_test_support.SampleEntry{
+        .{ .name = "alpha", .path = "/tools/alpha", .input_schema = closed_test_schema, .output_schema = closed_test_schema, .max_input_bytes = 64, .scope_tenant = "tenant_id" },
+    };
+    var buf: [2048]u8 = undefined;
+    const bytes = testCatalog(&buf, &scoped_entries);
+    const alpha = ToolSummary{ .name = "alpha", .method = "POST", .path = "/tools/alpha", .max_input_bytes = 64, .scope_tenant = "tenant_id" };
+
+    const agreeing = toolTestContract(&.{alpha});
+    var promoted = (try promote(&agreeing, acceptedTestAssessment(), [_]u8{0} ** 32, bytes)) orelse
+        return error.TestUnexpectedResult;
+    defer promoted.deinit();
+    const tool = promoted.tool_catalog.?.find("alpha") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("tenant_id", tool.scope_tenant orelse return error.TestMissingScope);
+
+    const Case = struct { label: []const u8, tool: ToolSummary };
+    var dropped = alpha;
+    dropped.scope_tenant = null;
+    var renamed = alpha;
+    renamed.scope_tenant = "org_id";
+    var added = alpha;
+    added.scope_subject = "user_id";
+    const cases = [_]Case{
+        .{ .label = "tenant dropped", .tool = dropped },
+        .{ .label = "tenant renamed", .tool = renamed },
+        .{ .label = "subject added", .tool = added },
+    };
+    for (cases) |case| {
+        const validated = toolTestContract(&.{case.tool});
+        std.testing.expectError(error.ToolCatalogContractMismatch, promote(&validated, acceptedTestAssessment(), [_]u8{0} ** 32, bytes)) catch |err| {
+            std.debug.print("case '{s}' was not refused as a mismatch\n", .{case.label});
+            return err;
+        };
+    }
+}
+
+test "a scoped catalog survives contract JSON, ZTCAT1, the kernel, and lowering with its grants" {
+    const allocator = std.testing.allocator;
+    const scoped_input =
+        \\{"type":"object","additionalProperties":false,"required":["tenant_id","user_id"],
+        \\ "properties":{"tenant_id":{"type":"string","maxLength":32},"user_id":{"type":"string","maxLength":32}}}
+    ;
+    const Spec = struct { name: []const u8, route: []const u8, tenant: ?[]const u8, subject: ?[]const u8, exports: []const [2][]const u8 };
+    const specs = [_]Spec{
+        .{ .name = "lookup", .route = "POST /tools/lookup", .tenant = "tenant_id", .subject = "user_id", .exports = &.{ .{ "zttp:cache", "cacheSet" }, .{ "zttp:crypto", "sha256" } } },
+        .{ .name = "slug", .route = "POST /tools/slug", .tenant = null, .subject = null, .exports = &.{.{ "zttp:text", "slugify" }} },
+    };
+
+    var original = zq.handler_contract.emptyContract(try allocator.dupe(u8, "tool.ts"));
+    defer original.deinit(allocator);
+    for (specs) |spec| {
+        var entry = zq.handler_contract.ToolEntry{
+            .name = &.{},
+            .route = &.{},
+            .description = &.{},
+            .input_schema_name = &.{},
+            .input_schema_json = &.{},
+            .output_schema_name = &.{},
+            .output_schema_json = &.{},
+            .max_input_bytes = 512,
+        };
+        errdefer entry.deinit(allocator);
+        entry.name = try allocator.dupe(u8, spec.name);
+        entry.route = try allocator.dupe(u8, spec.route);
+        entry.description = try allocator.dupe(u8, "A scoped tool.");
+        entry.input_schema_name = try allocator.dupe(u8, "In");
+        entry.input_schema_json = try allocator.dupe(u8, scoped_input);
+        entry.output_schema_name = try allocator.dupe(u8, "Out");
+        entry.output_schema_json = try allocator.dupe(u8, closed_test_schema);
+        if (spec.tenant) |field| entry.scope_tenant = try allocator.dupe(u8, field);
+        if (spec.subject) |field| entry.scope_subject = try allocator.dupe(u8, field);
+        for (spec.exports) |pair| {
+            const module = try allocator.dupe(u8, pair[0]);
+            errdefer allocator.free(module);
+            const name = try allocator.dupe(u8, pair[1]);
+            errdefer allocator.free(name);
+            try entry.reachable_exports.append(allocator, .{ .module = module, .name = name });
+        }
+        try original.tools.append(allocator, entry);
+    }
+
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    defer out.deinit();
+    try zq.handler_contract.writeContractJsonV2(&original, &out.writer);
+    var parsed = try zq.handler_contract.parseFromJson(allocator, out.written());
+    defer parsed.deinit(allocator);
+
+    // Encode, decode in the kernel, and lower: the path an accepted catalog takes.
+    const bytes = (try project_config.tool_catalog_encoding.encode(allocator, parsed.tools.items)) orelse
+        return error.TestExpectedCatalog;
+    defer allocator.free(bytes);
+    var raw = try fromHandlerContract(allocator, &parsed);
+    defer raw.deinit();
+    var catalog = try lowerAcceptedCatalog(allocator, bytes);
+    defer catalog.deinit();
+    try crossCheckToolCatalog(&catalog, raw.rawView().tools);
+
+    const lookup = catalog.find("lookup") orelse return error.TestExpectedTool;
+    try std.testing.expectEqualStrings("tenant_id", lookup.scope_tenant orelse return error.TestMissingScope);
+    try std.testing.expectEqualStrings("user_id", lookup.scope_subject orelse return error.TestMissingScope);
+    try std.testing.expectEqual(@as(usize, 2), lookup.exports.len);
+    try std.testing.expectEqualStrings("zttp:cache", lookup.exports[0].module);
+    try std.testing.expectEqualStrings("cacheSet", lookup.exports[0].name);
+    try std.testing.expectEqualStrings("zttp:crypto", lookup.exports[1].module);
+    try std.testing.expectEqualStrings("sha256", lookup.exports[1].name);
+
+    const slug = catalog.find("slug") orelse return error.TestExpectedTool;
+    try std.testing.expect(slug.scope_tenant == null and slug.scope_subject == null);
+    try std.testing.expectEqual(@as(usize, 1), slug.exports.len);
+
+    // Each tool holds its own grant and never another tool's.
+    try std.testing.expect(lookup.allowsExport("zttp:crypto", "sha256"));
+    try std.testing.expect(lookup.allowsExport("zttp:cache", "cacheSet"));
+    try std.testing.expect(!lookup.allowsExport("zttp:text", "slugify"));
+    try std.testing.expect(slug.allowsExport("zttp:text", "slugify"));
+    try std.testing.expect(!slug.allowsExport("zttp:crypto", "sha256"));
+    try std.testing.expect(!slug.allowsExport("zttp:cache", "cacheSet"));
+    // Both parts of the name must match.
+    try std.testing.expect(!lookup.allowsExport("zttp:text", "sha256"));
+
+    // The lowered slices borrow from the catalog's own bytes.
+    const base = @intFromPtr(catalog.bytes.ptr);
+    try std.testing.expect(@intFromPtr(lookup.exports[0].name.ptr) >= base);
+    try std.testing.expect(@intFromPtr(lookup.scope_tenant.?.ptr) + lookup.scope_tenant.?.len <= base + catalog.bytes.len);
 }
 
 test "promotion refuses a contract listing tools when no catalog was accepted" {

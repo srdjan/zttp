@@ -1472,12 +1472,15 @@ pub const ContractBuilder = struct {
     // Phase 4f: Tool catalog (M4 T2, ZTS513)
     // -----------------------------------------------------------------
 
-    const catalog_fields = [_][]const u8{ "route", "description", "input", "output", "maxInputBytes" };
+    /// The five required fields first, then the optional `scope` (M4 T5).
+    const catalog_fields = [_][]const u8{ "route", "description", "input", "output", "maxInputBytes", "scope" };
+    const required_catalog_fields = 5;
     const field_route = 0;
     const field_description = 1;
     const field_input = 2;
     const field_output = 3;
     const field_max_input_bytes = 4;
+    const field_scope = 5;
 
     /// Read the `toolCatalog` literal against the build rules of the T2 design
     /// note, section 5. On any refusal the catalog contributes no entry.
@@ -1602,7 +1605,7 @@ pub const ContractBuilder = struct {
             }
             fields[slot] = field.value;
         }
-        for (fields, catalog_fields) |field, field_name| {
+        for (fields[0..required_catalog_fields], catalog_fields[0..required_catalog_fields]) |field, field_name| {
             if (field != null_node) continue;
             try self.refuseToolCatalog(contract, .entry_field_missing, name, entry_node, field_name);
             readable = false;
@@ -1614,6 +1617,7 @@ pub const ContractBuilder = struct {
         const input_name = (try self.catalogString(contract, name, fields[field_input], "input")) orelse return;
         const output_name = (try self.catalogString(contract, name, fields[field_output], "output")) orelse return;
         if (description.len == 0) return self.refuseToolCatalog(contract, .entry_not_literal, name, fields[field_description], "description is empty");
+        const scope = (try self.readToolScope(contract, name, fields[field_scope])) orelse return;
 
         const max_input_bytes = self.getLiteralNumber(fields[field_max_input_bytes]) orelse
             return self.refuseToolCatalog(contract, .max_input_bytes_invalid, name, fields[field_max_input_bytes], null);
@@ -1635,6 +1639,7 @@ pub const ContractBuilder = struct {
         const output_json = try self.catalogSchema(contract, name, fields[field_output], output_name);
         const input_schema = input_json orelse return;
         const output_schema = output_json orelse return;
+        if (!try self.checkToolScope(contract, name, fields[field_scope], input_name, input_schema, scope)) return;
 
         // A resolved route always has a function: an unresolved value sets
         // `api_routes_dynamic`, which returned above.
@@ -1644,6 +1649,14 @@ pub const ContractBuilder = struct {
         defer walk.deinit(self.allocator);
         if (walk.incomplete) {
             return self.refuseToolCatalog(contract, .exports_unanalyzable, name, fields[field_route], route_key);
+        }
+        // Decision 6: a tool may not read state a separate call wrote. Checked
+        // over the whole reach, so a helper that reads the cache counts too.
+        for (walk.exports.items) |exp| {
+            if (!isCrossCallRead(exp.module, exp.name)) continue;
+            const detail = try std.fmt.allocPrint(self.allocator, "{s}.{s}", .{ exp.module, exp.name });
+            defer self.allocator.free(detail);
+            return self.refuseToolCatalog(contract, .cross_call_read, name, fields[field_route], detail);
         }
 
         var entry = contract_types.ToolEntry{
@@ -1664,6 +1677,8 @@ pub const ContractBuilder = struct {
         entry.input_schema_json = try self.allocator.dupe(u8, input_schema);
         entry.output_schema_name = try self.allocator.dupe(u8, output_name);
         entry.output_schema_json = try self.allocator.dupe(u8, output_schema);
+        if (scope.tenant) |field| entry.scope_tenant = try self.allocator.dupe(u8, field);
+        if (scope.subject) |field| entry.scope_subject = try self.allocator.dupe(u8, field);
         entry.reachable_exports = walk.exports;
         walk.exports = .empty;
         try state.entries.append(self.allocator, entry);
@@ -1680,6 +1695,133 @@ pub const ContractBuilder = struct {
         if (self.getLiteralString(node)) |s| return s;
         try self.refuseToolCatalog(contract, .entry_not_literal, name, node, field_name);
         return null;
+    }
+
+    /// The input fields a catalog entry binds to the verified identity (M4 T5
+    /// design note, section 5). Both borrow from the atom table.
+    const ToolScope = struct {
+        tenant: ?[]const u8 = null,
+        subject: ?[]const u8 = null,
+    };
+
+    /// Read the optional `scope` field: an object literal whose keys are
+    /// `tenant` and `subject` (one or both) and whose values are string
+    /// literals. Null after refusing it; an absent field is an empty scope.
+    fn readToolScope(self: *ContractBuilder, contract: *HandlerContract, name: []const u8, node: NodeIndex) !?ToolScope {
+        var scope: ToolScope = .{};
+        if (node == null_node) return scope;
+        const obj_node = self.resolveObjectLiteralNode(node) orelse {
+            try self.refuseToolCatalog(contract, .scope_not_literal, name, node, null);
+            return null;
+        };
+        const obj = self.ir_view.getObject(obj_node) orelse {
+            try self.refuseToolCatalog(contract, .scope_not_literal, name, node, null);
+            return null;
+        };
+        if (obj.properties_count == 0) {
+            try self.refuseToolCatalog(contract, .scope_not_literal, name, node, "scope is empty");
+            return null;
+        }
+        var k: u16 = 0;
+        while (k < obj.properties_count) : (k += 1) {
+            const prop_idx = self.ir_view.getListIndex(obj.properties_start, k);
+            const prop = self.literalProperty(prop_idx) orelse {
+                try self.refuseToolCatalog(contract, .scope_not_literal, name, prop_idx, null);
+                return null;
+            };
+            const key = self.getObjectPropertyKey(prop.key) orelse {
+                try self.refuseToolCatalog(contract, .scope_not_literal, name, prop_idx, null);
+                return null;
+            };
+            const slot: *?[]const u8 = if (std.mem.eql(u8, key, "tenant"))
+                &scope.tenant
+            else if (std.mem.eql(u8, key, "subject"))
+                &scope.subject
+            else {
+                try self.refuseToolCatalog(contract, .scope_unknown_key, name, prop_idx, key);
+                return null;
+            };
+            if (slot.* != null) {
+                try self.refuseToolCatalog(contract, .scope_not_literal, name, prop_idx, key);
+                return null;
+            }
+            slot.* = self.getLiteralString(prop.value) orelse {
+                try self.refuseToolCatalog(contract, .scope_not_literal, name, prop.value, key);
+                return null;
+            };
+        }
+        return scope;
+    }
+
+    /// Each scope value must name a required top-level property of the input
+    /// schema whose type is `string`, so the runtime always finds one string to
+    /// compare with the verified identity. False after refusing.
+    fn checkToolScope(
+        self: *ContractBuilder,
+        contract: *HandlerContract,
+        name: []const u8,
+        node: NodeIndex,
+        input_name: []const u8,
+        input_schema: []const u8,
+        scope: ToolScope,
+    ) !bool {
+        if (scope.tenant == null and scope.subject == null) return true;
+        var compiled = tool_schema.compile(self.allocator, input_schema) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            // `catalogSchema` admitted the text, so this is not reached; refuse
+            // rather than admit a binding nothing checked.
+            error.SchemaNotInSubset => {
+                try self.refuseToolCatalog(contract, .scope_field_invalid, name, node, input_name);
+                return false;
+            },
+        };
+        defer compiled.deinit();
+        const fields = [_]struct { key: []const u8, field: ?[]const u8 }{
+            .{ .key = "tenant", .field = scope.tenant },
+            .{ .key = "subject", .field = scope.subject },
+        };
+        for (fields) |binding| {
+            const field = binding.field orelse continue;
+            if (requiredStringProperty(compiled.root, field)) continue;
+            const detail = try std.fmt.allocPrint(self.allocator, "{s}: \"{s}\" in {s}", .{ binding.key, field, input_name });
+            defer self.allocator.free(detail);
+            try self.refuseToolCatalog(contract, .scope_field_invalid, name, node, detail);
+            return false;
+        }
+        return true;
+    }
+
+    fn requiredStringProperty(root: *const tool_schema.Node, field: []const u8) bool {
+        const root_object = switch (root.*) {
+            .object => |o| o,
+            // exhaustive: a root that is not an object has no property to
+            // bind, so the binding is refused, never admitted.
+            else => return false,
+        };
+        for (root_object.properties) |property| {
+            if (!std.mem.eql(u8, property.name, field)) continue;
+            return property.required and property.schema.* == .string;
+        }
+        return false;
+    }
+
+    /// The cross-call reads of decision 6, in its own wording. A row with no
+    /// names covers every export the module's binding declares.
+    const CrossCallRead = struct { module: []const u8, names: ?[]const []const u8 };
+    const cross_call_reads = [_]CrossCallRead{
+        .{ .module = "zttp:cache", .names = &.{ "cacheGet", "cacheIncr", "cacheStats" } },
+        .{ .module = "zttp:sql", .names = null },
+        .{ .module = "zttp:queue", .names = &.{"receive"} },
+        .{ .module = "zttp:durable", .names = &.{"waitSignal"} },
+    };
+
+    fn isCrossCallRead(module: []const u8, export_name: []const u8) bool {
+        for (cross_call_reads) |row| {
+            if (!std.mem.eql(u8, row.module, module)) continue;
+            const names = row.names orelse return builtin_modules.findExport(module, export_name) != null;
+            return json_utils.containsString(names, export_name);
+        }
+        return false;
     }
 
     /// The schema text a catalog field names, or null after refusing it.
@@ -6253,7 +6395,7 @@ const tool_refusal_cases = [_]ToolRefusalCase{
     .{ .reason = .entry_not_literal, .source = toolSource("", "\"POST /a\": a", toolCatalogOf("ta: 5")) },
     .{ .reason = .entry_not_literal, .source = toolSource("", "\"POST /a\": a", toolCatalogOf("ta: { route: 7, description: \"d\", input: \"In\", output: \"Out\", maxInputBytes: 64 }")) },
     .{ .reason = .entry_field_missing, .source = toolSource("", "\"POST /a\": a", toolCatalogOf("ta: { route: \"POST /a\", description: \"d\", input: \"In\", output: \"Out\" }")) },
-    .{ .reason = .entry_field_unknown, .source = toolSource("", "\"POST /a\": a", toolCatalogOf("ta: { route: \"POST /a\", description: \"d\", input: \"In\", output: \"Out\", maxInputBytes: 64, scope: \"all\" }")) },
+    .{ .reason = .entry_field_unknown, .source = toolSource("", "\"POST /a\": a", toolCatalogOf("ta: { route: \"POST /a\", description: \"d\", input: \"In\", output: \"Out\", maxInputBytes: 64, tags: \"all\" }")) },
     .{ .reason = .entry_field_repeated, .source = toolSource("", "\"POST /a\": a", toolCatalogOf("ta: { route: \"POST /a\", route: \"POST /a\", description: \"d\", input: \"In\", output: \"Out\", maxInputBytes: 64 }")) },
     .{ .reason = .duplicate_name, .source = toolSource("", "\"POST /a\": a", toolCatalogOf(tool_test_entry ++ ", " ++ tool_test_entry)) },
     .{ .reason = .duplicate_route, .source = toolSource("", "\"POST /a\": a", toolCatalogOf(tool_test_entry ++ ", tb: { route: \"POST /a\", description: \"d\", input: \"In\", output: \"Out\", maxInputBytes: 64 }")) },
@@ -6265,7 +6407,35 @@ const tool_refusal_cases = [_]ToolRefusalCase{
     .{ .reason = .schema_not_in_subset, .source = toolSource("schemaCompile(\"Open\", \"{\\\"type\\\":\\\"object\\\",\\\"properties\\\":{}}\");", "\"POST /a\": a", toolCatalogOf("ta: { route: \"POST /a\", description: \"d\", input: \"Open\", output: \"Out\", maxInputBytes: 64 }")) },
     .{ .reason = .max_input_bytes_invalid, .source = toolSource("", "\"POST /a\": a", toolCatalogOf("ta: { route: \"POST /a\", description: \"d\", input: \"In\", output: \"Out\", maxInputBytes: 0 }")) },
     .{ .reason = .max_input_bytes_invalid, .source = toolSource("", "\"POST /a\": a", toolCatalogOf("ta: { route: \"POST /a\", description: \"d\", input: \"In\", output: \"Out\", maxInputBytes: 1048577 }")) },
+    .{ .reason = .scope_not_literal, .source = toolSource("", "\"POST /a\": a", toolCatalogOf(scopedEntry("\"all\""))) },
+    .{ .reason = .scope_not_literal, .source = toolSource("", "\"POST /a\": a", toolCatalogOf(scopedEntry("{}"))) },
+    .{ .reason = .scope_not_literal, .source = toolSource("", "\"POST /a\": a", toolCatalogOf(scopedEntry("{ tenant: 7 }"))) },
+    .{ .reason = .scope_not_literal, .source = toolSource("", "\"POST /a\": a", toolCatalogOf(scopedEntry("{ tenant: \"id\", tenant: \"id\" }"))) },
+    .{ .reason = .scope_unknown_key, .source = toolSource("", "\"POST /a\": a", toolCatalogOf(scopedEntry("{ tenant: \"id\", owner: \"id\" }"))) },
+    // Not required, not a string, not declared, and not top-level.
+    .{ .reason = .scope_field_invalid, .source = toolSource(tool_scoped_schema, "\"POST /a\": a", toolCatalogOf(scopedInEntry("{ tenant: \"note\" }"))) },
+    .{ .reason = .scope_field_invalid, .source = toolSource(tool_scoped_schema, "\"POST /a\": a", toolCatalogOf(scopedInEntry("{ subject: \"count\" }"))) },
+    .{ .reason = .scope_field_invalid, .source = toolSource(tool_scoped_schema, "\"POST /a\": a", toolCatalogOf(scopedInEntry("{ tenant: \"tenant_id\", subject: \"nope\" }"))) },
+    .{ .reason = .scope_field_invalid, .source = toolSource(tool_scoped_schema, "\"POST /a\": a", toolCatalogOf(scopedInEntry("{ tenant: \"inner\" }"))) },
+    .{ .reason = .cross_call_read, .source = "import { cacheGet } from \"zttp:cache\";\n" ++ toolSource("function c(req) { cacheGet(\"n\", \"k\"); return Response.json({}); }", "\"POST /a\": c", toolCatalogOf(tool_test_entry)) },
+    // Reached through a helper, and from a module the rule covers whole.
+    .{ .reason = .cross_call_read, .source = "import { sqlExec } from \"zttp:sql\";\n" ++ toolSource("function write() { return sqlExec(\"x\", {}); }\nfunction c(req) { write(); return Response.json({}); }", "\"POST /a\": c", toolCatalogOf(tool_test_entry)) },
 };
+
+/// An input schema with a required string (`tenant_id`, `user_id`), an optional
+/// string (`note`), a required integer (`count`), and a nested object whose
+/// required string `inner` is not top-level.
+const tool_scoped_schema =
+    \\schemaCompile("Scoped", "{\"type\":\"object\",\"additionalProperties\":false,\"required\":[\"tenant_id\",\"user_id\",\"count\",\"nested\"],\"properties\":{\"tenant_id\":{\"type\":\"string\",\"maxLength\":32},\"user_id\":{\"type\":\"string\",\"maxLength\":32},\"note\":{\"type\":\"string\",\"maxLength\":32},\"count\":{\"type\":\"integer\"},\"nested\":{\"type\":\"object\",\"additionalProperties\":false,\"required\":[\"inner\"],\"properties\":{\"inner\":{\"type\":\"string\",\"maxLength\":8}}}}}");
+;
+
+fn scopedEntry(comptime scope: []const u8) []const u8 {
+    return "ta: { route: \"POST /a\", description: \"d\", input: \"In\", output: \"Out\", maxInputBytes: 64, scope: " ++ scope ++ " }";
+}
+
+fn scopedInEntry(comptime scope: []const u8) []const u8 {
+    return "ta: { route: \"POST /a\", description: \"d\", input: \"Scoped\", output: \"Out\", maxInputBytes: 64, scope: " ++ scope ++ " }";
+}
 
 /// Refusal members no handler source can reach, each with the mechanism that
 /// makes it unreachable. The census accepts a member only with a case or a row.
@@ -6332,6 +6502,79 @@ test "a well-formed tool catalog lands in the contract with its schemas" {
     try std.testing.expectEqualStrings("Out", tool.output_schema_name);
     try std.testing.expectEqual(@as(u32, 64), tool.max_input_bytes);
     try std.testing.expect(std.mem.indexOf(u8, tool.input_schema_json, "\"maxLength\":8") != null);
+}
+
+test "a scoped tool catalog entry carries its bound input fields" {
+    var contract = try buildTestContract(toolSource(tool_scoped_schema, "\"POST /a\": a", toolCatalogOf(scopedInEntry("{ tenant: \"tenant_id\", subject: \"user_id\" }"))));
+    defer contract.deinit(std.testing.allocator);
+    for (contract.spec_diagnostics.items) |d| {
+        if (d.kind == .tool_catalog_refused) {
+            std.debug.print("unexpected ZTS513: {s}\n", .{d.suggestion orelse d.spec_name});
+            return error.TestUnexpectedRefusal;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 1), contract.tools.items.len);
+    try std.testing.expectEqualStrings("tenant_id", contract.tools.items[0].scope_tenant orelse return error.TestMissingScope);
+    try std.testing.expectEqualStrings("user_id", contract.tools.items[0].scope_subject orelse return error.TestMissingScope);
+
+    // An entry without `scope` binds nothing.
+    var plain = try buildTestContract(toolSource("", "\"POST /a\": a", toolCatalogOf(tool_test_entry)));
+    defer plain.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 1), plain.tools.items.len);
+    try std.testing.expect(plain.tools.items[0].scope_tenant == null);
+    try std.testing.expect(plain.tools.items[0].scope_subject == null);
+}
+
+test "a tool that writes the cache is admitted while a cache read is refused" {
+    const source = comptime "import { cacheSet } from \"zttp:cache\";\n" ++
+        toolSource("function c(req) { cacheSet(\"n\", \"k\", \"v\", 10); return Response.json({}); }", "\"POST /a\": c", toolCatalogOf(tool_test_entry));
+    var contract = try buildTestContract(source);
+    defer contract.deinit(std.testing.allocator);
+    for (contract.spec_diagnostics.items) |d| {
+        if (d.kind == .tool_catalog_refused) {
+            std.debug.print("unexpected ZTS513: {s}\n", .{d.suggestion orelse d.spec_name});
+            return error.TestUnexpectedRefusal;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 1), contract.tools.items.len);
+    const exports = contract.tools.items[0].reachable_exports.items;
+    try std.testing.expectEqual(@as(usize, 1), exports.len);
+    try std.testing.expectEqualStrings("zttp:cache", exports[0].module);
+    try std.testing.expectEqualStrings("cacheSet", exports[0].name);
+}
+
+test "every builtin export that declares an unknown return label is a refused cross-call read" {
+    var marked: usize = 0;
+    for (builtin_modules.all) |binding| {
+        for (binding.exports) |func| {
+            if (!func.return_labels.unknown) continue;
+            marked += 1;
+            if (!ContractBuilder.isCrossCallRead(binding.specifier, func.name)) {
+                std.debug.print("{s}.{s} declares .unknown but is not a refused cross-call read\n", .{ binding.specifier, func.name });
+                return error.TestCrossCallListIncomplete;
+            }
+        }
+    }
+    // Floor: the five marked reads of the design note, section 2.
+    try std.testing.expect(marked >= 5);
+
+    // Every named row resolves to a real export, so the list cannot name a
+    // read the registry no longer has while a renamed one goes unrefused.
+    for (ContractBuilder.cross_call_reads) |row| {
+        const binding = builtin_modules.fromSpecifier(row.module) orelse return error.TestCrossCallModuleUnknown;
+        try std.testing.expect(binding.exports.len > 0);
+        const names = row.names orelse continue;
+        for (names) |export_name| {
+            if (builtin_modules.findExport(row.module, export_name) == null) {
+                std.debug.print("{s}.{s} is not an export\n", .{ row.module, export_name });
+                return error.TestCrossCallExportUnknown;
+            }
+        }
+    }
+    // The whole-module row covers every sql export, writes included.
+    const sql = builtin_modules.fromSpecifier("zttp:sql") orelse return error.TestCrossCallModuleUnknown;
+    for (sql.exports) |func| try std.testing.expect(ContractBuilder.isCrossCallRead("zttp:sql", func.name));
+    try std.testing.expect(!ContractBuilder.isCrossCallRead("zttp:cache", "cacheSet"));
 }
 
 test "a handler without toolCatalog is not under the tool profile" {

@@ -1509,7 +1509,7 @@ pub const ToolCatalogRefusal = enum {
     entry_not_literal,
     /// An entry lacks `route`, `description`, `input`, `output`, or `maxInputBytes`.
     entry_field_missing,
-    /// An entry has a field outside those five.
+    /// An entry has a field other than those five and the optional `scope`.
     entry_field_unknown,
     /// Two entries have the same name.
     duplicate_name,
@@ -1535,6 +1535,18 @@ pub const ToolCatalogRefusal = enum {
     /// read. The catalog would claim less authority than the code has, so the
     /// build refuses rather than under-report.
     exports_unanalyzable,
+    /// `scope` is not an object literal holding at least one key whose value
+    /// is a string literal.
+    scope_not_literal,
+    /// `scope` holds a key other than `tenant` and `subject`.
+    scope_unknown_key,
+    /// A `scope` value does not name a required top-level string property of
+    /// the input schema.
+    scope_field_invalid,
+    /// The route reaches an export that reads state a separate call wrote
+    /// (decision 6): a `zttp:cache` read, any `zttp:sql` export,
+    /// `queue.receive`, or `durable.waitSignal`.
+    cross_call_read,
 
     pub fn sentence(self: ToolCatalogRefusal) []const u8 {
         return switch (self) {
@@ -1543,7 +1555,7 @@ pub const ToolCatalogRefusal = enum {
             .catalog_repeated => "call toolCatalog once; a handler has one catalog",
             .entry_not_literal => "each entry must be an object literal whose fields are literals: strings for route, description, input, and output, and an integer for maxInputBytes",
             .entry_field_missing => "each entry needs route, description, input, output, and maxInputBytes",
-            .entry_field_unknown => "an entry may hold only route, description, input, output, and maxInputBytes",
+            .entry_field_unknown => "an entry may hold only route, description, input, output, maxInputBytes, and scope",
             .duplicate_name => "two entries have the same tool name",
             .duplicate_route => "two entries name the same route",
             .route_table_dynamic => "the routerMatch table must be an object literal so every tool route is known at build time",
@@ -1555,6 +1567,10 @@ pub const ToolCatalogRefusal = enum {
             .entry_field_repeated => "an entry names the same field twice",
             .max_input_bytes_invalid => "maxInputBytes must be a positive integer literal no larger than 1048576",
             .exports_unanalyzable => "the build cannot list every module export this route reaches, so it cannot bound the tool's authority",
+            .scope_not_literal => "scope must be an object literal with tenant, subject, or both, each a string literal naming an input field",
+            .scope_unknown_key => "scope may hold only tenant and subject",
+            .scope_field_invalid => "a scope value must name a required top-level string property of the input schema",
+            .cross_call_read => "a tool route may not reach an export that reads state a separate call wrote: zttp:cache reads, zttp:sql, queue.receive, or durable.waitSignal",
         };
     }
 };
@@ -1596,6 +1612,10 @@ pub const ToolEntry = struct {
     /// The declared input byte ceiling, at most
     /// `tool_schema.max_input_bytes_ceiling`.
     max_input_bytes: u32,
+    /// The input field bound to the verified tenant, when `scope` names one.
+    scope_tenant: ?[]const u8 = null,
+    /// The input field bound to the verified subject, when `scope` names one.
+    scope_subject: ?[]const u8 = null,
     /// The module exports the route function reaches, sorted with
     /// `ToolExport.lessThan`.
     reachable_exports: std.ArrayList(ToolExport) = .empty,
@@ -1608,6 +1628,8 @@ pub const ToolEntry = struct {
         allocator.free(self.input_schema_json);
         allocator.free(self.output_schema_name);
         allocator.free(self.output_schema_json);
+        if (self.scope_tenant) |s| allocator.free(s);
+        if (self.scope_subject) |s| allocator.free(s);
         for (self.reachable_exports.items) |*e| e.deinit(allocator);
         self.reachable_exports.deinit(allocator);
     }

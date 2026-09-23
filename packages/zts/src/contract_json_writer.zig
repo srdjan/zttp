@@ -281,6 +281,21 @@ fn writeContractJsonVersion(
         try writer.writeAll(", \"json\": ");
         try writeJsonString(writer, tool.output_schema_json);
         try writer.print(" }},\n      \"" ++ comptime contractKey(json_version, "maxInputBytes") ++ "\": {d},\n", .{tool.max_input_bytes});
+        // `scope` (M4 T5) is written only when the entry binds a field, so a
+        // catalog without one keeps its earlier bytes.
+        if (tool.scope_tenant != null or tool.scope_subject != null) {
+            try writer.writeAll("      \"scope\": {");
+            if (tool.scope_tenant) |field| {
+                try writer.writeAll(" \"tenant\": ");
+                try writeJsonString(writer, field);
+                if (tool.scope_subject != null) try writer.writeAll(",");
+            }
+            if (tool.scope_subject) |field| {
+                try writer.writeAll(" \"subject\": ");
+                try writeJsonString(writer, field);
+            }
+            try writer.writeAll(" },\n");
+        }
         try writer.writeAll("      \"" ++ comptime contractKey(json_version, "reachableExports") ++ "\": [");
         for (tool.reachable_exports.items, 0..) |exp, j| {
             if (j > 0) try writer.writeAll(", ");
