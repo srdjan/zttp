@@ -30,6 +30,7 @@
 # zts-base
 zts-base base_root.zig
 zts-base compat.zig
+zts-base declaration.zig
 zts-base endpoint.zig
 zts-base guard_catalog.zig
 zts-base identifier.zig

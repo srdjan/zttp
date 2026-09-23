@@ -80,6 +80,7 @@ runtime witness_corpus
 tools builtin_modules
 tools bytecode_cache
 tools contract_diff
+tools declaration
 tools file_io
 tools handler_contract
 tools handler_policy

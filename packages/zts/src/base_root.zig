@@ -63,6 +63,11 @@ pub const route_match = @import("route_match.zig");
 /// validator that checks a tool input against it.
 pub const tool_schema = @import("tool_schema.zig");
 
+/// The consumer declaration loader: classifications that assign `secret` or
+/// `credential` to a member of an outside source's value, and the closed
+/// refusal set (M4 T4).
+pub const declaration = @import("declaration.zig");
+
 /// The type annotations the TypeScript stripper records as it removes them.
 pub const type_map = @import("type_map.zig");
 

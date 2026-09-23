@@ -125,6 +125,8 @@ pub const route_match = base.route_match;
 /// The closed tool schema subset, its canonical form, and the streaming
 /// validator (M4 T2 and T3).
 pub const tool_schema = base.tool_schema;
+/// The consumer declaration loader and its closed refusal set (M4 T4).
+pub const declaration = base.declaration;
 pub const type_map = base.type_map;
 pub const type_pool = compiler.type_pool;
 pub const type_key = compiler.type_key;

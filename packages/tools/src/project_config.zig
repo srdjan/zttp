@@ -22,6 +22,9 @@ pub const ProjectConfig = struct {
     static_dir: ?[]const u8 = null,
     sqlite: ?[]const u8 = null,
     invariants: ?[]const u8 = null,
+    /// Path to the consumer declaration JSON (M4 T4). Resolved like `invariants`:
+    /// relative to the manifest directory.
+    declaration: ?[]const u8 = null,
     ledger: ?[]const u8 = null,
     /// Path to the capability-policy JSON this project's handlers are checked
     /// against. Resolved like `sqlite`: relative to the manifest directory.
@@ -39,6 +42,7 @@ pub const ProjectConfig = struct {
         if (self.static_dir) |path| allocator.free(path);
         if (self.sqlite) |path| allocator.free(path);
         if (self.invariants) |path| allocator.free(path);
+        if (self.declaration) |path| allocator.free(path);
         if (self.ledger) |path| allocator.free(path);
         if (self.policy) |path| allocator.free(path);
         if (self.durable_dir) |path| allocator.free(path);
@@ -80,6 +84,21 @@ pub const ProjectConfig = struct {
         const path = try self.resolvedInvariantsPath(allocator) orelse return null;
         defer allocator.free(path);
         return try invariant_config.loadFile(allocator, path);
+    }
+
+    pub fn resolvedDeclarationPath(self: *const ProjectConfig, allocator: std.mem.Allocator) !?[]u8 {
+        return if (self.declaration) |path| try self.resolvePath(allocator, path) else null;
+    }
+
+    /// Read the configured declaration's raw bytes. Null means the manifest
+    /// names no declaration; a configured path that cannot be read is an error.
+    /// The read is bounded by the loader's own document cap, so a file over it
+    /// fails here with `error.FileTooBig`. Validation is
+    /// `zts.declaration.parse`, which the caller runs. Caller frees.
+    pub fn readDeclaration(self: *const ProjectConfig, allocator: std.mem.Allocator) !?[]u8 {
+        const path = try self.resolvedDeclarationPath(allocator) orelse return null;
+        defer allocator.free(path);
+        return try zts.file_io.readFile(allocator, path, zts.declaration.max_document_bytes);
     }
 
     pub fn resolvedPolicyPath(self: *const ProjectConfig, allocator: std.mem.Allocator) !?[]u8 {
@@ -167,6 +186,7 @@ pub fn loadAbsolute(
         .static_dir = try dupOptionalStringField(allocator, obj, "staticDir"),
         .sqlite = try dupOptionalStringField(allocator, obj, "sqlite"),
         .invariants = try dupOptionalStringField(allocator, obj, "invariants"),
+        .declaration = try dupOptionalStringField(allocator, obj, "declaration"),
         .ledger = try dupOptionalStringField(allocator, obj, "ledger"),
         .policy = try dupOptionalStringField(allocator, obj, "policy"),
         .durable_dir = try dupOptionalStringField(allocator, obj, "durableDir"),
@@ -431,4 +451,73 @@ test "project discovery requires a readable confirmed invariant and paired store
     try std.testing.expectEqualStrings(expected, path);
     try tmp.dir.writeFile(io, .{ .sub_path = "zttp.json", .data = "{\"ledger\":\"ledger.db\"}" });
     try std.testing.expectError(error.IncompleteInvariantConfig, discover(a, io, manifest));
+}
+
+test "project config reads the declaration named by the manifest, resolved beside it" {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try std.Io.Dir.createDirPath(tmp.dir, io, "policy");
+    try tmp.dir.writeFile(io, .{ .sub_path = "zttp.json", .data =
+        \\{"declaration":"policy/declaration.json"}
+    });
+    const body =
+        \\{"version":1,"classifications":[]}
+    ;
+    try tmp.dir.writeFile(io, .{ .sub_path = "policy/declaration.json", .data = body });
+    const manifest = try tmp.dir.realPathFileAlloc(io, "zttp.json", a);
+    defer a.free(manifest);
+
+    var config = (try discover(a, io, manifest)).?;
+    defer config.deinit(a);
+    try std.testing.expectEqualStrings("policy/declaration.json", config.declaration.?);
+
+    const path = (try config.resolvedDeclarationPath(a)).?;
+    defer a.free(path);
+    const expected = try std.fs.path.resolve(a, &.{ config.root_dir, "policy", "declaration.json" });
+    defer a.free(expected);
+    try std.testing.expectEqualStrings(expected, path);
+
+    const bytes = (try config.readDeclaration(a)).?;
+    defer a.free(bytes);
+    try std.testing.expectEqualStrings(body, bytes);
+}
+
+test "project config without a declaration key reads no declaration" {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "zttp.json", .data = "{}" });
+    const manifest = try tmp.dir.realPathFileAlloc(io, "zttp.json", a);
+    defer a.free(manifest);
+
+    var config = (try discover(a, io, manifest)).?;
+    defer config.deinit(a);
+    try std.testing.expect(config.declaration == null);
+    try std.testing.expect((try config.resolvedDeclarationPath(a)) == null);
+    try std.testing.expect((try config.readDeclaration(a)) == null);
+}
+
+test "project config declaration read fails for a missing or oversized file" {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "zttp.json", .data =
+        \\{"declaration":"declaration.json"}
+    });
+    const manifest = try tmp.dir.realPathFileAlloc(io, "zttp.json", a);
+    defer a.free(manifest);
+    var config = (try discover(a, io, manifest)).?;
+    defer config.deinit(a);
+
+    try std.testing.expectError(error.FileNotFound, config.readDeclaration(a));
+
+    const big = try a.alloc(u8, zts.declaration.max_document_bytes + 1);
+    defer a.free(big);
+    @memset(big, ' ');
+    try tmp.dir.writeFile(io, .{ .sub_path = "declaration.json", .data = big });
+    try std.testing.expectError(error.FileTooBig, config.readDeclaration(a));
 }
