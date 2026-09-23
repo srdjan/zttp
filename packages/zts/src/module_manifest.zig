@@ -465,14 +465,17 @@ fn parseExport(allocator: std.mem.Allocator, value: std.json.Value) ManifestErro
     const effect_raw = optionalStringField(obj, "effect") orelse "read";
     const returns_raw = optionalStringField(obj, "returns") orelse "unknown";
     const failure_raw = optionalStringField(obj, "failureSeverity") orelse optionalStringField(obj, "failure_severity") orelse "none";
-    const name_owned = try allocator.dupe(u8, name);
-    errdefer allocator.free(name_owned);
+    const effect = std.meta.stringToEnum(mb.EffectClass, effect_raw) orelse return error.InvalidEffect;
+    const returns = std.meta.stringToEnum(mb.ReturnKind, returns_raw) orelse return error.InvalidReturnKind;
+    const failure_severity = std.meta.stringToEnum(mb.FailureSeverity, failure_raw) orelse return error.InvalidFailureSeverity;
 
+    // `exp` owns the name from here on: one errdefer, not two, or an error
+    // after construction frees it twice.
     var exp = Export{
-        .name = name_owned,
-        .effect = std.meta.stringToEnum(mb.EffectClass, effect_raw) orelse return error.InvalidEffect,
-        .returns = std.meta.stringToEnum(mb.ReturnKind, returns_raw) orelse return error.InvalidReturnKind,
-        .failure_severity = std.meta.stringToEnum(mb.FailureSeverity, failure_raw) orelse return error.InvalidFailureSeverity,
+        .name = try allocator.dupe(u8, name),
+        .effect = effect,
+        .returns = returns,
+        .failure_severity = failure_severity,
         .traceable = boolField(obj, "traceable") orelse true,
         .return_labels = .{},
         .contract_extractions = .empty,
@@ -874,4 +877,18 @@ test "parse manifest rejects duplicate exports within module" {
         \\}
     ;
     try std.testing.expectError(error.DuplicateExport, parse(std.testing.allocator, json));
+}
+
+test "parse manifest rejects an unknown contract category without freeing the export name twice" {
+    const json =
+        \\{
+        \\  "schemaVersion": 1,
+        \\  "specifier": "zttp-ext:bad",
+        \\  "exports": [
+        \\    { "name": "f", "params": ["string"], "returns": "string", "effect": "none",
+        \\      "contractExtractions": [{ "category": "no_such_category" }] }
+        \\  ]
+        \\}
+    ;
+    try std.testing.expectError(error.InvalidContractCategory, parse(std.testing.allocator, json));
 }
