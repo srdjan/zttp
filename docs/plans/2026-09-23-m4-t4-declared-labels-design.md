@@ -1,7 +1,7 @@
 # M4 T4 design note: declared-label carriage
 
-Status: accepted by the owner on 2026-09-23, with the recommended answer to
-each question in section 8. Check C4 of the
+Status: implemented on 2026-09-23. Accepted by the owner on 2026-09-23, with the
+recommended answer to each question in section 8. Check C4 of the
 [M4 release contract](2026-09-22-m4-release-contract.md) is written against
 the approach this note names.
 
@@ -234,7 +234,46 @@ end of section 8 stand.
 
 | Unit | Commit | Content |
 |---|---|---|
-| U1 | pending | declaration loader, refusal enum, canonical form, zttp.json key |
-| U2 | pending | flow checker origins, aggregate rule, precise member read, P8 statuses; old external-label API deleted |
-| U3 | pending | carriers into the check and build paths, `--declaration`, required-absent build error, contract version 20 report |
-| U4 | pending | consumer-contract text, C4 probes and census, full gate |
+| U1 | `3c120491` | declaration loader, refusal enum, zttp.json key |
+| U2 | `ce02fffc` | flow checker origins, aggregate rule, precise member read, P8 statuses; old external-label API deleted |
+| U3 | `e4f81152` | carriers into the check and build paths, `--declaration`, `-Ddeclaration`, required-absent build error, contract version 20 report |
+| U4 | `734f6a9e` and this record | consumer-contract sections 4.5 and 9.2, C4 evidence |
+
+## 11. Implementation notes and C4 evidence
+
+Five points differ from sections 3 to 7, each found while building. The
+declaration's canonical byte form is written in T5, with the kernel decoder
+that reads it, since that is where it binds; T4 enforces the parsed, sorted
+declaration. `resp.text()` is a body root as well as `.json()` and `.body`,
+because it returns the whole body. An aggregate that is only bound to a const
+or read through to reach a member is not forwarded, so it does not make an
+entry `indeterminate`; a use of the whole aggregate does. A write into, or a
+push onto, an origin-bearing binding drops its origin, because a precise read
+would otherwise subtract a label the write added. And the imported-helper
+flow walk needed the declaration too: without it a declared secret read
+inside an imported helper checked clean.
+
+Two carriers go beyond section 3: `-Ddeclaration` replaces the deleted
+`-Ddata-labels` so `-Dhandler` builds can carry a declaration, and the
+multi-module build path, which runs no flow check, refuses a declaration
+rather than ignoring it. One gap remains: the `zttp-runtime --watch` re-check
+path does not load the declaration; the `zttp dev` preflight does.
+
+C4, measured on `main`: `test-zts`, `test-precompile`, and `test-proof-swallow`
+pass unfiltered, with the full suite. AE4 is refused, asserting
+`no_secret_leakage`, for the field directly and through an alias, a part, a
+projection, `validateJson`, `JSON.stringify`, `text()`, a helper, the whole
+aggregate, body, and response, a computed read, and a write-then-read; the
+same shapes are admitted for a sibling, the same last segment under another
+parent, a local object, response metadata, and another host. A declared
+credential from a service is refused. AE18 through the cache stays unproven.
+AE19: `mask` keeps the label under a runtime bound and declassifies under a
+literal. An empty classifications array, a `validated` label, and every other
+loader rule are refused (a census over the 14 refusal reasons). P8: a census
+over the three statuses, and a required absent entry fails the build and the
+check end to end. Mutation probes, each on a genuine compile in `main` and
+restored byte for byte: the aggregate rule, the precise member read, the origin
+drop on write, last-segment matching, a repeated entry accepted, `relation`
+comparing last segments, `setDeclaration` skipped in the check path and in the
+build path, and the required-absent predicate; each failed a named test. The
+policy hash did not move, so no corpus re-record was needed.

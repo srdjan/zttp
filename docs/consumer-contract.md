@@ -38,11 +38,12 @@ contract. The acceptance policy is a compile-time value with two presets and no 
 format. One of eight consumer obligation properties is re-derived by the acceptance
 kernel; the other seven are disclosed.
 
-The declared data-label path described in section 9.2 is in progress (M4 T4). The old
-`-Ddata-labels` path is deleted. The declaration file (`packages/zts/src/declaration.zig`)
-reaches every flow check of the handler through `--declaration`, `-Ddeclaration`, or the
-`declaration` key in `zttp.json`, and the contract (version 20) carries the P8 status of
-each entry. Section 9.2 is not yet revised to match.
+The declared data-label path of section 9.2 is implemented for the M4 release boundary:
+the declaration file (`packages/zts/src/declaration.zig`) reaches every flow check of the
+handler through `--declaration`, `-Ddeclaration`, or the `declaration` key in
+`zttp.json`, the flow checker enforces its classifications (P9), and the contract (version
+20) carries the P8 status of each entry. The declaration does not yet bind as a graph
+member; that is M4 T5.
 
 Nothing else in this document is implemented. The declaration document, the admissibility
 stage, spec-driven generation, and the published vocabulary envelope are obligations
@@ -667,25 +668,31 @@ response reaches a client without violating `no_secret_leakage`. That default is
 the producer makes no claim about data it did not produce. It also means the default
 stops nothing.
 
-The flow checker holds the shape of externally declared label bindings, keyed by field
-name, in `parseExternalLabels` and `setExternalLabels`. The intent is that a consumer
-declaring the response field `ssn` as `secret` gets it enforced from that point, so the
-value cannot reach a response body, a log, or an outbound request without failing the
-build.
+A consumer that knows better declares it. The declaration's classifications section
+(section 4.5) names a source, a field path in its response body, and `secret` or
+`credential`, and the flow checker enforces it from that point: the value cannot reach a
+response body, a log, or an outbound request without failing the build with ZTS400 to
+ZTS403, and the diagnostic names the entry. The mechanism is origin tracking
+(`packages/zts/src/flow_checker.zig`, M4 T4). A value from a declared source carries its
+source and its path from the body root, through `.json()`, `.text()`, `.body`, member
+reads, and const aliases. It carries the declared labels of every entry at its path,
+below it, and at any aggregate above it. A member read on such a value takes only its own
+path's labels, so a sibling field is not labelled. Anything else - a call argument, a
+spread, a computed read, a validator - keeps the labels and loses the origin, which widens
+labels and never narrows them.
 
-**The rest of this section describes the mechanism before M4 T4.** That mechanism and its
-`-Ddata-labels` flag are deleted. Its replacement is the declaration file, which M4 T4
-carries into every flow check; the text below is revised in a later unit.
+The three ways the earlier short-name mechanism was blind are each closed and each has a
+test that fails when the closure is removed: whole-object forwarding carries the field's
+labels (P9 condition a); matching compares whole paths from the source root, so an
+unrelated `.email`, or the same last segment under another parent, never matches (P9
+condition b); and a malformed entry refuses the whole declaration with a named reason (P9
+condition c). A fetch whose host is not a literal is treated as any declared host, so a
+computed URL cannot escape a declaration. After the flow check every entry reports
+`matched`, `indeterminate`, or `absent` (P8), and a `required` entry that is `absent`
+fails the build: a declaration naming a field that never appears enforces nothing.
 
-P9 binds the producer to close that, and it is not satisfied by wiring the option alone.
-The binding consults external labels for named member access, so computed access and
-whole-object forwarding, which is the shape an untyped wrapped response takes, would still
-pass unchecked. A qualified binding also registers its short name, so `User.email` matches
-an unrelated `.email`, and a malformed entry is discarded silently. An implementation that
-wires the path without closing those three produces a build-time claim backed by a check
-that is blind where the arrangement is used, which is the vacuous-gate shape `AGENTS.md`
-records. P8 and P9 together state what it has to answer.
-
+The declaration is enforced at build time. It binds as its own executable-graph member in
+M4 T5, when the capability ceiling joins it (P4).
 ### 9.3 The claim C7 forbids
 
 C7 forbids a consumer to describe this arrangement as making the wrapped system safe. Safety is

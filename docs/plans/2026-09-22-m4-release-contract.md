@@ -1,6 +1,6 @@
 # M4: release contract for scoped tool routes
 
-Status: accepted by the owner on 2026-09-22. T1a, T1b, T2, and T3 are complete; T4 is in progress under its [design note](2026-09-23-m4-t4-declared-labels-design.md).
+Status: accepted by the owner on 2026-09-22. T1a, T1b, T2, T3, and T4 are complete; T5 is next.
 Baseline: local `main` at `176d81ca`. Roadmap row:
 [M4 in the roadmap](../roadmap.md) (`docs/roadmap.md:20`). This document
 reconciles proposal A, the
@@ -264,6 +264,18 @@ deployed binary serving and refusing real requests; the evidence is in section
 compile-options carrier (its file needs verification). This unit meets P8 and P9,
 including the three conditions at `docs/consumer-contract.md:724-727`.
 Completion: check C4.
+
+T4 decisions and result, 2026-09-23. The owner accepted the
+[design note](2026-09-23-m4-t4-declared-labels-design.md): a declaration may
+assign `secret` and `credential` only; a required entry the analysis never saw
+is a build error with no new ZTS code, so the policy hash did not move; the
+declaration binds as a graph member once, in T5; and the old `--data-labels`
+path is deleted in favour of zttp.json's `declaration` key, `--declaration`,
+and `-Ddeclaration`. The flow checker enforces classifications by origin and
+whole path, which closes all three P9 conditions, and the contract (version
+20) carries the P8 status of each entry. Check C4 passed; the evidence is in
+section 11 of the design note. One gap is recorded there: the
+`zttp-runtime --watch` re-check does not load the declaration.
 
 **T5. Subject scope and tool-local grants.** Depends on T3. Owned files:
 `packages/zts/src/handler_policy.zig`, `module_authorization.zig`, and the
