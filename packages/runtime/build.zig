@@ -136,6 +136,7 @@ pub fn build(b: *std.Build) void {
     });
     server_tests.addImport("zts", zts_mod);
     server_tests.addImport("zttp_proof_checker", proof_checker_mod);
+    server_tests.addImport("project_config", project_config_mod);
     server_tests.addOptions("runtime_feature_options", runtime_features);
 
     // The benchmark harness lives in bench/, outside the product source tree,

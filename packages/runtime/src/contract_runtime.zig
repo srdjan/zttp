@@ -10,6 +10,7 @@ const std = @import("std");
 const zq = @import("zts");
 const pcc = @import("zttp_proof_checker");
 const runtime_config = @import("runtime_config.zig");
+const project_config = @import("project_config");
 const HandlerContract = zq.HandlerContract;
 const HandlerProperties = zq.HandlerProperties;
 const CostEnvelope = zq.handler_contract.CostEnvelope;
@@ -95,9 +96,41 @@ pub const AcceptedCatalog = struct {
         }
         return null;
     }
+
+    /// The tool served on this request, matched the way `routerMatch` matches a
+    /// route key: the method without regard to case, and the path with `:param`
+    /// segments as wildcards.
+    pub fn match(self: *const AcceptedCatalog, method: []const u8, path: []const u8) ?*const AcceptedTool {
+        for (self.entries) |*entry| {
+            if (std.ascii.eqlIgnoreCase(entry.method, method) and matchPath(entry.path, path)) return entry;
+        }
+        return null;
+    }
 };
 
 /// Why a promotion that the kernel accepted still refuses to start.
+/// The verdict of a tool body check: `ok`, or a refusal reason and byte offset.
+pub const ToolVerdict = zq.tool_schema.ValidateResult;
+
+/// One producer tool entry, as the contract carries it.
+pub const ToolEntry = zq.handler_contract.ToolEntry;
+
+/// The largest 2xx tool response body the runtime validates. A larger one is a
+/// refusal, not a pass: an output the check never read is not an output it
+/// admitted.
+pub const max_tool_output_bytes: u32 = zq.tool_schema.max_input_bytes_ceiling;
+
+/// Check a request body against the tool's input schema and byte bound, before
+/// any JS value exists. `scratch` is the request arena.
+pub fn validateToolInput(scratch: std.mem.Allocator, tool: *const AcceptedTool, body: []const u8) std.mem.Allocator.Error!ToolVerdict {
+    return zq.tool_schema.validate(scratch, &tool.input, body, tool.max_input_bytes);
+}
+
+/// Check a 2xx response body against the tool's output schema (B8.4).
+pub fn validateToolOutput(scratch: std.mem.Allocator, tool: *const AcceptedTool, body: []const u8) std.mem.Allocator.Error!ToolVerdict {
+    return zq.tool_schema.validate(scratch, &tool.output, body, max_tool_output_bytes);
+}
+
 pub const PromoteError = std.mem.Allocator.Error || error{
     /// The accepted section bytes do not decode. Acceptance already decoded
     /// them, so this is an invariant violation, and it refuses rather than
@@ -266,6 +299,17 @@ pub fn promote(
 }
 
 /// Decode the accepted `ZTCAT1` bytes and compile every schema they carry.
+/// The dev-mode catalog (M4 T3, decision Q4): the producer's tool list encoded with
+/// the same encoder the build uses and lowered with the same code as an accepted
+/// catalog, so `zttp dev` answers a tool request exactly as a deployment would.
+/// It carries no acceptance claim: nothing checked it. Null when there are no
+/// tools.
+pub fn lowerProducerToolCatalog(allocator: std.mem.Allocator, tools: []const zq.handler_contract.ToolEntry) !?AcceptedCatalog {
+    const bytes = (try project_config.tool_catalog_encoding.encode(allocator, tools)) orelse return null;
+    defer allocator.free(bytes);
+    return try lowerAcceptedCatalog(allocator, bytes);
+}
+
 fn lowerAcceptedCatalog(allocator: std.mem.Allocator, bytes: []const u8) PromoteError!AcceptedCatalog {
     const owned = try allocator.dupe(u8, bytes);
     errdefer allocator.free(owned);
@@ -2303,4 +2347,40 @@ test "fromHandlerContract lowers the tool list with an uppercase method" {
     try std.testing.expectEqualStrings("POST", tools[0].method);
     try std.testing.expectEqualStrings("/tools/ping", tools[0].path);
     try std.testing.expectEqual(@as(u32, 256), tools[0].max_input_bytes);
+}
+
+test "the dev catalog lowers the producer's tools with the accepted code and matches routes like routerMatch" {
+    const allocator = std.testing.allocator;
+    try std.testing.expectEqual(@as(?AcceptedCatalog, null), try lowerProducerToolCatalog(allocator, &.{}));
+
+    var entry = zq.handler_contract.ToolEntry{
+        .name = &.{},
+        .route = &.{},
+        .description = &.{},
+        .input_schema_name = &.{},
+        .input_schema_json = &.{},
+        .output_schema_name = &.{},
+        .output_schema_json = &.{},
+        .max_input_bytes = 32,
+    };
+    defer entry.deinit(allocator);
+    entry.name = try allocator.dupe(u8, "order");
+    entry.route = try allocator.dupe(u8, "post /orders/:id");
+    entry.description = try allocator.dupe(u8, "Read one order.");
+    entry.input_schema_name = try allocator.dupe(u8, "In");
+    entry.input_schema_json = try allocator.dupe(u8, "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{}}");
+    entry.output_schema_name = try allocator.dupe(u8, "Out");
+    entry.output_schema_json = try allocator.dupe(u8, "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{}}");
+
+    var catalog = (try lowerProducerToolCatalog(allocator, &.{entry})) orelse return error.TestExpectedCatalog;
+    defer catalog.deinit();
+    const tool = catalog.match("POST", "/orders/42") orelse return error.TestExpectedMatch;
+    try std.testing.expectEqualStrings("order", tool.name);
+    try std.testing.expectEqual(@as(u32, 32), tool.max_input_bytes);
+    try std.testing.expect(catalog.match("post", "/orders/7") != null);
+    try std.testing.expect(catalog.match("GET", "/orders/42") == null);
+    try std.testing.expect(catalog.match("POST", "/orders") == null);
+
+    const verdict = try validateToolInput(allocator, tool, "{\"x\":1}");
+    try std.testing.expect(verdict == .refused and verdict.refused.reason == .unknown_field);
 }

@@ -575,12 +575,22 @@ pub const LiveReloadState = struct {
                 printReload("Contract failed validation: {}.\n", .{err});
                 return;
             };
+            // The producer's tool catalog, lowered with the deployment's code so
+            // dev answers a tool request as a deployment would (M4 T3, Q4). A
+            // catalog that does not lower installs nothing rather than serving
+            // tool routes unchecked.
+            var dev_tool_catalog = contract_runtime.lowerProducerToolCatalog(self.allocator, hc.tools.items) catch |err| {
+                validated.deinit();
+                printReload("Failed to lower the tool catalog: {}.\n", .{err});
+                return;
+            };
             self.server.setDevCapabilityPolicy(hc, configured_policy) catch |err| {
+                if (dev_tool_catalog) |*catalog| catalog.deinit();
                 validated.deinit();
                 printReload("Failed to install runtime policy generation: {}.\n", .{err});
                 return;
             };
-            self.server.updateContract(validated);
+            self.server.updateContractWithTools(validated, dev_tool_catalog);
         }
     }
 
@@ -909,6 +919,7 @@ pub const LiveReloadState = struct {
 
         var validated_contract: ?contract_runtime.ValidatedRuntimeContract = null;
         var dev_policy: ?RuntimePolicy = null;
+        var dev_tool_catalog: ?contract_runtime.AcceptedCatalog = null;
         if (runtime_contract) |hc| {
             const raw = contract_runtime.fromHandlerContract(self.allocator, hc) catch |err| {
                 printReload("Failed to build runtime contract: {}. Keeping previous handler active.\n", .{err});
@@ -921,6 +932,14 @@ pub const LiveReloadState = struct {
                 printReload("Contract failed validation: {}. Keeping previous handler active.\n", .{err});
                 return false;
             };
+            // Lowered with the deployment's code (M4 T3, Q4). A catalog that does
+            // not lower keeps the previous handler rather than serving the new
+            // one's tool routes unchecked.
+            dev_tool_catalog = contract_runtime.lowerProducerToolCatalog(self.allocator, hc.tools.items) catch |err| {
+                if (validated_contract) |*validated| validated.deinit();
+                printReload("Failed to lower the tool catalog: {}. Keeping previous handler active.\n", .{err});
+                return false;
+            };
             dev_policy = self.server.stageDevCapabilityPolicy(hc, configured_policy);
         }
 
@@ -931,6 +950,7 @@ pub const LiveReloadState = struct {
         // freed handler_code in ensureRuntime on a rapid second save.
         const invalidated = pool.reloadHandlerWithPolicy(new_code, self.handler_path, dev_policy) catch |err| {
             if (validated_contract) |*validated| validated.deinit();
+            if (dev_tool_catalog) |*catalog| catalog.deinit();
             printReload("Failed to install handler generation: {}. Keeping previous handler active.\n", .{err});
             return false;
         };
@@ -938,7 +958,7 @@ pub const LiveReloadState = struct {
         self.rotateGenerations(new_code);
 
         if (validated_contract) |validated| {
-            self.server.updateContract(validated);
+            self.server.updateContractWithTools(validated, dev_tool_catalog);
             if (self.server.proof_cache != null) {
                 printProve("Proof cache: enabled (deterministic + read_only)\n", .{});
             }

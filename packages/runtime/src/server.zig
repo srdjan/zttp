@@ -681,6 +681,35 @@ const ConnectionPool = struct {
             }
         }
 
+        // Tool routes (M4 T3): the body is checked against the catalog's input
+        // schema and byte bound here, before the proof cache and before any JS
+        // value exists. A deployment checks only the catalog its certificate
+        // promoted; `zttp dev` checks the producer's with the same code.
+        var tool_route: ?*const contract_runtime.AcceptedTool = null;
+        if (self.server.activeToolCatalog()) |catalog| {
+            if (catalog.match(request.method, request.path)) |tool| {
+                tool_route = tool;
+                const verdict = contract_runtime.validateToolInput(req_allocator, tool, request.body orelse "") catch {
+                    access_status = 500;
+                    self.sendErrorSync(fd, 500, "Internal Server Error") catch {};
+                    return .close;
+                };
+                switch (verdict) {
+                    .ok => {},
+                    .refused => |refused| {
+                        const status: u16 = if (refused.reason == .too_large) 413 else 400;
+                        var message_buf: [128]u8 = undefined;
+                        const message = std.fmt.bufPrint(&message_buf, "tool input refused: {s} at byte {d}", .{
+                            @tagName(refused.reason), refused.offset,
+                        }) catch "tool input refused";
+                        access_status = status;
+                        self.sendStatusSync(fd, status, message, keep_alive) catch {};
+                        return outcome_if_alive;
+                    },
+                }
+            }
+        }
+
         // Proof-driven response memoization: serve cached response without entering JS
         var proof_cache_key: ?u64 = null;
         if (self.server.proof_cache) |*cache| {
@@ -750,6 +779,32 @@ const ConnectionPool = struct {
                 return .close;
             };
             defer handle.deinit();
+
+            // A tool's 2xx body must match its output schema (B8.4). Checked
+            // before the proof cache stores it, so a refused body is never
+            // cached. A non-2xx answer is the handler's own error and passes.
+            if (tool_route) |tool| {
+                const status = handle.response.status;
+                if (status >= 200 and status < 300) {
+                    const verdict = contract_runtime.validateToolOutput(req_allocator, tool, handle.response.body) catch {
+                        access_status = 500;
+                        self.sendErrorSync(fd, 500, "Internal Server Error") catch {};
+                        return .close;
+                    };
+                    switch (verdict) {
+                        .ok => {},
+                        .refused => |refused| {
+                            var message_buf: [128]u8 = undefined;
+                            const message = std.fmt.bufPrint(&message_buf, "tool output refused: {s} at byte {d}", .{
+                                @tagName(refused.reason), refused.offset,
+                            }) catch "tool output refused";
+                            access_status = 500;
+                            self.sendErrorSync(fd, 500, message) catch {};
+                            return .close;
+                        },
+                    }
+                }
+            }
 
             // Store response in proof cache on miss
             if (proof_cache_key) |key| {
@@ -1383,6 +1438,11 @@ pub const Server = struct {
     /// kernel says otherwise, and null again after any live swap: the swapped
     /// handler is not the artifact the certificate described.
     proof_checked: ?contract_runtime.ProofCheckedContract = null,
+    /// The tool catalog `zttp dev` validates tool routes against: the producer's,
+    /// lowered with the same code as an accepted one and claiming nothing (M4 T3,
+    /// decision Q4). Null for a deployment, which validates only the catalog its
+    /// certificate promoted. Replaced with the contract, under `contract_lock`.
+    dev_tool_catalog: ?contract_runtime.AcceptedCatalog = null,
     /// Guards `contract`/`proof_cache` against the live-reload watcher thread
     /// freeing+rebuilding them (`updateContract`) while worker threads read
     /// them mid-request. Only engaged when `reload_active` is set, so the
@@ -1525,9 +1585,21 @@ pub const Server = struct {
     /// produce that tuple, and the swap is refused rather than allowed to leave
     /// a new handler standing on the old policy's coverage.
     /// Drop the promotion and release the accepted tool catalog it owns.
+    /// The catalog tool routes are validated against: the accepted one when a
+    /// certificate promoted this generation, else the dev one, else none.
+    pub fn activeToolCatalog(self: *const Self) ?*const contract_runtime.AcceptedCatalog {
+        if (self.proof_checked) |*promoted| {
+            if (promoted.tool_catalog) |*catalog| return catalog;
+        }
+        if (self.dev_tool_catalog) |*catalog| return catalog;
+        return null;
+    }
+
     fn clearProofChecked(self: *Self) void {
         if (self.proof_checked) |*promoted| promoted.deinit();
         self.proof_checked = null;
+        if (self.dev_tool_catalog) |*catalog| catalog.deinit();
+        self.dev_tool_catalog = null;
     }
 
     pub fn generationIsGuarded(self: *const Self) bool {
@@ -1545,6 +1617,16 @@ pub const Server = struct {
     /// Replace the runtime contract and reconfigure the proof cache.
     /// Called by live reload after a handler swap with a new contract.
     pub fn updateContract(self: *Self, new_contract: ValidatedRuntimeContract) void {
+        self.updateContractWithTools(new_contract, null);
+    }
+
+    /// Swap the contract and, in dev, the producer's tool catalog together, so no
+    /// request sees the new contract without the catalog that belongs to it.
+    pub fn updateContractWithTools(
+        self: *Self,
+        new_contract: ValidatedRuntimeContract,
+        dev_tool_catalog: ?contract_runtime.AcceptedCatalog,
+    ) void {
         // Exclusive: wait for any in-flight request readers to drain before
         // freeing+rebuilding the contract/proof_cache they may be reading.
         self.contract_lock.lock();
@@ -1557,6 +1639,7 @@ pub const Server = struct {
         // handler has not been checked by anything, and the proof cache,
         // unbounded reuse, and the durable-workflow guarantees all go with it.
         self.clearProofChecked();
+        self.dev_tool_catalog = dev_tool_catalog;
         if (self.pool) |*pool| {
             pool.setDurableWorkflowProperties(.{});
         }
@@ -4524,4 +4607,135 @@ test "attested appended payload requires a parsed runtime policy hash" {
         error.RuntimePolicySectionHashMissing,
         server.start(),
     );
+}
+
+// ---------------------------------------------------------------------------
+// Tool routes on the request path (M4 T3 U5)
+// ---------------------------------------------------------------------------
+
+const tool_test_input_schema =
+    \\{"type":"object","additionalProperties":false,"required":["id"],"properties":{"id":{"type":"string","maxLength":8}}}
+;
+const tool_test_output_schema =
+    \\{"type":"object","additionalProperties":false,"required":["ok"],"properties":{"ok":{"type":"boolean"}}}
+;
+
+fn toolTestCatalog(allocator: std.mem.Allocator) !contract_runtime.AcceptedCatalog {
+    var entry = contract_runtime.ToolEntry{
+        .name = &.{},
+        .route = &.{},
+        .description = &.{},
+        .input_schema_name = &.{},
+        .input_schema_json = &.{},
+        .output_schema_name = &.{},
+        .output_schema_json = &.{},
+        .max_input_bytes = 64,
+    };
+    defer entry.deinit(allocator);
+    entry.name = try allocator.dupe(u8, "lookup");
+    entry.route = try allocator.dupe(u8, "POST /tools/lookup");
+    entry.description = try allocator.dupe(u8, "Look up one order.");
+    entry.input_schema_name = try allocator.dupe(u8, "In");
+    entry.input_schema_json = try allocator.dupe(u8, tool_test_input_schema);
+    entry.output_schema_name = try allocator.dupe(u8, "Out");
+    entry.output_schema_json = try allocator.dupe(u8, tool_test_output_schema);
+    const catalog = try contract_runtime.lowerProducerToolCatalog(allocator, &.{entry});
+    return catalog orelse error.TestExpectedCatalog;
+}
+
+/// Serve one raw request through the real request path with the tool catalog
+/// installed, and return the start of the response.
+fn serveToolRequest(handler_code: []const u8, raw_request: []const u8, out: []u8) ![]const u8 {
+    const allocator = std.testing.allocator;
+    var srv = try Server.init(allocator, .{
+        .handler = .{ .inline_code = handler_code },
+        .log_requests = false,
+        .pool_size = 1,
+        .max_body_size = 4096,
+    });
+    defer srv.deinit();
+    srv.pool = try HandlerPool.init(allocator, .{}, handler_code, "<tool-test>", 1, 0);
+    srv.dev_tool_catalog = try toolTestCatalog(allocator);
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    var pool = ConnectionPool{
+        .workers = &[_]std.Thread{},
+        .queue = ConnectionPool.BoundedQueue.init(),
+        .running = std.atomic.Value(bool).init(true),
+        .server = &srv,
+        .allocator = allocator,
+    };
+
+    const fds = try createUnixSocketPair();
+    defer std.Io.Threaded.closeFd(fds[0]);
+    defer std.Io.Threaded.closeFd(fds[1]);
+    try writeAllFd(fds[1], raw_request);
+
+    var pending: ConnectionPool.PendingRequestBytes = .{};
+    defer pending.deinit(pool.allocator);
+    _ = try pool.handleSingleRequestSync(fds[0], 0, arena.allocator(), &pending);
+
+    const n = try std.posix.read(fds[1], out);
+    return out[0..n];
+}
+
+fn toolPost(comptime body: []const u8) []const u8 {
+    return std.fmt.comptimePrint("POST /tools/lookup HTTP/1.1\r\nHost: t\r\nContent-Length: {d}\r\n\r\n{s}", .{ body.len, body });
+}
+
+const tool_ok_handler = "function handler(req) { return Response.json({ ok: true }); }";
+
+test "a valid tool input reaches the handler and its matching output is sent" {
+    var buf: [1024]u8 = undefined;
+    const response = try serveToolRequest(tool_ok_handler, toolPost("{\"id\":\"a1\"}"), &buf);
+    try std.testing.expect(std.mem.startsWith(u8, response, "HTTP/1.1 200"));
+    try std.testing.expect(std.mem.indexOf(u8, response, "{\"ok\":true}") != null);
+}
+
+test "tool inputs the schema refuses are answered before the handler runs" {
+    // The handler would answer 200 to anything; every case below must be
+    // refused by the gate, never reach it.
+    const cases = [_]struct { request: []const u8, status: []const u8, reason: []const u8 }{
+        .{ .request = toolPost("{\"id\":\"a\",\"id\":\"b\"}"), .status = "HTTP/1.1 400", .reason = "duplicate_key" },
+        .{ .request = toolPost("{\"id\":\"a\",\"extra\":1}"), .status = "HTTP/1.1 400", .reason = "unknown_field" },
+        .{ .request = toolPost("{}"), .status = "HTTP/1.1 400", .reason = "missing_required" },
+        .{ .request = toolPost("{\"id\":\"123456789\"}"), .status = "HTTP/1.1 400", .reason = "string_too_long" },
+        .{ .request = toolPost("{\"id\":"), .status = "HTTP/1.1 400", .reason = "invalid_json" },
+        .{ .request = "POST /tools/lookup HTTP/1.1\r\nHost: t\r\nContent-Length: 0\r\n\r\n", .status = "HTTP/1.1 400", .reason = "invalid_json" },
+        .{ .request = toolPost("{\"id\":\"a\",                                                                  \"id\":\"b\"}"), .status = "HTTP/1.1 413", .reason = "too_large" },
+    };
+    for (cases) |case| {
+        var buf: [1024]u8 = undefined;
+        const response = try serveToolRequest(tool_ok_handler, case.request, &buf);
+        if (!std.mem.startsWith(u8, response, case.status) or std.mem.indexOf(u8, response, case.reason) == null) {
+            std.debug.print("expected {s} {s}, got:\n{s}\n", .{ case.status, case.reason, response });
+            return error.TestUnexpectedResponse;
+        }
+    }
+}
+
+test "a tool's 2xx body that breaks its output schema is refused with 500" {
+    var buf: [1024]u8 = undefined;
+    const response = try serveToolRequest(
+        "function handler(req) { return Response.json({ ok: \"yes\" }); }",
+        toolPost("{\"id\":\"a1\"}"),
+        &buf,
+    );
+    try std.testing.expect(std.mem.startsWith(u8, response, "HTTP/1.1 500"));
+    try std.testing.expect(std.mem.indexOf(u8, response, "tool output refused: type_mismatch") != null);
+}
+
+test "a tool's non-2xx answer and a non-tool route pass the gate untouched" {
+    var buf: [1024]u8 = undefined;
+    const not_found = try serveToolRequest(
+        "function handler(req) { return Response.json({ error: \"none\" }, { status: 404 }); }",
+        toolPost("{\"id\":\"a1\"}"),
+        &buf,
+    );
+    try std.testing.expect(std.mem.startsWith(u8, not_found, "HTTP/1.1 404"));
+
+    var buf2: [1024]u8 = undefined;
+    const other = try serveToolRequest(tool_ok_handler, "GET /health-check HTTP/1.1\r\nHost: t\r\n\r\n", &buf2);
+    try std.testing.expect(std.mem.startsWith(u8, other, "HTTP/1.1 200"));
 }
