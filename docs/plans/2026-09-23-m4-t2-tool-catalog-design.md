@@ -364,5 +364,41 @@ red, and each commit message says so.
 | U1 | `bc8134ef` | `tool_schema.zig`: subset check, compile, streaming validate |
 | U2 | `a7965fd2` | inert `zttp:tool` module and the `tool_catalog` category |
 | U3 | `86ca93c0` | `ToolEntry`, contract version 19, write and project |
-| U4 | pending | builder extraction, build rules, per-route export walk, diagnostic code and seed |
-| U5 | pending | tool fixture golden, B8.2 type test, census, corpus re-record |
+| U4 | `72d80bf6` | builder extraction, build rules, per-route export walk, ZTS513 and its seed |
+| U5 | `a289d768` | tool fixtures and B8.2 in the contract goldens |
+| fix | `c928f4ba` | a partner manifest export name freed twice on a late parse error |
+| fix | `e7b71599` | a golden check reran from cache after its handler fixture changed |
+| U5 | pending | DeepSeek corpus re-record, then coverage and convergence republish |
+
+## 11. Implementation notes
+
+Three points differ from sections 4 to 6, each found while building.
+
+The reachable-export walk counts an import wherever a reachable body
+mentions it, and it walks each module-scope declaration it names. This is
+wider than section 4.4 A's call walk and has no "unresolved call" case: a
+callback passed by name, an export handed around as a value, and a function
+returned from a function are all counted. The walk names every IR tag. A tag
+it cannot read refuses the tool as `exports_unanalyzable`, which no admitted
+source reaches; the census carries it with that mechanism.
+
+Rule 8 (tool-only) runs only on a catalog with no other refusal. An entry
+refused for another reason claims no route, and without this gate the same
+defect also reported its route as untooled.
+
+B8.2 holds through the type checker: a validated input field is a `string`,
+and passing it where a `nominal OrderId` is required is refused with ZTS203.
+Nominal identity comes from an explicit annotation in handler code
+(`const id: OrderId = input.id`). The formal spec's `OrderId(value)`
+constructor does not exist in the current language (ZTS214). That spec text
+is outside T2.
+
+Check C2, measured on `main` after U5: `test-zts`, `test-modules`,
+`test-precompile`, and `test-contract-golden` pass unfiltered. Mutation
+probes, each restored byte for byte: the duplicate-key and closed-field checks
+in `validate` (U1); the duplicate-name and subset checks in the contract
+projection (U3); the duplicate-name check, rule 8, import counting, and
+module-scope walking in the builder (U4); a broken fixture in the golden step
+(U5). Each failed a named test. The census covers `SubsetRefusal` (25
+members), `ValidateRefusal` (18), and `ToolCatalogRefusal` (17, one carried
+with a mechanism).
