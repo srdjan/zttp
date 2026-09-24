@@ -89,6 +89,11 @@ from outside the artifact. Disclosing an edge is not a weakness in the design;
 failing to disclose one is. The published set of them is the residual trusted
 boundary, and shrinking it one family at a time is the ratchet.
 
+A disclosure has to name something the artifact contains. An edge disclosed at
+a proof node the certificate does not have is refused, even when the evidence
+names the same absent node: agreement between two sections of a certificate
+does not make either reference real.
+
 ### Proof-checked contract
 A handler contract an acceptance has promoted. Only this drives behavior that is
 unsound if a compiler claim is wrong - the proof response cache, unbounded
