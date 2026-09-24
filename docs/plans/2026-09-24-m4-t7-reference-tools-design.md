@@ -130,3 +130,31 @@ The owner decided on 2026-09-24:
   cassettes embed, the corpus re-record waits for the owner's approval.
 - **Q6. Build check.** The build refuses a `schemaCompile` literal that
   `zttp:validate` cannot compile, and names the keyword.
+
+The owner refined Q6 on 2026-09-24. A catalog schema needs
+`additionalProperties: false`, which `zttp:validate` cannot compile, so a
+refusal of every such `schemaCompile` literal would refuse every tool handler.
+The build refuses the call that would fail instead: a `validateJson`,
+`validateObject`, `coerceJson`, or `decodeJson` call that names a schema
+`zttp:validate` cannot compile, and a `schemaCompile` literal it cannot compile
+that no catalog entry names. A catalog-only schema stays legal.
+
+## 8. Units
+
+- **U1, `toolInput`.** The export is `toolInput(name, req)`, with the name
+  first as in `validateJson(name, json)`, because every schema-name mechanism
+  (the type checker's typed `Result`, the contract builder's request schema,
+  the path generator's bounds) reads argument 0. The binding declares
+  `returns = .result`, `failure_severity = .critical`,
+  `return_labels.validated`, and a `request_schema` extraction, so labels,
+  result tracking, fault coverage, and `input_validated` follow from the
+  fields. The runtime answers `ok` only when a tool gate validated this
+  request against the input schema `name`: the tool grant carries the name,
+  and a new SDK bridge call reads it. The build refuses a `toolInput` whose
+  name is not the calling route's catalog input, as a new
+  `ToolCatalogRefusal` member under ZTS513.
+- **U2, the `schemaCompile` check** of the refined Q6. The builder cannot
+  import `zttp:validate`, so it keeps its own keyword list, and a test pins
+  the list to `validate.zig`'s.
+- **U3, the example, the harness, and the documentation**, as sections 3
+  and 4 describe, with `toolInput` in place of `validateJson`.
