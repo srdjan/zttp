@@ -288,6 +288,28 @@ The kernel meets the hexagonal target. It is pure, allocation-free, and has no c
 `var`, no `threadlocal`, and no `extern`, `export`, `asm`, or `@embedFile`. The gaps are at
 its boundary.
 
+- **Fixed in `d8d31f06`: trusted edges at absent IR nodes were accepted.** A trusted edge
+  carries no rule, so its `node_id` never reached the rule path's bound. Trusted inventory
+  `.node` members were never bounded either, and `trustedEdgeDeclared` compared the `u16`
+  member against a truncated `u32`. A probe certificate with 3 IR nodes and a disclosed
+  trusted edge at node 7 was accepted under `policy_mod.production`. Every evidence node and
+  every inventory node is now bounded, and three tests pin the refusal. One test also covers
+  a node that differs above 16 bits. The widened comparison has no test of its own: that
+  needs more than 65,536 IR nodes, and the default limit forbids it.
+- **The kernel runs without runtime safety in release binaries.** Releases build
+  `-Doptimize=ReleaseFast` (`.github/workflows/release.yml:129`), and `build.zig:226-229`
+  passes that mode into the kernel dependency. An out-of-range cast, a slice outside its
+  bounds, or overflow reached from certificate bytes is a panic in the Debug tests and
+  undefined behavior in production. Every such site checked in this review has an explicit
+  guard, but section 4 shows that many guards are not pinned by a test. Option: build the
+  kernel dependency as `ReleaseSafe` whenever the root is not `Debug`. The kernel runs at
+  artifact validation, so a safety panic refuses the artifact. The cost is not measured yet.
+  Measure it with `zig build test-proof-ratchet` before deciding.
+- **Enum bitmasks without a width guard.** `GuardKind` into `u8` (`checker.zig:794`),
+  `AddressScope` into `u8` (`residual.zig:220`), and `Property` into `u16`
+  (`verdict.zig:428-451`). A new member past the width is undefined behavior in
+  `ReleaseFast`. Use `std.EnumSet`, or add a `comptime` assert on the member count.
+
 - **Producer code lives in the kernel.** The certificate encoder (`certificate.zig:951-1188`)
   is called in production by `runtime/src/proof_certificate.zig:326-368`. Four test encoders
   are `pub` in the kernel: `checker.test_support :1592`, `certificate.fixture :1189`,
@@ -370,7 +392,7 @@ the exit status directly and never from a `-Dtest-filter` run.
 **Phase 0: tests and gates, no production change.** Add every test in section 4, the golden
 certificate vector, the golden graph root, the site-counting error censuses, and the
 reason-code census. Raise the purity-gate floors and add the missing patterns. Fix the two
-stale doc references. Build the mutation-probe step (section 7).
+stale doc references. Build the mutation-probe step (section 7). Decide the kernel build mode (section 5) from a measured cost.
 Verify: `zig build test-proof-checker`, `zig build test-proof-checker-purity`,
 `zig build test-proof-checker-mutants`.
 Expected: at least 90% of non-equivalent mutants killed in every file (baseline 39%), and
