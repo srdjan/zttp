@@ -1,0 +1,6 @@
+{
+  "egress": {
+    "allow_endpoints": ["http://127.0.0.1:39460"],
+    "allow_address_scopes": ["loopback"]
+  }
+}

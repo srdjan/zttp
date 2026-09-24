@@ -145,6 +145,101 @@ Result-producing virtual-module calls must be checked before `.value` access.
 Optional-producing calls must be narrowed before use. The verifier enforces both
 patterns.
 
+## Tool Routes
+
+A tool route is an HTTP route that a model or an agent can call, with a closed
+input, a closed output, and a caller the runtime has verified. The handler
+declares its tools with `toolCatalog` from `zttp:tool`, and the runtime checks
+every tool request before and after the handler runs. `examples/tools/` is a
+complete project with two tools; this section walks through it.
+
+**The catalog.** Call `toolCatalog` once at module scope with an object
+literal. Each entry names a `routerMatch` route, a description, an input and an
+output schema registered with `schemaCompile`, and `maxInputBytes`. Every route
+in the table must have an entry. Tool schemas use a closed subset: every object
+has `"additionalProperties": false`, every string has `maxLength`, and every
+array has `maxItems`. The build refuses a catalog that breaks a rule (ZTS513).
+
+```ts
+import { toolCatalog, toolInput } from "zttp:tool";
+
+toolCatalog({
+  convert: {
+    route: "POST /tools/convert",
+    description: "Convert a temperature between Celsius, Fahrenheit, and Kelvin.",
+    input: "ConvertInput",
+    output: "ConvertOutput",
+    maxInputBytes: 128
+  }
+});
+```
+
+**The input.** Before the handler runs, the runtime refuses an input that is
+larger than `maxInputBytes` (413) or that the input schema refuses (400). The
+tool reads the validated input with `toolInput(name, req)`, which returns a
+`Result` whose value type comes from the schema. It answers `ok` only on a tool
+request that the runtime validated against exactly that schema, and the build
+refuses a `toolInput` that names another schema than the route's own input.
+`zttp:validate` cannot compile a closed catalog schema, so do not read a tool
+input with `validateJson`; the build refuses that call (ZTS514).
+
+```ts
+function convert(req: Request): Response {
+  const parsed = toolInput("ConvertInput", req);
+  if (!parsed.ok) {
+    return Response.json({ error: "invalid input" }, { status: 400 });
+  }
+  const input = parsed.value;
+  return Response.json({ value: fromCelsius(toCelsius(input.value, input.from), input.to), unit: input.to });
+}
+```
+
+**The output.** The runtime validates every 2xx answer of a tool against the
+output schema and answers 500 `tool output refused` when the schema refuses it.
+Non-2xx answers pass unchanged.
+
+**The caller.** A tool request carries a bearer token, an HS256 JWT. zttp.json
+names the environment variable that holds the key and the claim that holds the
+tenant:
+
+```json
+"auth": { "keyEnv": "TOOLS_JWT_KEY", "tenantClaim": "tenant" }
+```
+
+A request with no token, a bad signature, an unexpected `alg`, an expired
+token, or no `sub` or tenant claim gets 401 before the handler runs. The handler receives
+`req.subject` and `req.tenant` from the verified claims, and the request it sees
+has no `authorization` header. A catalog `scope` binds an input field to the
+verified identity, and a request whose field differs gets 403:
+
+```ts
+scope: { tenant: "tenant_id" }
+```
+
+**The grant and the ceiling.** Each tool may call only the module exports its
+own route reaches, which the build lists into the catalog. A tool may not read
+state that a separate call wrote (`zttp:cache` reads, `zttp:sql`, `zttp:queue`
+receive, a durable signal wait). A declaration file can also set a capability
+ceiling that the whole handler must stay inside; `examples/tools` uses the
+`adapter` profile and excludes `zttp:crypto`. The catalog and the declaration
+are bound into the built artifact, and an artifact whose bound sections change
+refuses to start.
+
+**Credentials.** A tool can call an upstream with a credential that its code
+never sees. zttp.json names each credential and the requests it may go into,
+and the tool names it with a string literal in the `fetch` options. See
+[Outbound credentials](contracts-and-sandboxing.md#outbound-credentials) for the
+reference format, the checks the runtime makes before it adds the header, and
+the refusals.
+
+**Build and run.** `zttp build` emits a self-contained binary. It refuses to
+start when the key variable or a credential variable is unset or empty. A tool
+that calls an upstream also needs an egress policy that names the endpoint and
+an address scope, and the operator allows outbound requests with
+`--outbound-http` or `--outbound-host`.
+`zig build test-reference-tools` builds `examples/tools`, runs the binary, and
+checks the positive path and each boundary case with real requests.
+
 ## Application Invariants
 
 An application invariant states what must remain true after a committed state

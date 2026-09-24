@@ -1,7 +1,8 @@
 # M4 T7 design note: reference tools and documentation
 
 Status: accepted by the owner on 2026-09-24, with the recommended answer to
-each question in section 5. Implementation is in progress.
+each question in section 5. U1 to U3 are implemented, so T7 is complete; the
+evidence is in section 9.
 Check C7 of the [M4 release contract](2026-09-22-m4-release-contract.md) is
 written against the approach this note names.
 
@@ -158,3 +159,90 @@ that no catalog entry names. A catalog-only schema stays legal.
   the list to `validate.zig`'s.
 - **U3, the example, the harness, and the documentation**, as sections 3
   and 4 describe, with `toolInput` in place of `validateJson`.
+
+## 9. Implementation notes and evidence
+
+| Unit | Commit | Content |
+|---|---|---|
+| U1 | `d59055e6` | `toolInput(name, req)` and its build refusal |
+| U2 | `ef4286f0`, `55de49a0`, `bc11a423` | ZTS514, the `schemaCompile` check |
+| Corpus | `0ce1d45d`, `dbf32d0f`, `d055a981`, `75d716a8` | the approved DeepSeek re-record, coverage, convergence |
+| U3 | this commit | `examples/tools`, `test-reference-tools`, the user guide |
+
+**U1.** The grant carries the accepted catalog's `input_name`, and a new SDK
+bridge call, `zttpSdkActiveToolInputSchema`, reads it. `toolInput` answers
+`ok` only when the gate validated the current request against exactly that
+name; otherwise the error names `not_a_tool_request` or `schema_mismatch`. The
+binding declares the fields `validateJson` declares, so labels, result
+tracking, fault coverage, and `input_validated` follow; the three name lists
+the analyzers keep (type checker, path generator, request-schema
+classification) name it too. The build refuses a `toolInput` whose name is
+not a literal or not the route's catalog input (two `ToolCatalogRefusal`
+members under ZTS513, with census cases).
+
+**U2.** `validate_keywords.zig` (zts-base) holds the builder's copy of
+`zttp:validate`'s keyword list, which `validate.zig` now exposes as
+`supported_keywords`; a test in `builtin_modules.zig` pins the two together.
+ZTS514 refuses each `validateJson`, `validateObject`, `coerceJson`, or
+`decodeJson` call that names a schema `zttp:validate` cannot compile, and such
+a `schemaCompile` literal that nothing reads unless a tool catalog names it.
+A defect seed trips it through the real veto. The two nominal fixtures under
+`packages/tools/tests/fixtures/contract/` read their input with `toolInput`;
+their `validateJson` had failed on every input. `check-proof-swallow.sh`
+caught a `catch continue` in the first version of the check, which would have
+skipped a schema that failed to parse; it now propagates.
+
+**Hashes and the corpus.** U1 moved the module registry hash and U2 the policy
+hash; the module spec, the contract and expert goldens, the frozen signature
+digest, the language overview counts, the stand-in range hash, and both pins
+in `check-meta-drift.sh` moved with them. U1's own gate run was `zig build
+test`, which does not run `check-meta-drift.sh`, so U1 left the module hash pin
+stale and U2 corrected it. The owner approved the re-record. A one-case run
+validated the pipeline in 29 s; the full run recorded 19/19 against
+`deepseek-v4-flash` at a 600000 ms turn ceiling in 559 s, with raw first-draft
+pass 14/19, first-attempt green 14/19, and reached green 19/19. The replay
+reproduces 19/19 from flow artifacts.
+
+**U3.** The example needed two things the design did not list: a `policy.json`
+that names the upstream endpoint with the `loopback` address scope (a handler
+that makes outbound requests connects nowhere without an address scope), and
+`--outbound-host 127.0.0.1` on the artifact, which makes no outbound request
+unless the operator allows it. Both are in the README. `zttp build` wraps the
+`zttp-runtime` it finds beside its own binary, so the harness installs the two
+built binaries side by side in its work directory.
+
+`zig build test-reference-tools` builds the example with `zttp build`, starts
+the artifact from an empty directory, serves the loopback upstream on 39460,
+signs HS256 tokens, and sends real requests. It runs nine cases and fails
+when it ran fewer than it declares: `convert`; `order_status`, whose upstream
+receives `Authorization: Bearer <value>` and the query; B8.1 (403, and the
+upstream receives nothing); B8.3 (502 `ResponseTooLarge`); B8.4 (500 `tool
+output refused`); B8.2 and B8.7 (a mutated copy refused at build, with
+`expected OrderId, got string` and `module_excluded_by_declaration
+zttp:crypto`); and B8.8 and B8.9 (one byte of the declaration's `zttp:crypto`
+or the catalog's `convert` description changed and the payload CRC recomputed;
+the artifact refuses to serve with `graph_member_digest_mismatch`). A mutation
+that finds nothing to change fails its case. `zig build test` depends on the
+step.
+
+**Gates.** Every verdict below comes from an unfiltered step with its exit status read directly, with every U3 file staged. `bash scripts/verify.sh` passed ("all CI test-job steps passed"). `zig build test`: 194 of 194 steps, 8916 of 8922 tests passed, 6 skipped. `test-zruntime`: 444 of 445, 1 skipped. `test-server`: 456 of 458, 2 skipped. `test-zts`: 2324 of 2325, 1 skipped. `test-modules`: 138 of 138. `test-standin`: 56 of 56. `test-reference-tools`: 9 of 9 cases. The first two `verify.sh` runs failed on gates `zig build test` does not run, and each failure was a real gap: `check-proof-swallow.sh` (the U2 swallow, fixed in `55de49a0`), `policy-hash.txt` (pinned in `bc11a423`), and the vocabulary envelope (regenerated in ``75d716a8``).
+
+**Probes.** Each mutation was confirmed present, compiled, and restored with
+`/bin/cp -f` and `cmp`. One U1 probe did not compile on the first attempt and
+was redone.
+
+| Mutation | Step | Failing test or case |
+|---|---|---|
+| `toolInput` skips the name comparison | `test-zruntime` | `toolInput answers ok only for the schema the gate validated` |
+| the build skips the `toolInput` mismatch | `test-zts` | `a tool catalog is refused for each build rule it breaks` |
+| ZTS514 not raised for a validation call | `test-zts` | `a schema zttp:validate cannot compile is refused where a call would fail, and legal in a catalog` |
+| the example's catalog loses its `scope` | `test-reference-tools` | B8.1 (200 instead of 403; the upstream saw the request) |
+| zttp.json renames the `orders` credential | `test-reference-tools` | the build refuses the example; 0 of 1 cases |
+| the tamper cases change no byte | `test-reference-tools` | B8.8 and B8.9 (the artifact served) |
+| a harness error stops the run early | `test-reference-tools` | the floor: "ran 1 cases, fewer than the 9 this check declares" |
+
+**Not measured.** The harness uses a fixed upstream port, 39460, because the
+example names it; two concurrent runs on one host would collide. No case runs
+against a real TLS upstream. The build-time cases B8.2 and B8.7 edit
+`tools.ts` by exact text; an edit to those lines of the example fails the
+case as "the mutation found nothing to change", not silently.

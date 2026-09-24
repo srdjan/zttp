@@ -1,0 +1,16 @@
+{
+  "entry": "tools.ts",
+  "declaration": "declaration.json",
+  "policy": "policy.json",
+  "auth": { "keyEnv": "TOOLS_JWT_KEY", "tenantClaim": "tenant" },
+  "credentials": {
+    "orders": {
+      "env": "ORDERS_API_KEY",
+      "endpoint": "http://127.0.0.1:39460",
+      "header": "authorization",
+      "scheme": "Bearer",
+      "methods": ["GET"],
+      "paths": ["/v1/orders"]
+    }
+  }
+}
