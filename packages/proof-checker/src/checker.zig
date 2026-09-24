@@ -1201,6 +1201,12 @@ const Session = struct {
                 return reject(.evidence_check, .evidence_edge_invalid, .{ .property = obligation.property });
             }
 
+            // Every edge names a node, whether or not it carries a rule. An
+            // edge at a node the IR does not have states nothing.
+            if (entry.node_id >= self.certificate.ir.len()) {
+                return reject(.evidence_check, .proof_node_unknown, .{ .ir_node = entry.node_id });
+            }
+
             if (entry.edge == .not_established) {
                 refused[slot] = true;
                 continue;
@@ -1228,9 +1234,6 @@ const Session = struct {
             }
 
             if (entry.rule) |rule| {
-                if (entry.node_id >= self.certificate.ir.len()) {
-                    return reject(.evidence_check, .proof_node_unknown, .{ .ir_node = entry.node_id });
-                }
                 const node = try self.certificate.ir.get(entry.node_id);
                 switch (rule.family()) {
                     .totality => {
@@ -1285,6 +1288,9 @@ const Session = struct {
             const edge = try self.certificate.trusted.get(trusted_index);
             if (edge.grade != .trusted) {
                 return reject(.evidence_check, .evidence_edge_invalid, .{ .property = .response_total });
+            }
+            if (edge.family == .node and edge.member_id >= self.certificate.ir.len()) {
+                return reject(.evidence_check, .proof_node_unknown, .{ .ir_node = edge.member_id });
             }
             if (edge.family == .opcode) has_opcode_dependency = true;
             grades[totality_slot] = if (grades[totality_slot]) |existing|
@@ -1403,7 +1409,7 @@ const Session = struct {
         while (index < self.certificate.trusted.len()) : (index += 1) {
             try self.budget.spend(1);
             const edge = try self.certificate.trusted.get(index);
-            if (edge.family == .node and edge.member_id == @as(u16, @truncate(node_id))) return true;
+            if (edge.family == .node and @as(u32, edge.member_id) == node_id) return true;
         }
         return false;
     }
@@ -3124,6 +3130,86 @@ test "a declared edge that is not disclosed in the trusted inventory rejects" {
     try fixture.encode();
     const result = check(fixture.inputs(), policy_mod.production);
     try testing.expectEqual(verdict.ReasonCode.trusted_edge_undeclared, result.rejection.?.code);
+}
+
+test "trusted evidence at a node the proof IR does not have rejects" {
+    // A trusted edge carries no rule, so it never reaches the rule path's node
+    // bound. The inventory disclosing the same absent node does not make it
+    // real: the disclosure has to point at something the consumer can see.
+    var fixture = try test_support.build();
+    const absent: u32 = @intCast(fixture.parts().ir.len);
+    fixture.evidence[0] = .{
+        .obligation_index = 0,
+        .edge = .trusted,
+        .rule = null,
+        .node_id = absent,
+        .aux = 0,
+    };
+    const trusted = [_]cert_mod.TrustedEdge{
+        .{ .family = .node, .member_id = 0, .reason = .not_modeled, .grade = .trusted },
+        .{ .family = .node, .member_id = @intCast(absent), .reason = .not_modeled, .grade = .trusted },
+        .{ .family = .opcode, .member_id = 0, .reason = .not_modeled, .grade = .trusted },
+    };
+    var parts = fixture.parts();
+    parts.trusted = &trusted;
+    try fixture.encodeParts(parts);
+
+    const result = check(fixture.inputs(), policy_mod.production);
+    try testing.expect(!result.accepted());
+    try testing.expectEqual(verdict.Stage.evidence_check, result.rejection.?.stage);
+    try testing.expectEqual(verdict.ReasonCode.proof_node_unknown, result.rejection.?.code);
+    try testing.expectEqual(absent, result.rejection.?.subject.ir_node);
+}
+
+test "trusted evidence does not match an inventory node that differs above sixteen bits" {
+    // The inventory stores a node as u16 and evidence names it as u32. A node
+    // that differs only above bit 15 is a different node, not a disclosed one.
+    var fixture = try test_support.build();
+    fixture.evidence[0] = .{
+        .obligation_index = 0,
+        .edge = .trusted,
+        .rule = null,
+        .node_id = 0x1_0000,
+        .aux = 0,
+    };
+    const trusted = [_]cert_mod.TrustedEdge{
+        .{ .family = .node, .member_id = 0, .reason = .not_modeled, .grade = .trusted },
+        .{ .family = .opcode, .member_id = 0, .reason = .not_modeled, .grade = .trusted },
+    };
+    var parts = fixture.parts();
+    parts.trusted = &trusted;
+    try fixture.encodeParts(parts);
+
+    const result = check(fixture.inputs(), policy_mod.production);
+    try testing.expect(!result.accepted());
+    try testing.expectEqual(verdict.ReasonCode.proof_node_unknown, result.rejection.?.code);
+    try testing.expectEqual(@as(u32, 0x1_0000), result.rejection.?.subject.ir_node);
+}
+
+test "an inventory node the proof IR does not have rejects" {
+    var fixture = try test_support.build();
+    const absent: u16 = @intCast(fixture.parts().ir.len);
+    fixture.evidence[0] = .{
+        .obligation_index = 0,
+        .edge = .trusted,
+        .rule = null,
+        .node_id = 0,
+        .aux = 0,
+    };
+    const trusted = [_]cert_mod.TrustedEdge{
+        .{ .family = .node, .member_id = 0, .reason = .not_modeled, .grade = .trusted },
+        .{ .family = .node, .member_id = absent, .reason = .not_modeled, .grade = .trusted },
+        .{ .family = .opcode, .member_id = 0, .reason = .not_modeled, .grade = .trusted },
+    };
+    var parts = fixture.parts();
+    parts.trusted = &trusted;
+    try fixture.encodeParts(parts);
+
+    const result = check(fixture.inputs(), policy_mod.production);
+    try testing.expect(!result.accepted());
+    try testing.expectEqual(verdict.Stage.evidence_check, result.rejection.?.stage);
+    try testing.expectEqual(verdict.ReasonCode.proof_node_unknown, result.rejection.?.code);
+    try testing.expectEqual(@as(u32, absent), result.rejection.?.subject.ir_node);
 }
 
 test "a solver edge is refused unless the consumer asked for one" {
