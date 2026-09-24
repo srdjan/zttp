@@ -107,3 +107,26 @@ artifact over real sockets. Q2: the example names the fixed loopback endpoint
 Q3: all seven applicable B8 cases run against the example at their own
 boundary. Q4: a new "Tool routes" section in `docs/user-guide.md`, which links
 to the credential detail in `docs/contracts-and-sandboxing.md`.
+
+## 7. Found while building the example: a tool cannot read its input
+
+The example built and its artifact served: a request with no token got 401 and
+a token for another tenant got 403. But every valid call answered 400 from the
+handler. The catalog requires a closed object (`additionalProperties: false`),
+and `zttp:validate` refuses that keyword (`validate.zig:283-299`), so
+`schemaCompile` returns `false` for every catalog schema and `validateJson`
+with that name fails. Measured on `zttp serve`: the same schema without the
+keyword compiled and validated. The fixtures in
+`packages/tools/tests/fixtures/contract/` have the same shape, and no test ran
+them. `zttp check` and `zttp build` proved the handler anyway.
+
+The owner decided on 2026-09-24:
+
+- **Q5. Tool input.** A new export in `zttp:tool`, `toolInput(req, name)`,
+  returns a `Result` whose value type comes from the catalog schema `name`.
+  The value is built from the bytes the gate already validated against the
+  active tool's input schema, with the gate's own rules, so no second validator
+  can disagree with the first. If the new export moves a hash the DeepSeek
+  cassettes embed, the corpus re-record waits for the owner's approval.
+- **Q6. Build check.** The build refuses a `schemaCompile` literal that
+  `zttp:validate` cannot compile, and names the keyword.
