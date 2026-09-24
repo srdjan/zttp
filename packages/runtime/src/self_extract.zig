@@ -173,6 +173,10 @@ pub fn detectPath(allocator: std.mem.Allocator, path_z: [:0]const u8) !?Payload 
             );
             return error.UnsupportedArtifactFormat;
         },
+        error.PayloadTooLarge => {
+            if (!builtin.is_test) std.log.err("self-extract: the payload is larger than the 100 MiB this runtime reads; refusing to start", .{});
+            return error.PayloadTooLarge;
+        },
     };
     const payload_offset = trailer.payload_offset;
     const payload_size = trailer.payload_size;
@@ -218,7 +222,14 @@ pub const TrailerReadError = error{
     /// format. Distinct from `NoPayload` on purpose: a deployment artifact this
     /// runtime cannot read must say "rebuild", not "no handler here".
     UnsupportedArtifactFormat,
+    /// A payload is framed correctly and is larger than `max_payload_bytes`.
+    /// An artifact, not a plain binary: reporting `NoPayload` here would start
+    /// the plain runtime on it.
+    PayloadTooLarge,
 };
+
+/// The largest payload a runtime reads and the builder writes.
+pub const max_payload_bytes: u64 = 100 * 1024 * 1024;
 
 pub const Trailer = struct {
     payload_offset: u64,
@@ -248,7 +259,7 @@ pub fn readTrailer(file_size: u64, trailer: *const [TRAILER_SIZE]u8) TrailerRead
     const body_end = std.math.add(u64, payload_offset, payload_size) catch return error.NoPayload;
     const total = std.math.add(u64, body_end, @as(u64, TRAILER_SIZE)) catch return error.NoPayload;
     if (total != file_size) return error.NoPayload;
-    if (payload_size > 100 * 1024 * 1024) return error.NoPayload; // 100MB sanity limit
+    if (payload_size > max_payload_bytes) return error.PayloadTooLarge;
 
     if (version != FORMAT_VERSION) return error.UnsupportedArtifactFormat;
 
@@ -328,6 +339,8 @@ fn createWithWriter(
     // Serialize payload
     const payload = try serializePayload(allocator, input);
     defer allocator.free(payload);
+    // A payload the runtime would refuse to read must not be built.
+    if (payload.len > max_payload_bytes) return error.PayloadTooLarge;
 
     // Build trailer
     const payload_offset: u64 = @intCast(clean_size);
@@ -1714,10 +1727,12 @@ test "an overflowing trailer reports no payload rather than panicking" {
     try std.testing.expectError(error.NoPayload, readTrailer(64, &trailer));
 }
 
-test "an oversized payload is refused before it is allocated" {
+test "an oversized payload is refused before it is allocated, not read as no payload" {
     const size: u64 = 200 * 1024 * 1024;
     const trailer = buildTrailer(0, size, FORMAT_VERSION);
-    try std.testing.expectError(error.NoPayload, readTrailer(size + TRAILER_SIZE, &trailer));
+    try std.testing.expectError(error.PayloadTooLarge, readTrailer(size + TRAILER_SIZE, &trailer));
+    const at_bound = buildTrailer(0, max_payload_bytes, FORMAT_VERSION);
+    _ = try readTrailer(max_payload_bytes + TRAILER_SIZE, &at_bound);
 }
 
 /// Build an artifact at `output_path` from a small base file, then return its

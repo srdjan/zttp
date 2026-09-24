@@ -180,12 +180,20 @@ fn bundleCommand(
         }
     }
 
-    try bundle_mod.writeBundle(allocator, .{
+    bundle_mod.writeBundle(allocator, .{
         .contract_path = contract_path orelse "",
         .binary_path = binary_path,
         .replay_path = replay_path,
         .out_dir = out_dir orelse "",
-    }, stdout, stderr);
+    }, stdout, stderr) catch |err| switch (err) {
+        // A damaged artifact already wrote its diagnostic line.
+        error.CorruptArtifact => {
+            stdout.flush() catch {};
+            stderr.flush() catch {};
+            std.process.exit(1);
+        },
+        else => return err,
+    };
 }
 
 fn verifyCommand(
@@ -223,6 +231,9 @@ fn verifyCommand(
             // lines because they are different answers.
             error.ProofRejected,
             error.NoProofToCheck,
+            // A bundled artifact whose framed payload is damaged also wrote
+            // its line.
+            error.CorruptArtifact,
             => {
                 stdout.flush() catch {};
                 stderr.flush() catch {};

@@ -78,6 +78,10 @@ pub fn writeBundle(allocator: std.mem.Allocator, args: BundleArgs, stdout: *std.
                 try writeRebuildDiagnostic(stderr, "bundle");
                 return err;
             },
+            error.CorruptArtifact => {
+                try writeCorruptDiagnostic(stderr, "bundle");
+                return err;
+            },
             error.OutOfMemory => return err,
         };
     }
@@ -314,6 +318,10 @@ fn verifySemantics(
     var payload = payloadFromBinary(allocator, binary_bytes) catch |err| switch (err) {
         error.UnsupportedArtifactFormat => {
             try writeRebuildDiagnostic(stderr, "verify");
+            return err;
+        },
+        error.CorruptArtifact => {
+            try writeCorruptDiagnostic(stderr, "verify");
             return err;
         },
         error.OutOfMemory => return err,
@@ -658,11 +666,13 @@ fn isSupportedComponent(name: []const u8) bool {
 ///
 /// Returns null when the file is a plain binary. A payload framed correctly in
 /// a format this build cannot read is not null: `readTrailer` says so, and the
-/// caller reports it rather than treating the artifact as unproven.
+/// caller reports it rather than treating the artifact as unproven. A payload
+/// framed correctly and damaged - too large, failing its checksum, or not
+/// parsing - is `CorruptArtifact`, never null, for the same reason.
 fn payloadFromBinary(
     allocator: std.mem.Allocator,
     bytes: []const u8,
-) error{ OutOfMemory, UnsupportedArtifactFormat }!?self_extract.Payload {
+) error{ OutOfMemory, UnsupportedArtifactFormat, CorruptArtifact }!?self_extract.Payload {
     if (bytes.len < self_extract.TRAILER_SIZE) return null;
     const trailer_start = bytes.len - self_extract.TRAILER_SIZE;
     const trailer = self_extract.readTrailer(
@@ -671,17 +681,26 @@ fn payloadFromBinary(
     ) catch |err| switch (err) {
         error.NoPayload => return null,
         error.UnsupportedArtifactFormat => return error.UnsupportedArtifactFormat,
+        error.PayloadTooLarge => return error.CorruptArtifact,
     };
 
     const start: usize = @intCast(trailer.payload_offset);
     const size: usize = @intCast(trailer.payload_size);
-    if (start + size > bytes.len) return null;
+    if (start + size > bytes.len) return error.CorruptArtifact;
     const payload_bytes = bytes[start..][0..size];
-    if (std.hash.crc.Crc32.hash(payload_bytes) != trailer.checksum) return null;
-    return self_extract.parse(allocator, payload_bytes) catch |err| switch (err) {
+    if (std.hash.crc.Crc32.hash(payload_bytes) != trailer.checksum) return error.CorruptArtifact;
+    const payload = self_extract.parse(allocator, payload_bytes) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
-        else => return null,
+        else => return error.CorruptArtifact,
     };
+    return payload orelse error.CorruptArtifact;
+}
+
+fn writeCorruptDiagnostic(stderr: *std.Io.Writer, command: []const u8) !void {
+    try stderr.print(
+        "zttp proofs {s}: the artifact frames a handler payload that is damaged (too large, a checksum mismatch, or sections that do not parse). Rebuild or redeploy it.\n",
+        .{command},
+    );
 }
 
 fn writeRebuildDiagnostic(stderr: *std.Io.Writer, command: []const u8) !void {
@@ -766,6 +785,43 @@ fn predecessorArtifact(allocator: std.mem.Allocator) ![]u8 {
     std.mem.writeInt(u32, trailer[20..24], std.hash.crc.Crc32.hash(payload), .little);
     std.mem.writeInt(u64, trailer[24..32], self_extract.MAGIC, .little);
     return artifact;
+}
+
+test "bundle refuses a current-format artifact whose payload checksum fails, instead of bundling it as hash-only" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const old_cwd = try test_chdir(&tmp);
+    defer std.testing.allocator.free(old_cwd);
+    defer std.Io.Threaded.chdir(old_cwd) catch {};
+
+    try zts.file_io.writeFile(std.testing.allocator, "contract.json", "{}");
+    const artifact = try predecessorArtifact(std.testing.allocator);
+    defer std.testing.allocator.free(artifact);
+    // Current format, and one payload byte changed under the stored checksum.
+    const trailer = artifact[artifact.len - self_extract.TRAILER_SIZE ..];
+    std.mem.writeInt(u16, trailer[16..18], self_extract.FORMAT_VERSION, .little);
+    artifact["test-runtime".len] ^= 0x01;
+    try zts.file_io.writeFile(std.testing.allocator, "handler", artifact);
+
+    var out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer out.deinit();
+    var err = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer err.deinit();
+    try std.testing.expectError(error.CorruptArtifact, writeBundle(
+        std.testing.allocator,
+        .{
+            .contract_path = "contract.json",
+            .binary_path = "handler",
+            .out_dir = "bundle",
+        },
+        &out.writer,
+        &err.writer,
+    ));
+    try std.testing.expect(std.mem.indexOf(u8, err.writer.buffered(), "damaged") != null);
+    try std.testing.expectError(
+        error.FileNotFound,
+        std.Io.Dir.access(std.Io.Dir.cwd(), std.testing.io, "bundle", .{}),
+    );
 }
 
 test "bundle refuses a predecessor artifact before creating output" {

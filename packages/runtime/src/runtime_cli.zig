@@ -41,6 +41,12 @@ pub fn main(init: std.process.Init.Minimal) !void {
             );
             std.process.exit(1);
         },
+        error.PayloadTooLarge => {
+            shared.writeStderrLine(
+                "This binary carries a handler payload larger than the 100 MiB this runtime reads. Refusing to start.",
+            );
+            std.process.exit(1);
+        },
         error.CorruptArtifact => {
             shared.writeStderrLine(
                 "This binary carries a handler payload that is damaged. Refusing to start; rebuild or redeploy the artifact.",
