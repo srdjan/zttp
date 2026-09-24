@@ -76,6 +76,10 @@ pub const declaration = @import("declaration.zig");
 /// credential and the closed refusal set of its loader (M4 T6).
 pub const credential_ref = @import("credential_ref.zig");
 
+/// The schema keywords `zttp:validate` compiles, for the build-time check of
+/// a call that names a schema it would refuse (M4 T7, ZTS514).
+pub const validate_keywords = @import("validate_keywords.zig");
+
 /// The type annotations the TypeScript stripper records as it removes them.
 pub const type_map = @import("type_map.zig");
 

@@ -522,3 +522,15 @@ test "the analyzer projection keeps every module's own metadata and drops its im
         }
     }
 }
+
+test "the builder's copy of the zttp:validate keyword list matches the module's" {
+    // The build refuses a call that names a schema `zttp:validate` would
+    // refuse (ZTS514) by reading `validate_keywords.supported`. A keyword
+    // added to the module and not to the copy would make the build refuse a
+    // schema that compiles; one removed from the module would let through a
+    // schema that does not.
+    const module_list = &@import("zttp-modules").security.validate.supported_keywords;
+    const builder_list = &@import("zts-base").validate_keywords.supported;
+    try std.testing.expectEqual(module_list.len, builder_list.len);
+    for (module_list, builder_list) |a, b| try std.testing.expectEqualStrings(a, b);
+}

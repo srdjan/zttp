@@ -975,6 +975,12 @@ pub const SpecDiagnostic = struct {
         /// ZTS513: the handler's `toolCatalog` declaration is refused. The
         /// reason is a `ToolCatalogRefusal` tag, carried in `spec_name`.
         tool_catalog_refused,
+        /// ZTS514: a `validateJson`, `validateObject`, `coerceJson`, or
+        /// `decodeJson` call names a schema `zttp:validate` cannot compile, so
+        /// it fails on every input; or a `schemaCompile` literal it cannot
+        /// compile that no tool catalog entry names (M4 T7). `spec_name` is the
+        /// schema name.
+        schema_not_compilable,
 
         pub fn code(self: Kind) []const u8 {
             return switch (self) {
@@ -993,6 +999,7 @@ pub const SpecDiagnostic = struct {
                 .effect_ceiling_not_literal => "ZTS511",
                 .effect_row_lower_bound => "ZTS512",
                 .tool_catalog_refused => "ZTS513",
+                .schema_not_compilable => "ZTS514",
             };
         }
 

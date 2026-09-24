@@ -30,6 +30,7 @@ fn snippetForVaryingRead(object_name: []const u8, property_name: []const u8) []c
 
 const json_utils = @import("zts-base").json_utils;
 const tool_schema = @import("zts-base").tool_schema;
+const validate_keywords = @import("zts-base").validate_keywords;
 const ir = @import("zts-engine").parser.ir;
 const object = @import("zts-engine").object;
 const atom_table = @import("zts-engine").atom_table;
@@ -193,6 +194,9 @@ pub const ContractBuilder = struct {
     tool_catalog_calls: std.ArrayList(NodeIndex) = .empty,
     route_functions: std.ArrayList(RouteFunction) = .empty,
     api_schema_repeated: std.ArrayList([]const u8) = .empty,
+    /// Every `zttp:validate` or `zttp:decode` call that names a schema by a
+    /// literal, for the ZTS514 check (M4 T7). The name borrows the source.
+    schema_reads: std.ArrayList(SchemaRead) = .empty,
 
     // Partner extension tracking: the per-specifier extracted facts. The
     // bindings themselves live in `facts.extension_bindings`.
@@ -364,6 +368,7 @@ pub const ContractBuilder = struct {
         }
         self.api_routes.deinit(self.allocator);
         self.tool_catalog_calls.deinit(self.allocator);
+        self.schema_reads.deinit(self.allocator);
         self.route_functions.deinit(self.allocator);
         for (self.api_schema_repeated.items) |name| self.allocator.free(name);
         self.api_schema_repeated.deinit(self.allocator);
@@ -700,6 +705,10 @@ pub const ContractBuilder = struct {
         // `contract.tools` whole or is refused with one diagnostic per rule it
         // breaks, and then `contract.tools` stays empty.
         try self.buildToolCatalog(&contract, root, handler_fn);
+
+        // Phase 4g: a schema zttp:validate cannot compile (ZTS514). After the
+        // catalog, which decides whether a closed schema is legal.
+        try self.checkSchemaCompilability(&contract);
 
         return contract;
     }
@@ -2382,6 +2391,7 @@ pub const ContractBuilder = struct {
                             .tool_catalog => try self.tool_catalog_calls.append(self.allocator, idx),
                             // Generic: extract literal from arg N into category bucket
                             else => {
+                                if (ext.category == .request_schema) try self.recordSchemaRead(gb.module_specifier, gb.binding_name, call, ext.arg_position);
                                 if (self.getCategoryTarget(ext.category)) |target| {
                                     const transform: ?Transform =
                                         if (ext.transform) |t| switch (t) {
@@ -3605,6 +3615,71 @@ pub const ContractBuilder = struct {
             return table.getName(atom);
         }
         return null;
+    }
+
+    const SchemaRead = struct {
+        module: []const u8,
+        func: []const u8,
+        name: []const u8,
+        node: NodeIndex,
+    };
+
+    /// Record a `zttp:validate` or `zttp:decode` call that names its schema
+    /// with a literal. `toolInput` reads the gate's schema, not `zttp:validate`'s,
+    /// so it is not recorded.
+    fn recordSchemaRead(self: *ContractBuilder, module: []const u8, func: []const u8, call: Node.CallExpr, arg_position: u8) !void {
+        if (!std.mem.eql(u8, module, "zttp:validate") and !std.mem.eql(u8, module, "zttp:decode")) return;
+        if (call.args_count <= arg_position) return;
+        const node = self.ir_view.getListIndex(call.args_start, arg_position);
+        const name = self.getLiteralString(node) orelse return;
+        try self.schema_reads.append(self.allocator, .{ .module = module, .func = func, .name = name, .node = node });
+    }
+
+    /// Phase 4g (ZTS514). `schemaCompile` refuses a schema with a keyword
+    /// outside `zttp:validate`'s list at runtime, by returning false, and every
+    /// later call that names it then fails. Refuse each such call. A schema
+    /// no call reads is refused too, unless a tool catalog names it: a closed
+    /// catalog schema is legal, because the gate and `toolInput` use it and
+    /// `zttp:validate` never does.
+    fn checkSchemaCompilability(self: *ContractBuilder, contract: *HandlerContract) !void {
+        for (contract.api.schemas.items) |schema| {
+            var parsed = std.json.parseFromSlice(std.json.Value, self.allocator, schema.schema_json, .{}) catch continue;
+            defer parsed.deinit();
+            const keyword = validate_keywords.firstUnsupported(parsed.value) orelse continue;
+
+            var read_any = false;
+            for (self.schema_reads.items) |read| {
+                if (!std.mem.eql(u8, read.name, schema.name)) continue;
+                read_any = true;
+                const line = if (self.ir_view.getLoc(read.node)) |loc| loc.line else 0;
+                const suggestion = try std.fmt.allocPrint(self.allocator, "{s} (line {d}) names schema \"{s}\", which zttp:validate cannot compile: it does not support the keyword \"{s}\", so the call fails on every input", .{ read.func, line, schema.name, keyword });
+                try self.appendSchemaDiagnostic(contract, schema.name, suggestion);
+            }
+            if (read_any or self.catalogNamesSchema(contract, schema.name)) continue;
+            // A refused catalog keeps `contract.tools` empty; its own ZTS513
+            // diagnostics already stop the build, so do not add a second one.
+            if (self.tool_catalog_calls.items.len > 0) continue;
+            const suggestion = try std.fmt.allocPrint(self.allocator, "schemaCompile registers \"{s}\", which zttp:validate cannot compile: it does not support the keyword \"{s}\", so schemaCompile returns false at runtime", .{ schema.name, keyword });
+            try self.appendSchemaDiagnostic(contract, schema.name, suggestion);
+        }
+    }
+
+    fn catalogNamesSchema(_: *const ContractBuilder, contract: *const HandlerContract, name: []const u8) bool {
+        for (contract.tools.items) |tool| {
+            if (std.mem.eql(u8, tool.input_schema_name, name) or std.mem.eql(u8, tool.output_schema_name, name)) return true;
+        }
+        return false;
+    }
+
+    fn appendSchemaDiagnostic(self: *ContractBuilder, contract: *HandlerContract, name: []const u8, suggestion: []u8) !void {
+        errdefer self.allocator.free(suggestion);
+        const spec_name = try self.allocator.dupe(u8, name);
+        errdefer self.allocator.free(spec_name);
+        try contract.spec_diagnostics.append(self.allocator, .{
+            .kind = .schema_not_compilable,
+            .spec_name = spec_name,
+            .suggestion = suggestion,
+        });
     }
 
     fn extractSchemaCompile(self: *ContractBuilder, call: Node.CallExpr) !void {
@@ -6934,5 +7009,49 @@ test "each tool lists exactly the exports its own route reaches" {
         }
         try std.testing.expectEqualStrings(want.module, tool.reachable_exports.items[0].module);
         try std.testing.expectEqualStrings(want.name, tool.reachable_exports.items[0].name);
+    }
+}
+
+// ZTS514 (M4 T7 U2): a schema `zttp:validate` cannot compile makes
+// `schemaCompile` return false at runtime, and every later call that names it
+// fails. A closed tool catalog schema is legal: only the gate and `toolInput`
+// read it.
+test "a schema zttp:validate cannot compile is refused where a call would fail, and legal in a catalog" {
+    const closed = "{\\\"type\\\":\\\"object\\\",\\\"additionalProperties\\\":false,\\\"properties\\\":{}}";
+    const open = "{\\\"type\\\":\\\"object\\\",\\\"properties\\\":{}}";
+    const Case = struct { label: []const u8, source: []const u8, refused: usize };
+    const cases = [_]Case{
+        .{
+            .label = "validateJson names a closed schema",
+            .source = "import { schemaCompile, validateJson } from \"zttp:validate\";\nschemaCompile(\"In\", \"" ++ closed ++ "\");\nfunction handler(req) { const r = validateJson(\"In\", \"{}\"); return Response.json({ ok: r.ok }); }\n",
+            .refused = 1,
+        },
+        .{
+            .label = "a closed schema nothing reads and no catalog names",
+            .source = "import { schemaCompile } from \"zttp:validate\";\nschemaCompile(\"In\", \"" ++ closed ++ "\");\nfunction handler(req) { return Response.json({}); }\n",
+            .refused = 1,
+        },
+        .{
+            .label = "validateJson names an open schema",
+            .source = "import { schemaCompile, validateJson } from \"zttp:validate\";\nschemaCompile(\"In\", \"" ++ open ++ "\");\nfunction handler(req) { const r = validateJson(\"In\", \"{}\"); return Response.json({ ok: r.ok }); }\n",
+            .refused = 0,
+        },
+        .{
+            .label = "closed schemas a tool catalog names",
+            .source = toolSource("", "\"POST /a\": a", toolCatalogOf(tool_test_entry)),
+            .refused = 0,
+        },
+    };
+    for (cases) |case| {
+        var contract = try buildTestContract(case.source);
+        defer contract.deinit(std.testing.allocator);
+        var refused: usize = 0;
+        for (contract.spec_diagnostics.items) |d| {
+            if (d.kind != .schema_not_compilable) continue;
+            refused += 1;
+            try std.testing.expect(std.mem.indexOf(u8, d.suggestion.?, "additionalProperties") != null);
+        }
+        if (refused != case.refused) std.debug.print("case '{s}': {d} ZTS514, expected {d}\n", .{ case.label, refused, case.refused });
+        try std.testing.expectEqual(case.refused, refused);
     }
 }

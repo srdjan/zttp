@@ -313,6 +313,7 @@ pub fn specCode(kind: SpecKind) []const u8 {
         .effect_ceiling_not_literal => "ZTS511",
         .effect_row_lower_bound => "ZTS512",
         .tool_catalog_refused => "ZTS513",
+        .schema_not_compilable => "ZTS514",
     };
 }
 

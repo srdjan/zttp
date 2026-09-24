@@ -70,5 +70,6 @@ fn specDiagnosticMessage(d: zts.SpecDiagnostic) []const u8 {
         .effect_ceiling_not_literal => d.suggestion orelse "Effects<...> is not a closed union of string literals, so no ceiling was read",
         .effect_row_lower_bound => d.suggestion orelse "effect row is a lower bound; a call through an unresolvable value cannot discharge a ceiling",
         .tool_catalog_refused => d.suggestion orelse "the toolCatalog declaration is refused",
+        .schema_not_compilable => d.suggestion orelse "a validation call names a schema zttp:validate cannot compile",
     };
 }

@@ -43,8 +43,10 @@ fi
 # policy identity cover that cross-module contract requirement.
 # Moved 2026-09-23: ZTS513 (tool_catalog_refused) joins the policy registry
 # for the M4 T2 tool catalog.
+# Moved 2026-09-24: ZTS514 (schema_not_compilable) joins the policy registry
+# for M4 T7: a validation call that names a schema zttp:validate cannot compile.
 EXPECTED_PROFILE="zts-model-1"
-EXPECTED_POLICY_HASH="48bbab99b50d05ddf1d94e7d8a0d9a9577f990726755c9d25a591964925d7ed3"
+EXPECTED_POLICY_HASH="6ae21f9cbdf8240b130c77e7b258cb149dcae7890cdfc047d1ee01849d146f3a"
 # TSX is separately identified, and its hash binds the core grammar it lowers
 # into, so the declaration cut moves both hashes even though TSX syntax did not.
 EXPECTED_GRAMMAR_HASH="8c555c6dfe5afb98cf73d034a548dd5f18db5a6b540f334a43f0ac871f4d73be"
@@ -66,7 +68,8 @@ EXPECTED_RESTRICTION_HASH="3409f9e0490c698e67dcd1e7a6e3465f0d14c50e0a611bbe96520
 # at 11,061 against a 7,213-byte baseline.
 # Moved 2026-09-18: zttp:ledger adds protected post and balance exports.
 # Moved 2026-09-23: zttp:tool joins, the inert toolCatalog declaration of M4 T2.
-EXPECTED_BUILTIN_HASH="3002a7ecf70f94c81a429bd90ca98d7400ac7c02d9ee5e31ecd807a816c1df8b"
+# Moved 2026-09-24: zttp:tool adds toolInput, a tool's gate-validated input (M4 T7).
+EXPECTED_BUILTIN_HASH="e56627d1bafd5720330d4c28861ad3664df9529431e1f2d615717bf0b00db8bd"
 
 fail() {
   printf 'meta drift: %s\n' "$1" >&2

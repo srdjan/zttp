@@ -633,6 +633,20 @@ const clean_saga_compensated =
     \\
 ;
 
+const clean_open_schema =
+    \\import { schemaCompile, validateJson } from "zttp:validate";
+    \\
+    \\schemaCompile("Order", "{\"type\":\"object\",\"required\":[\"id\"],\"properties\":{\"id\":{\"type\":\"string\",\"maxLength\":16}}}");
+    \\
+    \\function handler(req: Request): Proof<Response, "deterministic"> {
+    \\  const result = validateJson("Order", req.body ?? "");
+    \\  if (!result.ok) return Response.json({ error: "invalid order" }, { status: 400 });
+    \\  const order = result.value;
+    \\  return Response.json({ id: order.id });
+    \\}
+    \\
+;
+
 const clean_tool_catalog =
     \\import { toolCatalog } from "zttp:tool";
     \\import { routerMatch } from "zttp:router";
@@ -2526,6 +2540,39 @@ pub const seeds = [_]DefectSeed{
         \\
         ,
         .ask = "Fix the ZTS513 compiler error in handler.ts",
+    },
+    .{
+        .id = "validate-closed-schema",
+        .code = "ZTS514",
+        .class = .model_retry,
+        .seed_source = clean_open_schema,
+        .bad_draft =
+        \\import { schemaCompile, validateJson } from "zttp:validate";
+        \\
+        \\schemaCompile("Order", "{\"type\":\"object\",\"additionalProperties\":false,\"required\":[\"id\"],\"properties\":{\"id\":{\"type\":\"string\",\"maxLength\":16}}}");
+        \\
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const result = validateJson("Order", req.body ?? "");
+        \\  if (!result.ok) return Response.json({ error: "invalid order" }, { status: 400 });
+        \\  const order = result.value;
+        \\  return Response.json({ id: order.id });
+        \\}
+        \\
+        ,
+        .good_draft =
+        \\import { schemaCompile, validateJson } from "zttp:validate";
+        \\
+        \\schemaCompile("Order", "{\"type\":\"object\",\"required\":[\"id\"],\"properties\":{\"id\":{\"type\":\"string\",\"maxLength\":16}}}");
+        \\
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const result = validateJson("Order", req.body ?? "");
+        \\  if (!result.ok) return Response.json({ error: "not an order" }, { status: 400 });
+        \\  const order = result.value;
+        \\  return Response.json({ id: order.id });
+        \\}
+        \\
+        ,
+        .ask = "Fix the ZTS514 compiler error in handler.ts",
     },
     .{
         .id = "dict-entry-round-trip",

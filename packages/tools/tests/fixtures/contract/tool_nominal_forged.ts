@@ -1,6 +1,6 @@
-import { toolCatalog } from "zttp:tool";
+import { toolCatalog, toolInput } from "zttp:tool";
 import { routerMatch } from "zttp:router";
-import { schemaCompile, validateJson } from "zttp:validate";
+import { schemaCompile } from "zttp:validate";
 
 nominal OrderId = string;
 
@@ -22,11 +22,7 @@ function describe(id: OrderId): string {
 }
 
 function lookup(req: Request): Response {
-  const text = requestText(req);
-  if (!text.ok) {
-    return Response.json({ error: "no body" }, { status: 400 });
-  }
-  const parsed = validateJson("LookupInput", String(text.value));
+  const parsed = toolInput("LookupInput", req);
   if (!parsed.ok) {
     return Response.json({ error: "invalid" }, { status: 400 });
   }

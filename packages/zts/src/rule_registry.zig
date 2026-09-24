@@ -560,6 +560,14 @@ const capsule_meta = [_]struct {
         .help = "Call toolCatalog once at module scope with an object literal. Give each entry route, description, input, output, and maxInputBytes as literals; name a routerMatch key and two schemas registered once with a literal schemaCompile; and give every route in the table an entry.",
         .repair = null,
     },
+    .{
+        .name = "schema_not_compilable",
+        .code = "ZTS514",
+        .description = "A validateJson, validateObject, coerceJson, or decodeJson call names a schema that zttp:validate cannot compile, so schemaCompile returned false at runtime and the call fails on every input. A schemaCompile literal that zttp:validate cannot compile and that no toolCatalog entry names is refused too. The diagnostic names the first keyword zttp:validate refuses.",
+        .example = "schemaCompile(\"In\", \"{\\\"type\\\":\\\"object\\\",\\\"additionalProperties\\\":false,\\\"properties\\\":{}}\"); validateJson(\"In\", body); // additionalProperties is not a zttp:validate keyword",
+        .help = "Use only keywords zttp:validate compiles in a schema you validate with validateJson. A closed tool catalog schema is read with toolInput from zttp:tool instead.",
+        .repair = null,
+    },
 };
 
 // ---------------------------------------------------------------------------

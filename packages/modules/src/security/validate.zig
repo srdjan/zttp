@@ -249,6 +249,35 @@ fn schemaDropImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const sdk.J
     return sdk.JSValue.false_val;
 }
 
+/// The keys a schema object may hold. The last three are descriptive metadata
+/// with no constraint semantics. The builder keeps a copy in
+/// `packages/zts/src/validate_keywords.zig` to refuse at build time a call
+/// that names a schema this list refuses (ZTS514); a test in
+/// `builtin_modules.zig` pins the copy to this list.
+pub const supported_keywords = [_][]const u8{
+    "type",
+    "minLength",
+    "maxLength",
+    "maxItems",
+    "minimum",
+    "maximum",
+    "required",
+    "properties",
+    "items",
+    "enum",
+    "format",
+    "$schema",
+    "title",
+    "description",
+};
+
+fn isSupportedKeyword(key: []const u8) bool {
+    for (supported_keywords) |k| {
+        if (std.mem.eql(u8, k, key)) return true;
+    }
+    return false;
+}
+
 fn compileSchemaFromJson(allocator: std.mem.Allocator, json_val: std.json.Value) !*CompiledSchema {
     const schema = try allocator.create(CompiledSchema);
     // deinit frees every sub-allocation already attached to the schema (each
@@ -280,22 +309,7 @@ fn compileSchemaFromJson(allocator: std.mem.Allocator, json_val: std.json.Value)
         var key_it = obj.iterator();
         while (key_it.next()) |entry| {
             const key = entry.key_ptr.*;
-            const supported = std.mem.eql(u8, key, "type") or
-                std.mem.eql(u8, key, "minLength") or
-                std.mem.eql(u8, key, "maxLength") or
-                std.mem.eql(u8, key, "maxItems") or
-                std.mem.eql(u8, key, "minimum") or
-                std.mem.eql(u8, key, "maximum") or
-                std.mem.eql(u8, key, "required") or
-                std.mem.eql(u8, key, "properties") or
-                std.mem.eql(u8, key, "items") or
-                std.mem.eql(u8, key, "enum") or
-                std.mem.eql(u8, key, "format") or
-                // Descriptive metadata: no constraint semantics, safe to ignore.
-                std.mem.eql(u8, key, "$schema") or
-                std.mem.eql(u8, key, "title") or
-                std.mem.eql(u8, key, "description");
-            if (!supported) return error.InvalidSchema;
+            if (!isSupportedKeyword(key)) return error.InvalidSchema;
         }
     }
 

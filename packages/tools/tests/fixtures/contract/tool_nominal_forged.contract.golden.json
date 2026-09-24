@@ -1,1 +1,1 @@
-{"success":false,"diagnostics":[{"code":"ZTS203","severity":"error","message":"argument type does not match parameter type: expected OrderId, got string","file":"packages/tools/tests/fixtures/contract/tool_nominal_forged.ts","line":34,"column":44,"suggestion":null,"repair_intent":null}]}
+{"success":false,"diagnostics":[{"code":"ZTS203","severity":"error","message":"argument type does not match parameter type: expected OrderId, got string","file":"packages/tools/tests/fixtures/contract/tool_nominal_forged.ts","line":30,"column":44,"suggestion":null,"repair_intent":null}]}
