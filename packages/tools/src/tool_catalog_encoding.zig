@@ -21,6 +21,7 @@ pub const schema_version: u16 = 3;
 
 comptime {
     if (schema_version != pcc.tool_catalog.schema_version) @compileError("ZTCAT1 encoder and kernel decoder disagree on the schema");
+    if (!std.mem.eql(u8, magic, pcc.tool_catalog.magic)) @compileError("ZTCAT1 encoder and kernel decoder disagree on the magic");
 }
 
 pub const EncodeError = std.mem.Allocator.Error || error{
