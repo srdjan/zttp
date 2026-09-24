@@ -1,6 +1,6 @@
 # M4: release contract for scoped tool routes
 
-Status: accepted by the owner on 2026-09-22. T1a, T1b, T2, T3, T4, T5a, and T5b are complete (T5 under its [design note](2026-09-23-m4-t5-scope-and-grants-design.md)); T6 is next.
+Status: accepted by the owner on 2026-09-22. T1a, T1b, T2, T3, T4, T5a, and T5b are complete (T5 under its [design note](2026-09-23-m4-t5-scope-and-grants-design.md)); T6 is in progress under its [design note](2026-09-24-m4-t6-credential-injection-design.md).
 Baseline: local `main` at `176d81ca`. Roadmap row:
 [M4 in the roadmap](../roadmap.md) (`docs/roadmap.md:20`). This document
 reconciles proposal A, the
@@ -319,6 +319,13 @@ deployment-owned secret reference and injects it only after it authorizes the
 exact request. Redirects stay unhandled (`runtime_http.zig:2044`) and never carry
 it. A search of `packages/runtime/src` and `packages/modules/src` finds no
 resolver or injection step today, as `A:78-79` also records. Completion: check C6.
+
+T6 decisions, 2026-09-24. The owner accepted the
+[design note](2026-09-24-m4-t6-credential-injection-design.md) with the
+recommended answer to each of its four questions: a literal credential name in
+the fetch options with a per-tool grant bound in `ZTCAT1`; injection on the
+synchronous `fetch` path only; `https` except an explicit loopback literal; and
+refusal of a response that echoes the exact value. T6 is three units, U1 to U3.
 
 **T7. Reference tools and documentation.** Depends on T1a to T6. Owned files: a
 new directory under `examples/`, its entry in the example suite, and

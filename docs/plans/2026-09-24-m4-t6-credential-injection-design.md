@@ -1,7 +1,7 @@
 # M4 T6 design note: credential injection
 
-Status: proposed on 2026-09-24. It waits for the owner's answers to the
-questions in section 9. Check C6 of the
+Status: accepted by the owner on 2026-09-24, with the recommended answer to
+each question in section 9. U1 is in progress. Check C6 of the
 [M4 release contract](2026-09-22-m4-release-contract.md) is written against
 the approach this note names.
 
@@ -301,3 +301,32 @@ as the only placement (no credential in a query string), the refusal of a
 colliding handler header instead of a replacement, a closed refusal enum in the
 599 detail, `OutcomeUnknown` for credentialed requests only, and the three-unit
 split.
+
+## 10. Decisions
+
+The owner answered on 2026-09-24 and accepted the recommended answer to each
+question. Q1: a tool names its credential with a string literal in the fetch
+options, and the route walk collects each tool's credential grant, which
+`ZTCAT1` binds. Q2: the runtime injects on the synchronous `fetch` path only,
+and refuses a credential on `fetchWithRetry`, durable fetch, the `zttp:io`
+parallel path, and `httpRequest`. Q3: a credential requires `https`, except an
+IPv4 or IPv6 loopback literal that the reference names explicitly; a host name
+that resolves to loopback does not qualify. Q4: the runtime refuses an upstream
+response whose head or decoded body holds the exact value, and the
+documentation states that an encoded echo is not found. The recommended
+defaults at the end of section 9 stand.
+
+Two points stay open. A minimum value length would stop a false
+`CredentialReflected` refusal when a short value occurs in a response by
+chance. No floor is set until a real credential format gives a reason for one.
+U2 adds a field to the `FetchOptions` signature. If that moves the hashes that
+the DeepSeek cassettes embed, U2 needs the owner's approval for a corpus
+re-record before it lands.
+
+## 11. Progress
+
+| Unit | Commit | Content |
+|---|---|---|
+| U1 | | The reference, the loader, contract version 22, and the store |
+| U2 | | Selection at build, the per-tool grant, and `ZTCAT1` schema 3 |
+| U3 | | Injection at runtime, the other senders, `OutcomeUnknown`, reflection |
