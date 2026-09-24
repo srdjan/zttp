@@ -7,7 +7,7 @@ What the offline suite proves, and what it does not.
 > The offline suite proves two things. The harness is faithful: recorder capture
 > and replay, the loop, veto, apply, retry, salvage, compiler repair, and the
 > hole loop execute correctly over their declared fixtures. And the
-> corpus is load-bearing: of the compiler's 60 advertised rules,
+> corpus is load-bearing: of the compiler's 61 advertised rules,
 > 4 are tripped by at least one case. It proves nothing about what a
 > model will draft. Raw first-draft pass, first-attempt green, median
 > round-trips, and intent pass
@@ -33,7 +33,7 @@ publishing first-draft, intent, or round-trip measurements still requires the
 named model. Developing and verifying the harness, veto, salvage, repair, and
 hole-loop machinery does not.
 
-Recorded 2026-09-23 over corpus `e6801afae099`. The replay fails
+Recorded 2026-09-24 over corpus `e6801afae099`. The replay fails
 when this page drifts from the run, so it is regenerated in the same commit as
 whatever moved it, and `git log docs/coverage.json` is the history.
 
@@ -41,9 +41,9 @@ whatever moved it, and `git log docs/coverage.json` is the history.
 
 | Rules advertised | Tripped by at least one case | Untripped |
 |---|---|---|
-| 60 | 4 | 56 |
+| 61 | 4 | 57 |
 
-Tripped: `ZTS400`, `ZTS500`, `ZTS509`, `ZTS625`
+Tripped: `ZTS305`, `ZTS400`, `ZTS500`, `ZTS509`
 
 The list above is a fair description of what these prompts ask for and a poor
 description of what the compiler proves. It is the mechanical form of an
@@ -56,22 +56,22 @@ was wrong the first time the count moved. Nothing in this section restates a
 number the generator computes; the codes are printed, and a reader who wants the
 breakdown reads them.
 
-Untripped: `ZTS302`, `ZTS303`, `ZTS304`, `ZTS305`, `ZTS306`, `ZTS308`, `ZTS309`, `ZTS310`, `ZTS501`, `ZTS502`, `ZTS600`, `ZTS629`, `ZTS601`, `ZTS061`, `ZTS602`, `ZTS603`, `ZTS604`, `ZTS605`, `ZTS608`, `ZTS609`, `ZTS610`, `ZTS623`, `ZTS611`, `ZTS612`, `ZTS621`, `ZTS613`, `ZTS614`, `ZTS616`, `ZTS620`, `ZTS622`, `ZTS626`, `ZTS627`, `ZTS628`, `ZTS624`, `ZTS606`, `ZTS503`, `ZTS504`, `ZTS505`, `ZTS506`, `ZTS508`, `ZTS607`, `ZTS510`, `ZTS511`, `ZTS512`, `ZTS513`, `POL001`, `POL003`, `POL005`, `POL007`, `ZTS401`, `ZTS402`, `ZTS403`, `ZTS404`, `ZTS405`, `ZTS406`, `ZTS407`
+Untripped: `ZTS302`, `ZTS303`, `ZTS304`, `ZTS306`, `ZTS308`, `ZTS309`, `ZTS310`, `ZTS501`, `ZTS502`, `ZTS600`, `ZTS629`, `ZTS601`, `ZTS061`, `ZTS602`, `ZTS603`, `ZTS604`, `ZTS605`, `ZTS608`, `ZTS609`, `ZTS610`, `ZTS623`, `ZTS611`, `ZTS612`, `ZTS621`, `ZTS613`, `ZTS614`, `ZTS616`, `ZTS620`, `ZTS622`, `ZTS625`, `ZTS626`, `ZTS627`, `ZTS628`, `ZTS624`, `ZTS606`, `ZTS503`, `ZTS504`, `ZTS505`, `ZTS506`, `ZTS508`, `ZTS607`, `ZTS510`, `ZTS511`, `ZTS512`, `ZTS513`, `ZTS514`, `POL001`, `POL003`, `POL005`, `POL007`, `ZTS401`, `ZTS402`, `ZTS403`, `ZTS404`, `ZTS405`, `ZTS406`, `ZTS407`
 
 ## What this corpus has ever reached
 
 The row above is one draw. The same prompts, seeds, provider, model and
 compiler have measured a different set each time they were recorded, because a
 rule is counted only when the model happens to make the mistake that trips it.
-Across the single published run of corpus `e6801afae099`, the
-tripped set took one shape, the smallest naming
-3 rules and the largest 3.
+Across the 2 published runs of corpus `e6801afae099`, the
+tripped set took 2 distinct shapes, the smallest naming
+3 rules and the largest 4.
 
 | Union across runs | Smallest single run | Largest single run |
 |---|---|---|
-| 5 | 3 | 3 |
+| 6 | 3 | 4 |
 
-Ever tripped: `ZTS400`, `ZTS500`, `ZTS501`, `ZTS509`, `ZTS625`
+Ever tripped: `ZTS305`, `ZTS400`, `ZTS500`, `ZTS501`, `ZTS509`, `ZTS625`
 
 This is the fairer answer to "what do these prompts reach", and no single row
 can give it. It is computed by `zig build coverage-union` from
@@ -94,26 +94,26 @@ is printed.
 
 | Rules advertised | Verified firing by a seed | Seeds |
 |---|---|---|
-| 60 | 59 | 62 |
+| 61 | 60 | 63 |
 
-Verified: `POL001`, `POL003`, `POL005`, `POL007`, `ZTS061`, `ZTS302`, `ZTS303`, `ZTS304`, `ZTS305`, `ZTS306`, `ZTS308`, `ZTS309`, `ZTS310`, `ZTS400`, `ZTS401`, `ZTS402`, `ZTS403`, `ZTS404`, `ZTS405`, `ZTS406`, `ZTS407`, `ZTS500`, `ZTS501`, `ZTS502`, `ZTS503`, `ZTS504`, `ZTS505`, `ZTS506`, `ZTS509`, `ZTS510`, `ZTS511`, `ZTS512`, `ZTS513`, `ZTS600`, `ZTS601`, `ZTS602`, `ZTS603`, `ZTS604`, `ZTS605`, `ZTS606`, `ZTS607`, `ZTS608`, `ZTS609`, `ZTS610`, `ZTS611`, `ZTS612`, `ZTS613`, `ZTS614`, `ZTS616`, `ZTS620`, `ZTS621`, `ZTS622`, `ZTS623`, `ZTS624`, `ZTS625`, `ZTS626`, `ZTS627`, `ZTS628`, `ZTS629`
+Verified: `POL001`, `POL003`, `POL005`, `POL007`, `ZTS061`, `ZTS302`, `ZTS303`, `ZTS304`, `ZTS305`, `ZTS306`, `ZTS308`, `ZTS309`, `ZTS310`, `ZTS400`, `ZTS401`, `ZTS402`, `ZTS403`, `ZTS404`, `ZTS405`, `ZTS406`, `ZTS407`, `ZTS500`, `ZTS501`, `ZTS502`, `ZTS503`, `ZTS504`, `ZTS505`, `ZTS506`, `ZTS509`, `ZTS510`, `ZTS511`, `ZTS512`, `ZTS513`, `ZTS514`, `ZTS600`, `ZTS601`, `ZTS602`, `ZTS603`, `ZTS604`, `ZTS605`, `ZTS606`, `ZTS607`, `ZTS608`, `ZTS609`, `ZTS610`, `ZTS611`, `ZTS612`, `ZTS613`, `ZTS614`, `ZTS616`, `ZTS620`, `ZTS621`, `ZTS622`, `ZTS623`, `ZTS624`, `ZTS625`, `ZTS626`, `ZTS627`, `ZTS628`, `ZTS629`
 
 No model is involved, so this figure does not move when a recording draws
 differently. It also proves less: a seed shows the compiler rejects a draft the
 harness supplied, and says nothing about whether a model would ever write one.
 That is the question the section above answers, and only a recording can.
 
-Neither number bounds the other. The corpus leaves 55 of the rules
+Neither number bounds the other. The corpus leaves 56 of the rules
 verified here untripped; it trips 0 that no seed covers; and the two
-sets share 4. Together they name 59 of the 60
+sets share 4. Together they name 60 of the 61
 advertised rules, and taking the corpus union above instead of this single run
-raises that to 59 - the closest thing to a combined answer this
+raises that to 60 - the closest thing to a combined answer this
 repository can produce, and still two claims added up rather than one
 measurement.
 
 ## The rules no seed reaches
 
-One advertised rule of 60 is not verified by a seed: `ZTS508`, because it is
+One advertised rule of 61 is not verified by a seed: `ZTS508`, because it is
 `non-default`. Emitted only under an opt-in mode the veto does not run.
 
 Nothing here is waiting on a seed. The registry once advertised codes no
@@ -127,7 +127,7 @@ since covered. Neither list can drift from the registry without failing a build.
 
 ## Codes the registry does not carry
 
-`ZTS001`, `ZTS002`, `ZTS056`, `ZTS203`
+`ZTS200`, `ZTS203`
 
 These are real diagnostics the corpus trips that no `rule_registry` entry
 carries - the parser, stripper, bool-checker, and type-checker families. The
