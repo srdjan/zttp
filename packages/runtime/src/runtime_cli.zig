@@ -672,6 +672,7 @@ fn parseServeArgs(allocator: std.mem.Allocator, argv: []const []const u8) !Serve
         if (cfg.auth) |auth| {
             config.runtime_config.tool_auth = .{ .key_env = auth.key_env, .tenant_claim = auth.tenant_claim };
         }
+        config.runtime_config.credentials = cfg.credentials;
         config.runtime_config.durable_oplog_dir = cfg.durable_dir;
         config.runtime_config.system_config_path = cfg.system;
         config.runtime_config.outbound_http_enabled = cfg.outbound_http;

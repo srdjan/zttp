@@ -68,6 +68,10 @@ pub const RuntimeConfig = struct {
     /// artifact ignores this and reads the names from its own contract, which
     /// the executable graph binds. Borrowed.
     tool_auth: ?ToolAuthNames = null,
+    /// The credential references for `zttp dev` and `serve` (M4 T6): zttp.json's
+    /// `credentials`. A deployed artifact ignores this and reads the references
+    /// from its own contract, which the executable graph binds. Borrowed.
+    credentials: []const zq.handler_contract.CredentialRef = &.{},
     trace_file_path: ?[]const u8 = null,
     /// Opt-in JSONL sink for runtime soundness incidents (`--incident-log`).
     /// `incident_log_path` is the CLI-supplied path; the server opens it once at

@@ -1,7 +1,7 @@
 # M4 T6 design note: credential injection
 
 Status: accepted by the owner on 2026-09-24, with the recommended answer to
-each question in section 9. U1 is in progress. Check C6 of the
+each question in section 9. U1 is implemented; U2 is next. Check C6 of the
 [M4 release contract](2026-09-22-m4-release-contract.md) is written against
 the approach this note names.
 
@@ -132,10 +132,12 @@ signature (B8.8).
 **The value.** The runtime reads each referenced variable once at startup, in a
 new `credential_store.zig` next to `tool_auth.zig`. The handler's env allow list
 does not apply, and no JS value ever holds the secret. The store zeroes each
-value on release. A tool handler that names a credential whose variable is unset
-or empty does not start (AE17 "missing secret binding"). Under `zttp dev` its
-tool requests answer 503 until the variable is set, as T5a does for a missing
-key (`runtime/src/live_reload.zig:579-581`).
+value on release. A server with a reference whose variable is unset or empty
+does not start (AE17 "missing secret binding"). U1 applies this to every
+reference and in every mode, `zttp dev` included: a credential the operator
+configured and did not supply is a misconfiguration, and a start that refuses
+names it at once. This is stricter than the first draft, which proposed a 503
+under `zttp dev` and a refusal only for a credential a tool names.
 
 ## 4. Selection: the handler names the credential
 
@@ -327,6 +329,56 @@ re-record before it lands.
 
 | Unit | Commit | Content |
 |---|---|---|
-| U1 | | The reference, the loader, contract version 22, and the store |
+| U1 | this commit | The reference, the loader, contract version 22, and the store |
 | U2 | | Selection at build, the per-tool grant, and `ZTCAT1` schema 3 |
 | U3 | | Injection at runtime, the other senders, `OutcomeUnknown`, reflection |
+
+## 12. U1 implementation notes and evidence
+
+**Shape.** `packages/zts/src/credential_ref.zig` (tier `zts-base`) holds the
+reference type, one validator with a `.config` and a `.canonical` form, and a
+closed refusal enum of 24 members. zttp.json and the contract parser share it,
+so the contract parser refuses any reference the build could not have written:
+a non-canonical endpoint, header case, method or path order, name order, a
+repeated name, or an empty list. `std.json` already refuses a repeated key in
+zttp.json (`DuplicateField`, measured), so a second entry cannot silently
+replace the first. The contract carries the references at version 22, only when
+one is configured, so a contract without them keeps its earlier bytes. The
+contract member of the executable graph binds them. Tools and runtime reach the
+module through `handler_contract`, so `scripts/module-boundary.allow` is
+unchanged. `packages/runtime/src/credential_store.zig` loads every value at
+startup and zeroes it on release; the server refuses to start with
+`error.CredentialValueMissing` when a variable is unset or empty. As section 3
+now says, this applies to every reference in every mode.
+
+**Gates.** Every verdict below comes from an unfiltered step with its exit status
+read directly. `zig build test`: 192 of 192 steps, 8895 of 8901 tests passed, 6
+skipped. `test-zruntime`: 426 of 427 passed, 1 skipped. `test-server`: 450 of
+452 passed, 2 skipped. `test-zts`: 2317 of 2318 passed, 1 skipped.
+`test-project-config` (40 of 40), `test-contract-golden`,
+`test-vocab-envelope-drift`, `test-module-boundary`, `zig fmt --check`, and the
+docs drift check passed. A census test requires every refusal member to be
+observed from a real input.
+
+**Probes.** Each mutation was confirmed present, compiled, and restored with
+`/bin/cp -f` and `cmp`. A first attempt at the first probe did not compile
+("pointless discard of capture"), so it proved nothing and was redone.
+
+| Mutation | Step | Failing test |
+|---|---|---|
+| `.` and `..` path segments accepted | `test-zts` | `credential references refuse each rule with its named reason` |
+| contract parser skips the set-order check | `test-zts` | `credential references survive a v1 and a v2 round trip, ...` |
+| zttp.json `credentials` ignored | `test-project-config` | `project config reads the credential references and refuses a broken one` |
+| server ignores a missing value | `test-server` | `a server refuses to start when a credential's variable is unset, ...` |
+
+**Deployed binary.** A project whose zttp.json configures one credential was
+built with `zttp build`. Started from an empty directory with the variable
+unset, the binary logged `Proof accepted`, then refused: "credential 'weather'
+needs environment variable ZTTP_U1_WEATHER_KEY, which is unset or empty;
+refusing to serve". It therefore read the reference from its own accepted
+contract. With the variable set to a marker value, it served `GET /` with 200,
+and neither its log nor the response held the marker.
+
+**Not measured in U1.** A byte change to a reference inside a deployed payload
+was not probed; the contract member's binding is covered by the existing C3
+checks. No request uses a credential yet: U3 adds injection.

@@ -29,6 +29,7 @@ test {
     // way, because `edge_server.zig` below imports `handler_instance.zig`.
     _ = @import("server.zig");
     _ = @import("tool_auth.zig");
+    _ = @import("credential_store.zig");
     _ = @import("edge_server.zig");
     _ = @import("runtime_features.zig").studio;
     _ = @import("proof_adapter.zig");

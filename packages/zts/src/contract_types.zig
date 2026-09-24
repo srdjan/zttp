@@ -15,6 +15,9 @@ const module_binding = @import("zts-base").module_authorization;
 const profile_identity = @import("zts-base").profile_identity;
 // The consumer declaration and the profile table its ceiling names (M4 T5b).
 const declaration = @import("zts-base").declaration;
+/// Credential references (M4 T6): the canonical type and its loader.
+pub const credential_ref = @import("zts-base").credential_ref;
+pub const CredentialRef = credential_ref.CredentialRef;
 const capability_profiles = @import("zts-base").capability_profiles;
 
 fn dupeOptionalString(allocator: std.mem.Allocator, s: ?[]const u8) !?[]const u8 {
@@ -2190,7 +2193,7 @@ pub const HoleSummary = struct {
 };
 
 pub const HandlerContract = struct {
-    version: u32 = 21,
+    version: u32 = 22,
     handler: HandlerLoc,
     routes: std.ArrayList(RouteInfo),
     modules: std.ArrayList([]const u8), // each entry owned
@@ -2218,6 +2221,11 @@ pub const HandlerContract = struct {
     /// Names only - the key never enters the contract. Null when the project
     /// configures no `auth`. Owned.
     tool_auth: ?ToolAuth = null,
+    /// The credential references (M4 T6): zttp.json's `credentials`, set by
+    /// the build in the canonical form `credential_ref.zig` defines, sorted by
+    /// name. Names and rules only - no value ever enters the contract. Empty
+    /// when the project configures none. Owned.
+    credentials: []CredentialRef = &.{},
     /// The P8 report (M4 T4): one entry per declared classification, in the
     /// declaration's canonical order, with the status the flow check reached.
     /// Empty when the build had no declaration. Owned.
@@ -2367,6 +2375,8 @@ pub const HandlerContract = struct {
         self.tools.deinit(allocator);
         if (self.tool_auth) |*auth| auth.deinit(allocator);
         self.tool_auth = null;
+        credential_ref.freeAll(allocator, self.credentials);
+        self.credentials = &.{};
         for (self.classifications.items) |*report| {
             report.deinit(allocator);
         }

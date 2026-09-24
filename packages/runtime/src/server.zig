@@ -24,6 +24,7 @@ const QueryParam = http_types.QueryParam;
 
 const contract_runtime = @import("contract_runtime.zig");
 const tool_auth_mod = @import("tool_auth.zig");
+const credential_store_mod = @import("credential_store.zig");
 const fault_explain = @import("fault_explain.zig");
 const incident_log = @import("incident_log.zig");
 const RuntimeContract = contract_runtime.RuntimeContract;
@@ -1505,6 +1506,11 @@ pub const Server = struct {
     /// refuses to start without it; a request that matches a tool while it is
     /// null is refused, never served unverified.
     tool_auth: ?tool_auth_mod.KeyState = null,
+    /// The credential values for outbound requests (M4 T6), loaded in `start`
+    /// from the variables the references name. A server with a reference
+    /// whose variable is unset or empty refuses to start. Values are zeroed
+    /// on release and never logged.
+    credential_store: ?credential_store_mod.Store = null,
     /// Guards `contract`/`proof_cache` against the live-reload watcher thread
     /// freeing+rebuilding them (`updateContract`) while worker threads read
     /// them mid-request. Only engaged when `reload_active` is set, so the
@@ -1622,6 +1628,7 @@ pub const Server = struct {
         self.clearProofChecked();
         if (self.contract) |*c| c.deinit();
         if (self.tool_auth) |*auth| auth.deinit();
+        if (self.credential_store) |*store| store.deinit();
         if (self.attestation_headers) |*ah| ah.deinit(self.allocator);
         if (self.well_known_doc) |*wkd| wkd.deinit(self.allocator);
         if (self.security_logger) |logger| logger.deinit();
@@ -1711,6 +1718,36 @@ pub const Server = struct {
                 return err;
             },
         };
+    }
+
+    /// Where this server reads the credential references. A deployed artifact
+    /// reads them from its own contract, which the executable graph binds, and
+    /// ignores anything else; dev and `serve` read zttp.json's `credentials`.
+    fn credentialRefs(self: *const Self) []const credential_store_mod.CredentialRef {
+        return switch (self.config.handler) {
+            .appended_payload => if (self.contract) |*contract| contract.view().credentials else &.{},
+            else => self.config.runtime_config.credentials,
+        };
+    }
+
+    /// Load every credential value from the environment (M4 T6 design note,
+    /// section 3). A reference whose variable is unset or empty refuses the
+    /// start in every mode: a credential the operator configured and did not
+    /// supply is a missing secret binding, not an optional one. The message
+    /// names the reference and its variable, never a value.
+    pub fn loadCredentials(self: *Self) !void {
+        if (self.credential_store) |*store| store.deinit();
+        self.credential_store = null;
+        switch (try credential_store_mod.load(self.allocator, self.credentialRefs(), credential_store_mod.processEnv())) {
+            .ok => |store| self.credential_store = store,
+            .missing => |ref| {
+                if (!builtin.is_test) std.log.err(
+                    "credential '{s}' needs environment variable {s}, which is unset or empty; refusing to serve",
+                    .{ ref.name, ref.env },
+                );
+                return error.CredentialValueMissing;
+            },
+        }
     }
 
     fn clearProofChecked(self: *Self) void {
@@ -2395,6 +2432,9 @@ pub const Server = struct {
         // it serves anything. Checked after acceptance, which is what installs
         // a deployment's catalog.
         try self.loadToolAuth();
+
+        // Credential values (M4 T6): read before any request can need one.
+        try self.loadCredentials();
 
         // Initialize runtime pool with embedded bytecode (must be set before prewarm)
         // Wire the server-level request timeout into the runtime config so the
@@ -4767,6 +4807,37 @@ const tool_test_tenant_claim = "tenant";
 
 extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
 extern "c" fn unsetenv(name: [*:0]const u8) c_int;
+
+test "a server refuses to start when a credential's variable is unset, and loads it once set" {
+    const allocator = std.testing.allocator;
+    const env_name = "ZTTP_SERVER_CREDENTIAL_TEST_KEY";
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator,
+        \\{"weather": {"env": "ZTTP_SERVER_CREDENTIAL_TEST_KEY", "endpoint": "https://api.weather.example",
+        \\  "header": "authorization", "scheme": "Bearer", "methods": ["GET"], "paths": ["/v1"]}}
+    , .{});
+    defer parsed.deinit();
+    const refs = (try credential_store_mod.credential_ref.parseConfig(allocator, parsed.value)).ok;
+    defer credential_store_mod.credential_ref.freeAll(allocator, refs);
+
+    var srv = try Server.init(allocator, .{
+        .handler = .{ .inline_code = "function handler(req) { return Response.text(\"ok\"); }" },
+        .log_requests = false,
+        .runtime_config = .{ .credentials = refs },
+    });
+    defer srv.deinit();
+
+    _ = unsetenv(env_name);
+    try std.testing.expectError(error.CredentialValueMissing, srv.loadCredentials());
+    try std.testing.expect(srv.credential_store == null);
+
+    _ = setenv(env_name, "", 1);
+    try std.testing.expectError(error.CredentialValueMissing, srv.loadCredentials());
+
+    _ = setenv(env_name, "server-credential-test-value", 1);
+    defer _ = unsetenv(env_name);
+    try srv.loadCredentials();
+    try std.testing.expectEqualStrings("server-credential-test-value", srv.credential_store.?.value("weather").?);
+}
 
 /// One tool entry for a test catalog. `exports` is the grant, sorted by module
 /// then name as the catalog stores it.

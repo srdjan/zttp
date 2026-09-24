@@ -80,6 +80,9 @@ pub const EmittedAffordance = contract_types.EmittedAffordance;
 pub const ToolEntry = contract_types.ToolEntry;
 pub const ToolExport = contract_types.ToolExport;
 pub const ToolAuth = contract_types.ToolAuth;
+/// Credential references (M4 T6): the canonical type and its loader.
+pub const credential_ref = contract_types.credential_ref;
+pub const CredentialRef = contract_types.CredentialRef;
 pub const ClassificationReport = contract_types.ClassificationReport;
 pub const ClassificationLabel = contract_types.ClassificationLabel;
 pub const ClassificationStatus = contract_types.ClassificationStatus;
@@ -1256,7 +1259,7 @@ test "writeContractJson minimal" {
     output = aw.toArrayList();
 
     // Should be valid-looking JSON with expected fields
-    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"version\": 21") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"version\": 22") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"handler.ts\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"modules\": []") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"serviceCalls\": []") != null);
@@ -1940,6 +1943,68 @@ test "the tool auth names survive a v1 and a v2 round trip, and their absence wr
     try std.testing.expectError(error.InvalidToolAuth, parseFromJson(allocator, empty));
 }
 
+test "credential references survive a v1 and a v2 round trip, and their absence writes nothing" {
+    const allocator = std.testing.allocator;
+    var original = try toolCatalogFixture(allocator);
+    defer original.deinit(allocator);
+
+    var without: std.Io.Writer.Allocating = .init(allocator);
+    defer without.deinit();
+    try writeContractJson(&original, &without.writer);
+    try std.testing.expect(std.mem.indexOf(u8, without.written(), "credentials") == null);
+
+    var config = try std.json.parseFromSlice(std.json.Value, allocator,
+        \\{"weather": {"env": "WEATHER_KEY", "endpoint": "https://api.weather.example", "header": "Authorization",
+        \\  "scheme": "Bearer", "methods": ["POST", "GET"], "paths": ["/v1/forecast", "/v1/alerts"]},
+        \\ "local": {"env": "LOCAL_KEY", "endpoint": "http://127.0.0.1:9000", "header": "x-api-key",
+        \\  "methods": ["GET"], "paths": ["/"]}}
+    , .{});
+    defer config.deinit();
+    original.credentials = (try credential_ref.parseConfig(allocator, config.value)).ok;
+
+    inline for (.{ writeContractJson, writeContractJsonV2 }) |write| {
+        var out: std.Io.Writer.Allocating = .init(allocator);
+        defer out.deinit();
+        try write(&original, &out.writer);
+        try std.testing.expect(std.mem.indexOf(u8, out.written(), "WEATHER_KEY") != null);
+        var parsed = try parseFromJson(allocator, out.written());
+        defer parsed.deinit(allocator);
+        try std.testing.expectEqual(@as(usize, 2), parsed.credentials.len);
+        for (original.credentials, parsed.credentials) |want, got| {
+            try std.testing.expectEqualStrings(want.name, got.name);
+            try std.testing.expectEqualStrings(want.env, got.env);
+            try std.testing.expectEqualStrings(want.endpoint, got.endpoint);
+            try std.testing.expectEqualStrings(want.header, got.header);
+            try std.testing.expectEqual(want.scheme == null, got.scheme == null);
+            if (want.scheme) |s| try std.testing.expectEqualStrings(s, got.scheme.?);
+            try std.testing.expectEqual(want.methods, got.methods);
+            try std.testing.expectEqual(want.paths.len, got.paths.len);
+            for (want.paths, got.paths) |wp, gp| try std.testing.expectEqualStrings(wp, gp);
+        }
+    }
+
+    // Each of these is a reference the build could not have written.
+    const prefix = "{\"version\": 22, \"handler\": {\"path\": \"t.ts\"}, \"credentials\": ";
+    const refused = [_][]const u8{
+        prefix ++ "[]}",
+        prefix ++ "[{\"name\": \"w\", \"env\": \"K\", \"endpoint\": \"https://a.example\", \"header\": \"x\", \"methods\": [\"GET\"], \"paths\": [\"/\"]}]}",
+        prefix ++ "[{\"name\": \"w\", \"env\": \"K\", \"endpoint\": \"https://a.example:443\", \"header\": \"X\", \"methods\": [\"GET\"], \"paths\": [\"/\"]}]}",
+        prefix ++ "[{\"name\": \"w\", \"env\": \"K\", \"endpoint\": \"http://a.example:80\", \"header\": \"x\", \"methods\": [\"GET\"], \"paths\": [\"/\"]}]}",
+        prefix ++ "[{\"name\": \"w\", \"env\": \"K\", \"endpoint\": \"https://a.example:443\", \"header\": \"x\", \"paths\": [\"/\"]}]}",
+        prefix ++ "[{\"name\": \"b\", \"env\": \"K\", \"endpoint\": \"https://a.example:443\", \"header\": \"x\", \"methods\": [\"GET\"], \"paths\": [\"/\"]}," ++
+            "{\"name\": \"a\", \"env\": \"K\", \"endpoint\": \"https://a.example:443\", \"header\": \"x\", \"methods\": [\"GET\"], \"paths\": [\"/\"]}]}",
+        prefix ++ "[{\"name\": \"a\", \"env\": \"K\", \"endpoint\": \"https://a.example:443\", \"header\": \"x\", \"methods\": [\"GET\"], \"paths\": [\"/\"]}," ++
+            "{\"name\": \"a\", \"env\": \"K\", \"endpoint\": \"https://a.example:443\", \"header\": \"x\", \"methods\": [\"GET\"], \"paths\": [\"/\"]}]}",
+    };
+    for (refused) |text| {
+        try std.testing.expectError(error.InvalidCredentialRefs, parseFromJson(allocator, text));
+    }
+    const accepted = prefix ++ "[{\"name\": \"w\", \"env\": \"K\", \"endpoint\": \"https://a.example:443\", \"header\": \"x\", \"methods\": [\"GET\"], \"paths\": [\"/\"]}]}";
+    var parsed = try parseFromJson(allocator, accepted);
+    defer parsed.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), parsed.credentials.len);
+}
+
 test "tool schema bytes and validator verdicts agree after a round trip" {
     const allocator = std.testing.allocator;
     var original = try toolCatalogFixture(allocator);
@@ -2105,7 +2170,7 @@ test "a contract with no declaration writes an empty classifications array" {
     defer out.deinit();
     try writeContractJson(&contract, &out.writer);
     try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"classifications\": [],") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"version\": 21,") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"version\": 22,") != null);
 }
 
 test "a contract with no ceiling writes ceiling null and reads it back as null" {
@@ -2176,7 +2241,7 @@ fn ceilingLine(json: []const u8) []const u8 {
 }
 
 fn ceilingJson(comptime body: []const u8) []const u8 {
-    return "{\"version\": 21, \"handler\": {\"path\": \"ceiling.ts\"}, \"ceiling\": " ++ body ++ "}";
+    return "{\"version\": 22, \"handler\": {\"path\": \"ceiling.ts\"}, \"ceiling\": " ++ body ++ "}";
 }
 
 test "ceiling projection refuses a report the build could not have written" {
@@ -2219,7 +2284,7 @@ test "ceiling projection refuses a report the build could not have written" {
 }
 
 fn classificationJson(comptime row: []const u8) []const u8 {
-    return "{\"version\": 21, \"handler\": {\"path\": \"declared.ts\"}, \"classifications\": [" ++ row ++ "]}";
+    return "{\"version\": 22, \"handler\": {\"path\": \"declared.ts\"}, \"classifications\": [" ++ row ++ "]}";
 }
 
 test "classification projection refuses a report the build could not have written" {

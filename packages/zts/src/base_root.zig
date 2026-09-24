@@ -72,6 +72,10 @@ pub const capability_profiles = @import("capability_profiles.zig");
 
 pub const declaration = @import("declaration.zig");
 
+/// Credential references: the deployment-owned description of one upstream
+/// credential and the closed refusal set of its loader (M4 T6).
+pub const credential_ref = @import("credential_ref.zig");
+
 /// The type annotations the TypeScript stripper records as it removes them.
 pub const type_map = @import("type_map.zig");
 

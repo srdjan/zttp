@@ -462,7 +462,7 @@ test "pinned identities match what the contract states" {
     try std.testing.expectEqual(@as(u16, 4), id.certificate_schema);
     try std.testing.expectEqual(@as(u16, 3), id.proof_system);
     try std.testing.expectEqual(@as(u32, 1), id.semantics_epoch);
-    try std.testing.expectEqual(@as(u32, 21), id.handler_contract_version);
+    try std.testing.expectEqual(@as(u32, 22), id.handler_contract_version);
     try std.testing.expectEqual(@as(u32, 2), id.agent_protocol_schema);
 }
 

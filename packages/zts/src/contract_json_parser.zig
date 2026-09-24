@@ -15,6 +15,7 @@ const module_binding = @import("zts-base").module_authorization;
 const json_utils = @import("zts-base").json_utils;
 const tool_schema = @import("zts-base").tool_schema;
 const capability_profiles = @import("zts-base").capability_profiles;
+const credential_ref = @import("zts-base").credential_ref;
 
 const HandlerContract = handler_contract.HandlerContract;
 const RouteInfo = handler_contract.RouteInfo;
@@ -146,6 +147,16 @@ const ToolScopeWire = struct {
 const ToolAuthWire = struct {
     keyEnv: ?WireString = null,
     tenantClaim: ?WireString = null,
+};
+
+const CredentialWire = struct {
+    name: ?WireString = null,
+    env: ?WireString = null,
+    endpoint: ?WireString = null,
+    header: ?WireString = null,
+    scheme: ?WireString = null,
+    methods: ?[]const WireString = null,
+    paths: ?[]const WireString = null,
 };
 
 const ToolWire = struct {
@@ -494,6 +505,7 @@ const ContractWire = struct {
     affordancesDynamic: bool = false,
     tools: []const ToolWire = &.{},
     toolAuth: ?ToolAuthWire = null,
+    credentials: ?[]const CredentialWire = null,
     classifications: []const ClassificationWire = &.{},
     ceiling: ?CeilingWire = null,
     cache: struct {
@@ -735,6 +747,7 @@ fn projectContract(
     contract.affordances_dynamic = wire.affordancesDynamic;
     try projectTools(allocator, wire.tools, &contract);
     try projectToolAuth(allocator, wire.toolAuth, &contract);
+    try projectCredentials(allocator, wire.credentials, &contract);
     try projectClassifications(allocator, wire.classifications, &contract);
     try projectCeiling(allocator, wire.ceiling, &contract);
     contract.cache.namespaces = try projectStringList(allocator, wire.cache.namespaces);
@@ -1062,6 +1075,54 @@ fn projectToolAuth(
     errdefer allocator.free(tenant_claim);
     if (key_env.len == 0 or tenant_claim.len == 0) return error.InvalidToolAuth;
     contract.tool_auth = .{ .key_env = key_env, .tenant_claim = tenant_claim };
+}
+
+/// Project the credential references (M4 T6). The build writes them in the
+/// canonical form `credential_ref.zig` defines, sorted by name, and never an
+/// empty list, so each entry is validated in that form and the set's order is
+/// checked: a contract cannot carry a reference the build could not have made.
+fn projectCredentials(
+    allocator: std.mem.Allocator,
+    wire: ?[]const CredentialWire,
+    contract: *HandlerContract,
+) !void {
+    const entries = wire orelse return;
+    if (entries.len == 0 or entries.len > credential_ref.max_credentials) return error.InvalidCredentialRefs;
+
+    // Decoded strings live in a scratch arena; `validate` copies what it keeps.
+    var scratch = std.heap.ArenaAllocator.init(allocator);
+    defer scratch.deinit();
+    const a = scratch.allocator();
+
+    var refs: std.ArrayList(credential_ref.CredentialRef) = .empty;
+    errdefer {
+        for (refs.items) |*r| r.deinit(allocator);
+        refs.deinit(allocator);
+    }
+    try refs.ensureTotalCapacityPrecise(allocator, entries.len);
+    for (entries) |entry| {
+        const fields: credential_ref.Fields = .{
+            .name = try decodeWireString(a, entry.name orelse return error.InvalidCredentialRefs),
+            .env = try decodeWireString(a, entry.env orelse return error.InvalidCredentialRefs),
+            .endpoint = try decodeWireString(a, entry.endpoint orelse return error.InvalidCredentialRefs),
+            .header = try decodeWireString(a, entry.header orelse return error.InvalidCredentialRefs),
+            .scheme = if (entry.scheme) |s| try decodeWireString(a, s) else null,
+            .methods = try decodeWireList(a, entry.methods orelse return error.InvalidCredentialRefs),
+            .paths = try decodeWireList(a, entry.paths orelse return error.InvalidCredentialRefs),
+        };
+        switch (try credential_ref.validate(allocator, fields, .canonical)) {
+            .ok => |ref| refs.appendAssumeCapacity(ref),
+            .refused => return error.InvalidCredentialRefs,
+        }
+    }
+    if (credential_ref.setOrder(refs.items) != null) return error.InvalidCredentialRefs;
+    contract.credentials = try refs.toOwnedSlice(allocator);
+}
+
+fn decodeWireList(allocator: std.mem.Allocator, wire: []const WireString) ![]const []const u8 {
+    const out = try allocator.alloc([]const u8, wire.len);
+    for (wire, 0..) |item, i| out[i] = try decodeWireString(allocator, item);
+    return out;
 }
 
 /// Project the applied ceiling (M4 T5b). The build derives every field but the
@@ -2084,7 +2145,7 @@ test "parseFromJson compatibility matrix preserves duplicate trailing and overfl
         version: u32,
     }{
         .{ .json = "{\"version\":1,\"version\":23} trailing", .version = 23 },
-        .{ .json = "{\"version\":99999999999999999999}", .version = 21 },
+        .{ .json = "{\"version\":99999999999999999999}", .version = 22 },
     };
     for (cases) |case| {
         var contract = try parseFromJson(std.testing.allocator, case.json);
@@ -2107,7 +2168,7 @@ test "parseFromJson keeps raw structural keys and appends repeated collections" 
     var contract = try parseFromJson(std.testing.allocator, json);
     defer contract.deinit(std.testing.allocator);
 
-    try std.testing.expectEqual(@as(u32, 21), contract.version);
+    try std.testing.expectEqual(@as(u32, 22), contract.version);
     try std.testing.expectEqual(@as(usize, 2), contract.modules.items.len);
     try std.testing.expectEqualStrings("zttp:env", contract.modules.items[0]);
     try std.testing.expectEqualStrings("zttp:cache", contract.modules.items[1]);

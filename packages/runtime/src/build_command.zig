@@ -175,6 +175,7 @@ pub fn compileCommand(allocator: std.mem.Allocator, argv: []const []const u8) !v
         .declaration = compile_context.declarationPtr(),
         .protected_ledger_path = compile_context.ledger_path,
         .tool_auth = compile_context.tool_auth,
+        .credentials = compile_context.credentials,
         .attest_requested = opts.attest_requested,
     });
 }
@@ -192,6 +193,10 @@ const ProjectCompileContext = struct {
     /// the contract, which the executable graph binds, so a deployed artifact
     /// reads the names it was built with and nothing else.
     tool_auth: ?zts.handler_contract.ToolAuth = null,
+    /// zttp.json's credential references (M4 T6), owned. The build writes
+    /// them into the contract, so the graph member that binds the contract
+    /// binds them too.
+    credentials: []zts.handler_contract.CredentialRef = &.{},
 
     fn init(
         allocator: std.mem.Allocator,
@@ -207,6 +212,7 @@ const ProjectCompileContext = struct {
             const names = zts.handler_contract.ToolAuth{ .key_env = auth.key_env, .tenant_claim = auth.tenant_claim };
             context.tool_auth = try names.dupe(allocator);
         }
+        context.credentials = try zts.handler_contract.credential_ref.dupeAll(allocator, project.credentials);
         context.invariant_spec = project.readInvariantSpec(allocator) catch |err| {
             std.debug.print(
                 "Configured invariant specification '{s}' could not be loaded: {s}\n",
@@ -266,6 +272,7 @@ const ProjectCompileContext = struct {
         if (self.ledger_path) |path| allocator.free(path);
         if (self.declaration) |*decl| decl.deinit();
         if (self.tool_auth) |*auth| auth.deinit(allocator);
+        zts.handler_contract.credential_ref.freeAll(allocator, self.credentials);
         self.* = .{};
     }
 
@@ -462,6 +469,7 @@ pub fn buildCommand(allocator: std.mem.Allocator, argv: []const []const u8) !voi
         .declaration = artifact.compile_context.declarationPtr(),
         .protected_ledger_path = artifact.compile_context.ledger_path,
         .tool_auth = artifact.compile_context.tool_auth,
+        .credentials = artifact.compile_context.credentials,
         .attest_requested = opts.attest_requested,
     });
 
@@ -577,6 +585,7 @@ pub fn localDeployCommand(allocator: std.mem.Allocator, argv: []const []const u8
         .declaration = artifact.compile_context.declarationPtr(),
         .protected_ledger_path = artifact.compile_context.ledger_path,
         .tool_auth = artifact.compile_context.tool_auth,
+        .credentials = artifact.compile_context.credentials,
         .ledger_service_name = artifact.project_name,
         .attest_requested = opts.attest_requested,
     });
@@ -988,6 +997,9 @@ pub const BuildRequest = struct {
     declaration: ?*const zts.declaration.Declaration = null,
     /// zttp.json's `auth` names (M4 T5), written into the contract. Borrowed.
     tool_auth: ?zts.handler_contract.ToolAuth = null,
+    /// zttp.json's credential references (M4 T6), written into the
+    /// contract. Borrowed.
+    credentials: []const zts.handler_contract.CredentialRef = &.{},
     protected_ledger_path: ?[]const u8 = null,
     /// Service name to record in the proof ledger entry. Null when the
     /// build is not part of a named project (`compile`/`build` paths);
@@ -1162,6 +1174,13 @@ fn runBuild(
         if (compiled.contract) |*contract| {
             if (contract.tool_auth) |*prior| prior.deinit(allocator);
             contract.tool_auth = try auth.dupe(allocator);
+        }
+    }
+    if (request.credentials.len > 0) {
+        if (compiled.contract) |*contract| {
+            zts.handler_contract.credential_ref.freeAll(allocator, contract.credentials);
+            contract.credentials = &.{};
+            contract.credentials = try zts.handler_contract.credential_ref.dupeAll(allocator, request.credentials);
         }
     }
 

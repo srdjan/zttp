@@ -323,6 +323,43 @@ fn writeContractJsonVersion(
         try writer.writeAll(" },\n");
     }
 
+    // credentials (M4 T6): the references in their canonical form, sorted by
+    // name, written only when the project configures one, so a contract
+    // without them keeps its earlier bytes. Names and rules, never a value.
+    if (contract.credentials.len > 0) {
+        try writer.writeAll("  \"credentials\": [");
+        for (contract.credentials, 0..) |ref, i| {
+            if (i > 0) try writer.writeAll(",");
+            try writer.writeAll("\n    { \"name\": ");
+            try writeJsonString(writer, ref.name);
+            try writer.writeAll(", \"env\": ");
+            try writeJsonString(writer, ref.env);
+            try writer.writeAll(", \"endpoint\": ");
+            try writeJsonString(writer, ref.endpoint);
+            try writer.writeAll(", \"header\": ");
+            try writeJsonString(writer, ref.header);
+            if (ref.scheme) |scheme| {
+                try writer.writeAll(", \"scheme\": ");
+                try writeJsonString(writer, scheme);
+            }
+            try writer.writeAll(", \"methods\": [");
+            var methods = ref.methods.iterator();
+            var first = true;
+            while (methods.next()) |method| {
+                if (!first) try writer.writeAll(", ");
+                first = false;
+                try writeJsonString(writer, @tagName(method));
+            }
+            try writer.writeAll("], \"paths\": [");
+            for (ref.paths, 0..) |path, j| {
+                if (j > 0) try writer.writeAll(", ");
+                try writeJsonString(writer, path);
+            }
+            try writer.writeAll("] }");
+        }
+        try writer.writeAll("\n  ],\n");
+    }
+
     // classifications (the M4 T4 P8 report: one entry per declared
     // classification with the status the flow check reached)
     try writer.writeAll("  \"classifications\": [");

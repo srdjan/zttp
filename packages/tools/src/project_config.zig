@@ -52,6 +52,10 @@ pub const ProjectConfig = struct {
     /// and `auth.tenantClaim` names the claim that carries the tenant. Names
     /// only; the key itself never appears in zttp.json.
     auth: ?AuthConfig = null,
+    /// The credential references (M4 T6): zttp.json's `credentials`, validated
+    /// and sorted by name. Names and rules only; no value ever appears in
+    /// zttp.json. Empty when the project configures none. Owned.
+    credentials: []zts.handler_contract.CredentialRef = &.{},
 
     pub fn deinit(self: *ProjectConfig, allocator: std.mem.Allocator) void {
         allocator.free(self.root_dir);
@@ -69,6 +73,7 @@ pub const ProjectConfig = struct {
         for (self.outbound_hosts) |host| allocator.free(host);
         allocator.free(self.outbound_hosts);
         if (self.auth) |*auth| auth.deinit(allocator);
+        zts.handler_contract.credential_ref.freeAll(allocator, self.credentials);
     }
 
     pub fn resolvePath(self: *const ProjectConfig, allocator: std.mem.Allocator, path: []const u8) ![]u8 {
@@ -216,6 +221,7 @@ pub fn loadAbsolute(
     };
     errdefer config.deinit(allocator);
     config.auth = try parseAuthField(allocator, obj);
+    config.credentials = try parseCredentialsField(allocator, obj);
 
     if ((config.invariants == null) != (config.ledger == null)) return error.IncompleteInvariantConfig;
     // Every project-aware command rejects an unreadable or unsupported
@@ -359,6 +365,27 @@ fn parseAuthField(allocator: std.mem.Allocator, obj: std.json.ObjectMap) !?AuthC
     const owned_key_env = try allocator.dupe(u8, key_env.string);
     errdefer allocator.free(owned_key_env);
     return .{ .key_env = owned_key_env, .tenant_claim = try allocator.dupe(u8, tenant_claim.string) };
+}
+
+/// Read the `credentials` object (M4 T6 design note, section 3). A reference
+/// that breaks a rule refuses the whole manifest and names the rule and the
+/// reference, because a credential read half right could reach the wrong
+/// destination.
+fn parseCredentialsField(allocator: std.mem.Allocator, obj: std.json.ObjectMap) ![]zts.handler_contract.CredentialRef {
+    const value = obj.get("credentials") orelse return &.{};
+    return switch (try zts.handler_contract.credential_ref.parseConfig(allocator, value)) {
+        .ok => |refs| refs,
+        .refused => |refused| {
+            if (!@import("builtin").is_test) {
+                std.debug.print("zttp.json credential '{s}' refused ({s}): {s}\n", .{
+                    refused.name(),
+                    @tagName(refused.reason),
+                    refused.reason.sentence(),
+                });
+            }
+            return error.InvalidCredentialConfig;
+        },
+    };
 }
 
 fn parseBoolField(obj: std.json.ObjectMap, key: []const u8, default_value: bool) !bool {
@@ -594,5 +621,56 @@ test "project config reads the auth names and refuses any other auth shape" {
         const manifest = try tmp.dir.realPathFileAlloc(io, "zttp.json", a);
         defer a.free(manifest);
         try std.testing.expectError(error.InvalidAuthConfig, discover(a, io, manifest));
+    }
+}
+
+test "project config reads the credential references and refuses a broken one" {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+
+    {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        try tmp.dir.writeFile(io, .{ .sub_path = "zttp.json", .data =
+            \\{"credentials": {
+            \\  "weather": {"env": "WEATHER_KEY", "endpoint": "https://api.weather.example", "header": "authorization",
+            \\    "scheme": "Bearer", "methods": ["GET"], "paths": ["/v1/forecast"]},
+            \\  "billing": {"env": "BILLING_KEY", "endpoint": "https://billing.example:8443", "header": "x-api-key",
+            \\    "methods": ["POST"], "paths": ["/charges"]}}}
+        });
+        const manifest = try tmp.dir.realPathFileAlloc(io, "zttp.json", a);
+        defer a.free(manifest);
+        var config = (try discover(a, io, manifest)).?;
+        defer config.deinit(a);
+        try std.testing.expectEqual(@as(usize, 2), config.credentials.len);
+        try std.testing.expectEqualStrings("billing", config.credentials[0].name);
+        try std.testing.expectEqualStrings("https://billing.example:8443", config.credentials[0].endpoint);
+        try std.testing.expectEqualStrings("weather", config.credentials[1].name);
+        try std.testing.expectEqualStrings("WEATHER_KEY", config.credentials[1].env);
+    }
+
+    {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        try tmp.dir.writeFile(io, .{ .sub_path = "zttp.json", .data = "{}" });
+        const manifest = try tmp.dir.realPathFileAlloc(io, "zttp.json", a);
+        defer a.free(manifest);
+        var config = (try discover(a, io, manifest)).?;
+        defer config.deinit(a);
+        try std.testing.expectEqual(@as(usize, 0), config.credentials.len);
+    }
+
+    const refused = [_][]const u8{
+        "{\"credentials\": []}",
+        "{\"credentials\": {\"w\": {\"env\": \"K\", \"endpoint\": \"http://api.example\", \"header\": \"x\", \"methods\": [\"GET\"], \"paths\": [\"/\"]}}}",
+        "{\"credentials\": {\"w\": {\"env\": \"K\", \"endpoint\": \"https://api.example\", \"header\": \"x\", \"methods\": [\"GET\"], \"paths\": [\"/\"], \"value\": \"s3cret\"}}}",
+    };
+    for (refused) |body| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        try tmp.dir.writeFile(io, .{ .sub_path = "zttp.json", .data = body });
+        const manifest = try tmp.dir.realPathFileAlloc(io, "zttp.json", a);
+        defer a.free(manifest);
+        try std.testing.expectError(error.InvalidCredentialConfig, discover(a, io, manifest));
     }
 }

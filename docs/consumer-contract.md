@@ -614,7 +614,7 @@ Pinned identities, each compared by equality:
 | Certificate schema | 4 | `packages/proof-checker/src/proof_system.zig` |
 | Proof system | `zttp_pcc_v3` = 3 | `packages/proof-checker/src/proof_system.zig` |
 | Semantics epoch | 1 | `packages/proof-checker/src/proof_system.zig` |
-| Handler contract version | 21 | `packages/zts/src/contract_types.zig` |
+| Handler contract version | 22 | `packages/zts/src/contract_types.zig` |
 | Agent protocol schema | 2 | [Agent Protocol v2](internals/agent-protocol-v2.md) |
 
 ### 6.1 The vocabulary envelope
