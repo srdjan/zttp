@@ -54,7 +54,12 @@ pub fn installState(
     const token = mb.pushActiveModuleContext(ctx, service_module.binding.specifier, binding.required_capabilities);
     defer mb.popActiveModuleContext(token);
 
-    if (ctx.getModuleState(service_module.ServiceState, MODULE_STATE_SLOT)) |existing| {
+    // The module reads its state through the SDK's `getModuleState`, which
+    // unwraps an `SdkStateEnvelope`, so the state is installed in one. A bare
+    // pointer would have the module read the first word of `base` as the
+    // envelope's user pointer.
+    if (mb.sdk_bridge.getSdkModuleStatePtr(ctx, MODULE_STATE_SLOT)) |existing_ptr| {
+        const existing: *service_module.ServiceState = @ptrCast(@alignCast(existing_ptr));
         const installed: *InstalledState = @fieldParentPtr("base", existing);
         installed.base.deinitSelf();
         installed.runtime_ptr = runtime_ptr;
@@ -71,13 +76,13 @@ pub fn installState(
         .call_fn = call_fn,
         .base = service_module.ServiceState.init(ctx.allocator, @ptrCast(installed), InstalledState.sdkCall),
     };
-    // setModuleState (which registers the deinit adapter) is not reached if
+    // installSdkModuleState (which registers the deinit adapter) is not reached if
     // populateServices fails, so the embedded ServiceState's hashmap and any
     // partial registrations would leak with only the destroy errdefer. Free the
     // base too; errdefers run in reverse, so this fires before destroy.
     errdefer installed.base.deinitSelf();
     try populateServices(ctx, &installed.base, ctx.allocator, system_path);
-    ctx.setModuleState(MODULE_STATE_SLOT, @ptrCast(&installed.base), &stateDeinitAdapter);
+    try mb.sdk_bridge.installSdkModuleState(ctx, MODULE_STATE_SLOT, @ptrCast(&installed.base), sdkDeinit);
 }
 
 fn populateServices(
@@ -103,7 +108,7 @@ fn populateServices(
     }
 }
 
-fn stateDeinitAdapter(ptr: *anyopaque, _: std.mem.Allocator) void {
+fn sdkDeinit(ptr: *anyopaque) callconv(.c) void {
     const base: *service_module.ServiceState = @ptrCast(@alignCast(ptr));
     const installed: *InstalledState = @fieldParentPtr("base", base);
     const allocator = base.allocator;

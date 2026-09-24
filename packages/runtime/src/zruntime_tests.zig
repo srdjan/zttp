@@ -5775,10 +5775,31 @@ const CredentialUpstream = struct {
         return std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}{s}", .{ self.port, path });
     }
 
+    /// Send `/__stop` and join. A handler normally asks for it last; when a
+    /// handler fails before that, this stop ends the thread instead of
+    /// leaving it in `accept`. After the handler's own stop, this one sits
+    /// unread in the backlog.
+    fn stop(self: *CredentialUpstream) void {
+        const thread = self.thread orelse return;
+        self.sendStop() catch {};
+        thread.join();
+        self.thread = null;
+    }
+
+    fn sendStop(self: *CredentialUpstream) !void {
+        const io = self.io_backend.io();
+        const address = try std.Io.net.IpAddress.parseIp4("127.0.0.1", self.port);
+        var stream = try address.connect(io, .{ .mode = .stream });
+        defer stream.close(io);
+        var out_buf: [64]u8 = undefined;
+        var writer = stream.writer(io, &out_buf);
+        try writer.interface.writeAll("GET /__stop HTTP/1.1\r\n\r\n");
+        try writer.interface.flush();
+    }
+
     /// Join after the handler asked for `/__stop`, then release everything.
     fn deinit(self: *CredentialUpstream) void {
-        if (self.thread) |thread| thread.join();
-        self.thread = null;
+        self.stop();
         self.listener.deinit(self.io_backend.io());
         self.io_backend.deinit();
         for (self.captured.items) |*captured| captured.deinit(std.testing.allocator);
@@ -5787,8 +5808,7 @@ const CredentialUpstream = struct {
 
     /// The requests the runtime sent before `/__stop`. Joins first.
     fn requests(self: *CredentialUpstream) ![]const TestCapturedRequest {
-        if (self.thread) |thread| thread.join();
-        self.thread = null;
+        self.stop();
         const err_int = self.thread_error.swap(0, .acq_rel);
         if (err_int != 0) return @errorFromInt(err_int);
         return self.captured.items;
@@ -6311,4 +6331,48 @@ test "a POST with no body is sent with an empty body on every sender" {
     for (requests) |request| {
         try std.testing.expectEqualStrings("0", request.getHeader("content-length").?);
     }
+}
+
+// `zttp:service` reads its state through the SDK's `getModuleState`, which
+// unwraps an envelope, like `zttp:fetch`. No runtime test called
+// `serviceCall` before this one.
+test "serviceCall reaches the upstream a system file names" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var upstream = try CredentialUpstream.init(.ok);
+    defer upstream.deinit();
+    try upstream.start();
+    const base = try upstream.url(allocator, "");
+    var endpoint_buf: [512]u8 = undefined;
+    const endpoints = [_][]const u8{egressEndpoint(base, &endpoint_buf)};
+
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const dir = try durableTestDirPath(allocator, &tmp_dir);
+    const system_path = try std.fmt.allocPrint(allocator, "{s}/system.json", .{dir});
+    const manifest = try std.fmt.allocPrint(allocator,
+        \\{{ "version": 1, "handlers": [
+        \\  {{ "name": "weather", "path": "{s}/weather.ts", "baseUrl": "{s}" }}
+        \\] }}
+    , .{ dir, base });
+    try zq.file_io.writeFile(allocator, system_path, manifest);
+
+    const handler_code = try std.fmt.allocPrint(allocator,
+        \\import {{ serviceCall }} from "zttp:service";
+        \\function handler(req) {{
+        \\  const res = serviceCall("weather", "GET /v1/forecast");
+        \\  fetchSync("{s}/__stop");
+        \\  return Response.json({{ status: res.status, body: res.body }});
+        \\}}
+    , .{base});
+    const body = try runCredentialHandler(allocator, .{ .system_config_path = system_path }, &endpoints, null, handler_code);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, body, .{});
+    try std.testing.expectEqual(@as(i64, 200), parsed.value.object.get("status").?.integer);
+    try std.testing.expectEqualStrings("forecast", parsed.value.object.get("body").?.string);
+    const requests = try upstream.requests();
+    try std.testing.expectEqual(@as(usize, 1), requests.len);
+    try std.testing.expectEqualStrings("/v1/forecast", requests[0].path);
 }
