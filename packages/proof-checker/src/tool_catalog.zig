@@ -32,6 +32,9 @@
 //!   export, export_count times, strictly increasing by (module, name):
 //!     module           string  1..64
 //!     name             string  1..64
+//!   credential_count u16     0..64
+//!   credential, credential_count times, strictly increasing by bytes:
+//!     name             string  1..64: a credential the tool may use
 //! trailing bytes: refused
 //! ```
 //!
@@ -41,13 +44,17 @@
 //! string property of the input schema is a build rule, and the runtime finds
 //! the field in the compiled schema it validates with.
 //!
-//! Schema 2 (M4 T5) added the two scope fields. Schema 1 is refused: no
-//! artifact carrying it exists outside tests.
+//! Schema 2 (M4 T5) added the two scope fields. Schema 3 (M4 T6) added the
+//! credential names: the tool's credential grant, which the runtime checks
+//! before it injects a credential. The kernel checks their lengths, encoding,
+//! and order; that each names a reference the project defines is a build
+//! rule. Schemas 1 and 2 are refused: no artifact carrying them exists
+//! outside tests.
 
 const std = @import("std");
 
 pub const magic = "ZTCAT1\x00\x00";
-pub const schema_version: u16 = 2;
+pub const schema_version: u16 = 3;
 pub const header_size: usize = magic.len + 2 + 2;
 
 pub const digest_domain = "zttp-tool-catalog-v1";
@@ -65,6 +72,8 @@ pub const max_max_input_bytes: u32 = 1048576;
 pub const max_scope_field_bytes: u32 = 64;
 pub const max_exports: u16 = 256;
 pub const max_export_field_bytes: u32 = 64;
+pub const max_credentials: u16 = 64;
+pub const max_credential_name_bytes: u32 = 64;
 
 /// Every refusal the decoder can report. Closed, and each member names one
 /// distinct defect so a diagnostic can say which rule the bytes broke.
@@ -92,6 +101,11 @@ pub const DecodeError = error{
     /// Exports must be strictly increasing by (module, name), which also
     /// refuses a duplicate export.
     ExportsNotOrdered,
+    CredentialCountOutOfRange,
+    CredentialNameLength,
+    /// Credential names must be strictly increasing by byte order, which also
+    /// refuses a duplicate.
+    CredentialsNotOrdered,
     InvalidUtf8,
     TrailingData,
 };
@@ -122,6 +136,8 @@ pub const Entry = struct {
     /// The input field bound to the verified subject, or null.
     scope_subject: ?[]const u8,
     exports: ExportIterator,
+    /// The credential names the tool may use (schema 3).
+    credentials: NameIterator,
 };
 
 /// A decoded catalog. Only `decode` builds one, so the bytes it holds have
@@ -184,6 +200,22 @@ pub const ExportIterator = struct {
     }
 };
 
+/// Length-prefixed names, one after another.
+pub const NameIterator = struct {
+    bytes: []const u8,
+    pos: usize,
+    remaining: u16,
+
+    pub fn next(self: *NameIterator) DecodeError!?[]const u8 {
+        if (self.remaining == 0) return null;
+        var reader = Reader{ .bytes = self.bytes, .pos = self.pos };
+        const name = try reader.string(1, max_credential_name_bytes, error.CredentialNameLength);
+        self.pos = reader.pos;
+        self.remaining -= 1;
+        return name;
+    }
+};
+
 pub const EntryIterator = struct {
     bytes: []const u8,
     pos: usize,
@@ -224,6 +256,14 @@ fn readEntry(reader: *Reader) DecodeError!Entry {
     reader.pos = walk.pos;
     exports.bytes = reader.bytes[0..reader.pos];
 
+    const credential_count = try reader.int(u16);
+    if (credential_count > max_credentials) return error.CredentialCountOutOfRange;
+    var credentials = NameIterator{ .bytes = reader.bytes, .pos = reader.pos, .remaining = credential_count };
+    var credential_walk = credentials;
+    while (try credential_walk.next()) |_| {}
+    reader.pos = credential_walk.pos;
+    credentials.bytes = reader.bytes[0..reader.pos];
+
     return .{
         .name = name,
         .method = method,
@@ -237,6 +277,7 @@ fn readEntry(reader: *Reader) DecodeError!Entry {
         .scope_tenant = scope_tenant,
         .scope_subject = scope_subject,
         .exports = exports,
+        .credentials = credentials,
     };
 }
 
@@ -269,6 +310,16 @@ fn validateEntry(entry: Entry) DecodeError!void {
             if (Export.order(prev, item) != .lt) return error.ExportsNotOrdered;
         }
         previous = item;
+    }
+
+    var credentials = entry.credentials;
+    var previous_credential: ?[]const u8 = null;
+    while (try credentials.next()) |name| {
+        try validUtf8(name);
+        if (previous_credential) |prev| {
+            if (std.mem.order(u8, prev, name) != .lt) return error.CredentialsNotOrdered;
+        }
+        previous_credential = name;
     }
 }
 
@@ -367,6 +418,7 @@ pub const test_support = struct {
         scope_tenant: ?[]const u8 = null,
         scope_subject: ?[]const u8 = null,
         exports: []const SampleExport = &.{},
+        credentials: []const []const u8 = &.{},
     };
 
     pub fn writeEntry(w: *Writer, entry: SampleEntry) void {
@@ -386,6 +438,8 @@ pub const test_support = struct {
             w.string(item.module);
             w.string(item.name);
         }
+        w.int(u16, @intCast(entry.credentials.len));
+        for (entry.credentials) |name| w.string(name);
     }
 
     pub fn writeCatalog(w: *Writer, entries: []const SampleEntry) void {
@@ -415,6 +469,7 @@ pub const test_support = struct {
             .output_schema = "{\"type\":\"number\"}",
             .max_input_bytes = 1048576,
             .scope_tenant = "tenant_id",
+            .credentials = &.{ "billing", "weather" },
         },
     };
 
@@ -470,6 +525,12 @@ test "a valid two-entry catalog decodes and iterates every field" {
     try testing.expectEqual(@as(?[]const u8, null), lookup.scope_subject);
     var no_exports = lookup.exports;
     try testing.expectEqual(@as(?Export, null), try no_exports.next());
+    var lookup_credentials = lookup.credentials;
+    try testing.expectEqualStrings("billing", (try lookup_credentials.next()).?);
+    try testing.expectEqualStrings("weather", (try lookup_credentials.next()).?);
+    try testing.expectEqual(@as(?[]const u8, null), try lookup_credentials.next());
+    var echo_credentials = echo.credentials;
+    try testing.expectEqual(@as(?[]const u8, null), try echo_credentials.next());
 
     try testing.expectEqual(@as(?Entry, null), try it.next());
 
@@ -527,6 +588,30 @@ fn unsupportedSchema(w: *test_support.Writer) void {
     w.int(u16, 1);
     test_support.writeEntry(w, test_support.sample_entries[0]);
 }
+
+/// Schema 2, the layout before the credential names, is refused too.
+fn schemaTwo(w: *test_support.Writer) void {
+    w.raw(magic);
+    w.int(u16, 2);
+    w.int(u16, 1);
+    test_support.writeEntry(w, test_support.sample_entries[0]);
+}
+
+/// An entry with no exports that claims one credential more than the bound.
+fn tooManyCredentials(w: *test_support.Writer) void {
+    w.raw(magic);
+    w.int(u16, schema_version);
+    w.int(u16, 1);
+    const fields = [_][]const u8{ "echo", "POST", "/x", "d", "I", "{}", "O", "{}" };
+    for (fields) |value| w.string(value);
+    w.int(u32, 1);
+    w.string("");
+    w.string("");
+    w.int(u16, 0);
+    w.int(u16, max_credentials + 1);
+}
+
+const credential_65 = "c" ** (max_credential_name_bytes + 1);
 
 fn zeroEntries(w: *test_support.Writer) void {
     w.raw(magic);
@@ -598,6 +683,7 @@ const cases = [_]Case{
     .{ .expected = error.Truncated, .custom = sampleTruncated },
     .{ .expected = error.BadMagic, .custom = badMagic },
     .{ .expected = error.UnsupportedSchema, .custom = unsupportedSchema },
+    .{ .expected = error.UnsupportedSchema, .custom = schemaTwo },
     .{ .expected = error.EntryCountOutOfRange, .custom = zeroEntries },
     .{ .expected = error.EntryCountOutOfRange, .custom = tooManyEntries },
     .{ .expected = error.NameLength, .entries = &.{.{ .name = "", .path = "/x" }} },
@@ -630,6 +716,12 @@ const cases = [_]Case{
     .{ .expected = error.ExportsNotOrdered, .entries = &.{.{ .name = "a", .path = "/x", .exports = &.{ .{ .module = "m", .name = "g" }, .{ .module = "m", .name = "f" } } }} },
     .{ .expected = error.ExportsNotOrdered, .entries = &.{.{ .name = "a", .path = "/x", .exports = &.{ .{ .module = "n", .name = "a" }, .{ .module = "m", .name = "z" } } }} },
     .{ .expected = error.ExportsNotOrdered, .entries = &.{.{ .name = "a", .path = "/x", .exports = &.{ .{ .module = "m", .name = "f" }, .{ .module = "m", .name = "f" } } }} },
+    .{ .expected = error.CredentialCountOutOfRange, .custom = tooManyCredentials },
+    .{ .expected = error.CredentialNameLength, .entries = &.{.{ .name = "a", .path = "/x", .credentials = &.{""} }} },
+    .{ .expected = error.CredentialNameLength, .entries = &.{.{ .name = "a", .path = "/x", .credentials = &.{credential_65} }} },
+    .{ .expected = error.CredentialsNotOrdered, .entries = &.{.{ .name = "a", .path = "/x", .credentials = &.{ "weather", "billing" } }} },
+    .{ .expected = error.CredentialsNotOrdered, .entries = &.{.{ .name = "a", .path = "/x", .credentials = &.{ "weather", "weather" } }} },
+    .{ .expected = error.InvalidUtf8, .entries = &.{.{ .name = "a", .path = "/x", .credentials = &.{"\xfe"} }} },
     .{ .expected = error.InvalidUtf8, .entries = &.{.{ .name = "\xff", .path = "/x" }} },
     .{ .expected = error.InvalidUtf8, .entries = &.{.{ .name = "a", .path = "/x", .input_schema = "{\"\xc3\"}" }} },
     .{ .expected = error.InvalidUtf8, .entries = &.{.{ .name = "a", .path = "/x", .exports = &.{.{ .module = "m", .name = "\x80" }} }} },

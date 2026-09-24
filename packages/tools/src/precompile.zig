@@ -1146,6 +1146,26 @@ pub fn refuseCeilingBreach(
     return error.CeilingBreached;
 }
 
+/// Refuse a build whose tool names a credential the project does not define,
+/// or calls it at an endpoint other than the reference names (M4 T6 design
+/// note, section 4). A build error with the tool, the credential, and the
+/// reason named, not a ZTS diagnostic, so the policy hash does not move.
+pub fn refuseCredentialBreach(
+    contract: *const HandlerContract,
+    refs: ?[]const handler_contract.CredentialRef,
+    filename: []const u8,
+) !void {
+    const configured = refs orelse return;
+    const breach = handler_contract.firstCredentialBreach(contract, configured) orelse return;
+    if (!builtin.is_test) {
+        debugPrint(
+            "Credential refused {s}: tool \"{s}\" names credential \"{s}\" at {s}: {s}\n",
+            .{ filename, breach.tool, breach.credential, breach.endpoint, breach.reason.sentence() },
+        );
+    }
+    return error.CredentialBreached;
+}
+
 fn ceilingBreachHint(reason: handler_contract.CeilingBreachReason) []const u8 {
     return switch (reason) {
         .capabilities_unknown => "The build produced no capability matrix, so the ceiling cannot be shown to hold.",
@@ -2016,6 +2036,11 @@ pub const CompileOptions = struct {
     /// with `error.RequiredClassificationAbsent`. A handler outside the
     /// declaration's ceiling refuses the build with `error.CeilingBreached`.
     declaration: ?*const zts.declaration.Declaration = null,
+    /// The project's credential references (M4 T6). Borrowed. When set, a
+    /// tool that names a credential no reference defines, or calls it at
+    /// another endpoint, refuses the build with `error.CredentialBreached`.
+    /// Null means the caller has no project context and nothing is compared.
+    credentials: ?[]const handler_contract.CredentialRef = null,
 };
 
 test "formatIsoTimestamp produces ISO-8601 UTC" {
@@ -2489,6 +2514,7 @@ pub fn compileHandler(
             errdefer if (contract) |*built| built.deinit(allocator);
             if (contract) |*built| try refuseRequiredAbsent(built, filename);
             if (contract) |*built| try refuseCeilingBreach(built, opts.declaration, filename);
+            if (contract) |*built| try refuseCredentialBreach(built, opts.credentials, filename);
 
             return .{
                 .bytecode = bytecode_data,
@@ -2552,6 +2578,7 @@ pub fn compileHandler(
         // After the last write to the properties: `read_only` is final once
         // `buildContractWithPolicy` returns, and nothing below writes it.
         try refuseCeilingBreach(&contract.?, opts.declaration, filename);
+        try refuseCredentialBreach(&contract.?, opts.credentials, filename);
     }
 
     // Generate exhaustive test cases from path analysis.

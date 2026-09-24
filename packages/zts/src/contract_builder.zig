@@ -1656,6 +1656,9 @@ pub const ContractBuilder = struct {
         if (walk.incomplete) {
             return self.refuseToolCatalog(contract, .exports_unanalyzable, name, fields[field_route], route_key);
         }
+        if (walk.refusal) |refusal| {
+            return self.refuseToolCatalog(contract, refusal.reason, name, refusal.node, refusal.detail);
+        }
         // Decision 6: a tool may not read state a separate call wrote. Checked
         // over the whole reach, so a helper that reads the cache counts too.
         for (walk.exports.items) |exp| {
@@ -1687,6 +1690,9 @@ pub const ContractBuilder = struct {
         if (scope.subject) |field| entry.scope_subject = try self.allocator.dupe(u8, field);
         entry.reachable_exports = walk.exports;
         walk.exports = .empty;
+        std.mem.sort(contract_types.ToolCredential, walk.credentials.items, {}, contract_types.ToolCredential.lessThan);
+        entry.credentials = walk.credentials;
+        walk.credentials = .empty;
         try state.entries.append(self.allocator, entry);
     }
 
@@ -1907,14 +1913,31 @@ pub const ContractBuilder = struct {
         });
     }
 
+    /// A credential rule a route breaks (M4 T6). `detail` is static text.
+    const WalkRefusal = struct {
+        reason: contract_types.ToolCatalogRefusal,
+        node: NodeIndex,
+        detail: []const u8,
+    };
+
     const ExportWalk = struct {
         exports: std.ArrayList(contract_types.ToolExport) = .empty,
         seen: std.AutoHashMapUnmanaged(NodeIndex, void) = .empty,
         /// Set when the walk met a node it cannot read. The export list is then
         /// a lower bound, not the set, and the caller refuses the tool.
         incomplete: bool = false,
+        /// The credentials the route names (M4 T6), one per (name, endpoint).
+        credentials: std.ArrayList(contract_types.ToolCredential) = .empty,
+        /// The `fetch` identifiers this walk met as the callee of a call. Any
+        /// other mention of `fetch` is `fetch_as_value`.
+        direct_callees: std.AutoHashMapUnmanaged(NodeIndex, void) = .empty,
+        /// The first credential rule the route breaks, which refuses the tool.
+        refusal: ?WalkRefusal = null,
 
         fn deinit(walk: *ExportWalk, allocator: std.mem.Allocator) void {
+            for (walk.credentials.items) |*c| c.deinit(allocator);
+            walk.credentials.deinit(allocator);
+            walk.direct_callees.deinit(allocator);
             for (walk.exports.items) |*e| e.deinit(allocator);
             walk.exports.deinit(allocator);
             walk.seen.deinit(allocator);
@@ -2015,6 +2038,7 @@ pub const ContractBuilder = struct {
             },
             .call, .method_call => {
                 const call = self.ir_view.getCall(node) orelse return self.markIncomplete(walk);
+                try self.checkToolFetchCall(walk, node, call);
                 try self.walkToolExports(walk, call.callee);
                 for (0..call.args_count) |k| try self.walkToolExports(walk, self.ir_view.getListIndex(call.args_start, @intCast(k)));
             },
@@ -2115,6 +2139,9 @@ pub const ContractBuilder = struct {
         // exports that carry contract extractions, so `sha256` is not in it.
         for (self.factsRef().imports.items) |record| {
             if (record.slot != binding.slot) continue;
+            if (isFetchExport(record.module_specifier, record.imported_name, "fetch") and !walk.direct_callees.contains(node)) {
+                self.walkRefuse(walk, .fetch_as_value, node, "fetch");
+            }
             return self.addToolExport(walk, record.module_specifier, record.imported_name);
         }
         switch (binding.kind) {
@@ -2129,6 +2156,105 @@ pub const ContractBuilder = struct {
                 try self.walkToolExports(walk, decl_init);
             },
         }
+    }
+
+    fn isFetchExport(module: []const u8, imported: []const u8, name: []const u8) bool {
+        return std.mem.eql(u8, module, "zttp:fetch") and std.mem.eql(u8, imported, name);
+    }
+
+    /// Record the first credential rule a route breaks; later ones are not
+    /// reported, because the first already refuses the tool.
+    fn walkRefuse(_: *const ContractBuilder, walk: *ExportWalk, reason: contract_types.ToolCatalogRefusal, node: NodeIndex, detail: []const u8) void {
+        if (walk.refusal == null) walk.refusal = .{ .reason = reason, .node = node, .detail = detail };
+    }
+
+    /// The `zttp:fetch` export a callee names, or null.
+    fn fetchCallee(self: *const ContractBuilder, callee: NodeIndex) ?[]const u8 {
+        if (self.ir_view.getTag(callee) != .identifier) return null;
+        const binding = self.ir_view.getBinding(callee) orelse return null;
+        for (self.factsRef().imports.items) |record| {
+            if (record.slot != binding.slot) continue;
+            if (!std.mem.eql(u8, record.module_specifier, "zttp:fetch")) return null;
+            return record.imported_name;
+        }
+        return null;
+    }
+
+    /// The credential rules of a `zttp:fetch` call in a tool route (M4 T6
+    /// design note, section 4). The runtime reads `credential` from whatever
+    /// options object the call receives, so the build must see that object
+    /// whole: a `fetch` call takes a string literal URL and, when present, an
+    /// object literal of options with no spread, and its `credential` is a
+    /// string literal. `fetchWithRetry` and a `durable` fetch may not carry one.
+    /// The runtime refuses a credential on every sender but a plain `fetch`, so
+    /// a `fetchWithRetry` whose options the build cannot see is not refused here.
+    fn checkToolFetchCall(self: *ContractBuilder, walk: *ExportWalk, node: NodeIndex, call: Node.CallExpr) !void {
+        const export_name = self.fetchCallee(call.callee) orelse return;
+        const is_fetch = std.mem.eql(u8, export_name, "fetch");
+        if (is_fetch) try walk.direct_callees.put(self.allocator, call.callee, {});
+        if (call.args_count == 0) return;
+
+        const first = self.ir_view.getListIndex(call.args_start, 0);
+        const first_tag = self.ir_view.getTag(first) orelse return self.walkRefuse(walk, .fetch_arguments_not_literal, node, "the URL");
+        // `fetch(init)` reads the URL and every option from one object, and
+        // then ignores a second argument; `fetch(url, init?)` reads two.
+        var url_node: NodeIndex = null_node;
+        var options_node: NodeIndex = null_node;
+        switch (first_tag) {
+            .lit_string => {
+                url_node = first;
+                if (call.args_count > 1) options_node = self.ir_view.getListIndex(call.args_start, 1);
+            },
+            .object_literal => options_node = first,
+            else => {
+                if (is_fetch) self.walkRefuse(walk, .fetch_arguments_not_literal, first, "the URL");
+                return;
+            },
+        }
+        if (options_node == null_node) return;
+        if (self.ir_view.getTag(options_node) != .object_literal) {
+            if (is_fetch) self.walkRefuse(walk, .fetch_arguments_not_literal, options_node, "the options");
+            return;
+        }
+
+        const obj = self.ir_view.getObject(options_node) orelse return self.walkRefuse(walk, .fetch_arguments_not_literal, options_node, "the options");
+        var credential_node: NodeIndex = null_node;
+        var has_durable = false;
+        var k: u16 = 0;
+        while (k < obj.properties_count) : (k += 1) {
+            const prop_idx = self.ir_view.getListIndex(obj.properties_start, k);
+            const prop = self.literalProperty(prop_idx) orelse {
+                if (is_fetch) self.walkRefuse(walk, .fetch_arguments_not_literal, prop_idx, "a spread or computed option");
+                continue;
+            };
+            const key = self.getObjectPropertyKey(prop.key) orelse {
+                if (is_fetch) self.walkRefuse(walk, .fetch_arguments_not_literal, prop_idx, "a computed option key");
+                continue;
+            };
+            if (std.mem.eql(u8, key, "credential")) credential_node = prop.value;
+            if (std.mem.eql(u8, key, "durable")) has_durable = true;
+            if (std.mem.eql(u8, key, "url") and first_tag == .object_literal) url_node = prop.value;
+        }
+        if (credential_node == null_node) return;
+
+        if (!is_fetch) return self.walkRefuse(walk, .credential_sender_unsupported, credential_node, export_name);
+        if (has_durable) return self.walkRefuse(walk, .credential_sender_unsupported, credential_node, "durable");
+        const credential_name = self.getLiteralString(credential_node) orelse
+            return self.walkRefuse(walk, .credential_not_literal, credential_node, "credential");
+        const url = (if (url_node == null_node) null else self.getLiteralString(url_node)) orelse
+            return self.walkRefuse(walk, .fetch_arguments_not_literal, node, "the URL of a credentialed fetch");
+        var endpoint_buf: [endpoint.max_endpoint_bytes]u8 = undefined;
+        const canonical = endpoint.normalize(url, &endpoint_buf) catch
+            return self.walkRefuse(walk, .fetch_arguments_not_literal, url_node, "the URL names no endpoint");
+
+        for (walk.credentials.items) |c| {
+            if (std.mem.eql(u8, c.name, credential_name) and std.mem.eql(u8, c.endpoint, canonical)) return;
+        }
+        const owned_name = try self.allocator.dupe(u8, credential_name);
+        errdefer self.allocator.free(owned_name);
+        const owned_endpoint = try self.allocator.dupe(u8, canonical);
+        errdefer self.allocator.free(owned_endpoint);
+        try walk.credentials.append(self.allocator, .{ .name = owned_name, .endpoint = owned_endpoint });
     }
 
     fn addToolExport(self: *ContractBuilder, walk: *ExportWalk, module: []const u8, name: []const u8) !void {
@@ -6449,7 +6575,22 @@ const tool_refusal_cases = [_]ToolRefusalCase{
     // Reached through a helper, and from a module the rule covers whole.
     .{ .reason = .cross_call_read, .source = "import { sqlExec } from \"zttp:sql\";\n" ++ toolSource("function write() { return sqlExec(\"x\", {}); }\nfunction c(req) { write(); return Response.json({}); }", "\"POST /a\": c", toolCatalogOf(tool_test_entry)) },
     .{ .reason = .dispatch_reaches_export, .source = "import { sha256 } from \"zttp:crypto\";\n" ++ tool_test_head ++ "\nconst routes = { \"POST /a\": a };\n" ++ toolCatalogOf(tool_test_entry) ++ "\nfunction handler(req) {\n  sha256(\"x\");\n  const found = routerMatch(routes, req);\n  if (found !== undefined) return found.handler(req);\n  return Response.json({}, { status: 404 });\n}\n" },
+    // M4 T6: the build must see every options object a tool route hands fetch.
+    .{ .reason = .fetch_arguments_not_literal, .source = fetchToolSource("function c(req) { const u = \"https://api.example/v1\"; fetch(u); return Response.json({}); }") },
+    .{ .reason = .fetch_arguments_not_literal, .source = fetchToolSource("function c(req) { const o = { credential: \"w\" }; fetch(\"https://api.example/v1\", o); return Response.json({}); }") },
+    .{ .reason = .fetch_arguments_not_literal, .source = fetchToolSource("function c(req) { const o = { method: \"GET\" }; fetch(\"https://api.example/v1\", { ...o }); return Response.json({}); }") },
+    .{ .reason = .fetch_arguments_not_literal, .source = fetchToolSource("function c(req) { fetch({ url: req.method, credential: \"w\" }); return Response.json({}); }") },
+    .{ .reason = .fetch_as_value, .source = fetchToolSource("function c(req) { const f = fetch; return Response.json({}); }") },
+    .{ .reason = .credential_not_literal, .source = fetchToolSource("function c(req) { fetch(\"https://api.example/v1\", { credential: req.method }); return Response.json({}); }") },
+    .{ .reason = .credential_sender_unsupported, .source = fetchToolSource("function c(req) { fetchWithRetry(\"https://api.example/v1\", { credential: \"w\" }); return Response.json({}); }") },
+    .{ .reason = .credential_sender_unsupported, .source = fetchToolSource("function c(req) { fetch(\"https://api.example/v1\", { credential: \"w\", durable: { key: \"k\" } }); return Response.json({}); }") },
 };
+
+/// A one-tool handler whose route function `c` is `route_fn`, with both
+/// `zttp:fetch` exports imported.
+fn fetchToolSource(comptime route_fn: []const u8) []const u8 {
+    return "import { fetch, fetchWithRetry } from \"zttp:fetch\";\n" ++ toolSource(route_fn, "\"POST /a\": c", toolCatalogOf(tool_test_entry));
+}
 
 /// An input schema with a required string (`tenant_id`, `user_id`), an optional
 /// string (`note`), a required integer (`count`), and a nested object whose
@@ -6516,6 +6657,81 @@ test "every tool catalog refusal is driven by a case or names why none can reach
             return error.TestCensusGap;
         }
     }
+}
+
+const credential_tool_source = "import { fetch } from \"zttp:fetch\";\n" ++ tool_test_head ++
+    \\function lookup() { return fetch("https://api.weather.example/v1/forecast", { credential: "weather" }); }
+    \\function c(req) {
+    \\  lookup();
+    \\  fetch({ url: "https://api.weather.example/v1/alerts", credential: "weather" });
+    \\  fetch("https://billing.example:8443/charges", { method: "POST", credential: "billing", body: "x" });
+    \\  fetch("https://public.example/status");
+    \\  return Response.json({});
+    \\}
+    \\const routes = { "POST /a": c };
+    \\
+++ toolCatalogOf(tool_test_entry) ++ "\n" ++ tool_test_handler;
+
+test "a tool's credential grant lists each literal credential its route reaches, once" {
+    var contract = try buildTestContract(credential_tool_source);
+    defer contract.deinit(std.testing.allocator);
+    for (contract.spec_diagnostics.items) |d| try std.testing.expect(d.kind != .tool_catalog_refused);
+    try std.testing.expectEqual(@as(usize, 1), contract.tools.items.len);
+    const creds = contract.tools.items[0].credentials.items;
+    // Sorted by (name, endpoint); the two `weather` calls share one endpoint,
+    // one of them through a helper, and collapse to one entry.
+    try std.testing.expectEqual(@as(usize, 2), creds.len);
+    try std.testing.expectEqualStrings("billing", creds[0].name);
+    try std.testing.expectEqualStrings("https://billing.example:8443", creds[0].endpoint);
+    try std.testing.expectEqualStrings("weather", creds[1].name);
+    try std.testing.expectEqualStrings("https://api.weather.example:443", creds[1].endpoint);
+}
+
+test "a tool credential the references do not cover is a named breach" {
+    const allocator = std.testing.allocator;
+    var contract = try buildTestContract(credential_tool_source);
+    defer contract.deinit(allocator);
+
+    const Case = struct { refs: []const u8, reason: ?contract_types.CredentialBreachReason, credential: []const u8 = "" };
+    const cases = [_]Case{
+        .{ .refs = "{}", .reason = .credential_unknown, .credential = "billing" },
+        .{
+            .refs =
+            \\{"billing": {"env": "B", "endpoint": "https://billing.example:8443", "header": "x-key", "methods": ["POST"], "paths": ["/charges"]},
+            \\ "weather": {"env": "W", "endpoint": "https://api.weather.example:8443", "header": "x-key", "methods": ["GET"], "paths": ["/v1"]}}
+            ,
+            .reason = .credential_endpoint_mismatch,
+            .credential = "weather",
+        },
+        .{
+            .refs =
+            \\{"billing": {"env": "B", "endpoint": "https://billing.example:8443", "header": "x-key", "methods": ["POST"], "paths": ["/charges"]},
+            \\ "weather": {"env": "W", "endpoint": "https://api.weather.example", "header": "x-key", "methods": ["GET"], "paths": ["/v1"]}}
+            ,
+            .reason = null,
+        },
+    };
+    for (cases) |case| {
+        var parsed = try std.json.parseFromSlice(std.json.Value, allocator, case.refs, .{});
+        defer parsed.deinit();
+        const refs = (try contract_types.credential_ref.parseConfig(allocator, parsed.value)).ok;
+        defer contract_types.credential_ref.freeAll(allocator, refs);
+        const breach = contract_types.firstCredentialBreach(&contract, refs);
+        if (case.reason) |reason| {
+            const got = breach orelse return error.TestExpectedBreach;
+            try std.testing.expectEqual(reason, got.reason);
+            try std.testing.expectEqualStrings(case.credential, got.credential);
+            try std.testing.expectEqualStrings("ta", got.tool);
+        } else {
+            try std.testing.expect(breach == null);
+        }
+    }
+}
+
+test "every credential breach reason is driven by a case" {
+    // The breach test above observes both members; this pins the count so a
+    // member added later without a case fails here.
+    try std.testing.expectEqual(@as(usize, 2), std.meta.tags(contract_types.CredentialBreachReason).len);
 }
 
 test "a well-formed tool catalog lands in the contract with its schemas" {

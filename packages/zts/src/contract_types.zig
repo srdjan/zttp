@@ -1557,6 +1557,19 @@ pub const ToolCatalogRefusal = enum {
     /// module export other than `routerMatch`. At runtime no tool's grant
     /// holds it, so every tool request would fail on it.
     dispatch_reaches_export,
+    /// In a tool route, a `zttp:fetch` `fetch` call whose URL is not a string
+    /// literal, whose options are not an object literal, or whose options hold a
+    /// spread (M4 T6). A value the build cannot see could carry a `credential`
+    /// that model input chose.
+    fetch_arguments_not_literal,
+    /// In a tool route, `fetch` is named other than as the callee of a call,
+    /// so a call the build cannot see could name a credential.
+    fetch_as_value,
+    /// A `credential` option is not a string literal.
+    credential_not_literal,
+    /// A `credential` option on `fetchWithRetry`, or beside `durable`: only the
+    /// synchronous `fetch` path injects a credential, and it never retries.
+    credential_sender_unsupported,
 
     pub fn sentence(self: ToolCatalogRefusal) []const u8 {
         return switch (self) {
@@ -1582,6 +1595,10 @@ pub const ToolCatalogRefusal = enum {
             .scope_field_invalid => "a scope value must name a required top-level string property of the input schema",
             .cross_call_read => "a tool route may not reach an export that reads state a separate call wrote: zttp:cache reads, zttp:sql, queue.receive, or durable.waitSignal",
             .dispatch_reaches_export => "the handler's dispatch outside the route functions may call only routerMatch: no tool's grant holds any other export",
+            .fetch_arguments_not_literal => "in a tool route, fetch takes a string literal URL and, when present, an object literal of options with no spread, so the build sees every credential it names",
+            .fetch_as_value => "in a tool route, call fetch directly; a fetch passed or stored as a value could name a credential the build cannot see",
+            .credential_not_literal => "the credential option must be a string literal naming a credential in zttp.json",
+            .credential_sender_unsupported => "a credential goes only on a plain fetch call: not on fetchWithRetry and not beside durable, because a credentialed request is never retried",
         };
     }
 };
@@ -1630,6 +1647,11 @@ pub const ToolEntry = struct {
     /// The module exports the route function reaches, sorted with
     /// `ToolExport.lessThan`.
     reachable_exports: std.ArrayList(ToolExport) = .empty,
+    /// The credentials the route function names (M4 T6): one per distinct
+    /// (name, endpoint) pair of a literal `credential` on a `fetch` call,
+    /// sorted with `ToolCredential.lessThan`. The names are the tool's
+    /// credential grant.
+    credentials: std.ArrayList(ToolCredential) = .empty,
 
     pub fn deinit(self: *ToolEntry, allocator: std.mem.Allocator) void {
         allocator.free(self.name);
@@ -1643,8 +1665,76 @@ pub const ToolEntry = struct {
         if (self.scope_subject) |s| allocator.free(s);
         for (self.reachable_exports.items) |*e| e.deinit(allocator);
         self.reachable_exports.deinit(allocator);
+        for (self.credentials.items) |*c| c.deinit(allocator);
+        self.credentials.deinit(allocator);
     }
 };
+
+/// One credential a tool route names (M4 T6): the literal `credential` of a
+/// `zttp:fetch` `fetch` call, and the canonical endpoint of that call's
+/// literal URL. Owned.
+pub const ToolCredential = struct {
+    name: []const u8,
+    endpoint: []const u8,
+
+    pub fn deinit(self: *ToolCredential, allocator: std.mem.Allocator) void {
+        allocator.free(self.name);
+        allocator.free(self.endpoint);
+    }
+
+    /// Sort by name, then by endpoint.
+    pub fn lessThan(_: void, a: ToolCredential, b: ToolCredential) bool {
+        return switch (std.mem.order(u8, a.name, b.name)) {
+            .lt => true,
+            .gt => false,
+            .eq => std.mem.lessThan(u8, a.endpoint, b.endpoint),
+        };
+    }
+};
+
+/// Why a tool's credential does not match the project's references (M4 T6).
+pub const CredentialBreachReason = enum {
+    /// No reference in zttp.json has the name.
+    credential_unknown,
+    /// The fetch call's URL is at another endpoint than the reference names.
+    credential_endpoint_mismatch,
+
+    pub fn sentence(self: CredentialBreachReason) []const u8 {
+        return switch (self) {
+            .credential_unknown => "the tool names a credential that zttp.json \"credentials\" does not define",
+            .credential_endpoint_mismatch => "the fetch URL is at a different endpoint than the credential reference names",
+        };
+    }
+};
+
+pub const CredentialBreach = struct {
+    reason: CredentialBreachReason,
+    tool: []const u8,
+    credential: []const u8,
+    endpoint: []const u8,
+};
+
+/// The first tool credential that no reference in `refs` covers, in catalog
+/// order, or null. Borrows from `contract`.
+pub fn firstCredentialBreach(contract: *const HandlerContract, refs: []const CredentialRef) ?CredentialBreach {
+    for (contract.tools.items) |tool| {
+        for (tool.credentials.items) |use| {
+            const ref = credential_ref.find(refs, use.name) orelse return .{
+                .reason = .credential_unknown,
+                .tool = tool.name,
+                .credential = use.name,
+                .endpoint = use.endpoint,
+            };
+            if (!std.mem.eql(u8, ref.endpoint, use.endpoint)) return .{
+                .reason = .credential_endpoint_mismatch,
+                .tool = tool.name,
+                .credential = use.name,
+                .endpoint = use.endpoint,
+            };
+        }
+    }
+    return null;
+}
 
 /// Where a tool handler's runtime finds the key and the tenant (M4 T5 design
 /// note, section 4): the environment variable that holds the HS256 key, and

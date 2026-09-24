@@ -83,6 +83,10 @@ pub const ToolAuth = contract_types.ToolAuth;
 /// Credential references (M4 T6): the canonical type and its loader.
 pub const credential_ref = contract_types.credential_ref;
 pub const CredentialRef = contract_types.CredentialRef;
+pub const ToolCredential = contract_types.ToolCredential;
+pub const CredentialBreachReason = contract_types.CredentialBreachReason;
+pub const CredentialBreach = contract_types.CredentialBreach;
+pub const firstCredentialBreach = contract_types.firstCredentialBreach;
 pub const ClassificationReport = contract_types.ClassificationReport;
 pub const ClassificationLabel = contract_types.ClassificationLabel;
 pub const ClassificationStatus = contract_types.ClassificationStatus;
@@ -2003,6 +2007,61 @@ test "credential references survive a v1 and a v2 round trip, and their absence 
     var parsed = try parseFromJson(allocator, accepted);
     defer parsed.deinit(allocator);
     try std.testing.expectEqual(@as(usize, 1), parsed.credentials.len);
+}
+
+test "a tool's credentials survive a v1 and a v2 round trip, and a non-canonical list is refused" {
+    const allocator = std.testing.allocator;
+    var original = try toolCatalogFixture(allocator);
+    defer original.deinit(allocator);
+
+    var without: std.Io.Writer.Allocating = .init(allocator);
+    defer without.deinit();
+    try writeContractJson(&original, &without.writer);
+    try std.testing.expect(std.mem.indexOf(u8, without.written(), "\"credentials\"") == null);
+
+    const pairs = [_][2][]const u8{
+        .{ "billing", "https://billing.example:8443" },
+        .{ "weather", "https://api.weather.example:443" },
+    };
+    for (pairs) |pair| {
+        const name = try allocator.dupe(u8, pair[0]);
+        errdefer allocator.free(name);
+        const endpoint_text = try allocator.dupe(u8, pair[1]);
+        errdefer allocator.free(endpoint_text);
+        try original.tools.items[0].credentials.append(allocator, .{ .name = name, .endpoint = endpoint_text });
+    }
+
+    var written: std.Io.Writer.Allocating = .init(allocator);
+    defer written.deinit();
+    inline for (.{ writeContractJson, writeContractJsonV2 }, 0..) |write, write_index| {
+        var out: std.Io.Writer.Allocating = .init(allocator);
+        defer out.deinit();
+        try write(&original, &out.writer);
+        var parsed = try parseFromJson(allocator, out.written());
+        defer parsed.deinit(allocator);
+        const got = parsed.tools.items[0].credentials.items;
+        try std.testing.expectEqual(pairs.len, got.len);
+        for (pairs, got) |want, cred| {
+            try std.testing.expectEqualStrings(want[0], cred.name);
+            try std.testing.expectEqualStrings(want[1], cred.endpoint);
+        }
+        if (write_index == 0) try written.writer.writeAll(out.written());
+    }
+
+    // Swap the order, drop the port, and empty a name: each is something the
+    // build does not write.
+    const text = written.written();
+    const mutations = [_][2][]const u8{
+        .{ "{ \"name\": \"billing\"", "{ \"name\": \"zzz\"" },
+        .{ "https://api.weather.example:443", "https://api.weather.example" },
+        .{ "{ \"name\": \"weather\"", "{ \"name\": \"\"" },
+    };
+    for (mutations) |m| {
+        const at = std.mem.indexOf(u8, text, m[0]) orelse return error.TestMutationTargetMissing;
+        const mutated = try std.mem.concat(allocator, u8, &.{ text[0..at], m[1], text[at + m[0].len ..] });
+        defer allocator.free(mutated);
+        try std.testing.expectError(error.InvalidToolCatalog, parseFromJson(allocator, mutated));
+    }
 }
 
 test "tool schema bytes and validator verdicts agree after a round trip" {

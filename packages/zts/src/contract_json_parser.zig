@@ -16,6 +16,7 @@ const json_utils = @import("zts-base").json_utils;
 const tool_schema = @import("zts-base").tool_schema;
 const capability_profiles = @import("zts-base").capability_profiles;
 const credential_ref = @import("zts-base").credential_ref;
+const endpoint_rule = @import("zts-base").endpoint;
 
 const HandlerContract = handler_contract.HandlerContract;
 const RouteInfo = handler_contract.RouteInfo;
@@ -134,6 +135,11 @@ const ToolSchemaWire = struct {
     json: WireString = .{ .bytes = "" },
 };
 
+const ToolCredentialWire = struct {
+    name: WireString = .{ .bytes = "" },
+    endpoint: WireString = .{ .bytes = "" },
+};
+
 const ToolExportWire = struct {
     module: WireString = .{ .bytes = "" },
     name: WireString = .{ .bytes = "" },
@@ -168,6 +174,7 @@ const ToolWire = struct {
     outputSchema: ToolSchemaWire = .{},
     maxInputBytes: WireU32 = .{ .value = null },
     reachableExports: []const ToolExportWire = &.{},
+    credentials: []const ToolCredentialWire = &.{},
 };
 
 const ClassificationWire = struct {
@@ -1055,7 +1062,34 @@ fn projectTools(
                 return error.InvalidToolCatalog;
             }
         }
+        try projectToolCredentials(allocator, wire.credentials, &entry);
         contract.tools.appendAssumeCapacity(entry);
+    }
+}
+
+/// Project one tool's credential grant (M4 T6). The build writes each name
+/// with the canonical endpoint of its call, sorted by (name, endpoint) with no
+/// repeat, and never an empty field.
+fn projectToolCredentials(
+    allocator: std.mem.Allocator,
+    wires: []const ToolCredentialWire,
+    entry: *contract_types.ToolEntry,
+) !void {
+    try entry.credentials.ensureTotalCapacity(allocator, wires.len);
+    for (wires) |wire| {
+        const name = try decodeWireString(allocator, wire.name);
+        errdefer allocator.free(name);
+        const endpoint_text = try decodeWireString(allocator, wire.endpoint);
+        entry.credentials.appendAssumeCapacity(.{ .name = name, .endpoint = endpoint_text });
+    }
+    var buf: [endpoint_rule.max_endpoint_bytes]u8 = undefined;
+    for (entry.credentials.items, 0..) |cred, j| {
+        if (cred.name.len == 0) return error.InvalidToolCatalog;
+        const canonical = endpoint_rule.normalize(cred.endpoint, &buf) catch return error.InvalidToolCatalog;
+        if (!std.mem.eql(u8, canonical, cred.endpoint)) return error.InvalidToolCatalog;
+        if (j > 0 and !contract_types.ToolCredential.lessThan({}, entry.credentials.items[j - 1], cred)) {
+            return error.InvalidToolCatalog;
+        }
     }
 }
 

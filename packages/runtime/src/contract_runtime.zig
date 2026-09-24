@@ -61,6 +61,9 @@ pub const ToolSummary = struct {
     max_input_bytes: u32,
     scope_tenant: ?[]const u8 = null,
     scope_subject: ?[]const u8 = null,
+    /// The distinct credential names the tool's route names (M4 T6), sorted.
+    /// Owned.
+    credentials: []const []const u8 = &.{},
 };
 
 /// One module export a tool may call. Borrows from `AcceptedCatalog.bytes`.
@@ -84,6 +87,10 @@ pub const AcceptedTool = struct {
     /// The tool's grant (M4 T5 design note, section 6): the reachable exports
     /// the build proved for its route, in catalog order.
     exports: []const Export = &.{},
+    /// The tool's credential grant (M4 T6 design note, section 4): the names
+    /// its route names, sorted. The slice is owned by the catalog; each name
+    /// borrows from `AcceptedCatalog.bytes`.
+    credentials: []const []const u8 = &.{},
     input: zq.tool_schema.CompiledToolSchema,
     output: zq.tool_schema.CompiledToolSchema,
 
@@ -93,6 +100,15 @@ pub const AcceptedTool = struct {
     pub fn allowsExport(self: *const AcceptedTool, module: []const u8, name: []const u8) bool {
         for (self.exports) |exp| {
             if (std.mem.eql(u8, exp.module, module) and std.mem.eql(u8, exp.name, name)) return true;
+        }
+        return false;
+    }
+
+    /// Whether this tool's grant holds the credential `name`. A tool may use
+    /// only the credentials its own route names.
+    pub fn allowsCredential(self: *const AcceptedTool, name: []const u8) bool {
+        for (self.credentials) |granted| {
+            if (std.mem.eql(u8, granted, name)) return true;
         }
         return false;
     }
@@ -111,6 +127,7 @@ pub const AcceptedCatalog = struct {
             entry.input.deinit();
             entry.output.deinit();
             self.allocator.free(entry.exports);
+            self.allocator.free(entry.credentials);
         }
         self.allocator.free(self.entries);
         self.allocator.free(self.bytes);
@@ -470,6 +487,7 @@ fn lowerAcceptedCatalog(allocator: std.mem.Allocator, bytes: []const u8) Promote
             entry.input.deinit();
             entry.output.deinit();
             allocator.free(entry.exports);
+            allocator.free(entry.credentials);
         }
         allocator.free(entries);
     }
@@ -479,6 +497,8 @@ fn lowerAcceptedCatalog(allocator: std.mem.Allocator, bytes: []const u8) Promote
         if (filled >= entries.len) return error.AcceptedToolCatalogUndecodable;
         const exports = try lowerAcceptedExports(allocator, entry.exports);
         errdefer allocator.free(exports);
+        const credentials = try lowerAcceptedCredentials(allocator, entry.credentials);
+        errdefer allocator.free(credentials);
         var input = try compileAcceptedSchema(allocator, entry.input_schema);
         errdefer input.deinit();
         const output = try compileAcceptedSchema(allocator, entry.output_schema);
@@ -490,6 +510,7 @@ fn lowerAcceptedCatalog(allocator: std.mem.Allocator, bytes: []const u8) Promote
             .scope_tenant = entry.scope_tenant,
             .scope_subject = entry.scope_subject,
             .exports = exports,
+            .credentials = credentials,
             .input = input,
             .output = output,
         };
@@ -513,6 +534,21 @@ fn lowerAcceptedExports(allocator: std.mem.Allocator, iterator: pcc.tool_catalog
     }
     if (index != exports.len) return error.AcceptedToolCatalogUndecodable;
     return exports;
+}
+
+/// The entry's credential names as slices into the accepted bytes. The
+/// decoder already bounded the count and checked the order.
+fn lowerAcceptedCredentials(allocator: std.mem.Allocator, iterator: pcc.tool_catalog.NameIterator) PromoteError![]const []const u8 {
+    const names = try allocator.alloc([]const u8, iterator.remaining);
+    errdefer allocator.free(names);
+    var walk = iterator;
+    var index: usize = 0;
+    while (walk.next() catch return error.AcceptedToolCatalogUndecodable) |name| : (index += 1) {
+        if (index >= names.len) return error.AcceptedToolCatalogUndecodable;
+        names[index] = name;
+    }
+    if (index != names.len) return error.AcceptedToolCatalogUndecodable;
+    return names;
 }
 
 fn compileAcceptedSchema(allocator: std.mem.Allocator, schema: []const u8) PromoteError!zq.tool_schema.CompiledToolSchema {
@@ -540,11 +576,20 @@ fn crossCheckToolCatalog(catalog: *const AcceptedCatalog, contract_tools: []cons
             !std.mem.eql(u8, entry.path, tool.path) or
             entry.max_input_bytes != tool.max_input_bytes or
             !optionalStringsEqual(entry.scope_tenant, tool.scope_tenant) or
-            !optionalStringsEqual(entry.scope_subject, tool.scope_subject))
+            !optionalStringsEqual(entry.scope_subject, tool.scope_subject) or
+            !stringListsEqual(entry.credentials, tool.credentials))
         {
             return error.ToolCatalogContractMismatch;
         }
     }
+}
+
+fn stringListsEqual(a: []const []const u8, b: []const []const u8) bool {
+    if (a.len != b.len) return false;
+    for (a, b) |left, right| {
+        if (!std.mem.eql(u8, left, right)) return false;
+    }
+    return true;
 }
 
 fn optionalStringsEqual(a: ?[]const u8, b: ?[]const u8) bool {
@@ -1022,6 +1067,8 @@ pub fn fromHandlerContract(allocator: std.mem.Allocator, hc: *const HandlerContr
         const scope_tenant = if (tool.scope_tenant) |field| try allocator.dupe(u8, field) else null;
         errdefer if (scope_tenant) |field| allocator.free(field);
         const scope_subject = if (tool.scope_subject) |field| try allocator.dupe(u8, field) else null;
+        errdefer if (scope_subject) |field| allocator.free(field);
+        const credentials = try distinctCredentialNames(allocator, tool.credentials.items);
         tools.appendAssumeCapacity(.{
             .name = name,
             .method = method,
@@ -1029,6 +1076,7 @@ pub fn fromHandlerContract(allocator: std.mem.Allocator, hc: *const HandlerContr
             .max_input_bytes = tool.max_input_bytes,
             .scope_tenant = scope_tenant,
             .scope_subject = scope_subject,
+            .credentials = credentials,
         });
     }
 
@@ -1096,8 +1144,27 @@ pub fn fromHandlerContract(allocator: std.mem.Allocator, hc: *const HandlerContr
     } };
 }
 
+/// The distinct names of a contract tool's credentials, in their sorted order:
+/// the same grant the `ZTCAT1` encoder writes, so the startup cross-check
+/// compares like with like. Owned, each name included.
+fn distinctCredentialNames(allocator: std.mem.Allocator, credentials: []const zq.handler_contract.ToolCredential) ![]const []const u8 {
+    var names: std.ArrayList([]const u8) = .empty;
+    errdefer {
+        for (names.items) |name| allocator.free(name);
+        names.deinit(allocator);
+    }
+    for (credentials, 0..) |cred, j| {
+        if (j > 0 and std.mem.eql(u8, credentials[j - 1].name, cred.name)) continue;
+        try names.ensureUnusedCapacity(allocator, 1);
+        names.appendAssumeCapacity(try allocator.dupe(u8, cred.name));
+    }
+    return names.toOwnedSlice(allocator);
+}
+
 fn freeToolSummaryItems(allocator: std.mem.Allocator, tools: []const ToolSummary) void {
     for (tools) |tool| {
+        for (tool.credentials) |name| allocator.free(name);
+        allocator.free(tool.credentials);
         allocator.free(tool.name);
         allocator.free(tool.method);
         allocator.free(tool.path);
@@ -2520,15 +2587,52 @@ test "promotion refuses a contract whose scope bindings disagree with the accept
     }
 }
 
+test "promotion refuses a contract whose credential grant disagrees with the accepted catalog" {
+    const entries = [_]catalog_test_support.SampleEntry{
+        .{ .name = "alpha", .path = "/tools/alpha", .input_schema = closed_test_schema, .output_schema = closed_test_schema, .max_input_bytes = 64, .credentials = &.{ "billing", "weather" } },
+    };
+    var buf: [2048]u8 = undefined;
+    const bytes = testCatalog(&buf, &entries);
+    const granted = [_][]const u8{ "billing", "weather" };
+    const alpha = ToolSummary{ .name = "alpha", .method = "POST", .path = "/tools/alpha", .max_input_bytes = 64, .credentials = &granted };
+
+    const agreeing = toolTestContract(&.{alpha});
+    var promoted = (try promote(&agreeing, acceptedTestAssessment(), [_]u8{0} ** 32, bytes, null)) orelse
+        return error.TestUnexpectedResult;
+    defer promoted.deinit();
+    const tool = promoted.tool_catalog.?.find("alpha") orelse return error.TestUnexpectedResult;
+    try std.testing.expect(tool.allowsCredential("weather"));
+
+    const dropped_names = [_][]const u8{"billing"};
+    const renamed_names = [_][]const u8{ "billing", "weathers" };
+    const added_names = [_][]const u8{ "billing", "extra", "weather" };
+    const Case = struct { label: []const u8, names: []const []const u8 };
+    const cases = [_]Case{
+        .{ .label = "credential dropped", .names = &dropped_names },
+        .{ .label = "credential renamed", .names = &renamed_names },
+        .{ .label = "credential added", .names = &added_names },
+        .{ .label = "no credentials", .names = &.{} },
+    };
+    for (cases) |case| {
+        var summary = alpha;
+        summary.credentials = case.names;
+        const validated = toolTestContract(&.{summary});
+        std.testing.expectError(error.ToolCatalogContractMismatch, promote(&validated, acceptedTestAssessment(), [_]u8{0} ** 32, bytes, null)) catch |err| {
+            std.debug.print("case '{s}' was not refused as a mismatch\n", .{case.label});
+            return err;
+        };
+    }
+}
+
 test "a scoped catalog survives contract JSON, ZTCAT1, the kernel, and lowering with its grants" {
     const allocator = std.testing.allocator;
     const scoped_input =
         \\{"type":"object","additionalProperties":false,"required":["tenant_id","user_id"],
         \\ "properties":{"tenant_id":{"type":"string","maxLength":32},"user_id":{"type":"string","maxLength":32}}}
     ;
-    const Spec = struct { name: []const u8, route: []const u8, tenant: ?[]const u8, subject: ?[]const u8, exports: []const [2][]const u8 };
+    const Spec = struct { name: []const u8, route: []const u8, tenant: ?[]const u8, subject: ?[]const u8, exports: []const [2][]const u8, credentials: []const [2][]const u8 = &.{} };
     const specs = [_]Spec{
-        .{ .name = "lookup", .route = "POST /tools/lookup", .tenant = "tenant_id", .subject = "user_id", .exports = &.{ .{ "zttp:cache", "cacheSet" }, .{ "zttp:crypto", "sha256" } } },
+        .{ .name = "lookup", .route = "POST /tools/lookup", .tenant = "tenant_id", .subject = "user_id", .exports = &.{ .{ "zttp:cache", "cacheSet" }, .{ "zttp:crypto", "sha256" } }, .credentials = &.{ .{ "weather", "https://a.example:443" }, .{ "weather", "https://b.example:443" } } },
         .{ .name = "slug", .route = "POST /tools/slug", .tenant = null, .subject = null, .exports = &.{.{ "zttp:text", "slugify" }} },
     };
 
@@ -2561,6 +2665,13 @@ test "a scoped catalog survives contract JSON, ZTCAT1, the kernel, and lowering 
             const name = try allocator.dupe(u8, pair[1]);
             errdefer allocator.free(name);
             try entry.reachable_exports.append(allocator, .{ .module = module, .name = name });
+        }
+        for (spec.credentials) |pair| {
+            const name = try allocator.dupe(u8, pair[0]);
+            errdefer allocator.free(name);
+            const endpoint = try allocator.dupe(u8, pair[1]);
+            errdefer allocator.free(endpoint);
+            try entry.credentials.append(allocator, .{ .name = name, .endpoint = endpoint });
         }
         try original.tools.append(allocator, entry);
     }
@@ -2603,6 +2714,13 @@ test "a scoped catalog survives contract JSON, ZTCAT1, the kernel, and lowering 
     try std.testing.expect(!slug.allowsExport("zttp:cache", "cacheSet"));
     // Both parts of the name must match.
     try std.testing.expect(!lookup.allowsExport("zttp:text", "sha256"));
+
+    // The credential grant (M4 T6): one name for two endpoints, and a tool
+    // whose route names none holds none.
+    try std.testing.expectEqual(@as(usize, 1), lookup.credentials.len);
+    try std.testing.expect(lookup.allowsCredential("weather"));
+    try std.testing.expect(!lookup.allowsCredential("billing"));
+    try std.testing.expect(!slug.allowsCredential("weather"));
 
     // The lowered slices borrow from the catalog's own bytes.
     const base = @intFromPtr(catalog.bytes.ptr);

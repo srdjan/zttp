@@ -305,7 +305,22 @@ fn writeContractJsonVersion(
             try writeJsonString(writer, exp.name);
             try writer.writeAll(" }");
         }
-        try writer.writeAll("]\n    }");
+        try writer.writeAll("]");
+        // `credentials` (M4 T6) is written only when the route names one, so a
+        // catalog without one keeps its earlier bytes.
+        if (tool.credentials.items.len > 0) {
+            try writer.writeAll(",\n      \"credentials\": [");
+            for (tool.credentials.items, 0..) |cred, j| {
+                if (j > 0) try writer.writeAll(", ");
+                try writer.writeAll("{ \"name\": ");
+                try writeJsonString(writer, cred.name);
+                try writer.writeAll(", \"endpoint\": ");
+                try writeJsonString(writer, cred.endpoint);
+                try writer.writeAll(" }");
+            }
+            try writer.writeAll("]");
+        }
+        try writer.writeAll("\n    }");
     }
     if (contract.tools.items.len > 0) {
         try writer.writeAll("\n  ");

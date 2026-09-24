@@ -1,7 +1,7 @@
 # M4 T6 design note: credential injection
 
 Status: accepted by the owner on 2026-09-24, with the recommended answer to
-each question in section 9. U1 is implemented; U2 is next. Check C6 of the
+each question in section 9. U1 and U2 are implemented; U3 is next. Check C6 of the
 [M4 release contract](2026-09-22-m4-release-contract.md) is written against
 the approach this note names.
 
@@ -330,7 +330,7 @@ re-record before it lands.
 | Unit | Commit | Content |
 |---|---|---|
 | U1 | this commit | The reference, the loader, contract version 22, and the store |
-| U2 | | Selection at build, the per-tool grant, and `ZTCAT1` schema 3 |
+| U2 | this commit | Selection at build, the per-tool grant, and `ZTCAT1` schema 3 |
 | U3 | | Injection at runtime, the other senders, `OutcomeUnknown`, reflection |
 
 ## 12. U1 implementation notes and evidence
@@ -382,3 +382,82 @@ and neither its log nor the response held the marker.
 **Not measured in U1.** A byte change to a reference inside a deployed payload
 was not probed; the contract member's binding is covered by the existing C3
 checks. No request uses a credential yet: U3 adds injection.
+
+**Found after U1.** The zts layering gate needs a row in `scripts/zts-tiers.allow`
+for every tracked file in `packages/zts/src`. It reads tracked files only, and
+`credential_ref.zig` was untracked when U1's aggregate run passed, so the gate
+did not see it. The next aggregate run failed with "no row for
+credential_ref.zig". Commit `d6140e57` adds the row. The U1 gate list above
+therefore did not cover that gate.
+
+## 13. U2 implementation notes and evidence
+
+**Selection.** The tool route walk in `contract_builder.zig` now reads every
+`zttp:fetch` call it reaches, helpers included. Four new `ToolCatalogRefusal`
+members, under ZTS513 with no new code, so the policy hash does not move:
+
+- `fetch_arguments_not_literal`: in a tool route, a `fetch` whose URL is not a
+  string literal, whose options are not an object literal, or whose options hold
+  a spread or a computed key, and a credentialed `fetch(init)` whose `url` is not
+  a string literal.
+- `fetch_as_value`: `fetch` named other than as the callee of a call.
+- `credential_not_literal`: a `credential` that is not a string literal.
+- `credential_sender_unsupported`: a `credential` on `fetchWithRetry`, or beside
+  `durable`.
+
+The first two are wider than section 4 said. The runtime reads `credential` from
+whatever options object a call receives, so a `fetch(url, parsedInput)` or a
+`const f = fetch` would let model input choose among the tool's granted
+credentials. The build therefore refuses them in every tool route, credential or
+not. A `fetchWithRetry` whose options the build cannot see is not refused here:
+U3 refuses a credential on that sender at runtime.
+
+The contract carries each tool's credentials as (name, endpoint) pairs, sorted,
+with the endpoint canonical. The parser refuses an unsorted list, a non-canonical
+endpoint, and an empty name. `FetchOptions` gains `credential?: string`.
+
+**Against the references.** `firstCredentialBreach` compares each pair with
+zttp.json's references: `credential_unknown` when no reference has the name, and
+`credential_endpoint_mismatch` when the call's endpoint is not the reference's.
+The build path runs it on both compile paths and refuses with
+`error.CredentialBreached`, named tool, credential, and reason. A build always
+compares, so a tool that names a credential when zttp.json configures none is
+refused. A caller with no project context passes null and nothing is compared.
+Method and path stay runtime checks (U3).
+
+**Grant binding.** `ZTCAT1` moves to schema 3: each entry ends with its distinct
+credential names, strictly increasing. The kernel decoder accepts schema 3 only
+and adds `CredentialCountOutOfRange`, `CredentialNameLength`, and
+`CredentialsNotOrdered`, each with a refusal case in its census. The runtime keeps
+the names on `AcceptedTool` (`allowsCredential`) and refuses to start when the
+contract's grant differs from the accepted catalog's. `docs/consumer-contract.md`
+carries the new layout.
+
+**Cassettes.** No re-record. `FetchOptions` is built in `module_types.zig`, not
+in the binding, so the registry hash does not move, and the new refusal members
+do not move the policy hash. Measured: with U2 in place, the aggregate suite
+replayed the DeepSeek corpus 19 of 19 from flow artifacts.
+
+**Gates.** Unfiltered, exit status read directly, with every U2 file staged:
+`zig build test` 192 of 192 steps, 8902 of 8908 tests passed, 6 skipped;
+`test-zruntime` 427 of 428, 1 skipped; `test-server` 451 of 453, 2 skipped;
+`test-zts` 2321 of 2322, 1 skipped; `test-proof-checker` 183 of 183;
+`test-precompile` 155 of 155; `test-project-config` 41 of 41; `test-cli`,
+`test-contract-golden`, `test-vocab-envelope-drift`, `test-module-boundary`, the
+zts layering gate, `zig fmt --check`, and the docs drift check passed.
+
+**Probes.** Each mutation was confirmed present, compiled with no error, and
+restored with `/bin/cp -f` and `cmp`.
+
+| Mutation | Step | Failing test |
+|---|---|---|
+| `refuseCredentialBreach` returns at once | `test-cli` | `a project build refuses a tool credential zttp.json does not define` |
+| non-literal options not refused | `test-zts` | `a tool catalog is refused for each build rule it breaks` |
+| `fetch_as_value` never raised | `test-zts` | `a tool catalog is refused for each build rule it breaks` |
+| kernel accepts unordered credential names | `test-proof-checker` | `every refusal case decodes to its exact error` |
+| runtime ignores the credential grant in the cross-check | `test-server` | `promotion refuses a contract whose credential grant disagrees with the accepted catalog` |
+
+**Known gaps.** An ordinary (non-tool) handler that passes `credential` is not
+refused at build; U3's runtime refuses it, because no tool grant is active.
+`zttp check` does not compare the references. `zttp dev` does not either; a
+mismatch there surfaces at the call in U3.

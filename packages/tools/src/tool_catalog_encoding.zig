@@ -15,9 +15,9 @@ const ToolEntry = zts.handler_contract.ToolEntry;
 const tool_schema = zts.tool_schema;
 
 pub const magic = "ZTCAT1\x00\x00";
-/// Schema 2 (M4 T5) carries each entry's scope fields. The kernel decoder
-/// accepts this one schema only.
-pub const schema_version: u16 = 2;
+/// Schema 2 (M4 T5) carries each entry's scope fields, and schema 3 (M4 T6)
+/// its credential names. The kernel decoder accepts this one schema only.
+pub const schema_version: u16 = 3;
 
 comptime {
     if (schema_version != pcc.tool_catalog.schema_version) @compileError("ZTCAT1 encoder and kernel decoder disagree on the schema");
@@ -78,6 +78,17 @@ pub fn encode(allocator: std.mem.Allocator, tools: []const ToolEntry) EncodeErro
         for (tool.reachable_exports.items) |exp| {
             try appendString(allocator, &out, exp.module);
             try appendString(allocator, &out, exp.name);
+        }
+        // The grant is the distinct names. The contract sorts its credentials
+        // by (name, endpoint), so equal names are adjacent.
+        var distinct: usize = 0;
+        for (tool.credentials.items, 0..) |cred, j| {
+            if (j == 0 or !std.mem.eql(u8, tool.credentials.items[j - 1].name, cred.name)) distinct += 1;
+        }
+        try appendInt(allocator, &out, u16, std.math.cast(u16, distinct) orelse return error.CatalogRefused);
+        for (tool.credentials.items, 0..) |cred, j| {
+            if (j > 0 and std.mem.eql(u8, tool.credentials.items[j - 1].name, cred.name)) continue;
+            try appendString(allocator, &out, cred.name);
         }
     }
 
@@ -239,6 +250,36 @@ test "scope fields are encoded after the byte bound and decode as written" {
     // An empty bound field cannot pass for an absent one.
     tools[1].scope_subject = try allocator.dupe(u8, "");
     try testing.expectError(error.CatalogRefused, encode(allocator, &tools));
+}
+
+test "a tool's credential names are encoded once each and decode in order" {
+    const allocator = testing.allocator;
+    var tools = [_]ToolEntry{try testEntry(allocator, "lookup", "POST /l", &.{})};
+    defer for (&tools) |*t| t.deinit(allocator);
+    // The contract's order: by (name, endpoint). `weather` at two endpoints is
+    // one grant.
+    const pairs = [_][2][]const u8{
+        .{ "billing", "https://billing.example:443" },
+        .{ "weather", "https://a.example:443" },
+        .{ "weather", "https://b.example:443" },
+    };
+    for (pairs) |pair| {
+        const name = try allocator.dupe(u8, pair[0]);
+        errdefer allocator.free(name);
+        const endpoint = try allocator.dupe(u8, pair[1]);
+        errdefer allocator.free(endpoint);
+        try tools[0].credentials.append(allocator, .{ .name = name, .endpoint = endpoint });
+    }
+
+    const bytes = (try encode(allocator, &tools)) orelse return error.TestExpectedBytes;
+    defer allocator.free(bytes);
+    const catalog = try pcc.tool_catalog.decode(bytes);
+    var it = catalog.entries();
+    const entry = (try it.next()) orelse return error.TestMissingEntry;
+    var names = entry.credentials;
+    try testing.expectEqualStrings("billing", (try names.next()) orelse return error.TestMissingName);
+    try testing.expectEqualStrings("weather", (try names.next()) orelse return error.TestMissingName);
+    try testing.expectEqual(@as(?[]const u8, null), try names.next());
 }
 
 test "a catalog the kernel would refuse is not encoded" {

@@ -442,7 +442,7 @@ the entry binds no input field to that identity.
 
 ```text
 magic            8 bytes  "ZTCAT1\0\0"
-schema           u16      2
+schema           u16      3
 entry_count      u16      1..64
 entry, entry_count times, strictly increasing by name bytes:
   name             string  1..64 bytes
@@ -460,12 +460,19 @@ entry, entry_count times, strictly increasing by name bytes:
   export, export_count times, strictly increasing by (module, name):
     module           string  1..64 bytes
     name             string  1..64 bytes
+  credential_count u16     0..64
+  credential, credential_count times, strictly increasing by bytes:
+    name             string  1..64 bytes: a credential the tool may use
 trailing bytes: refused
 ```
 
-Strict increase refuses a duplicate name and a duplicate export. No two entries share a
-(method, path) route. Schema 2 added the scope fields, which carry the entry's `scope`
-binding (M4 T5); the kernel accepts schema 2 only. The build admits a scope field only when
+Strict increase refuses a duplicate name, a duplicate export, and a duplicate credential.
+No two entries share a (method, path) route. Schema 2 added the scope fields, which carry
+the entry's `scope` binding (M4 T5). Schema 3 added the credential names, which are the
+tool's credential grant (M4 T6): the literal `credential` names its route passes to
+`fetch`. The kernel accepts schema 3 only and checks each name's length, encoding, and
+order; that each names a reference in zttp.json at the endpoint its call reaches is a build
+rule. The build admits a scope field only when
 it names a required top-level string property of the input schema; the kernel checks its
 length and encoding. A schema is written in canonical schema JSON: no whitespace; strings
 JSON-escaped (`"`, `\`, and bytes below 0x20, with `\u00XX` for those without a short

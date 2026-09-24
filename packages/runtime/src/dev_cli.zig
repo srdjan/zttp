@@ -355,6 +355,7 @@ fn isDeclarationBuildError(err: anyerror) bool {
     return err == error.DeclarationContextFailed or
         err == error.RequiredClassificationAbsent or
         err == error.CeilingBreached or
+        err == error.CredentialBreached or
         err == error.DeclarationNotEnforced;
 }
 
@@ -442,6 +443,7 @@ fn cmdDeploy(ctx: cli_help.Ctx) anyerror!void {
             error.DeclarationContextFailed,
             error.RequiredClassificationAbsent,
             error.CeilingBreached,
+            error.CredentialBreached,
             error.DeclarationNotEnforced,
             => std.process.exit(1),
             else => return err,

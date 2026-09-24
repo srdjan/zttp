@@ -104,6 +104,9 @@ fn registerFetchOptions(env: *TypeEnv, pool: *TypePool, allocator: std.mem.Alloc
         optionalField(pool, allocator, "query", object_refFor(pool, allocator)),
         optionalField(pool, allocator, "maxResponseBytes", pool.idx_number),
         optionalField(pool, allocator, "durable", object_refFor(pool, allocator)),
+        // M4 T6: the name of a credential reference the runtime injects. The
+        // build requires a string literal in a tool route.
+        optionalField(pool, allocator, "credential", pool.idx_string),
     });
     if (options == null_type_idx) return;
     env.putTypeAlias("FetchOptions", options);
@@ -379,7 +382,7 @@ test "FetchOptions names what the runtime reads, and only that" {
     populateModuleTypes(&env, &pool, allocator);
 
     const options = env.getTypeAlias("FetchOptions") orelse return error.MissingFetchOptions;
-    const expected = [_][]const u8{ "method", "headers", "body", "query", "maxResponseBytes", "durable" };
+    const expected = [_][]const u8{ "method", "headers", "body", "query", "maxResponseBytes", "durable", "credential" };
     const fields = pool.getRecordFields(options);
     try std.testing.expectEqual(expected.len, fields.len);
     for (expected, fields) |name, field| {

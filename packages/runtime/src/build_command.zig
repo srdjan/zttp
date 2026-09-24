@@ -1055,6 +1055,9 @@ const BuildCompileInput = struct {
     system_path: ?[]const u8,
     policy: ?*const zts.HandlerPolicy,
     declaration: ?*const zts.declaration.Declaration = null,
+    /// The project's credential references (M4 T6). A build always compares
+    /// them, so a tool naming a credential with none configured refuses.
+    credentials: []const zts.handler_contract.CredentialRef = &.{},
 };
 
 fn compileCapability(
@@ -1070,6 +1073,7 @@ fn compileCapability(
         .system_path = input.system_path,
         .policy = if (input.policy) |policy| policy.* else null,
         .declaration = input.declaration,
+        .credentials = input.credentials,
     });
 }
 
@@ -1143,6 +1147,7 @@ fn runBuild(
         .system_path = request.system_path,
         .policy = request.policy,
         .declaration = request.declaration,
+        .credentials = request.credentials,
     }) catch |err| {
         // precompile already prints per-error lines to stderr; only surface
         // the remediation hint so the dev knows where to look.
@@ -3697,6 +3702,90 @@ test "a project build carries the zttp.json declaration and refuses a required e
         .attest_requested = false,
     }, control_caps);
     try std.testing.expectEqual(@as(usize, 1), control.tail_calls);
+}
+
+/// A one-tool handler whose route fetches with the credential `name` (M4 T6).
+fn credentialedToolSource(comptime name: []const u8) []const u8 {
+    return
+    \\import { toolCatalog } from "zttp:tool";
+    \\import { routerMatch } from "zttp:router";
+    \\import { schemaCompile } from "zttp:validate";
+    \\import { fetch } from "zttp:fetch";
+    \\
+    \\schemaCompile("PingInput", "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{}}");
+    \\schemaCompile("PingOutput", "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"ok\":{\"type\":\"boolean\"}}}");
+    \\
+    \\toolCatalog({
+    \\  ping: {
+    \\    route: "POST /tools/ping",
+    \\    description: "Ask the upstream whether it is up.",
+    \\    input: "PingInput",
+    \\    output: "PingOutput",
+    \\    maxInputBytes: 256
+    \\  }
+    \\});
+    \\
+    \\function ping(req: Request): Response {
+    \\  const res = fetch("https://api.weather.example/v1/status", { credential: "
+    ++ name ++
+        \\" });
+        \\  return Response.json({ ok: res.ok });
+        \\}
+        \\
+        \\const routes = { "POST /tools/ping": ping };
+        \\
+        \\function handler(req: Request): Response {
+        \\  const found = routerMatch(routes, req);
+        \\  if (found !== undefined) {
+        \\    return found.handler(req);
+        \\  }
+        \\  return Response.json({ error: "not found" }, { status: 404 });
+        \\}
+        \\
+    ;
+}
+
+test "a project build refuses a tool credential zttp.json does not define" {
+    const allocator = std.testing.allocator;
+    const weather_refs =
+        \\{"entry":"src/handler.ts","credentials":{"weather":{"env":"W","endpoint":"https://api.weather.example",
+        \\ "header":"authorization","scheme":"Bearer","methods":["GET"],"paths":["/v1"]}}}
+    ;
+    const Case = struct { manifest: []const u8, source: []const u8, refused: bool };
+    const cases = [_]Case{
+        .{ .manifest = weather_refs, .source = credentialedToolSource("weather"), .refused = false },
+        .{ .manifest = weather_refs, .source = credentialedToolSource("billing"), .refused = true },
+        .{ .manifest = "{\"entry\":\"src/handler.ts\"}", .source = credentialedToolSource("weather"), .refused = true },
+    };
+    for (cases) |case| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        try tmp.dir.createDirPath(std.testing.io, "src");
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "zttp.json", .data = case.manifest });
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "src/handler.ts", .data = case.source });
+        const handler_path = try tmp.dir.realPathFileAlloc(std.testing.io, "src/handler.ts", allocator);
+        defer allocator.free(handler_path);
+        var context = try discoverExplicitCompileContext(allocator, handler_path);
+        defer context.deinit(allocator);
+
+        var probe = BuildProbe{};
+        var caps = probe.capabilities();
+        caps.read_source = readSourceCapability;
+        caps.compile = compileCapability;
+        const request: BuildRequest = .{
+            .handler_path = handler_path,
+            .output_path = "out",
+            .credentials = context.credentials,
+            .attest_requested = false,
+        };
+        if (case.refused) {
+            try std.testing.expectError(error.CredentialBreached, runBuild(allocator, request, caps));
+            try std.testing.expectEqual(@as(usize, 0), probe.tail_calls);
+        } else {
+            _ = try runBuild(allocator, request, caps);
+            try std.testing.expectEqual(@as(usize, 1), probe.tail_calls);
+        }
+    }
 }
 
 test "a project build carries the zttp.json ceiling and refuses a handler outside it" {

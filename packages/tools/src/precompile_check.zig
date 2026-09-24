@@ -792,6 +792,7 @@ pub fn generateTypeDefs(writer: anytype) void {
         \\  query?: Record<string, string>;
         \\  maxResponseBytes?: number;
         \\  durable?: Record<string, unknown>;
+        \\  credential?: string;
         \\}
         \\
         \\
