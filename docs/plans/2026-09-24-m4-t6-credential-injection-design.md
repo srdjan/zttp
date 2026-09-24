@@ -1,7 +1,7 @@
 # M4 T6 design note: credential injection
 
 Status: accepted by the owner on 2026-09-24, with the recommended answer to
-each question in section 9. U1 and U2 are implemented; U3 is next. Check C6 of the
+each question in section 9. U1, U2, and U3 are implemented, so T6 is complete. Check C6 of the
 [M4 release contract](2026-09-22-m4-release-contract.md) is written against
 the approach this note names.
 
@@ -329,9 +329,9 @@ re-record before it lands.
 
 | Unit | Commit | Content |
 |---|---|---|
-| U1 | this commit | The reference, the loader, contract version 22, and the store |
-| U2 | this commit | Selection at build, the per-tool grant, and `ZTCAT1` schema 3 |
-| U3 | | Injection at runtime, the other senders, `OutcomeUnknown`, reflection |
+| U1 | `5fdf94e8`, `d6140e57` | The reference, the loader, contract version 22, and the store |
+| U2 | `5a084f31` | Selection at build, the per-tool grant, and `ZTCAT1` schema 3 |
+| U3 | this commit | Injection at runtime, the other senders, `OutcomeUnknown`, reflection |
 
 ## 12. U1 implementation notes and evidence
 
@@ -461,3 +461,92 @@ restored with `/bin/cp -f` and `cmp`.
 refused at build; U3's runtime refuses it, because no tool grant is active.
 `zttp check` does not compare the references. `zttp dev` does not either; a
 mismatch there surfaces at the call in U3.
+
+## 14. U3 implementation notes and evidence
+
+**Shape.** `credential_store.zig` now keeps an owned copy of each reference
+beside its value, so the runtime authorizes against the reference the value was
+loaded for, whatever the source of the references. `authorize` is a pure
+function over the store, the grant answer, and the exact request. It runs the
+seven checks of section 5 in order and returns the entry or one member of the
+closed `Refusal` enum, which adds `path_unsupported` for the other senders. The
+server hands the store to the pool through `RuntimeConfig.credential_store`,
+and the tool grant gains `allows_credential`, which `tool_auth.grantFor`
+answers from `AcceptedTool.allowsCredential`. In `fetchSyncResult`,
+`authorizeCredential` runs after the address-scope check and before the
+connect, and only a granted decision appends the header. The header value is
+zeroed on every exit. A path check refuses a `.` or `..` segment (plain or as
+`%2e`), an encoded `/` or `\`, a raw `\`, and an empty segment other than the
+last one.
+
+**Other senders.** The `zttp:io` collector, a durable fetch, and `httpRequest`
+refuse a credential with `path_unsupported` in the runtime. `fetchWithRetry`
+refuses it in the module, before its loop, through a new `refuse_fn` in the
+module state that builds the same 599.
+
+**Outcome and reflection.** A credentialed request whose send completed and
+whose response head did not arrive answers `OutcomeUnknown`; other fetches keep
+`ResponseHeadFailed` or `TimedOut`. A response whose reason, header names or
+values, or decoded body holds the exact value answers `CredentialReflected`
+with `response_head` or `response_body`, and the runtime zeroes its copies
+first. `docs/contracts-and-sandboxing.md` states that an encoded echo is not
+found.
+
+**Found in U3.** Two defects outside T6 surfaced.
+
+The `zttp:fetch` state was installed with `ctx.setModuleState`, a bare
+pointer, while the SDK's `getModuleState` unwraps an `SdkStateEnvelope`. The
+module therefore read the first word of the state as the envelope's user
+pointer and read `InstalledState` as if it were `FetchState`. `fetch` worked by
+coincidence, because the first two fields of both structs are a runtime pointer
+and a call function of the same shape. The first call to `fetchWithRetry` read
+a heap address as a function pointer and crashed with a bus error; no runtime
+test called `fetchWithRetry` before. The state is now installed in the envelope,
+as `sql.zig` does, and a plain `fetchWithRetry` test covers it.
+
+A `fetch` with `POST` or `PUT` and no body reaches `sendBodiless`, which
+asserts that the method has no body, so the worker panics. The census `PUT`
+case carries a body so that a probe can run past it. The fix is a separate
+commit.
+
+**Tests.** `test-zruntime` runs the credential cases against a loopback
+upstream that records every request until the handler asks for `/__stop`, so
+a refusal that still sent a request shows up as a recorded request. One census
+test runs 15 cases, one or more per `Refusal` member, checks every case, and
+requires that each member is observed and that no case sent a request. Other
+tests cover the positive path (GET with a query and POST, the header holds the
+scheme and the value), a redirect to a second listener that receives nothing,
+`OutcomeUnknown` with exactly two requests at the upstream (one credentialed,
+one plain that keeps `ResponseHeadFailed`), reflection in the head and in the
+body, B8.3 with `ResponseTooLarge`, and the marker search of section 7: every
+response body, the trace file (with a floor that it recorded the calls), and
+the security event stream (with a floor of one event). `test-server` adds a
+unit census of `authorize` and two tests through the real tool request path,
+with the grant from `grantFor`: a granted fetch carries the credential, and a
+2xx tool body over its output schema's `maxLength` is refused
+`tool output refused: string_too_long` (the second half of B8.3).
+
+**Gates.** Every verdict below comes from an unfiltered step with its exit status read directly, with every U3 file staged. `bash scripts/verify.sh` passed. `zig build test`: 192 of 192 steps, 8910 of 8916 tests passed, 6 skipped. `test-zruntime`: 441 of 442 passed, 1 skipped. `test-server`: 455 of 457 passed, 2 skipped. `test-modules`: 137 of 137. `test-runtime-purity` passed. `zts module-spec-render --check` passed: the binding exports did not change, so `module-specs/net/fetch.json` did not move.
+
+**Probes.** Each mutation was confirmed present, compiled, and restored with
+`/bin/cp -f` and `cmp`.
+
+| Mutation | Step | Failing test |
+|---|---|---|
+| a refusal injects the credential and sends (the C6 probe) | `test-zruntime` | the census: all 11 cases that reach `authorizeCredential` fail and each sent one request; the trace test fails |
+| header-collision check removed | `test-zruntime`, `test-server`, `zig build test` | the census case `the handler's own header`, and the `authorize` unit census |
+| grant check answers true in `authorizeCredential` | `test-zruntime` | the census case `another tool's credential` |
+| `allowsCredentialThunk` answers false | `test-server` | both server credential tests |
+| fetch state installed as a bare pointer again | `test-zruntime` | `fetchWithRetry without a credential reaches the upstream once` and the census (crash) |
+| reflection check skipped | `test-zruntime` | `an upstream that echoes the credential is refused before the tool reads it` |
+| `OutcomeUnknown` never chosen | `test-zruntime` | `a credentialed request with no answer is OutcomeUnknown and is sent once` |
+
+A first version of the server tests joined an upstream thread that waited in
+`accept`, so the grant probe hung instead of failing. The upstream now receives
+a `/__stop` connection on every join, and the probe fails in seconds.
+
+**Not measured.** No test runs against a real TLS upstream; every positive
+test uses a loopback literal over plain HTTP, which Q3 allows. The value is
+not zeroed in the HTTP client's connection write buffer. `zttp check` and
+`zttp dev` still do not compare a tool's credentials with the references at
+build time (a U2 gap); a mismatch in dev is refused at the call.

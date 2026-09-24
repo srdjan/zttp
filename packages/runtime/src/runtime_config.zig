@@ -6,6 +6,7 @@ const std = @import("std");
 const zq = @import("zts");
 const embedded_handler = @import("embedded_handler");
 const fault_explain = @import("fault_explain.zig");
+const credential_store = @import("credential_store.zig");
 
 const cost_meter = zq.CostMeter;
 
@@ -72,6 +73,11 @@ pub const RuntimeConfig = struct {
     /// `credentials`. A deployed artifact ignores this and reads the references
     /// from its own contract, which the executable graph binds. Borrowed.
     credentials: []const zq.handler_contract.CredentialRef = &.{},
+    /// The loaded credential values (M4 T6), which the server owns for its
+    /// lifetime and sets before it builds the pool. Null when no reference is
+    /// configured or no server loaded them; a credentialed fetch is then
+    /// refused with `not_configured`. Borrowed.
+    credential_store: ?*const credential_store.Store = null,
     trace_file_path: ?[]const u8 = null,
     /// Opt-in JSONL sink for runtime soundness incidents (`--incident-log`).
     /// `incident_log_path` is the CLI-supplied path; the server opens it once at

@@ -21,10 +21,20 @@ pub const FetchDeadlinePassedFn = *const fn (
     handle: *sdk.ModuleHandle,
 ) bool;
 
+/// Builds the runtime's 599 fetch error with `code` and `details`, so a
+/// refusal here has the same shape as one the runtime gives.
+pub const FetchRefuseFn = *const fn (
+    runtime_ptr: *anyopaque,
+    handle: *sdk.ModuleHandle,
+    code: []const u8,
+    details: []const u8,
+) anyerror!sdk.JSValue;
+
 pub const FetchState = struct {
     runtime_ptr: *anyopaque,
     call_fn: FetchCallFn,
     deadline_passed_fn: ?FetchDeadlinePassedFn = null,
+    refuse_fn: ?FetchRefuseFn = null,
 };
 
 pub const binding = sdk.ModuleBinding{
@@ -140,6 +150,15 @@ fn fetchWithRetryImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const s
     // Build the args slice for the underlying fetch call: (url, init).
     const fetch_args = args[0..@min(args.len, 2)];
 
+    // This loop resends a request, a write whose outcome is unknown included,
+    // so it never carries a credential (M4 T6 design note, section 5, Q2).
+    if (namesCredential(handle, fetch_args)) {
+        const refuse = state.refuse_fn orelse {
+            return sdk.throwError(handle, "Error", "fetchWithRetry() cannot carry a credential");
+        };
+        return refuse(state.runtime_ptr, handle, "CredentialRefused", "path_unsupported");
+    }
+
     // Parse retryOptions from the third argument, if present.
     var max_retries: i32 = DEFAULT_MAX_RETRIES;
     var base_delay_ms: i64 = DEFAULT_BASE_DELAY_MS;
@@ -229,6 +248,16 @@ fn fetchWithRetryImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const s
         }
         attempt += 1;
     }
+}
+
+/// True when the init of a `(url, init)` or `(init)` call names a credential.
+fn namesCredential(handle: *sdk.ModuleHandle, fetch_args: []const sdk.JSValue) bool {
+    for (fetch_args) |arg| {
+        if (!sdk.isObject(arg)) continue;
+        const credential = sdk.objectGet(handle, arg, "credential") orelse continue;
+        if (!credential.isUndefined()) return true;
+    }
+    return false;
 }
 
 fn requestDeadlinePassed(state: *const FetchState, handle: *sdk.ModuleHandle) bool {

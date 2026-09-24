@@ -1013,7 +1013,7 @@ pub const HandlerInstance = struct {
     }
 
     fn installFetchModuleState(self: *Self) !void {
-        try zq.modules.fetch.installState(self.ctx, self, fetchModuleCallback);
+        try zq.modules.fetch.installState(self.ctx, self, fetchModuleCallback, http.fetchModuleRefusal);
     }
 
     fn verifyBytecodeRecursive(func: *const zq.FunctionBytecode) !void {

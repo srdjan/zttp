@@ -19,6 +19,7 @@ const durable_store_mod = @import("durable_store.zig");
 const durable_fetch = @import("durable_fetch.zig");
 const http_parser = @import("http_parser.zig");
 const retry_backoff = @import("retry_backoff.zig");
+const credential_store = @import("credential_store.zig");
 
 const HandlerInstance = handler_instance.HandlerInstance;
 const http_types = @import("http_types.zig");
@@ -633,6 +634,8 @@ const FetchInitOptions = struct {
     body: ?[]const u8 = null,
     max_response_bytes: usize,
     headers: std.ArrayList(std.http.Header) = .empty,
+    /// The credential the call names (M4 T6). Borrowed from the JS string.
+    credential: ?[]const u8 = null,
 
     fn deinit(self: *FetchInitOptions, allocator: std.mem.Allocator) void {
         self.headers.deinit(allocator);
@@ -879,7 +882,62 @@ fn parseFetchInitOptions(
         }
     }
 
+    if (credentialOption(rt, init, pool)) |credential_val| {
+        const name = getStringData(credential_val) orelse {
+            return fetchInitError(rt, allocator, &options, "InvalidCredential", "credential must be a string");
+        };
+        if (name.len == 0) {
+            return fetchInitError(rt, allocator, &options, "InvalidCredential", "credential must be a non-empty string");
+        }
+        options.credential = name;
+    }
+
     return .{ .ok = options };
+}
+
+/// The `credential` value of a fetch init, or null when the init names none.
+/// Every sender reads it through here, so a sender that does not inject a
+/// credential refuses exactly the calls the synchronous path would act on.
+fn credentialOption(rt: *HandlerInstance, init: *zq.JSObject, pool: *const zq.HiddenClassPool) ?zq.JSValue {
+    const credential_val = getDynamicProperty(rt.ctx, init, pool, "credential") orelse return null;
+    if (credential_val.isUndefined()) return null;
+    return credential_val;
+}
+
+/// The one refusal every sender other than the synchronous `fetch` gives a
+/// credentialed call (M4 T6 design note, section 5, and Q2).
+fn credentialPathUnsupported(rt: *HandlerInstance) !zq.JSValue {
+    return createFetchErrorResponse(rt, "CredentialRefused", @tagName(credential_store.Refusal.path_unsupported));
+}
+
+/// Authorize the credential a call names against the exact request the
+/// runtime is about to send (M4 T6 design note, section 5). The active tool's
+/// grant answers check 1; the store checks the rest. Runs after every other
+/// check and before the connect.
+fn authorizeCredential(rt: *HandlerInstance, name: []const u8, url: []const u8, options: *const FetchInitOptions) credential_store.Decision {
+    const granted = blk: {
+        const request = rt.active_request orelse break :blk false;
+        const grant = request.tool_grant orelse break :blk false;
+        break :blk grant.allows_credential(grant.context, name);
+    };
+    return credential_store.authorize(rt.config.credential_store, granted, name, .{
+        .url = url,
+        .method = options.method,
+        .headers = options.headers.items,
+    });
+}
+
+/// Where an upstream response echoed the credential value, or null. Only the
+/// exact bytes are found: an encoded echo (base64, a hash, or a compression
+/// the runtime does not decode) is not (design note, section 7, and Q4).
+fn credentialReflection(value: []const u8, head: *const OwnedResponseHead, body: []const u8) ?[]const u8 {
+    if (std.mem.indexOf(u8, head.reason, value) != null) return "response_head";
+    for (head.headers.items) |header| {
+        if (std.mem.indexOf(u8, header.name, value) != null) return "response_head";
+        if (std.mem.indexOf(u8, header.value, value) != null) return "response_head";
+    }
+    if (std.mem.indexOf(u8, body, value) != null) return "response_body";
+    return null;
 }
 
 // Shared outbound-fetch plumbing for the three call sites below (the synchronous
@@ -983,6 +1041,20 @@ fn fetchSyncResult(rt: *HandlerInstance, args: []const zq.JSValue) !zq.JSValue {
         .unresolved => |details| return createFetchErrorResponse(rt, "ConnectFailed", details),
     }
 
+    // The credential (M4 T6) is added only here, after every other check and
+    // before the connect, and only when the exact request passes each check
+    // of `authorizeCredential`. The header value is zeroed on every exit.
+    var credential_header: ?[]u8 = null;
+    defer if (credential_header) |header_value| credential_store.releaseHeaderValue(rt.allocator, header_value);
+    const credential_value: ?[]const u8 = if (options.credential) |name| switch (authorizeCredential(rt, name, fetch_args.url, &options)) {
+        .refused => |reason| return createFetchErrorResponse(rt, "CredentialRefused", @tagName(reason)),
+        .granted => |entry| granted: {
+            credential_header = try credential_store.headerValue(rt.allocator, entry);
+            try options.headers.append(rt.allocator, .{ .name = entry.ref.header, .value = credential_header.? });
+            break :granted entry.value;
+        },
+    } else null;
+
     // One budget for connect, handshake, and exchange, starting after name
     // resolution. The backend arms the watchdog when the connect succeeds.
     var deadline: FetchDeadline = .{ .timeout_ms = effectiveOutboundTimeoutMs(rt), .io = client.io };
@@ -1040,7 +1112,11 @@ fn fetchSyncResult(rt: *HandlerInstance, args: []const zq.JSValue) !zq.JSValue {
     }
 
     var response = req.receiveHead(&.{}) catch |err| {
-        return createFetchErrorResponse(rt, deadline.failCode("ResponseHeadFailed"), @errorName(err));
+        // The send completed, so a credentialed request may have reached the
+        // upstream and acted. Its outcome is unknown, and nothing retries it
+        // (design note, section 6). Other fetches keep their codes.
+        const code = if (credential_value != null) "OutcomeUnknown" else deadline.failCode("ResponseHeadFailed");
+        return createFetchErrorResponse(rt, code, @errorName(err));
     };
     const status = @intFromEnum(response.head.status);
     var owned_head = try snapshotResponseHead(rt.allocator, response.head);
@@ -1056,6 +1132,21 @@ fn fetchSyncResult(rt: *HandlerInstance, args: []const zq.JSValue) !zq.JSValue {
     // a clean EOF; reject it instead of returning a truncated response.
     if (deadline.expired()) {
         return createFetchErrorResponse(rt, "TimedOut", "exceeded outbound_timeout_ms");
+    }
+
+    // An upstream that echoes the credential would hand it to tool code.
+    // Refuse before any JS value holds the response (design note, Q4).
+    if (credential_value) |value| {
+        if (credentialReflection(value, &owned_head, response_body)) |where| {
+            // The copies hold the value; zero them before the defers free them.
+            std.crypto.secureZero(u8, response_body);
+            std.crypto.secureZero(u8, owned_head.reason);
+            for (owned_head.headers.items) |header| {
+                std.crypto.secureZero(u8, header.name);
+                std.crypto.secureZero(u8, header.value);
+            }
+            return createFetchErrorResponse(rt, "CredentialReflected", where);
+        }
     }
 
     const created = try createFetchResponse(rt, status, owned_head.reason, response_body, owned_head.contentType());
@@ -1097,6 +1188,15 @@ fn collectFetchForParallel(rt: *HandlerInstance, collector: *zq.modules.io.Paral
         .err => |err_val| return err_val,
     };
     errdefer options.deinit(a);
+    // The worker threads that send a parallel descriptor do not inject a
+    // credential (M4 T6, Q2).
+    if (options.credential != null) {
+        // Reset after the deinit, so the errdefer is a no-op if building the
+        // refusal fails.
+        options.deinit(a);
+        options.headers = .empty;
+        return credentialPathUnsupported(rt);
+    }
 
     const owned_url = try a.dupe(u8, url);
     errdefer a.free(owned_url);
@@ -1179,10 +1279,28 @@ pub fn fetchModuleCallback(
         switch (try parseDurableFetchOpts(rt, obj, pool)) {
             .none => {},
             .err => |err_val| return err_val,
-            .ok => |opts| return runDurableFetch(rt, args, opts),
+            .ok => |opts| {
+                // A durable fetch retries every 5xx, a transport failure
+                // included, so it never carries a credential (M4 T6, Q2).
+                if (credentialOption(rt, obj, pool) != null) return credentialPathUnsupported(rt);
+                return runDurableFetch(rt, args, opts);
+            },
         }
     }
     return fetchSyncNative(@ptrCast(rt.ctx), zq.JSValue.undefined_val, args);
+}
+
+/// The `zttp:fetch` module's refusal callback: the same 599 fetch error the
+/// runtime's own senders give, for a refusal the module decides.
+pub fn fetchModuleRefusal(
+    runtime_ptr: *anyopaque,
+    ctx: *zq.Context,
+    code: []const u8,
+    details: []const u8,
+) anyerror!zq.JSValue {
+    _ = ctx;
+    const rt: *HandlerInstance = @ptrCast(@alignCast(runtime_ptr));
+    return createFetchErrorResponse(rt, code, details);
 }
 
 fn fetchModuleReplay(rt: *HandlerInstance) !zq.JSValue {
@@ -2249,6 +2367,11 @@ fn httpRequestResultJsonAlloc(rt: *HandlerInstance, args: []const zq.JSValue) ![
         return try httpRequestErrorJsonAlloc(a, "InvalidJson", "request JSON must be an object");
     }
     const obj = parsed.value.object;
+
+    // This sender never injects a credential (M4 T6, Q2).
+    if (obj.get("credential") != null) {
+        return try httpRequestErrorJsonAlloc(a, "CredentialRefused", @tagName(credential_store.Refusal.path_unsupported));
+    }
 
     const url_v = obj.get("url") orelse {
         return try httpRequestErrorJsonAlloc(a, "InvalidUrl", "missing url field");

@@ -49,9 +49,12 @@ pub const CapabilityCeiling = struct {
 /// shape as the engine's `ToolGrant`, restated so this file stays free of the
 /// engine: `allows(context, module, name)` answers for the tool `context`
 /// points at, which the caller keeps alive for the call.
+/// `allows_credential(context, name)` answers whether that tool's credential
+/// grant (M4 T6) holds `name`; only the runtime's fetch asks it.
 pub const ToolGrant = struct {
     context: *const anyopaque,
     allows: *const fn (context: *const anyopaque, module: []const u8, name: []const u8) bool,
+    allows_credential: *const fn (context: *const anyopaque, name: []const u8) bool,
 };
 
 pub const HttpRequestOwned = struct {

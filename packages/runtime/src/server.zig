@@ -2441,6 +2441,8 @@ pub const Server = struct {
         // interpreter's cooperative deadline check is enforced per handler call.
         var pool_rt_config = self.config.runtime_config;
         pool_rt_config.request_timeout_ms = self.config.timeout_ms;
+        // The store lives as long as the server, which outlives the pool.
+        pool_rt_config.credential_store = if (self.credential_store) |*store| store else null;
         pool_rt_config.invariant_coverage_accepted = self.config.runtime_config.invariant_section != null and
             self.proof_checked != null;
         // Result and optional safety let the interpreter skip checks a handler
@@ -4846,6 +4848,10 @@ const ToolTestSpec = struct {
     output_schema: []const u8 = tool_test_output_schema,
     scope_tenant: ?[]const u8 = null,
     exports: []const [2][]const u8 = &.{},
+    /// The credential grant, as (name, endpoint) pairs sorted by name.
+    credentials: []const [2][]const u8 = &.{},
+    /// The pooled runtimes' config.
+    pool_config: RuntimeConfig = .{},
 };
 
 fn toolTestCatalogFor(allocator: std.mem.Allocator, spec: ToolTestSpec) !contract_runtime.AcceptedCatalog {
@@ -4875,6 +4881,13 @@ fn toolTestCatalogFor(allocator: std.mem.Allocator, spec: ToolTestSpec) !contrac
         errdefer allocator.free(name);
         try entry.reachable_exports.append(allocator, .{ .module = module, .name = name });
     }
+    for (spec.credentials) |pair| {
+        const name = try allocator.dupe(u8, pair[0]);
+        errdefer allocator.free(name);
+        const endpoint = try allocator.dupe(u8, pair[1]);
+        errdefer allocator.free(endpoint);
+        try entry.credentials.append(allocator, .{ .name = name, .endpoint = endpoint });
+    }
     const catalog = try contract_runtime.lowerProducerToolCatalog(allocator, &.{entry});
     return catalog orelse error.TestExpectedCatalog;
 }
@@ -4896,7 +4909,7 @@ fn serveToolRequestWith(spec: ToolTestSpec, handler_code: []const u8, raw_reques
         .runtime_config = .{ .tool_auth = .{ .key_env = tool_test_key_env, .tenant_claim = tool_test_tenant_claim } },
     });
     defer srv.deinit();
-    srv.pool = try HandlerPool.init(allocator, .{}, handler_code, "<tool-test>", 1, 0);
+    srv.pool = try HandlerPool.init(allocator, spec.pool_config, handler_code, "<tool-test>", 1, 0);
     srv.dev_tool_catalog = try toolTestCatalogFor(allocator, spec);
     _ = setenv(tool_test_key_env, tool_test_key, 1);
     try srv.loadToolAuth();
@@ -5031,6 +5044,172 @@ test "a tool's 2xx body that breaks its output schema is refused with 500" {
         &buf,
     );
     try expectResponse(response, "HTTP/1.1 500", "tool output refused: type_mismatch");
+}
+
+/// A loopback upstream for one request: it records the request's
+/// `authorization` header and answers 200 with `body`.
+const CredentialTestUpstream = struct {
+    io_backend: std.Io.Threaded,
+    listener: std.Io.net.Server,
+    body: []const u8,
+    thread: ?std.Thread = null,
+    authorization_buf: [256]u8 = undefined,
+    authorization_len: usize = 0,
+    requests: usize = 0,
+
+    fn init(body: []const u8) !CredentialTestUpstream {
+        var io_backend = std.Io.Threaded.init(std.testing.allocator, .{ .environ = .empty });
+        const address = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
+        const listener = try address.listen(io_backend.io(), .{ .reuse_address = true });
+        return .{ .io_backend = io_backend, .listener = listener, .body = body };
+    }
+
+    fn port(self: *const CredentialTestUpstream) u16 {
+        return self.listener.socket.address.getPort();
+    }
+
+    fn start(self: *CredentialTestUpstream) !void {
+        self.thread = try std.Thread.spawn(.{}, run, .{self});
+    }
+
+    /// Send `/__stop`, which the upstream does not count, and join. A fetch
+    /// the runtime refused sends nothing, and the thread would otherwise wait
+    /// in `accept` forever; after a real request the stop sits unread in the
+    /// backlog.
+    fn join(self: *CredentialTestUpstream) void {
+        const thread = self.thread orelse return;
+        self.sendStop() catch {};
+        thread.join();
+        self.thread = null;
+    }
+
+    fn sendStop(self: *CredentialTestUpstream) !void {
+        const io = self.io_backend.io();
+        const address = try std.Io.net.IpAddress.parseIp4("127.0.0.1", self.port());
+        var stream = try address.connect(io, .{ .mode = .stream });
+        defer stream.close(io);
+        var out_buf: [64]u8 = undefined;
+        var writer = stream.writer(io, &out_buf);
+        try writer.interface.writeAll("GET /__stop HTTP/1.1\r\n\r\n");
+        try writer.interface.flush();
+    }
+
+    fn deinit(self: *CredentialTestUpstream) void {
+        self.join();
+        self.listener.deinit(self.io_backend.io());
+        self.io_backend.deinit();
+    }
+
+    fn authorization(self: *const CredentialTestUpstream) []const u8 {
+        return self.authorization_buf[0..self.authorization_len];
+    }
+
+    fn run(self: *CredentialTestUpstream) void {
+        self.serveOne() catch {};
+    }
+
+    fn serveOne(self: *CredentialTestUpstream) !void {
+        const io = self.io_backend.io();
+        var stream = try self.listener.accept(io);
+        defer stream.close(io);
+        var head: [4096]u8 = undefined;
+        var len: usize = 0;
+        while (std.mem.indexOf(u8, head[0..len], "\r\n\r\n") == null and len < head.len) {
+            var vecs: [1][]u8 = .{head[len..]};
+            const n = try io.vtable.netRead(io.userdata, stream.socket.handle, &vecs);
+            if (n == 0) break;
+            len += n;
+        }
+        if (std.mem.startsWith(u8, head[0..len], "GET /__stop ")) return;
+        self.requests += 1;
+        var lines = std.mem.splitSequence(u8, head[0..len], "\r\n");
+        while (lines.next()) |line| {
+            const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
+            if (!std.ascii.eqlIgnoreCase(line[0..colon], "authorization")) continue;
+            const value = std.mem.trim(u8, line[colon + 1 ..], " ");
+            const n = @min(value.len, self.authorization_buf.len);
+            @memcpy(self.authorization_buf[0..n], value[0..n]);
+            self.authorization_len = n;
+        }
+        var out_buf: [512]u8 = undefined;
+        var writer = stream.writer(io, &out_buf);
+        try writer.interface.print("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n{s}", .{ self.body.len, self.body });
+        try writer.interface.flush();
+    }
+};
+
+const credential_test_env = "ZTTP_SERVER_TOOL_CREDENTIAL_KEY";
+const credential_test_value = "server-tool-credential-marker";
+const credential_output_schema =
+    \\{"type":"object","additionalProperties":false,"required":["body"],"properties":{"body":{"type":"string","maxLength":16}}}
+;
+
+/// Serve one tool request whose handler fetches `upstream` with the
+/// credential `weather`, which the tool is granted, and returns the upstream
+/// body as its output.
+fn serveCredentialedTool(upstream: *CredentialTestUpstream, out: []u8) ![]const u8 {
+    const allocator = std.testing.allocator;
+    var endpoint_buf: [64]u8 = undefined;
+    const endpoint = try std.fmt.bufPrint(&endpoint_buf, "http://127.0.0.1:{d}", .{upstream.port()});
+    var paths = [_][]const u8{"/v1"};
+    const refs = [_]credential_store_mod.CredentialRef{.{
+        .name = "weather",
+        .env = credential_test_env,
+        .endpoint = endpoint,
+        .header = "authorization",
+        .scheme = "Bearer",
+        .methods = std.EnumSet(credential_store_mod.credential_ref.Method).initOne(.GET),
+        .paths = &paths,
+    }};
+    _ = setenv(credential_test_env, credential_test_value, 1);
+    defer _ = unsetenv(credential_test_env);
+    var store = (try credential_store_mod.load(allocator, &refs, credential_store_mod.processEnv())).ok;
+    defer store.deinit();
+
+    var handler_buf: [512]u8 = undefined;
+    const handler_code = try std.fmt.bufPrint(&handler_buf,
+        \\import {{ fetch }} from "zttp:fetch";
+        \\function handler(req) {{
+        \\  const res = fetch("{s}/v1/forecast", {{ credential: "weather" }});
+        \\  return Response.json({{ body: res.body }});
+        \\}}
+    , .{endpoint});
+
+    var reqs = ToolRequests.init();
+    defer reqs.deinit();
+    try upstream.start();
+    const response = try serveToolRequestWith(.{
+        .output_schema = credential_output_schema,
+        .exports = &.{.{ "zttp:fetch", "fetch" }},
+        .credentials = &.{.{ "weather", endpoint }},
+        .pool_config = .{
+            .outbound_http_enabled = true,
+            .credential_store = &store,
+            .dev_capability_policy = .{ .egress_scopes = (engine.endpoint.ScopeSet{}).with(.loopback) },
+        },
+    }, handler_code, try reqs.post("{\"id\":\"a1\"}"), out);
+    upstream.join();
+    return response;
+}
+
+test "a granted tool's fetch carries its credential through the server request path" {
+    var upstream = try CredentialTestUpstream.init("sunny");
+    defer upstream.deinit();
+    var buf: [1024]u8 = undefined;
+    const response = try serveCredentialedTool(&upstream, &buf);
+    try expectResponse(response, "HTTP/1.1 200", "{\"body\":\"sunny\"}");
+    try std.testing.expectEqual(@as(usize, 1), upstream.requests);
+    try std.testing.expectEqualStrings("Bearer " ++ credential_test_value, upstream.authorization());
+    try std.testing.expect(std.mem.indexOf(u8, response, credential_test_value) == null);
+}
+
+test "a credentialed tool whose 2xx body is too large for its output schema is refused (B8.3)" {
+    var upstream = try CredentialTestUpstream.init("0123456789abcdef0123456789abcdef");
+    defer upstream.deinit();
+    var buf: [1024]u8 = undefined;
+    const response = try serveCredentialedTool(&upstream, &buf);
+    try expectResponse(response, "HTTP/1.1 500", "tool output refused: string_too_long");
+    try std.testing.expectEqual(@as(usize, 1), upstream.requests);
 }
 
 test "a tool's non-2xx answer and a non-tool route pass the gate untouched" {

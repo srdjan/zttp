@@ -5680,3 +5680,595 @@ test "an invariant pool refuses reload and keeps serving its accepted generation
     defer after.deinit();
     try std.testing.expectEqualStrings("accepted", after.body);
 }
+
+// ============================================================================
+// Credential injection (M4 T6 U3)
+// ============================================================================
+//
+// docs/plans/2026-09-24-m4-t6-credential-injection-design.md, sections 5 to 8.
+// Each handler asks the upstream for `/__stop` last, and the upstream records
+// every request before that one, so a refusal that still sent a request shows
+// up as a recorded request rather than as a hang.
+
+const credential_store = @import("credential_store.zig");
+
+/// The value every credential test loads. No response, trace, or event may
+/// hold it (design note, section 7).
+const credential_marker = "zttp-u3-marker-5c1e9a";
+const credential_env = "ZTTP_U3_TEST_KEY";
+
+fn credentialMarkerEnv(_: ?*const anyopaque, name_z: [:0]const u8) ?[]const u8 {
+    if (std.mem.eql(u8, name_z, credential_env)) return credential_marker;
+    return null;
+}
+
+/// A store with one reference, `weather`: `endpoint`, the `authorization`
+/// header with scheme `Bearer`, GET and POST, and the path prefix `/v1`.
+/// Loaded from a hand-built reference, so a test can name an endpoint the
+/// loader would refuse.
+fn credentialTestStore(allocator: std.mem.Allocator, endpoint: []const u8) !credential_store.Store {
+    var paths = [_][]const u8{"/v1"};
+    var methods = std.EnumSet(credential_store.credential_ref.Method).initEmpty();
+    methods.insert(.GET);
+    methods.insert(.POST);
+    const refs = [_]credential_store.CredentialRef{.{
+        .name = "weather",
+        .env = credential_env,
+        .endpoint = endpoint,
+        .header = "authorization",
+        .scheme = "Bearer",
+        .methods = methods,
+        .paths = &paths,
+    }};
+    return (try credential_store.load(allocator, &refs, .{ .get = credentialMarkerEnv })).ok;
+}
+
+/// A tool grant that allows every export and the credentials it names.
+const TestCredentialGrant = struct {
+    names: []const []const u8,
+
+    fn allowsExport(_: *const anyopaque, _: []const u8, _: []const u8) bool {
+        return true;
+    }
+
+    fn allowsCredential(context: *const anyopaque, name: []const u8) bool {
+        const self: *const TestCredentialGrant = @ptrCast(@alignCast(context));
+        for (self.names) |granted| {
+            if (std.mem.eql(u8, granted, name)) return true;
+        }
+        return false;
+    }
+
+    fn grant(self: *const TestCredentialGrant) http_types.ToolGrant {
+        return .{ .context = @ptrCast(self), .allows = allowsExport, .allows_credential = allowsCredential };
+    }
+};
+
+/// An upstream that records every request until one asks for `/__stop`.
+const CredentialUpstream = struct {
+    io_backend: std.Io.Threaded,
+    listener: std.Io.net.Server,
+    port: u16,
+    reply: Reply,
+    /// The `Location` of a `.redirect` reply.
+    location: []const u8 = "",
+    thread: ?std.Thread = null,
+    /// Owned by `std.testing.allocator`, which is thread-safe; the test's
+    /// arena is not, and the handler allocates from it while this runs.
+    captured: std.ArrayListUnmanaged(TestCapturedRequest) = .empty,
+    thread_error: std.atomic.Value(TestErrorInt) = std.atomic.Value(TestErrorInt).init(0),
+
+    const Reply = enum { ok, echo_body, echo_head, redirect, close_without_answer, large_body };
+
+    fn init(reply: Reply) !CredentialUpstream {
+        var io_backend = std.Io.Threaded.init(std.testing.allocator, .{ .environ = .empty });
+        const address = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
+        const listener = try address.listen(io_backend.io(), .{ .reuse_address = true });
+        return .{ .io_backend = io_backend, .listener = listener, .port = listener.socket.address.getPort(), .reply = reply };
+    }
+
+    fn start(self: *CredentialUpstream) !void {
+        self.thread = try std.Thread.spawn(.{}, run, .{self});
+    }
+
+    fn url(self: *const CredentialUpstream, allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+        return std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}{s}", .{ self.port, path });
+    }
+
+    /// Join after the handler asked for `/__stop`, then release everything.
+    fn deinit(self: *CredentialUpstream) void {
+        if (self.thread) |thread| thread.join();
+        self.thread = null;
+        self.listener.deinit(self.io_backend.io());
+        self.io_backend.deinit();
+        for (self.captured.items) |*captured| captured.deinit(std.testing.allocator);
+        self.captured.deinit(std.testing.allocator);
+    }
+
+    /// The requests the runtime sent before `/__stop`. Joins first.
+    fn requests(self: *CredentialUpstream) ![]const TestCapturedRequest {
+        if (self.thread) |thread| thread.join();
+        self.thread = null;
+        const err_int = self.thread_error.swap(0, .acq_rel);
+        if (err_int != 0) return @errorFromInt(err_int);
+        return self.captured.items;
+    }
+
+    fn run(self: *CredentialUpstream) void {
+        self.runInner() catch |err| self.thread_error.store(@intFromError(err), .release);
+    }
+
+    fn runInner(self: *CredentialUpstream) !void {
+        const io = self.io_backend.io();
+        const allocator = std.testing.allocator;
+        while (true) {
+            var stream = self.listener.accept(io) catch |err| switch (err) {
+                error.ConnectionAborted => continue,
+                else => return err,
+            };
+            defer stream.close(io);
+            var captured = try captureRequest(allocator, &stream, io);
+            if (std.mem.eql(u8, captured.path, "/__stop")) {
+                captured.deinit(allocator);
+                try writeTestResponse(&stream, io, 200, "OK", &.{}, "stopped");
+                return;
+            }
+            self.captured.append(allocator, captured) catch |err| {
+                captured.deinit(allocator);
+                return err;
+            };
+            const authorization = captured.getHeader("authorization") orelse "";
+            switch (self.reply) {
+                .ok => try writeTestResponse(&stream, io, 200, "OK", &.{"Content-Type: text/plain"}, "forecast"),
+                .echo_body => try writeTestResponse(&stream, io, 200, "OK", &.{"Content-Type: text/plain"}, authorization),
+                .echo_head => {
+                    var line_buf: [256]u8 = undefined;
+                    const line = try std.fmt.bufPrint(&line_buf, "x-echo: {s}", .{authorization});
+                    try writeTestResponse(&stream, io, 200, "OK", &.{line}, "ok");
+                },
+                .redirect => {
+                    var line_buf: [256]u8 = undefined;
+                    const line = try std.fmt.bufPrint(&line_buf, "Location: {s}", .{self.location});
+                    try writeTestResponse(&stream, io, 302, "Found", &.{line}, "");
+                },
+                .close_without_answer => {},
+                .large_body => try writeTestResponse(&stream, io, 200, "OK", &.{"Content-Type: text/plain"}, "0123456789abcdef0123456789abcdef"),
+            }
+        }
+    }
+};
+
+/// Run `handler_code` once under `grant`, with egress allowed to `endpoints`
+/// and to loopback, and return the response body. Every body is searched for
+/// the marker here, so no test can forget to.
+fn runCredentialHandler(
+    allocator: std.mem.Allocator,
+    config: RuntimeConfig,
+    endpoints: []const []const u8,
+    grant: ?http_types.ToolGrant,
+    handler_code: []const u8,
+) ![]u8 {
+    var run_config = config;
+    run_config.outbound_http_enabled = true;
+    const rt = try HandlerInstance.init(allocator, run_config);
+    defer rt.deinit();
+    rt.ctx.capability_policy = .{
+        .egress = .{ .enabled = true, .values = endpoints },
+        .egress_scopes = (zq.endpoint.ScopeSet{}).with(.loopback),
+    };
+    try rt.loadHandler(handler_code, "<credential>");
+
+    var request = try makeTestRequest(allocator, "GET", "/", null);
+    defer request.deinit(allocator);
+    var view = request.asView();
+    view.tool_grant = grant;
+    var response = try rt.executeHandler(view);
+    defer response.deinit();
+    try std.testing.expect(std.mem.indexOf(u8, response.body, credential_marker) == null);
+    return allocator.dupe(u8, response.body);
+}
+
+fn expectFetchError(body: []const u8, code: []const u8, details: []const u8) !void {
+    return expectRefusalBody(body, 599, code, details);
+}
+
+/// `httpRequest` answers with its own JSON, which carries no status.
+fn expectRefusalBody(body: []const u8, expected_status: ?i64, code: []const u8, details: []const u8) !void {
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, body, .{});
+    defer parsed.deinit();
+    const obj = parsed.value.object;
+    if (expected_status) |expected| {
+        const status = obj.get("status") orelse return error.TestExpectedFetchError;
+        try std.testing.expectEqual(expected, status.integer);
+    } else try std.testing.expect(obj.get("status") == null);
+    const err = obj.get("error") orelse return error.TestExpectedFetchError;
+    const detail = obj.get("details") orelse return error.TestExpectedFetchError;
+    try std.testing.expectEqualStrings(code, err.string);
+    try std.testing.expectEqualStrings(details, detail.string);
+}
+
+test "an authorized tool request reaches the upstream with the credential in its header" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var upstream = try CredentialUpstream.init(.ok);
+    defer upstream.deinit();
+    try upstream.start();
+
+    const base = try upstream.url(allocator, "");
+    var endpoint_buf: [512]u8 = undefined;
+    const endpoint = egressEndpoint(base, &endpoint_buf);
+    var store = try credentialTestStore(std.testing.allocator, endpoint);
+    defer store.deinit();
+    const grant = TestCredentialGrant{ .names = &.{"weather"} };
+
+    const handler_code = try std.fmt.allocPrint(allocator,
+        \\import {{ fetch }} from "zttp:fetch";
+        \\function handler(req) {{
+        \\  const got = fetch("{s}/v1/forecast", {{ credential: "weather", query: {{ lat: 1, lon: 2 }} }});
+        \\  const posted = fetch("{s}/v1", {{ credential: "weather", method: "POST", body: "x" }});
+        \\  fetch("{s}/__stop");
+        \\  return Response.json({{ got: got.status, body: got.body, posted: posted.status }});
+        \\}}
+    , .{ base, base, base });
+    const body = try runCredentialHandler(allocator, .{ .credential_store = &store }, &.{endpoint}, grant.grant(), handler_code);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, body, .{});
+    try std.testing.expectEqual(@as(i64, 200), parsed.value.object.get("got").?.integer);
+    try std.testing.expectEqualStrings("forecast", parsed.value.object.get("body").?.string);
+    try std.testing.expectEqual(@as(i64, 200), parsed.value.object.get("posted").?.integer);
+
+    const requests = try upstream.requests();
+    try std.testing.expectEqual(@as(usize, 2), requests.len);
+    const expected_header = "Bearer " ++ credential_marker;
+    try std.testing.expectEqualStrings("GET", requests[0].method);
+    try std.testing.expectEqualStrings("/v1/forecast?lat=1&lon=2", requests[0].path);
+    try std.testing.expectEqualStrings(expected_header, requests[0].getHeader("authorization").?);
+    try std.testing.expectEqualStrings("POST", requests[1].method);
+    try std.testing.expectEqualStrings(expected_header, requests[1].getHeader("authorization").?);
+}
+
+test "every credential refusal sends nothing, names its reason, and every reason is observed" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const durable_dir = try durableTestDirPath(allocator, &tmp_dir);
+
+    const Case = struct {
+        label: []const u8,
+        /// The fetch under test. `@BASE@` is the upstream's base URL, `@OTHER@`
+        /// the other upstream's.
+        call: []const u8,
+        grant: []const []const u8 = &.{"weather"},
+        no_grant: bool = false,
+        no_store: bool = false,
+        /// The store's endpoint names `localhost` instead of the address.
+        plain_store: bool = false,
+        durable: bool = false,
+        /// The sender answers with `httpRequest`'s JSON, which has no status.
+        no_status: bool = false,
+        reason: credential_store.Refusal,
+    };
+    const cases = [_]Case{
+        .{ .label = "no tool request", .call = "fetch(\"@BASE@/v1\", { credential: \"weather\" })", .no_grant = true, .reason = .not_granted },
+        .{ .label = "another tool's credential", .call = "fetch(\"@BASE@/v1\", { credential: \"weather\" })", .grant = &.{"billing"}, .reason = .not_granted },
+        .{ .label = "no store", .call = "fetch(\"@BASE@/v1\", { credential: \"weather\" })", .no_store = true, .reason = .not_configured },
+        .{ .label = "granted, never configured", .call = "fetch(\"@BASE@/v1\", { credential: \"billing\" })", .grant = &.{ "billing", "weather" }, .reason = .not_configured },
+        .{ .label = "another endpoint", .call = "fetch(\"@OTHER@/v1\", { credential: \"weather\" })", .reason = .endpoint_mismatch },
+        .{ .label = "a method outside the reference", .call = "fetch(\"@BASE@/v1\", { credential: \"weather\", method: \"PUT\", body: \"x\" })", .reason = .method_not_allowed },
+        .{ .label = "a path outside the prefixes", .call = "fetch(\"@BASE@/v2/admin\", { credential: \"weather\" })", .reason = .path_not_allowed },
+        .{ .label = "a prefix that is not a segment", .call = "fetch(\"@BASE@/v1x\", { credential: \"weather\" })", .reason = .path_not_allowed },
+        .{ .label = "a dot segment", .call = "fetch(\"@BASE@/v1/%2e%2e/admin\", { credential: \"weather\" })", .reason = .path_not_allowed },
+        .{ .label = "the handler's own header", .call = "fetch(\"@BASE@/v1\", { credential: \"weather\", headers: { Authorization: \"Bearer mine\" } })", .reason = .header_collision },
+        .{ .label = "plain http to a name", .call = "fetch(\"@NAMED@/v1\", { credential: \"weather\" })", .plain_store = true, .reason = .plaintext },
+        .{ .label = "fetchWithRetry", .call = "fetchWithRetry(\"@BASE@/v1\", { credential: \"weather\" }, { maxRetries: 3 })", .reason = .path_unsupported },
+        .{ .label = "durable fetch", .call = "fetch(\"@BASE@/v1\", { credential: \"weather\", durable: { key: \"k\", retries: 3 } })", .durable = true, .reason = .path_unsupported },
+        .{ .label = "parallel", .call = "parallelFetch(\"@BASE@/v1\")", .reason = .path_unsupported },
+        .{ .label = "httpRequest", .call = "JSON.parse(httpRequest(JSON.stringify({ url: \"@BASE@/v1\", credential: \"weather\" })))", .no_status = true, .reason = .path_unsupported },
+    };
+
+    var observed = std.EnumSet(credential_store.Refusal).initEmpty();
+    var failures: usize = 0;
+    for (cases) |case| {
+        var upstream = try CredentialUpstream.init(.ok);
+        defer upstream.deinit();
+        try upstream.start();
+        var other = try CredentialUpstream.init(.ok);
+        defer other.deinit();
+        try other.start();
+
+        const base = try upstream.url(allocator, "");
+        const other_base = try other.url(allocator, "");
+        const named_base = try std.fmt.allocPrint(allocator, "http://localhost:{d}", .{upstream.port});
+        var endpoint_buf: [512]u8 = undefined;
+        var other_buf: [512]u8 = undefined;
+        var named_buf: [512]u8 = undefined;
+        const endpoints = [_][]const u8{
+            egressEndpoint(base, &endpoint_buf),
+            egressEndpoint(other_base, &other_buf),
+            egressEndpoint(named_base, &named_buf),
+        };
+
+        var store = try credentialTestStore(std.testing.allocator, if (case.plain_store) endpoints[2] else endpoints[0]);
+        defer store.deinit();
+        const grant = TestCredentialGrant{ .names = case.grant };
+
+        const template =
+            \\import { fetch, fetchWithRetry } from "zttp:fetch";
+            \\import { parallel } from "zttp:io";
+            \\function parallelFetch(url) {
+            \\  const box = [];
+            \\  function one() { box.push(fetchSync(url, { credential: "weather" })); }
+            \\  parallel([one]);
+            \\  return box[0];
+            \\}
+            \\function handler(req) {
+            \\  const res = @CALL@;
+            \\  fetch("@BASE@/__stop");
+            \\  fetch("@OTHER@/__stop");
+            \\  return Response.json({ status: res.status, error: res.error, details: res.details });
+            \\}
+        ;
+        const with_call = try std.mem.replaceOwned(u8, allocator, template, "@CALL@", case.call);
+        const with_base = try std.mem.replaceOwned(u8, allocator, with_call, "@BASE@", base);
+        const with_other = try std.mem.replaceOwned(u8, allocator, with_base, "@OTHER@", other_base);
+        const handler_code = try std.mem.replaceOwned(u8, allocator, with_other, "@NAMED@", named_base);
+
+        var config: RuntimeConfig = .{ .credential_store = if (case.no_store) null else &store };
+        if (case.durable) config.durable_oplog_dir = durable_dir;
+        const body = try runCredentialHandler(
+            allocator,
+            config,
+            &endpoints,
+            if (case.no_grant) null else grant.grant(),
+            handler_code,
+        );
+
+        // Every case runs, so a broken check reports each case it lets through
+        // instead of the first one.
+        var refused = true;
+        expectRefusalBody(body, if (case.no_status) null else 599, "CredentialRefused", @tagName(case.reason)) catch {
+            std.debug.print("case '{s}' was not refused as {s}: {s}\n", .{ case.label, @tagName(case.reason), body });
+            refused = false;
+        };
+        const sent = (try upstream.requests()).len + (try other.requests()).len;
+        if (sent != 0) std.debug.print("case '{s}' sent {d} request(s)\n", .{ case.label, sent });
+        if (refused and sent == 0) observed.insert(case.reason) else failures += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 0), failures);
+    try std.testing.expect(observed.eql(std.EnumSet(credential_store.Refusal).initFull()));
+}
+
+test "a credentialed redirect returns to the tool and the second listener receives nothing" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var target = try CredentialUpstream.init(.ok);
+    defer target.deinit();
+    try target.start();
+    var upstream = try CredentialUpstream.init(.redirect);
+    defer upstream.deinit();
+    const target_base = try target.url(allocator, "");
+    upstream.location = try std.fmt.allocPrint(allocator, "{s}/v1/stolen", .{target_base});
+    try upstream.start();
+
+    const base = try upstream.url(allocator, "");
+    var endpoint_buf: [512]u8 = undefined;
+    var target_buf: [512]u8 = undefined;
+    const endpoints = [_][]const u8{ egressEndpoint(base, &endpoint_buf), egressEndpoint(target_base, &target_buf) };
+    var store = try credentialTestStore(std.testing.allocator, endpoints[0]);
+    defer store.deinit();
+    const grant = TestCredentialGrant{ .names = &.{"weather"} };
+
+    const handler_code = try std.fmt.allocPrint(allocator,
+        \\function handler(req) {{
+        \\  const res = fetchSync("{s}/v1", {{ credential: "weather" }});
+        \\  fetchSync("{s}/__stop");
+        \\  fetchSync("{s}/__stop");
+        \\  return Response.json({{ status: res.status, location: res.headers.get("location") }});
+        \\}}
+    , .{ base, base, target_base });
+    const body = try runCredentialHandler(allocator, .{ .credential_store = &store }, &endpoints, grant.grant(), handler_code);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, body, .{});
+    try std.testing.expectEqual(@as(i64, 302), parsed.value.object.get("status").?.integer);
+    try std.testing.expectEqualStrings(upstream.location, parsed.value.object.get("location").?.string);
+    try std.testing.expectEqual(@as(usize, 1), (try upstream.requests()).len);
+    try std.testing.expectEqual(@as(usize, 0), (try target.requests()).len);
+}
+
+test "a credentialed request with no answer is OutcomeUnknown and is sent once" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var upstream = try CredentialUpstream.init(.close_without_answer);
+    defer upstream.deinit();
+    try upstream.start();
+
+    const base = try upstream.url(allocator, "");
+    var endpoint_buf: [512]u8 = undefined;
+    const endpoints = [_][]const u8{egressEndpoint(base, &endpoint_buf)};
+    var store = try credentialTestStore(std.testing.allocator, endpoints[0]);
+    defer store.deinit();
+    const grant = TestCredentialGrant{ .names = &.{"weather"} };
+
+    // The second call names no credential: its code does not change.
+    const handler_code = try std.fmt.allocPrint(allocator,
+        \\import {{ fetch }} from "zttp:fetch";
+        \\function handler(req) {{
+        \\  const res = fetch("{s}/v1", {{ credential: "weather", method: "POST", body: "charge" }});
+        \\  const plain = fetch("{s}/v1", {{ method: "POST", body: "charge" }});
+        \\  fetch("{s}/__stop");
+        \\  return Response.json({{ status: res.status, error: res.error, plain: plain.error }});
+        \\}}
+    , .{ base, base, base });
+    const body = try runCredentialHandler(allocator, .{ .credential_store = &store }, &endpoints, grant.grant(), handler_code);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, body, .{});
+    try std.testing.expectEqual(@as(i64, 599), parsed.value.object.get("status").?.integer);
+    try std.testing.expectEqualStrings("OutcomeUnknown", parsed.value.object.get("error").?.string);
+    try std.testing.expectEqualStrings("ResponseHeadFailed", parsed.value.object.get("plain").?.string);
+    const requests = try upstream.requests();
+    try std.testing.expectEqual(@as(usize, 2), requests.len);
+    try std.testing.expect(requests[0].getHeader("authorization") != null);
+    try std.testing.expect(requests[1].getHeader("authorization") == null);
+}
+
+test "an upstream that echoes the credential is refused before the tool reads it" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const Case = struct { reply: CredentialUpstream.Reply, where: []const u8 };
+    for ([_]Case{ .{ .reply = .echo_body, .where = "response_body" }, .{ .reply = .echo_head, .where = "response_head" } }) |case| {
+        var upstream = try CredentialUpstream.init(case.reply);
+        defer upstream.deinit();
+        try upstream.start();
+
+        const base = try upstream.url(allocator, "");
+        var endpoint_buf: [512]u8 = undefined;
+        const endpoints = [_][]const u8{egressEndpoint(base, &endpoint_buf)};
+        var store = try credentialTestStore(std.testing.allocator, endpoints[0]);
+        defer store.deinit();
+        const grant = TestCredentialGrant{ .names = &.{"weather"} };
+
+        const handler_code = try std.fmt.allocPrint(allocator,
+            \\function handler(req) {{
+            \\  const res = fetchSync("{s}/v1", {{ credential: "weather" }});
+            \\  fetchSync("{s}/__stop");
+            \\  return Response.json({{ status: res.status, error: res.error, details: res.details, body: res.body }});
+            \\}}
+        , .{ base, base });
+        const body = try runCredentialHandler(allocator, .{ .credential_store = &store }, &endpoints, grant.grant(), handler_code);
+        try expectFetchError(body, "CredentialReflected", case.where);
+        try std.testing.expectEqual(@as(usize, 1), (try upstream.requests()).len);
+    }
+}
+
+test "a credentialed response over the size bound is refused (B8.3)" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var upstream = try CredentialUpstream.init(.large_body);
+    defer upstream.deinit();
+    try upstream.start();
+
+    const base = try upstream.url(allocator, "");
+    var endpoint_buf: [512]u8 = undefined;
+    const endpoints = [_][]const u8{egressEndpoint(base, &endpoint_buf)};
+    var store = try credentialTestStore(std.testing.allocator, endpoints[0]);
+    defer store.deinit();
+    const grant = TestCredentialGrant{ .names = &.{"weather"} };
+
+    const handler_code = try std.fmt.allocPrint(allocator,
+        \\function handler(req) {{
+        \\  const res = fetchSync("{s}/v1", {{ credential: "weather" }});
+        \\  fetchSync("{s}/__stop");
+        \\  return Response.json({{ status: res.status, error: res.error, details: res.details }});
+        \\}}
+    , .{ base, base });
+    const body = try runCredentialHandler(allocator, .{ .credential_store = &store, .outbound_max_response_bytes = 16 }, &endpoints, grant.grant(), handler_code);
+    try expectFetchError(body, "ResponseTooLarge", "response exceeded max_response_bytes");
+    try std.testing.expectEqual(@as(usize, 1), (try upstream.requests()).len);
+}
+
+test "the credential value reaches neither the trace nor the security event stream" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    try zq.security_events.initGlobal(std.testing.allocator, 64);
+    defer zq.security_events.deinitGlobal();
+
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const trace_path = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/credential.trace", .{tmp_dir.sub_path});
+
+    var upstream = try CredentialUpstream.init(.ok);
+    defer upstream.deinit();
+    try upstream.start();
+
+    const base = try upstream.url(allocator, "");
+    var endpoint_buf: [512]u8 = undefined;
+    const endpoints = [_][]const u8{egressEndpoint(base, &endpoint_buf)};
+    var store = try credentialTestStore(std.testing.allocator, endpoints[0]);
+    defer store.deinit();
+    const grant = TestCredentialGrant{ .names = &.{"weather"} };
+
+    // One granted call, one refused call, and one denied by egress, so the
+    // trace holds a success and a refusal and the stream holds a denial.
+    const handler_code = try std.fmt.allocPrint(allocator,
+        \\import {{ fetch }} from "zttp:fetch";
+        \\function handler(req) {{
+        \\  const ok = fetch("{s}/v1", {{ credential: "weather" }});
+        \\  const refused = fetch("{s}/v2", {{ credential: "weather" }});
+        \\  const denied = fetch("http://denied.example/v1", {{ credential: "weather" }});
+        \\  fetch("{s}/__stop");
+        \\  return Response.json({{ ok: ok.status, refused: refused.details, denied: denied.error }});
+        \\}}
+    , .{ base, base, base });
+    const body = try runCredentialHandler(allocator, .{ .credential_store = &store, .trace_file_path = trace_path }, &endpoints, grant.grant(), handler_code);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, body, .{});
+    try std.testing.expectEqual(@as(i64, 200), parsed.value.object.get("ok").?.integer);
+    try std.testing.expectEqualStrings("path_not_allowed", parsed.value.object.get("refused").?.string);
+    try std.testing.expectEqualStrings("HostNotAllowed", parsed.value.object.get("denied").?.string);
+    try std.testing.expectEqual(@as(usize, 1), (try upstream.requests()).len);
+
+    const trace = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, trace_path, allocator, .limited(1 << 20));
+    // Floor: the trace recorded the calls, so the search below covers them.
+    try std.testing.expect(std.mem.indexOf(u8, trace, "\"weather\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, trace, "forecast") != null);
+    try std.testing.expect(std.mem.indexOf(u8, trace, credential_marker) == null);
+
+    const stream = zq.security_events.getGlobal() orelse return error.TestUnexpectedResult;
+    var drained: [64]zq.security_events.SecurityEvent = undefined;
+    const count = stream.drain(&drained);
+    // Floor: the egress denial emitted at least one event.
+    try std.testing.expect(count >= 1);
+    for (drained[0..count]) |event| {
+        for ([_][]const u8{ event.moduleSlice(), event.detailSlice(), event.actionSlice(), event.resourceKindSlice(), event.resourceIdSlice() }) |text| {
+            try std.testing.expect(std.mem.indexOf(u8, text, credential_marker) == null);
+        }
+    }
+}
+
+// `fetchWithRetry` reads its callbacks through the SDK's `getModuleState`,
+// which unwraps an envelope. The state was once installed as a bare pointer,
+// so the module read the wrong struct and called a heap address as a
+// function the first time it reached a callback no other export used.
+test "fetchWithRetry without a credential reaches the upstream once" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var upstream = try CredentialUpstream.init(.ok);
+    defer upstream.deinit();
+    try upstream.start();
+
+    const base = try upstream.url(allocator, "");
+    var endpoint_buf: [512]u8 = undefined;
+    const endpoints = [_][]const u8{egressEndpoint(base, &endpoint_buf)};
+
+    const handler_code = try std.fmt.allocPrint(allocator,
+        \\import {{ fetch, fetchWithRetry }} from "zttp:fetch";
+        \\function handler(req) {{
+        \\  const res = fetchWithRetry("{s}/v1", {{}}, {{ maxRetries: 2 }});
+        \\  fetch("{s}/__stop");
+        \\  return Response.json({{ status: res.status, body: res.body }});
+        \\}}
+    , .{ base, base });
+    const body = try runCredentialHandler(allocator, .{}, &endpoints, null, handler_code);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, body, .{});
+    try std.testing.expectEqual(@as(i64, 200), parsed.value.object.get("status").?.integer);
+    try std.testing.expectEqualStrings("forecast", parsed.value.object.get("body").?.string);
+    try std.testing.expectEqual(@as(usize, 1), (try upstream.requests()).len);
+}

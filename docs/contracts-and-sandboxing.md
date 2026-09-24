@@ -341,6 +341,64 @@ simulation, expert verification, live-reload candidates, and recorded proof
 capsules. A missing, unreadable, or malformed policy is an error; no command
 substitutes an unrestricted policy and publishes a clean verdict or artifact.
 
+### Outbound credentials
+
+A tool route can send an upstream credential that its code never sees. The
+deployment names the credential in zttp.json. The reference holds the name of
+the environment variable and the rules for the requests the value may go into,
+never the value:
+
+```json
+"credentials": {
+  "weather": {
+    "env": "WEATHER_API_KEY",
+    "endpoint": "https://api.weather.example",
+    "header": "authorization",
+    "scheme": "Bearer",
+    "methods": ["GET"],
+    "paths": ["/v1/forecast"]
+  }
+}
+```
+
+The tool names the credential with a string literal in the `zttp:fetch` options:
+
+```ts
+const res = fetch("https://api.weather.example/v1/forecast", {
+  credential: "weather",
+  query: { lat: input.lat }
+});
+```
+
+The build refuses a `credential` that is not a string literal, a name that
+zttp.json does not define, and a call whose URL is at another endpoint. Each
+tool can use only the credentials that its own route names. The server reads
+every value once at startup and does not start when a variable is unset or
+empty.
+
+The runtime adds the header only after it checks the exact request that it is
+about to send: the active tool holds the credential, the endpoint is the
+reference's endpoint, the method is in `methods`, the path matches a prefix in
+`paths` at a segment boundary, the handler did not set the header itself, and
+the scheme is `https` or the host is a loopback IP literal. A path with a `.` or
+`..` segment, an empty segment, or an encoded `/` or `\` does not match. A
+refusal is a 599 fetch error with the code `CredentialRefused` and one of these
+details: `not_granted`, `not_configured`, `endpoint_mismatch`,
+`method_not_allowed`, `path_not_allowed`, `header_collision`, `plaintext`, or
+`path_unsupported`. No detail holds the value.
+
+Only the synchronous `fetch` injects a credential. `fetchWithRetry`, a durable
+fetch, the `zttp:io` parallel path, and `httpRequest` refuse one with
+`path_unsupported`, so no retry loop can send a credentialed request twice. A
+credentialed request is sent once. When the send completed and no response head
+arrived, the code is `OutcomeUnknown`, because the upstream may have acted. The
+runtime does not follow a redirect: a 3xx answer returns to the tool.
+
+An upstream that returns the value in its response head or its decoded body is
+refused with `CredentialReflected` before the tool can read the response. The
+runtime finds only the exact bytes of the value. It does not find an encoded
+echo, such as base64, a hash, or a compression that it does not decode.
+
 ## OpenAPI and TypeScript SDK (`-Dopenapi`, `-Dsdk=ts`)
 
 The same proven route facts can be emitted as OpenAPI and as a

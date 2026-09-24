@@ -6,8 +6,8 @@ index when a plan starts, closes, or moves to the archive.
 
 | Document | Role and status | Work authority |
 |---|---|---|
-| [M4: release contract for scoped tool routes](2026-09-22-m4-release-contract.md) | Accepted 2026-09-22; T1a to T5b complete, T6 in progress | Owner accepted the contract on 2026-09-22 |
-| [M4 T6: credential injection](2026-09-24-m4-t6-credential-injection-design.md) | Accepted 2026-09-24; U1 and U2 implemented, U3 next | Owner accepted the design and answered its four questions |
+| [M4: release contract for scoped tool routes](2026-09-22-m4-release-contract.md) | Accepted 2026-09-22; T1a to T6 complete, T7 next | Owner accepted the contract on 2026-09-22 |
+| [M4 T6: credential injection](2026-09-24-m4-t6-credential-injection-design.md) | Implemented 2026-09-24; U1, U2, and U3 complete | Owner accepted the design and answered its four questions |
 | [M4 T5: subject scope and tool-local grants](2026-09-23-m4-t5-scope-and-grants-design.md) | Accepted 2026-09-23; T5a and T5b implemented | Owner accepted the design and answered its four questions |
 | [M4 T4: declared-label carriage](2026-09-23-m4-t4-declared-labels-design.md) | Implemented 2026-09-23 | Owner accepted the design and answered its four questions |
 | [M4 T3: catalog encoding and artifact binding](2026-09-23-m4-t3-catalog-binding-design.md) | Implemented 2026-09-23 | Owner accepted the design and answered its four questions |
