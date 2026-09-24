@@ -2206,18 +2206,6 @@ pub const ContractBuilder = struct {
         return null;
     }
 
-    /// The `zttp:fetch` export a callee names, or null.
-    fn fetchCallee(self: *const ContractBuilder, callee: NodeIndex) ?[]const u8 {
-        if (self.ir_view.getTag(callee) != .identifier) return null;
-        const binding = self.ir_view.getBinding(callee) orelse return null;
-        for (self.factsRef().imports.items) |record| {
-            if (record.slot != binding.slot) continue;
-            if (!std.mem.eql(u8, record.module_specifier, "zttp:fetch")) return null;
-            return record.imported_name;
-        }
-        return null;
-    }
-
     /// The credential rules of a `zttp:fetch` call in a tool route (M4 T6
     /// design note, section 4). The runtime reads `credential` from whatever
     /// options object the call receives, so the build must see that object
@@ -2227,7 +2215,7 @@ pub const ContractBuilder = struct {
     /// The runtime refuses a credential on every sender but a plain `fetch`, so
     /// a `fetchWithRetry` whose options the build cannot see is not refused here.
     fn checkToolFetchCall(self: *ContractBuilder, walk: *ExportWalk, node: NodeIndex, call: Node.CallExpr) !void {
-        const export_name = self.fetchCallee(call.callee) orelse return;
+        const export_name = self.importedCallee(call.callee, "zttp:fetch") orelse return;
         const is_fetch = std.mem.eql(u8, export_name, "fetch");
         if (is_fetch) try walk.direct_callees.put(self.allocator, call.callee, {});
         if (call.args_count == 0) return;
@@ -3618,7 +3606,6 @@ pub const ContractBuilder = struct {
     }
 
     const SchemaRead = struct {
-        module: []const u8,
         func: []const u8,
         name: []const u8,
         node: NodeIndex,
@@ -3632,7 +3619,7 @@ pub const ContractBuilder = struct {
         if (call.args_count <= arg_position) return;
         const node = self.ir_view.getListIndex(call.args_start, arg_position);
         const name = self.getLiteralString(node) orelse return;
-        try self.schema_reads.append(self.allocator, .{ .module = module, .func = func, .name = name, .node = node });
+        try self.schema_reads.append(self.allocator, .{ .func = func, .name = name, .node = node });
     }
 
     /// Phase 4g (ZTS514). `schemaCompile` refuses a schema with a keyword
@@ -3657,7 +3644,7 @@ pub const ContractBuilder = struct {
                 const suggestion = try std.fmt.allocPrint(self.allocator, "{s} (line {d}) names schema \"{s}\", which zttp:validate cannot compile: it does not support the keyword \"{s}\", so the call fails on every input", .{ read.func, line, schema.name, keyword });
                 try self.appendSchemaDiagnostic(contract, schema.name, suggestion);
             }
-            if (read_any or self.catalogNamesSchema(contract, schema.name)) continue;
+            if (read_any or catalogNamesSchema(contract, schema.name)) continue;
             // A refused catalog keeps `contract.tools` empty; its own ZTS513
             // diagnostics already stop the build, so do not add a second one.
             if (self.tool_catalog_calls.items.len > 0) continue;
@@ -3666,7 +3653,7 @@ pub const ContractBuilder = struct {
         }
     }
 
-    fn catalogNamesSchema(_: *const ContractBuilder, contract: *const HandlerContract, name: []const u8) bool {
+    fn catalogNamesSchema(contract: *const HandlerContract, name: []const u8) bool {
         for (contract.tools.items) |tool| {
             if (std.mem.eql(u8, tool.input_schema_name, name) or std.mem.eql(u8, tool.output_schema_name, name)) return true;
         }

@@ -170,15 +170,9 @@ pub export fn zttpSdkParseJson(_: *sdk.ModuleHandle, _: [*]const u8, _: usize, o
     return true;
 }
 
-/// The shim never serves a tool request, so the active input schema is unset
-/// unless a test sets `active_tool_input_schema`.
-pub var active_tool_input_schema: ?[]const u8 = null;
-
-pub export fn zttpSdkActiveToolInputSchema(_: *sdk.ModuleHandle, out_ptr: *[*]const u8, out_len: *usize) bool {
-    const name = active_tool_input_schema orelse return false;
-    out_ptr.* = name.ptr;
-    out_len.* = name.len;
-    return true;
+/// The shim never serves a tool request, so no input schema is active.
+pub export fn zttpSdkActiveToolInputSchema(_: *sdk.ModuleHandle, _: *[*]const u8, _: *usize) bool {
+    return false;
 }
 
 pub export fn zttpSdkGetModuleState(_: *sdk.ModuleHandle, slot: usize) ?*anyopaque {

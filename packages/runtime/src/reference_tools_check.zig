@@ -41,6 +41,7 @@ const jwt_key = "reference-tools-check-key-0123456789";
 const credential_value = "reference-tools-credential-7d3f1a";
 const example_files = [_][]const u8{ "zttp.json", "tools.ts", "declaration.json", "policy.json" };
 const expected_cases: usize = 9;
+const order_body = "{\"tenant_id\":\"acme\",\"order_id\":\"o-17\"}";
 
 const Check = struct {
     gpa: std.mem.Allocator,
@@ -129,7 +130,7 @@ fn installBinary(gpa: std.mem.Allocator, io: Io, src: []const u8, dir: []const u
 fn run(check: *Check) !void {
     const project = try check.path(&.{ check.work, "project" });
     defer check.gpa.free(project);
-    try copyExample(check, project, null);
+    try copyExample(check, project, &.{});
     const artifact = try check.path(&.{ check.work, "tools-bin" });
     defer check.gpa.free(artifact);
 
@@ -140,8 +141,8 @@ fn run(check: *Check) !void {
         return;
     }
 
-    const upstream = try Upstream.start(check.io);
-    defer upstream.stop(check.io);
+    const upstream = try Upstream.start();
+    defer upstream.stop();
 
     try requestCases(check, artifact, upstream);
     try buildRefusalCases(check);
@@ -177,7 +178,7 @@ fn requestCases(check: *Check, artifact: []const u8, upstream: *Upstream) !void 
     {
         upstream.setReply(.ok);
         const before = upstream.requestCount();
-        const res = try post(check, port, "/tools/order_status", acme, "{\"tenant_id\":\"acme\",\"order_id\":\"o-17\"}");
+        const res = try post(check, port, "/tools/order_status", acme, order_body);
         defer res.deinit(check.gpa);
         const seen = upstream.last();
         const header_ok = std.mem.eql(u8, seen.authorization(), "Bearer " ++ credential_value);
@@ -193,7 +194,7 @@ fn requestCases(check: *Check, artifact: []const u8, upstream: *Upstream) !void 
 
     {
         const before = upstream.requestCount();
-        const res = try post(check, port, "/tools/order_status", globex, "{\"tenant_id\":\"acme\",\"order_id\":\"o-17\"}");
+        const res = try post(check, port, "/tools/order_status", globex, order_body);
         defer res.deinit(check.gpa);
         if (res.status == 403 and contains(res.body, "tenant") and upstream.requestCount() == before) {
             check.pass("B8.1 incorrect subject: another tenant's token is refused before the handler runs");
@@ -202,7 +203,7 @@ fn requestCases(check: *Check, artifact: []const u8, upstream: *Upstream) !void 
 
     {
         upstream.setReply(.oversized);
-        const res = try post(check, port, "/tools/order_status", acme, "{\"tenant_id\":\"acme\",\"order_id\":\"o-17\"}");
+        const res = try post(check, port, "/tools/order_status", acme, order_body);
         defer res.deinit(check.gpa);
         if (res.status == 502 and contains(res.body, "ResponseTooLarge")) {
             check.pass("B8.3 oversized upstream response: the bound refuses it and the tool answers 502");
@@ -211,7 +212,7 @@ fn requestCases(check: *Check, artifact: []const u8, upstream: *Upstream) !void 
 
     {
         upstream.setReply(.malformed);
-        const res = try post(check, port, "/tools/order_status", acme, "{\"tenant_id\":\"acme\",\"order_id\":\"o-17\"}");
+        const res = try post(check, port, "/tools/order_status", acme, order_body);
         defer res.deinit(check.gpa);
         if (res.status == 500 and contains(res.body, "tool output refused")) {
             check.pass("B8.4 malformed result: the output gate refuses a status outside the schema");
@@ -254,10 +255,10 @@ fn expectBuildRefused(check: *Check, name: []const u8, dir_name: []const u8, mut
     defer check.gpa.free(artifact);
     const build = try runZttpBuild(check, project, artifact);
     defer check.gpa.free(build.output);
-    if (!build.ok and contains(build.output, needle)) {
-        check.pass(name);
-    } else if (build.ok) {
+    if (build.ok) {
         check.fail(name, "zttp build accepted the mutated handler", .{});
+    } else if (contains(build.output, needle)) {
+        check.pass(name);
     } else check.fail(name, "zttp build failed without \"{s}\":\n{s}", .{ needle, build.output });
 }
 
@@ -321,21 +322,19 @@ fn expectTamperRefused(check: *Check, name: []const u8, artifact: []const u8, ma
 // Project copy and build
 // ---------------------------------------------------------------------------
 
-fn copyExample(check: *Check, dest: []const u8, mutations: ?[]const Mutation) !void {
+fn copyExample(check: *Check, dest: []const u8, mutations: []const Mutation) !void {
     try Io.Dir.cwd().createDirPath(check.io, dest);
     for (example_files) |file| {
         const src = try check.path(&.{ check.example, file });
         defer check.gpa.free(src);
         var text = try Io.Dir.cwd().readFileAlloc(check.io, src, check.gpa, .limited(1 << 20));
         defer check.gpa.free(text);
-        if (mutations) |list| {
-            if (std.mem.eql(u8, file, "tools.ts")) {
-                for (list) |m| {
-                    if (std.mem.indexOf(u8, text, m.find) == null) return error.MutationDidNotApply;
-                    const next = try std.mem.replaceOwned(u8, check.gpa, text, m.find, m.replace);
-                    check.gpa.free(text);
-                    text = next;
-                }
+        if (std.mem.eql(u8, file, "tools.ts")) {
+            for (mutations) |m| {
+                if (std.mem.indexOf(u8, text, m.find) == null) return error.MutationDidNotApply;
+                const next = try std.mem.replaceOwned(u8, check.gpa, text, m.find, m.replace);
+                check.gpa.free(text);
+                text = next;
             }
         }
         const dst = try check.path(&.{ dest, file });
@@ -529,7 +528,7 @@ const Upstream = struct {
         }
     };
 
-    fn start(_: Io) !*Upstream {
+    fn start() !*Upstream {
         const self = try std.heap.page_allocator.create(Upstream);
         self.* = .{ .io_backend = Io.Threaded.init(std.heap.page_allocator, .{ .environ = .empty }), .listener = undefined, .thread = undefined };
         const address = try Io.net.IpAddress.parseIp4("127.0.0.1", upstream_port);
@@ -541,7 +540,7 @@ const Upstream = struct {
         return self;
     }
 
-    fn stop(self: *Upstream, _: Io) void {
+    fn stop(self: *Upstream) void {
         const io = self.io_backend.io();
         if (connect(io, upstream_port)) |stream| {
             var buf: [64]u8 = undefined;

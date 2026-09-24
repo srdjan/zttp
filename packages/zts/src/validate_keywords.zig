@@ -32,7 +32,7 @@ pub const supported = [_][]const u8{
     "description",
 };
 
-pub fn isSupported(key: []const u8) bool {
+fn isSupported(key: []const u8) bool {
     for (supported) |k| {
         if (std.mem.eql(u8, k, key)) return true;
     }
@@ -74,9 +74,6 @@ test "firstUnsupported names the first keyword zttp:validate refuses" {
     for (cases) |case| {
         var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, case.text, .{});
         defer parsed.deinit();
-        const got = firstUnsupported(parsed.value);
-        if (case.expected) |want| {
-            try std.testing.expectEqualStrings(want, got.?);
-        } else try std.testing.expect(got == null);
+        try std.testing.expectEqualDeep(case.expected, firstUnsupported(parsed.value));
     }
 }
