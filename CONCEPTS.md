@@ -35,6 +35,18 @@ A declared upper bound on the Capabilities a function may reach. The inferred se
 
 ## Accepting an artifact
 
+### Deployment artifact
+A self-contained binary, also called a self-extracting binary: the runtime
+executable with one handler's payload appended - its bytecode, contract, policy,
+certificate, and the declaration and tool catalog when it has them - and a fixed
+trailer at the end that frames that payload.
+
+Whether a binary is an artifact is decided once, from the trailer's framing
+alone. A binary whose trailer frames no payload is a plain runtime and may serve
+a project from source. A binary whose trailer frames a payload is an artifact
+from then on: a payload that is damaged, too large, or unreadable refuses to
+start, and never falls back to running as a plain runtime.
+
 ### Executable graph
 The ordered inventory of every byte and identity that can affect what a
 deployment runs: the entry module's bytecode, each dependency in load order,
