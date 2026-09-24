@@ -3643,7 +3643,9 @@ pub const ContractBuilder = struct {
     /// `zttp:validate` never does.
     fn checkSchemaCompilability(self: *ContractBuilder, contract: *HandlerContract) !void {
         for (contract.api.schemas.items) |schema| {
-            var parsed = std.json.parseFromSlice(std.json.Value, self.allocator, schema.schema_json, .{}) catch continue;
+            // `extractSchemaJson` stores only text that parsed, so a parse
+            // error here is an invariant breach and propagates.
+            var parsed = try std.json.parseFromSlice(std.json.Value, self.allocator, schema.schema_json, .{});
             defer parsed.deinit();
             const keyword = validate_keywords.firstUnsupported(parsed.value) orelse continue;
 
