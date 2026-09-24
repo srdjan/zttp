@@ -178,7 +178,7 @@ const dispatch_exports = [_]contract_runtime.Export{
 /// `tool` must outlive the call; the server holds the catalog under the
 /// contract lock for the whole request.
 pub fn grantFor(tool: *const contract_runtime.AcceptedTool) http_types.ToolGrant {
-    return .{ .context = @ptrCast(tool), .allows = allowsThunk, .allows_credential = allowsCredentialThunk };
+    return .{ .context = @ptrCast(tool), .allows = allowsThunk, .allows_credential = allowsCredentialThunk, .input_schema = tool.input_name };
 }
 
 fn allowsCredentialThunk(context: *const anyopaque, name: []const u8) bool {

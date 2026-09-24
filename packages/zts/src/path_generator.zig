@@ -1600,13 +1600,13 @@ pub const PathGenerator = struct {
         if (tag != .call) return null;
         const call = self.ir_view.getCall(init_node) orelse return null;
         const meta = self.getCalleeMeta(call.callee) orelse return null;
-        if (!std.mem.eql(u8, meta.module, "validate")) return null;
-        if (!std.mem.eql(u8, meta.func, "validateJson") and
-            !std.mem.eql(u8, meta.func, "validateObject") and
-            !std.mem.eql(u8, meta.func, "coerceJson"))
-        {
-            return null;
-        }
+        const validates = std.mem.eql(u8, meta.module, "validate") and
+            (std.mem.eql(u8, meta.func, "validateJson") or
+                std.mem.eql(u8, meta.func, "validateObject") or
+                std.mem.eql(u8, meta.func, "coerceJson"));
+        // zttp:tool (M4 T7) names its schema in argument 0 as well.
+        const tool_input = std.mem.eql(u8, meta.module, "tool") and std.mem.eql(u8, meta.func, "toolInput");
+        if (!validates and !tool_input) return null;
         if (call.args_count == 0) return null;
 
         const schema_name_node = self.ir_view.getListIndex(call.args_start, 0);

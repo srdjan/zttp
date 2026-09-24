@@ -91,6 +91,9 @@ pub const AcceptedTool = struct {
     /// its route names, sorted. The slice is owned by the catalog; each name
     /// borrows from `AcceptedCatalog.bytes`.
     credentials: []const []const u8 = &.{},
+    /// The name of the input schema, the name `toolInput` must pass (M4 T7).
+    /// Borrows from `AcceptedCatalog.bytes`.
+    input_name: []const u8 = "",
     input: zq.tool_schema.CompiledToolSchema,
     output: zq.tool_schema.CompiledToolSchema,
 
@@ -511,6 +514,7 @@ fn lowerAcceptedCatalog(allocator: std.mem.Allocator, bytes: []const u8) Promote
             .scope_subject = entry.scope_subject,
             .exports = exports,
             .credentials = credentials,
+            .input_name = entry.input_name,
             .input = input,
             .output = output,
         };

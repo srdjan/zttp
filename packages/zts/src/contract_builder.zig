@@ -1651,7 +1651,7 @@ pub const ContractBuilder = struct {
         // `api_routes_dynamic`, which returned above.
         const fn_node = self.route_functions.items[route_index].fn_node orelse
             return self.refuseToolCatalog(contract, .route_table_dynamic, name, fields[field_route], route_key);
-        var walk = try self.collectToolExports(fn_node);
+        var walk = try self.collectToolExports(fn_node, input_name);
         defer walk.deinit(self.allocator);
         if (walk.incomplete) {
             return self.refuseToolCatalog(contract, .exports_unanalyzable, name, fields[field_route], route_key);
@@ -1933,6 +1933,9 @@ pub const ContractBuilder = struct {
         direct_callees: std.AutoHashMapUnmanaged(NodeIndex, void) = .empty,
         /// The first credential rule the route breaks, which refuses the tool.
         refusal: ?WalkRefusal = null,
+        /// The route's catalog input schema, the only name `toolInput` may pass
+        /// (M4 T7). Empty outside a tool route, where nothing is compared.
+        input_name: []const u8 = "",
 
         fn deinit(walk: *ExportWalk, allocator: std.mem.Allocator) void {
             for (walk.credentials.items) |*c| c.deinit(allocator);
@@ -1950,8 +1953,8 @@ pub const ContractBuilder = struct {
     /// over-approximates the call graph, which is the safe direction for a list
     /// that becomes a grant: a callback passed by name, a function held in a
     /// const, or an export handed around as a value is still counted.
-    fn collectToolExports(self: *ContractBuilder, fn_node: NodeIndex) !ExportWalk {
-        var walk: ExportWalk = .{};
+    fn collectToolExports(self: *ContractBuilder, fn_node: NodeIndex, input_name: []const u8) !ExportWalk {
+        var walk: ExportWalk = .{ .input_name = input_name };
         errdefer walk.deinit(self.allocator);
         try self.walkToolExports(&walk, fn_node);
         std.mem.sort(contract_types.ToolExport, walk.exports.items, {}, contract_types.ToolExport.lessThan);
@@ -2039,6 +2042,7 @@ pub const ContractBuilder = struct {
             .call, .method_call => {
                 const call = self.ir_view.getCall(node) orelse return self.markIncomplete(walk);
                 try self.checkToolFetchCall(walk, node, call);
+                self.checkToolInputCall(walk, call);
                 try self.walkToolExports(walk, call.callee);
                 for (0..call.args_count) |k| try self.walkToolExports(walk, self.ir_view.getListIndex(call.args_start, @intCast(k)));
             },
@@ -2166,6 +2170,31 @@ pub const ContractBuilder = struct {
     /// reported, because the first already refuses the tool.
     fn walkRefuse(_: *const ContractBuilder, walk: *ExportWalk, reason: contract_types.ToolCatalogRefusal, node: NodeIndex, detail: []const u8) void {
         if (walk.refusal == null) walk.refusal = .{ .reason = reason, .node = node, .detail = detail };
+    }
+
+    /// A `toolInput` call in a tool route names the route's own catalog input
+    /// schema with a string literal. A helper that two routes share is walked
+    /// once per route, so it is checked against each route's input.
+    fn checkToolInputCall(self: *const ContractBuilder, walk: *ExportWalk, call: Node.CallExpr) void {
+        if (walk.input_name.len == 0) return;
+        const export_name = self.importedCallee(call.callee, "zttp:tool") orelse return;
+        if (!std.mem.eql(u8, export_name, "toolInput")) return;
+        if (call.args_count == 0) return self.walkRefuse(walk, .tool_input_not_literal, call.callee, "toolInput");
+        const name_node = self.ir_view.getListIndex(call.args_start, 0);
+        const name = self.getLiteralString(name_node) orelse return self.walkRefuse(walk, .tool_input_not_literal, name_node, "toolInput");
+        if (!std.mem.eql(u8, name, walk.input_name)) self.walkRefuse(walk, .tool_input_mismatch, name_node, name);
+    }
+
+    /// The export of `specifier` that a callee names, or null.
+    fn importedCallee(self: *const ContractBuilder, callee: NodeIndex, specifier: []const u8) ?[]const u8 {
+        if (self.ir_view.getTag(callee) != .identifier) return null;
+        const binding = self.ir_view.getBinding(callee) orelse return null;
+        for (self.factsRef().imports.items) |record| {
+            if (record.slot != binding.slot) continue;
+            if (!std.mem.eql(u8, record.module_specifier, specifier)) return null;
+            return record.imported_name;
+        }
+        return null;
     }
 
     /// The `zttp:fetch` export a callee names, or null.
@@ -4637,7 +4666,8 @@ pub const ContractBuilder = struct {
         const name = fn_name orelse return;
         if (std.mem.eql(u8, name, "validateJson") or
             std.mem.eql(u8, name, "coerceJson") or
-            std.mem.eql(u8, name, "decodeJson"))
+            std.mem.eql(u8, name, "decodeJson") or
+            std.mem.eql(u8, name, "toolInput"))
         {
             try self.appendRequestBodySchemaRef(route, "application/json", schema_ref);
         } else if (std.mem.eql(u8, name, "decodeForm")) {
@@ -6584,10 +6614,16 @@ const tool_refusal_cases = [_]ToolRefusalCase{
     .{ .reason = .credential_not_literal, .source = fetchToolSource("function c(req) { fetch(\"https://api.example/v1\", { credential: req.method }); return Response.json({}); }") },
     .{ .reason = .credential_sender_unsupported, .source = fetchToolSource("function c(req) { fetchWithRetry(\"https://api.example/v1\", { credential: \"w\" }); return Response.json({}); }") },
     .{ .reason = .credential_sender_unsupported, .source = fetchToolSource("function c(req) { fetch(\"https://api.example/v1\", { credential: \"w\", durable: { key: \"k\" } }); return Response.json({}); }") },
+    .{ .reason = .tool_input_mismatch, .source = toolInputSource("function c(req) { const r = toolInput(\"Out\", req); return Response.json({}); }") },
+    .{ .reason = .tool_input_not_literal, .source = toolInputSource("function c(req) { const r = toolInput(req.method, req); return Response.json({}); }") },
 };
 
 /// A one-tool handler whose route function `c` is `route_fn`, with both
 /// `zttp:fetch` exports imported.
+fn toolInputSource(comptime route_fn: []const u8) []const u8 {
+    return "import { toolInput } from \"zttp:tool\";\n" ++ toolSource(route_fn, "\"POST /a\": c", toolCatalogOf(tool_test_entry));
+}
+
 fn fetchToolSource(comptime route_fn: []const u8) []const u8 {
     return "import { fetch, fetchWithRetry } from \"zttp:fetch\";\n" ++ toolSource(route_fn, "\"POST /a\": c", toolCatalogOf(tool_test_entry));
 }

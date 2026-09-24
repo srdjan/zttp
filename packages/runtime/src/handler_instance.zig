@@ -1458,7 +1458,7 @@ pub const HandlerInstance = struct {
         // The defer clears it on every exit, error paths included, so a pooled
         // runtime never carries one request's grant into the next.
         self.ctx.active_tool_grant = if (request.tool_grant) |grant|
-            .{ .context = grant.context, .allows = grant.allows }
+            .{ .context = grant.context, .allows = grant.allows, .input_schema = grant.input_schema }
         else
             null;
         defer self.ctx.active_tool_grant = null;

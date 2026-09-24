@@ -1570,6 +1570,12 @@ pub const ToolCatalogRefusal = enum {
     /// A `credential` option on `fetchWithRetry`, or beside `durable`: only the
     /// synchronous `fetch` path injects a credential, and it never retries.
     credential_sender_unsupported,
+    /// In a tool route, `toolInput` names its schema with something other than
+    /// a string literal (M4 T7).
+    tool_input_not_literal,
+    /// In a tool route, `toolInput` names a schema other than the route's
+    /// catalog input, so it could never answer `ok` on that route (M4 T7).
+    tool_input_mismatch,
 
     pub fn sentence(self: ToolCatalogRefusal) []const u8 {
         return switch (self) {
@@ -1599,6 +1605,8 @@ pub const ToolCatalogRefusal = enum {
             .fetch_as_value => "in a tool route, call fetch directly; a fetch passed or stored as a value could name a credential the build cannot see",
             .credential_not_literal => "the credential option must be a string literal naming a credential in zttp.json",
             .credential_sender_unsupported => "a credential goes only on a plain fetch call: not on fetchWithRetry and not beside durable, because a credentialed request is never retried",
+            .tool_input_not_literal => "toolInput takes the route's catalog input schema name as a string literal",
+            .tool_input_mismatch => "toolInput must name the input schema of the route's own catalog entry, which is the only schema the gate validated",
         };
     }
 };

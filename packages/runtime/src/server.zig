@@ -5212,6 +5212,22 @@ test "a credentialed tool whose 2xx body is too large for its output schema is r
     try std.testing.expectEqual(@as(usize, 1), upstream.requests);
 }
 
+test "a tool reads its gate-validated input with toolInput on the server request path" {
+    var reqs = ToolRequests.init();
+    defer reqs.deinit();
+    const handler_code =
+        \\import { toolInput } from "zttp:tool";
+        \\function handler(req) {
+        \\  const r = toolInput("In", req);
+        \\  if (!r.ok) return Response.json({ ok: false });
+        \\  return Response.json({ ok: r.value.id === "a1" });
+        \\}
+    ;
+    var buf: [1024]u8 = undefined;
+    const response = try serveToolRequestWith(.{ .exports = &.{.{ "zttp:tool", "toolInput" }} }, handler_code, try reqs.post("{\"id\":\"a1\"}"), &buf);
+    try expectResponse(response, "HTTP/1.1 200", "{\"ok\":true}");
+}
+
 test "a tool's non-2xx answer and a non-tool route pass the gate untouched" {
     var reqs = ToolRequests.init();
     defer reqs.deinit();

@@ -2725,7 +2725,9 @@ pub const TypeChecker = struct {
             std.mem.eql(u8, name, "coerceJson") or
             std.mem.eql(u8, name, "decodeJson") or
             std.mem.eql(u8, name, "decodeForm") or
-            std.mem.eql(u8, name, "decodeQuery"))
+            std.mem.eql(u8, name, "decodeQuery") or
+            // zttp:tool (M4 T7): the schema name is argument 0 here too.
+            std.mem.eql(u8, name, "toolInput"))
         {
             if (call.args_count > 0) {
                 const schema_node = self.ir_view.getListIndex(call.args_start, 0);

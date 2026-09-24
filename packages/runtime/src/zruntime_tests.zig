@@ -6376,3 +6376,51 @@ test "serviceCall reaches the upstream a system file names" {
     try std.testing.expectEqual(@as(usize, 1), requests.len);
     try std.testing.expectEqualStrings("/v1/forecast", requests[0].path);
 }
+
+// `toolInput` (M4 T7) answers `ok` only for the input schema the tool gate
+// validated this request against, which the grant carries.
+test "toolInput answers ok only for the schema the gate validated" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const handler_code =
+        \\import { toolInput } from "zttp:tool";
+        \\function handler(req) {
+        \\  const r = toolInput("OrderInput", req);
+        \\  if (r.ok) return Response.json({ ok: true, order: r.value.order_id });
+        \\  return Response.json({ ok: false, error: r.error });
+        \\}
+    ;
+    const Case = struct { input_schema: ?[]const u8, ok: bool, detail: []const u8 };
+    const cases = [_]Case{
+        .{ .input_schema = "OrderInput", .ok = true, .detail = "o-1" },
+        .{ .input_schema = "OtherInput", .ok = false, .detail = "schema_mismatch" },
+        .{ .input_schema = null, .ok = false, .detail = "not_a_tool_request" },
+    };
+    for (cases) |case| {
+        const rt = try HandlerInstance.init(allocator, .{});
+        defer rt.deinit();
+        try rt.loadHandler(handler_code, "<tool-input>");
+        var request = HttpRequestOwned{
+            .method = try allocator.dupe(u8, "POST"),
+            .url = try allocator.dupe(u8, "/tools/order_status"),
+            .headers = .empty,
+            .body = try allocator.dupe(u8, "{\"tenant_id\":\"acme\",\"order_id\":\"o-1\"}"),
+        };
+        defer request.deinit(allocator);
+        const grant_state = TestCredentialGrant{ .names = &.{} };
+        var view = request.asView();
+        if (case.input_schema) |name| {
+            var grant = grant_state.grant();
+            grant.input_schema = name;
+            view.tool_grant = grant;
+        }
+        var response = try rt.executeHandler(view);
+        defer response.deinit();
+        var parsed = try std.json.parseFromSlice(std.json.Value, allocator, response.body, .{});
+        try std.testing.expectEqual(case.ok, parsed.value.object.get("ok").?.bool);
+        const detail = if (case.ok) parsed.value.object.get("order").? else parsed.value.object.get("error").?;
+        try std.testing.expectEqualStrings(case.detail, detail.string);
+    }
+}

@@ -55,6 +55,9 @@ pub const ToolGrant = struct {
     context: *const anyopaque,
     allows: *const fn (context: *const anyopaque, module: []const u8, name: []const u8) bool,
     allows_credential: *const fn (context: *const anyopaque, name: []const u8) bool,
+    /// The input schema the gate validated this request against (M4 T7).
+    /// `toolInput` answers only for this name.
+    input_schema: []const u8 = "",
 };
 
 pub const HttpRequestOwned = struct {

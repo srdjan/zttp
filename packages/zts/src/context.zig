@@ -98,6 +98,9 @@ pub const CallFrame = struct {
 pub const ToolGrant = struct {
     context: *const anyopaque,
     allows: *const fn (context: *const anyopaque, module: []const u8, name: []const u8) bool,
+    /// The input schema the tool gate validated the request body against (M4
+    /// T7). `toolInput` answers only for this name. Borrowed.
+    input_schema: []const u8 = "",
 };
 
 /// The accepted capability ceiling of the handler (M4 T5b design note,

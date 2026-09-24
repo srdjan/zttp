@@ -313,6 +313,18 @@ pub const sdk_bridge = struct {
         return getSdkModuleStatePtr(ctx, slot);
     }
 
+    /// The input schema name of the tool request the context is serving (M4
+    /// T7), which the runtime sets for exactly one handler call. False when
+    /// no tool request is active.
+    pub export fn zttpSdkActiveToolInputSchema(handle: *ModuleHandle, out_ptr: *[*]const u8, out_len: *usize) bool {
+        const ctx = handleToContext(handle);
+        const grant = ctx.active_tool_grant orelse return false;
+        if (grant.input_schema.len == 0) return false;
+        out_ptr.* = grant.input_schema.ptr;
+        out_len.* = grant.input_schema.len;
+        return true;
+    }
+
     pub export fn zttpSdkSetModuleState(
         handle: *ModuleHandle,
         slot: usize,
