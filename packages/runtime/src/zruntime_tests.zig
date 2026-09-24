@@ -6272,3 +6272,43 @@ test "fetchWithRetry without a credential reaches the upstream once" {
     try std.testing.expectEqualStrings("forecast", parsed.value.object.get("body").?.string);
     try std.testing.expectEqual(@as(usize, 1), (try upstream.requests()).len);
 }
+
+// std's `sendBodiless` asserts that the method carries no body, so a POST,
+// PUT, or PATCH the handler sent without one once panicked the worker. Each
+// sender now sends an empty body instead.
+test "a POST with no body is sent with an empty body on every sender" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var upstream = try CredentialUpstream.init(.ok);
+    defer upstream.deinit();
+    try upstream.start();
+
+    const base = try upstream.url(allocator, "");
+    var endpoint_buf: [512]u8 = undefined;
+    const endpoints = [_][]const u8{egressEndpoint(base, &endpoint_buf)};
+
+    const handler_code = try std.fmt.allocPrint(allocator,
+        \\import {{ parallel }} from "zttp:io";
+        \\function viaParallel() {{ return fetchSync("{s}/parallel", {{ method: "PATCH" }}); }}
+        \\function handler(req) {{
+        \\  const sync = fetchSync("{s}/sync", {{ method: "POST" }});
+        \\  const bridged = JSON.parse(httpRequest(JSON.stringify({{ url: "{s}/bridge", method: "PUT" }})));
+        \\  const par = parallel([viaParallel]);
+        \\  fetchSync("{s}/__stop");
+        \\  return Response.json({{ sync: sync.status, bridged: bridged.status, par: par[0].status }});
+        \\}}
+    , .{ base, base, base, base });
+    const body = try runCredentialHandler(allocator, .{}, &endpoints, null, handler_code);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, body, .{});
+    try std.testing.expectEqual(@as(i64, 200), parsed.value.object.get("sync").?.integer);
+    try std.testing.expectEqual(@as(i64, 200), parsed.value.object.get("bridged").?.integer);
+    try std.testing.expectEqual(@as(i64, 200), parsed.value.object.get("par").?.integer);
+    const requests = try upstream.requests();
+    try std.testing.expectEqual(@as(usize, 3), requests.len);
+    for (requests) |request| {
+        try std.testing.expectEqualStrings("0", request.getHeader("content-length").?);
+    }
+}

@@ -506,8 +506,9 @@ as `sql.zig` does, and a plain `fetchWithRetry` test covers it.
 
 A `fetch` with `POST` or `PUT` and no body reaches `sendBodiless`, which
 asserts that the method has no body, so the worker panics. The census `PUT`
-case carries a body so that a probe can run past it. The fix is a separate
-commit.
+case carries a body so that a probe can run past it. The next commit fixes it:
+each of the three senders sends an empty body for a method that carries one, and
+a test sends a bodiless POST, PUT, and PATCH through them.
 
 **Tests.** `test-zruntime` runs the credential cases against a loopback
 upstream that records every request until the handler asks for `/__stop`, so

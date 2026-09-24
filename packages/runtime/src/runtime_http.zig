@@ -980,6 +980,15 @@ fn readResponseBody(response: *std.http.Client.Response, allocator: std.mem.Allo
     return body;
 }
 
+/// The body to send: the handler's, or an empty one for a method that carries
+/// a body (POST, PUT, PATCH) when the handler gave none. std's `sendBodiless`
+/// asserts that the method has no body, so without this a bodiless POST
+/// panics the worker.
+fn outboundBody(method: std.http.Method, body: ?[]const u8) ?[]const u8 {
+    if (body) |payload| return payload;
+    return if (method.requestHasBody()) "" else null;
+}
+
 /// The outbound-exchange watchdog. Defined in its own file so the developer
 /// CLI can arm the same one without importing this module; see that file for
 /// why std cannot bound the exchange itself.
@@ -1091,7 +1100,7 @@ fn fetchSyncResult(rt: *HandlerInstance, args: []const zq.JSValue) !zq.JSValue {
     };
     defer req.deinit();
 
-    if (options.body) |payload| {
+    if (outboundBody(options.method, options.body)) |payload| {
         req.transfer_encoding = .{ .content_length = payload.len };
         var request_body = req.sendBodyUnflushed(&.{}) catch |err| {
             return createFetchErrorResponse(rt, deadline.failCode("RequestSendFailed"), @errorName(err));
@@ -2190,7 +2199,7 @@ fn doFetchWorkerInner(
     };
     defer req.deinit();
 
-    if (desc.body) |payload| {
+    if (outboundBody(desc.method, desc.body)) |payload| {
         req.transfer_encoding = .{ .content_length = payload.len };
         var request_body = req.sendBodyUnflushed(&.{}) catch |err| {
             return zq.modules.io.FetchResult{
@@ -2514,7 +2523,7 @@ fn httpRequestResultJsonAlloc(rt: *HandlerInstance, args: []const zq.JSValue) ![
     };
     defer req.deinit();
 
-    if (body) |payload| {
+    if (outboundBody(method, body)) |payload| {
         req.transfer_encoding = .{ .content_length = payload.len };
         var request_body = req.sendBodyUnflushed(&.{}) catch |err| {
             return try httpRequestErrorJsonAlloc(a, deadline.failCode("RequestSendFailed"), @errorName(err));
