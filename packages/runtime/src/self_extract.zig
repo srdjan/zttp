@@ -127,6 +127,12 @@ pub const Payload = struct {
 
 // -- Detection: read own executable, check for appended payload --
 
+/// Null means this binary carries no payload: it is a plain runtime. Once the
+/// trailer frames a payload, the binary is a deployment artifact, and a payload
+/// that cannot be read in full, fails its checksum, or does not parse is an
+/// error rather than null. Returning null there would start the plain runtime
+/// on a damaged artifact, which serves whatever project is in the working
+/// directory with no proof and no declared ceiling.
 pub fn detect(allocator: std.mem.Allocator) !?Payload {
     const self_path = try getSelfExePath(allocator);
     defer allocator.free(self_path);
@@ -134,7 +140,16 @@ pub fn detect(allocator: std.mem.Allocator) !?Payload {
     const self_path_z = try allocator.dupeZ(u8, self_path);
     defer allocator.free(self_path_z);
 
-    const fd = std.c.open(self_path_z, .{ .ACCMODE = .RDONLY }, @as(std.c.mode_t, 0));
+    return detectPath(allocator, self_path_z);
+}
+
+/// A payload is framed and damaged: a short read, a checksum mismatch, or
+/// bytes that do not parse to a payload.
+pub const ArtifactError = error{CorruptArtifact};
+
+/// `detect` for the file at `path_z`.
+pub fn detectPath(allocator: std.mem.Allocator, path_z: [:0]const u8) !?Payload {
+    const fd = std.c.open(path_z, .{ .ACCMODE = .RDONLY }, @as(std.c.mode_t, 0));
     if (fd < 0) return null;
     defer _ = std.c.close(fd);
 
@@ -168,14 +183,30 @@ pub fn detect(allocator: std.mem.Allocator) !?Payload {
     defer allocator.free(payload_data);
 
     const payload_read = std.c.pread(fd, payload_data.ptr, payload_data.len, @intCast(payload_offset));
-    if (payload_read < 0 or @as(usize, @intCast(payload_read)) != payload_data.len) return null;
+    if (payload_read < 0 or @as(usize, @intCast(payload_read)) != payload_data.len) {
+        return corruptArtifact("the payload could not be read in full");
+    }
 
     // Verify checksum
     const checksum_actual = std.hash.crc.Crc32.hash(payload_data);
-    if (checksum_actual != checksum_expected) return null;
+    if (checksum_actual != checksum_expected) {
+        return corruptArtifact("the payload checksum does not match its trailer");
+    }
 
     // Parse sections
-    return parse(allocator, payload_data);
+    const payload = parse(allocator, payload_data) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        else => {
+            if (!builtin.is_test) std.log.err("self-extract: the payload does not parse: {s}", .{@errorName(err)});
+            return error.CorruptArtifact;
+        },
+    };
+    return payload orelse corruptArtifact("the payload carries no handler bytecode or is truncated");
+}
+
+fn corruptArtifact(comptime why: []const u8) ArtifactError {
+    if (!builtin.is_test) std.log.err("self-extract: " ++ why ++ "; refusing to start", .{});
+    return error.CorruptArtifact;
 }
 
 pub const TrailerReadError = error{
@@ -519,12 +550,12 @@ pub fn parse(allocator: std.mem.Allocator, data: []const u8) !?Payload {
 
     var i: u16 = 0;
     while (i < section_count) : (i += 1) {
-        if (pos + 5 > data.len) return null;
+        if (pos + 5 > data.len) return error.InvalidPayload;
 
         const section_type = data[pos];
         pos += 1;
         const section_size = try readU32(data, &pos);
-        if (section_size > data.len - pos) return null;
+        if (section_size > data.len - pos) return error.InvalidPayload;
         const section_data = data[pos .. pos + section_size];
         pos += section_size;
 
@@ -574,7 +605,7 @@ pub fn parse(allocator: std.mem.Allocator, data: []const u8) !?Payload {
         }
     }
 
-    if (bytecode == null) return null;
+    if (bytecode == null) return error.InvalidPayload;
     if (pos != data.len) return error.InvalidPayload;
 
     return .{
@@ -1687,4 +1718,92 @@ test "an oversized payload is refused before it is allocated" {
     const size: u64 = 200 * 1024 * 1024;
     const trailer = buildTrailer(0, size, FORMAT_VERSION);
     try std.testing.expectError(error.NoPayload, readTrailer(size + TRAILER_SIZE, &trailer));
+}
+
+/// Build an artifact at `output_path` from a small base file, then return its
+/// bytes. The caller frees the result.
+fn writeDetectFixture(allocator: std.mem.Allocator, tmp: std.testing.TmpDir, output_path: []const u8) ![]u8 {
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "base", .data = "#!/bin/sh\nexit 0\n" });
+    const base_path = try selfExtractTestPath(allocator, tmp, "base");
+    defer allocator.free(base_path);
+    const policy = zts.RuntimePolicy{};
+    try create(allocator, base_path, output_path, .{ .bytecode = "payload-bytecode", .policy = &policy });
+    return tmp.dir.readFileAlloc(std.testing.io, std.fs.path.basename(output_path), allocator, .limited(1 << 20));
+}
+
+/// Overwrite the artifact at `name` with `bytes`, recomputing the trailer
+/// checksum over the payload when `fix_checksum` is set.
+fn rewriteDetectFixture(tmp: std.testing.TmpDir, name: []const u8, bytes: []u8, fix_checksum: bool) !void {
+    if (fix_checksum) {
+        const trailer = bytes[bytes.len - TRAILER_SIZE ..];
+        const offset: usize = @intCast(std.mem.readInt(u64, trailer[0..8], .little));
+        const size: usize = @intCast(std.mem.readInt(u64, trailer[8..16], .little));
+        std.mem.writeInt(u32, trailer[20..24], std.hash.crc.Crc32.hash(bytes[offset..][0..size]), .little);
+    }
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = name, .data = bytes });
+}
+
+test "detectPath reads an intact artifact and reports no payload for a plain binary" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const output_path = try selfExtractTestPath(allocator, tmp, "artifact");
+    defer allocator.free(output_path);
+    const bytes = try writeDetectFixture(allocator, tmp, output_path);
+    defer allocator.free(bytes);
+
+    const output_z = try allocator.dupeZ(u8, output_path);
+    defer allocator.free(output_z);
+    const payload = (try detectPath(allocator, output_z)) orelse return error.TestExpectedPayload;
+    defer payload.deinit(allocator);
+    try std.testing.expectEqualStrings("payload-bytecode", payload.bytecode);
+
+    const base_path = try selfExtractTestPath(allocator, tmp, "base");
+    defer allocator.free(base_path);
+    const base_z = try allocator.dupeZ(u8, base_path);
+    defer allocator.free(base_z);
+    try std.testing.expect((try detectPath(allocator, base_z)) == null);
+}
+
+test "detectPath refuses a framed payload with a changed byte instead of reporting no payload" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const output_path = try selfExtractTestPath(allocator, tmp, "artifact");
+    defer allocator.free(output_path);
+    const bytes = try writeDetectFixture(allocator, tmp, output_path);
+    defer allocator.free(bytes);
+
+    // One byte inside the bytecode string, checksum left as built.
+    const at = std.mem.indexOf(u8, bytes, "payload-bytecode") orelse return error.TestFixture;
+    bytes[at] ^= 0x01;
+    try rewriteDetectFixture(tmp, "artifact", bytes, false);
+
+    const output_z = try allocator.dupeZ(u8, output_path);
+    defer allocator.free(output_z);
+    try std.testing.expectError(error.CorruptArtifact, detectPath(allocator, output_z));
+}
+
+test "detectPath refuses a framed payload whose checksum holds but whose sections do not parse" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const output_path = try selfExtractTestPath(allocator, tmp, "artifact");
+    defer allocator.free(output_path);
+    const bytes = try writeDetectFixture(allocator, tmp, output_path);
+    defer allocator.free(bytes);
+
+    // Claim more sections than the payload holds, then make the checksum
+    // agree, so only the parser can notice.
+    const trailer = bytes[bytes.len - TRAILER_SIZE ..];
+    const offset: usize = @intCast(std.mem.readInt(u64, trailer[0..8], .little));
+    std.mem.writeInt(u16, bytes[offset..][0..2], 0xFFFF, .little);
+    try rewriteDetectFixture(tmp, "artifact", bytes, true);
+
+    const output_z = try allocator.dupeZ(u8, output_path);
+    defer allocator.free(output_z);
+    try std.testing.expectError(error.CorruptArtifact, detectPath(allocator, output_z));
 }

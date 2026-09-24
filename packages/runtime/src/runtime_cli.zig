@@ -31,7 +31,9 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
     // Check for self-extracting binary payload before anything else. A payload
     // this runtime cannot read is not the same as no payload: swallowing it
-    // would start the plain CLI on a binary somebody deployed as a service.
+    // would start the plain CLI on a binary somebody deployed as a service,
+    // and that CLI serves whatever project is in the working directory. So
+    // every error here stops the binary; only `null` means a plain runtime.
     const self_payload = self_extract.detect(allocator) catch |err| switch (err) {
         error.UnsupportedArtifactFormat => {
             shared.writeStderrLine(
@@ -39,7 +41,19 @@ pub fn main(init: std.process.Init.Minimal) !void {
             );
             std.process.exit(1);
         },
-        else => null,
+        error.CorruptArtifact => {
+            shared.writeStderrLine(
+                "This binary carries a handler payload that is damaged. Refusing to start; rebuild or redeploy the artifact.",
+            );
+            std.process.exit(1);
+        },
+        else => {
+            var buf: [256]u8 = undefined;
+            const line = std.fmt.bufPrint(&buf, "Could not inspect this binary for a handler payload: {s}. Refusing to start.", .{@errorName(err)}) catch
+                "Could not inspect this binary for a handler payload. Refusing to start.";
+            shared.writeStderrLine(line);
+            std.process.exit(1);
+        },
     };
 
     const args = try shared.collectArgs(allocator, init.args);

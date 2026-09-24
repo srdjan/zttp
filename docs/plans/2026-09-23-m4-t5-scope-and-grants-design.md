@@ -363,12 +363,17 @@ decodes) and the payload CRC-32 was recomputed, as a deliberate attacker would. 
 then refused to serve: `attestation: the loaded executable graph does not match the signed
 root; refusing to serve`, `error.ExecutableGraphMismatch`.
 
-**Found, not changed.** With the byte changed but the CRC left stale, the binary did not
-reach acceptance. `self_extract` returns no payload on a CRC mismatch, and the binary then
-starts as a plain `zttp-runtime`. From an empty directory that exits with `NoHandler`. From
-the project directory it discovered `zttp.json` and served the project source with no
-proof and no ceiling. That fallback is older than T5 and is outside this unit; it is
-recorded here for an owner decision, not closed.
+**Found and closed afterwards.** With the byte changed but the CRC left stale, the binary did
+not reach acceptance. `self_extract` returned no payload on a CRC mismatch, and the binary
+then started as a plain `zttp-runtime`: from the project directory it discovered
+`zttp.json` and served the project source with no proof and no ceiling. `runtime_cli`
+also mapped every other `detect` error to "no payload". That fallback was older than T5.
+The owner asked for it to be fixed before T6: once a trailer frames a payload, a short
+read, a checksum mismatch, or a payload that does not parse is `error.CorruptArtifact`,
+and the binary refuses to start on any `detect` error. The same stale-CRC binary, run from
+the project directory, now exits 1 with "the payload checksum does not match its trailer".
+The new tests also found that `parse` leaked the sections it had read when a later section
+was truncated; those paths now return `error.InvalidPayload`.
 
 **Known gaps.** `zttp dev` and `zttp-runtime --watch` load no declaration, so the
 development server enforces no ceiling at runtime. The ceiling refusal on the

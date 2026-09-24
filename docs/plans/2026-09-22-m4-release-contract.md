@@ -309,8 +309,8 @@ build refuses a handler outside the ceiling with a named reason, the contract
 at runtime outside the accepted ceiling (P15). A deployed binary served under its
 ceiling and refused to start after one declaration byte changed. The evidence,
 thirteen probes, and three known gaps are in section 13.1 of the design note. One
-older fallback was found and left for an owner decision: a self-contained binary
-whose payload CRC fails starts as a plain runtime.
+older fallback was found and then closed: a self-contained binary whose payload CRC
+failed started as a plain runtime; it now refuses to start.
 
 **T6. Credential injection.** Depends on T1a, T1b, and T5. Owned files:
 `packages/runtime/src/runtime_http.zig`, `packages/modules/src/net/fetch.zig` and
