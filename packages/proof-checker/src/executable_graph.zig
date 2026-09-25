@@ -290,9 +290,89 @@ test "root is stable and order-sensitive" {
     try testing.expectError(error.NotOrdered, computeRoot(&swapped));
 }
 
+test "the executable graph root has a pinned format" {
+    const members = [_]Member{
+        m(.dep_bytecode, 0, 0x11),
+        m(.dep_bytecode, 1, 0x22),
+    };
+    const root = try computeRoot(&members);
+    // This digest was computed once and is now a pinned graph-format value.
+    // The test does not derive the expected bytes from the implementation.
+    const expected = [_]u8{
+        0xda, 0x21, 0x5f, 0x7c, 0xd7, 0xf4, 0x91, 0x76,
+        0x5e, 0x1d, 0xe1, 0x14, 0x5e, 0xab, 0xd0, 0x1f,
+        0xe6, 0x50, 0xf9, 0xbd, 0x03, 0xd9, 0x77, 0xbe,
+        0xd1, 0x83, 0x08, 0x95, 0xdd, 0x80, 0x36, 0x87,
+    };
+    try testing.expectEqualSlices(u8, &expected, &root);
+}
+
+test "the root binds each member ordinal" {
+    const original = [_]Member{
+        m(.dep_bytecode, 0, 0x11),
+        m(.dep_bytecode, 1, 0x22),
+    };
+    const changed = [_]Member{
+        m(.dep_bytecode, 0, 0x11),
+        m(.dep_bytecode, 2, 0x22),
+    };
+    const original_root = try computeRoot(&original);
+    const changed_root = try computeRoot(&changed);
+    try testing.expect(!std.mem.eql(u8, &original_root, &changed_root));
+}
+
+test "the root binds each member kind" {
+    const original = [_]Member{
+        m(.dep_bytecode, 0, 0x11),
+        m(.dep_bytecode, 1, 0x22),
+    };
+    const changed = [_]Member{
+        m(.main_bytecode, 0, 0x11),
+        m(.dep_bytecode, 1, 0x22),
+    };
+    const original_root = try computeRoot(&original);
+    const changed_root = try computeRoot(&changed);
+    try testing.expect(!std.mem.eql(u8, &original_root, &changed_root));
+}
+
+test "the root binds the declared member count" {
+    const one = [_]Member{m(.dep_bytecode, 0, 0x11)};
+    const two = [_]Member{
+        m(.dep_bytecode, 0, 0x11),
+        m(.dep_bytecode, 1, 0x22),
+    };
+    const one_root = try computeRoot(&one);
+    const two_root = try computeRoot(&two);
+    try testing.expect(!std.mem.eql(u8, &one_root, &two_root));
+}
+
 test "a duplicate member is refused" {
     const dup = [_]Member{ m(.dep_bytecode, 0, 9), m(.dep_bytecode, 0, 9) };
     try testing.expectError(error.DuplicateMember, computeRoot(&dup));
+}
+
+test "the streaming root refuses too many and too few members" {
+    var too_many = try RootHasher.init(1);
+    try too_many.push(m(.dep_bytecode, 0, 1));
+    try testing.expectError(error.NotOrdered, too_many.push(m(.dep_bytecode, 1, 2)));
+
+    var too_few = try RootHasher.init(2);
+    try too_few.push(m(.dep_bytecode, 0, 1));
+    try testing.expectError(error.NotOrdered, too_few.finish());
+}
+
+test "ordinals within one member kind must increase" {
+    const ordered = [_]Member{
+        m(.dep_bytecode, 0, 1),
+        m(.dep_bytecode, 1, 2),
+    };
+    _ = try computeRoot(&ordered);
+
+    const reversed = [_]Member{
+        m(.dep_bytecode, 1, 1),
+        m(.dep_bytecode, 0, 2),
+    };
+    try testing.expectError(error.NotOrdered, computeRoot(&reversed));
 }
 
 test "mutating any member class changes the root" {
@@ -331,6 +411,11 @@ test "required kinds must all be present" {
     const members = fullGraph(&buf);
     try checkRequiredKinds(members);
     try testing.expectError(error.MissingRequiredKind, checkRequiredKinds(members[0 .. members.len - 1]));
+}
+
+test "semantics is required and declaration is optional" {
+    try testing.expect(MemberKind.semantics.required());
+    try testing.expect(!MemberKind.declaration.required());
 }
 
 test "member kind wire decoding is closed" {

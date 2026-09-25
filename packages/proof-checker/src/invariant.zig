@@ -1368,6 +1368,230 @@ test "a specification past the size bound is refused before it is parsed" {
     try std.testing.expectError(error.SpecTooLarge, decode(&oversize));
 }
 
+test "an empty ledger id is refused" {
+    const empty = magic.* ++ [_]u8{
+        1, 0, // schema
+        1, 0, // kind
+        0, 0, // ledger id length
+        1, 0, // currency count
+    };
+    try std.testing.expectError(error.EmptyLedgerId, decode(empty[0..]));
+}
+
+test "the ledger id length bound includes the limit" {
+    var at_limit: [header_size + max_ledger_id_bytes + currency_record_size]u8 = undefined;
+    @memcpy(at_limit[0..8], magic);
+    std.mem.writeInt(u16, at_limit[8..10], schema_version_v1, .little);
+    std.mem.writeInt(u16, at_limit[10..12], @intFromEnum(Kind.balance_conservation_v1), .little);
+    std.mem.writeInt(u16, at_limit[12..14], max_ledger_id_bytes, .little);
+    std.mem.writeInt(u16, at_limit[14..16], 1, .little);
+    @memset(at_limit[header_size..][0..max_ledger_id_bytes], 'a');
+    @memcpy(at_limit[header_size + max_ledger_id_bytes ..][0..3], "USD");
+    at_limit[at_limit.len - 1] = max_scale;
+
+    const spec = try decode(&at_limit);
+    try std.testing.expectEqual(@as(usize, max_ledger_id_bytes), spec.ledger_id.len);
+
+    const over_limit = magic.* ++ [_]u8{
+        1, 0, // schema
+        1,                       0, // kind
+        max_ledger_id_bytes + 1, 0,
+        1, 0, // currency count
+    };
+    try std.testing.expectError(error.InvalidLedgerId, decode(over_limit[0..]));
+}
+
+test "the currency count and scale bounds include their limits" {
+    var at_limit: [header_size + 1 + @as(usize, max_currencies) * currency_record_size]u8 = undefined;
+    @memcpy(at_limit[0..8], magic);
+    std.mem.writeInt(u16, at_limit[8..10], schema_version_v1, .little);
+    std.mem.writeInt(u16, at_limit[10..12], @intFromEnum(Kind.balance_conservation_v1), .little);
+    std.mem.writeInt(u16, at_limit[12..14], 1, .little);
+    std.mem.writeInt(u16, at_limit[14..16], max_currencies, .little);
+    at_limit[header_size] = 'x';
+    for (0..max_currencies) |index| {
+        const start = header_size + 1 + index * currency_record_size;
+        at_limit[start] = 'A';
+        at_limit[start + 1] = 'A' + @as(u8, @intCast(index / 26));
+        at_limit[start + 2] = 'A' + @as(u8, @intCast(index % 26));
+        at_limit[start + 3] = max_scale;
+    }
+
+    const spec = try decode(&at_limit);
+    try std.testing.expectEqual(max_currencies, spec.currency_count);
+    try std.testing.expectEqual(max_scale, (try spec.currency(max_currencies - 1)).scale);
+    try std.testing.expectError(error.Truncated, spec.currency(max_currencies));
+
+    const too_many = magic.* ++ [_]u8{
+        1, 0, // schema
+        1, 0, // kind
+        1,                  0, // ledger id length
+        max_currencies + 1, 0,
+    };
+    try std.testing.expectError(error.TooManyCurrencies, decode(too_many[0..]));
+
+    const scale_over_limit = magic.* ++ [_]u8{
+        1, 0, // schema
+        1, 0, // kind
+        1, 0, // ledger id length
+        1, 0, // currency count
+    } ++ "xUSD" ++ [_]u8{max_scale + 1};
+    try std.testing.expectError(error.InvalidScale, decode(scale_over_limit[0..]));
+}
+
+test "the account matcher count and length bounds include their limits" {
+    var longest: [2 + account_matcher_header_size + max_account_bytes]u8 = undefined;
+    std.mem.writeInt(u16, longest[0..2], 1, .little);
+    longest[2] = @intFromEnum(AccountMatcherTag.exact);
+    std.mem.writeInt(u16, longest[3..5], max_account_bytes, .little);
+    @memset(longest[5..], 'a');
+    const one = try decodeAccountMatchers(&longest);
+    try std.testing.expectEqual(@as(usize, max_account_bytes), (try one.at(0)).value.len);
+
+    const too_long = [_]u8{
+        1,                                     0,
+        @intFromEnum(AccountMatcherTag.exact), max_account_bytes + 1,
+        0,
+    };
+    try std.testing.expectError(error.AccountMatcherTooLong, decodeAccountMatchers(&too_long));
+
+    var most: [2 + @as(usize, max_account_matchers) * (account_matcher_header_size + 2)]u8 = undefined;
+    std.mem.writeInt(u16, most[0..2], max_account_matchers, .little);
+    for (0..max_account_matchers) |index| {
+        const start = 2 + index * (account_matcher_header_size + 2);
+        most[start] = @intFromEnum(AccountMatcherTag.exact);
+        std.mem.writeInt(u16, most[start + 1 ..][0..2], 2, .little);
+        most[start + 3] = 'A' + @as(u8, @intCast(index / 26));
+        most[start + 4] = 'A' + @as(u8, @intCast(index % 26));
+    }
+    const all = try decodeAccountMatchers(&most);
+    try std.testing.expectEqual(max_account_matchers, all.count);
+
+    const too_many = [_]u8{ max_account_matchers + 1, 0 };
+    try std.testing.expectError(error.TooManyAccountMatchers, decodeAccountMatchers(&too_many));
+}
+
+test "the kind count bound includes the limit" {
+    // Only two kind ordinals exist, so no valid document can contain 32 unique
+    // kinds. Truncated proves that the count guard admitted the limit and the
+    // decoder continued to the missing first record.
+    const at_limit = magic.* ++ [_]u8{
+        2,         0, // schema
+        max_kinds, 0,
+        1, 0, // ledger id length
+        1, 0, // currency count
+    } ++ "xUSD" ++ [_]u8{0};
+    try std.testing.expectError(error.Truncated, decode(at_limit[0..]));
+
+    const over_limit = magic.* ++ [_]u8{
+        2,             0, // schema
+        max_kinds + 1, 0,
+        1, 0, // ledger id length
+        1, 0, // currency count
+    };
+    try std.testing.expectError(error.TooManyKinds, decode(over_limit[0..]));
+}
+
+test "ledger dots and only uppercase currency bytes decode" {
+    const dotted = magic.* ++ [_]u8{
+        1, 0, // schema
+        1, 0, // kind
+        3, 0, // ledger id length
+        1, 0, // currency count
+    } ++ "a.bUSD" ++ [_]u8{2};
+    try std.testing.expectEqualStrings("a.b", (try decode(dotted[0..])).ledger_id);
+
+    const lowercase_currency = magic.* ++ [_]u8{
+        1, 0, // schema
+        1, 0, // kind
+        1, 0, // ledger id length
+        1, 0, // currency count
+    } ++ "xUSd" ++ [_]u8{2};
+    try std.testing.expectError(error.InvalidCurrency, decode(lowercase_currency[0..]));
+}
+
+test "every invariant decode error is driven through a public decoder" {
+    const Entry = enum { specification, account_matchers };
+    const Probe = struct {
+        expected: DecodeError,
+        entry: Entry,
+        bytes: []const u8,
+    };
+
+    const bad_magic = [_]u8{0} ** header_size;
+    const unsupported_schema = magic.* ++ [_]u8{ 3, 0, 1, 0, 1, 0, 1, 0 };
+    const unknown_kind = magic.* ++ [_]u8{ 1, 0, 3, 0, 1, 0, 1, 0 };
+    const empty_ledger = magic.* ++ [_]u8{ 1, 0, 1, 0, 0, 0, 1, 0 };
+    const invalid_ledger = magic.* ++ [_]u8{ 1, 0, 1, 0, 1, 0, 1, 0 } ++ "!USD" ++ [_]u8{2};
+    const empty_currency_set = magic.* ++ [_]u8{ 1, 0, 1, 0, 1, 0, 0, 0 } ++ "x";
+    const too_many_currencies = magic.* ++ [_]u8{ 1, 0, 1, 0, 1, 0, max_currencies + 1, 0 };
+    const invalid_currency = magic.* ++ [_]u8{ 1, 0, 1, 0, 1, 0, 1, 0 } ++ "xUSd" ++ [_]u8{2};
+    const invalid_scale = magic.* ++ [_]u8{ 1, 0, 1, 0, 1, 0, 1, 0 } ++ "xUSD" ++ [_]u8{max_scale + 1};
+    const currencies_not_ordered = magic.* ++ [_]u8{ 1, 0, 1, 0, 1, 0, 2, 0 } ++ "xUSD" ++ [_]u8{2} ++ "USD" ++ [_]u8{2};
+    const trailing_data = v1_fixture ++ [_]u8{0xff};
+    const too_many_kinds = magic.* ++ [_]u8{ 2, 0, max_kinds + 1, 0, 1, 0, 1, 0 };
+    const duplicate_kind = magic.* ++ [_]u8{ 2, 0, 2, 0, 1, 0, 1, 0 } ++ "xUSD" ++ [_]u8{2} ++ [_]u8{ 1, 0, 0, 0, 1, 0, 0, 0 };
+    const kinds_not_ordered = magic.* ++ [_]u8{ 2, 0, 2, 0, 1, 0, 1, 0 } ++ "xUSD" ++ [_]u8{2} ++ [_]u8{ 3, 0, 0, 0, 1, 0, 0, 0 };
+    const required_kind_missing = magic.* ++ [_]u8{ 2, 0, 0, 0, 1, 0, 1, 0 } ++ "xUSD" ++ [_]u8{2};
+    const unexpected_kind_payload = v2_header_and_common ++ [_]u8{ 1, 0, 1, 0, 0 };
+    const spec_too_large = [_]u8{0} ** (max_spec_bytes + 1);
+
+    const probes = [_]Probe{
+        .{ .expected = error.SpecTooLarge, .entry = .specification, .bytes = spec_too_large[0..] },
+        .{ .expected = error.Truncated, .entry = .specification, .bytes = &.{} },
+        .{ .expected = error.BadMagic, .entry = .specification, .bytes = bad_magic[0..] },
+        .{ .expected = error.UnsupportedSchemaVersion, .entry = .specification, .bytes = unsupported_schema[0..] },
+        .{ .expected = error.UnknownInvariantKind, .entry = .specification, .bytes = unknown_kind[0..] },
+        .{ .expected = error.EmptyLedgerId, .entry = .specification, .bytes = empty_ledger[0..] },
+        .{ .expected = error.InvalidLedgerId, .entry = .specification, .bytes = invalid_ledger[0..] },
+        .{ .expected = error.EmptyCurrencySet, .entry = .specification, .bytes = empty_currency_set[0..] },
+        .{ .expected = error.TooManyCurrencies, .entry = .specification, .bytes = too_many_currencies[0..] },
+        .{ .expected = error.InvalidCurrency, .entry = .specification, .bytes = invalid_currency[0..] },
+        .{ .expected = error.InvalidScale, .entry = .specification, .bytes = invalid_scale[0..] },
+        .{ .expected = error.CurrenciesNotOrdered, .entry = .specification, .bytes = currencies_not_ordered[0..] },
+        .{ .expected = error.TrailingData, .entry = .specification, .bytes = trailing_data[0..] },
+        .{ .expected = error.TooManyKinds, .entry = .specification, .bytes = too_many_kinds[0..] },
+        .{ .expected = error.DuplicateKind, .entry = .specification, .bytes = duplicate_kind[0..] },
+        .{ .expected = error.KindsNotOrdered, .entry = .specification, .bytes = kinds_not_ordered[0..] },
+        .{ .expected = error.RequiredKindMissing, .entry = .specification, .bytes = required_kind_missing[0..] },
+        .{ .expected = error.UnexpectedKindPayload, .entry = .specification, .bytes = unexpected_kind_payload[0..] },
+        .{ .expected = error.EmptyAccountMatcherSet, .entry = .account_matchers, .bytes = &.{ 0, 0 } },
+        .{ .expected = error.TooManyAccountMatchers, .entry = .account_matchers, .bytes = &.{ max_account_matchers + 1, 0 } },
+        .{ .expected = error.UnknownAccountMatcher, .entry = .account_matchers, .bytes = &.{ 1, 0, 3, 1, 0, 'a' } },
+        .{ .expected = error.EmptyAccountMatcher, .entry = .account_matchers, .bytes = &.{ 1, 0, 1, 0, 0 } },
+        .{ .expected = error.AccountMatcherTooLong, .entry = .account_matchers, .bytes = &.{ 1, 0, 1, max_account_bytes + 1, 0 } },
+        .{ .expected = error.InvalidAccountMatcher, .entry = .account_matchers, .bytes = &.{ 1, 0, 1, 1, 0, 0 } },
+        .{ .expected = error.DuplicateAccountMatcher, .entry = .account_matchers, .bytes = &.{ 2, 0, 1, 1, 0, 'a', 1, 1, 0, 'a' } },
+        .{ .expected = error.AccountMatchersNotOrdered, .entry = .account_matchers, .bytes = &.{ 2, 0, 1, 1, 0, 'b', 1, 1, 0, 'a' } },
+    };
+
+    for (probes, 0..) |probe, index| {
+        const result: ?DecodeError = switch (probe.entry) {
+            .specification => if (decode(probe.bytes)) |_| null else |err| @as(DecodeError, err),
+            .account_matchers => if (decodeAccountMatchers(probe.bytes)) |_| null else |err| @as(DecodeError, err),
+        };
+        const actual = result orelse {
+            std.debug.print("invariant decode probe {d}: expected {s}, decoded\n", .{ index, @errorName(probe.expected) });
+            return error.TestUnexpectedResult;
+        };
+        if (actual != probe.expected) {
+            std.debug.print("invariant decode probe {d}: expected {s}, got {s}\n", .{ index, @errorName(probe.expected), @errorName(actual) });
+            return error.TestUnexpectedResult;
+        }
+    }
+
+    inline for (@typeInfo(DecodeError).error_set.?) |member| {
+        var driven = false;
+        for (probes) |probe| {
+            if (std.mem.eql(u8, @errorName(probe.expected), member.name)) driven = true;
+        }
+        if (!driven) {
+            std.debug.print("DecodeError.{s} has no public decoder probe\n", .{member.name});
+            return error.TestUnexpectedResult;
+        }
+    }
+}
+
 test "the two wire schemas are distinct and schema 1 stays pinned at one" {
     // Deployed artifacts and existing ledger stores are bound to the digest of
     // schema 1 bytes. Moving this constant would change every one of them.

@@ -1594,6 +1594,36 @@ fn bindExecutableGraph(
 
 const testing = std.testing;
 
+fn expectAt(result: Assessment, stage: verdict.Stage, code: verdict.ReasonCode) !void {
+    try testing.expect(result.rejection != null);
+    try testing.expectEqual(stage, result.rejection.?.stage);
+    try testing.expectEqual(code, result.rejection.?.code);
+}
+
+/// Bind test parts with the same public encoder and root calculation as a producer.
+fn encodeBoundTestParts(buffer: []u8, source: cert_mod.Parts, members: []graph.Member) !usize {
+    std.mem.sort(graph.Member, members, {}, struct {
+        fn lt(_: void, a: graph.Member, b: graph.Member) bool {
+            return graph.Member.order(a, b) == .lt;
+        }
+    }.lt);
+    var parts = source;
+    for (members) |*member| {
+        if (member.kind == .proof_certificate) member.digest = [_]u8{0} ** 32;
+    }
+    parts.graph = members;
+    parts.identity.executable_root = [_]u8{0} ** 32;
+    const provisional = try cert_mod.encode(parts, buffer);
+    var budget = Budget.init(.{});
+    const decoded = try cert_mod.decode(provisional, .{}, &budget);
+    const commitment = try cert_mod.commitmentDigest(provisional, decoded);
+    for (members) |*member| {
+        if (member.kind == .proof_certificate) member.digest = commitment;
+    }
+    parts.identity.executable_root = try graph.computeRoot(members);
+    return (try cert_mod.encode(parts, buffer)).len;
+}
+
 pub const test_support = struct {
     pub fn digest(seed: u8) [32]u8 {
         var out: [32]u8 = undefined;
@@ -2426,6 +2456,247 @@ test "tampered invariant specification bytes reject before coverage" {
     inputs.invariant_spec = &tampered;
     const result = check(inputs, policy_mod.production);
     try testing.expectEqual(verdict.ReasonCode.invariant_spec_digest_mismatch, result.rejection.?.code);
+    try testing.expectEqual(@as(std.meta.Tag(verdict.Subject), .none), std.meta.activeTag(result.rejection.?.subject));
+    const expected_digest = invariant.digest(test_invariant_spec);
+    try testing.expectEqualSlices(u8, &expected_digest, &result.rejection.?.expected.?.digest);
+}
+
+test "invariant coverage refuses observations beyond the configured limit" {
+    var fixture = try buildInvariantFixture();
+    const observed = [_]invariant.ObservedOperation{
+        fixture.observed[0],
+        .{ .function_ordinal = 0, .code_offset = 4, .operation = .post },
+    };
+    var inputs = fixture.inputs();
+    inputs.observed_invariant_operations = &observed;
+    var limited = policy_mod.production;
+    limited.limits.max_invariant_operations = 1;
+    try expectAt(check(inputs, limited), .limits, .work_budget_exhausted);
+}
+
+test "an invariant witness cannot name a return node" {
+    var fixture = try buildInvariantFixture();
+    fixture.invariant_witnesses[0].ir_node = 3;
+    fixture.invariant_witnesses[0].translation_index = 2;
+    fixture.invariant_witnesses[0].code_offset = 4;
+    fixture.observed[0].code_offset = 4;
+    try fixture.encodeWith(&fixture.invariant_witnesses);
+    try expectAt(check(fixture.inputs(), policy_mod.production), .invariant_coverage, .invariant_member_extra);
+}
+
+test "an invariant witness needs its own scope and a valid translation index" {
+    var scope = try buildInvariantFixture();
+    scope.invariant_witnesses[0].scope_ir_node = 1;
+    try scope.encodeWith(&scope.invariant_witnesses);
+    try expectAt(check(scope.inputs(), policy_mod.production), .invariant_coverage, .invariant_translation_missing);
+
+    var absent = try buildInvariantFixture();
+    absent.invariant_witnesses[0].translation_index = @intCast(absent.translation.len);
+    try absent.encodeWith(&absent.invariant_witnesses);
+    try expectAt(check(absent.inputs(), policy_mod.production), .invariant_coverage, .invariant_translation_missing);
+}
+
+test "an unconfigured invariant refuses supplied specification bytes" {
+    var fixture = try test_support.build();
+    var inputs = fixture.inputs();
+    inputs.invariant_spec = test_invariant_spec;
+    try expectAt(check(inputs, policy_mod.production), .invariant_coverage, .invariant_spec_digest_mismatch);
+}
+
+test "an unconfigured invariant refuses observed operations" {
+    var fixture = try test_support.build();
+    const observed = [_]invariant.ObservedOperation{.{ .function_ordinal = 0, .code_offset = 2, .operation = .post }};
+    var inputs = fixture.inputs();
+    inputs.observed_invariant_operations = &observed;
+    try expectAt(check(inputs, policy_mod.production), .invariant_coverage, .invariant_spec_missing);
+}
+
+test "an unconfigured invariant refuses invariant graph members" {
+    var fixture = try buildInvariantFixture();
+    var parts = fixture.parts(&.{});
+    parts.identity.invariant_spec_digest = [_]u8{0} ** 32;
+    fixture.len = try encodeBoundTestParts(&fixture.buffer, parts, &fixture.members);
+    var inputs = fixture.inputs();
+    inputs.invariant_spec = null;
+    inputs.observed_invariant_operations = &.{};
+    const result = check(inputs, policy_mod.production);
+    try expectAt(result, .invariant_coverage, .invariant_spec_missing);
+    try testing.expectEqual(@as(std.meta.Tag(verdict.Subject), .graph_member), std.meta.activeTag(result.rejection.?.subject));
+}
+
+test "an unconfigured invariant refuses a ledger call in the IR" {
+    var fixture = try test_support.build();
+    fixture.ir[2].tag = .ledger_call;
+    try fixture.encode();
+    try expectAt(check(fixture.inputs(), policy_mod.production), .invariant_coverage, .invariant_spec_missing);
+}
+
+test "an invariant witness offset must match the independent observation" {
+    var fixture = try buildInvariantFixture();
+    fixture.observed[0].code_offset = 3;
+    try expectAt(check(fixture.inputs(), policy_mod.production), .invariant_coverage, .invariant_observed_mismatch);
+}
+
+test "duplicate and descending invariant witnesses keep distinct reasons" {
+    var fixture = try buildInvariantFixture();
+    var witnesses = [_]cert_mod.InvariantWitness{ fixture.invariant_witnesses[0], fixture.invariant_witnesses[0] };
+    try fixture.encodeWith(&witnesses);
+    try expectAt(check(fixture.inputs(), policy_mod.production), .invariant_coverage, .invariant_member_duplicate);
+
+    witnesses[1].code_offset = 1;
+    try fixture.encodeWith(&witnesses);
+    try expectAt(check(fixture.inputs(), policy_mod.production), .invariant_coverage, .invariant_member_out_of_order);
+}
+
+test "one ledger node cannot use two ordered witnesses" {
+    var fixture = try buildInvariantFixture();
+    fixture.translation[1].code_len = 2;
+    var witnesses = [_]cert_mod.InvariantWitness{ fixture.invariant_witnesses[0], fixture.invariant_witnesses[0] };
+    witnesses[1].code_offset = 3;
+    const observed = [_]invariant.ObservedOperation{
+        fixture.observed[0],
+        .{ .function_ordinal = 0, .code_offset = 3, .operation = .post },
+    };
+    try fixture.encodeWith(&witnesses);
+    var inputs = fixture.inputs();
+    inputs.observed_invariant_operations = &observed;
+    try expectAt(check(inputs, policy_mod.production), .invariant_coverage, .invariant_member_duplicate);
+}
+
+test "duplicate independent observations reject before witness comparison" {
+    var fixture = try buildInvariantFixture();
+    fixture.translation[1].code_len = 2;
+    var witnesses = [_]cert_mod.InvariantWitness{ fixture.invariant_witnesses[0], fixture.invariant_witnesses[0] };
+    witnesses[1].code_offset = 3;
+    const observed = [_]invariant.ObservedOperation{ fixture.observed[0], fixture.observed[0] };
+    try fixture.encodeWith(&witnesses);
+    var inputs = fixture.inputs();
+    inputs.observed_invariant_operations = &observed;
+    const result = check(inputs, policy_mod.production);
+    try expectAt(result, .invariant_coverage, .invariant_observed_mismatch);
+    try testing.expectEqual(@as(std.meta.Tag(verdict.Subject), .code_offset), std.meta.activeTag(result.rejection.?.subject));
+    try testing.expectEqual(@as(u32, 2), result.rejection.?.subject.code_offset);
+}
+
+test "an invariant witness cannot use a jump as its emission" {
+    var fixture = try buildInvariantFixture();
+    const translation = [_]cert_mod.Witness{
+        fixture.translation[0],                                                                                                   fixture.translation[1], fixture.translation[2],
+        .{ .ir_node = 2, .code_start = 3, .code_len = 1, .target_ir = 2, .target_offset = 2, .scope_ir_node = 0, .kind = .jump },
+    };
+    var witness = fixture.invariant_witnesses;
+    witness[0].translation_index = 3;
+    witness[0].code_offset = 3;
+    fixture.observed[0].code_offset = 3;
+    var parts = fixture.parts(&witness);
+    parts.translation = &translation;
+    fixture.len = try encodeBoundTestParts(&fixture.buffer, parts, &fixture.members);
+    try expectAt(check(fixture.inputs(), policy_mod.production), .invariant_coverage, .invariant_translation_missing);
+}
+
+test "a second ledger call needs a witness when witness and observation counts agree" {
+    var fixture = try buildInvariantFixture();
+    const ir = [_]cert_mod.IrNode{
+        fixture.ir[0],
+        fixture.ir[1],
+        fixture.ir[2],
+        .{ .id = 3, .tag = .ledger_call, .parent = 1, .first_child = 0, .child_count = 0, .digest = test_support.digest(24), .aux = 0 },
+        .{ .id = 4, .tag = .return_node, .parent = 1, .first_child = 0, .child_count = 0, .digest = test_support.digest(25) },
+    };
+    var ordered_ir = ir;
+    ordered_ir[1].child_count = 3;
+    const translation = [_]cert_mod.Witness{
+        fixture.translation[0],
+        fixture.translation[1],
+        .{ .ir_node = 3, .code_start = 4, .code_len = 1, .target_ir = 3, .target_offset = 4, .scope_ir_node = 0, .kind = .emission },
+        .{ .ir_node = 4, .code_start = 6, .code_len = 2, .target_ir = 4, .target_offset = 6, .scope_ir_node = 0, .kind = .emission },
+    };
+    var parts = fixture.parts(&fixture.invariant_witnesses);
+    parts.ir = &ordered_ir;
+    parts.translation = &translation;
+    parts.identity.ir_root = cert_mod.irRootFromNodes(&ordered_ir);
+    for (&fixture.members) |*member| {
+        if (member.kind == .proof_ir) member.digest = parts.identity.ir_root;
+    }
+    fixture.len = try encodeBoundTestParts(&fixture.buffer, parts, &fixture.members);
+    const result = check(fixture.inputs(), policy_mod.production);
+    try expectAt(result, .invariant_coverage, .invariant_member_missing);
+    try testing.expectEqual(@as(std.meta.Tag(verdict.Subject), .ir_node), std.meta.activeTag(result.rejection.?.subject));
+    try testing.expectEqual(@as(u32, 3), result.rejection.?.subject.ir_node);
+}
+
+test "an invariant specification that cannot decode rejects" {
+    const invalid = [_]u8{0};
+    var fixture = try buildInvariantFixtureFor(&invalid);
+    try expectAt(check(fixture.inputs(), policy_mod.production), .invariant_coverage, .invariant_spec_undecodable);
+}
+
+test "missing invariant graph members reject independently" {
+    var fixture = try buildInvariantFixture();
+    var without_spec: [10]graph.Member = undefined;
+    @memcpy(without_spec[0..9], fixture.members[0..9]);
+    without_spec[9] = fixture.members[10];
+    const parts = fixture.parts(&fixture.invariant_witnesses);
+    fixture.len = try encodeBoundTestParts(&fixture.buffer, parts, &without_spec);
+    var inputs = fixture.inputs();
+    inputs.observed_graph = &without_spec;
+    try expectAt(check(inputs, policy_mod.production), .invariant_coverage, .invariant_spec_member_missing);
+
+    var other = try buildInvariantFixture();
+    var without_adapter: [10]graph.Member = undefined;
+    @memcpy(&without_adapter, other.members[0..10]);
+    const other_parts = other.parts(&other.invariant_witnesses);
+    other.len = try encodeBoundTestParts(&other.buffer, other_parts, &without_adapter);
+    var other_inputs = other.inputs();
+    other_inputs.observed_graph = &without_adapter;
+    try expectAt(check(other_inputs, policy_mod.production), .invariant_coverage, .invariant_adapter_member_missing);
+}
+
+test "an invariant spec member at a nonzero ordinal rejects even with the right digest" {
+    var fixture = try buildInvariantFixture();
+    fixture.members[9].ordinal = 1;
+    const parts = fixture.parts(&fixture.invariant_witnesses);
+    fixture.len = try encodeBoundTestParts(&fixture.buffer, parts, &fixture.members);
+    var inputs = fixture.inputs();
+    inputs.observed_graph = &fixture.members;
+    try expectAt(check(inputs, policy_mod.production), .invariant_coverage, .invariant_spec_digest_mismatch);
+}
+
+test "an opcode inventory edge may name an id past the proof IR" {
+    // Only a node edge is bounded by the IR length. An opcode id names a
+    // bytecode opcode, so bounding it by the node count would refuse a sound
+    // certificate whose handler has fewer nodes than the opcode's number.
+    var fixture = try test_support.build();
+    fixture.trusted[0].member_id = @intCast(fixture.ir.len + 7);
+    try fixture.encode();
+    const result = check(fixture.inputs(), policy_mod.production);
+    try testing.expect(result.rejection == null);
+    try testing.expectEqual(SemanticState.policy_accepted, result.semantic);
+}
+
+test "invariant adapter, operation, sink, and implementation identities reject" {
+    var adapter = try buildInvariantFixture();
+    for (&adapter.members) |*member| {
+        if (member.kind == .invariant_ledger_adapter) member.digest = test_support.digest(0x78);
+    }
+    const parts = adapter.parts(&adapter.invariant_witnesses);
+    adapter.len = try encodeBoundTestParts(&adapter.buffer, parts, &adapter.members);
+    try expectAt(check(adapter.inputs(), policy_mod.production), .invariant_coverage, .invariant_adapter_identity_mismatch);
+
+    var operation = try buildInvariantFixture();
+    operation.ir[2].aux = @intCast(invariant.catalog.len);
+    try operation.encodeWith(&operation.invariant_witnesses);
+    try expectAt(check(operation.inputs(), policy_mod.production), .invariant_coverage, .invariant_operation_unknown);
+
+    var sink = try buildInvariantFixture();
+    sink.invariant_witnesses[0].sink = .ledger_balance;
+    try sink.encodeWith(&sink.invariant_witnesses);
+    try expectAt(check(sink.inputs(), policy_mod.production), .invariant_coverage, .invariant_sink_mismatch);
+
+    var impl = try buildInvariantFixture();
+    impl.invariant_witnesses[0].impl_id +%= 1;
+    try impl.encodeWith(&impl.invariant_witnesses);
+    try expectAt(check(impl.inputs(), policy_mod.production), .invariant_coverage, .invariant_impl_identity_mismatch);
 }
 
 test "a guarded artifact is accepted, and its guards are counted apart from its properties" {
@@ -2451,7 +2722,7 @@ test "a guarded artifact is accepted, and its guards are counted apart from its 
     try testing.expectEqual(@as(?verdict.AssuranceGrade, .tested), result.grade);
     inline for (@typeInfo(ps.Property).@"enum".fields) |field| {
         const property: ps.Property = @enumFromInt(field.value);
-        _ = result.properties.gradeFor(property);
+        try testing.expectEqual(@as(?verdict.AssuranceGrade, .tested), result.properties.gradeFor(property));
     }
 }
 
@@ -2511,6 +2782,79 @@ test "an omitted, extra, duplicated, or reordered guard rejects" {
     try encodeGuardedParts(&extra, extra_parts);
     result = check(extra.inputs(), policy_mod.production);
     try testing.expectEqual(verdict.ReasonCode.guard_member_extra, result.rejection.?.code);
+
+    var duplicate = try test_support.buildGuarded();
+    const two_calls = [_]cert_mod.IrNode{
+        duplicate.ir[0],
+        duplicate.ir[1],
+        duplicate.ir[2],
+        .{ .id = 3, .tag = .capability_call, .parent = 1, .first_child = 0, .child_count = 0, .digest = test_support.digest(24), .aux = 0 },
+        .{ .id = 4, .tag = .return_node, .parent = 1, .first_child = 0, .child_count = 0, .digest = test_support.digest(25) },
+    };
+    var ir = two_calls;
+    ir[1].child_count = 3;
+    const duplicated = [_]cert_mod.ResidualObligation{ duplicate.residual_plan[0], duplicate.residual_plan[0] };
+    var duplicate_parts = duplicate.parts();
+    duplicate_parts.ir = &ir;
+    duplicate_parts.identity.ir_root = cert_mod.irRootFromNodes(&ir);
+    duplicate_parts.residual = &duplicated;
+    duplicate_parts.identity.residual_plan_digest = cert_mod.residualPlanDigest(&duplicated);
+    for (&duplicate.members) |*member| {
+        if (member.kind == .proof_ir) member.digest = duplicate_parts.identity.ir_root;
+        if (member.kind == .residual_plan) member.digest = duplicate_parts.identity.residual_plan_digest;
+    }
+    duplicate.len = try encodeBoundTestParts(&duplicate.buffer, duplicate_parts, &duplicate.members);
+    try expectAt(check(duplicate.inputs(), policy_mod.production), .guard_coverage, .guard_member_duplicate);
+
+    var descending = duplicated;
+    descending[1].operation_id = 1;
+    duplicate_parts.residual = &descending;
+    duplicate_parts.identity.residual_plan_digest = cert_mod.residualPlanDigest(&descending);
+    for (&duplicate.members) |*member| {
+        if (member.kind == .residual_plan) member.digest = duplicate_parts.identity.residual_plan_digest;
+    }
+    duplicate.len = try encodeBoundTestParts(&duplicate.buffer, duplicate_parts, &duplicate.members);
+    try expectAt(check(duplicate.inputs(), policy_mod.production), .guard_coverage, .guard_member_out_of_order);
+}
+
+test "current behavior accepts two residual-plan graph members with a nonzero ordinal" {
+    var fixture = try test_support.buildGuarded();
+    var members: [11]graph.Member = undefined;
+    @memcpy(members[0..fixture.members.len], &fixture.members);
+    members[10] = .{ .kind = .residual_plan, .ordinal = 1, .digest = fixture.parts().identity.residual_plan_digest };
+    const parts = fixture.parts();
+    fixture.len = try encodeBoundTestParts(&fixture.buffer, parts, &members);
+    var inputs = fixture.inputs();
+    inputs.observed_graph = &members;
+    const result = check(inputs, policy_mod.production);
+    try testing.expectEqual(SemanticState.policy_accepted, result.semantic);
+    try testing.expect(result.rejection == null);
+
+    // Both certificates add one graph record. The residual member scan adds
+    // no work beyond the record decoding and graph binding shared by both.
+    var ordinary = try test_support.buildGuarded();
+    var ordinary_members: [11]graph.Member = undefined;
+    @memcpy(ordinary_members[0..ordinary.members.len], &ordinary.members);
+    ordinary_members[10] = .{ .kind = .source_profile_frontend, .ordinal = 0, .digest = test_support.digest(0x79) };
+    const ordinary_parts = ordinary.parts();
+    ordinary.len = try encodeBoundTestParts(&ordinary.buffer, ordinary_parts, &ordinary_members);
+    var ordinary_inputs = ordinary.inputs();
+    ordinary_inputs.observed_graph = &ordinary_members;
+    const ordinary_result = check(ordinary_inputs, policy_mod.production);
+    try testing.expectEqual(SemanticState.policy_accepted, ordinary_result.semantic);
+    try testing.expect(ordinary_result.rejection == null);
+    try testing.expectEqual(ordinary_result.work_spent, result.work_spent);
+}
+
+test "current behavior skips rewrite checks when translation is empty" {
+    var fixture = try test_support.buildGuarded();
+    const invalid = [_]cert_mod.Rewrite{.{ .rule = .rewrite_peephole_fusion, .before_offset = 0, .before_len = 4, .after_offset = 0, .after_len = 9, .delta = 0 }};
+    var parts = fixture.parts();
+    parts.rewrites = &invalid;
+    try encodeGuardedParts(&fixture, parts);
+    const result = check(fixture.inputs(), policy_mod.production);
+    try testing.expectEqual(SemanticState.policy_accepted, result.semantic);
+    try testing.expect(result.rejection == null);
 }
 
 test "a guard that disagrees with the consumer's catalog rejects on every field" {
@@ -2561,6 +2905,11 @@ test "a guard that disagrees with the consumer's catalog rejects on every field"
             std.debug.print("guard '{s}' mismatch was not refused as expected\n", .{case.name});
             return err;
         };
+        try testing.expectEqual(verdict.Stage.guard_coverage, result.rejection.?.stage);
+        if (case.code == .guard_impl_identity_mismatch) {
+            try testing.expectEqual(@as(u64, residual.guard_impl.env_read_v1), result.rejection.?.expected.?.scalar);
+            try testing.expectEqual(@as(u64, 99), result.rejection.?.actual.?.scalar);
+        }
     }
 }
 
@@ -2653,6 +3002,19 @@ test "a residual plan that is not the one the identity names rejects" {
         verdict.ReasonCode.residual_plan_digest_mismatch,
         result.rejection.?.code,
     );
+    try testing.expectEqual(@as(std.meta.Tag(verdict.Subject), .none), std.meta.activeTag(result.rejection.?.subject));
+}
+
+test "a residual-plan graph member must name the actual plan" {
+    var fixture = try test_support.buildGuarded();
+    for (&fixture.members) |*member| {
+        if (member.kind == .residual_plan) member.digest = test_support.digest(0x7D);
+    }
+    const parts = fixture.parts();
+    try encodeGuardedParts(&fixture, parts);
+    const result = check(fixture.inputs(), policy_mod.production);
+    try expectAt(result, .guard_coverage, .residual_plan_digest_mismatch);
+    try testing.expectEqual(@as(std.meta.Tag(verdict.Subject), .graph_member), std.meta.activeTag(result.rejection.?.subject));
 }
 
 test "the immediate predecessor schema is refused by production" {
@@ -2728,6 +3090,7 @@ test "translation cannot omit its trusted opcode dependency" {
 
     const result = check(fixture.inputs(), policy_mod.production);
     try testing.expect(!result.accepted());
+    try testing.expectEqual(verdict.Stage.evidence_check, result.rejection.?.stage);
     try testing.expectEqual(verdict.ReasonCode.trusted_edge_undeclared, result.rejection.?.code);
 }
 
@@ -2791,6 +3154,7 @@ test "a valid certificate attached to another artifact rejects" {
     inputs.observed_graph = fixture.graphMembers();
     const result = check(inputs, policy_mod.production);
     try testing.expectEqual(verdict.Stage.artifact_binding, result.rejection.?.stage);
+    try testing.expectEqual(verdict.ReasonCode.graph_member_digest_mismatch, result.rejection.?.code);
 }
 
 test "an artifact carrying a member the certificate omits rejects" {
@@ -2818,6 +3182,85 @@ test "an artifact missing a member the certificate names rejects" {
     try testing.expectEqual(verdict.ReasonCode.graph_member_missing, result.rejection.?.code);
 }
 
+test "a root different from the committed graph root rejects" {
+    var fixture = try test_support.build();
+    var parts = fixture.parts();
+    parts.identity.executable_root = test_support.digest(0x71);
+    fixture.len = (try cert_mod.encode(parts, &fixture.buffer)).len;
+    try expectAt(check(fixture.inputs(), policy_mod.production), .artifact_binding, .executable_root_mismatch);
+}
+
+test "a zero executable commitment rejects" {
+    var fixture = try test_support.build();
+    var parts = fixture.parts();
+    parts.identity.executable_root = [_]u8{0} ** 32;
+    fixture.len = (try cert_mod.encode(parts, &fixture.buffer)).len;
+    try expectAt(check(fixture.inputs(), policy_mod.production), .artifact_binding, .zero_commitment);
+}
+
+test "a graph without a required kind rejects even when the lists agree" {
+    var fixture = try test_support.build();
+    var parts = fixture.parts();
+    const without_main = fixture.members[1..];
+    parts.graph = without_main;
+    parts.identity.executable_root = try graph.computeRoot(without_main);
+    fixture.len = (try cert_mod.encode(parts, &fixture.buffer)).len;
+    var inputs = fixture.inputs();
+    inputs.observed_graph = without_main;
+    try expectAt(check(inputs, policy_mod.production), .artifact_binding, .graph_member_missing);
+}
+
+test "a proof IR graph member that differs from the identity rejects" {
+    var fixture = try test_support.build();
+    for (&fixture.members) |*member| {
+        if (member.kind == .proof_ir) member.digest = test_support.digest(0x72);
+    }
+    var parts = fixture.parts();
+    parts.identity.executable_root = try graph.computeRoot(&fixture.members);
+    fixture.len = (try cert_mod.encode(parts, &fixture.buffer)).len;
+    try expectAt(check(fixture.inputs(), policy_mod.production), .artifact_binding, .proof_ir_digest_mismatch);
+}
+
+test "a certificate graph member that differs from its commitment rejects" {
+    var fixture = try test_support.build();
+    for (&fixture.members) |*member| {
+        if (member.kind == .proof_certificate) member.digest = test_support.digest(0x73);
+    }
+    var parts = fixture.parts();
+    parts.identity.executable_root = try graph.computeRoot(&fixture.members);
+    fixture.len = (try cert_mod.encode(parts, &fixture.buffer)).len;
+    try expectAt(check(fixture.inputs(), policy_mod.production), .artifact_binding, .proof_certificate_digest_mismatch);
+}
+
+test "an observed member after the last claimed member rejects" {
+    var fixture = try test_support.build();
+    var observed: [10]graph.Member = undefined;
+    @memcpy(observed[0..fixture.members.len], &fixture.members);
+    observed[9] = .{ .kind = .declaration, .ordinal = 0, .digest = test_support.digest(0x74) };
+    var inputs = fixture.inputs();
+    inputs.observed_graph = &observed;
+    try expectAt(check(inputs, policy_mod.production), .artifact_binding, .graph_member_extra);
+}
+
+test "duplicate and descending graph members keep their exact reasons" {
+    var fixture = try test_support.build();
+    var members = fixture.members;
+    members[1] = members[0];
+    var parts = fixture.parts();
+    parts.graph = &members;
+    parts.identity.executable_root = test_support.digest(0x75);
+    fixture.len = (try cert_mod.encode(parts, &fixture.buffer)).len;
+    var inputs = fixture.inputs();
+    inputs.observed_graph = &members;
+    try expectAt(check(inputs, policy_mod.production), .artifact_binding, .graph_member_duplicate);
+
+    members[0] = fixture.members[1];
+    members[1] = fixture.members[0];
+    parts.graph = &members;
+    fixture.len = (try cert_mod.encode(parts, &fixture.buffer)).len;
+    try expectAt(check(inputs, policy_mod.production), .artifact_binding, .graph_member_out_of_order);
+}
+
 test "an unsupported semantics epoch rejects" {
     var fixture = try test_support.build();
     const epochs = [_]u32{ps.semantics_epoch + 7};
@@ -2829,6 +3272,17 @@ test "an unsupported semantics epoch rejects" {
     const result = check(fixture.inputs(), other);
     try testing.expectEqual(verdict.ReasonCode.unsupported_semantics_epoch, result.rejection.?.code);
     try testing.expectEqual(verdict.Stage.proof_system_identity, result.rejection.?.stage);
+}
+
+test "empty policy identity sets are refused before certificate parsing" {
+    var fixture = try test_support.build();
+    var no_systems = policy_mod.production;
+    no_systems.proof_systems = &.{};
+    try expectAt(check(fixture.inputs(), no_systems), .policy, .proof_system_not_selected);
+
+    var no_epochs = policy_mod.production;
+    no_epochs.semantics_epochs = &.{};
+    try expectAt(check(fixture.inputs(), no_epochs), .policy, .semantics_epoch_not_selected);
 }
 
 test "a starved work budget rejects at the limits stage" {
@@ -2865,7 +3319,7 @@ test "provenance is carried through and never raises the semantic state" {
     try testing.expectEqual(verdict.ProvenanceState.absent, without.provenance);
 }
 
-test "a fabricated totality claim is refused, and it is not recertifiable" {
+test "a totality rule whose return premise fails is refused" {
     var fixture = try test_support.build();
     // The handler no longer returns on any path; the certificate still claims
     // it does.
@@ -2874,10 +3328,146 @@ test "a fabricated totality claim is refused, and it is not recertifiable" {
 
     const result = check(fixture.inputs(), policy_mod.production);
     try testing.expectEqual(verdict.Stage.evidence_check, result.rejection.?.stage);
-    // The cited rule stops applying first, which is the same refusal one step
-    // earlier: either way the consumer never takes the producer's word.
-    try testing.expect(result.rejection.?.code == .rule_premise_unmet or
-        result.rejection.?.code == .fabricated_property);
+    try testing.expectEqual(verdict.ReasonCode.rule_premise_unmet, result.rejection.?.code);
+}
+
+test "a graded totality claim on a nonreturning handler is fabricated" {
+    var fixture = try test_support.build();
+    fixture.ir[2].tag = .plain;
+    fixture.evidence[0] = test_support.testedFor(0);
+    try fixture.encode();
+    const result = check(fixture.inputs(), policy_mod.production);
+    try expectAt(result, .evidence_check, .fabricated_property);
+    try testing.expect(!result.rejection.?.recertifiable);
+}
+
+test "one branch arm cannot establish totality" {
+    var fixture = try test_support.build();
+    fixture.ir[1].tag = .branch;
+    fixture.evidence[0] = test_support.testedFor(0);
+    try fixture.encode();
+    try expectAt(check(fixture.inputs(), policy_mod.production), .evidence_check, .fabricated_property);
+}
+
+test "a childless function cannot inherit a sibling's totality" {
+    var fixture = try test_support.build();
+    fixture.ir[0].child_count = 2;
+    fixture.ir[1].tag = .function;
+    fixture.ir[1].first_child = 2;
+    fixture.ir[1].child_count = 0;
+    fixture.ir[2].parent = 0;
+    fixture.evidence[0] = test_support.testedFor(0);
+    try fixture.encode();
+    try expectAt(check(fixture.inputs(), policy_mod.production), .evidence_check, .fabricated_property);
+}
+
+test "a disclosed trusted node can declare handler totality" {
+    var fixture = try test_support.build();
+    fixture.ir[2].tag = .plain;
+    fixture.evidence[0] = .{ .obligation_index = 0, .edge = .trusted, .rule = null, .node_id = 0, .aux = 0 };
+    const trusted = [_]cert_mod.TrustedEdge{
+        .{ .family = .node, .member_id = 0, .reason = .not_modeled, .grade = .trusted },
+        .{ .family = .opcode, .member_id = 0, .reason = .not_modeled, .grade = .trusted },
+    };
+    var parts = fixture.parts();
+    parts.identity.ir_root = cert_mod.irRootFromNodes(&fixture.ir);
+    parts.trusted = &trusted;
+    for (&fixture.members) |*member| {
+        if (member.kind == .proof_ir) member.digest = parts.identity.ir_root;
+    }
+    try fixture.encodeParts(parts);
+    const result = check(fixture.inputs(), policy_mod.production);
+    try testing.expectEqual(SemanticState.policy_accepted, result.semantic);
+    try testing.expect(result.rejection == null);
+}
+
+test "each obligation needs evidence" {
+    var fixture = try test_support.build();
+    var parts = fixture.parts();
+    parts.evidence = fixture.evidence[0..9];
+    try fixture.encodeParts(parts);
+    try expectAt(check(fixture.inputs(), policy_mod.production), .evidence_check, .obligation_without_evidence);
+}
+
+test "an evidence obligation index at the count bound rejects" {
+    var fixture = try test_support.build();
+    fixture.evidence[9].obligation_index = @intCast(fixture.obligations.len);
+    try fixture.encode();
+    try expectAt(check(fixture.inputs(), policy_mod.production), .evidence_check, .obligation_missing);
+}
+
+test "refused totality evidence prevents a fabricated-property verdict" {
+    var fixture = try test_support.build();
+    fixture.ir[2].tag = .plain;
+    fixture.evidence[0] = test_support.testedFor(0);
+    const evidence = fixture.evidence ++ [_]cert_mod.Evidence{.{ .obligation_index = 0, .edge = .not_established, .rule = null, .node_id = 0, .aux = 0 }};
+    var parts = fixture.parts();
+    parts.ir = &fixture.ir;
+    parts.identity.ir_root = cert_mod.irRootFromNodes(&fixture.ir);
+    for (&fixture.members) |*member| {
+        if (member.kind == .proof_ir) member.digest = parts.identity.ir_root;
+    }
+    parts.evidence = &evidence;
+    try fixture.encodeParts(parts);
+    try expectAt(check(fixture.inputs(), policy_mod.production), .policy, .required_property_not_established);
+}
+
+test "an optional trusted totality edge is not counted as disclosed" {
+    var fixture = try test_support.build();
+    var policy = policy_mod.production;
+    const required = [_]policy_mod.Requirement{.{ .property = .results_checked, .min_grade = .tested }};
+    policy.required = &required;
+    const result = check(fixture.inputs(), policy);
+    try testing.expectEqual(SemanticState.policy_accepted, result.semantic);
+    try testing.expect(result.rejection == null);
+    try testing.expectEqual(@as(u32, 1), result.disclosed_edges);
+}
+
+test "an opcode inventory edge cannot disclose a trusted proof node" {
+    var fixture = try test_support.build();
+    fixture.evidence[0] = .{ .obligation_index = 0, .edge = .trusted, .rule = null, .node_id = 0, .aux = 0 };
+    try fixture.encode();
+    try expectAt(check(fixture.inputs(), policy_mod.production), .evidence_check, .trusted_edge_undeclared);
+}
+
+test "tested evidence also needs an existing proof node" {
+    var fixture = try test_support.build();
+    fixture.evidence[3].node_id = @intCast(fixture.ir.len);
+    try fixture.encode();
+    try expectAt(check(fixture.inputs(), policy_mod.production), .evidence_check, .proof_node_unknown);
+}
+
+test "refused evidence defeats graded evidence for the same property" {
+    var fixture = try test_support.build();
+    const evidence = fixture.evidence ++ [_]cert_mod.Evidence{.{
+        .obligation_index = 1,
+        .edge = .not_established,
+        .rule = null,
+        .node_id = 0,
+        .aux = 0,
+    }};
+    var parts = fixture.parts();
+    parts.evidence = &evidence;
+    try fixture.encodeParts(parts);
+    const required = [_]policy_mod.Requirement{.{ .property = .results_checked, .min_grade = .tested }};
+    var policy = policy_mod.production;
+    policy.required = &required;
+    try expectAt(check(fixture.inputs(), policy), .policy, .required_property_not_established);
+}
+
+test "a nontrusted grade in the trusted inventory rejects" {
+    var fixture = try test_support.build();
+    fixture.trusted[0].grade = .tested;
+    try fixture.encode();
+    try expectAt(check(fixture.inputs(), policy_mod.production), .evidence_check, .evidence_edge_invalid);
+}
+
+test "translation evidence without any witness rejects" {
+    var fixture = try test_support.build();
+    var parts = fixture.parts();
+    parts.translation = &.{};
+    try fixture.encodeParts(parts);
+    try expectAt(check(fixture.inputs(), policy_mod.production), .translation_check, .witness_missing);
 }
 
 test "citing a rule that does not apply at the named node rejects" {
@@ -2895,7 +3485,7 @@ test "proved evidence without a kernel rule rejects" {
     try fixture.encode();
 
     const result = check(fixture.inputs(), policy_mod.production);
-    try testing.expect(!result.accepted());
+    try testing.expectEqual(verdict.ReasonCode.evidence_edge_invalid, result.rejection.?.code);
     try testing.expectEqual(verdict.Stage.evidence_check, result.rejection.?.stage);
 }
 
@@ -2917,6 +3507,16 @@ test "an omitted obligation rejects" {
     const result = check(fixture.inputs(), policy_mod.production);
     try testing.expectEqual(verdict.Stage.obligation_reconstruction, result.rejection.?.stage);
     try testing.expectEqual(verdict.ReasonCode.obligation_missing, result.rejection.?.code);
+    try testing.expectEqual(@as(std.meta.Tag(verdict.Subject), .none), std.meta.activeTag(result.rejection.?.subject));
+}
+
+test "an extra obligation rejects before reconstructing properties" {
+    var fixture = try test_support.build();
+    const obligations = fixture.obligations ++ [_]cert_mod.Obligation{fixture.obligations[7]};
+    var parts = fixture.parts();
+    parts.obligations = &obligations;
+    try fixture.encodeParts(parts);
+    try expectAt(check(fixture.inputs(), policy_mod.production), .obligation_reconstruction, .obligation_extra);
 }
 
 test "a duplicated or reordered obligation rejects" {
@@ -2961,8 +3561,7 @@ test "a cyclic or out-of-order proof IR rejects" {
     fixture.ir[1].parent = 2;
     try fixture.encode();
     var result = check(fixture.inputs(), policy_mod.production);
-    try testing.expect(result.rejection.?.code == .proof_node_cycle or
-        result.rejection.?.code == .proof_node_parent_mismatch);
+    try testing.expectEqual(verdict.ReasonCode.proof_node_parent_mismatch, result.rejection.?.code);
 
     var backwards = try test_support.build();
     backwards.ir[0].first_child = 0;
@@ -2977,18 +3576,122 @@ test "a child whose parent disagrees with its owner rejects" {
     try fixture.encode();
 
     const result = check(fixture.inputs(), policy_mod.production);
-    try testing.expect(!result.accepted());
+    try testing.expectEqual(verdict.ReasonCode.proof_node_parent_mismatch, result.rejection.?.code);
     try testing.expectEqual(verdict.Stage.evidence_check, result.rejection.?.stage);
 }
 
 test "proof IR depth is bounded by policy" {
     var fixture = try test_support.build();
     var shallow = policy_mod.production;
-    shallow.limits.max_depth = 1;
+    shallow.limits.max_depth = 2;
 
     const result = check(fixture.inputs(), shallow);
-    try testing.expect(!result.accepted());
-    try testing.expectEqual(verdict.Stage.limits, result.rejection.?.stage);
+    try expectAt(result, .limits, .proof_depth_exceeded);
+}
+
+test "an incorrect proof node id rejects" {
+    var fixture = try test_support.build();
+    fixture.ir[1].id = 9;
+    try fixture.encode();
+    try expectAt(check(fixture.inputs(), policy_mod.production), .evidence_check, .proof_node_unknown);
+}
+
+test "a handler marker on a nonfunction rejects" {
+    var fixture = try test_support.build();
+    fixture.ir[0].is_handler = false;
+    fixture.ir[1].is_handler = true;
+    try fixture.encode();
+    try expectAt(check(fixture.inputs(), policy_mod.production), .evidence_check, .proof_node_unknown);
+}
+
+test "a root with a nonzero parent rejects" {
+    var fixture = try test_support.build();
+    fixture.ir[0].parent = 1;
+    try fixture.encode();
+    try expectAt(check(fixture.inputs(), policy_mod.production), .evidence_check, .proof_node_cycle);
+}
+
+test "a proof node cannot name itself as parent" {
+    var fixture = try test_support.build();
+    fixture.ir[0].child_count = 0;
+    fixture.ir[1].parent = 1;
+    try fixture.encode();
+    try expectAt(check(fixture.inputs(), policy_mod.production), .evidence_check, .proof_node_cycle);
+}
+
+test "a parent must claim every child that names it" {
+    var fixture = try test_support.build();
+    const ir = [_]cert_mod.IrNode{
+        fixture.ir[0],                                                                                                   fixture.ir[1], fixture.ir[2],
+        .{ .id = 3, .tag = .plain, .parent = 0, .first_child = 0, .child_count = 0, .digest = test_support.digest(24) },
+    };
+    var parts = fixture.parts();
+    parts.ir = &ir;
+    parts.identity.ir_root = cert_mod.irRootFromNodes(&ir);
+    for (&fixture.members) |*member| {
+        if (member.kind == .proof_ir) member.digest = parts.identity.ir_root;
+    }
+    fixture.len = try encodeBoundTestParts(&fixture.buffer, parts, &fixture.members);
+    try expectAt(check(fixture.inputs(), policy_mod.production), .evidence_check, .proof_node_parent_mismatch);
+}
+
+test "a proof node cannot claim children beyond the IR" {
+    var fixture = try test_support.build();
+    fixture.ir[1].child_count = 5;
+    try fixture.encode();
+    try expectAt(check(fixture.inputs(), policy_mod.production), .evidence_check, .proof_node_unknown);
+}
+
+test "two parents cannot both claim the same child" {
+    var fixture = try test_support.build();
+    fixture.ir[0].child_count = 2;
+    fixture.ir[2].parent = 0;
+    try fixture.encode();
+    try expectAt(check(fixture.inputs(), policy_mod.production), .evidence_check, .proof_node_parent_mismatch);
+}
+
+test "the root depth guard names the root at a zero depth limit" {
+    var fixture = try test_support.build();
+    var policy = policy_mod.production;
+    policy.limits.max_depth = 0;
+    const result = check(fixture.inputs(), policy);
+    try expectAt(result, .limits, .proof_depth_exceeded);
+    try testing.expectEqual(@as(std.meta.Tag(verdict.Subject), .ir_node), std.meta.activeTag(result.rejection.?.subject));
+    try testing.expectEqual(@as(u32, 0), result.rejection.?.subject.ir_node);
+}
+
+test "two handler markers reject" {
+    var fixture = try test_support.build();
+    fixture.ir[1].tag = .function;
+    fixture.ir[1].is_handler = true;
+    try fixture.encode();
+    try expectAt(check(fixture.inputs(), policy_mod.production), .evidence_check, .proof_node_unknown);
+}
+
+test "the handler count implies the empty IR refusal" {
+    var fixture = try test_support.build();
+    var parts = fixture.parts();
+    parts.ir = &.{};
+    parts.identity.ir_root = cert_mod.irRootFromNodes(&.{});
+    for (&fixture.members) |*member| {
+        if (member.kind == .proof_ir) member.digest = parts.identity.ir_root;
+    }
+    fixture.len = try encodeBoundTestParts(&fixture.buffer, parts, &fixture.members);
+    try expectAt(check(fixture.inputs(), policy_mod.production), .evidence_check, .proof_node_unknown);
+}
+
+test "the handler shape check precedes both entry-function lookups" {
+    var fixture = try test_support.build();
+    fixture.ir[0].is_handler = false;
+    try fixture.encode();
+    try expectAt(check(fixture.inputs(), policy_mod.production), .evidence_check, .proof_node_unknown);
+}
+
+test "canonical order and count imply every obligation is present" {
+    var fixture = try test_support.build();
+    fixture.obligations[7] = fixture.obligations[6];
+    try fixture.encode();
+    try expectAt(check(fixture.inputs(), policy_mod.production), .obligation_reconstruction, .obligation_duplicate);
 }
 
 test "a jump witness naming the wrong target offset rejects" {
@@ -3043,12 +3746,82 @@ test "a rewrite whose spans do not add up rejects" {
     try testing.expectEqual(verdict.ReasonCode.rewrite_span_mismatch, result.rejection.?.code);
 }
 
+test "a rewrite with a source-level rule rejects" {
+    var fixture = try test_support.build();
+    fixture.rewrites[0].rule = .sequence_member_total;
+    try fixture.encode();
+    try expectAt(check(fixture.inputs(), policy_mod.production), .translation_check, .rewrite_unknown);
+}
+
 test "a witness pointing outside the proof IR rejects" {
     var fixture = try test_support.build();
     fixture.witnesses[0].ir_node = 99;
     try fixture.encode();
     const result = check(fixture.inputs(), policy_mod.production);
     try testing.expectEqual(verdict.ReasonCode.witness_range_out_of_bounds, result.rejection.?.code);
+}
+
+test "an emission target must name a proof node" {
+    var fixture = try test_support.build();
+    fixture.witnesses[1].target_ir = @intCast(fixture.ir.len);
+    try fixture.encode();
+    try expectAt(check(fixture.inputs(), policy_mod.production), .translation_check, .witness_range_out_of_bounds);
+}
+
+test "a nested emission may end at its ancestor boundary" {
+    var fixture = try test_support.build();
+    fixture.witnesses[1].code_len = 6;
+    try fixture.encode();
+    const result = check(fixture.inputs(), policy_mod.production);
+    try testing.expectEqual(SemanticState.policy_accepted, result.semantic);
+    try testing.expect(result.rejection == null);
+}
+
+test "emission ranges reset between function scopes" {
+    var fixture = try test_support.build();
+    const ir = [_]cert_mod.IrNode{
+        .{ .id = 0, .tag = .function, .is_handler = true, .parent = 0, .first_child = 1, .child_count = 2, .digest = test_support.digest(20) },
+        .{ .id = 1, .tag = .return_node, .parent = 0, .first_child = 0, .child_count = 0, .digest = test_support.digest(21) },
+        .{ .id = 2, .tag = .function, .parent = 0, .first_child = 3, .child_count = 1, .digest = test_support.digest(22) },
+        .{ .id = 3, .tag = .return_node, .parent = 2, .first_child = 0, .child_count = 0, .digest = test_support.digest(23) },
+    };
+    const translation = [_]cert_mod.Witness{
+        .{ .ir_node = 1, .code_start = 0, .code_len = 5, .target_ir = 1, .target_offset = 0, .scope_ir_node = 0, .kind = .emission },
+        .{ .ir_node = 3, .code_start = 1, .code_len = 5, .target_ir = 3, .target_offset = 1, .scope_ir_node = 2, .kind = .emission },
+    };
+    var evidence = fixture.evidence;
+    evidence[0] = .{ .obligation_index = 0, .edge = .not_established, .rule = null, .node_id = 0, .aux = 0 };
+    var parts = fixture.parts();
+    parts.ir = &ir;
+    parts.translation = &translation;
+    parts.evidence = &evidence;
+    parts.identity.ir_root = cert_mod.irRootFromNodes(&ir);
+    for (&fixture.members) |*member| {
+        if (member.kind == .proof_ir) member.digest = parts.identity.ir_root;
+    }
+    fixture.len = try encodeBoundTestParts(&fixture.buffer, parts, &fixture.members);
+    var policy = policy_mod.production;
+    const required = [_]policy_mod.Requirement{.{ .property = .results_checked, .min_grade = .tested }};
+    policy.required = &required;
+    const result = check(fixture.inputs(), policy);
+    try testing.expectEqual(SemanticState.policy_accepted, result.semantic);
+    try testing.expect(result.rejection == null);
+}
+
+test "duplicate translation witnesses reject" {
+    var fixture = try test_support.build();
+    const witnesses = [_]cert_mod.Witness{ fixture.witnesses[0], fixture.witnesses[0] };
+    var parts = fixture.parts();
+    parts.translation = &witnesses;
+    try fixture.encodeParts(parts);
+    try expectAt(check(fixture.inputs(), policy_mod.production), .translation_check, .witness_range_overlaps);
+}
+
+test "a translation scope must name a function" {
+    var fixture = try test_support.build();
+    fixture.witnesses[1].scope_ir_node = 1;
+    try fixture.encode();
+    try expectAt(check(fixture.inputs(), policy_mod.production), .translation_check, .witness_range_out_of_bounds);
 }
 
 test "a property the producer did not establish is refused by a policy that requires it" {
@@ -3288,8 +4061,22 @@ test "a solver answer cannot discharge a different obligation" {
     inputs.solver_results = &discharged;
 
     const result = check(inputs, solver_policy);
-    try testing.expect(!result.accepted());
+    try testing.expectEqual(verdict.ReasonCode.solver_query_mismatch, result.rejection.?.code);
     try testing.expectEqual(verdict.Stage.solver, result.rejection.?.stage);
+}
+
+test "a solver query index at the section bound rejects" {
+    var fixture = try test_support.build();
+    fixture.evidence[1].edge = .solver;
+    fixture.evidence[1].rule = null;
+    fixture.evidence[1].aux = 1;
+    const queries = [_]cert_mod.SolverQuery{.{ .obligation_index = 0, .query_kind = .opcode_equivalence }};
+    var parts = fixture.parts();
+    parts.solver = &queries;
+    try fixture.encodeParts(parts);
+    var policy = policy_mod.production;
+    policy.allow_solver_edges = true;
+    try expectAt(check(fixture.inputs(), policy), .solver, .solver_query_too_large);
 }
 
 test "a development artifact is checked and never accepted for production" {
@@ -3661,4 +4448,159 @@ test "every declaration reason code is observed" {
         }
     }
     try testing.expectEqual(@as(usize, 3), codes);
+}
+
+const ReasonProbe = enum { root_mismatch, zero_root, trailing_member, missing_evidence, fabricated_totality };
+
+fn runReasonProbe(probe: ReasonProbe) !Assessment {
+    var fixture = try test_support.build();
+    switch (probe) {
+        .root_mismatch => {
+            var parts = fixture.parts();
+            parts.identity.executable_root = test_support.digest(0x71);
+            fixture.len = (try cert_mod.encode(parts, &fixture.buffer)).len;
+            return check(fixture.inputs(), policy_mod.production);
+        },
+        .zero_root => {
+            var parts = fixture.parts();
+            parts.identity.executable_root = [_]u8{0} ** 32;
+            fixture.len = (try cert_mod.encode(parts, &fixture.buffer)).len;
+            return check(fixture.inputs(), policy_mod.production);
+        },
+        .trailing_member => {
+            var members: [10]graph.Member = undefined;
+            @memcpy(members[0..9], &fixture.members);
+            members[9] = .{ .kind = .declaration, .ordinal = 0, .digest = test_support.digest(0x74) };
+            var inputs = fixture.inputs();
+            inputs.observed_graph = &members;
+            return check(inputs, policy_mod.production);
+        },
+        .missing_evidence => {
+            var parts = fixture.parts();
+            parts.evidence = fixture.evidence[0..9];
+            try fixture.encodeParts(parts);
+            return check(fixture.inputs(), policy_mod.production);
+        },
+        .fabricated_totality => {
+            fixture.ir[2].tag = .plain;
+            fixture.evidence[0] = test_support.testedFor(0);
+            try fixture.encode();
+            return check(fixture.inputs(), policy_mod.production);
+        },
+    }
+}
+
+/// A code not in the probe table needs a named public-entry test or a closed
+/// decoder mechanism here. Adding an enum member requires a new row or probe.
+fn reasonAllowlist(code: verdict.ReasonCode) ?[]const u8 {
+    return switch (code) {
+        .executable_root_mismatch,
+        .zero_commitment,
+        .graph_member_extra,
+        .obligation_without_evidence,
+        .fabricated_property,
+        => null,
+
+        .certificate_too_large,
+        .truncated_input,
+        .bad_magic,
+        .unknown_section_tag,
+        .duplicate_section,
+        .missing_required_section,
+        .trailing_data,
+        .section_too_large,
+        .section_length_mismatch,
+        .count_exceeds_limit,
+        .section_not_canonically_ordered,
+        .reserved_field_nonzero,
+        => "certificate.test.every decode error is observed through the public decoder and reasonFor maps each error",
+        .unsupported_schema_version, .unknown_enum_member => "checker tests for predecessor schema, proof system, and certificate decoder enum values pin the exact decode code",
+        .work_budget_exhausted => "checker.test.a starved work budget rejects at the limits stage pins the budget result",
+        .proof_depth_exceeded => "checker.test.proof IR depth is bounded by policy uses a three-deep IR and max_depth two",
+        .unsupported_proof_system => "ProofSystem currently has one member; a validated nonempty policy cannot exclude it without widening that enum",
+        .unsupported_semantics_epoch => "checker.test.an unsupported semantics epoch rejects supplies a different policy epoch",
+
+        .graph_member_missing => "checker tests for a missing observed member and a required kind each pin this code",
+        .graph_member_digest_mismatch => "checker.test.mutating any observed member class rejects at artifact binding checks every member class",
+        .graph_member_out_of_order, .graph_member_duplicate => "checker.test.duplicate and descending graph members keep their exact reasons checks RootHasher refusals",
+        .proof_ir_digest_mismatch => "checker tests for a mismatched graph member and a mismatched IR root pin both producers",
+        .proof_certificate_digest_mismatch => "checker.test.a certificate graph member that differs from its commitment rejects checks the commitment",
+
+        .obligation_missing => "checker.test.an omitted obligation rejects checks the exact count guard",
+        .obligation_extra => "checker.test.an extra obligation rejects before reconstructing properties checks the count guard",
+        .obligation_duplicate, .obligation_out_of_order => "checker.test.a duplicated or reordered obligation rejects checks canonical order",
+        .obligation_subject_unknown => "checker.test.an obligation whose subject is not the entry function rejects checks reconstruction",
+        .rule_premise_unmet => "checker tests for a missing return premise and an inapplicable cited rule pin this reason",
+        .proof_node_cycle => "checker.test.a root with a nonzero parent rejects checks the root shape",
+        .proof_node_unknown => "checker tests for a bad node id, wrong handler tag, and two handlers pin shape refusals",
+        .trusted_edge_undeclared => "checker.test.translation cannot omit its trusted opcode dependency checks the inventory",
+        .evidence_edge_invalid => "checker tests for a missing kernel rule and a nontrusted inventory grade pin this reason",
+        .proof_node_parent_mismatch => "checker.test.a child whose parent disagrees with its owner rejects checks ownership",
+
+        .witness_missing => "checker.test.translation evidence without any witness rejects checks the missing witness",
+        .witness_range_overlaps => "checker tests for partial and ancestor range overlap pin this reason",
+        .witness_range_out_of_bounds => "checker.test.a witness pointing outside the proof IR rejects checks bounds",
+        .jump_target_mismatch => "checker.test.a jump witness naming the wrong target offset rejects checks its target",
+        .rewrite_unknown => "checker.test.a rewrite with a source-level rule rejects checks the rule family",
+        .rewrite_span_mismatch => "checker.test.a rewrite whose spans do not add up rejects checks both bad spans",
+        .solver_edge_not_permitted, .solver_inconclusive, .solver_query_too_large => "checker.test.a solver edge is refused unless the consumer asked for one checks all three paths",
+        .solver_query_mismatch => "checker.test.a solver answer cannot discharge a different obligation checks the query link",
+
+        .required_property_not_established => "checker.test.refused evidence defeats graded evidence for the same property checks refusal dominance",
+        .grade_below_floor => "checker.test.a grade below the policy floor rejects and says both sides checks the grade",
+        .development_artifact_refused => "checker.test.a development artifact is checked and never accepted for production checks deployment policy",
+        .proof_system_not_selected, .semantics_epoch_not_selected => "checker.test.empty policy identity sets are refused before certificate parsing checks policy validation",
+        .policy_requires_nothing => "checker.test.a policy that requires nothing is refused before anything is read checks empty requirements",
+
+        .guard_member_missing, .guard_member_extra, .guard_member_duplicate, .guard_member_out_of_order => "checker.test.an omitted, extra, duplicated, or reordered guard rejects checks the four list paths",
+        .guard_kind_mismatch, .guard_normalization_mismatch, .guard_sink_mismatch, .guard_section_mismatch, .guard_impl_identity_mismatch => "checker.test.a guard that disagrees with the consumer's catalog rejects on every field checks each catalog field",
+        .guard_operation_unknown => "checker.test.a guarded call naming a catalog row that does not exist rejects checks catalog bounds",
+        .guard_category_not_configured => "checker.test.a guarded operation with no configured category rejects checks the policy category",
+        .residual_plan_digest_mismatch => "checker.test.a residual plan that is not the one the identity names rejects checks the plan digest",
+        .runtime_policy_missing => "checker.test.a guarded artifact with no policy bytes rejects rather than assuming any checks absent authority",
+        .runtime_policy_undecodable => "checker.test.policy bytes that do not hash to the committed digest reject checks policy bytes",
+        .guard_family_disabled => "checker.test.a fully consistent SQL guard remains disabled checks the family gate",
+
+        .invariant_spec_missing => "checker tests for observed operations, graph members, and ledger calls on the unconfigured path pin this code",
+        .invariant_spec_undecodable => "checker.test.an invariant specification that cannot decode rejects checks the spec decoder",
+        .invariant_spec_digest_mismatch => "checker tests for supplied bytes without configuration and tampered spec bytes pin the digest",
+        .invariant_spec_member_missing, .invariant_adapter_member_missing => "checker.test.missing invariant graph members reject independently checks both bound members",
+        .invariant_adapter_identity_mismatch => "checker.test.invariant adapter, operation, sink, and implementation identities reject checks adapter identity",
+        .invariant_operation_required => "checker.test.a configured artifact exhibiting no ledger operation rejects with invariant_operation_required checks emptiness",
+        .invariant_member_missing => "checker.test.a second ledger call needs a witness when witness and observation counts agree checks the IR scan",
+        .invariant_member_extra => "checker.test.missing and extra invariant witnesses reject checks the independent count",
+        .invariant_member_duplicate, .invariant_member_out_of_order => "checker.test.duplicate and descending invariant witnesses keep distinct reasons checks canonical order",
+        .invariant_operation_unknown, .invariant_sink_mismatch, .invariant_impl_identity_mismatch => "checker.test.invariant adapter, operation, sink, and implementation identities reject checks catalog comparison",
+        .invariant_operation_mismatch => "checker.test.a forged invariant operation cannot borrow a real call site checks operation identity",
+        .invariant_translation_missing => "checker.test.invariant call must lie within its full expression emission checks translation coverage",
+        .invariant_observed_mismatch => "checker.test.an invariant witness offset must match the independent observation checks independent offsets",
+
+        .tool_catalog_undecodable, .tool_catalog_digest_mismatch, .tool_catalog_member_missing => "checker.test.every tool catalog reason code is observed constructs each public-check rejection",
+        .declaration_undecodable, .declaration_digest_mismatch, .declaration_member_missing => "checker.test.every declaration reason code is observed constructs each public-check rejection",
+    };
+}
+
+test "every reason code has a public-check probe or an explained producer" {
+    const probes = [_]struct { code: verdict.ReasonCode, stage: verdict.Stage, input: ReasonProbe }{
+        .{ .code = .executable_root_mismatch, .stage = .artifact_binding, .input = .root_mismatch },
+        .{ .code = .zero_commitment, .stage = .artifact_binding, .input = .zero_root },
+        .{ .code = .graph_member_extra, .stage = .artifact_binding, .input = .trailing_member },
+        .{ .code = .obligation_without_evidence, .stage = .evidence_check, .input = .missing_evidence },
+        .{ .code = .fabricated_property, .stage = .evidence_check, .input = .fabricated_totality },
+    };
+    var probed = std.EnumSet(verdict.ReasonCode).initEmpty();
+    for (probes) |probe| {
+        try testing.expect(!probed.contains(probe.code));
+        try expectAt(try runReasonProbe(probe.input), probe.stage, probe.code);
+        probed.insert(probe.code);
+    }
+    inline for (std.meta.fields(verdict.ReasonCode)) |field| {
+        const code: verdict.ReasonCode = @enumFromInt(field.value);
+        if (reasonAllowlist(code)) |mechanism| {
+            try testing.expect(mechanism.len > 0);
+            try testing.expect(!probed.contains(code));
+        } else {
+            try testing.expect(probed.contains(code));
+        }
+    }
 }

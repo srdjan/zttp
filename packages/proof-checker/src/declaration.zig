@@ -453,6 +453,27 @@ test "a declaration with only classifications or only a ceiling decodes" {
     try testing.expectEqual(@as(?[]const u8, null), try excludes.next());
 }
 
+test "classification order compares source kind before source name" {
+    const classifications = [_]test_support.SampleClassification{
+        .{ .source_kind = 0, .source_name = "z.example", .path = "a" },
+        .{ .source_kind = 1, .source_name = "a-service", .path = "a" },
+    };
+    var buf: [512]u8 = undefined;
+    var w = test_support.Writer{ .buf = &buf };
+    test_support.writeDeclaration(&w, &classifications, null);
+
+    const declaration = try decode(w.bytes());
+    try testing.expectEqual(@as(u16, 2), declaration.classification_count);
+    var it = declaration.classifications();
+    const fetch = (try it.next()).?;
+    try testing.expectEqual(SourceKind.fetch, fetch.source_kind);
+    try testing.expectEqualStrings("z.example", fetch.source_name);
+    const service = (try it.next()).?;
+    try testing.expectEqual(SourceKind.service, service.source_kind);
+    try testing.expectEqualStrings("a-service", service.source_name);
+    try testing.expectEqual(@as(?Classification, null), try it.next());
+}
+
 test "the declaration digest is stable and domain-separated" {
     var buf: [1024]u8 = undefined;
     const bytes = test_support.sample(&buf);
@@ -469,13 +490,58 @@ test "the declaration digest is stable and domain-separated" {
     try testing.expect(!std.mem.eql(u8, &a, &digest(tampered_buf[0..bytes.len])));
 }
 
+const DecodeSite = enum {
+    short_header,
+    integer_body,
+    string_body,
+    magic,
+    schema,
+    classification_count,
+    source_kind,
+    source_name_length,
+    path_length,
+    path_segment_count,
+    path_segment_empty,
+    path_segment_length,
+    path_first_character,
+    path_character,
+    label,
+    required,
+    reason_length,
+    source_name_utf8,
+    reason_utf8,
+    classification_order,
+    ceiling_flag,
+    profile,
+    exclude_count,
+    exclude_length,
+    exclude_prefix,
+    exclude_character,
+    exclude_order,
+    trailing_data,
+    empty_declaration,
+};
+
 const Case = struct {
+    site: DecodeSite,
     expected: DecodeError,
     classifications: []const test_support.SampleClassification = &.{},
     ceiling: ?test_support.SampleCeiling = test_support.SampleCeiling{},
     /// When set, the case is written by hand instead of from the fields above.
     custom: ?*const fn (w: *test_support.Writer) void = null,
 };
+
+fn truncatedInteger(w: *test_support.Writer) void {
+    w.raw(magic);
+}
+
+fn truncatedString(w: *test_support.Writer) void {
+    w.raw(magic);
+    w.int(u16, schema_version);
+    w.int(u16, 1);
+    w.int(u8, 0);
+    w.int(u32, 1);
+}
 
 fn sampleWithTrailingByte(w: *test_support.Writer) void {
     test_support.writeDeclaration(w, &test_support.sample_classifications, test_support.sample_ceiling);
@@ -565,45 +631,47 @@ const path_17 = "a.b.c.d.e.f.g.h.i.j.k.l.m.n.o.p.q";
 const s = test_support.sample_classifications;
 
 const cases = [_]Case{
-    .{ .expected = error.Truncated, .custom = sampleTruncated },
-    .{ .expected = error.Truncated, .custom = shortMagic },
-    .{ .expected = error.BadMagic, .custom = badMagic },
-    .{ .expected = error.UnsupportedSchema, .custom = unsupportedSchema },
-    .{ .expected = error.ClassificationCountOutOfRange, .custom = tooManyClassifications },
-    .{ .expected = error.SourceKindInvalid, .classifications = &.{.{ .path = "a", .source_kind = 2 }} },
-    .{ .expected = error.SourceNameLength, .classifications = &.{.{ .path = "a", .source_name = "" }} },
-    .{ .expected = error.SourceNameLength, .custom = sourceNameTooLong },
-    .{ .expected = error.PathInvalid, .classifications = &.{.{ .path = "" }} },
-    .{ .expected = error.PathInvalid, .custom = pathTooLong },
-    .{ .expected = error.PathInvalid, .classifications = &.{.{ .path = "a..b" }} },
-    .{ .expected = error.PathInvalid, .classifications = &.{.{ .path = "a." }} },
-    .{ .expected = error.PathInvalid, .classifications = &.{.{ .path = "1a" }} },
-    .{ .expected = error.PathInvalid, .classifications = &.{.{ .path = "a.b-c" }} },
-    .{ .expected = error.PathInvalid, .classifications = &.{.{ .path = segment_65 }} },
-    .{ .expected = error.PathInvalid, .classifications = &.{.{ .path = path_17 }} },
-    .{ .expected = error.LabelInvalid, .classifications = &.{.{ .path = "a", .label = 2 }} },
-    .{ .expected = error.RequiredInvalid, .classifications = &.{.{ .path = "a", .required = 2 }} },
-    .{ .expected = error.ReasonLength, .classifications = &.{.{ .path = "a", .reason = "" }} },
-    .{ .expected = error.ReasonLength, .custom = reasonTooLong },
-    .{ .expected = error.InvalidUtf8, .classifications = &.{.{ .path = "a", .reason = "\xff" }} },
-    .{ .expected = error.InvalidUtf8, .classifications = &.{.{ .path = "a", .source_name = "a\xc3" }} },
+    .{ .site = .string_body, .expected = error.Truncated, .custom = sampleTruncated },
+    .{ .site = .short_header, .expected = error.Truncated, .custom = shortMagic },
+    .{ .site = .integer_body, .expected = error.Truncated, .custom = truncatedInteger },
+    .{ .site = .string_body, .expected = error.Truncated, .custom = truncatedString },
+    .{ .site = .magic, .expected = error.BadMagic, .custom = badMagic },
+    .{ .site = .schema, .expected = error.UnsupportedSchema, .custom = unsupportedSchema },
+    .{ .site = .classification_count, .expected = error.ClassificationCountOutOfRange, .custom = tooManyClassifications },
+    .{ .site = .source_kind, .expected = error.SourceKindInvalid, .classifications = &.{.{ .path = "a", .source_kind = 2 }} },
+    .{ .site = .source_name_length, .expected = error.SourceNameLength, .classifications = &.{.{ .path = "a", .source_name = "" }} },
+    .{ .site = .source_name_length, .expected = error.SourceNameLength, .custom = sourceNameTooLong },
+    .{ .site = .path_length, .expected = error.PathInvalid, .classifications = &.{.{ .path = "" }} },
+    .{ .site = .path_length, .expected = error.PathInvalid, .custom = pathTooLong },
+    .{ .site = .path_segment_empty, .expected = error.PathInvalid, .classifications = &.{.{ .path = "a..b" }} },
+    .{ .site = .path_segment_empty, .expected = error.PathInvalid, .classifications = &.{.{ .path = "a." }} },
+    .{ .site = .path_first_character, .expected = error.PathInvalid, .classifications = &.{.{ .path = "1a" }} },
+    .{ .site = .path_character, .expected = error.PathInvalid, .classifications = &.{.{ .path = "a.b-c" }} },
+    .{ .site = .path_segment_length, .expected = error.PathInvalid, .classifications = &.{.{ .path = segment_65 }} },
+    .{ .site = .path_segment_count, .expected = error.PathInvalid, .classifications = &.{.{ .path = path_17 }} },
+    .{ .site = .label, .expected = error.LabelInvalid, .classifications = &.{.{ .path = "a", .label = 2 }} },
+    .{ .site = .required, .expected = error.RequiredInvalid, .classifications = &.{.{ .path = "a", .required = 2 }} },
+    .{ .site = .reason_length, .expected = error.ReasonLength, .classifications = &.{.{ .path = "a", .reason = "" }} },
+    .{ .site = .reason_length, .expected = error.ReasonLength, .custom = reasonTooLong },
+    .{ .site = .reason_utf8, .expected = error.InvalidUtf8, .classifications = &.{.{ .path = "a", .reason = "\xff" }} },
+    .{ .site = .source_name_utf8, .expected = error.InvalidUtf8, .classifications = &.{.{ .path = "a", .source_name = "a\xc3" }} },
     // Out of order by kind, by name, and by path; then a repeat.
-    .{ .expected = error.ClassificationsNotOrdered, .classifications = &.{ s[1], s[0] } },
-    .{ .expected = error.ClassificationsNotOrdered, .classifications = &.{ .{ .path = "a", .source_name = "b.example" }, .{ .path = "a", .source_name = "a.example" } } },
-    .{ .expected = error.ClassificationsNotOrdered, .classifications = &.{ .{ .path = "b" }, .{ .path = "a" } } },
-    .{ .expected = error.ClassificationsNotOrdered, .classifications = &.{ .{ .path = "a" }, .{ .path = "a", .label = 1 } } },
-    .{ .expected = error.CeilingFlagInvalid, .custom = ceilingFlagTwo },
-    .{ .expected = error.ProfileInvalid, .ceiling = .{ .profile = 3 } },
-    .{ .expected = error.ExcludeCountOutOfRange, .custom = tooManyExcludes },
-    .{ .expected = error.ExcludeInvalid, .ceiling = .{ .exclude = &.{"zttp"} } },
-    .{ .expected = error.ExcludeInvalid, .ceiling = .{ .exclude = &.{"zttp-e:x"} } },
-    .{ .expected = error.ExcludeInvalid, .ceiling = .{ .exclude = &.{"zttp:A"} } },
-    .{ .expected = error.ExcludeInvalid, .ceiling = .{ .exclude = &.{"zttp:a/b"} } },
-    .{ .expected = error.ExcludeInvalid, .custom = excludeTooLong },
-    .{ .expected = error.ExcludesNotOrdered, .ceiling = .{ .exclude = &.{ "zttp:sql", "zttp:fetch" } } },
-    .{ .expected = error.ExcludesNotOrdered, .ceiling = .{ .exclude = &.{ "zttp:fetch", "zttp:fetch" } } },
-    .{ .expected = error.DeclarationEmpty, .ceiling = null },
-    .{ .expected = error.TrailingData, .custom = sampleWithTrailingByte },
+    .{ .site = .classification_order, .expected = error.ClassificationsNotOrdered, .classifications = &.{ s[1], s[0] } },
+    .{ .site = .classification_order, .expected = error.ClassificationsNotOrdered, .classifications = &.{ .{ .path = "a", .source_name = "b.example" }, .{ .path = "a", .source_name = "a.example" } } },
+    .{ .site = .classification_order, .expected = error.ClassificationsNotOrdered, .classifications = &.{ .{ .path = "b" }, .{ .path = "a" } } },
+    .{ .site = .classification_order, .expected = error.ClassificationsNotOrdered, .classifications = &.{ .{ .path = "a" }, .{ .path = "a", .label = 1 } } },
+    .{ .site = .ceiling_flag, .expected = error.CeilingFlagInvalid, .custom = ceilingFlagTwo },
+    .{ .site = .profile, .expected = error.ProfileInvalid, .ceiling = .{ .profile = 3 } },
+    .{ .site = .exclude_count, .expected = error.ExcludeCountOutOfRange, .custom = tooManyExcludes },
+    .{ .site = .exclude_length, .expected = error.ExcludeInvalid, .ceiling = .{ .exclude = &.{"zttp"} } },
+    .{ .site = .exclude_prefix, .expected = error.ExcludeInvalid, .ceiling = .{ .exclude = &.{"zttp-e:x"} } },
+    .{ .site = .exclude_character, .expected = error.ExcludeInvalid, .ceiling = .{ .exclude = &.{"zttp:A"} } },
+    .{ .site = .exclude_character, .expected = error.ExcludeInvalid, .ceiling = .{ .exclude = &.{"zttp:a/b"} } },
+    .{ .site = .exclude_length, .expected = error.ExcludeInvalid, .custom = excludeTooLong },
+    .{ .site = .exclude_order, .expected = error.ExcludesNotOrdered, .ceiling = .{ .exclude = &.{ "zttp:sql", "zttp:fetch" } } },
+    .{ .site = .exclude_order, .expected = error.ExcludesNotOrdered, .ceiling = .{ .exclude = &.{ "zttp:fetch", "zttp:fetch" } } },
+    .{ .site = .empty_declaration, .expected = error.DeclarationEmpty, .ceiling = null },
+    .{ .site = .trailing_data, .expected = error.TrailingData, .custom = sampleWithTrailingByte },
 };
 
 fn ceilingFlagTwo(w: *test_support.Writer) void {
@@ -635,7 +703,20 @@ test "every refusal case decodes to its exact error" {
     }
 }
 
-test "every declaration decode error is driven by a refusal case" {
+test "every declaration decode site and error is driven by a refusal case" {
+    const sites = @typeInfo(DecodeSite).@"enum".fields;
+    inline for (sites) |site_field| {
+        const site: DecodeSite = @enumFromInt(site_field.value);
+        var driven = false;
+        for (cases) |case| {
+            if (case.site == site) driven = true;
+        }
+        if (!driven) {
+            std.debug.print("DecodeSite.{s} has no refusal case\n", .{site_field.name});
+            return error.TestUnexpectedResult;
+        }
+    }
+
     const members = @typeInfo(DecodeError).error_set.?;
     inline for (members) |member| {
         var driven = false;

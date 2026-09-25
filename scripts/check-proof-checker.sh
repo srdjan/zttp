@@ -41,8 +41,9 @@ while IFS= read -r -d '' path; do
     *.zig) sources+=("$path") ;;
   esac
 done < <(git ls-files -z --cached --others --exclude-standard "$src" | sort -z)
-# The kernel is small on purpose, but "smaller than this" means the glob broke.
-min_sources=6
+# The kernel is small on purpose, but "smaller than this" means the glob broke
+# or a file was dropped. The floor is the count on 2026-09-25.
+min_sources=14
 if [[ ${#sources[@]} -lt $min_sources ]]; then
   note "found ${#sources[@]} source files under $src, expected at least $min_sources - the gate is reading nothing"
   exit 1
@@ -202,10 +203,58 @@ for file in "${sources[@]}"; do
 done
 
 # The floor itself. Deleting the corpus must fail this gate, not quietly pass it.
-min_tests=40
+# The count on 2026-09-25 was 274; the margin allows a small consolidation, not
+# the loss of a file's worth of tests.
+min_tests=265
 if [[ "$total_tests" -lt "$min_tests" ]]; then
   note "found $total_tests kernel tests, expected at least $min_tests"
 fi
+
+# ---------------------------------------------------------------------------
+# 3. Reason-code census.
+# ---------------------------------------------------------------------------
+# Every public ReasonCode must be named inside at least one kernel test block,
+# or carry a row below that states why no input can produce it. A code nothing
+# names is either unpinned or unproducible, and `rule_family_mismatch` shipped
+# as the second kind. The mutation gate decides whether the naming tests kill
+# the guard; this census decides that no code is left without one.
+#
+# Rows: code, then the mechanism.
+unproducible_codes=(
+  # ProofSystem has one member, and a validated policy cannot select an empty
+  # set, so no certificate can name a proof system the policy excludes.
+  unsupported_proof_system
+)
+verdict_file="$src/verdict.zig"
+reason_codes=()
+while IFS= read -r code; do reason_codes+=("$code"); done < <(awk '/^pub const ReasonCode = enum/,/^};/' "$verdict_file" | sed -nE 's/^[[:space:]]+([a-z_]+) = [0-9]+,.*/\1/p')
+if [[ ${#reason_codes[@]} -lt 50 ]]; then
+  note "read ${#reason_codes[@]} ReasonCode members from $verdict_file; the census is reading nothing"
+fi
+test_block_lines="$(awk '
+  FNR == 1 { in_test = 0 }
+  /^test "/ { in_test = 1 }
+  in_test { print }
+  in_test && /^}/ { in_test = 0 }
+' "${sources[@]}")"
+for code in "${reason_codes[@]}"; do
+  allowed=0
+  for row in "${unproducible_codes[@]}"; do
+    [[ "$row" == "$code" ]] && allowed=1
+  done
+  named=0
+  if grep -qE "\.${code}([^a-z_]|\$)" <<<"$test_block_lines"; then named=1; fi
+  if [[ $allowed -eq 1 && $named -eq 1 ]]; then
+    note "ReasonCode.$code is allowlisted as unproducible but a test names it; remove the row"
+  elif [[ $allowed -eq 0 && $named -eq 0 ]]; then
+    note "ReasonCode.$code is named by no kernel test; pin it or allowlist it with the mechanism"
+  fi
+done
+for row in "${unproducible_codes[@]}"; do
+  found=0
+  for code in "${reason_codes[@]}"; do [[ "$code" == "$row" ]] && found=1; done
+  [[ $found -eq 1 ]] || note "unproducible_codes row '$row' is not a ReasonCode member"
+done
 
 if [[ "$fail" -ne 0 ]]; then
   exit 1

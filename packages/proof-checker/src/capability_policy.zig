@@ -451,13 +451,28 @@ test "an over-count, trailing bytes, truncation, and an unknown scope reject" {
 }
 
 test "a policy larger than the bound is refused before it is read" {
-    const big = [_]u8{0} ** 16;
-    var digest: [32]u8 = undefined;
-    Sha256.hash(&big, &digest, .{});
-    // The bound is on the input, so a short blob passes the size gate and fails
-    // later; the check itself is exercised by its own constant.
-    try testing.expect(residual.max_policy_bytes == 256 * 1024);
-    try testing.expect(std.meta.isError(decode(&big, digest)));
+    const big = [_]u8{0} ** (residual.max_policy_bytes + 1);
+    try testing.expectError(error.PolicyTooLarge, decode(&big, [_]u8{0} ** 32));
+}
+
+test "an SQL flag outside the closed boolean encoding is refused" {
+    var b = Builder{};
+    b.section(false, &.{});
+    b.section(false, &.{});
+    b.section(false, &.{});
+    b.byte(1);
+    b.u16le(1);
+    b.byte(2);
+    b.u16le(1);
+    b.byte('q');
+    b.byte(0);
+    try testing.expectError(error.ReservedFieldNonZero, decode(b.bytes(), b.digest()));
+}
+
+test "an enabled byte outside the closed boolean encoding is refused" {
+    var b = sample();
+    b.buffer[0] = 2;
+    try testing.expectError(error.ReservedFieldNonZero, decode(b.bytes(), b.digest()));
 }
 
 test "a full category still resolves inside the comparison bound" {

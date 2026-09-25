@@ -504,12 +504,24 @@ test "a guard kind decides its own rule, section, and sink" {
     try testing.expectEqual(Normalization.identifier_exact_v1, GuardKind.env_key.normalization());
     try testing.expectEqual(PolicySection.sql, GuardKind.sql_write.section());
     try testing.expectEqual(SinkId.sql_execute, GuardKind.sql_read.sink());
-    inline for (@typeInfo(GuardKind).@"enum".fields) |field| {
-        const kind: GuardKind = @enumFromInt(field.value);
-        _ = kind.normalization();
-        _ = kind.section();
-        _ = kind.sink();
-        _ = kind.family();
+    const expected = [_]struct {
+        kind: GuardKind,
+        normalization: Normalization,
+        section: PolicySection,
+        sink: SinkId,
+        family: Family,
+    }{
+        .{ .kind = .env_key, .normalization = .identifier_exact_v1, .section = .env, .sink = .env_read, .family = .env },
+        .{ .kind = .egress_endpoint, .normalization = .endpoint_v1, .section = .egress, .sink = .egress_connect, .family = .egress },
+        .{ .kind = .cache_namespace, .normalization = .identifier_exact_v1, .section = .cache, .sink = .cache_operation, .family = .cache },
+        .{ .kind = .sql_read, .normalization = .identifier_exact_v1, .section = .sql, .sink = .sql_execute, .family = .sql },
+        .{ .kind = .sql_write, .normalization = .identifier_exact_v1, .section = .sql, .sink = .sql_execute, .family = .sql },
+    };
+    for (expected) |item| {
+        try testing.expectEqual(item.normalization, item.kind.normalization());
+        try testing.expectEqual(item.section, item.kind.section());
+        try testing.expectEqual(item.sink, item.kind.sink());
+        try testing.expectEqual(item.family, item.kind.family());
     }
 
     try testing.expect(enabled_families.contains(.env));
@@ -536,6 +548,7 @@ test "identifier normalization is exact" {
     try testing.expectError(error.Empty, normalize(.identifier_exact_v1, "", &out));
     try testing.expectError(error.Malformed, normalize(.identifier_exact_v1, "A\tB", &out));
     try testing.expectError(error.Malformed, normalize(.identifier_exact_v1, "A\x00B", &out));
+    try testing.expectError(error.Malformed, normalize(.identifier_exact_v1, "A\x7fB", &out));
 
     const long = [_]u8{'a'} ** (max_identifier_bytes);
     _ = try normalize(.identifier_exact_v1, &long, &out);
@@ -584,7 +597,11 @@ test "endpoint normalization refuses what it cannot canonicalize" {
     try testing.expectError(error.Malformed, normalize(.endpoint_v1, "https://", &out));
     try testing.expectError(error.Malformed, normalize(.endpoint_v1, "https://host:0", &out));
     try testing.expectError(error.Malformed, normalize(.endpoint_v1, "https://host:70000", &out));
+    try testing.expectError(error.Malformed, normalize(.endpoint_v1, "https://host:65536", &out));
+    try testing.expectError(error.Malformed, normalize(.endpoint_v1, "https://host:000080", &out));
     try testing.expectError(error.Malformed, normalize(.endpoint_v1, "https://host:x", &out));
+    try testing.expectError(error.Malformed, normalize(.endpoint_v1, "https://host name", &out));
+    try testing.expectError(error.Malformed, normalize(.endpoint_v1, "https://[::1]x80", &out));
     try testing.expectError(error.Malformed, normalize(.endpoint_v1, "https://host..", &out));
     // Userinfo is the substitution that reads as the allowed host and is not.
     try testing.expectError(

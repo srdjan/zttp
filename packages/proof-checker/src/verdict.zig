@@ -508,6 +508,10 @@ test "semantic states are ordered and never skipped backwards" {
     try std.testing.expect(SemanticState.policy_accepted.atLeast(.proof_checked));
     try std.testing.expect(SemanticState.proof_checked.atLeast(.integrity_verified));
     try std.testing.expect(!SemanticState.integrity_verified.atLeast(.proof_checked));
+    inline for (@typeInfo(SemanticState).@"enum".fields) |field| {
+        const state: SemanticState = @enumFromInt(field.value);
+        try std.testing.expect(state.atLeast(state));
+    }
 }
 
 test "weakest edge dominates" {
@@ -516,6 +520,10 @@ test "weakest edge dominates" {
     try std.testing.expectEqual(AssuranceGrade.proved, AssuranceGrade.weakest(.proved, .proved));
     try std.testing.expect(AssuranceGrade.proved.atLeastAsStrongAs(.tested));
     try std.testing.expect(!AssuranceGrade.tested.atLeastAsStrongAs(.proved));
+    inline for (@typeInfo(AssuranceGrade).@"enum".fields) |field| {
+        const grade: AssuranceGrade = @enumFromInt(field.value);
+        try std.testing.expect(grade.atLeastAsStrongAs(grade));
+    }
 }
 
 test "a rejection is never an acceptance" {
@@ -526,6 +534,19 @@ test "a rejection is never an acceptance" {
     }, 0);
     try std.testing.expect(!a.accepted());
     try std.testing.expectEqual(@as(?AssuranceGrade, null), a.grade);
+
+    const contradictory = Assessment.reject(.policy_accepted, .absent, .{
+        .stage = .policy,
+        .code = .required_property_not_established,
+        .recertifiable = true,
+    }, 0);
+    try std.testing.expect(!contradictory.accepted());
+}
+
+test "guard and invariant readiness require exact non-empty coverage" {
+    try std.testing.expect(!(GuardVerdicts{ .required = 1, .covered = 2 }).ready());
+    try std.testing.expect(!(GuardVerdicts{ .required = 2, .covered = 1 }).ready());
+    try std.testing.expect(!(InvariantVerdicts{ .configured = true }).ready());
 }
 
 test "reason codes are unique and stable" {
@@ -548,21 +569,50 @@ test "assurance grade wire encoding is one-based and closed" {
     }
 }
 
-test "every stage and state names itself" {
-    inline for (@typeInfo(Stage).@"enum".fields) |f| {
-        const s: Stage = @enumFromInt(f.value);
-        try std.testing.expect(s.name().len > 0);
-    }
-    inline for (@typeInfo(SemanticState).@"enum".fields) |f| {
-        const s: SemanticState = @enumFromInt(f.value);
-        try std.testing.expect(s.name().len > 0);
-    }
-    inline for (@typeInfo(ProvenanceState).@"enum".fields) |f| {
-        const s: ProvenanceState = @enumFromInt(f.value);
-        try std.testing.expect(s.name().len > 0);
-    }
-    inline for (@typeInfo(AssuranceGrade).@"enum".fields) |f| {
-        const g: AssuranceGrade = @enumFromInt(f.value);
-        try std.testing.expect(g.name().len > 0);
-    }
+test "every stage and state has its exact stable name" {
+    const stages = .{
+        .{ Stage.decode, "decode" },
+        .{ Stage.limits, "limits" },
+        .{ Stage.proof_system_identity, "proof_system_identity" },
+        .{ Stage.artifact_binding, "artifact_binding" },
+        .{ Stage.obligation_reconstruction, "obligation_reconstruction" },
+        .{ Stage.evidence_check, "evidence_check" },
+        .{ Stage.translation_check, "translation_check" },
+        .{ Stage.solver, "solver" },
+        .{ Stage.policy, "policy" },
+        .{ Stage.guard_coverage, "guard_coverage" },
+        .{ Stage.invariant_coverage, "invariant_coverage" },
+        .{ Stage.tool_catalog, "tool_catalog" },
+        .{ Stage.declaration, "declaration" },
+    };
+    try std.testing.expectEqual(@typeInfo(Stage).@"enum".fields.len, stages.len);
+    inline for (stages) |item| try std.testing.expectEqualStrings(item[1], item[0].name());
+
+    const semantic_states = .{
+        .{ SemanticState.parsed, "parsed" },
+        .{ SemanticState.integrity_verified, "integrity_verified" },
+        .{ SemanticState.proof_checked, "proof_checked" },
+        .{ SemanticState.policy_accepted, "policy_accepted" },
+    };
+    try std.testing.expectEqual(@typeInfo(SemanticState).@"enum".fields.len, semantic_states.len);
+    inline for (semantic_states) |item| try std.testing.expectEqualStrings(item[1], item[0].name());
+
+    const provenance_states = .{
+        .{ ProvenanceState.absent, "absent" },
+        .{ ProvenanceState.unchecked, "unchecked" },
+        .{ ProvenanceState.signature_verified, "signature_verified" },
+        .{ ProvenanceState.trusted_origin, "trusted_origin" },
+    };
+    try std.testing.expectEqual(@typeInfo(ProvenanceState).@"enum".fields.len, provenance_states.len);
+    inline for (provenance_states) |item| try std.testing.expectEqualStrings(item[1], item[0].name());
+
+    const assurance_grades = .{
+        .{ AssuranceGrade.proved, "proved" },
+        .{ AssuranceGrade.translation_validated, "translation_validated" },
+        .{ AssuranceGrade.solver_assumed, "solver_assumed" },
+        .{ AssuranceGrade.tested, "tested" },
+        .{ AssuranceGrade.trusted, "trusted" },
+    };
+    try std.testing.expectEqual(@typeInfo(AssuranceGrade).@"enum".fields.len, assurance_grades.len);
+    inline for (assurance_grades) |item| try std.testing.expectEqualStrings(item[1], item[0].name());
 }

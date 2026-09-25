@@ -557,12 +557,93 @@ test "the catalog digest is stable and domain-separated" {
     try testing.expect(!std.mem.eql(u8, &a, &digest(tampered_buf[0..bytes.len])));
 }
 
+test "GET and POST may share one path" {
+    const entries = [_]test_support.SampleEntry{
+        .{ .name = "get", .method = "GET", .path = "/shared" },
+        .{ .name = "post", .method = "POST", .path = "/shared" },
+    };
+    var buf: [1024]u8 = undefined;
+    var w = test_support.Writer{ .buf = &buf };
+    test_support.writeCatalog(&w, &entries);
+
+    const catalog = try decode(w.bytes());
+    try testing.expectEqual(@as(u16, 2), catalog.entry_count);
+    var it = catalog.entries();
+    const get = (try it.next()).?;
+    try testing.expectEqualStrings("GET", get.method);
+    try testing.expectEqualStrings("/shared", get.path);
+    const post = (try it.next()).?;
+    try testing.expectEqualStrings("POST", post.method);
+    try testing.expectEqualStrings("/shared", post.path);
+    try testing.expectEqual(@as(?Entry, null), try it.next());
+}
+
+const DecodeSite = enum {
+    short_header,
+    integer_body,
+    string_body,
+    magic,
+    schema,
+    entry_count,
+    name_length,
+    method_length,
+    path_length,
+    description_length,
+    input_name_length,
+    input_schema_length,
+    output_name_length,
+    output_schema_length,
+    max_input_bytes,
+    tenant_scope_length,
+    subject_scope_length,
+    export_count,
+    export_module_length,
+    export_name_length,
+    credential_count,
+    credential_name_length,
+    method_characters,
+    path_prefix,
+    name_utf8,
+    path_utf8,
+    description_utf8,
+    input_name_utf8,
+    input_schema_utf8,
+    output_name_utf8,
+    output_schema_utf8,
+    tenant_scope_utf8,
+    subject_scope_utf8,
+    export_module_utf8,
+    export_name_utf8,
+    credential_utf8,
+    export_order,
+    credential_order,
+    name_order,
+    trailing_data,
+    duplicate_route,
+};
+
 const Case = struct {
+    site: DecodeSite,
     expected: DecodeError,
     entries: []const test_support.SampleEntry = &.{},
     /// When set, the case is written by hand instead of from `entries`.
     custom: ?*const fn (w: *test_support.Writer) void = null,
 };
+
+fn shortHeader(w: *test_support.Writer) void {
+    w.raw("ZTCAT");
+}
+
+fn truncatedInteger(w: *test_support.Writer) void {
+    w.raw(magic);
+}
+
+fn truncatedString(w: *test_support.Writer) void {
+    w.raw(magic);
+    w.int(u16, schema_version);
+    w.int(u16, 1);
+    w.int(u32, 1);
+}
 
 fn sampleWithTrailingByte(w: *test_support.Writer) void {
     test_support.writeCatalog(w, &test_support.sample_entries);
@@ -680,52 +761,62 @@ const scope_64 = "s" ** max_scope_field_bytes;
 const e = test_support.sample_entries;
 
 const cases = [_]Case{
-    .{ .expected = error.Truncated, .custom = sampleTruncated },
-    .{ .expected = error.BadMagic, .custom = badMagic },
-    .{ .expected = error.UnsupportedSchema, .custom = unsupportedSchema },
-    .{ .expected = error.UnsupportedSchema, .custom = schemaTwo },
-    .{ .expected = error.EntryCountOutOfRange, .custom = zeroEntries },
-    .{ .expected = error.EntryCountOutOfRange, .custom = tooManyEntries },
-    .{ .expected = error.NameLength, .entries = &.{.{ .name = "", .path = "/x" }} },
-    .{ .expected = error.NameLength, .custom = nameTooLong },
-    .{ .expected = error.MethodInvalid, .entries = &.{.{ .name = "a", .method = "get", .path = "/x" }} },
-    .{ .expected = error.MethodInvalid, .entries = &.{.{ .name = "a", .method = "", .path = "/x" }} },
-    .{ .expected = error.MethodInvalid, .entries = &.{.{ .name = "a", .method = "POSTPOSTPOSTPOSTX", .path = "/x" }} },
-    .{ .expected = error.PathInvalid, .entries = &.{.{ .name = "a", .path = "x" }} },
-    .{ .expected = error.PathInvalid, .entries = &.{.{ .name = "a", .path = "" }} },
-    .{ .expected = error.DescriptionLength, .entries = &.{.{ .name = "a", .path = "/x", .description = "" }} },
-    .{ .expected = error.DescriptionLength, .custom = descriptionTooLong },
-    .{ .expected = error.SchemaNameLength, .entries = &.{.{ .name = "a", .path = "/x", .input_name = "" }} },
-    .{ .expected = error.SchemaNameLength, .entries = &.{.{ .name = "a", .path = "/x", .output_name = "" }} },
-    .{ .expected = error.SchemaLength, .entries = &.{.{ .name = "a", .path = "/x", .input_schema = "" }} },
-    .{ .expected = error.SchemaLength, .entries = &.{.{ .name = "a", .path = "/x", .output_schema = "" }} },
-    .{ .expected = error.SchemaLength, .custom = schemaTooLong },
-    .{ .expected = error.MaxInputBytesOutOfRange, .entries = &.{.{ .name = "a", .path = "/x", .max_input_bytes = 0 }} },
-    .{ .expected = error.MaxInputBytesOutOfRange, .entries = &.{.{ .name = "a", .path = "/x", .max_input_bytes = max_max_input_bytes + 1 }} },
-    .{ .expected = error.ScopeFieldLength, .entries = &.{.{ .name = "a", .path = "/x", .scope_tenant = scope_65 }} },
-    .{ .expected = error.ScopeFieldLength, .entries = &.{.{ .name = "a", .path = "/x", .scope_subject = scope_65 }} },
-    .{ .expected = error.ScopeFieldLength, .custom = scopeTooLong },
-    .{ .expected = error.InvalidUtf8, .entries = &.{.{ .name = "a", .path = "/x", .scope_subject = "\xff" }} },
-    .{ .expected = error.ExportCountOutOfRange, .custom = tooManyExports },
-    .{ .expected = error.ExportFieldLength, .entries = &.{.{ .name = "a", .path = "/x", .exports = &.{.{ .module = "", .name = "f" }} }} },
-    .{ .expected = error.ExportFieldLength, .entries = &.{.{ .name = "a", .path = "/x", .exports = &.{.{ .module = "m", .name = "" }} }} },
-    .{ .expected = error.NamesNotOrdered, .entries = &.{ e[1], e[0] } },
-    .{ .expected = error.NamesNotOrdered, .entries = &.{ .{ .name = "a", .path = "/x" }, .{ .name = "a", .path = "/y" } } },
-    .{ .expected = error.RouteDuplicate, .entries = &.{ .{ .name = "a", .path = "/x" }, .{ .name = "b", .path = "/x" } } },
-    .{ .expected = error.RouteDuplicate, .entries = &.{ .{ .name = "a", .path = "/x" }, .{ .name = "b", .path = "/y" }, .{ .name = "c", .path = "/x" } } },
-    .{ .expected = error.ExportsNotOrdered, .entries = &.{.{ .name = "a", .path = "/x", .exports = &.{ .{ .module = "m", .name = "g" }, .{ .module = "m", .name = "f" } } }} },
-    .{ .expected = error.ExportsNotOrdered, .entries = &.{.{ .name = "a", .path = "/x", .exports = &.{ .{ .module = "n", .name = "a" }, .{ .module = "m", .name = "z" } } }} },
-    .{ .expected = error.ExportsNotOrdered, .entries = &.{.{ .name = "a", .path = "/x", .exports = &.{ .{ .module = "m", .name = "f" }, .{ .module = "m", .name = "f" } } }} },
-    .{ .expected = error.CredentialCountOutOfRange, .custom = tooManyCredentials },
-    .{ .expected = error.CredentialNameLength, .entries = &.{.{ .name = "a", .path = "/x", .credentials = &.{""} }} },
-    .{ .expected = error.CredentialNameLength, .entries = &.{.{ .name = "a", .path = "/x", .credentials = &.{credential_65} }} },
-    .{ .expected = error.CredentialsNotOrdered, .entries = &.{.{ .name = "a", .path = "/x", .credentials = &.{ "weather", "billing" } }} },
-    .{ .expected = error.CredentialsNotOrdered, .entries = &.{.{ .name = "a", .path = "/x", .credentials = &.{ "weather", "weather" } }} },
-    .{ .expected = error.InvalidUtf8, .entries = &.{.{ .name = "a", .path = "/x", .credentials = &.{"\xfe"} }} },
-    .{ .expected = error.InvalidUtf8, .entries = &.{.{ .name = "\xff", .path = "/x" }} },
-    .{ .expected = error.InvalidUtf8, .entries = &.{.{ .name = "a", .path = "/x", .input_schema = "{\"\xc3\"}" }} },
-    .{ .expected = error.InvalidUtf8, .entries = &.{.{ .name = "a", .path = "/x", .exports = &.{.{ .module = "m", .name = "\x80" }} }} },
-    .{ .expected = error.TrailingData, .custom = sampleWithTrailingByte },
+    .{ .site = .short_header, .expected = error.Truncated, .custom = shortHeader },
+    .{ .site = .integer_body, .expected = error.Truncated, .custom = truncatedInteger },
+    .{ .site = .string_body, .expected = error.Truncated, .custom = truncatedString },
+    .{ .site = .string_body, .expected = error.Truncated, .custom = sampleTruncated },
+    .{ .site = .magic, .expected = error.BadMagic, .custom = badMagic },
+    .{ .site = .schema, .expected = error.UnsupportedSchema, .custom = unsupportedSchema },
+    .{ .site = .schema, .expected = error.UnsupportedSchema, .custom = schemaTwo },
+    .{ .site = .entry_count, .expected = error.EntryCountOutOfRange, .custom = zeroEntries },
+    .{ .site = .entry_count, .expected = error.EntryCountOutOfRange, .custom = tooManyEntries },
+    .{ .site = .name_length, .expected = error.NameLength, .entries = &.{.{ .name = "", .path = "/x" }} },
+    .{ .site = .name_length, .expected = error.NameLength, .custom = nameTooLong },
+    .{ .site = .method_characters, .expected = error.MethodInvalid, .entries = &.{.{ .name = "a", .method = "get", .path = "/x" }} },
+    .{ .site = .method_length, .expected = error.MethodInvalid, .entries = &.{.{ .name = "a", .method = "", .path = "/x" }} },
+    .{ .site = .method_length, .expected = error.MethodInvalid, .entries = &.{.{ .name = "a", .method = "POSTPOSTPOSTPOSTX", .path = "/x" }} },
+    .{ .site = .path_prefix, .expected = error.PathInvalid, .entries = &.{.{ .name = "a", .path = "x" }} },
+    .{ .site = .path_length, .expected = error.PathInvalid, .entries = &.{.{ .name = "a", .path = "" }} },
+    .{ .site = .description_length, .expected = error.DescriptionLength, .entries = &.{.{ .name = "a", .path = "/x", .description = "" }} },
+    .{ .site = .description_length, .expected = error.DescriptionLength, .custom = descriptionTooLong },
+    .{ .site = .input_name_length, .expected = error.SchemaNameLength, .entries = &.{.{ .name = "a", .path = "/x", .input_name = "" }} },
+    .{ .site = .output_name_length, .expected = error.SchemaNameLength, .entries = &.{.{ .name = "a", .path = "/x", .output_name = "" }} },
+    .{ .site = .input_schema_length, .expected = error.SchemaLength, .entries = &.{.{ .name = "a", .path = "/x", .input_schema = "" }} },
+    .{ .site = .output_schema_length, .expected = error.SchemaLength, .entries = &.{.{ .name = "a", .path = "/x", .output_schema = "" }} },
+    .{ .site = .input_schema_length, .expected = error.SchemaLength, .custom = schemaTooLong },
+    .{ .site = .max_input_bytes, .expected = error.MaxInputBytesOutOfRange, .entries = &.{.{ .name = "a", .path = "/x", .max_input_bytes = 0 }} },
+    .{ .site = .max_input_bytes, .expected = error.MaxInputBytesOutOfRange, .entries = &.{.{ .name = "a", .path = "/x", .max_input_bytes = max_max_input_bytes + 1 }} },
+    .{ .site = .tenant_scope_length, .expected = error.ScopeFieldLength, .entries = &.{.{ .name = "a", .path = "/x", .scope_tenant = scope_65 }} },
+    .{ .site = .subject_scope_length, .expected = error.ScopeFieldLength, .entries = &.{.{ .name = "a", .path = "/x", .scope_subject = scope_65 }} },
+    .{ .site = .subject_scope_length, .expected = error.ScopeFieldLength, .custom = scopeTooLong },
+    .{ .site = .export_count, .expected = error.ExportCountOutOfRange, .custom = tooManyExports },
+    .{ .site = .export_module_length, .expected = error.ExportFieldLength, .entries = &.{.{ .name = "a", .path = "/x", .exports = &.{.{ .module = "", .name = "f" }} }} },
+    .{ .site = .export_name_length, .expected = error.ExportFieldLength, .entries = &.{.{ .name = "a", .path = "/x", .exports = &.{.{ .module = "m", .name = "" }} }} },
+    .{ .site = .name_order, .expected = error.NamesNotOrdered, .entries = &.{ e[1], e[0] } },
+    .{ .site = .name_order, .expected = error.NamesNotOrdered, .entries = &.{ .{ .name = "a", .path = "/x" }, .{ .name = "a", .path = "/y" } } },
+    .{ .site = .duplicate_route, .expected = error.RouteDuplicate, .entries = &.{ .{ .name = "a", .path = "/x" }, .{ .name = "b", .path = "/x" } } },
+    .{ .site = .duplicate_route, .expected = error.RouteDuplicate, .entries = &.{ .{ .name = "a", .path = "/x" }, .{ .name = "b", .path = "/y" }, .{ .name = "c", .path = "/x" } } },
+    .{ .site = .export_order, .expected = error.ExportsNotOrdered, .entries = &.{.{ .name = "a", .path = "/x", .exports = &.{ .{ .module = "m", .name = "g" }, .{ .module = "m", .name = "f" } } }} },
+    .{ .site = .export_order, .expected = error.ExportsNotOrdered, .entries = &.{.{ .name = "a", .path = "/x", .exports = &.{ .{ .module = "n", .name = "a" }, .{ .module = "m", .name = "z" } } }} },
+    .{ .site = .export_order, .expected = error.ExportsNotOrdered, .entries = &.{.{ .name = "a", .path = "/x", .exports = &.{ .{ .module = "m", .name = "f" }, .{ .module = "m", .name = "f" } } }} },
+    .{ .site = .credential_count, .expected = error.CredentialCountOutOfRange, .custom = tooManyCredentials },
+    .{ .site = .credential_name_length, .expected = error.CredentialNameLength, .entries = &.{.{ .name = "a", .path = "/x", .credentials = &.{""} }} },
+    .{ .site = .credential_name_length, .expected = error.CredentialNameLength, .entries = &.{.{ .name = "a", .path = "/x", .credentials = &.{credential_65} }} },
+    .{ .site = .credential_order, .expected = error.CredentialsNotOrdered, .entries = &.{.{ .name = "a", .path = "/x", .credentials = &.{ "weather", "billing" } }} },
+    .{ .site = .credential_order, .expected = error.CredentialsNotOrdered, .entries = &.{.{ .name = "a", .path = "/x", .credentials = &.{ "weather", "weather" } }} },
+    .{ .site = .credential_utf8, .expected = error.InvalidUtf8, .entries = &.{.{ .name = "a", .path = "/x", .credentials = &.{"\xfe"} }} },
+    .{ .site = .name_utf8, .expected = error.InvalidUtf8, .entries = &.{.{ .name = "\xff", .path = "/x" }} },
+    .{ .site = .path_utf8, .expected = error.InvalidUtf8, .entries = &.{.{ .name = "a", .path = "/\xff" }} },
+    .{ .site = .description_utf8, .expected = error.InvalidUtf8, .entries = &.{.{ .name = "a", .path = "/x", .description = "\xff" }} },
+    .{ .site = .input_name_utf8, .expected = error.InvalidUtf8, .entries = &.{.{ .name = "a", .path = "/x", .input_name = "\xff" }} },
+    .{ .site = .input_schema_utf8, .expected = error.InvalidUtf8, .entries = &.{.{ .name = "a", .path = "/x", .input_schema = "{\"\xc3\"}" }} },
+    .{ .site = .output_name_utf8, .expected = error.InvalidUtf8, .entries = &.{.{ .name = "a", .path = "/x", .output_name = "\xff" }} },
+    .{ .site = .output_schema_utf8, .expected = error.InvalidUtf8, .entries = &.{.{ .name = "a", .path = "/x", .output_schema = "\xff" }} },
+    .{ .site = .tenant_scope_utf8, .expected = error.InvalidUtf8, .entries = &.{.{ .name = "a", .path = "/x", .scope_tenant = "\xff" }} },
+    .{ .site = .subject_scope_utf8, .expected = error.InvalidUtf8, .entries = &.{.{ .name = "a", .path = "/x", .scope_subject = "\xff" }} },
+    .{ .site = .export_module_utf8, .expected = error.InvalidUtf8, .entries = &.{.{ .name = "a", .path = "/x", .exports = &.{.{ .module = "\x80", .name = "f" }} }} },
+    .{ .site = .export_name_utf8, .expected = error.InvalidUtf8, .entries = &.{.{ .name = "a", .path = "/x", .exports = &.{.{ .module = "m", .name = "\x80" }} }} },
+    .{ .site = .trailing_data, .expected = error.TrailingData, .custom = sampleWithTrailingByte },
 };
 
 test "every refusal case decodes to its exact error" {
@@ -750,7 +841,20 @@ test "every refusal case decodes to its exact error" {
     }
 }
 
-test "every decode error is driven by a refusal case" {
+test "every decode site and error is driven by a refusal case" {
+    const sites = @typeInfo(DecodeSite).@"enum".fields;
+    inline for (sites) |site_field| {
+        const site: DecodeSite = @enumFromInt(site_field.value);
+        var driven = false;
+        for (cases) |case| {
+            if (case.site == site) driven = true;
+        }
+        if (!driven) {
+            std.debug.print("DecodeSite.{s} has no refusal case\n", .{site_field.name});
+            return error.TestUnexpectedResult;
+        }
+    }
+
     const members = @typeInfo(DecodeError).error_set.?;
     inline for (members) |member| {
         var driven = false;
@@ -785,8 +889,37 @@ test "a catalog at the entry and export bounds decodes" {
     while (index < max_entries) : (index += 1) {
         const name: [2]u8 = .{ 'a' + @as(u8, @intCast(index / 26)), 'a' + @as(u8, @intCast(index % 26)) };
         const path: [3]u8 = .{ '/', name[0], name[1] };
-        test_support.writeEntry(&w, .{ .name = &name, .path = &path });
+        if (index == 0) {
+            const fields = [_][]const u8{ &name, "POST", &path, "d", "I", "{}", "O", "{}" };
+            for (fields) |value| w.string(value);
+            w.int(u32, 1);
+            w.string("");
+            w.string("");
+            w.int(u16, max_exports);
+            var export_index: u16 = 0;
+            while (export_index < max_exports) : (export_index += 1) {
+                const export_name: [2]u8 = .{
+                    'a' + @as(u8, @intCast(export_index / 26)),
+                    'a' + @as(u8, @intCast(export_index % 26)),
+                };
+                w.string("m");
+                w.string(&export_name);
+            }
+            w.int(u16, 0);
+        } else {
+            test_support.writeEntry(&w, .{ .name = &name, .path = &path });
+        }
     }
     const catalog = try decode(w.bytes());
     try testing.expectEqual(max_entries, catalog.entry_count);
+    var entries = catalog.entries();
+    const first = (try entries.next()).?;
+    var exports = first.exports;
+    var export_count: u16 = 0;
+    while (try exports.next()) |item| : (export_count += 1) {
+        try testing.expectEqualStrings("m", item.module);
+        if (export_count == 0) try testing.expectEqualStrings("aa", item.name);
+        if (export_count == max_exports - 1) try testing.expectEqualStrings("jv", item.name);
+    }
+    try testing.expectEqual(max_exports, export_count);
 }

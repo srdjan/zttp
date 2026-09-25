@@ -1252,6 +1252,31 @@ fn buildMinimal(buf: []u8) ![]u8 {
     return encode(parts, buf);
 }
 
+fn buildAllSections(buf: []u8) ![]u8 {
+    const members = minimalGraph();
+    const ir = [_]IrNode{
+        .{ .id = 0, .tag = .function, .is_handler = true, .parent = 0, .first_child = 1, .child_count = 1, .digest = fixture.digest(20) },
+        .{ .id = 1, .tag = .return_node, .parent = 0, .first_child = 0, .child_count = 0, .digest = fixture.digest(21) },
+    };
+    const obligations = [_]Obligation{.{ .property = .response_total, .subject_kind = .function, .subject_id = 0 }};
+    const evidence = [_]Evidence{.{ .obligation_index = 0, .edge = .proved, .rule = .return_total, .node_id = 1, .aux = 0 }};
+    const translation = [_]Witness{.{ .ir_node = 1, .code_start = 2, .code_len = 3, .target_ir = 0, .target_offset = 4, .scope_ir_node = 0, .kind = .emission }};
+    const rewrites = [_]Rewrite{.{ .rule = .return_total, .before_offset = 2, .before_len = 3, .after_offset = 4, .after_len = 5, .delta = -1 }};
+    const trusted = [_]TrustedEdge{.{ .family = .opcode, .member_id = 7, .reason = .not_modeled, .grade = .trusted }};
+    const solver = [_]SolverQuery{.{ .obligation_index = 0, .query_kind = .opcode_equivalence }};
+    const guards = [_]ResidualObligation{.{ .kind = .env_key, .normalization = .identifier_exact_v1, .sink = .env_read, .section = .env, .impl_id = 9, .operation_id = 1 }};
+    const invariants = [_]InvariantWitness{.{ .ir_node = 1, .scope_ir_node = 0, .function_ordinal = 0, .code_offset = 2, .translation_index = 0, .operation = .post, .sink = .ledger_post, .impl_id = 9 }};
+    var parts = fixture.minimalParts(&members, &ir, &obligations, &evidence);
+    parts.identity.executable_root = try graph_mod.computeRoot(&members);
+    parts.translation = &translation;
+    parts.rewrites = &rewrites;
+    parts.trusted = &trusted;
+    parts.solver = &solver;
+    parts.residual = &guards;
+    parts.invariants = &invariants;
+    return encode(parts, buf);
+}
+
 test "a minimal certificate round trips through the canonical codec" {
     var buf: [4096]u8 = undefined;
     const bytes = try buildMinimal(&buf);
@@ -1318,6 +1343,180 @@ test "the encoder refuses a buffer that cannot hold the certificate" {
 fn sectionHeaderOffset(bytes: []const u8, records: []const u8) usize {
     // The four-byte table count sits between the section header and records.
     return @intFromPtr(records.ptr) - @intFromPtr(bytes.ptr) - 4 - section_header_size;
+}
+
+const TestSection = struct { start: usize, payload: usize, length: usize };
+
+fn testSection(bytes: []const u8, tag: SectionTag) TestSection {
+    var at: usize = header_size;
+    while (at < bytes.len) {
+        const length = u32At(bytes, at + 2);
+        if (u16At(bytes, at) == @intFromEnum(tag)) {
+            return .{ .start = at, .payload = at + section_header_size, .length = length };
+        }
+        at += section_header_size + length;
+    }
+    unreachable;
+}
+
+test "all certificate sections have pinned wire bytes and decoded fields" {
+    var buf: [4096]u8 = undefined;
+    const bytes = try buildAllSections(&buf);
+    // This literal pins the wire format. Computing the expected digest from
+    // the encoder at test time would check only encoder-decoder agreement.
+    const pinned = [_]u8{
+        0x60, 0x63, 0xe7, 0x03, 0x86, 0x68, 0x10, 0xab,
+        0x6d, 0x57, 0xa8, 0x71, 0x38, 0x19, 0xc2, 0xe7,
+        0xc2, 0x66, 0x38, 0xe2, 0xa2, 0xe2, 0x4b, 0xe9,
+        0x51, 0xa8, 0xc7, 0x8d, 0xe2, 0xdf, 0xdc, 0xf6,
+    };
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
+    try testing.expectEqualSlices(u8, &pinned, &digest);
+
+    var budget = Budget.init(.{});
+    const cert = try decode(bytes, .{}, &budget);
+    try testing.expectEqual(@as(u16, 11), u16At(bytes, 16));
+    try testing.expectEqual(@as(u32, 8), cert.graph.len());
+    try testing.expectEqual(@as(u32, 1), cert.obligations.len());
+    try testing.expectEqual(@as(u32, 2), cert.ir.len());
+    try testing.expectEqual(@as(u32, 1), cert.evidence.len());
+    try testing.expectEqual(@as(u32, 1), cert.translation.len());
+    try testing.expectEqual(@as(u32, 1), cert.rewrites.len());
+    try testing.expectEqual(@as(u32, 1), cert.trusted.len());
+    try testing.expectEqual(@as(u32, 1), cert.solver.len());
+    try testing.expectEqual(@as(u32, 1), cert.residual.len());
+    try testing.expectEqual(@as(u32, 1), cert.invariants.len());
+    try testing.expectEqualSlices(u8, &fixture.digest(2), &cert.identity.contract_digest);
+    try testing.expectEqual(graph_mod.MemberKind.main_bytecode, (try cert.graph.get(0)).kind);
+    try testing.expectEqual(ps.Property.response_total, (try cert.obligations.get(0)).property);
+    try testing.expectEqual(ps.NodeTag.function, (try cert.ir.get(0)).tag);
+    try testing.expect((try cert.ir.get(0)).is_handler);
+    try testing.expectEqual(EdgeKind.proved, (try cert.evidence.get(0)).edge);
+    try testing.expectEqual(@as(u32, 3), (try cert.translation.get(0)).code_len);
+    try testing.expectEqual(@as(u32, 7), (try cert.trusted.get(0)).member_id);
+    try testing.expectEqual(@as(i32, -1), (try cert.rewrites.get(0)).delta);
+    try testing.expectEqual(SolverQueryKind.opcode_equivalence, (try cert.solver.get(0)).query_kind);
+    try testing.expectEqual(residual.GuardKind.env_key, (try cert.residual.get(0)).kind);
+    try testing.expectEqual(@as(u32, 2), (try cert.invariants.get(0)).code_offset);
+}
+
+test "each required certificate section is required by the decoder" {
+    var buf: [4096]u8 = undefined;
+    const bytes = try buildMinimal(&buf);
+    inline for (.{ .identity, .graph, .obligations, .proof_ir, .evidence }) |tag| {
+        const section = testSection(bytes, tag);
+        const end = section.payload + section.length;
+        var removed: [4096]u8 = undefined;
+        @memcpy(removed[0..section.start], bytes[0..section.start]);
+        @memcpy(removed[section.start..][0 .. bytes.len - end], bytes[end..]);
+        std.mem.writeInt(u16, removed[16..18], 4, .little);
+        var budget = Budget.init(.{});
+        try testing.expectError(error.MissingRequiredSection, decode(removed[0 .. bytes.len - (end - section.start)], .{}, &budget));
+    }
+}
+
+const CertificateDecodeSite = enum {
+    identity_flags,
+    obligation_reserved,
+    ir_flags,
+    ir_reserved,
+    ir_aux,
+    evidence_reserved,
+    evidence_rule,
+    witness_reserved,
+    rewrite_reserved,
+    trusted_reserved,
+    solver_reserved,
+    residual_reserved,
+    invariant_reserved,
+};
+
+test "certificate record reserved sites and closed wire fields refuse nonzero bytes" {
+    var buf: [4096]u8 = undefined;
+    const bytes = try buildAllSections(&buf);
+    const Site = struct { site: CertificateDecodeSite, tag: SectionTag, offset: usize, value: u8, expected: DecodeError };
+    const sites = [_]Site{
+        .{ .site = .identity_flags, .tag = .identity, .offset = 192, .value = 0x02, .expected = error.ReservedFieldNonZero }, // C08
+        .{ .site = .obligation_reserved, .tag = .obligations, .offset = 3, .value = 1, .expected = error.ReservedFieldNonZero },
+        .{ .site = .ir_flags, .tag = .proof_ir, .offset = 6, .value = 0x02, .expected = error.ReservedFieldNonZero }, // C22
+        .{ .site = .ir_reserved, .tag = .proof_ir, .offset = 7, .value = 1, .expected = error.ReservedFieldNonZero },
+        .{ .site = .ir_aux, .tag = .proof_ir, .offset = 52, .value = 1, .expected = error.ReservedFieldNonZero }, // C13
+        .{ .site = .evidence_reserved, .tag = .evidence, .offset = 5, .value = 1, .expected = error.ReservedFieldNonZero }, // C14
+        .{ .site = .evidence_rule, .tag = .evidence, .offset = 6, .value = 0xff, .expected = error.UnknownEnumMember }, // C16
+        .{ .site = .witness_reserved, .tag = .translation, .offset = 25, .value = 1, .expected = error.ReservedFieldNonZero }, // C15
+        .{ .site = .rewrite_reserved, .tag = .rewrites, .offset = 2, .value = 1, .expected = error.ReservedFieldNonZero }, // C24
+        .{ .site = .trusted_reserved, .tag = .trusted, .offset = 6, .value = 1, .expected = error.ReservedFieldNonZero }, // C23
+        .{ .site = .solver_reserved, .tag = .solver, .offset = 6, .value = 1, .expected = error.ReservedFieldNonZero }, // C19
+        .{ .site = .residual_reserved, .tag = .residual, .offset = 12, .value = 1, .expected = error.ReservedFieldNonZero }, // C17
+        .{ .site = .invariant_reserved, .tag = .invariant, .offset = 22, .value = 1, .expected = error.ReservedFieldNonZero }, // C18
+    };
+    inline for (sites) |site| {
+        var changed: [4096]u8 = undefined;
+        @memcpy(changed[0..bytes.len], bytes);
+        const section = testSection(bytes, site.tag);
+        const record = section.payload + @as(usize, if (site.tag == .identity) 0 else 4);
+        changed[record + site.offset] = site.value;
+        var budget = Budget.init(.{});
+        try testing.expectError(site.expected, decode(changed[0..bytes.len], .{}, &budget));
+    }
+    inline for (@typeInfo(CertificateDecodeSite).@"enum".fields) |field| {
+        const site: CertificateDecodeSite = @enumFromInt(field.value);
+        var driven = false;
+        for (sites) |probe| {
+            if (probe.site == site) driven = true;
+        }
+        try testing.expect(driven);
+    }
+}
+
+test "table sections refuse slack bytes" {
+    var buf: [4096]u8 = undefined;
+    const bytes = try buildMinimal(&buf);
+    const section = testSection(bytes, .graph);
+    const end = section.payload + section.length;
+    var changed: [4097]u8 = undefined;
+    @memcpy(changed[0..end], bytes[0..end]);
+    changed[end] = 0x5a;
+    @memcpy(changed[end + 1 ..][0 .. bytes.len - end], bytes[end..]);
+    std.mem.writeInt(u32, changed[section.start + 2 ..][0..4], @intCast(section.length + 1), .little);
+    var budget = Budget.init(.{});
+    try testing.expectError(error.SectionLengthMismatch, decode(changed[0 .. bytes.len + 1], .{}, &budget));
+}
+
+test "certificate section and record limits include the limit" {
+    var buf: [4096]u8 = undefined;
+    const bytes = try buildAllSections(&buf);
+    var budget = Budget.init(.{});
+    const cert = try decode(bytes, .{ .max_sections = 11, .max_graph_members = 8, .max_solver_queries = 1 }, &budget);
+    try testing.expectEqual(@as(u32, 1), cert.solver.len());
+
+    budget = Budget.init(.{});
+    try testing.expectError(error.CountExceedsLimit, decode(bytes, .{ .max_solver_queries = 0 }, &budget));
+    budget = Budget.init(.{});
+    try testing.expectError(error.CountExceedsLimit, decode(bytes, .{ .max_sections = 10 }, &budget));
+}
+
+test "certificate section count past the limit is refused before reading sections" {
+    var buf: [4096]u8 = undefined;
+    const bytes = try buildAllSections(&buf);
+    var changed: [4096]u8 = undefined;
+    @memcpy(changed[0..bytes.len], bytes);
+    std.mem.writeInt(u16, changed[16..18], 12, .little);
+    var budget = Budget.init(.{});
+    try testing.expectError(error.CountExceedsLimit, decode(changed[0..bytes.len], .{ .max_sections = 11 }, &budget));
+}
+
+test "certificate decode charges table framing and every record" {
+    var buf: [4096]u8 = undefined;
+    const bytes = try buildAllSections(&buf);
+    var budget = Budget.init(.{ .max_work = 104 });
+    const cert = try decode(bytes, .{}, &budget);
+    try testing.expectEqual(@as(u64, 0), budget.remaining);
+    try testing.expectError(error.Truncated, cert.invariants.get(cert.invariants.len()));
+
+    budget = Budget.init(.{ .max_work = 103 });
+    try testing.expectError(error.WorkBudgetExhausted, decode(bytes, .{}, &budget));
 }
 
 fn probeDecodeError(comptime expected: DecodeError) !void {
@@ -1443,6 +1642,30 @@ test "every decode error maps to a distinct stable reason code" {
             try testing.expect(reasonFor(a) != reasonFor(b));
         }
     }
+}
+
+test "every decode error maps to its exact reason code" {
+    // Distinctness alone passes a swap of two rows. These pairs are the public
+    // contract an operator reads, so each one is pinned.
+    const pairs = [_]struct { err: DecodeError, code: ReasonCode }{
+        .{ .err = error.CertificateTooLarge, .code = .certificate_too_large },
+        .{ .err = error.Truncated, .code = .truncated_input },
+        .{ .err = error.BadMagic, .code = .bad_magic },
+        .{ .err = error.UnsupportedSchemaVersion, .code = .unsupported_schema_version },
+        .{ .err = error.UnknownSectionTag, .code = .unknown_section_tag },
+        .{ .err = error.DuplicateSection, .code = .duplicate_section },
+        .{ .err = error.MissingRequiredSection, .code = .missing_required_section },
+        .{ .err = error.TrailingData, .code = .trailing_data },
+        .{ .err = error.SectionTooLarge, .code = .section_too_large },
+        .{ .err = error.SectionLengthMismatch, .code = .section_length_mismatch },
+        .{ .err = error.CountExceedsLimit, .code = .count_exceeds_limit },
+        .{ .err = error.UnknownEnumMember, .code = .unknown_enum_member },
+        .{ .err = error.SectionNotCanonicallyOrdered, .code = .section_not_canonically_ordered },
+        .{ .err = error.ReservedFieldNonZero, .code = .reserved_field_nonzero },
+        .{ .err = error.WorkBudgetExhausted, .code = .work_budget_exhausted },
+    };
+    try testing.expectEqual(@typeInfo(DecodeError).error_set.?.len, pairs.len);
+    for (pairs) |pair| try testing.expectEqual(pair.code, reasonFor(pair.err));
 }
 
 test "edge kinds grade and check consistently" {

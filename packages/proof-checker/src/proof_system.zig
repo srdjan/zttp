@@ -318,6 +318,16 @@ test "the ratchet floor is met and the two halves partition the alphabet" {
     // change that only meant to simplify.
     try std.testing.expect(checked >= 1);
     try std.testing.expect(Property.response_total.consumerChecked());
+    try std.testing.expectEqual(@as(usize, 1), checked);
+    inline for (.{
+        Property.results_checked,
+        Property.no_secret_leakage,
+        Property.state_isolated,
+        Property.deterministic,
+        Property.read_only,
+        Property.retry_safe,
+        Property.capability_bounded,
+    }) |property| try std.testing.expect(!property.consumerChecked());
 }
 
 test "every property states its subject and names itself" {
@@ -333,8 +343,16 @@ test "every property states its subject and names itself" {
 }
 
 test "rule family is stated for every rule" {
-    inline for (@typeInfo(Rule).@"enum".fields) |field| {
-        const r: Rule = @enumFromInt(field.value);
-        _ = r.family();
-    }
+    inline for (.{
+        Rule.return_total,
+        Rule.branch_both_arms_total,
+        Rule.sequence_member_total,
+        Rule.loop_never_total,
+    }) |rule| try std.testing.expectEqual(RuleFamily.totality, rule.family());
+    inline for (.{
+        Rule.emission_contiguous,
+        Rule.jump_target_resolved,
+        Rule.rewrite_peephole_fusion,
+        Rule.rewrite_compaction,
+    }) |rule| try std.testing.expectEqual(RuleFamily.translation, rule.family());
 }
