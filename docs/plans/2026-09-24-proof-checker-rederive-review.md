@@ -18,6 +18,13 @@ the removal of `rule_family_mismatch` (see "Owner decisions"). Phases 0 to 4 are
 4. **`work_spent` (M4): keep the count identical** with one walk over both member kinds, so
    Phase 2 is a pure refactor. Its acceptance check is that every `Assessment` from the kernel
    suite and the ratchet corpus is identical before and after.
+5. **T5 and T6: accepted for Phase 4. T7: declined.** The owner left the choice to the
+   implementer. T7 fails its own precondition: the stage does not follow from the code.
+   `obligation_missing` is emitted under `obligation_reconstruction` (`checker.zig:991`) and
+   under `evidence_check` (`:1194`), so deleting `Rejection.stage` would lose information.
+6. **Section 7 behavior questions: pin the current behavior.** Phase 0 pins that a rewrite
+   with no translation section is not checked, and that the residual-plan member loop keeps
+   its current shape. Neither changes in this series.
 
 ## 1. Executive summary
 
@@ -435,8 +442,8 @@ Verify: Phase 1 commands plus the runtime unit root that holds
 `proof_activation.zig:345-349` (run by `zig build test`).
 Expected: `residual.zig` maxCC 25 to 8, -5 branches (measured on its own).
 
-**Phase 4: type-driven public changes (T1, T5, T6, T7).** T1 is accepted (owner decision 3).
-T5 to T7 still need an owner decision before they start. T2 is done.
+**Phase 4: type-driven public changes (T1, T5, T6).** T1 is accepted (owner decision 3).
+T5 and T6 are accepted and T7 is declined (owner decision 5). T2 is done.
 Verify: `bash scripts/verify.sh` on a clean tree. This covers
 `test-vocab-envelope-drift` and the policy-hash pins.
 Expected: the branch count may rise. Success means the compiler refuses the contradictory
