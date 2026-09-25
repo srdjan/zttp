@@ -30,8 +30,9 @@ cross-compile without Docker.
 - [ ] `zig build -Doptimize=ReleaseFast -Dtarget=x86_64-macos-none -Dstrip`
 - [ ] `zig build -Doptimize=ReleaseFast -Dtarget=aarch64-macos-none -Dstrip`
 - [ ] Check release binary sizes with `ls -lh zig-out/bin/`. The release workflow
-      builds with `-Dstrip`; stripped `zttp` is roughly 8-9 MB (vs ~50 MB
-      unstripped). A debug-sized artifact in the release means `-Dstrip` was dropped.
+      builds with `-Dstrip`; stripped `zttp` measured 12.1-13.3 MB across the
+      four targets at 0.21.0. A debug-sized artifact in the release means
+      `-Dstrip` was dropped.
 
 ## Documentation
 
