@@ -42,10 +42,12 @@ pub fn build(b: *std.Build) void {
     });
     const proof_review_mod = proof_review_dep.module("zttp_proof_review");
 
-    // The acceptance kernel. It takes no options, so it dedups on its own.
+    // The acceptance kernel. It takes no options, so it dedups on its own, as
+    // long as every declaration computes the same mode: a release build keeps
+    // runtime safety in the kernel (see the root build.zig).
     const proof_checker_dep = b.dependency("zttp_proof_checker", .{
         .target = target,
-        .optimize = optimize,
+        .optimize = @as(std.builtin.OptimizeMode, if (optimize == .Debug) .Debug else .ReleaseSafe),
     });
     const proof_checker_mod = proof_checker_dep.module("zttp_proof_checker");
 

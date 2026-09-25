@@ -27,9 +27,12 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     });
+    // A release build keeps runtime safety in the acceptance kernel. Every
+    // declaration of this dependency computes the same mode so they dedup
+    // (see the root build.zig).
     const proof_checker_dep = b.dependency("zttp_proof_checker", .{
         .target = target,
-        .optimize = optimize,
+        .optimize = @as(std.builtin.OptimizeMode, if (optimize == .Debug) .Debug else .ReleaseSafe),
     });
     project_config_mod.addImport("zttp_proof_checker", proof_checker_dep.module("zttp_proof_checker"));
     zts_cli_mod.addImport("zts", zts_mod);

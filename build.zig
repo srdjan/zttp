@@ -223,9 +223,17 @@ pub fn build(b: *std.Build) void {
     // available to every consumer below it, and wired with no imports of its
     // own: the package is a leaf, and `scripts/check-proof-checker.sh` fails
     // when that stops being true.
+    //
+    // A release build keeps runtime safety in the kernel. Its guards are the
+    // only thing between certificate bytes and an out-of-range cast or slice,
+    // which ReleaseFast turns into undefined behavior and ReleaseSafe turns
+    // into a panic. The kernel runs once, before the pool exists, so that panic
+    // is a refusal to serve. Measured cost: about 30% per `check` call on the
+    // kernel fixture, roughly half a microsecond, paid once per start.
+    const proof_checker_optimize: std.builtin.OptimizeMode = if (optimize == .Debug) .Debug else .ReleaseSafe;
     const proof_checker_dep = b.dependency("zttp_proof_checker", .{
         .target = target,
-        .optimize = optimize,
+        .optimize = proof_checker_optimize,
     });
     const proof_checker_tests = b.addTest(.{
         .filters = test_filters,
