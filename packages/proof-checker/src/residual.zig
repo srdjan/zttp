@@ -325,55 +325,69 @@ fn normalizeEndpoint(value: []const u8, out: []u8) NormalizeError![]const u8 {
     if (value.len == 0) return error.Empty;
     if (value.len > max_endpoint_bytes) return error.TooLong;
 
-    const separator = std.mem.indexOf(u8, value, "://") orelse return error.Malformed;
-    const scheme = blk: {
-        if (asciiEqlIgnoreCase(value[0..separator], "http")) break :blk Scheme.http;
-        if (asciiEqlIgnoreCase(value[0..separator], "https")) break :blk Scheme.https;
-        return error.Malformed;
-    };
-
-    var rest = value[separator + 3 ..];
-    // Everything from the first path, query, or fragment byte is not part of
-    // the endpoint. The guard authorizes a destination, not a request.
-    if (std.mem.indexOfAny(u8, rest, "/?#")) |cut| rest = rest[0..cut];
-    if (rest.len == 0) return error.Malformed;
-    // Userinfo is refused rather than dropped: `evil.example@allowed.example`
-    // reads as the allowed host to a careless parser and connects to neither.
-    if (std.mem.indexOfScalar(u8, rest, '@') != null) return error.Malformed;
-
-    var host = rest;
-    var port: ?u16 = null;
-    if (rest[0] == '[') {
-        const close = std.mem.indexOfScalar(u8, rest, ']') orelse return error.Malformed;
-        host = rest[0 .. close + 1];
-        const tail = rest[close + 1 ..];
-        if (tail.len > 0) {
-            if (tail[0] != ':') return error.Malformed;
-            port = try parsePort(tail[1..]);
-        }
-    } else if (std.mem.lastIndexOfScalar(u8, rest, ':')) |colon| {
-        host = rest[0..colon];
-        port = try parsePort(rest[colon + 1 ..]);
-    }
-
-    if (host.len == 0) return error.Malformed;
-    // One trailing dot is the same name in DNS; more than one is not a name.
-    if (host[host.len - 1] == '.') host = host[0 .. host.len - 1];
-    if (host.len == 0 or host[host.len - 1] == '.') return error.Malformed;
-    for (host) |byte| {
-        if (byte <= 0x20 or byte >= 0x7F) return error.Malformed;
-    }
-
-    const effective_port = port orelse scheme.defaultPort();
+    const parsed = try parseScheme(value);
+    const authority = try authorityOf(parsed.rest);
+    const endpoint = try splitHostPort(authority);
+    const host = try canonicalHost(endpoint.host);
+    const effective_port = endpoint.port orelse parsed.scheme.defaultPort();
     var buffer: [max_endpoint_bytes]u8 = undefined;
     const written = std.fmt.bufPrint(&buffer, "{s}://{s}:{d}", .{
-        scheme.text(),
+        parsed.scheme.text(),
         host,
         effective_port,
     }) catch return error.TooLong;
     if (written.len > out.len) return error.TooLong;
     for (written, 0..) |byte, index| out[index] = std.ascii.toLower(byte);
     return out[0..written.len];
+}
+
+fn parseScheme(value: []const u8) NormalizeError!struct { scheme: Scheme, rest: []const u8 } {
+    const separator = std.mem.indexOf(u8, value, "://") orelse return error.Malformed;
+    const scheme = blk: {
+        if (std.ascii.eqlIgnoreCase(value[0..separator], "http")) break :blk Scheme.http;
+        if (std.ascii.eqlIgnoreCase(value[0..separator], "https")) break :blk Scheme.https;
+        return error.Malformed;
+    };
+    return .{ .scheme = scheme, .rest = value[separator + 3 ..] };
+}
+
+fn authorityOf(rest: []const u8) NormalizeError![]const u8 {
+    // Everything from the first path, query, or fragment byte is not part of
+    // the endpoint. The guard authorizes a destination, not a request.
+    const authority = if (std.mem.indexOfAny(u8, rest, "/?#")) |cut| rest[0..cut] else rest;
+    if (authority.len == 0) return error.Malformed;
+    // Userinfo is refused rather than dropped: `evil.example@allowed.example`
+    // reads as the allowed host to a careless parser and connects to neither.
+    if (std.mem.indexOfScalar(u8, authority, '@') != null) return error.Malformed;
+    return authority;
+}
+
+fn splitHostPort(authority: []const u8) NormalizeError!struct { host: []const u8, port: ?u16 } {
+    var host = authority;
+    var port: ?u16 = null;
+    if (authority[0] == '[') {
+        const close = std.mem.indexOfScalar(u8, authority, ']') orelse return error.Malformed;
+        host = authority[0 .. close + 1];
+        const tail = authority[close + 1 ..];
+        if (tail.len > 0) {
+            if (tail[0] != ':') return error.Malformed;
+            port = try parsePort(tail[1..]);
+        }
+    } else if (std.mem.lastIndexOfScalar(u8, authority, ':')) |colon| {
+        host = authority[0..colon];
+        port = try parsePort(authority[colon + 1 ..]);
+    }
+    return .{ .host = host, .port = port };
+}
+
+fn canonicalHost(raw: []const u8) NormalizeError![]const u8 {
+    // One trailing dot is the same name in DNS; more than one is not a name.
+    const host = std.mem.trimEnd(u8, raw, ".");
+    if (host.len == 0 or raw.len - host.len > 1) return error.Malformed;
+    for (host) |byte| {
+        if (byte <= 0x20 or byte >= 0x7F) return error.Malformed;
+    }
+    return host;
 }
 
 fn parsePort(text: []const u8) NormalizeError!u16 {
@@ -386,14 +400,6 @@ fn parsePort(text: []const u8) NormalizeError!u16 {
     }
     if (port == 0) return error.Malformed;
     return @intCast(port);
-}
-
-fn asciiEqlIgnoreCase(a: []const u8, b: []const u8) bool {
-    if (a.len != b.len) return false;
-    for (a, b) |x, y| {
-        if (std.ascii.toLower(x) != std.ascii.toLower(y)) return false;
-    }
-    return true;
 }
 
 // ---------------------------------------------------------------------------
