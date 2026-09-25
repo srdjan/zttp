@@ -44,9 +44,16 @@ if [[ "$corpus_size" -lt "$min_corpus" ]]; then
   exit 1
 fi
 
-# The property alphabet, read from the enum's own name table so a renamed
-# member cannot slip past by not matching a pattern written down here.
-properties="$(sed -n 's/^            \.\([a-z_]*\) => "\1",$/\1/p' "$kernel" | sort -u)"
+# Read the property alphabet from its enum declaration. The name method may
+# use @tagName, so it cannot serve as the source of this list.
+properties="$(awk '
+  /^pub const Property = enum\(u16\) \{/ { in_property = 1; next }
+  in_property && /^};/ { exit }
+  in_property && /^    [a-z_][a-z_]* = [0-9]+,/ {
+    name = $1
+    print name
+  }
+' "$kernel" | sort -u)"
 if [[ -z "$properties" ]]; then
   note "found no properties in $kernel - the gate is reading nothing"
   exit 1
@@ -98,6 +105,11 @@ for name in $checked; do checked_count=$((checked_count + 1)); done
 if [[ "$checked_count" -lt 1 ]]; then
   note "the kernel re-derives no property at all; a checker that checks nothing is not a checker"
   exit 1
+fi
+
+if ! diff -u <(printf '%s\n' "$properties") <(printf '%s\n' $checked $disclosed | sort -u) >/dev/null; then
+  note "consumerChecked does not cover the Property enum exactly:"
+  diff -u <(printf '%s\n' "$properties") <(printf '%s\n' $checked $disclosed | sort -u) >&2 || true
 fi
 
 # ---------------------------------------------------------------------------
