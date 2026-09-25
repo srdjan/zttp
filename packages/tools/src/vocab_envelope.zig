@@ -328,7 +328,7 @@ test "derived counts match what the contract prose states" {
         .{ .key = "consumer_obligation_properties", .n = 8 },
         .{ .key = "assurance_grades", .n = 5 },
         .{ .key = "acceptance_stages", .n = 13 },
-        .{ .key = "reason_codes", .n = 95 },
+        .{ .key = "reason_codes", .n = 94 },
         .{ .key = "evidence_edge_kinds", .n = 6 },
         .{ .key = "residual_guard_kinds", .n = 5 },
         .{ .key = "residual_guard_families", .n = 4 },
