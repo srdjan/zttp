@@ -122,11 +122,7 @@ pub const Normalization = enum(u8) {
     endpoint_v1 = 2,
 
     pub fn fromWire(value: u8) ?Normalization {
-        return switch (value) {
-            1 => .identifier_exact_v1,
-            2 => .endpoint_v1,
-            else => null,
-        };
+        return std.enums.fromInt(Normalization, value);
     }
 
     pub fn name(self: Normalization) []const u8 {
@@ -151,13 +147,7 @@ pub const SinkId = enum(u8) {
     sql_execute = 4,
 
     pub fn fromWire(value: u8) ?SinkId {
-        return switch (value) {
-            1 => .env_read,
-            2 => .egress_connect,
-            3 => .cache_operation,
-            4 => .sql_execute,
-            else => null,
-        };
+        return std.enums.fromInt(SinkId, value);
     }
 
     pub fn name(self: SinkId) []const u8 {
@@ -173,13 +163,7 @@ pub const PolicySection = enum(u8) {
     sql = 4,
 
     pub fn fromWire(value: u8) ?PolicySection {
-        return switch (value) {
-            1 => .env,
-            2 => .egress,
-            3 => .cache,
-            4 => .sql,
-            else => null,
-        };
+        return std.enums.fromInt(PolicySection, value);
     }
 
     pub fn name(self: PolicySection) []const u8 {
@@ -201,15 +185,7 @@ pub const AddressScope = enum(u8) {
     unspecified = 6,
 
     pub fn fromWire(value: u8) ?AddressScope {
-        return switch (value) {
-            1 => .public,
-            2 => .private,
-            3 => .loopback,
-            4 => .link_local,
-            5 => .multicast,
-            6 => .unspecified,
-            else => null,
-        };
+        return std.enums.fromInt(AddressScope, value);
     }
 
     pub fn name(self: AddressScope) []const u8 {
@@ -220,6 +196,13 @@ pub const AddressScope = enum(u8) {
         return @as(u8, 1) << @intCast(@intFromEnum(self) - 1);
     }
 };
+
+comptime {
+    for (@typeInfo(AddressScope).@"enum".fields) |field| {
+        if (field.value < 1 or field.value > @bitSizeOf(u8))
+            @compileError("AddressScope exceeds ScopeSet's wire byte");
+    }
+}
 
 /// The set of scopes a policy admits, as one byte.
 pub const ScopeSet = struct {
@@ -298,9 +281,9 @@ pub const NormalizeError = error{
 /// Canonicalize a resource for its rule. `out` receives the result; the
 /// returned slice points into it.
 ///
-/// One function, called by the producer, the checker, the policy loader, and
-/// the runtime sink. Four implementations of "the same" rule is how a guard
-/// ends up checking a string the effect never sees.
+/// The checker, policy loader, and runtime sink call this function. The producer
+/// has its own copy in `packages/zts/src/endpoint.zig`, pinned by the
+/// differential test in `packages/runtime/src/proof_activation.zig`.
 pub fn normalize(rule: Normalization, value: []const u8, out: []u8) NormalizeError![]const u8 {
     return switch (rule) {
         .identifier_exact_v1 => normalizeIdentifier(value, out),

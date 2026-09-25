@@ -30,12 +30,7 @@ pub const SemanticState = enum(u8) {
     }
 
     pub fn name(self: SemanticState) []const u8 {
-        return switch (self) {
-            .parsed => "parsed",
-            .integrity_verified => "integrity_verified",
-            .proof_checked => "proof_checked",
-            .policy_accepted => "policy_accepted",
-        };
+        return @tagName(self);
     }
 };
 
@@ -53,12 +48,7 @@ pub const ProvenanceState = enum(u8) {
     trusted_origin = 4,
 
     pub fn name(self: ProvenanceState) []const u8 {
-        return switch (self) {
-            .absent => "absent",
-            .unchecked => "unchecked",
-            .signature_verified => "signature_verified",
-            .trusted_origin => "trusted_origin",
-        };
+        return @tagName(self);
     }
 };
 
@@ -101,13 +91,7 @@ pub const AssuranceGrade = enum(u8) {
     }
 
     pub fn name(self: AssuranceGrade) []const u8 {
-        return switch (self) {
-            .proved => "proved",
-            .translation_validated => "translation_validated",
-            .solver_assumed => "solver_assumed",
-            .tested => "tested",
-            .trusted => "trusted",
-        };
+        return @tagName(self);
     }
 };
 
@@ -133,21 +117,7 @@ pub const Stage = enum(u8) {
     declaration = 13,
 
     pub fn name(self: Stage) []const u8 {
-        return switch (self) {
-            .decode => "decode",
-            .limits => "limits",
-            .proof_system_identity => "proof_system_identity",
-            .artifact_binding => "artifact_binding",
-            .obligation_reconstruction => "obligation_reconstruction",
-            .evidence_check => "evidence_check",
-            .translation_check => "translation_check",
-            .solver => "solver",
-            .policy => "policy",
-            .guard_coverage => "guard_coverage",
-            .invariant_coverage => "invariant_coverage",
-            .tool_catalog => "tool_catalog",
-            .declaration => "declaration",
-        };
+        return @tagName(self);
     }
 };
 
@@ -426,6 +396,11 @@ pub const Rejection = struct {
 
 pub const PropertyVerdicts = struct {
     const count = @typeInfo(proof_system.Property).@"enum".fields.len;
+
+    comptime {
+        if (count > @bitSizeOf(u16))
+            @compileError("Property exceeds PropertyVerdicts' accepted bitset");
+    }
 
     grades: [count]?AssuranceGrade = [_]?AssuranceGrade{null} ** count,
     accepted_bits: u16 = 0,

@@ -79,11 +79,7 @@ pub const Kind = enum(u16) {
     declared_accounts_v1 = 2,
 
     pub fn fromWire(value: u16) ?Kind {
-        return switch (value) {
-            1 => .balance_conservation_v1,
-            2 => .declared_accounts_v1,
-            else => null,
-        };
+        return std.enums.fromInt(Kind, value);
     }
 };
 
@@ -284,11 +280,7 @@ pub const AccountMatcherTag = enum(u8) {
     prefix = 2,
 
     pub fn fromWire(value: u8) ?AccountMatcherTag {
-        return switch (value) {
-            1 => .exact,
-            2 => .prefix,
-            else => null,
-        };
+        return std.enums.fromInt(AccountMatcherTag, value);
     }
 };
 
@@ -732,11 +724,7 @@ pub const Operation = enum(u8) {
     balance = 2,
 
     pub fn fromWire(value: u8) ?Operation {
-        return switch (value) {
-            1 => .post,
-            2 => .balance,
-            else => null,
-        };
+        return std.enums.fromInt(Operation, value);
     }
 };
 
@@ -745,11 +733,7 @@ pub const SinkId = enum(u8) {
     ledger_balance = 2,
 
     pub fn fromWire(value: u8) ?SinkId {
-        return switch (value) {
-            1 => .ledger_post,
-            2 => .ledger_balance,
-            else => null,
-        };
+        return std.enums.fromInt(SinkId, value);
     }
 };
 

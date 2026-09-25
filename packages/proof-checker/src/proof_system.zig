@@ -22,10 +22,7 @@ pub const ProofSystem = enum(u16) {
     zttp_pcc_v3 = 3,
 
     pub fn fromWire(value: u16) ?ProofSystem {
-        return switch (value) {
-            3 => .zttp_pcc_v3,
-            else => null,
-        };
+        return std.enums.fromInt(ProofSystem, value);
     }
 };
 
@@ -58,17 +55,7 @@ pub const Property = enum(u16) {
     capability_bounded = 8,
 
     pub fn fromWire(value: u16) ?Property {
-        return switch (value) {
-            1 => .response_total,
-            2 => .results_checked,
-            3 => .no_secret_leakage,
-            4 => .state_isolated,
-            5 => .deterministic,
-            6 => .read_only,
-            7 => .retry_safe,
-            8 => .capability_bounded,
-            else => null,
-        };
+        return std.enums.fromInt(Property, value);
     }
 
     /// Which proof-IR member an obligation for this property is about.
@@ -130,16 +117,7 @@ pub const Property = enum(u16) {
     }
 
     pub fn name(self: Property) []const u8 {
-        return switch (self) {
-            .response_total => "response_total",
-            .results_checked => "results_checked",
-            .no_secret_leakage => "no_secret_leakage",
-            .state_isolated => "state_isolated",
-            .deterministic => "deterministic",
-            .read_only => "read_only",
-            .retry_safe => "retry_safe",
-            .capability_bounded => "capability_bounded",
-        };
+        return @tagName(self);
     }
 };
 
@@ -175,17 +153,7 @@ pub const Rule = enum(u16) {
     rewrite_compaction = 8,
 
     pub fn fromWire(value: u16) ?Rule {
-        return switch (value) {
-            1 => .return_total,
-            2 => .branch_both_arms_total,
-            3 => .sequence_member_total,
-            4 => .loop_never_total,
-            5 => .emission_contiguous,
-            6 => .jump_target_resolved,
-            7 => .rewrite_peephole_fusion,
-            8 => .rewrite_compaction,
-            else => null,
-        };
+        return std.enums.fromInt(Rule, value);
     }
 
     /// Which stage the rule belongs to. A translation rule cited as proof of a
@@ -235,17 +203,7 @@ pub const NodeTag = enum(u16) {
     ledger_call = 8,
 
     pub fn fromWire(value: u16) ?NodeTag {
-        return switch (value) {
-            1 => .function,
-            2 => .sequence,
-            3 => .branch,
-            4 => .loop_node,
-            5 => .return_node,
-            6 => .plain,
-            7 => .capability_call,
-            8 => .ledger_call,
-            else => null,
-        };
+        return std.enums.fromInt(NodeTag, value);
     }
 
     /// Whether a node of this tag carries a catalog index in its `aux` field.
@@ -272,14 +230,7 @@ pub const TrustReason = enum(u16) {
     deferred_family = 5,
 
     pub fn fromWire(value: u16) ?TrustReason {
-        return switch (value) {
-            1 => .not_modeled,
-            2 => .solver_absent,
-            3 => .corpus_only,
-            4 => .external_axiom,
-            5 => .deferred_family,
-            else => null,
-        };
+        return std.enums.fromInt(TrustReason, value);
     }
 };
 

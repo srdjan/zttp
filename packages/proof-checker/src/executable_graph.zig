@@ -66,29 +66,7 @@ pub const MemberKind = enum(u16) {
     declaration = 20,
 
     pub fn fromWire(value: u16) ?MemberKind {
-        return switch (value) {
-            1 => .main_bytecode,
-            2 => .dep_bytecode,
-            3 => .nested_function,
-            4 => .constant_pool,
-            5 => .module_identity,
-            6 => .native_module_identity,
-            7 => .contract_bytes,
-            8 => .runtime_policy_bytes,
-            9 => .source_profile_core,
-            10 => .source_profile_frontend,
-            11 => .core_grammar,
-            12 => .semantics,
-            13 => .capability_matrix,
-            14 => .proof_ir,
-            15 => .proof_certificate,
-            16 => .residual_plan,
-            17 => .invariant_spec,
-            18 => .invariant_ledger_adapter,
-            19 => .tool_catalog,
-            20 => .declaration,
-            else => null,
-        };
+        return std.enums.fromInt(MemberKind, value);
     }
 
     pub fn name(self: MemberKind) []const u8 {
