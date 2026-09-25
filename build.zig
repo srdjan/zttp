@@ -263,6 +263,7 @@ pub fn build(b: *std.Build) void {
     const proof_checker_mutants_cmd = b.addRunArtifact(proof_checker_mutants_exe);
     proof_checker_mutants_cmd.addArg(b.graph.zig_exe);
     proof_checker_mutants_cmd.addDirectoryArg(proof_checker_dep.path(""));
+    proof_checker_mutants_cmd.addFileArg(tools_dep.path("src/proof_checker_mutants.zon"));
     proof_checker_mutants_cmd.has_side_effects = true;
     const proof_checker_mutants_step = b.step("test-proof-checker-mutants", "Run the committed mutants against the acceptance kernel suite");
     proof_checker_mutants_step.dependOn(&proof_checker_mutants_cmd.step);

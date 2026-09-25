@@ -14,7 +14,10 @@ const Mutant = struct {
     equivalent: ?[]const u8,
 };
 
-const mutants: []const Mutant = @import("proof_checker_mutants.zon");
+// Read at run time, not @import-ed. An imported .zon was measured not to
+// invalidate the build cache when only the list changed: the runner kept
+// probing a deleted list and reported rows that no longer existed.
+var mutants: []const Mutant = &.{};
 
 // The Phase 0 suite contains 276 tests. This floor allows only a small loss.
 const minimum_test_count: usize = 270;
@@ -68,7 +71,12 @@ fn run(init: std.process.Init) !void {
     _ = args.next();
     const zig_arg = args.next() orelse return usage();
     const kernel_arg = args.next() orelse return usage();
+    const list_arg = args.next() orelse return usage();
     if (args.next() != null) return usage();
+
+    var list_arena = std.heap.ArenaAllocator.init(allocator);
+    defer list_arena.deinit();
+    mutants = loadList(list_arena.allocator(), io, list_arg) catch return error.GateFailed;
 
     const zig_exe = try std.Io.Dir.cwd().realPathFileAlloc(io, zig_arg, allocator);
     defer allocator.free(zig_exe);
@@ -139,7 +147,7 @@ fn run(init: std.process.Init) !void {
 }
 
 fn usage() error{InvalidArguments} {
-    std.debug.print("usage: proof-checker-mutants <zig-exe> <proof-checker-package>\n", .{});
+    std.debug.print("usage: proof-checker-mutants <zig-exe> <proof-checker-package> <mutant-list.zon>\n", .{});
     return error.InvalidArguments;
 }
 
@@ -551,4 +559,16 @@ fn printReport(production_files: []const []u8, results: []const Result) bool {
         .{ mutants.len, total_equivalent, total_killed, total_survived, total_timeout, total_no_compile, total_no_apply, total_harness_error },
     );
     return gate_failed;
+}
+
+fn loadList(arena: std.mem.Allocator, io: std.Io, path: []const u8) ![]const Mutant {
+    const source = std.Io.Dir.cwd().readFileAllocOptions(io, path, arena, .limited(16 * 1024 * 1024), .of(u8), 0) catch |err| {
+        std.debug.print("proof-checker mutants: cannot read {s}: {s}\n", .{ path, @errorName(err) });
+        return err;
+    };
+    var diag: std.zon.parse.Diagnostics = .{};
+    return std.zon.parse.fromSliceAlloc([]const Mutant, arena, source, &diag, .{ .free_on_error = false }) catch |err| {
+        std.debug.print("proof-checker mutants: {s} is not a valid mutant list:\n{f}", .{ path, diag });
+        return err;
+    };
 }
