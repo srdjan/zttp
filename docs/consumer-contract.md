@@ -585,7 +585,7 @@ stated so a drift gate can check them and a reader can fail the document against
 | Consumer obligation properties | 8 | `packages/proof-checker/src/proof_system.zig` |
 | Assurance grades | 5 | `packages/proof-checker/src/verdict.zig` |
 | Acceptance stages | 13 | `packages/proof-checker/src/verdict.zig` |
-| Reason codes | 95 | `packages/proof-checker/src/verdict.zig` |
+| Reason codes | 94 | `packages/proof-checker/src/verdict.zig` |
 | Evidence edge kinds | 6 | `packages/proof-checker/src/certificate.zig` |
 | Residual guard kinds | 5 | `packages/proof-checker/src/residual.zig` |
 | Residual guard families, catalogued | 4 | `packages/proof-checker/src/residual.zig` |

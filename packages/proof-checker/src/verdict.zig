@@ -156,7 +156,7 @@ pub const Stage = enum(u8) {
 ///
 /// Every member here is a code some path in this package constructs. A code the
 /// kernel advertises and never produces reads, to anyone auditing the rejection
-/// surface, as a check that exists; three such were removed rather than left in
+/// surface, as a check that exists; four such were removed rather than left in
 /// as placeholders, and their numbers are retired.
 pub const ReasonCode = enum(u16) {
     // decode
@@ -203,7 +203,6 @@ pub const ReasonCode = enum(u16) {
 
     // evidence
     obligation_without_evidence = 1501,
-    rule_family_mismatch = 1503,
     rule_premise_unmet = 1504,
     proof_node_cycle = 1505,
     proof_node_unknown = 1506,

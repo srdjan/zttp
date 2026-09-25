@@ -120,7 +120,6 @@
       { "name": "obligation_out_of_order", "ordinal": 1404 },
       { "name": "obligation_subject_unknown", "ordinal": 1405 },
       { "name": "obligation_without_evidence", "ordinal": 1501 },
-      { "name": "rule_family_mismatch", "ordinal": 1503 },
       { "name": "rule_premise_unmet", "ordinal": 1504 },
       { "name": "proof_node_cycle", "ordinal": 1505 },
       { "name": "proof_node_unknown", "ordinal": 1506 },

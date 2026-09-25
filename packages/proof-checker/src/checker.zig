@@ -1236,10 +1236,11 @@ const Session = struct {
             if (entry.rule) |rule| {
                 const node = try self.certificate.ir.get(entry.node_id);
                 switch (rule.family()) {
+                    // `validEvidenceShape` already tied each family to its edge
+                    // and property, so a mismatch was refused above as
+                    // `evidence_edge_invalid`.
                     .totality => {
-                        if (obligation.property != .response_total) {
-                            return reject(.evidence_check, .rule_family_mismatch, .{ .rule = rule });
-                        }
+                        std.debug.assert(entry.edge == .proved and obligation.property == .response_total);
                         // The consumer derives the rule itself and compares. A
                         // producer that cites a rule which does not apply here
                         // is refused even when the fold happens to agree.
@@ -1250,9 +1251,7 @@ const Session = struct {
                         }
                     },
                     .translation => {
-                        if (entry.edge != .translation_validated) {
-                            return reject(.evidence_check, .rule_family_mismatch, .{ .rule = rule });
-                        }
+                        std.debug.assert(entry.edge == .translation_validated);
                         if (self.certificate.translation.len() == 0) {
                             return reject(.translation_check, .witness_missing, .{ .rule = rule });
                         }
