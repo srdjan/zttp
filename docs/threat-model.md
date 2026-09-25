@@ -107,7 +107,7 @@ repository is in scope.
   sha256. Every path segment is opened without following symlinks, so a
   component that resolves outside the bundle directory is refused rather than
   hashed.
-- Self-extract format 4, `zttp-attest-v4`, and `zttp-bundle-3` are equality
+- Self-extract format 6, `zttp-attest-v4`, and `zttp-bundle-3` are equality
   checks. Immediate predecessors are refused with rebuild guidance.
 
 ## Known Footguns

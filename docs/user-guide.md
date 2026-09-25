@@ -779,7 +779,7 @@ what reason. That check happens before any runtime is warmed, so a refused
 artifact never has a handler ready.
 
 Production artifacts use certificate schema `4`, proof system
-`zttp_pcc_v3 = 3`, self-extract format `4`, attestation
+`zttp_pcc_v3 = 3`, self-extract format `6`, attestation
 `zttp-attest-v4`, and bundle format `zttp-bundle-3`. Immediate predecessor
 formats are refused with a rebuild instruction. A guarded artifact must also
 have exact residual-plan and runtime-policy coverage before startup. Guarded
