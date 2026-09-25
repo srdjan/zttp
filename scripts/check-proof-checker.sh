@@ -92,10 +92,56 @@ forbidden=(
   'getStdOut'
   'getStdErr'
   'std\.heap\.'
+  'std\.Io'
+  'std\.log'
+  'std\.c\.'
+  'std\.atomic'
+  '@embedFile'
+  '(^|[^A-Za-z0-9_])extern[^A-Za-z0-9_]'
+  '^[[:space:]]*(pub )?export '
+  '(^|[^A-Za-z0-9_])asm[^A-Za-z0-9_]'
+  'threadlocal'
 )
 for pattern in "${forbidden[@]}"; do
   if hits="$(grep -nE "$pattern" "${sources[@]}" || true)"; [[ -n "$hits" ]]; then
     note "ambient capability '$pattern' reached from the kernel:"
+    printf '%s\n' "$hits" >&2
+  fi
+done
+
+# Mutable statics. A container-level `var` is state shared by every call, which
+# makes a verdict depend on the calls before it. zig fmt puts every container
+# declaration at column 0, so a column-0 `var` is exactly the top-level form.
+if hits="$(grep -nE '^(pub )?var ' "${sources[@]}" || true)"; [[ -n "$hits" ]]; then
+  note "the kernel declares a container-level var; it holds no mutable state:"
+  printf '%s\n' "$hits" >&2
+fi
+
+# Production-only patterns. Tests may print a diagnostic before they fail, so
+# these are checked on the lines outside `test` blocks and outside the private
+# `fn expect...` assertion helpers those blocks call. zig fmt opens a top-level
+# declaration at column 0 and closes it with a bare `}` at column 0, which is
+# what the awk below keys on; `zig fmt --check` in verify.sh holds that shape.
+# A helper must stay private: a `pub fn expect` is reachable from production.
+production_only=(
+  'std\.debug\.print'
+)
+production_lines="$(awk '
+  FNR == 1 { in_test = 0 }
+  /^test "/ || /^fn expect/ { in_test = 1 }
+  !in_test { print FILENAME ":" FNR ":" $0 }
+  in_test && /^}/ { in_test = 0 }
+' "${sources[@]}")"
+# Floor on the filter: it must drop the test lines and keep the rest, or a
+# shape change has made it pass everything or check nothing.
+production_count="$(printf '%s\n' "$production_lines" | wc -l | tr -d ' ')"
+all_count="$(cat "${sources[@]}" | wc -l | tr -d ' ')"
+if [[ "$production_count" -ge "$all_count" || "$production_count" -lt $((all_count / 4)) ]]; then
+  note "the test-block filter kept $production_count of $all_count lines; it no longer separates tests from production code"
+fi
+for pattern in "${production_only[@]}"; do
+  if hits="$(printf '%s\n' "$production_lines" | grep -E "$pattern" || true)"; [[ -n "$hits" ]]; then
+    note "'$pattern' reached from kernel production code:"
     printf '%s\n' "$hits" >&2
   fi
 done
