@@ -175,12 +175,11 @@ pub const Currency = struct {
 /// One decoded specification, presented the same way whichever schema the
 /// bytes carried. A consumer reads `kind_count`, `kindAt` and `payloadFor`
 /// without asking which wire schema produced them.
+pub const Schema = enum(u16) { v1 = schema_version_v1, v2 = schema_version_v2 };
+
 pub const Spec = struct {
-    /// The wire schema these bytes carried.
-    schema: u16,
-    /// The required kind. Schema 1 names it in the header; schema 2 must list
-    /// it among the declared kinds, and the decoder refuses bytes that omit it.
-    kind: Kind,
+    /// Schema 1 names its one kind in the header. Schema 2 carries records.
+    kinds: union(Schema) { v1: Kind, v2: void },
     ledger_id: []const u8,
     currency_bytes: []const u8,
     currency_count: u16,
@@ -230,8 +229,9 @@ pub const Spec = struct {
     /// the walk total for a `Spec` built any other way.
     fn recordAt(self: Spec, index: u16) DecodeError!Record {
         if (index >= self.kind_count) return error.Truncated;
-        if (self.schema != schema_version_v2) {
-            return .{ .kind = self.kind, .payload = self.kind_bytes[0..0] };
+        switch (self.kinds) {
+            .v1 => |kind| return .{ .kind = kind, .payload = self.kind_bytes[0..0] },
+            .v2 => {},
         }
         var cursor: usize = 0;
         var position: u16 = 0;
@@ -491,8 +491,7 @@ fn decodeV1(bytes: []const u8) DecodeError!Spec {
     if (bytes.len > counts.common_end) return error.TrailingData;
     const common = try decodeCommon(bytes, counts);
     return .{
-        .schema = schema_version_v1,
-        .kind = kind,
+        .kinds = .{ .v1 = kind },
         .ledger_id = common.ledger_id,
         .currency_bytes = common.currency_bytes,
         .currency_count = counts.currency_count,
@@ -531,8 +530,7 @@ fn decodeV2(bytes: []const u8) DecodeError!Spec {
     if (cursor != kind_bytes.len) return error.TrailingData;
 
     const spec = Spec{
-        .schema = schema_version_v2,
-        .kind = .balance_conservation_v1,
+        .kinds = .v2,
         .ledger_id = common.ledger_id,
         .currency_bytes = common.currency_bytes,
         .currency_count = counts.currency_count,
@@ -774,7 +772,7 @@ test "canonical invariant spec decodes without allocation" {
         2, 0, // currency count
     } ++ "ledger" ++ "EUR" ++ [_]u8{2} ++ "USD" ++ [_]u8{2};
     const spec = try decode(bytes);
-    try std.testing.expectEqual(Kind.balance_conservation_v1, spec.kind);
+    try std.testing.expectEqual(Kind.balance_conservation_v1, try spec.kindAt(0));
     try std.testing.expectEqualStrings("ledger", spec.ledger_id);
     try std.testing.expectEqualSlices(u8, "EUR", &(try spec.currency(0)).code);
     try std.testing.expectEqual(@as(u8, 2), (try spec.currency(1)).scale);
@@ -1021,8 +1019,8 @@ const v1_fixture = magic.* ++ [_]u8{
 
 test "a schema 2 specification decodes the same ledger and currency region as schema 1" {
     const spec = try decode(v2_fixture);
-    try std.testing.expectEqual(@as(u16, 2), spec.schema);
-    try std.testing.expectEqual(Kind.balance_conservation_v1, spec.kind);
+    try std.testing.expectEqual(Schema.v2, std.meta.activeTag(spec.kinds));
+    try std.testing.expectEqual(Kind.balance_conservation_v1, try spec.kindAt(0));
     try std.testing.expectEqualStrings("ledger", spec.ledger_id);
     try std.testing.expectEqual(@as(u16, 1), spec.currency_count);
     try std.testing.expectEqualSlices(u8, "USD", &(try spec.currency(0)).code);
@@ -1045,7 +1043,7 @@ test "a schema 1 specification presents the same kind view as schema 2" {
     // schema 1 document names one kind, so it reports one, at index zero, with
     // no payload, exactly as the schema 2 document above does.
     const spec = try decode(v1_fixture);
-    try std.testing.expectEqual(@as(u16, 1), spec.schema);
+    try std.testing.expectEqual(Schema.v1, std.meta.activeTag(spec.kinds));
     try std.testing.expectEqual(@as(u16, 1), spec.kind_count);
     try std.testing.expectEqual(Kind.balance_conservation_v1, try spec.kindAt(0));
     try std.testing.expectError(error.Truncated, spec.kindAt(1));

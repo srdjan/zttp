@@ -370,25 +370,29 @@ fn verifySemantics(
         .declaration = payload.declaration_section,
     }, pcc.policy.production);
 
-    if (assessment.rejection) |rejection| {
-        try stdout.print(
-            "Proof:     REJECTED at {s} ({s}); reached {s}\n",
-            .{ rejection.stage.name(), rejection.code.text(), assessment.semantic.name() },
-        );
-        try stdout.print(
-            "           {s} rebuilding and recertifying this handler.\n",
-            .{if (rejection.recertifiable) "Resolvable by" else "Not resolvable by"},
-        );
-        return error.ProofRejected;
-    }
+    const accepted = switch (assessment.outcome) {
+        .accepted => |value| value,
+        .rejected => |failure| {
+            const rejection = failure.rejection;
+            try stdout.print(
+                "Proof:     REJECTED at {s} ({s}); reached {s}\n",
+                .{ rejection.stage.name(), rejection.code.text(), assessment.semantic().name() },
+            );
+            try stdout.print(
+                "           {s} rebuilding and recertifying this handler.\n",
+                .{if (rejection.recertifiable) "Resolvable by" else "Not resolvable by"},
+            );
+            return error.ProofRejected;
+        },
+    };
 
     try stdout.print(
         "Proof:     {s} (weakest edge: {s}; {d} disclosed edge(s) the consumer did not check{s})\n",
         .{
-            assessment.semantic.name(),
-            if (assessment.grade) |grade| grade.name() else "none",
+            assessment.semantic().name(),
+            accepted.grade.name(),
             assessment.disclosed_edges,
-            if (assessment.development_only) ", development artifact" else "",
+            if (accepted.development_only) ", development artifact" else "",
         },
     );
     // Coverage on its own line, never inside the proof line above. A covered

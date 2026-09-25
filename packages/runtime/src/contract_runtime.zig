@@ -424,8 +424,11 @@ pub fn promote(
     tool_catalog_section: ?[]const u8,
     declaration_section: ?[]const u8,
 ) PromoteError!?ProofCheckedContract {
-    if (!assessment.accepted()) return null;
-    const grade = assessment.grade orelse return null;
+    const accepted = switch (assessment.outcome) {
+        .accepted => |value| value,
+        .rejected => return null,
+    };
+    const grade = accepted.grade;
     // Coverage is part of acceptance, not a note beside it. A certificate
     // whose reconstructed guards are not all covered describes operations the
     // consumer could not account for, and the kernel rejects it; this refuses
@@ -456,7 +459,7 @@ pub fn promote(
         ),
         .reads_request_state = validated.view().reads_request_state,
         .grade = grade,
-        .development_only = assessment.development_only,
+        .development_only = accepted.development_only,
         .guards = assessment.guards,
         .invariants = InvariantStatus.fromVerdicts(assessment.invariants),
         .runtime_policy_digest = runtime_policy_digest,
@@ -2062,16 +2065,13 @@ test "promotion exposes only properties that cleared the policy" {
     property_verdicts.recordGrade(.results_checked, .tested);
     property_verdicts.recordGrade(.no_secret_leakage, .tested);
     property_verdicts.recordGrade(.capability_bounded, .tested);
-    property_verdicts.accept(.response_total);
-    property_verdicts.accept(.results_checked);
-    property_verdicts.accept(.no_secret_leakage);
-    property_verdicts.accept(.capability_bounded);
+    property_verdicts.accept(.response_total, .trusted);
+    property_verdicts.accept(.results_checked, .tested);
+    property_verdicts.accept(.no_secret_leakage, .tested);
+    property_verdicts.accept(.capability_bounded, .tested);
     const assessment = pcc.Assessment{
-        .semantic = .policy_accepted,
+        .outcome = .{ .accepted = .{ .grade = .trusted, .development_only = false } },
         .provenance = .absent,
-        .grade = .trusted,
-        .development_only = false,
-        .rejection = null,
         .work_spent = 1,
         .properties = property_verdicts,
     };
@@ -2139,11 +2139,8 @@ test "a read-only generation is coverage ready and reports vacuous write applica
     };
     var validated = validatedFromInner(contract);
     var assessment = pcc.Assessment{
-        .semantic = .policy_accepted,
+        .outcome = .{ .accepted = .{ .grade = .trusted, .development_only = false } },
         .provenance = .absent,
-        .grade = .trusted,
-        .development_only = false,
-        .rejection = null,
         .work_spent = 1,
     };
     assessment.invariants = .{
@@ -2468,11 +2465,8 @@ fn testCatalog(buf: []u8, entries: []const catalog_test_support.SampleEntry) []c
 
 fn acceptedTestAssessment() pcc.Assessment {
     return .{
-        .semantic = .policy_accepted,
+        .outcome = .{ .accepted = .{ .grade = .trusted, .development_only = false } },
         .provenance = .absent,
-        .grade = .trusted,
-        .development_only = false,
-        .rejection = null,
         .work_spent = 1,
     };
 }
@@ -2798,11 +2792,13 @@ test "the accepted ceiling is the profile's categories and the union of both exc
     try std.testing.expectError(error.AcceptedDeclarationUndecodable, lowerAcceptedCeiling(allocator, "ZTDCL1"));
 }
 
-test "promotion reads no catalog for an assessment short of acceptance" {
+test "promotion reads no catalog for a rejected assessment" {
     const validated = toolTestContract(&matching_tool_summaries);
-    var refused = acceptedTestAssessment();
-    refused.semantic = .integrity_verified;
-    refused.grade = null;
+    const refused = pcc.Assessment.reject(.integrity_verified, .absent, false, .{
+        .stage = .evidence_check,
+        .code = .obligation_missing,
+        .recertifiable = true,
+    }, 1);
     try std.testing.expect((try promote(&validated, refused, [_]u8{0} ** 32, "not a catalog", null)) == null);
 }
 

@@ -74,18 +74,11 @@ fn refusal(
     provenance: pcc.ProvenanceState,
     recertifiable: bool,
 ) Assessment {
-    return .{
-        .semantic = .parsed,
-        .provenance = provenance,
-        .grade = null,
-        .development_only = false,
-        .rejection = .{
-            .stage = stage,
-            .code = code,
-            .recertifiable = recertifiable,
-        },
-        .work_spent = 0,
-    };
+    return Assessment.reject(.parsed, provenance, null, .{
+        .stage = stage,
+        .code = code,
+        .recertifiable = recertifiable,
+    }, 0);
 }
 
 /// Rebuild the inventory this process's sections produce, and fold it.
@@ -267,8 +260,8 @@ test "an artifact with no certificate is refused, not waved through" {
     }, pcc.policy.production);
 
     try testing.expect(!result.accepted());
-    try testing.expectEqual(pcc.ReasonCode.missing_required_section, result.rejection.?.code);
-    try testing.expect(result.rejection.?.recertifiable);
+    try testing.expectEqual(pcc.ReasonCode.missing_required_section, result.rejection().?.code);
+    try testing.expect(result.rejection().?.recertifiable);
 }
 
 test "a certificate that does not decode is refused at the decode stage" {
@@ -280,7 +273,7 @@ test "a certificate that does not decode is refused at the decode stage" {
     }, pcc.policy.production);
     try testing.expect(!result.accepted());
     // The graph rebuild runs first and refuses the empty module stream.
-    try testing.expect(result.rejection != null);
+    try testing.expect(result.rejection() != null);
 }
 
 test "the producer and the consumer cap policy resources at the same numbers" {

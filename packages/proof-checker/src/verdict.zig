@@ -391,49 +391,65 @@ pub const Rejection = struct {
 
 pub const PropertyVerdicts = struct {
     const count = @typeInfo(proof_system.Property).@"enum".fields.len;
-
-    comptime {
-        if (count > @bitSizeOf(u16))
-            @compileError("Property exceeds PropertyVerdicts' accepted bitset");
-    }
-
-    grades: [count]?AssuranceGrade = [_]?AssuranceGrade{null} ** count,
-    accepted_bits: u16 = 0,
+    pub const Entry = union(enum) {
+        none,
+        graded: AssuranceGrade,
+        accepted: AssuranceGrade,
+    };
+    entries: [count]Entry = [_]Entry{.none} ** count,
 
     fn slot(property: proof_system.Property) usize {
         return @intFromEnum(property) - 1;
     }
 
     pub fn gradeFor(self: PropertyVerdicts, property: proof_system.Property) ?AssuranceGrade {
-        return self.grades[slot(property)];
+        return switch (self.entries[slot(property)]) {
+            .none => null,
+            .graded, .accepted => |grade| grade,
+        };
     }
 
     pub fn accepted(self: PropertyVerdicts, property: proof_system.Property) bool {
-        return self.accepted_bits & (@as(u16, 1) << @intCast(slot(property))) != 0;
+        return self.entries[slot(property)] == .accepted;
     }
 
     pub fn recordGrade(self: *PropertyVerdicts, property: proof_system.Property, grade: AssuranceGrade) void {
-        self.grades[slot(property)] = grade;
+        self.entries[slot(property)] = switch (self.entries[slot(property)]) {
+            .accepted => .{ .accepted = grade },
+            .none, .graded => .{ .graded = grade },
+        };
     }
 
-    pub fn accept(self: *PropertyVerdicts, property: proof_system.Property) void {
-        self.accepted_bits |= @as(u16, 1) << @intCast(slot(property));
+    pub fn accept(self: *PropertyVerdicts, property: proof_system.Property, grade: AssuranceGrade) void {
+        self.entries[slot(property)] = .{ .accepted = grade };
     }
+};
+
+/// A refusal can stop at one of these three established stages.
+pub const Reached = union(enum) {
+    parsed,
+    integrity_verified,
+    proof_checked: ?AssuranceGrade,
+
+    pub fn semantic(self: Reached) SemanticState {
+        return switch (self) {
+            .parsed => .parsed,
+            .integrity_verified => .integrity_verified,
+            .proof_checked => .proof_checked,
+        };
+    }
+};
+
+pub const Outcome = union(enum) {
+    accepted: struct { grade: AssuranceGrade, development_only: bool },
+    rejected: struct { reached: Reached, rejection: Rejection, development_only: ?bool },
 };
 
 /// The full result of one acceptance run. Every field states work the consumer
 /// actually did.
 pub const Assessment = struct {
-    semantic: SemanticState,
+    outcome: Outcome,
     provenance: ProvenanceState,
-    /// The weakest edge used to reach `semantic`. Absent below `proof_checked`,
-    /// because nothing was graded yet.
-    grade: ?AssuranceGrade,
-    /// The artifact declared an ephemeral identity or an unpinned runtime
-    /// policy. Such an artifact can be checked, and can never be accepted for
-    /// production.
-    development_only: bool,
-    rejection: ?Rejection,
     /// Work units spent. Reported so a caller can see how close a certificate
     /// came to its budget.
     work_spent: u64,
@@ -454,21 +470,55 @@ pub const Assessment = struct {
     invariants: InvariantVerdicts = .{},
 
     pub fn accepted(self: Assessment) bool {
-        return self.rejection == null and self.semantic == .policy_accepted;
+        return self.outcome == .accepted;
+    }
+
+    pub fn semantic(self: Assessment) SemanticState {
+        return switch (self.outcome) {
+            .accepted => .policy_accepted,
+            .rejected => |failure| failure.reached.semantic(),
+        };
+    }
+
+    pub fn grade(self: Assessment) ?AssuranceGrade {
+        return switch (self.outcome) {
+            .accepted => |success| success.grade,
+            .rejected => |failure| switch (failure.reached) {
+                .parsed, .integrity_verified => null,
+                .proof_checked => |grade_value| grade_value,
+            },
+        };
+    }
+
+    pub fn rejection(self: Assessment) ?Rejection {
+        return switch (self.outcome) {
+            .accepted => null,
+            .rejected => |failure| failure.rejection,
+        };
+    }
+
+    /// Null means decoding stopped before the certificate identity was known.
+    pub fn developmentOnly(self: Assessment) ?bool {
+        return switch (self.outcome) {
+            .accepted => |success| success.development_only,
+            .rejected => |failure| failure.development_only,
+        };
     }
 
     pub fn reject(
-        state: SemanticState,
+        reached: Reached,
         provenance: ProvenanceState,
-        rejection: Rejection,
+        development_only: ?bool,
+        refusal: Rejection,
         work_spent: u64,
     ) Assessment {
         return .{
-            .semantic = state,
+            .outcome = .{ .rejected = .{
+                .reached = reached,
+                .rejection = refusal,
+                .development_only = development_only,
+            } },
             .provenance = provenance,
-            .grade = null,
-            .development_only = false,
-            .rejection = rejection,
             .work_spent = work_spent,
         };
     }
@@ -487,20 +537,26 @@ test "weakest edge dominates" {
 }
 
 test "a rejection is never an acceptance" {
-    const a = Assessment.reject(.parsed, .absent, .{
+    const a = Assessment.reject(.parsed, .absent, null, .{
         .stage = .decode,
         .code = .bad_magic,
         .recertifiable = true,
     }, 0);
     try std.testing.expect(!a.accepted());
-    try std.testing.expectEqual(@as(?AssuranceGrade, null), a.grade);
+    try std.testing.expectEqual(@as(?AssuranceGrade, null), a.grade());
+}
 
-    const contradictory = Assessment.reject(.policy_accepted, .absent, .{
-        .stage = .policy,
-        .code = .required_property_not_established,
-        .recertifiable = true,
-    }, 0);
-    try std.testing.expect(!contradictory.accepted());
+test "a property keeps its acceptance when its grade is updated" {
+    var properties: PropertyVerdicts = .{};
+    try std.testing.expectEqual(@as(?AssuranceGrade, null), properties.gradeFor(.response_total));
+    try std.testing.expect(!properties.accepted(.response_total));
+    properties.recordGrade(.response_total, .tested);
+    try std.testing.expectEqual(@as(?AssuranceGrade, .tested), properties.gradeFor(.response_total));
+    try std.testing.expect(!properties.accepted(.response_total));
+    properties.accept(.response_total, .tested);
+    properties.recordGrade(.response_total, .proved);
+    try std.testing.expectEqual(@as(?AssuranceGrade, .proved), properties.gradeFor(.response_total));
+    try std.testing.expect(properties.accepted(.response_total));
 }
 
 test "guard and invariant readiness require exact non-empty coverage" {

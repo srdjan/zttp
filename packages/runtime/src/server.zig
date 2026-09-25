@@ -2116,7 +2116,7 @@ pub const Server = struct {
         };
         if (self.proof_checked == null) {
             if (!builtin.is_test) {
-                if (assessment.rejection) |rejection| {
+                if (assessment.rejection()) |rejection| {
                     std.log.err(
                         "activation: proof acceptance failed at {s} ({s}); refusing to serve. Rebuild {s}resolve this.",
                         .{
@@ -4627,11 +4627,8 @@ test "a live swap drops the promotion the replaced artifact earned" {
 
     // Stand in for what an accepted certificate earns.
     server.proof_checked = try contract_runtime.promote(&server.contract.?, .{
-        .semantic = .policy_accepted,
+        .outcome = .{ .accepted = .{ .grade = .translation_validated, .development_only = false } },
         .provenance = .absent,
-        .grade = .translation_validated,
-        .development_only = false,
-        .rejection = null,
         .work_spent = 1,
     }, [_]u8{0} ** 32, null, null);
     try std.testing.expect(server.proof_checked != null);
@@ -4649,7 +4646,7 @@ test "a live swap drops the promotion the replaced artifact earned" {
     try std.testing.expect(server.proof_checked == null);
 }
 
-test "promotion refuses anything short of acceptance" {
+test "promotion refuses a policy rejection" {
     const allocator = std.testing.allocator;
     const contract_json = try stampedContractJsonForTest(allocator, "");
     defer allocator.free(contract_json);
@@ -4659,36 +4656,16 @@ test "promotion refuses anything short of acceptance" {
 
     // Checked but refused by policy.
     try std.testing.expect((try contract_runtime.promote(&validated, .{
-        .semantic = .proof_checked,
+        .outcome = .{ .rejected = .{
+            .reached = .{ .proof_checked = .trusted },
+            .rejection = .{
+                .stage = .policy,
+                .code = .grade_below_floor,
+                .recertifiable = true,
+            },
+            .development_only = false,
+        } },
         .provenance = .absent,
-        .grade = .trusted,
-        .development_only = false,
-        .rejection = .{
-            .stage = .policy,
-            .code = .grade_below_floor,
-            .recertifiable = true,
-        },
-        .work_spent = 1,
-    }, [_]u8{0} ** 32, null, null)) == null);
-
-    // Accepted, but with no grade to report. An acceptance that cannot say how
-    // strong it is does not get to drive anything.
-    try std.testing.expect((try contract_runtime.promote(&validated, .{
-        .semantic = .policy_accepted,
-        .provenance = .absent,
-        .grade = null,
-        .development_only = false,
-        .rejection = null,
-        .work_spent = 1,
-    }, [_]u8{0} ** 32, null, null)) == null);
-
-    // Integrity alone is not acceptance.
-    try std.testing.expect((try contract_runtime.promote(&validated, .{
-        .semantic = .integrity_verified,
-        .provenance = .trusted_origin,
-        .grade = null,
-        .development_only = false,
-        .rejection = null,
         .work_spent = 1,
     }, [_]u8{0} ** 32, null, null)) == null);
 }

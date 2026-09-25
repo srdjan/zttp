@@ -1,8 +1,8 @@
 # Review: rederiving the acceptance kernel (`packages/proof-checker`)
 
-Status: plan accepted 2026-09-25. Owner: this repository. Measured on 2026-09-24 against
-commit `dea0eddc`. Implemented so far: the trusted-node fix, the kernel build mode, and
-the removal of `rule_family_mismatch` (see "Owner decisions"). Phases 0 to 4 are not started.
+Status: implemented 2026-09-25. Owner: this repository. Measured on 2026-09-24 against
+commit `dea0eddc`. The trusted-node fix, the kernel build mode, the removal of
+`rule_family_mismatch`, and Phases 0 to 4 are committed. See "Results" at the end.
 
 ## Owner decisions (2026-09-25)
 
@@ -183,12 +183,12 @@ is proven by a test before the explicit one goes.
 
 ### Type-driven
 
-**T1. `Assessment` can hold contradictory states (`verdict.zig:457-506`).** It can represent
+**T1. Before Phase 4, `Assessment` could hold contradictory states (`verdict.zig:457-506`).** It could represent
 `policy_accepted` with a rejection (mutant V5 survives), `policy_accepted` with a null
 grade, a grade below `proof_checked`, and a stop below `policy_accepted` with no rejection.
-The kernel never produces these values, but the runtime pays to defend against them:
+The kernel never produced these values, but the runtime paid to defend against them:
 `contract_runtime.zig:428` has `grade orelse return null`, and `server.zig:4674-4694` tests
-both impossible shapes. Proposed shape:
+both impossible shapes. The initial proposed shape was:
 
 ```zig
 pub const Reached = union(enum) { parsed, integrity_verified, proof_checked: ?AssuranceGrade };
@@ -202,7 +202,13 @@ pub const Outcome = union(enum) {
 and `:1349` stop there without one. Nine construction sites outside the package change.
 Risk: medium, because this is a public API used by runtime and tools. `Assessment.reject`
 also hard-codes `development_only = false` (`verdict.zig:501`), a claim nothing checked. The
-new shape must carry that field honestly.
+new shape must carry that field honestly. The Phase 4 type uses an `Outcome`
+union. Its accepted member requires a grade and a declared development flag.
+Its rejected member requires a `Rejection`, a `Reached` value, and an optional
+development flag. The flag is null until certificate decoding returns an
+identity. A `proof_checked` rejection can have an optional grade. Provenance,
+work spent, property verdicts, disclosed edges, guard verdicts, and invariant
+verdicts stay on `Assessment` because both outcomes can report them.
 
 **T2. `rule_family_mismatch` has no reachable producer (`verdict.zig:206`).** The checks at
 `checker.zig:1237` and `:1250` re-test what `validEvidenceShape` (`:1412`) already refused.
@@ -224,15 +230,16 @@ explicitly. This deletes the two dead `orelse` branches in M8. It is included in
 `graph_member_out_of_order`. Give each function its own error set, and add
 `CountExceeded` to `push`.
 
-**T5. `invariant.Spec` carries states the decoder never produces (`invariant.zig:182-195`).**
-`schema: u16` admits schema 7, which `recordAt` (`:237`) treats as v1. `Spec.kind` is always
-`.balance_conservation_v1` and has no production reader. Use
-`Schema = enum(u16) { v1 = 1, v2 = 2 }` with a `kinds: union(Schema)` field, and drop
-`kind`. One external reader changes (`tools/src/invariant_config.zig:261`).
+**T5. Before Phase 4, `invariant.Spec` carried states the decoder never produced (`invariant.zig:182-195`).**
+`schema: u16` admitted schema 7, which `recordAt` (`:237`) treated as v1. `Spec.kind` was always
+`.balance_conservation_v1` and had no production reader. Phase 4 uses
+`Schema = enum(u16) { v1 = 1, v2 = 2 }` with a `kinds: union(Schema)` field and removes
+`kind`. The external reader in `tools/src/invariant_config.zig` reads the tag.
 
-**T6. `PropertyVerdicts` does not tie the accepted bit to the grade (`verdict.zig:428-453`).**
-`accept()` can set a bit whose grade slot is null. Use
-`[count]union(enum) { none, graded: G, accepted: G }`.
+**T6. Before Phase 4, `PropertyVerdicts` did not tie the accepted bit to the grade (`verdict.zig:428-453`).**
+`accept()` could set a bit whose grade slot was null. Phase 4 uses
+`[count]union(enum) { none, graded: G, accepted: G }`. Both public read methods
+retain their behavior for valid entries.
 
 **T7. `Rejection.stage` is independent of `code`.** `checker.zig:276-281` reports
 decode-block codes under `.limits`, and `else => .unknown_enum_member` swallows the rest of
@@ -469,3 +476,34 @@ Expected: the branch count may rise. Success means the compiler refuses the cont
 - Scope trap: do not rederive the producer side (`runtime/src/proof_certificate.zig`,
   `zts/src/endpoint.zig`, `tools/src/*_encoding.zig`) in the same series. Its drift gates are
   what judge the kernel change.
+
+## Results (2026-09-25)
+
+Measured with the same scratch AST walker as section 2. The walker counts top-level test helpers
+as production code, so the Phase 0 tests raised the starting count from 998 to 1066.
+
+| Measure | Before Phase 0 | After Phase 4 |
+|---|---|---|
+| Kernel tests | 186 | 279 |
+| Mutation kill rate, non-equivalent mutants | 80/204 (39%) | 248/248 (100%), 9 equivalent rows |
+| Decision points (walker, incl. test helpers) | 1066 | 900 |
+| Largest acceptance-function CC | 59 (`checkInvariantCoverage`) | 30 (`checkConfiguredInvariants`) |
+| `checkEvidence` CC | 46 | 19 |
+| `normalizeEndpoint` CC | 25 | 8 |
+
+Phase 1 gave most of the branch cut (1066 to 897). Phase 2 cut complexity, not branches (897 to
+895). Phase 4 added branches (to 900), as section 8 expected for a type-driven change. The plan's
+projected -219 branches assumed the checker draft; the measured Phase 2 cut was smaller.
+
+Gates added: `zig build test-proof-checker-mutants` (manual, about 100 s; the list is
+`packages/tools/src/proof_checker_mutants.zon`, read at run time), a reason-code census and higher
+floors in `scripts/check-proof-checker.sh`, and more forbidden patterns in the same script.
+
+Equivalence evidence: Phase 2 printed every `Assessment` from the kernel suite (196) and the ratchet
+corpus (4) before and after, and the traces were identical, `work_spent` included. Phase 3 compared
+the old and new endpoint normalizer on 800,015 generated inputs. In Phase 4 the traces differ only
+where the old `Assessment.reject` hard-coded `development_only = false` before an identity was
+decoded; the new type reports it as unknown.
+
+Not done: moving `scripts/check-residual-guards.sh` off Python, the `Section.get` budget, and the
+producer-side rederive. These are section 7 items outside Phases 0 to 4.

@@ -714,6 +714,23 @@ These are reported as distinct states, never collapsed into one word:
 | `policy_accepted` | The checked result meets this consumer's required properties, epochs, and minimum grades. |
 | Provenance | Orthogonal: `absent`, `unchecked`, `signature_verified`, or `trusted_origin`. It never raises or lowers a semantic state. |
 
+The Zig `Assessment.outcome` is either `accepted` or `rejected`. An accepted
+outcome has a grade and the certificate's development flag. A rejected outcome
+has a rejection, the stage it reached, and an optional development flag. The
+flag is absent when certificate decoding did not return an identity. A rejection
+at `proof_checked` can have a grade or no grade. A rejection at an earlier stage
+has no grade. Provenance, work spent, property verdicts, disclosed edge count,
+guard verdicts, and invariant verdicts remain on `Assessment` because a
+rejection can report work completed before it stopped.
+
+Each property verdict is one of `none`, `graded`, or `accepted`. The latter two
+carry a grade. An accepted property therefore always has a grade. The public
+`gradeFor` and `accepted` methods report these values.
+
+The decoded invariant `Spec` has a schema-tagged `kinds` field. Schema 1 names
+its one kind in the field. Schema 2 reads the kind records from the document.
+This in-memory type does not change the invariant wire bytes or digests.
+
 A signature says who signed. It does not say what was signed is safe. An
 unsigned artifact whose certificate this consumer accepts is accepted; a signed
 artifact whose certificate fails is not.

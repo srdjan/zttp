@@ -2263,15 +2263,15 @@ test "a real compile reaches policy acceptance, and one changed byte does not" {
         .observed_graph = observed,
         .scratch = scratch,
     }, pcc.policy.production);
-    if (accepted.rejection) |rejection| {
+    if (accepted.rejection()) |rejection| {
         std.debug.print(
             "unexpected rejection: {s} / {s}\n",
             .{ rejection.stage.name(), rejection.code.text() },
         );
         return error.TestUnexpectedResult;
     }
-    try std.testing.expectEqual(pcc.SemanticState.policy_accepted, accepted.semantic);
-    try std.testing.expect(accepted.grade != null);
+    try std.testing.expectEqual(pcc.SemanticState.policy_accepted, accepted.semantic());
+    try std.testing.expect(accepted.grade() != null);
 
     // One byte of the deployed bytecode, changed. The certificate is untouched
     // and internally valid; it no longer describes what would run.
@@ -2296,7 +2296,7 @@ test "a real compile reaches policy acceptance, and one changed byte does not" {
         .scratch = scratch,
     }, pcc.policy.production);
     try std.testing.expect(!rejected.accepted());
-    try std.testing.expectEqual(pcc.verdict.Stage.artifact_binding, rejected.rejection.?.stage);
+    try std.testing.expectEqual(pcc.verdict.Stage.artifact_binding, rejected.rejection().?.stage);
 }
 
 fn acceptCompiledSource(
@@ -2397,7 +2397,7 @@ test "real guarded artifacts reach consumer acceptance in expression positions" 
     };
     for (guarded_sources) |source| {
         const result = try acceptCompiledSource(allocator, source, policy);
-        if (result.rejection) |rejection| {
+        if (result.rejection()) |rejection| {
             std.debug.print(
                 "guarded artifact rejected at {s} ({s}): {any}\n",
                 .{ rejection.stage.name(), rejection.code.text(), rejection },
@@ -2408,10 +2408,13 @@ test "real guarded artifacts reach consumer acceptance in expression positions" 
         try std.testing.expectEqual(@as(u32, 1), result.guards.required);
         try std.testing.expectEqual(@as(u32, 1), result.guards.covered);
         try std.testing.expectEqual(@as(u8, 1), result.guards.kinds);
-        try std.testing.expectEqual(
-            static_result.properties.accepted_bits,
-            result.properties.accepted_bits,
-        );
+        inline for (@typeInfo(pcc.proof_system.Property).@"enum".fields) |field| {
+            const property: pcc.proof_system.Property = @enumFromInt(field.value);
+            try std.testing.expectEqual(
+                static_result.properties.accepted(property),
+                result.properties.accepted(property),
+            );
+        }
     }
 }
 
@@ -2692,7 +2695,7 @@ fn loadDeclaredArtifactForSource(
 }
 
 fn expectAccepted(assessment: pcc.Assessment) !void {
-    if (assessment.rejection) |rejection| {
+    if (assessment.rejection()) |rejection| {
         std.debug.print(
             "unexpected rejection: {s} / {s}\n",
             .{ rejection.stage.name(), rejection.code.text() },
@@ -2703,7 +2706,7 @@ fn expectAccepted(assessment: pcc.Assessment) !void {
 }
 
 fn expectRefusedAt(assessment: pcc.Assessment, stage: pcc.verdict.Stage, code: pcc.ReasonCode) !void {
-    const rejection = assessment.rejection orelse return error.TestUnexpectedResult;
+    const rejection = assessment.rejection() orelse return error.TestUnexpectedResult;
     std.testing.expectEqual(code, rejection.code) catch |err| {
         std.debug.print("refused with {s} at {s}\n", .{ rejection.code.text(), rejection.stage.name() });
         return err;

@@ -169,13 +169,14 @@ pub const RuntimeCapabilityPolicyInput = struct {
 };
 
 fn rejectAt(
-    state: SemanticState,
+    reached: verdict.Reached,
     provenance: verdict.ProvenanceState,
+    development_only: ?bool,
     budget: Budget,
     limits: limits_mod.Limits,
     rejection: Rejection,
 ) Assessment {
-    return Assessment.reject(state, provenance, rejection, budget.spent(limits));
+    return Assessment.reject(reached, provenance, development_only, rejection, budget.spent(limits));
 }
 
 /// Run semantic acceptance over one certificate and one recomputed inventory.
@@ -184,7 +185,7 @@ pub fn check(inputs: Inputs, policy: Policy) Assessment {
     const limits = policy.limits;
 
     policy.validate() catch |err| {
-        return rejectAt(.parsed, inputs.provenance, budget, limits, .{
+        return rejectAt(.parsed, inputs.provenance, null, budget, limits, .{
             .stage = .policy,
             .code = switch (err) {
                 error.EmptyRequirementSet => .policy_requires_nothing,
@@ -204,7 +205,7 @@ pub fn check(inputs: Inputs, policy: Policy) Assessment {
         limits,
         &budget,
     ) catch |err| {
-        return rejectAt(.parsed, inputs.provenance, budget, limits, .{
+        return rejectAt(.parsed, inputs.provenance, null, budget, limits, .{
             .stage = if (err == error.WorkBudgetExhausted) .limits else .decode,
             .code = cert_mod.reasonFor(err),
             .recertifiable = true,
@@ -212,7 +213,7 @@ pub fn check(inputs: Inputs, policy: Policy) Assessment {
     };
 
     if (!policy.acceptsProofSystem(certificate.proof_system)) {
-        return rejectAt(.parsed, inputs.provenance, budget, limits, .{
+        return rejectAt(.parsed, inputs.provenance, certificate.identity.development, budget, limits, .{
             .stage = .proof_system_identity,
             .code = .unsupported_proof_system,
             .actual = .{ .scalar = @intFromEnum(certificate.proof_system) },
@@ -220,7 +221,7 @@ pub fn check(inputs: Inputs, policy: Policy) Assessment {
         });
     }
     if (!policy.acceptsEpoch(certificate.semantics_epoch)) {
-        return rejectAt(.parsed, inputs.provenance, budget, limits, .{
+        return rejectAt(.parsed, inputs.provenance, certificate.identity.development, budget, limits, .{
             .stage = .proof_system_identity,
             .code = .unsupported_semantics_epoch,
             .actual = .{ .scalar = certificate.semantics_epoch },
@@ -229,21 +230,21 @@ pub fn check(inputs: Inputs, policy: Policy) Assessment {
     }
 
     const certificate_digest = cert_mod.commitmentDigest(inputs.certificate, certificate) catch |err| {
-        return rejectAt(.parsed, inputs.provenance, budget, limits, .{
+        return rejectAt(.parsed, inputs.provenance, certificate.identity.development, budget, limits, .{
             .stage = .decode,
             .code = cert_mod.reasonFor(err),
             .recertifiable = true,
         });
     };
     if (bindExecutableGraph(certificate, certificate_digest, inputs.observed_graph, &budget)) |rejection| {
-        return rejectAt(.parsed, inputs.provenance, budget, limits, rejection);
+        return rejectAt(.parsed, inputs.provenance, certificate.identity.development, budget, limits, rejection);
     }
 
     // Everything above establishes that the certificate describes exactly the
     // artifact in hand. Nothing above establishes what the artifact does.
 
     if (inputs.scratch.len < scratchBytes(limits)) {
-        return rejectAt(.integrity_verified, inputs.provenance, budget, limits, .{
+        return rejectAt(.integrity_verified, inputs.provenance, certificate.identity.development, budget, limits, .{
             .stage = .limits,
             .code = .work_budget_exhausted,
             .recertifiable = false,
@@ -272,7 +273,7 @@ pub fn check(inputs: Inputs, policy: Policy) Assessment {
     };
 
     const outcome = session.run() catch |err| {
-        return rejectAt(.integrity_verified, inputs.provenance, budget, limits, .{
+        return rejectAt(.integrity_verified, inputs.provenance, certificate.identity.development, budget, limits, .{
             .stage = .limits,
             .code = switch (err) {
                 error.WorkBudgetExhausted => .work_budget_exhausted,
@@ -288,11 +289,17 @@ pub fn check(inputs: Inputs, policy: Policy) Assessment {
         // consumer reached. "Checked to here, and refused for this reason" is
         // more use to an operator than a bare refusal.
         return .{
-            .semantic = outcome.state,
+            .outcome = .{ .rejected = .{
+                .reached = switch (outcome.state) {
+                    .parsed => .parsed,
+                    .integrity_verified => .integrity_verified,
+                    .proof_checked => .{ .proof_checked = outcome.grade },
+                    .policy_accepted => unreachable,
+                },
+                .rejection = rejection,
+                .development_only = certificate.identity.development,
+            } },
             .provenance = inputs.provenance,
-            .grade = outcome.grade,
-            .development_only = certificate.identity.development,
-            .rejection = rejection,
             .work_spent = budget.spent(limits),
             .guards = outcome.guards,
             .invariants = outcome.invariants,
@@ -302,11 +309,11 @@ pub fn check(inputs: Inputs, policy: Policy) Assessment {
     }
 
     return .{
-        .semantic = outcome.state,
+        .outcome = .{ .accepted = .{
+            .grade = outcome.grade.?,
+            .development_only = certificate.identity.development,
+        } },
         .provenance = inputs.provenance,
-        .grade = outcome.grade,
-        .development_only = certificate.identity.development,
-        .rejection = null,
         .work_spent = budget.spent(limits),
         .disclosed_edges = outcome.disclosed_edges,
         .properties = outcome.properties,
@@ -1312,7 +1319,7 @@ const Session = struct {
                 verdict.AssuranceGrade.weakest(current, grade)
             else
                 grade;
-            property_verdicts.accept(requirement.property);
+            property_verdicts.accept(requirement.property, grade);
         }
 
         if (self.certificate.identity.development and !self.policy.allow_development) {
@@ -1532,9 +1539,9 @@ fn checkGraphMemberDigest(
 const testing = std.testing;
 
 fn expectAt(result: Assessment, stage: verdict.Stage, code: verdict.ReasonCode) !void {
-    try testing.expect(result.rejection != null);
-    try testing.expectEqual(stage, result.rejection.?.stage);
-    try testing.expectEqual(code, result.rejection.?.code);
+    try testing.expect(result.rejection() != null);
+    try testing.expectEqual(stage, result.rejection().?.stage);
+    try testing.expectEqual(code, result.rejection().?.code);
 }
 
 /// Bind test parts with the same public encoder and root calculation as a producer.
@@ -2134,7 +2141,7 @@ fn buildBalanceOnlyInvariantFixtureFor(spec: []const u8) !InvariantTestFixture {
 test "a configured invariant is checked independently from property and guard verdicts" {
     var fixture = try buildInvariantFixture();
     const result = check(fixture.inputs(), policy_mod.production);
-    if (result.rejection) |rejection| {
+    if (result.rejection()) |rejection| {
         std.debug.print("unexpected invariant rejection: {s} / {s}\n", .{
             rejection.stage.name(),
             rejection.code.text(),
@@ -2158,7 +2165,7 @@ test "a schema 2 invariant specification is accepted and reports the same kind b
     // be the one this document hashes to under its own domain.
     var fixture = try buildInvariantFixtureFor(test_invariant_spec_v2);
     const result = check(fixture.inputs(), policy_mod.production);
-    if (result.rejection) |rejection| {
+    if (result.rejection()) |rejection| {
         std.debug.print("unexpected schema 2 invariant rejection: {s} / {s}\n", .{
             rejection.stage.name(),
             rejection.code.text(),
@@ -2188,10 +2195,10 @@ test "a schema 2 certificate bound to the schema 1 digest of the same ledger is 
     }
     try fixture.encodeWith(&fixture.invariant_witnesses);
     const result = check(fixture.inputs(), policy_mod.production);
-    try testing.expectEqual(verdict.Stage.invariant_coverage, result.rejection.?.stage);
+    try testing.expectEqual(verdict.Stage.invariant_coverage, result.rejection().?.stage);
     try testing.expectEqual(
         verdict.ReasonCode.invariant_spec_digest_mismatch,
-        result.rejection.?.code,
+        result.rejection().?.code,
     );
 }
 
@@ -2199,8 +2206,8 @@ test "missing and extra invariant witnesses reject" {
     var missing = try buildInvariantFixture();
     try missing.encodeWith(&.{});
     var result = check(missing.inputs(), policy_mod.production);
-    try testing.expectEqual(verdict.Stage.invariant_coverage, result.rejection.?.stage);
-    try testing.expectEqual(verdict.ReasonCode.invariant_member_missing, result.rejection.?.code);
+    try testing.expectEqual(verdict.Stage.invariant_coverage, result.rejection().?.stage);
+    try testing.expectEqual(verdict.ReasonCode.invariant_member_missing, result.rejection().?.code);
 
     var extra = try buildInvariantFixture();
     const witnesses = [_]cert_mod.InvariantWitness{
@@ -2218,7 +2225,7 @@ test "missing and extra invariant witnesses reject" {
     };
     try extra.encodeWith(&witnesses);
     result = check(extra.inputs(), policy_mod.production);
-    try testing.expectEqual(verdict.ReasonCode.invariant_member_extra, result.rejection.?.code);
+    try testing.expectEqual(verdict.ReasonCode.invariant_member_extra, result.rejection().?.code);
 }
 
 test "invariant call must lie within its full expression emission" {
@@ -2234,7 +2241,7 @@ test "invariant call must lie within its full expression emission" {
         fixture.observed[0].code_offset = offset;
         try fixture.encodeWith(&fixture.invariant_witnesses);
         const result = check(fixture.inputs(), policy_mod.production);
-        try testing.expectEqual(verdict.ReasonCode.invariant_translation_missing, result.rejection.?.code);
+        try testing.expectEqual(verdict.ReasonCode.invariant_translation_missing, result.rejection().?.code);
     }
 }
 
@@ -2248,14 +2255,14 @@ test "a forged invariant operation cannot borrow a real call site" {
     try fixture.encodeWith(&forged);
 
     const result = check(fixture.inputs(), policy_mod.production);
-    try testing.expectEqual(verdict.Stage.invariant_coverage, result.rejection.?.stage);
-    try testing.expectEqual(verdict.ReasonCode.invariant_operation_mismatch, result.rejection.?.code);
+    try testing.expectEqual(verdict.Stage.invariant_coverage, result.rejection().?.stage);
+    try testing.expectEqual(verdict.ReasonCode.invariant_operation_mismatch, result.rejection().?.code);
 }
 
 test "a balance-only artifact is covered and reports vacuous write applicability" {
     var fixture = try buildBalanceOnlyInvariantFixtureFor(test_invariant_spec);
     const result = check(fixture.inputs(), policy_mod.production);
-    if (result.rejection) |rejection| {
+    if (result.rejection()) |rejection| {
         std.debug.print("unexpected balance-only rejection: {s} / {s}\n", .{
             rejection.stage.name(),
             rejection.code.text(),
@@ -2288,7 +2295,7 @@ test "a balance-only artifact is covered and reports vacuous write applicability
 test "a post-bearing artifact reports covered write applicability for every declared kind" {
     var fixture = try buildInvariantFixtureFor(test_invariant_spec_two_kinds);
     const result = check(fixture.inputs(), policy_mod.production);
-    if (result.rejection) |rejection| {
+    if (result.rejection()) |rejection| {
         std.debug.print("unexpected two-kind rejection: {s} / {s}\n", .{
             rejection.stage.name(),
             rejection.code.text(),
@@ -2332,10 +2339,10 @@ test "a configured artifact exhibiting no ledger operation rejects with invarian
     var inputs = fixture.inputs();
     inputs.observed_invariant_operations = &.{};
     const result = check(inputs, policy_mod.production);
-    try testing.expectEqual(verdict.Stage.invariant_coverage, result.rejection.?.stage);
+    try testing.expectEqual(verdict.Stage.invariant_coverage, result.rejection().?.stage);
     try testing.expectEqual(
         verdict.ReasonCode.invariant_operation_required,
-        result.rejection.?.code,
+        result.rejection().?.code,
     );
     // A rejected artifact reports no applicability at all. Vacuity is a report
     // about an accepted artifact, never a softer landing for a refused one.
@@ -2352,8 +2359,8 @@ test "a declared write absent from independent observation rejects rather than r
     var unobserved_inputs = unobserved.inputs();
     unobserved_inputs.observed_invariant_operations = &.{};
     var result = check(unobserved_inputs, policy_mod.production);
-    try testing.expectEqual(verdict.Stage.invariant_coverage, result.rejection.?.stage);
-    try testing.expectEqual(verdict.ReasonCode.invariant_member_extra, result.rejection.?.code);
+    try testing.expectEqual(verdict.Stage.invariant_coverage, result.rejection().?.stage);
+    try testing.expectEqual(verdict.ReasonCode.invariant_member_extra, result.rejection().?.code);
     try testing.expectEqual(
         verdict.WriteApplicability.not_applicable,
         result.invariants.writeApplicability(),
@@ -2364,7 +2371,7 @@ test "a declared write absent from independent observation rejects rather than r
     var unwitnessed = try buildInvariantFixture();
     try unwitnessed.encodeWith(&.{});
     result = check(unwitnessed.inputs(), policy_mod.production);
-    try testing.expectEqual(verdict.ReasonCode.invariant_member_missing, result.rejection.?.code);
+    try testing.expectEqual(verdict.ReasonCode.invariant_member_missing, result.rejection().?.code);
     try testing.expectEqual(
         verdict.WriteApplicability.not_applicable,
         result.invariants.writeApplicability(),
@@ -2378,7 +2385,7 @@ test "a declared write absent from independent observation rejects rather than r
     forged.invariant_witnesses[0].impl_id = invariant.catalog[1].impl_id;
     try forged.encodeWith(&forged.invariant_witnesses);
     result = check(forged.inputs(), policy_mod.production);
-    try testing.expectEqual(verdict.ReasonCode.invariant_observed_mismatch, result.rejection.?.code);
+    try testing.expectEqual(verdict.ReasonCode.invariant_observed_mismatch, result.rejection().?.code);
     try testing.expectEqual(
         verdict.WriteApplicability.not_applicable,
         result.invariants.writeApplicability(),
@@ -2392,10 +2399,10 @@ test "tampered invariant specification bytes reject before coverage" {
     var inputs = fixture.inputs();
     inputs.invariant_spec = &tampered;
     const result = check(inputs, policy_mod.production);
-    try testing.expectEqual(verdict.ReasonCode.invariant_spec_digest_mismatch, result.rejection.?.code);
-    try testing.expectEqual(@as(std.meta.Tag(verdict.Subject), .none), std.meta.activeTag(result.rejection.?.subject));
+    try testing.expectEqual(verdict.ReasonCode.invariant_spec_digest_mismatch, result.rejection().?.code);
+    try testing.expectEqual(@as(std.meta.Tag(verdict.Subject), .none), std.meta.activeTag(result.rejection().?.subject));
     const expected_digest = invariant.digest(test_invariant_spec);
-    try testing.expectEqualSlices(u8, &expected_digest, &result.rejection.?.expected.?.digest);
+    try testing.expectEqualSlices(u8, &expected_digest, &result.rejection().?.expected.?.digest);
 }
 
 test "invariant coverage refuses observations beyond the configured limit" {
@@ -2458,7 +2465,7 @@ test "an unconfigured invariant refuses invariant graph members" {
     inputs.observed_invariant_operations = &.{};
     const result = check(inputs, policy_mod.production);
     try expectAt(result, .invariant_coverage, .invariant_spec_missing);
-    try testing.expectEqual(@as(std.meta.Tag(verdict.Subject), .graph_member), std.meta.activeTag(result.rejection.?.subject));
+    try testing.expectEqual(@as(std.meta.Tag(verdict.Subject), .graph_member), std.meta.activeTag(result.rejection().?.subject));
 }
 
 test "an unconfigured invariant refuses a ledger call in the IR" {
@@ -2511,8 +2518,8 @@ test "duplicate independent observations reject before witness comparison" {
     inputs.observed_invariant_operations = &observed;
     const result = check(inputs, policy_mod.production);
     try expectAt(result, .invariant_coverage, .invariant_observed_mismatch);
-    try testing.expectEqual(@as(std.meta.Tag(verdict.Subject), .code_offset), std.meta.activeTag(result.rejection.?.subject));
-    try testing.expectEqual(@as(u32, 2), result.rejection.?.subject.code_offset);
+    try testing.expectEqual(@as(std.meta.Tag(verdict.Subject), .code_offset), std.meta.activeTag(result.rejection().?.subject));
+    try testing.expectEqual(@as(u32, 2), result.rejection().?.subject.code_offset);
 }
 
 test "an invariant witness cannot use a jump as its emission" {
@@ -2558,8 +2565,8 @@ test "a second ledger call needs a witness when witness and observation counts a
     fixture.len = try encodeBoundTestParts(&fixture.buffer, parts, &fixture.members);
     const result = check(fixture.inputs(), policy_mod.production);
     try expectAt(result, .invariant_coverage, .invariant_member_missing);
-    try testing.expectEqual(@as(std.meta.Tag(verdict.Subject), .ir_node), std.meta.activeTag(result.rejection.?.subject));
-    try testing.expectEqual(@as(u32, 3), result.rejection.?.subject.ir_node);
+    try testing.expectEqual(@as(std.meta.Tag(verdict.Subject), .ir_node), std.meta.activeTag(result.rejection().?.subject));
+    try testing.expectEqual(@as(u32, 3), result.rejection().?.subject.ir_node);
 }
 
 test "an invariant specification that cannot decode rejects" {
@@ -2607,8 +2614,8 @@ test "an opcode inventory edge may name an id past the proof IR" {
     fixture.trusted[0].member_id = @intCast(fixture.ir.len + 7);
     try fixture.encode();
     const result = check(fixture.inputs(), policy_mod.production);
-    try testing.expect(result.rejection == null);
-    try testing.expectEqual(SemanticState.policy_accepted, result.semantic);
+    try testing.expect(result.rejection() == null);
+    try testing.expectEqual(SemanticState.policy_accepted, result.semantic());
 }
 
 test "invariant adapter, operation, sink, and implementation identities reject" {
@@ -2640,14 +2647,14 @@ test "a guarded artifact is accepted, and its guards are counted apart from its 
     var fixture = try test_support.buildGuarded();
     const result = check(fixture.inputs(), policy_mod.production);
 
-    if (result.rejection) |rejection| {
+    if (result.rejection()) |rejection| {
         std.debug.print(
             "unexpected rejection: {s} / {s}\n",
             .{ rejection.stage.name(), rejection.code.text() },
         );
         return error.TestUnexpectedResult;
     }
-    try testing.expectEqual(SemanticState.policy_accepted, result.semantic);
+    try testing.expectEqual(SemanticState.policy_accepted, result.semantic());
     try testing.expectEqual(@as(u32, 1), result.guards.required);
     try testing.expectEqual(@as(u32, 1), result.guards.covered);
     try testing.expect(result.guards.ready());
@@ -2656,7 +2663,7 @@ test "a guarded artifact is accepted, and its guards are counted apart from its 
     // A covered guard is not a discharged property. Nothing about the guard
     // appears in the property verdicts, and the grade is still the weakest
     // static edge.
-    try testing.expectEqual(@as(?verdict.AssuranceGrade, .tested), result.grade);
+    try testing.expectEqual(@as(?verdict.AssuranceGrade, .tested), result.grade());
     inline for (@typeInfo(ps.Property).@"enum".fields) |field| {
         const property: ps.Property = @enumFromInt(field.value);
         try testing.expectEqual(@as(?verdict.AssuranceGrade, .tested), result.properties.gradeFor(property));
@@ -2679,7 +2686,7 @@ test "the immediate predecessor proof system is refused at decode" {
     const result = check(fixture.inputs(), policy_mod.production);
     try testing.expectEqual(
         verdict.ReasonCode.unknown_enum_member,
-        result.rejection.?.code,
+        result.rejection().?.code,
     );
 }
 
@@ -2694,8 +2701,8 @@ test "an omitted, extra, duplicated, or reordered guard rejects" {
     parts.graph = &missing.members;
     try encodeGuardedParts(&missing, parts);
     var result = check(missing.inputs(), policy_mod.production);
-    try testing.expectEqual(verdict.Stage.guard_coverage, result.rejection.?.stage);
-    try testing.expectEqual(verdict.ReasonCode.guard_member_missing, result.rejection.?.code);
+    try testing.expectEqual(verdict.Stage.guard_coverage, result.rejection().?.stage);
+    try testing.expectEqual(verdict.ReasonCode.guard_member_missing, result.rejection().?.code);
 
     var extra = try test_support.buildGuarded();
     const two = [_]cert_mod.ResidualObligation{
@@ -2718,7 +2725,7 @@ test "an omitted, extra, duplicated, or reordered guard rejects" {
     extra_parts.graph = &extra.members;
     try encodeGuardedParts(&extra, extra_parts);
     result = check(extra.inputs(), policy_mod.production);
-    try testing.expectEqual(verdict.ReasonCode.guard_member_extra, result.rejection.?.code);
+    try testing.expectEqual(verdict.ReasonCode.guard_member_extra, result.rejection().?.code);
 
     var duplicate = try test_support.buildGuarded();
     const two_calls = [_]cert_mod.IrNode{
@@ -2764,8 +2771,8 @@ test "current behavior accepts two residual-plan graph members with a nonzero or
     var inputs = fixture.inputs();
     inputs.observed_graph = &members;
     const result = check(inputs, policy_mod.production);
-    try testing.expectEqual(SemanticState.policy_accepted, result.semantic);
-    try testing.expect(result.rejection == null);
+    try testing.expectEqual(SemanticState.policy_accepted, result.semantic());
+    try testing.expect(result.rejection() == null);
 
     // Both certificates add one graph record. The residual member scan adds
     // no work beyond the record decoding and graph binding shared by both.
@@ -2778,8 +2785,8 @@ test "current behavior accepts two residual-plan graph members with a nonzero or
     var ordinary_inputs = ordinary.inputs();
     ordinary_inputs.observed_graph = &ordinary_members;
     const ordinary_result = check(ordinary_inputs, policy_mod.production);
-    try testing.expectEqual(SemanticState.policy_accepted, ordinary_result.semantic);
-    try testing.expect(ordinary_result.rejection == null);
+    try testing.expectEqual(SemanticState.policy_accepted, ordinary_result.semantic());
+    try testing.expect(ordinary_result.rejection() == null);
     try testing.expectEqual(ordinary_result.work_spent, result.work_spent);
 }
 
@@ -2790,8 +2797,8 @@ test "current behavior skips rewrite checks when translation is empty" {
     parts.rewrites = &invalid;
     try encodeGuardedParts(&fixture, parts);
     const result = check(fixture.inputs(), policy_mod.production);
-    try testing.expectEqual(SemanticState.policy_accepted, result.semantic);
-    try testing.expect(result.rejection == null);
+    try testing.expectEqual(SemanticState.policy_accepted, result.semantic());
+    try testing.expect(result.rejection() == null);
 }
 
 test "a guard that disagrees with the consumer's catalog rejects on every field" {
@@ -2838,14 +2845,14 @@ test "a guard that disagrees with the consumer's catalog rejects on every field"
         case.apply(&fixture.residual_plan[0]);
         try fixture.encode();
         const result = check(fixture.inputs(), policy_mod.production);
-        testing.expectEqual(case.code, result.rejection.?.code) catch |err| {
+        testing.expectEqual(case.code, result.rejection().?.code) catch |err| {
             std.debug.print("guard '{s}' mismatch was not refused as expected\n", .{case.name});
             return err;
         };
-        try testing.expectEqual(verdict.Stage.guard_coverage, result.rejection.?.stage);
+        try testing.expectEqual(verdict.Stage.guard_coverage, result.rejection().?.stage);
         if (case.code == .guard_impl_identity_mismatch) {
-            try testing.expectEqual(@as(u64, residual.guard_impl.env_read_v1), result.rejection.?.expected.?.scalar);
-            try testing.expectEqual(@as(u64, 99), result.rejection.?.actual.?.scalar);
+            try testing.expectEqual(@as(u64, residual.guard_impl.env_read_v1), result.rejection().?.expected.?.scalar);
+            try testing.expectEqual(@as(u64, 99), result.rejection().?.actual.?.scalar);
         }
     }
 }
@@ -2855,7 +2862,7 @@ test "a guarded call naming a catalog row that does not exist rejects" {
     fixture.ir[2].aux = @intCast(residual.catalog.len);
     try fixture.encode();
     const result = check(fixture.inputs(), policy_mod.production);
-    try testing.expectEqual(verdict.ReasonCode.guard_operation_unknown, result.rejection.?.code);
+    try testing.expectEqual(verdict.ReasonCode.guard_operation_unknown, result.rejection().?.code);
 }
 
 test "a fully consistent SQL guard remains disabled" {
@@ -2876,8 +2883,8 @@ test "a fully consistent SQL guard remains disabled" {
     try fixture.encode();
 
     const result = check(fixture.inputs(), policy_mod.production);
-    try testing.expectEqual(verdict.Stage.guard_coverage, result.rejection.?.stage);
-    try testing.expectEqual(verdict.ReasonCode.guard_family_disabled, result.rejection.?.code);
+    try testing.expectEqual(verdict.Stage.guard_coverage, result.rejection().?.stage);
+    try testing.expectEqual(verdict.ReasonCode.guard_family_disabled, result.rejection().?.code);
 }
 
 test "a guarded operation with no configured category rejects" {
@@ -2899,7 +2906,7 @@ test "a guarded operation with no configured category rejects" {
     const result = check(fixture.inputs(), policy_mod.production);
     try testing.expectEqual(
         verdict.ReasonCode.guard_category_not_configured,
-        result.rejection.?.code,
+        result.rejection().?.code,
     );
 }
 
@@ -2908,7 +2915,7 @@ test "a guarded artifact with no policy bytes rejects rather than assuming any" 
     var inputs = fixture.inputs();
     inputs.runtime_policy = null;
     const result = check(inputs, policy_mod.production);
-    try testing.expectEqual(verdict.ReasonCode.runtime_policy_missing, result.rejection.?.code);
+    try testing.expectEqual(verdict.ReasonCode.runtime_policy_missing, result.rejection().?.code);
 }
 
 test "policy bytes that do not hash to the committed digest reject" {
@@ -2921,7 +2928,7 @@ test "policy bytes that do not hash to the committed digest reject" {
     const result = check(inputs, policy_mod.production);
     try testing.expectEqual(
         verdict.ReasonCode.runtime_policy_undecodable,
-        result.rejection.?.code,
+        result.rejection().?.code,
     );
 }
 
@@ -2937,9 +2944,9 @@ test "a residual plan that is not the one the identity names rejects" {
     const result = check(fixture.inputs(), policy_mod.production);
     try testing.expectEqual(
         verdict.ReasonCode.residual_plan_digest_mismatch,
-        result.rejection.?.code,
+        result.rejection().?.code,
     );
-    try testing.expectEqual(@as(std.meta.Tag(verdict.Subject), .none), std.meta.activeTag(result.rejection.?.subject));
+    try testing.expectEqual(@as(std.meta.Tag(verdict.Subject), .none), std.meta.activeTag(result.rejection().?.subject));
 }
 
 test "a residual-plan graph member must name the actual plan" {
@@ -2951,7 +2958,7 @@ test "a residual-plan graph member must name the actual plan" {
     try encodeGuardedParts(&fixture, parts);
     const result = check(fixture.inputs(), policy_mod.production);
     try expectAt(result, .guard_coverage, .residual_plan_digest_mismatch);
-    try testing.expectEqual(@as(std.meta.Tag(verdict.Subject), .graph_member), std.meta.activeTag(result.rejection.?.subject));
+    try testing.expectEqual(@as(std.meta.Tag(verdict.Subject), .graph_member), std.meta.activeTag(result.rejection().?.subject));
 }
 
 test "the immediate predecessor schema is refused by production" {
@@ -2960,7 +2967,7 @@ test "the immediate predecessor schema is refused by production" {
     const result = check(fixture.inputs(), policy_mod.production);
     try testing.expectEqual(
         verdict.ReasonCode.unsupported_schema_version,
-        result.rejection.?.code,
+        result.rejection().?.code,
     );
 }
 
@@ -3027,23 +3034,23 @@ test "translation cannot omit its trusted opcode dependency" {
 
     const result = check(fixture.inputs(), policy_mod.production);
     try testing.expect(!result.accepted());
-    try testing.expectEqual(verdict.Stage.evidence_check, result.rejection.?.stage);
-    try testing.expectEqual(verdict.ReasonCode.trusted_edge_undeclared, result.rejection.?.code);
+    try testing.expectEqual(verdict.Stage.evidence_check, result.rejection().?.stage);
+    try testing.expectEqual(verdict.ReasonCode.trusted_edge_undeclared, result.rejection().?.code);
 }
 
 test "a matching certificate and inventory reach policy acceptance" {
     var fixture = try test_support.build();
     const result = check(fixture.inputs(), policy_mod.production);
 
-    if (result.rejection) |rejection| {
+    if (result.rejection()) |rejection| {
         std.debug.print("unexpected rejection: {s} / {s}\n", .{ rejection.stage.name(), rejection.code.text() });
         return error.TestUnexpectedResult;
     }
-    try testing.expectEqual(SemanticState.policy_accepted, result.semantic);
+    try testing.expectEqual(SemanticState.policy_accepted, result.semantic());
     try testing.expect(result.accepted());
     // The opcode relation under the translation witnesses is still trusted, so
     // it is the honest weakest edge for the accepted theorem chain.
-    try testing.expectEqual(@as(?verdict.AssuranceGrade, .trusted), result.grade);
+    try testing.expectEqual(@as(?verdict.AssuranceGrade, .trusted), result.grade());
     try testing.expect(result.properties.accepted(.no_secret_leakage));
     try testing.expect(!result.properties.accepted(.read_only));
     try testing.expectEqual(@as(?verdict.AssuranceGrade, .tested), result.properties.gradeFor(.read_only));
@@ -3058,8 +3065,8 @@ test "a policy that requires nothing is refused before anything is read" {
         .required = &.{},
     };
     const result = check(fixture.inputs(), empty);
-    try testing.expectEqual(verdict.ReasonCode.policy_requires_nothing, result.rejection.?.code);
-    try testing.expect(!result.rejection.?.recertifiable);
+    try testing.expectEqual(verdict.ReasonCode.policy_requires_nothing, result.rejection().?.code);
+    try testing.expect(!result.rejection().?.recertifiable);
 }
 
 test "mutating any observed member class rejects at artifact binding" {
@@ -3070,12 +3077,12 @@ test "mutating any observed member class rejects at artifact binding" {
         var inputs = fixture.inputs();
         inputs.observed_graph = &observed;
         const result = check(inputs, policy_mod.production);
-        try testing.expectEqual(verdict.Stage.artifact_binding, result.rejection.?.stage);
+        try testing.expectEqual(verdict.Stage.artifact_binding, result.rejection().?.stage);
         try testing.expectEqual(
             verdict.ReasonCode.graph_member_digest_mismatch,
-            result.rejection.?.code,
+            result.rejection().?.code,
         );
-        try testing.expect(result.rejection.?.recertifiable);
+        try testing.expect(result.rejection().?.recertifiable);
     }
 }
 
@@ -3090,8 +3097,8 @@ test "a valid certificate attached to another artifact rejects" {
     var inputs = other.inputs();
     inputs.observed_graph = fixture.graphMembers();
     const result = check(inputs, policy_mod.production);
-    try testing.expectEqual(verdict.Stage.artifact_binding, result.rejection.?.stage);
-    try testing.expectEqual(verdict.ReasonCode.graph_member_digest_mismatch, result.rejection.?.code);
+    try testing.expectEqual(verdict.Stage.artifact_binding, result.rejection().?.stage);
+    try testing.expectEqual(verdict.ReasonCode.graph_member_digest_mismatch, result.rejection().?.code);
 }
 
 test "an artifact carrying a member the certificate omits rejects" {
@@ -3108,7 +3115,7 @@ test "an artifact carrying a member the certificate omits rejects" {
     var inputs = fixture.inputs();
     inputs.observed_graph = &observed;
     const result = check(inputs, policy_mod.production);
-    try testing.expectEqual(verdict.ReasonCode.graph_member_extra, result.rejection.?.code);
+    try testing.expectEqual(verdict.ReasonCode.graph_member_extra, result.rejection().?.code);
 }
 
 test "an artifact missing a member the certificate names rejects" {
@@ -3116,7 +3123,7 @@ test "an artifact missing a member the certificate names rejects" {
     var inputs = fixture.inputs();
     inputs.observed_graph = fixture.members[0 .. fixture.members.len - 1];
     const result = check(inputs, policy_mod.production);
-    try testing.expectEqual(verdict.ReasonCode.graph_member_missing, result.rejection.?.code);
+    try testing.expectEqual(verdict.ReasonCode.graph_member_missing, result.rejection().?.code);
 }
 
 test "a root different from the committed graph root rejects" {
@@ -3207,8 +3214,8 @@ test "an unsupported semantics epoch rejects" {
         .required = policy_mod.production.required,
     };
     const result = check(fixture.inputs(), other);
-    try testing.expectEqual(verdict.ReasonCode.unsupported_semantics_epoch, result.rejection.?.code);
-    try testing.expectEqual(verdict.Stage.proof_system_identity, result.rejection.?.stage);
+    try testing.expectEqual(verdict.ReasonCode.unsupported_semantics_epoch, result.rejection().?.code);
+    try testing.expectEqual(verdict.Stage.proof_system_identity, result.rejection().?.stage);
 }
 
 test "empty policy identity sets are refused before certificate parsing" {
@@ -3227,17 +3234,17 @@ test "a starved work budget rejects at the limits stage" {
     var starved = policy_mod.production;
     starved.limits.max_work = 2;
     const result = check(fixture.inputs(), starved);
-    try testing.expectEqual(verdict.Stage.limits, result.rejection.?.stage);
-    try testing.expectEqual(verdict.ReasonCode.work_budget_exhausted, result.rejection.?.code);
+    try testing.expectEqual(verdict.Stage.limits, result.rejection().?.stage);
+    try testing.expectEqual(verdict.ReasonCode.work_budget_exhausted, result.rejection().?.code);
 }
 
 test "checking is deterministic" {
     var fixture = try test_support.build();
     const first = check(fixture.inputs(), policy_mod.production);
     const second = check(fixture.inputs(), policy_mod.production);
-    try testing.expectEqual(first.semantic, second.semantic);
+    try testing.expectEqual(first.semantic(), second.semantic());
     try testing.expectEqual(first.work_spent, second.work_spent);
-    try testing.expectEqual(first.grade, second.grade);
+    try testing.expectEqual(first.grade(), second.grade());
 }
 
 test "provenance is carried through and never raises the semantic state" {
@@ -3246,7 +3253,7 @@ test "provenance is carried through and never raises the semantic state" {
     inputs.provenance = .trusted_origin;
     const result = check(inputs, policy_mod.production);
     try testing.expectEqual(verdict.ProvenanceState.trusted_origin, result.provenance);
-    try testing.expectEqual(SemanticState.policy_accepted, result.semantic);
+    try testing.expectEqual(SemanticState.policy_accepted, result.semantic());
 
     // And an unsigned artifact with the same evidence is accepted just the same.
     var unsigned = fixture.inputs();
@@ -3264,8 +3271,8 @@ test "a totality rule whose return premise fails is refused" {
     try fixture.encode();
 
     const result = check(fixture.inputs(), policy_mod.production);
-    try testing.expectEqual(verdict.Stage.evidence_check, result.rejection.?.stage);
-    try testing.expectEqual(verdict.ReasonCode.rule_premise_unmet, result.rejection.?.code);
+    try testing.expectEqual(verdict.Stage.evidence_check, result.rejection().?.stage);
+    try testing.expectEqual(verdict.ReasonCode.rule_premise_unmet, result.rejection().?.code);
 }
 
 test "a graded totality claim on a nonreturning handler is fabricated" {
@@ -3275,7 +3282,7 @@ test "a graded totality claim on a nonreturning handler is fabricated" {
     try fixture.encode();
     const result = check(fixture.inputs(), policy_mod.production);
     try expectAt(result, .evidence_check, .fabricated_property);
-    try testing.expect(!result.rejection.?.recertifiable);
+    try testing.expect(!result.rejection().?.recertifiable);
 }
 
 test "one branch arm cannot establish totality" {
@@ -3314,8 +3321,8 @@ test "a disclosed trusted node can declare handler totality" {
     }
     try fixture.encodeParts(parts);
     const result = check(fixture.inputs(), policy_mod.production);
-    try testing.expectEqual(SemanticState.policy_accepted, result.semantic);
-    try testing.expect(result.rejection == null);
+    try testing.expectEqual(SemanticState.policy_accepted, result.semantic());
+    try testing.expect(result.rejection() == null);
 }
 
 test "each obligation needs evidence" {
@@ -3355,8 +3362,8 @@ test "an optional trusted totality edge is not counted as disclosed" {
     const required = [_]policy_mod.Requirement{.{ .property = .results_checked, .min_grade = .tested }};
     policy.required = &required;
     const result = check(fixture.inputs(), policy);
-    try testing.expectEqual(SemanticState.policy_accepted, result.semantic);
-    try testing.expect(result.rejection == null);
+    try testing.expectEqual(SemanticState.policy_accepted, result.semantic());
+    try testing.expect(result.rejection() == null);
     try testing.expectEqual(@as(u32, 1), result.disclosed_edges);
 }
 
@@ -3412,7 +3419,7 @@ test "citing a rule that does not apply at the named node rejects" {
     fixture.evidence[0].rule = .branch_both_arms_total;
     try fixture.encode();
     const result = check(fixture.inputs(), policy_mod.production);
-    try testing.expectEqual(verdict.ReasonCode.rule_premise_unmet, result.rejection.?.code);
+    try testing.expectEqual(verdict.ReasonCode.rule_premise_unmet, result.rejection().?.code);
 }
 
 test "proved evidence without a kernel rule rejects" {
@@ -3422,8 +3429,8 @@ test "proved evidence without a kernel rule rejects" {
     try fixture.encode();
 
     const result = check(fixture.inputs(), policy_mod.production);
-    try testing.expectEqual(verdict.ReasonCode.evidence_edge_invalid, result.rejection.?.code);
-    try testing.expectEqual(verdict.Stage.evidence_check, result.rejection.?.stage);
+    try testing.expectEqual(verdict.ReasonCode.evidence_edge_invalid, result.rejection().?.code);
+    try testing.expectEqual(verdict.Stage.evidence_check, result.rejection().?.stage);
 }
 
 test "a translation rule cited as a source-level proof is a category error" {
@@ -3431,7 +3438,7 @@ test "a translation rule cited as a source-level proof is a category error" {
     fixture.evidence[0].rule = .jump_target_resolved;
     try fixture.encode();
     const result = check(fixture.inputs(), policy_mod.production);
-    try testing.expectEqual(verdict.ReasonCode.evidence_edge_invalid, result.rejection.?.code);
+    try testing.expectEqual(verdict.ReasonCode.evidence_edge_invalid, result.rejection().?.code);
 }
 
 test "an omitted obligation rejects" {
@@ -3442,9 +3449,9 @@ test "an omitted obligation rejects" {
     try fixture.encodeParts(parts);
 
     const result = check(fixture.inputs(), policy_mod.production);
-    try testing.expectEqual(verdict.Stage.obligation_reconstruction, result.rejection.?.stage);
-    try testing.expectEqual(verdict.ReasonCode.obligation_missing, result.rejection.?.code);
-    try testing.expectEqual(@as(std.meta.Tag(verdict.Subject), .none), std.meta.activeTag(result.rejection.?.subject));
+    try testing.expectEqual(verdict.Stage.obligation_reconstruction, result.rejection().?.stage);
+    try testing.expectEqual(verdict.ReasonCode.obligation_missing, result.rejection().?.code);
+    try testing.expectEqual(@as(std.meta.Tag(verdict.Subject), .none), std.meta.activeTag(result.rejection().?.subject));
 }
 
 test "an extra obligation rejects before reconstructing properties" {
@@ -3461,13 +3468,13 @@ test "a duplicated or reordered obligation rejects" {
     fixture.obligations[1] = fixture.obligations[0];
     try fixture.encode();
     var result = check(fixture.inputs(), policy_mod.production);
-    try testing.expectEqual(verdict.ReasonCode.obligation_duplicate, result.rejection.?.code);
+    try testing.expectEqual(verdict.ReasonCode.obligation_duplicate, result.rejection().?.code);
 
     var reordered = try test_support.build();
     std.mem.swap(cert_mod.Obligation, &reordered.obligations[0], &reordered.obligations[1]);
     try reordered.encode();
     result = check(reordered.inputs(), policy_mod.production);
-    try testing.expectEqual(verdict.ReasonCode.obligation_out_of_order, result.rejection.?.code);
+    try testing.expectEqual(verdict.ReasonCode.obligation_out_of_order, result.rejection().?.code);
 }
 
 test "an obligation whose subject is not the entry function rejects" {
@@ -3475,7 +3482,7 @@ test "an obligation whose subject is not the entry function rejects" {
     fixture.obligations[0].subject_id = 2;
     try fixture.encode();
     const result = check(fixture.inputs(), policy_mod.production);
-    try testing.expectEqual(verdict.ReasonCode.obligation_subject_unknown, result.rejection.?.code);
+    try testing.expectEqual(verdict.ReasonCode.obligation_subject_unknown, result.rejection().?.code);
 }
 
 test "a proof IR that does not fold into its stated root rejects" {
@@ -3490,7 +3497,7 @@ test "a proof IR that does not fold into its stated root rejects" {
     try fixture.encodeParts(parts);
 
     const result = check(fixture.inputs(), policy_mod.production);
-    try testing.expectEqual(verdict.ReasonCode.proof_ir_digest_mismatch, result.rejection.?.code);
+    try testing.expectEqual(verdict.ReasonCode.proof_ir_digest_mismatch, result.rejection().?.code);
 }
 
 test "a cyclic or out-of-order proof IR rejects" {
@@ -3498,13 +3505,13 @@ test "a cyclic or out-of-order proof IR rejects" {
     fixture.ir[1].parent = 2;
     try fixture.encode();
     var result = check(fixture.inputs(), policy_mod.production);
-    try testing.expectEqual(verdict.ReasonCode.proof_node_parent_mismatch, result.rejection.?.code);
+    try testing.expectEqual(verdict.ReasonCode.proof_node_parent_mismatch, result.rejection().?.code);
 
     var backwards = try test_support.build();
     backwards.ir[0].first_child = 0;
     try backwards.encode();
     result = check(backwards.inputs(), policy_mod.production);
-    try testing.expectEqual(verdict.ReasonCode.proof_node_cycle, result.rejection.?.code);
+    try testing.expectEqual(verdict.ReasonCode.proof_node_cycle, result.rejection().?.code);
 }
 
 test "a child whose parent disagrees with its owner rejects" {
@@ -3513,8 +3520,8 @@ test "a child whose parent disagrees with its owner rejects" {
     try fixture.encode();
 
     const result = check(fixture.inputs(), policy_mod.production);
-    try testing.expectEqual(verdict.ReasonCode.proof_node_parent_mismatch, result.rejection.?.code);
-    try testing.expectEqual(verdict.Stage.evidence_check, result.rejection.?.stage);
+    try testing.expectEqual(verdict.ReasonCode.proof_node_parent_mismatch, result.rejection().?.code);
+    try testing.expectEqual(verdict.Stage.evidence_check, result.rejection().?.stage);
 }
 
 test "proof IR depth is bounded by policy" {
@@ -3593,8 +3600,8 @@ test "the root depth guard names the root at a zero depth limit" {
     policy.limits.max_depth = 0;
     const result = check(fixture.inputs(), policy);
     try expectAt(result, .limits, .proof_depth_exceeded);
-    try testing.expectEqual(@as(std.meta.Tag(verdict.Subject), .ir_node), std.meta.activeTag(result.rejection.?.subject));
-    try testing.expectEqual(@as(u32, 0), result.rejection.?.subject.ir_node);
+    try testing.expectEqual(@as(std.meta.Tag(verdict.Subject), .ir_node), std.meta.activeTag(result.rejection().?.subject));
+    try testing.expectEqual(@as(u32, 0), result.rejection().?.subject.ir_node);
 }
 
 test "two handler markers reject" {
@@ -3636,8 +3643,8 @@ test "a jump witness naming the wrong target offset rejects" {
     fixture.witnesses[2].target_offset = 5;
     try fixture.encode();
     const result = check(fixture.inputs(), policy_mod.production);
-    try testing.expectEqual(verdict.Stage.translation_check, result.rejection.?.stage);
-    try testing.expectEqual(verdict.ReasonCode.jump_target_mismatch, result.rejection.?.code);
+    try testing.expectEqual(verdict.Stage.translation_check, result.rejection().?.stage);
+    try testing.expectEqual(verdict.ReasonCode.jump_target_mismatch, result.rejection().?.code);
 }
 
 test "emission ranges that partially overlap reject" {
@@ -3649,7 +3656,7 @@ test "emission ranges that partially overlap reject" {
     fixture.witnesses[2].target_offset = 6;
     try fixture.encode();
     const result = check(fixture.inputs(), policy_mod.production);
-    try testing.expectEqual(verdict.ReasonCode.witness_range_overlaps, result.rejection.?.code);
+    try testing.expectEqual(verdict.ReasonCode.witness_range_overlaps, result.rejection().?.code);
 }
 
 test "emission ranges reject overlap with any active ancestor" {
@@ -3665,7 +3672,7 @@ test "emission ranges reject overlap with any active ancestor" {
     try fixture.encodeParts(parts);
 
     const result = check(fixture.inputs(), policy_mod.production);
-    try testing.expectEqual(verdict.ReasonCode.witness_range_overlaps, result.rejection.?.code);
+    try testing.expectEqual(verdict.ReasonCode.witness_range_overlaps, result.rejection().?.code);
 }
 
 test "a rewrite whose spans do not add up rejects" {
@@ -3673,14 +3680,14 @@ test "a rewrite whose spans do not add up rejects" {
     fixture.rewrites[0].delta = -4;
     try fixture.encode();
     var result = check(fixture.inputs(), policy_mod.production);
-    try testing.expectEqual(verdict.ReasonCode.rewrite_span_mismatch, result.rejection.?.code);
+    try testing.expectEqual(verdict.ReasonCode.rewrite_span_mismatch, result.rejection().?.code);
 
     var grown = try test_support.build();
     grown.rewrites[0].after_len = 9;
     grown.rewrites[0].delta = 5;
     try grown.encode();
     result = check(grown.inputs(), policy_mod.production);
-    try testing.expectEqual(verdict.ReasonCode.rewrite_span_mismatch, result.rejection.?.code);
+    try testing.expectEqual(verdict.ReasonCode.rewrite_span_mismatch, result.rejection().?.code);
 }
 
 test "a rewrite with a source-level rule rejects" {
@@ -3695,7 +3702,7 @@ test "a witness pointing outside the proof IR rejects" {
     fixture.witnesses[0].ir_node = 99;
     try fixture.encode();
     const result = check(fixture.inputs(), policy_mod.production);
-    try testing.expectEqual(verdict.ReasonCode.witness_range_out_of_bounds, result.rejection.?.code);
+    try testing.expectEqual(verdict.ReasonCode.witness_range_out_of_bounds, result.rejection().?.code);
 }
 
 test "an emission target must name a proof node" {
@@ -3710,8 +3717,8 @@ test "a nested emission may end at its ancestor boundary" {
     fixture.witnesses[1].code_len = 6;
     try fixture.encode();
     const result = check(fixture.inputs(), policy_mod.production);
-    try testing.expectEqual(SemanticState.policy_accepted, result.semantic);
-    try testing.expect(result.rejection == null);
+    try testing.expectEqual(SemanticState.policy_accepted, result.semantic());
+    try testing.expect(result.rejection() == null);
 }
 
 test "emission ranges reset between function scopes" {
@@ -3741,8 +3748,8 @@ test "emission ranges reset between function scopes" {
     const required = [_]policy_mod.Requirement{.{ .property = .results_checked, .min_grade = .tested }};
     policy.required = &required;
     const result = check(fixture.inputs(), policy);
-    try testing.expectEqual(SemanticState.policy_accepted, result.semantic);
-    try testing.expect(result.rejection == null);
+    try testing.expectEqual(SemanticState.policy_accepted, result.semantic());
+    try testing.expect(result.rejection() == null);
 }
 
 test "duplicate translation witnesses reject" {
@@ -3767,13 +3774,13 @@ test "a property the producer did not establish is refused by a policy that requ
     fixture.evidence[3].edge = .not_established;
     try fixture.encode();
     const result = check(fixture.inputs(), policy_mod.production);
-    try testing.expectEqual(verdict.Stage.policy, result.rejection.?.stage);
+    try testing.expectEqual(verdict.Stage.policy, result.rejection().?.stage);
     try testing.expectEqual(
         verdict.ReasonCode.required_property_not_established,
-        result.rejection.?.code,
+        result.rejection().?.code,
     );
     // The proof was still checked; it is the policy that said no.
-    try testing.expectEqual(SemanticState.proof_checked, result.semantic);
+    try testing.expectEqual(SemanticState.proof_checked, result.semantic());
 }
 
 test "a property a policy does not require may go unestablished" {
@@ -3799,14 +3806,14 @@ test "a grade below the policy floor rejects and says both sides" {
         .required = &requirements,
     };
     const result = check(fixture.inputs(), strict);
-    try testing.expectEqual(verdict.ReasonCode.grade_below_floor, result.rejection.?.code);
+    try testing.expectEqual(verdict.ReasonCode.grade_below_floor, result.rejection().?.code);
     try testing.expectEqual(
         @as(u64, verdict.AssuranceGrade.translation_validated.toWire()),
-        result.rejection.?.expected.?.scalar,
+        result.rejection().?.expected.?.scalar,
     );
     try testing.expectEqual(
         @as(u64, verdict.AssuranceGrade.trusted.toWire()),
-        result.rejection.?.actual.?.scalar,
+        result.rejection().?.actual.?.scalar,
     );
 }
 
@@ -3823,10 +3830,10 @@ test "declared trusted opcode dependencies cap translation assurance" {
 
     const result = check(fixture.inputs(), translation_only);
     try testing.expect(!result.accepted());
-    try testing.expectEqual(verdict.ReasonCode.grade_below_floor, result.rejection.?.code);
+    try testing.expectEqual(verdict.ReasonCode.grade_below_floor, result.rejection().?.code);
     try testing.expectEqual(
         @as(u64, verdict.AssuranceGrade.trusted.toWire()),
-        result.rejection.?.actual.?.scalar,
+        result.rejection().?.actual.?.scalar,
     );
 }
 
@@ -3838,7 +3845,7 @@ test "a declared edge that is not disclosed in the trusted inventory rejects" {
     // The inventory still only mentions the opcode edge, not node 1.
     try fixture.encode();
     const result = check(fixture.inputs(), policy_mod.production);
-    try testing.expectEqual(verdict.ReasonCode.trusted_edge_undeclared, result.rejection.?.code);
+    try testing.expectEqual(verdict.ReasonCode.trusted_edge_undeclared, result.rejection().?.code);
 }
 
 test "trusted evidence at a node the proof IR does not have rejects" {
@@ -3865,9 +3872,9 @@ test "trusted evidence at a node the proof IR does not have rejects" {
 
     const result = check(fixture.inputs(), policy_mod.production);
     try testing.expect(!result.accepted());
-    try testing.expectEqual(verdict.Stage.evidence_check, result.rejection.?.stage);
-    try testing.expectEqual(verdict.ReasonCode.proof_node_unknown, result.rejection.?.code);
-    try testing.expectEqual(absent, result.rejection.?.subject.ir_node);
+    try testing.expectEqual(verdict.Stage.evidence_check, result.rejection().?.stage);
+    try testing.expectEqual(verdict.ReasonCode.proof_node_unknown, result.rejection().?.code);
+    try testing.expectEqual(absent, result.rejection().?.subject.ir_node);
 }
 
 test "trusted evidence does not match an inventory node that differs above sixteen bits" {
@@ -3891,8 +3898,8 @@ test "trusted evidence does not match an inventory node that differs above sixte
 
     const result = check(fixture.inputs(), policy_mod.production);
     try testing.expect(!result.accepted());
-    try testing.expectEqual(verdict.ReasonCode.proof_node_unknown, result.rejection.?.code);
-    try testing.expectEqual(@as(u32, 0x1_0000), result.rejection.?.subject.ir_node);
+    try testing.expectEqual(verdict.ReasonCode.proof_node_unknown, result.rejection().?.code);
+    try testing.expectEqual(@as(u32, 0x1_0000), result.rejection().?.subject.ir_node);
 }
 
 test "an inventory node the proof IR does not have rejects" {
@@ -3916,9 +3923,9 @@ test "an inventory node the proof IR does not have rejects" {
 
     const result = check(fixture.inputs(), policy_mod.production);
     try testing.expect(!result.accepted());
-    try testing.expectEqual(verdict.Stage.evidence_check, result.rejection.?.stage);
-    try testing.expectEqual(verdict.ReasonCode.proof_node_unknown, result.rejection.?.code);
-    try testing.expectEqual(@as(u32, absent), result.rejection.?.subject.ir_node);
+    try testing.expectEqual(verdict.Stage.evidence_check, result.rejection().?.stage);
+    try testing.expectEqual(verdict.ReasonCode.proof_node_unknown, result.rejection().?.code);
+    try testing.expectEqual(@as(u32, absent), result.rejection().?.subject.ir_node);
 }
 
 test "a solver edge is refused unless the consumer asked for one" {
@@ -3933,28 +3940,28 @@ test "a solver edge is refused unless the consumer asked for one" {
     try fixture.encodeParts(parts);
 
     var result = check(fixture.inputs(), policy_mod.production);
-    try testing.expectEqual(verdict.Stage.solver, result.rejection.?.stage);
-    try testing.expectEqual(verdict.ReasonCode.solver_edge_not_permitted, result.rejection.?.code);
+    try testing.expectEqual(verdict.Stage.solver, result.rejection().?.stage);
+    try testing.expectEqual(verdict.ReasonCode.solver_edge_not_permitted, result.rejection().?.code);
 
     // Permitted, but nobody ran a solver. Silence is not a yes.
     var permissive = policy_mod.production;
     permissive.allow_solver_edges = true;
     result = check(fixture.inputs(), permissive);
-    try testing.expectEqual(verdict.ReasonCode.solver_inconclusive, result.rejection.?.code);
+    try testing.expectEqual(verdict.ReasonCode.solver_inconclusive, result.rejection().?.code);
 
     // An adapter that ran and could not decide is also not a yes.
     var inputs = fixture.inputs();
     const inconclusive = [_]bool{false};
     inputs.solver_results = &inconclusive;
     result = check(inputs, permissive);
-    try testing.expectEqual(verdict.ReasonCode.solver_inconclusive, result.rejection.?.code);
+    try testing.expectEqual(verdict.ReasonCode.solver_inconclusive, result.rejection().?.code);
 
     // Discharged. The edge now grades, and it grades weaker than a proof.
     const discharged = [_]bool{true};
     inputs.solver_results = &discharged;
     result = check(inputs, permissive);
     try testing.expect(result.accepted());
-    try testing.expectEqual(@as(?verdict.AssuranceGrade, .trusted), result.grade);
+    try testing.expectEqual(@as(?verdict.AssuranceGrade, .trusted), result.grade());
 
     // A query index outside the certificate's own solver section is refused
     // before any result is consulted.
@@ -3965,7 +3972,7 @@ test "a solver edge is refused unless the consumer asked for one" {
     var wide = fixture.inputs();
     wide.solver_results = &discharged;
     result = check(wide, permissive);
-    try testing.expectEqual(verdict.ReasonCode.solver_query_too_large, result.rejection.?.code);
+    try testing.expectEqual(verdict.ReasonCode.solver_query_too_large, result.rejection().?.code);
 }
 
 test "a solver answer cannot discharge a different obligation" {
@@ -3998,8 +4005,8 @@ test "a solver answer cannot discharge a different obligation" {
     inputs.solver_results = &discharged;
 
     const result = check(inputs, solver_policy);
-    try testing.expectEqual(verdict.ReasonCode.solver_query_mismatch, result.rejection.?.code);
-    try testing.expectEqual(verdict.Stage.solver, result.rejection.?.stage);
+    try testing.expectEqual(verdict.ReasonCode.solver_query_mismatch, result.rejection().?.code);
+    try testing.expectEqual(verdict.Stage.solver, result.rejection().?.stage);
 }
 
 test "a solver query index at the section bound rejects" {
@@ -4023,16 +4030,16 @@ test "a development artifact is checked and never accepted for production" {
     try fixture.encodeParts(parts);
 
     const strict = check(fixture.inputs(), policy_mod.production);
-    try testing.expectEqual(verdict.ReasonCode.development_artifact_refused, strict.rejection.?.code);
-    try testing.expectEqual(SemanticState.proof_checked, strict.semantic);
+    try testing.expectEqual(verdict.ReasonCode.development_artifact_refused, strict.rejection().?.code);
+    try testing.expectEqual(SemanticState.proof_checked, strict.semantic());
     // It was still checked, and the grade it reached is reported.
-    try testing.expect(strict.grade != null);
+    try testing.expect(strict.grade() != null);
 
     var permissive = policy_mod.development;
     permissive.required = policy_mod.production.required;
     const local = check(fixture.inputs(), permissive);
     try testing.expect(local.accepted());
-    try testing.expect(local.development_only);
+    try testing.expect(local.developmentOnly().?);
 }
 
 test "scratch smaller than the kernel needs is refused rather than truncated" {
@@ -4040,8 +4047,8 @@ test "scratch smaller than the kernel needs is refused rather than truncated" {
     var inputs = fixture.inputs();
     inputs.scratch = fixture.scratch[0..8];
     const result = check(inputs, policy_mod.production);
-    try testing.expectEqual(verdict.Stage.limits, result.rejection.?.stage);
-    try testing.expect(!result.rejection.?.recertifiable);
+    try testing.expectEqual(verdict.Stage.limits, result.rejection().?.stage);
+    try testing.expect(!result.rejection().?.recertifiable);
 }
 
 test "scratchBytes covers three bits per node at the configured bound" {
@@ -4140,7 +4147,7 @@ fn BindingFixture(comptime catalogs: usize, comptime declarations: usize) type {
 }
 
 fn expectRejected(result: Assessment, code: verdict.ReasonCode) !void {
-    const rejection = result.rejection orelse {
+    const rejection = result.rejection() orelse {
         std.debug.print("expected {s}, accepted\n", .{code.text()});
         return error.TestUnexpectedResult;
     };
@@ -4153,7 +4160,7 @@ fn expectRejected(result: Assessment, code: verdict.ReasonCode) !void {
 test "a tool catalog matching its graph member is accepted" {
     var fixture = try CatalogFixture(1).build();
     const result = check(fixture.inputs(), policy_mod.production);
-    if (result.rejection) |rejection| {
+    if (result.rejection()) |rejection| {
         std.debug.print("unexpected rejection: {s} / {s}\n", .{ rejection.stage.name(), rejection.code.text() });
         return error.TestUnexpectedResult;
     }
@@ -4173,7 +4180,7 @@ test "one mutated catalog byte rejects with tool_catalog_digest_mismatch" {
     inputs.tool_catalog = tampered[0..original.len];
     const result = check(inputs, policy_mod.production);
     try expectRejected(result, .tool_catalog_digest_mismatch);
-    try testing.expectEqual(verdict.Stage.tool_catalog, result.rejection.?.stage);
+    try testing.expectEqual(verdict.Stage.tool_catalog, result.rejection().?.stage);
 }
 
 test "a graph member naming another catalog digest rejects" {
@@ -4237,7 +4244,7 @@ test "every tool catalog reason code is observed" {
 
     for ([_]Inputs{ mutated, no_bytes, undecodable, no_member }) |inputs| {
         const result = check(inputs, policy_mod.production);
-        if (result.rejection) |rejection| seen.insert(rejection.code);
+        if (result.rejection()) |rejection| seen.insert(rejection.code);
     }
 
     inline for (@typeInfo(verdict.ReasonCode).@"enum".fields) |field| {
@@ -4254,7 +4261,7 @@ test "every tool catalog reason code is observed" {
 test "an artifact with no declaration and no declaration member passes the declaration stage" {
     var fixture = try test_support.build();
     const result = check(fixture.inputs(), policy_mod.production);
-    if (result.rejection) |rejection| {
+    if (result.rejection()) |rejection| {
         std.debug.print("unexpected rejection: {s} / {s}\n", .{ rejection.stage.name(), rejection.code.text() });
         return error.TestUnexpectedResult;
     }
@@ -4264,7 +4271,7 @@ test "an artifact with no declaration and no declaration member passes the decla
 test "a declaration matching its graph member is accepted" {
     var fixture = try DeclarationFixture(1).build();
     const result = check(fixture.inputs(), policy_mod.production);
-    if (result.rejection) |rejection| {
+    if (result.rejection()) |rejection| {
         std.debug.print("unexpected rejection: {s} / {s}\n", .{ rejection.stage.name(), rejection.code.text() });
         return error.TestUnexpectedResult;
     }
@@ -4274,7 +4281,7 @@ test "a declaration matching its graph member is accepted" {
 test "a tool catalog and a declaration each matching their member are accepted" {
     var fixture = try BindingFixture(1, 1).build();
     const result = check(fixture.inputs(), policy_mod.production);
-    if (result.rejection) |rejection| {
+    if (result.rejection()) |rejection| {
         std.debug.print("unexpected rejection: {s} / {s}\n", .{ rejection.stage.name(), rejection.code.text() });
         return error.TestUnexpectedResult;
     }
@@ -4298,7 +4305,7 @@ test "one mutated declaration byte rejects with declaration_digest_mismatch" {
     _ = try declaration.decode(inputs.declaration.?);
     const result = check(inputs, policy_mod.production);
     try expectRejected(result, .declaration_digest_mismatch);
-    try testing.expectEqual(verdict.Stage.declaration, result.rejection.?.stage);
+    try testing.expectEqual(verdict.Stage.declaration, result.rejection().?.stage);
 }
 
 test "a graph member naming another declaration digest rejects" {
@@ -4322,7 +4329,7 @@ test "declaration bytes with no graph member reject" {
     inputs.declaration = declaration.test_support.sample(&buf);
     const result = check(inputs, policy_mod.production);
     try expectRejected(result, .declaration_member_missing);
-    try testing.expectEqual(verdict.Stage.declaration, result.rejection.?.stage);
+    try testing.expectEqual(verdict.Stage.declaration, result.rejection().?.stage);
 }
 
 test "a declaration member with no declaration bytes rejects and names the member" {
@@ -4331,11 +4338,11 @@ test "a declaration member with no declaration bytes rejects and names the membe
     inputs.declaration = null;
     const result = check(inputs, policy_mod.production);
     try expectRejected(result, .declaration_member_missing);
-    try testing.expectEqual(verdict.Stage.declaration, result.rejection.?.stage);
+    try testing.expectEqual(verdict.Stage.declaration, result.rejection().?.stage);
     try testing.expectEqual(verdict.Subject{ .graph_member = .{
         .kind = @intFromEnum(graph.MemberKind.declaration),
         .ordinal = 0,
-    } }, result.rejection.?.subject);
+    } }, result.rejection().?.subject);
 }
 
 test "undecodable declaration bytes reject before the digest is compared" {
@@ -4367,7 +4374,7 @@ test "every declaration reason code is observed" {
 
     for ([_]Inputs{ mutated, no_bytes, undecodable, no_member }) |inputs| {
         const result = check(inputs, policy_mod.production);
-        if (result.rejection) |rejection| {
+        if (result.rejection()) |rejection| {
             try testing.expectEqual(verdict.Stage.declaration, rejection.stage);
             seen.insert(rejection.code);
         }

@@ -258,7 +258,7 @@ test "the schema 2 template canonicalizes its kind set and refuses weakened ones
     );
     defer a.free(spec);
     const decoded = try invariant.decode(spec);
-    try std.testing.expectEqual(invariant.schema_version_v2, decoded.schema);
+    try std.testing.expectEqual(invariant.Schema.v2, std.meta.activeTag(decoded.kinds));
     try std.testing.expectEqualStrings("main", decoded.ledger_id);
     try std.testing.expectEqualStrings("EUR", &(try decoded.currency(0)).code);
     try std.testing.expectEqual(@as(u16, 1), decoded.kind_count);

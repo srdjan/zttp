@@ -220,14 +220,14 @@ test "every corpus handler certifies and reaches production acceptance" {
         defer certified.deinit();
 
         const result = certified.assess(pcc.policy.production);
-        if (result.rejection) |rejection| {
+        if (result.rejection()) |rejection| {
             std.debug.print(
                 "ratchet: '{s}' rejected at {s} ({s})\n",
                 .{ case.name, rejection.stage.name(), rejection.code.text() },
             );
             return error.TestUnexpectedResult;
         }
-        try testing.expectEqual(pcc.SemanticState.policy_accepted, result.semantic);
+        try testing.expectEqual(pcc.SemanticState.policy_accepted, result.semantic());
         accepted += 1;
     }
     try testing.expectEqual(corpus.len, accepted);
@@ -283,14 +283,14 @@ test "a certificate that only discloses totality is refused by the production fl
 
     const result = certified.assess(demanding);
     try testing.expect(!result.accepted());
-    try testing.expectEqual(pcc.verdict.Stage.policy, result.rejection.?.stage);
+    try testing.expectEqual(pcc.verdict.Stage.policy, result.rejection().?.stage);
     try testing.expectEqual(
         pcc.ReasonCode.grade_below_floor,
-        result.rejection.?.code,
+        result.rejection().?.code,
     );
     try testing.expectEqual(
         @as(u64, pcc.AssuranceGrade.proved.toWire()),
-        result.rejection.?.expected.?.scalar,
+        result.rejection().?.expected.?.scalar,
     );
 }
 
