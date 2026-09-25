@@ -39,6 +39,7 @@
 //! See docs/plans/2026-09-23-m4-t5-scope-and-grants-design.md section 13.
 
 const std = @import("std");
+const wire = @import("wire.zig");
 
 pub const magic = "ZTDCL1\x00\x00";
 pub const schema_version: u16 = 1;
@@ -146,75 +147,27 @@ pub const Declaration = struct {
     }
 };
 
-/// Bounds-checked reads over a byte slice. It reports truncation and nothing
-/// else: content rules are checked by `decode`.
-const Reader = struct {
-    bytes: []const u8,
-    pos: usize,
+const Reader = wire.Reader;
 
-    fn int(self: *Reader, comptime T: type) DecodeError!T {
-        const size = @sizeOf(T);
-        if (self.bytes.len - self.pos < size) return error.Truncated;
-        const value = std.mem.readInt(T, self.bytes[self.pos..][0..size], .little);
-        self.pos += size;
-        return value;
-    }
+pub const ClassificationIterator = wire.Iterator(Classification, DecodeError, readClassification);
+pub const ExcludeIterator = wire.Iterator([]const u8, DecodeError, readExclude);
 
-    /// A length-prefixed string. The length bound is checked before the body
-    /// is required, so an out-of-range length names itself rather than
-    /// surfacing as truncation.
-    fn string(self: *Reader, min: u32, max: u32, length_error: DecodeError) DecodeError![]const u8 {
-        const len = try self.int(u32);
-        if (len < min or len > max) return length_error;
-        if (self.bytes.len - self.pos < len) return error.Truncated;
-        const out = self.bytes[self.pos..][0..len];
-        self.pos += len;
-        return out;
-    }
-};
-
-pub const ClassificationIterator = struct {
-    bytes: []const u8,
-    pos: usize,
-    remaining: u16,
-
-    pub fn next(self: *ClassificationIterator) DecodeError!?Classification {
-        if (self.remaining == 0) return null;
-        var reader = Reader{ .bytes = self.bytes, .pos = self.pos };
-        const item = try readClassification(&reader);
-        self.pos = reader.pos;
-        self.remaining -= 1;
-        return item;
-    }
-};
-
-pub const ExcludeIterator = struct {
-    bytes: []const u8,
-    pos: usize,
-    remaining: u16,
-
-    pub fn next(self: *ExcludeIterator) DecodeError!?[]const u8 {
-        if (self.remaining == 0) return null;
-        var reader = Reader{ .bytes = self.bytes, .pos = self.pos };
-        const item = try reader.string(min_exclude_bytes, max_exclude_bytes, error.ExcludeInvalid);
-        self.pos = reader.pos;
-        self.remaining -= 1;
-        return item;
-    }
-};
+fn readExclude(reader: *Reader) DecodeError![]const u8 {
+    return reader.string(u32, min_exclude_bytes, max_exclude_bytes, error.ExcludeInvalid);
+}
 
 /// Read one classification with every field rule applied.
 fn readClassification(reader: *Reader) DecodeError!Classification {
     const kind_byte = try reader.int(u8);
     if (kind_byte > 1) return error.SourceKindInvalid;
-    const source_name = try reader.string(1, max_source_name_bytes, error.SourceNameLength);
-    const path = try reader.string(1, max_path_bytes, error.PathInvalid);
+    const source_name = try reader.string(u32, 1, max_source_name_bytes, error.SourceNameLength);
+    const path = try reader.string(u32, 1, max_path_bytes, error.PathInvalid);
     try validPath(path);
     const label_byte = try reader.int(u8);
     if (label_byte > 1) return error.LabelInvalid;
     const required_byte = try reader.int(u8);
     if (required_byte > 1) return error.RequiredInvalid;
-    const reason = try reader.string(1, max_reason_bytes, error.ReasonLength);
+    const reason = try reader.string(u32, 1, max_reason_bytes, error.ReasonLength);
     if (!std.unicode.utf8ValidateSlice(source_name)) return error.InvalidUtf8;
     if (!std.unicode.utf8ValidateSlice(reason)) return error.InvalidUtf8;
     return .{
@@ -254,22 +207,16 @@ fn validExclude(entry: []const u8) DecodeError!void {
 
 /// Decode and validate canonical declaration bytes.
 pub fn decode(bytes: []const u8) DecodeError!Declaration {
-    if (bytes.len < magic.len) return error.Truncated;
-    if (!std.mem.eql(u8, bytes[0..magic.len], magic)) return error.BadMagic;
-    var reader = Reader{ .bytes = bytes, .pos = magic.len };
-    if (try reader.int(u16) != schema_version) return error.UnsupportedSchema;
+    var reader = try wire.header(bytes, magic, schema_version);
     const count = try reader.int(u16);
     if (count > max_classifications) return error.ClassificationCountOutOfRange;
 
-    var previous: ?Classification = null;
-    var index: u16 = 0;
-    while (index < count) : (index += 1) {
-        const item = try readClassification(&reader);
-        if (previous) |prev| {
-            if (Classification.order(prev, item) != .lt) return error.ClassificationsNotOrdered;
-        }
-        previous = item;
+    var classes = ClassificationIterator{ .bytes = bytes, .pos = reader.pos, .remaining = count };
+    var class_order = wire.Ascending(Classification, Classification.order){};
+    while (try classes.next()) |item| {
+        if (class_order.step(item) != .lt) return error.ClassificationsNotOrdered;
     }
+    reader.pos = classes.pos;
 
     const flag = try reader.int(u8);
     if (flag > 1) return error.CeilingFlagInvalid;
@@ -281,13 +228,10 @@ pub fn decode(bytes: []const u8) DecodeError!Declaration {
         if (exclude_count > max_exclude) return error.ExcludeCountOutOfRange;
         const exclude_pos = reader.pos;
         var it = ExcludeIterator{ .bytes = bytes, .pos = exclude_pos, .remaining = exclude_count };
-        var previous_entry: ?[]const u8 = null;
+        var entries = wire.Ascending([]const u8, wire.bytesOrder){};
         while (try it.next()) |entry| {
             try validExclude(entry);
-            if (previous_entry) |prev| {
-                if (std.mem.order(u8, prev, entry) != .lt) return error.ExcludesNotOrdered;
-            }
-            previous_entry = entry;
+            if (entries.step(entry) != .lt) return error.ExcludesNotOrdered;
         }
         reader.pos = it.pos;
         ceiling = .{
@@ -297,7 +241,7 @@ pub fn decode(bytes: []const u8) DecodeError!Declaration {
             .exclude_pos = exclude_pos,
         };
     }
-    if (reader.pos != bytes.len) return error.TrailingData;
+    if (!reader.atEnd()) return error.TrailingData;
     if (count == 0 and ceiling == null) return error.DeclarationEmpty;
 
     return .{ .bytes = bytes, .classification_count = count, .ceiling = ceiling };
@@ -306,10 +250,7 @@ pub fn decode(bytes: []const u8) DecodeError!Declaration {
 /// Domain-separated SHA-256 over the whole encoding. The digest a graph member
 /// carries for these bytes.
 pub fn digest(bytes: []const u8) [32]u8 {
-    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
-    hasher.update(digest_domain);
-    hasher.update(bytes);
-    return hasher.finalResult();
+    return wire.domainDigest(digest_domain, bytes);
 }
 
 // ---------------------------------------------------------------------------
@@ -319,29 +260,7 @@ pub fn digest(bytes: []const u8) [32]u8 {
 /// A writer for building declarations in tests, over a fixed buffer. It writes
 /// what it is told, valid or not, so a test can build each refusal directly.
 pub const test_support = struct {
-    pub const Writer = struct {
-        buf: []u8,
-        len: usize = 0,
-
-        pub fn raw(self: *Writer, data: []const u8) void {
-            @memcpy(self.buf[self.len..][0..data.len], data);
-            self.len += data.len;
-        }
-
-        pub fn int(self: *Writer, comptime T: type, value: T) void {
-            std.mem.writeInt(T, self.buf[self.len..][0..@sizeOf(T)], value, .little);
-            self.len += @sizeOf(T);
-        }
-
-        pub fn string(self: *Writer, data: []const u8) void {
-            self.int(u32, @intCast(data.len));
-            self.raw(data);
-        }
-
-        pub fn bytes(self: *const Writer) []const u8 {
-            return self.buf[0..self.len];
-        }
-    };
+    pub const Writer = wire.Writer;
 
     /// Raw bytes rather than enums, so a test can write an out-of-range code.
     pub const SampleClassification = struct {

@@ -52,6 +52,9 @@
 //! outside tests.
 
 const std = @import("std");
+const wire = @import("wire.zig");
+
+const Reader = wire.Reader;
 
 pub const magic = "ZTCAT1\x00\x00";
 pub const schema_version: u16 = 3;
@@ -121,6 +124,11 @@ pub const Export = struct {
     }
 };
 
+pub const ExportIterator = wire.Iterator(Export, DecodeError, readExport);
+/// Length-prefixed names, one after another.
+pub const NameIterator = wire.Iterator([]const u8, DecodeError, readCredential);
+pub const EntryIterator = wire.Iterator(Entry, DecodeError, readEntry);
+
 pub const Entry = struct {
     name: []const u8,
     method: []const u8,
@@ -151,117 +159,49 @@ pub const Catalog = struct {
     }
 };
 
-/// Bounds-checked reads over a byte slice. It reports truncation and nothing
-/// else: content rules are checked by `decode`.
-const Reader = struct {
-    bytes: []const u8,
-    pos: usize,
+fn readExport(reader: *Reader) DecodeError!Export {
+    const module = try reader.string(u32, 1, max_export_field_bytes, error.ExportFieldLength);
+    const name = try reader.string(u32, 1, max_export_field_bytes, error.ExportFieldLength);
+    return .{ .module = module, .name = name };
+}
 
-    fn int(self: *Reader, comptime T: type) DecodeError!T {
-        const size = @sizeOf(T);
-        if (self.bytes.len - self.pos < size) return error.Truncated;
-        const value = std.mem.readInt(T, self.bytes[self.pos..][0..size], .little);
-        self.pos += size;
-        return value;
-    }
+fn readCredential(reader: *Reader) DecodeError![]const u8 {
+    return reader.string(u32, 1, max_credential_name_bytes, error.CredentialNameLength);
+}
 
-    /// A length-prefixed string. The length bound is checked before the body
-    /// is required, so an out-of-range length names itself rather than
-    /// surfacing as truncation.
-    fn string(self: *Reader, min: u32, max: u32, length_error: DecodeError) DecodeError![]const u8 {
-        const len = try self.int(u32);
-        if (len < min or len > max) return length_error;
-        if (self.bytes.len - self.pos < len) return error.Truncated;
-        const out = self.bytes[self.pos..][0..len];
-        self.pos += len;
-        return out;
-    }
-
-    /// A length-prefixed string where length 0 means absent.
-    fn optionalString(self: *Reader, max: u32, length_error: DecodeError) DecodeError!?[]const u8 {
-        const out = try self.string(0, max, length_error);
-        return if (out.len == 0) null else out;
-    }
-};
-
-pub const ExportIterator = struct {
-    bytes: []const u8,
-    pos: usize,
-    remaining: u16,
-
-    pub fn next(self: *ExportIterator) DecodeError!?Export {
-        if (self.remaining == 0) return null;
-        var reader = Reader{ .bytes = self.bytes, .pos = self.pos };
-        const module = try reader.string(1, max_export_field_bytes, error.ExportFieldLength);
-        const name = try reader.string(1, max_export_field_bytes, error.ExportFieldLength);
-        self.pos = reader.pos;
-        self.remaining -= 1;
-        return .{ .module = module, .name = name };
-    }
-};
-
-/// Length-prefixed names, one after another.
-pub const NameIterator = struct {
-    bytes: []const u8,
-    pos: usize,
-    remaining: u16,
-
-    pub fn next(self: *NameIterator) DecodeError!?[]const u8 {
-        if (self.remaining == 0) return null;
-        var reader = Reader{ .bytes = self.bytes, .pos = self.pos };
-        const name = try reader.string(1, max_credential_name_bytes, error.CredentialNameLength);
-        self.pos = reader.pos;
-        self.remaining -= 1;
-        return name;
-    }
-};
-
-pub const EntryIterator = struct {
-    bytes: []const u8,
-    pos: usize,
-    remaining: u16,
-
-    pub fn next(self: *EntryIterator) DecodeError!?Entry {
-        if (self.remaining == 0) return null;
-        var reader = Reader{ .bytes = self.bytes, .pos = self.pos };
-        const entry = try readEntry(&reader);
-        self.pos = reader.pos;
-        self.remaining -= 1;
-        return entry;
-    }
-};
+/// A scope field: length 0 means absent.
+fn readScope(reader: *Reader) DecodeError!?[]const u8 {
+    const out = try reader.string(u32, 0, max_scope_field_bytes, error.ScopeFieldLength);
+    return if (out.len == 0) null else out;
+}
 
 /// Read one entry's fields with length bounds only, and step over its exports.
 fn readEntry(reader: *Reader) DecodeError!Entry {
-    const name = try reader.string(1, max_name_bytes, error.NameLength);
-    const method = try reader.string(1, max_method_bytes, error.MethodInvalid);
-    const path = try reader.string(1, max_path_bytes, error.PathInvalid);
-    const description = try reader.string(1, max_description_bytes, error.DescriptionLength);
-    const input_name = try reader.string(1, max_schema_name_bytes, error.SchemaNameLength);
-    const input_schema = try reader.string(1, max_schema_bytes, error.SchemaLength);
-    const output_name = try reader.string(1, max_schema_name_bytes, error.SchemaNameLength);
-    const output_schema = try reader.string(1, max_schema_bytes, error.SchemaLength);
+    const name = try reader.string(u32, 1, max_name_bytes, error.NameLength);
+    const method = try reader.string(u32, 1, max_method_bytes, error.MethodInvalid);
+    const path = try reader.string(u32, 1, max_path_bytes, error.PathInvalid);
+    const description = try reader.string(u32, 1, max_description_bytes, error.DescriptionLength);
+    const input_name = try reader.string(u32, 1, max_schema_name_bytes, error.SchemaNameLength);
+    const input_schema = try reader.string(u32, 1, max_schema_bytes, error.SchemaLength);
+    const output_name = try reader.string(u32, 1, max_schema_name_bytes, error.SchemaNameLength);
+    const output_schema = try reader.string(u32, 1, max_schema_bytes, error.SchemaLength);
     const max_input_bytes = try reader.int(u32);
     if (max_input_bytes < min_max_input_bytes or max_input_bytes > max_max_input_bytes) {
         return error.MaxInputBytesOutOfRange;
     }
-    const scope_tenant = try reader.optionalString(max_scope_field_bytes, error.ScopeFieldLength);
-    const scope_subject = try reader.optionalString(max_scope_field_bytes, error.ScopeFieldLength);
+    const scope_tenant = try readScope(reader);
+    const scope_subject = try readScope(reader);
     const export_count = try reader.int(u16);
     if (export_count > max_exports) return error.ExportCountOutOfRange;
 
     var exports = ExportIterator{ .bytes = reader.bytes, .pos = reader.pos, .remaining = export_count };
-    var walk = exports;
-    while (try walk.next()) |_| {}
-    reader.pos = walk.pos;
+    try exports.skipAll(reader);
     exports.bytes = reader.bytes[0..reader.pos];
 
     const credential_count = try reader.int(u16);
     if (credential_count > max_credentials) return error.CredentialCountOutOfRange;
     var credentials = NameIterator{ .bytes = reader.bytes, .pos = reader.pos, .remaining = credential_count };
-    var credential_walk = credentials;
-    while (try credential_walk.next()) |_| {}
-    reader.pos = credential_walk.pos;
+    try credentials.skipAll(reader);
     credentials.bytes = reader.bytes[0..reader.pos];
 
     return .{
@@ -302,47 +242,35 @@ fn validateEntry(entry: Entry) DecodeError!void {
     if (entry.scope_subject) |field| try validUtf8(field);
 
     var exports = entry.exports;
-    var previous: ?Export = null;
+    var export_order = wire.Ascending(Export, Export.order){};
     while (try exports.next()) |item| {
         try validUtf8(item.module);
         try validUtf8(item.name);
-        if (previous) |prev| {
-            if (Export.order(prev, item) != .lt) return error.ExportsNotOrdered;
-        }
-        previous = item;
+        if (export_order.step(item) != .lt) return error.ExportsNotOrdered;
     }
 
     var credentials = entry.credentials;
-    var previous_credential: ?[]const u8 = null;
+    var credential_order = wire.Ascending([]const u8, wire.bytesOrder){};
     while (try credentials.next()) |name| {
         try validUtf8(name);
-        if (previous_credential) |prev| {
-            if (std.mem.order(u8, prev, name) != .lt) return error.CredentialsNotOrdered;
-        }
-        previous_credential = name;
+        if (credential_order.step(name) != .lt) return error.CredentialsNotOrdered;
     }
 }
 
 /// Decode and validate canonical catalog bytes.
 pub fn decode(bytes: []const u8) DecodeError!Catalog {
-    if (bytes.len < magic.len) return error.Truncated;
-    if (!std.mem.eql(u8, bytes[0..magic.len], magic)) return error.BadMagic;
-    var reader = Reader{ .bytes = bytes, .pos = magic.len };
-    if (try reader.int(u16) != schema_version) return error.UnsupportedSchema;
+    var reader = try wire.header(bytes, magic, schema_version);
     const entry_count = try reader.int(u16);
     if (entry_count < min_entries or entry_count > max_entries) return error.EntryCountOutOfRange;
 
-    var previous_name: ?[]const u8 = null;
-    var index: u16 = 0;
-    while (index < entry_count) : (index += 1) {
-        const entry = try readEntry(&reader);
+    var entries = EntryIterator{ .bytes = bytes, .pos = reader.pos, .remaining = entry_count };
+    var name_order = wire.Ascending([]const u8, wire.bytesOrder){};
+    while (try entries.next()) |entry| {
         try validateEntry(entry);
-        if (previous_name) |prev| {
-            if (std.mem.order(u8, prev, entry.name) != .lt) return error.NamesNotOrdered;
-        }
-        previous_name = entry.name;
+        if (name_order.step(entry.name) != .lt) return error.NamesNotOrdered;
     }
-    if (reader.pos != bytes.len) return error.TrailingData;
+    reader.pos = entries.pos;
+    if (!reader.atEnd()) return error.TrailingData;
 
     const catalog = Catalog{ .bytes = bytes, .entry_count = entry_count };
 
@@ -366,10 +294,7 @@ pub fn decode(bytes: []const u8) DecodeError!Catalog {
 /// Domain-separated SHA-256 over the whole encoding. The digest a graph member
 /// carries for these bytes.
 pub fn digest(bytes: []const u8) [32]u8 {
-    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
-    hasher.update(digest_domain);
-    hasher.update(bytes);
-    return hasher.finalResult();
+    return wire.domainDigest(digest_domain, bytes);
 }
 
 // ---------------------------------------------------------------------------
@@ -379,29 +304,7 @@ pub fn digest(bytes: []const u8) [32]u8 {
 /// A writer for building catalogs in tests, over a fixed buffer. It writes what
 /// it is told, valid or not, so a test can build each refusal directly.
 pub const test_support = struct {
-    pub const Writer = struct {
-        buf: []u8,
-        len: usize = 0,
-
-        pub fn raw(self: *Writer, data: []const u8) void {
-            @memcpy(self.buf[self.len..][0..data.len], data);
-            self.len += data.len;
-        }
-
-        pub fn int(self: *Writer, comptime T: type, value: T) void {
-            std.mem.writeInt(T, self.buf[self.len..][0..@sizeOf(T)], value, .little);
-            self.len += @sizeOf(T);
-        }
-
-        pub fn string(self: *Writer, data: []const u8) void {
-            self.int(u32, @intCast(data.len));
-            self.raw(data);
-        }
-
-        pub fn bytes(self: *const Writer) []const u8 {
-            return self.buf[0..self.len];
-        }
-    };
+    pub const Writer = wire.Writer;
 
     pub const SampleExport = struct { module: []const u8, name: []const u8 };
 

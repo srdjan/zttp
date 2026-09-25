@@ -43,7 +43,7 @@ while IFS= read -r -d '' path; do
 done < <(git ls-files -z --cached --others --exclude-standard "$src" | sort -z)
 # The kernel is small on purpose, but "smaller than this" means the glob broke
 # or a file was dropped. The floor is the count on 2026-09-25.
-min_sources=14
+min_sources=15
 if [[ ${#sources[@]} -lt $min_sources ]]; then
   note "found ${#sources[@]} source files under $src, expected at least $min_sources - the gate is reading nothing"
   exit 1

@@ -19,6 +19,7 @@
 
 const std = @import("std");
 const residual = @import("residual.zig");
+const wire = @import("wire.zig");
 
 const Sha256 = std.crypto.hash.sha2.Sha256;
 
@@ -54,15 +55,15 @@ pub const Section = struct {
         while (seen < index) : (seen += 1) {
             cursor = try self.skip(cursor);
         }
-        return self.read(cursor);
+        return self.read(cursor, null);
     }
 
     fn skip(self: Section, cursor: usize) DecodeError!usize {
-        const entry = try self.read(cursor);
+        const entry = try self.read(cursor, null);
         return cursor + entry.encoded_len;
     }
 
-    fn read(self: Section, cursor: usize) DecodeError!Entry {
+    fn read(self: Section, cursor: usize, max_entry_bytes: ?usize) DecodeError!Entry {
         var at = cursor;
         var read_only = false;
         if (self.tagged) {
@@ -75,6 +76,10 @@ pub const Section = struct {
         if (at + 2 > self.bytes.len) return error.Truncated;
         const len = std.mem.readInt(u16, self.bytes[at..][0..2], .little);
         at += 2;
+        if (max_entry_bytes) |max| {
+            if (len == 0) return error.EntryEmpty;
+            if (len > max) return error.EntryTooLong;
+        }
         if (at + len > self.bytes.len) return error.Truncated;
         return .{
             .value = self.bytes[at..][0..len],
@@ -156,72 +161,42 @@ fn maxEntryBytes(which: residual.PolicySection) usize {
     };
 }
 
-const Cursor = struct {
-    bytes: []const u8,
-    at: usize = 0,
-
-    fn u8At(self: *Cursor) DecodeError!u8 {
-        if (self.at + 1 > self.bytes.len) return error.Truncated;
-        const value = self.bytes[self.at];
-        self.at += 1;
-        return value;
-    }
-
-    fn u16At(self: *Cursor) DecodeError!u16 {
-        if (self.at + 2 > self.bytes.len) return error.Truncated;
-        const value = std.mem.readInt(u16, self.bytes[self.at..][0..2], .little);
-        self.at += 2;
-        return value;
-    }
-
-    fn take(self: *Cursor, len: usize) DecodeError![]const u8 {
-        if (self.at + len > self.bytes.len) return error.Truncated;
-        const slice = self.bytes[self.at..][0..len];
-        self.at += len;
-        return slice;
-    }
-};
-
+/// One section: an enabled byte, a u16 count, then `count` records in the
+/// shape `Section.read` defines. The decoder and lookup use the same record
+/// reader, so they cannot disagree about where a record ends.
 fn decodeSection(
-    cursor: *Cursor,
+    reader: *wire.Reader,
     which: residual.PolicySection,
-    tagged: bool,
 ) DecodeError!Section {
-    const enabled_byte = try cursor.u8At();
+    const enabled_byte = try reader.int(u8);
     if (enabled_byte > 1) return error.ReservedFieldNonZero;
-    const count = try cursor.u16At();
+    const count = try reader.int(u16);
     if (count > residual.max_policy_entries) return error.CountExceedsLimit;
 
-    const start = cursor.at;
-    var previous: ?[]const u8 = null;
-    var index: u16 = 0;
-    while (index < count) : (index += 1) {
-        if (tagged) {
-            const flag = try cursor.u8At();
-            if (flag > 1) return error.ReservedFieldNonZero;
-        }
-        const len = try cursor.u16At();
-        if (len == 0) return error.EntryEmpty;
-        if (len > maxEntryBytes(which)) return error.EntryTooLong;
-        const value = try cursor.take(len);
-        if (previous) |prev| {
-            switch (std.mem.order(u8, prev, value)) {
-                .lt => {},
-                .eq => return error.DuplicateEntry,
-                // Ascending order is not cosmetic: it is what makes the lookup
-                // bounded and what makes a duplicate impossible to encode.
-                .gt => return error.EntriesNotSorted,
-            }
-        }
-        previous = value;
-    }
-
-    return .{
+    var section = Section{
         .enabled = enabled_byte == 1,
         .count = count,
-        .bytes = cursor.bytes[start..cursor.at],
-        .tagged = tagged,
+        .bytes = reader.bytes[reader.pos..],
+        .tagged = which == .sql,
     };
+    var cursor: usize = 0;
+    // Ascending order is not cosmetic: it is what makes the lookup bounded and
+    // what makes a duplicate impossible to encode.
+    var order = wire.Ascending([]const u8, wire.bytesOrder){};
+    var index: u16 = 0;
+    while (index < count) : (index += 1) {
+        const entry = try section.read(cursor, maxEntryBytes(which));
+        cursor += entry.encoded_len;
+        switch (order.step(entry.value)) {
+            .lt => {},
+            .eq => return error.DuplicateEntry,
+            .gt => return error.EntriesNotSorted,
+        }
+    }
+
+    section.bytes = section.bytes[0..cursor];
+    reader.pos += cursor;
+    return section;
 }
 
 /// Decode the serialized runtime capability policy and bind it to a digest.
@@ -236,15 +211,14 @@ pub fn decode(bytes: []const u8, expected_digest: [32]u8) DecodeError!Policy {
     Sha256.hash(bytes, &digest, .{});
     if (!std.mem.eql(u8, &digest, &expected_digest)) return error.DigestMismatch;
 
-    var cursor = Cursor{ .bytes = bytes };
-    const env = try decodeSection(&cursor, .env, false);
-    const egress = try decodeSection(&cursor, .egress, false);
-    const cache = try decodeSection(&cursor, .cache, false);
-    const sql = try decodeSection(&cursor, .sql, true);
-    const scope_bits = try cursor.u8At();
-    const scopes = residual.ScopeSet.fromWire(scope_bits) orelse return error.UnknownAddressScope;
+    var reader = wire.Reader{ .bytes = bytes };
+    const env = try decodeSection(&reader, .env);
+    const egress = try decodeSection(&reader, .egress);
+    const cache = try decodeSection(&reader, .cache);
+    const sql = try decodeSection(&reader, .sql);
+    const scopes = residual.ScopeSet.fromWire(try reader.int(u8)) orelse return error.UnknownAddressScope;
 
-    if (cursor.at != bytes.len) return error.TrailingData;
+    if (!reader.atEnd()) return error.TrailingData;
 
     return .{
         .env = env,
@@ -407,6 +381,14 @@ test "unsorted, duplicate, empty, and oversized entries reject" {
     oversized.sqlSection(true, &.{}, true);
     oversized.byte(0);
     try testing.expectError(error.EntryTooLong, decode(oversized.bytes(), oversized.digest()));
+}
+
+test "an oversized entry reports its bound before its truncated body" {
+    var b = Builder{};
+    b.byte(1);
+    b.u16le(1);
+    b.u16le(residual.max_identifier_bytes + 1);
+    try testing.expectError(error.EntryTooLong, decode(b.bytes(), b.digest()));
 }
 
 test "an endpoint may be longer than an identifier, up to its own bound" {

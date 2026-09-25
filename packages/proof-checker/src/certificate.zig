@@ -84,20 +84,7 @@ pub const SectionTag = enum(u16) {
     invariant = 11,
 
     pub fn fromWire(value: u16) ?SectionTag {
-        return switch (value) {
-            1 => .identity,
-            2 => .graph,
-            3 => .obligations,
-            4 => .proof_ir,
-            5 => .evidence,
-            6 => .translation,
-            7 => .rewrites,
-            8 => .trusted,
-            9 => .solver,
-            10 => .residual,
-            11 => .invariant,
-            else => null,
-        };
+        return std.enums.fromInt(SectionTag, value);
     }
 
     pub fn required(self: SectionTag) bool {
@@ -147,11 +134,7 @@ pub const SubjectKind = enum(u8) {
     function = 2,
 
     pub fn fromWire(value: u8) ?SubjectKind {
-        return switch (value) {
-            1 => .handler,
-            2 => .function,
-            else => null,
-        };
+        return std.enums.fromInt(SubjectKind, value);
     }
 };
 
@@ -215,15 +198,7 @@ pub const EdgeKind = enum(u8) {
     not_established = 6,
 
     pub fn fromWire(value: u8) ?EdgeKind {
-        return switch (value) {
-            1 => .proved,
-            2 => .translation_validated,
-            3 => .solver,
-            4 => .tested,
-            5 => .trusted,
-            6 => .not_established,
-            else => null,
-        };
+        return std.enums.fromInt(EdgeKind, value);
     }
 
     /// The grade an edge of this kind contributes when it holds. An edge that
@@ -271,11 +246,7 @@ pub const WitnessKind = enum(u8) {
     jump = 2,
 
     pub fn fromWire(value: u8) ?WitnessKind {
-        return switch (value) {
-            1 => .emission,
-            2 => .jump,
-            else => null,
-        };
+        return std.enums.fromInt(WitnessKind, value);
     }
 };
 
@@ -329,11 +300,7 @@ pub const TrustedFamily = enum(u8) {
     opcode = 2,
 
     pub fn fromWire(value: u8) ?TrustedFamily {
-        return switch (value) {
-            1 => .node,
-            2 => .opcode,
-            else => null,
-        };
+        return std.enums.fromInt(TrustedFamily, value);
     }
 };
 
@@ -403,10 +370,7 @@ pub const SolverQueryKind = enum(u16) {
     opcode_equivalence = 1,
 
     pub fn fromWire(value: u16) ?SolverQueryKind {
-        return switch (value) {
-            1 => .opcode_equivalence,
-            else => null,
-        };
+        return std.enums.fromInt(SolverQueryKind, value);
     }
 };
 
@@ -622,35 +586,39 @@ pub const Certificate = struct {
     invariants: InvariantTable = .{},
 };
 
+const Slot = struct {
+    part_field: []const u8,
+    cert_field: []const u8,
+    limit_field: []const u8,
+    record_size: usize,
+};
+
+fn slot(comptime tag: SectionTag) Slot {
+    return switch (tag) {
+        .identity => .{ .part_field = "identity", .cert_field = "identity", .limit_field = "", .record_size = identity_size },
+        .graph => .{ .part_field = "graph", .cert_field = "graph", .limit_field = "max_graph_members", .record_size = graph_record_size },
+        .obligations => .{ .part_field = "obligations", .cert_field = "obligations", .limit_field = "max_obligations", .record_size = obligation_record_size },
+        .proof_ir => .{ .part_field = "ir", .cert_field = "ir", .limit_field = "max_ir_nodes", .record_size = ir_record_size },
+        .evidence => .{ .part_field = "evidence", .cert_field = "evidence", .limit_field = "max_evidence", .record_size = evidence_record_size },
+        .translation => .{ .part_field = "translation", .cert_field = "translation", .limit_field = "max_witnesses", .record_size = witness_record_size },
+        .rewrites => .{ .part_field = "rewrites", .cert_field = "rewrites", .limit_field = "max_rewrites", .record_size = rewrite_record_size },
+        .trusted => .{ .part_field = "trusted", .cert_field = "trusted", .limit_field = "max_trusted_edges", .record_size = trusted_record_size },
+        .solver => .{ .part_field = "solver", .cert_field = "solver", .limit_field = "max_solver_queries", .record_size = solver_record_size },
+        .residual => .{ .part_field = "residual", .cert_field = "residual", .limit_field = "max_residual_obligations", .record_size = residual_record_size },
+        .invariant => .{ .part_field = "invariants", .cert_field = "invariants", .limit_field = "max_invariant_operations", .record_size = invariant_record_size },
+    };
+}
+
 fn countLimitFor(tag: SectionTag, limits: Limits) u32 {
     return switch (tag) {
         .identity => 1,
-        .graph => limits.max_graph_members,
-        .obligations => limits.max_obligations,
-        .proof_ir => limits.max_ir_nodes,
-        .evidence => limits.max_evidence,
-        .translation => limits.max_witnesses,
-        .rewrites => limits.max_rewrites,
-        .trusted => limits.max_trusted_edges,
-        .solver => limits.max_solver_queries,
-        .residual => limits.max_residual_obligations,
-        .invariant => limits.max_invariant_operations,
+        inline else => |case| @field(limits, slot(case).limit_field),
     };
 }
 
 fn recordSizeFor(tag: SectionTag) usize {
     return switch (tag) {
-        .identity => identity_size,
-        .graph => graph_record_size,
-        .obligations => obligation_record_size,
-        .proof_ir => ir_record_size,
-        .evidence => evidence_record_size,
-        .translation => witness_record_size,
-        .rewrites => rewrite_record_size,
-        .trusted => trusted_record_size,
-        .solver => solver_record_size,
-        .residual => residual_record_size,
-        .invariant => invariant_record_size,
+        inline else => |case| slot(case).record_size,
     };
 }
 
@@ -742,68 +710,42 @@ fn decodeSection(
     limits: Limits,
     budget: *Budget,
 ) DecodeError!void {
-    if (tag == .identity) {
-        if (payload.len != identity_size) return error.SectionLengthMismatch;
-        var identity = Identity{
-            .executable_root = undefined,
-            .ir_root = undefined,
-            .contract_digest = undefined,
-            .development = false,
-        };
-        @memcpy(&identity.executable_root, payload[0..32]);
-        @memcpy(&identity.ir_root, payload[32..64]);
-        @memcpy(&identity.contract_digest, payload[64..96]);
-        @memcpy(&identity.residual_plan_digest, payload[96..128]);
-        @memcpy(&identity.runtime_policy_digest, payload[128..160]);
-        @memcpy(&identity.invariant_spec_digest, payload[160..192]);
-        const flags = payload[192];
-        if (flags & ~@as(u8, 0x01) != 0) return error.ReservedFieldNonZero;
-        identity.development = (flags & 0x01) != 0;
-        cert.identity = identity;
-        return;
-    }
-
-    if (payload.len < 4) return error.SectionLengthMismatch;
-    const count = u32At(payload, 0);
-    if (count > countLimitFor(tag, limits)) return error.CountExceedsLimit;
-    const record_size = recordSizeFor(tag);
-    const expected = 4 + @as(usize, count) * record_size;
-    if (payload.len != expected) return error.SectionLengthMismatch;
-    const records = payload[4..];
-    try budget.spend(@as(u64, count) + 1);
-
     switch (tag) {
-        .identity => unreachable,
-        .graph => cert.graph = .{ .bytes = records, .count = count },
-        .obligations => cert.obligations = .{ .bytes = records, .count = count },
-        .proof_ir => cert.ir = .{ .bytes = records, .count = count },
-        .evidence => cert.evidence = .{ .bytes = records, .count = count },
-        .translation => cert.translation = .{ .bytes = records, .count = count },
-        .rewrites => cert.rewrites = .{ .bytes = records, .count = count },
-        .trusted => cert.trusted = .{ .bytes = records, .count = count },
-        .solver => cert.solver = .{ .bytes = records, .count = count },
-        .residual => cert.residual = .{ .bytes = records, .count = count },
-        .invariant => cert.invariants = .{ .bytes = records, .count = count },
-    }
+        .identity => {
+            if (payload.len != identity_size) return error.SectionLengthMismatch;
+            var identity = Identity{
+                .executable_root = undefined,
+                .ir_root = undefined,
+                .contract_digest = undefined,
+                .development = false,
+            };
+            @memcpy(&identity.executable_root, payload[0..32]);
+            @memcpy(&identity.ir_root, payload[32..64]);
+            @memcpy(&identity.contract_digest, payload[64..96]);
+            @memcpy(&identity.residual_plan_digest, payload[96..128]);
+            @memcpy(&identity.runtime_policy_digest, payload[128..160]);
+            @memcpy(&identity.invariant_spec_digest, payload[160..192]);
+            const flags = payload[192];
+            if (flags & ~@as(u8, 0x01) != 0) return error.ReservedFieldNonZero;
+            identity.development = (flags & 0x01) != 0;
+            cert.identity = identity;
+        },
+        inline else => |case| {
+            if (payload.len < 4) return error.SectionLengthMismatch;
+            const count = u32At(payload, 0);
+            if (count > countLimitFor(case, limits)) return error.CountExceedsLimit;
+            const expected = 4 + @as(usize, count) * recordSizeFor(case);
+            if (payload.len != expected) return error.SectionLengthMismatch;
+            @field(cert, slot(case).cert_field) = .{ .bytes = payload[4..], .count = count };
+            try budget.spend(@as(u64, count) + 1);
 
-    // Validate every enum-bearing field now, so a caller walking the table
-    // later cannot be surprised by a member outside the alphabet.
-    var i: u32 = 0;
-    while (i < count) : (i += 1) {
-        try budget.spend(1);
-        switch (tag) {
-            .identity => unreachable,
-            .graph => _ = try cert.graph.get(i),
-            .obligations => _ = try cert.obligations.get(i),
-            .proof_ir => _ = try cert.ir.get(i),
-            .evidence => _ = try cert.evidence.get(i),
-            .translation => _ = try cert.translation.get(i),
-            .rewrites => _ = try cert.rewrites.get(i),
-            .trusted => _ = try cert.trusted.get(i),
-            .solver => _ = try cert.solver.get(i),
-            .residual => _ = try cert.residual.get(i),
-            .invariant => _ = try cert.invariants.get(i),
-        }
+            // Validate every enum-bearing field before a caller walks the table.
+            var i: u32 = 0;
+            while (i < count) : (i += 1) {
+                try budget.spend(1);
+                _ = try @field(cert, slot(case).cert_field).get(i);
+            }
+        },
     }
 }
 
@@ -972,17 +914,15 @@ pub const EncodeError = error{BufferTooSmall};
 /// Bytes `encode` needs for `parts`.
 pub fn encodedSize(parts: Parts) usize {
     var total: usize = header_size;
-    total += section_header_size + identity_size;
-    total += section_header_size + 4 + parts.graph.len * graph_record_size;
-    total += section_header_size + 4 + parts.obligations.len * obligation_record_size;
-    total += section_header_size + 4 + parts.ir.len * ir_record_size;
-    total += section_header_size + 4 + parts.evidence.len * evidence_record_size;
-    if (parts.translation.len > 0) total += section_header_size + 4 + parts.translation.len * witness_record_size;
-    if (parts.rewrites.len > 0) total += section_header_size + 4 + parts.rewrites.len * rewrite_record_size;
-    if (parts.trusted.len > 0) total += section_header_size + 4 + parts.trusted.len * trusted_record_size;
-    if (parts.solver.len > 0) total += section_header_size + 4 + parts.solver.len * solver_record_size;
-    if (parts.residual.len > 0) total += section_header_size + 4 + parts.residual.len * residual_record_size;
-    if (parts.invariants.len > 0) total += section_header_size + 4 + parts.invariants.len * invariant_record_size;
+    inline for (@typeInfo(SectionTag).@"enum".fields) |field| {
+        const tag: SectionTag = @enumFromInt(field.value);
+        if (tag == .identity) {
+            total += section_header_size + identity_size;
+        } else {
+            const count = @field(parts, slot(tag).part_field).len;
+            if (tag.required() or count > 0) total += section_header_size + 4 + count * slot(tag).record_size;
+        }
+    }
     return total;
 }
 
@@ -1027,13 +967,15 @@ const Cursor = struct {
 };
 
 fn sectionCount(parts: Parts) u16 {
-    var count: u16 = 5;
-    if (parts.translation.len > 0) count += 1;
-    if (parts.rewrites.len > 0) count += 1;
-    if (parts.trusted.len > 0) count += 1;
-    if (parts.solver.len > 0) count += 1;
-    if (parts.residual.len > 0) count += 1;
-    if (parts.invariants.len > 0) count += 1;
+    var count: u16 = 0;
+    inline for (@typeInfo(SectionTag).@"enum".fields) |field| {
+        const tag: SectionTag = @enumFromInt(field.value);
+        if (tag == .identity) {
+            count += 1;
+        } else if (tag.required() or @field(parts, slot(tag).part_field).len > 0) {
+            count += 1;
+        }
+    }
     return count;
 }
 
@@ -1048,130 +990,150 @@ pub fn encode(parts: Parts, out: []u8) EncodeError![]u8 {
     try cursor.u32At(parts.semantics_epoch);
     try cursor.u16At(sectionCount(parts));
 
-    try cursor.u16At(@intFromEnum(SectionTag.identity));
-    try cursor.u32At(identity_size);
-    try cursor.raw(&parts.identity.executable_root);
-    try cursor.raw(&parts.identity.ir_root);
-    try cursor.raw(&parts.identity.contract_digest);
-    try cursor.raw(&parts.identity.residual_plan_digest);
-    try cursor.raw(&parts.identity.runtime_policy_digest);
-    try cursor.raw(&parts.identity.invariant_spec_digest);
-    try cursor.u8At(if (parts.identity.development) 0x01 else 0x00);
-
-    try writeTable(&cursor, .graph, parts.graph.len, graph_record_size);
-    for (parts.graph) |member| {
-        try cursor.u16At(@intFromEnum(member.kind));
-        try cursor.u32At(member.ordinal);
-        try cursor.raw(&member.digest);
+    inline for (@typeInfo(SectionTag).@"enum".fields) |field| {
+        try encodeSection(@enumFromInt(field.value), parts, &cursor);
     }
-
-    try writeTable(&cursor, .obligations, parts.obligations.len, obligation_record_size);
-    for (parts.obligations) |obligation| {
-        try cursor.u16At(@intFromEnum(obligation.property));
-        try cursor.u8At(@intFromEnum(obligation.subject_kind));
-        try cursor.zeros(1);
-        try cursor.u32At(obligation.subject_id);
-    }
-
-    try writeTable(&cursor, .proof_ir, parts.ir.len, ir_record_size);
-    for (parts.ir) |node| {
-        try cursor.u32At(node.id);
-        try cursor.u16At(@intFromEnum(node.tag));
-        try cursor.u8At(@intFromBool(node.is_handler));
-        try cursor.zeros(1);
-        try cursor.u32At(node.parent);
-        try cursor.u32At(node.first_child);
-        try cursor.u32At(node.child_count);
-        try cursor.raw(&node.digest);
-        try cursor.u32At(node.aux);
-    }
-
-    try writeTable(&cursor, .evidence, parts.evidence.len, evidence_record_size);
-    for (parts.evidence) |entry| {
-        try cursor.u32At(entry.obligation_index);
-        try cursor.u8At(@intFromEnum(entry.edge));
-        try cursor.zeros(1);
-        try cursor.u16At(if (entry.rule) |rule| @intFromEnum(rule) else 0);
-        try cursor.u32At(entry.node_id);
-        try cursor.u32At(entry.aux);
-    }
-
-    if (parts.translation.len > 0) {
-        try writeTable(&cursor, .translation, parts.translation.len, witness_record_size);
-        for (parts.translation) |witness| {
-            try cursor.u32At(witness.ir_node);
-            try cursor.u32At(witness.code_start);
-            try cursor.u32At(witness.code_len);
-            try cursor.u32At(witness.target_ir);
-            try cursor.u32At(witness.target_offset);
-            try cursor.u32At(witness.scope_ir_node);
-            try cursor.u8At(@intFromEnum(witness.kind));
-            try cursor.zeros(3);
-        }
-    }
-
-    if (parts.rewrites.len > 0) {
-        try writeTable(&cursor, .rewrites, parts.rewrites.len, rewrite_record_size);
-        for (parts.rewrites) |rewrite| {
-            try cursor.u16At(@intFromEnum(rewrite.rule));
-            try cursor.zeros(2);
-            try cursor.u32At(rewrite.before_offset);
-            try cursor.u32At(rewrite.before_len);
-            try cursor.u32At(rewrite.after_offset);
-            try cursor.u32At(rewrite.after_len);
-            try cursor.i32At(rewrite.delta);
-        }
-    }
-
-    if (parts.trusted.len > 0) {
-        try writeTable(&cursor, .trusted, parts.trusted.len, trusted_record_size);
-        for (parts.trusted) |edge| {
-            try cursor.u8At(@intFromEnum(edge.family));
-            try cursor.u8At(edge.grade.toWire());
-            try cursor.u16At(edge.member_id);
-            try cursor.u16At(@intFromEnum(edge.reason));
-            try cursor.zeros(2);
-        }
-    }
-
-    if (parts.solver.len > 0) {
-        try writeTable(&cursor, .solver, parts.solver.len, solver_record_size);
-        for (parts.solver) |query| {
-            try cursor.u32At(query.obligation_index);
-            try cursor.u16At(@intFromEnum(query.query_kind));
-            try cursor.zeros(2);
-        }
-    }
-
-    if (parts.residual.len > 0) {
-        try writeTable(&cursor, .residual, parts.residual.len, residual_record_size);
-        for (parts.residual) |obligation| {
-            try cursor.u8At(@intFromEnum(obligation.kind));
-            try cursor.u8At(@intFromEnum(obligation.normalization));
-            try cursor.u8At(@intFromEnum(obligation.sink));
-            try cursor.u8At(@intFromEnum(obligation.section));
-            try cursor.u32At(obligation.impl_id);
-            try cursor.u32At(obligation.operation_id);
-            try cursor.zeros(4);
-        }
-    }
-
-    if (parts.invariants.len > 0) {
-        try writeTable(&cursor, .invariant, parts.invariants.len, invariant_record_size);
-        for (parts.invariants) |witness| {
-            try cursor.u32At(witness.ir_node);
-            try cursor.u32At(witness.scope_ir_node);
-            try cursor.u32At(witness.function_ordinal);
-            try cursor.u32At(witness.code_offset);
-            try cursor.u32At(witness.translation_index);
-            try cursor.u8At(@intFromEnum(witness.operation));
-            try cursor.u8At(@intFromEnum(witness.sink));
-            try cursor.zeros(2);
-            try cursor.u32At(witness.impl_id);
-        }
-    }
-
     return out[0..cursor.at];
+}
+
+fn encodeSection(comptime tag: SectionTag, parts: Parts, cursor: *Cursor) EncodeError!void {
+    if (tag != .identity) {
+        if (!tag.required() and @field(parts, slot(tag).part_field).len == 0) return;
+    }
+    switch (tag) {
+        .identity => {
+            try cursor.u16At(@intFromEnum(tag));
+            try cursor.u32At(@intCast(slot(tag).record_size));
+            try cursor.raw(&parts.identity.executable_root);
+            try cursor.raw(&parts.identity.ir_root);
+            try cursor.raw(&parts.identity.contract_digest);
+            try cursor.raw(&parts.identity.residual_plan_digest);
+            try cursor.raw(&parts.identity.runtime_policy_digest);
+            try cursor.raw(&parts.identity.invariant_spec_digest);
+            try cursor.u8At(if (parts.identity.development) 0x01 else 0x00);
+        },
+        .graph => {
+            const records = @field(parts, slot(tag).part_field);
+            try writeTable(cursor, tag, records.len, slot(tag).record_size);
+            for (records) |member| {
+                try cursor.u16At(@intFromEnum(member.kind));
+                try cursor.u32At(member.ordinal);
+                try cursor.raw(&member.digest);
+            }
+        },
+        .obligations => {
+            const records = @field(parts, slot(tag).part_field);
+            try writeTable(cursor, tag, records.len, slot(tag).record_size);
+            for (records) |obligation| {
+                try cursor.u16At(@intFromEnum(obligation.property));
+                try cursor.u8At(@intFromEnum(obligation.subject_kind));
+                try cursor.zeros(1);
+                try cursor.u32At(obligation.subject_id);
+            }
+        },
+        .proof_ir => {
+            const records = @field(parts, slot(tag).part_field);
+            try writeTable(cursor, tag, records.len, slot(tag).record_size);
+            for (records) |node| {
+                try cursor.u32At(node.id);
+                try cursor.u16At(@intFromEnum(node.tag));
+                try cursor.u8At(@intFromBool(node.is_handler));
+                try cursor.zeros(1);
+                try cursor.u32At(node.parent);
+                try cursor.u32At(node.first_child);
+                try cursor.u32At(node.child_count);
+                try cursor.raw(&node.digest);
+                try cursor.u32At(node.aux);
+            }
+        },
+        .evidence => {
+            const records = @field(parts, slot(tag).part_field);
+            try writeTable(cursor, tag, records.len, slot(tag).record_size);
+            for (records) |entry| {
+                try cursor.u32At(entry.obligation_index);
+                try cursor.u8At(@intFromEnum(entry.edge));
+                try cursor.zeros(1);
+                try cursor.u16At(if (entry.rule) |rule| @intFromEnum(rule) else 0);
+                try cursor.u32At(entry.node_id);
+                try cursor.u32At(entry.aux);
+            }
+        },
+        .translation => {
+            const records = @field(parts, slot(tag).part_field);
+            try writeTable(cursor, tag, records.len, slot(tag).record_size);
+            for (records) |witness| {
+                try cursor.u32At(witness.ir_node);
+                try cursor.u32At(witness.code_start);
+                try cursor.u32At(witness.code_len);
+                try cursor.u32At(witness.target_ir);
+                try cursor.u32At(witness.target_offset);
+                try cursor.u32At(witness.scope_ir_node);
+                try cursor.u8At(@intFromEnum(witness.kind));
+                try cursor.zeros(3);
+            }
+        },
+        .rewrites => {
+            const records = @field(parts, slot(tag).part_field);
+            try writeTable(cursor, tag, records.len, slot(tag).record_size);
+            for (records) |rewrite| {
+                try cursor.u16At(@intFromEnum(rewrite.rule));
+                try cursor.zeros(2);
+                try cursor.u32At(rewrite.before_offset);
+                try cursor.u32At(rewrite.before_len);
+                try cursor.u32At(rewrite.after_offset);
+                try cursor.u32At(rewrite.after_len);
+                try cursor.i32At(rewrite.delta);
+            }
+        },
+        .trusted => {
+            const records = @field(parts, slot(tag).part_field);
+            try writeTable(cursor, tag, records.len, slot(tag).record_size);
+            for (records) |edge| {
+                try cursor.u8At(@intFromEnum(edge.family));
+                try cursor.u8At(edge.grade.toWire());
+                try cursor.u16At(edge.member_id);
+                try cursor.u16At(@intFromEnum(edge.reason));
+                try cursor.zeros(2);
+            }
+        },
+        .solver => {
+            const records = @field(parts, slot(tag).part_field);
+            try writeTable(cursor, tag, records.len, slot(tag).record_size);
+            for (records) |query| {
+                try cursor.u32At(query.obligation_index);
+                try cursor.u16At(@intFromEnum(query.query_kind));
+                try cursor.zeros(2);
+            }
+        },
+        .residual => {
+            const records = @field(parts, slot(tag).part_field);
+            try writeTable(cursor, tag, records.len, slot(tag).record_size);
+            for (records) |obligation| {
+                try cursor.u8At(@intFromEnum(obligation.kind));
+                try cursor.u8At(@intFromEnum(obligation.normalization));
+                try cursor.u8At(@intFromEnum(obligation.sink));
+                try cursor.u8At(@intFromEnum(obligation.section));
+                try cursor.u32At(obligation.impl_id);
+                try cursor.u32At(obligation.operation_id);
+                try cursor.zeros(4);
+            }
+        },
+        .invariant => {
+            const records = @field(parts, slot(tag).part_field);
+            try writeTable(cursor, tag, records.len, slot(tag).record_size);
+            for (records) |witness| {
+                try cursor.u32At(witness.ir_node);
+                try cursor.u32At(witness.scope_ir_node);
+                try cursor.u32At(witness.function_ordinal);
+                try cursor.u32At(witness.code_offset);
+                try cursor.u32At(witness.translation_index);
+                try cursor.u8At(@intFromEnum(witness.operation));
+                try cursor.u8At(@intFromEnum(witness.sink));
+                try cursor.zeros(2);
+                try cursor.u32At(witness.impl_id);
+            }
+        },
+    }
 }
 
 fn writeTable(cursor: *Cursor, tag: SectionTag, count: usize, record_size: usize) EncodeError!void {

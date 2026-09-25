@@ -22,6 +22,7 @@ pub const proof_system = @import("proof_system.zig");
 pub const residual = @import("residual.zig");
 pub const tool_catalog = @import("tool_catalog.zig");
 pub const verdict = @import("verdict.zig");
+pub const wire = @import("wire.zig");
 
 pub const Assessment = verdict.Assessment;
 pub const AssuranceGrade = verdict.AssuranceGrade;

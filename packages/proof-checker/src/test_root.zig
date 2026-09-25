@@ -18,4 +18,5 @@ comptime {
     _ = @import("root.zig");
     _ = @import("tool_catalog.zig");
     _ = @import("verdict.zig");
+    _ = @import("wire.zig");
 }
