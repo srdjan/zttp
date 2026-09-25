@@ -276,6 +276,8 @@ A build step that fails when a repo invariant is violated, as distinct from a te
 
 A Gate must assert a floor on its own input before any count it reports means anything. A Gate whose corpus is empty, whose filter matches nothing, or whose build product has no consumer reports success while checking nothing, and is then cited afterwards as evidence. Deleting a Gate's input and confirming it turns red is the check that separates the two.
 
+A floor guards the input a Gate holds, not whether that input is the one in the tree. A Gate that compiles its input list into its own executable was observed to keep running an earlier list after the list was edited, because the build reused an executable built from the old list. Such a Gate reads its data at run time instead. A Gate that reports an item no file contains any more is the sign that it holds a stale input.
+
 When a Gate classifies a closed set, it must also reject inputs outside that set. Mapping an unknown member into a fallback bucket lets the declared buckets stay green while the topology the Gate reports has already changed.
 
 The floor is necessary and not sufficient. A Gate holding a full input can still assert something weaker than its own name claims, so that runs in which the named behavior never happened satisfy it too. An assertion must name the value expected rather than the values excluded, since a difference from two wrong answers is satisfied by a third. A Gate is also only as good as the fixture beneath it: when two outcomes it is meant to separate write identical observable state, no assertion over that state can tell them apart.
