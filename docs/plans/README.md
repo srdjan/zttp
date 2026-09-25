@@ -6,7 +6,7 @@ index when a plan starts, closes, or moves to the archive.
 
 | Document | Role and status | Work authority |
 |---|---|---|
-| [Proof-checker rederive review](2026-09-24-proof-checker-rederive-review.md) | Accepted 2026-09-25; three owner decisions implemented, Phases 0 to 4 not started | Owner accepted the plan and answered its four decisions |
+| [Proof-checker rederive review](2026-09-24-proof-checker-rederive-review.md) | Implemented 2026-09-25; Phases 0 to 4 committed, results and section 7 leftovers at the end of the plan | Owner accepted the plan and answered its four decisions |
 | [M4: release contract for scoped tool routes](2026-09-22-m4-release-contract.md) | Accepted 2026-09-22; T1a to T7 complete | Owner accepted the contract on 2026-09-22 |
 | [M4 T7: reference tools and documentation](2026-09-24-m4-t7-reference-tools-design.md) | Implemented 2026-09-24; U1 to U3 complete | Owner accepted the design and answered its six questions |
 | [M4 T6: credential injection](2026-09-24-m4-t6-credential-injection-design.md) | Implemented 2026-09-24; U1, U2, and U3 complete | Owner accepted the design and answered its four questions |
