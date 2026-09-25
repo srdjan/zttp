@@ -247,6 +247,26 @@ pub fn build(b: *std.Build) void {
     const proof_checker_test_step = b.step("test-proof-checker", "Run the consumer acceptance kernel tests");
     proof_checker_test_step.dependOn(&run_proof_checker_tests.step);
 
+    // Probe committed single-point mutations against a private copy of the
+    // working tree. This gate is explicit because each row needs a fresh Zig
+    // cache and the current suite has survivors that Phase 0 must pin.
+    const proof_checker_mutants_mod = b.createModule(.{
+        .root_source_file = tools_dep.path("src/proof_checker_mutants.zig"),
+        .target = b.graph.host,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    const proof_checker_mutants_exe = b.addExecutable(.{
+        .name = "proof-checker-mutants",
+        .root_module = proof_checker_mutants_mod,
+    });
+    const proof_checker_mutants_cmd = b.addRunArtifact(proof_checker_mutants_exe);
+    proof_checker_mutants_cmd.addArg(b.graph.zig_exe);
+    proof_checker_mutants_cmd.addDirectoryArg(proof_checker_dep.path(""));
+    proof_checker_mutants_cmd.has_side_effects = true;
+    const proof_checker_mutants_step = b.step("test-proof-checker-mutants", "Run the committed mutants against the acceptance kernel suite");
+    proof_checker_mutants_step.dependOn(&proof_checker_mutants_cmd.step);
+
     // The kernel's own floor: the suite above reports a pass whether it
     // collected two hundred tests or none, so a separate gate asserts the
     // corpus is non-empty and the package still imports nothing.

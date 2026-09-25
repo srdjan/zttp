@@ -94,3 +94,8 @@ coverage-union release-operation
 # commits it. Wiring it into a check would defeat the gate, because a build that
 # regenerates its own expected output can never disagree with itself.
 vocab-envelope-write regeneration
+
+# A mutation run uses a fresh Zig cache for each row. The 231-row run took
+# 98.81 seconds on this machine. Run this explicit gate while strengthening
+# the acceptance suite.
+test-proof-checker-mutants slow-mutation-probe

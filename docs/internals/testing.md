@@ -324,7 +324,21 @@ reaches no filesystem, clock, process, network, signing, or allocator, and that
 the suite the first step reports on is not empty. The second gate exists because
 the first reports a pass over zero tests. It fails in both directions: a new
 forbidden import fails it, and so does a source file that `src/test_root.zig`
-does not reference or that carries no test.
+does not reference or that carries no test. It also refuses mutable statics,
+`extern`, `asm`, and `@embedFile` anywhere in the kernel and `std.debug.print`
+outside tests. Its floors are 14 source files and 265 tests. Its reason-code
+census requires every `ReasonCode` member to be named inside a kernel test
+block, or to carry a row in the script that states why no input produces it.
+
+`zig build test-proof-checker-mutants` measures whether that suite can see a
+change. It applies each row of `packages/tools/src/proof_checker_mutants.zon`
+to a private copy of the kernel, compiles the suite with a fresh cache, and
+fails when a mutant survives, when a row no longer applies, or when a row
+marked equivalent is killed. An equivalent row states the mechanism that makes
+the change invisible. The step is manual (`scripts/manual-steps.allow`): it
+takes about 100 seconds. Run it after any change to `packages/proof-checker`.
+A reused cache gave stale verdicts during the review that introduced it, so the
+fresh cache is not optional.
 
 `zig build test-proof-ratchet` compiles a corpus of real handlers, builds real
 certificates, runs the real acceptance kernel over them, and asserts the exact
