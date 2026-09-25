@@ -371,8 +371,11 @@ const Session = struct {
             return reject(.artifact_binding, .proof_ir_digest_mismatch, .none);
         }
 
-        if (try self.checkIrShape()) |rejection| return rejection;
-        if (try self.checkObligationSet()) |rejection| return rejection;
+        const entry = switch (try self.checkIrShape()) {
+            .entry => |value| value,
+            .rejected => |rejection| return rejection,
+        };
+        if (try self.checkObligationSet(entry)) |rejection| return rejection;
 
         try self.markDeclared();
         try self.foldTotality();
@@ -392,113 +395,88 @@ const Session = struct {
             .covered => |verdicts| verdicts,
         };
 
-        var outcome = try self.checkEvidence();
+        var outcome = try self.checkEvidence(entry);
         outcome.guards = guards;
         outcome.invariants = invariants;
         return outcome;
     }
 
-    /// Relate the supplied `ZTCAT1` bytes to the one `tool_catalog` graph
-    /// member. The member's digest is already bound to the executable root;
-    /// this stage is what ties it to bytes the kernel decoded itself.
-    ///
-    /// Bytes with no member, and a member with no bytes, are both refused: a
-    /// catalog the graph does not commit to is not accepted, and a commitment
-    /// to a catalog nobody supplied cannot be checked.
-    fn checkToolCatalog(self: *Session) SessionError!?Outcome {
-        const bytes = self.tool_catalog orelse {
-            var graph_index: u32 = 0;
-            while (graph_index < self.certificate.graph.len()) : (graph_index += 1) {
-                try self.budget.spend(1);
-                const member = try self.certificate.graph.get(graph_index);
-                if (member.kind == .tool_catalog) {
-                    return reject(.tool_catalog, .tool_catalog_member_missing, memberSubject(member));
-                }
+    const MemberBinding = union(enum) {
+        missing,
+        bound,
+        mismatch: graph.Member,
+    };
+
+    const MemberBinder = struct {
+        kind: graph.MemberKind,
+        digest: ?[32]u8,
+        found: bool = false,
+
+        fn visit(self: *MemberBinder, member: graph.Member) ?MemberBinding {
+            if (member.kind != self.kind) return null;
+            if (self.digest == null) return .{ .mismatch = member };
+            if (self.found) return .{ .mismatch = member };
+            self.found = true;
+            if (member.ordinal != 0 or !std.mem.eql(u8, &member.digest, &self.digest.?)) {
+                return .{ .mismatch = member };
             }
             return null;
-        };
+        }
 
-        _ = tool_catalog.decode(bytes) catch
-            return reject(.tool_catalog, .tool_catalog_undecodable, .none);
-        const catalog_digest = tool_catalog.digest(bytes);
+        fn finish(self: MemberBinder) MemberBinding {
+            return if (self.found) .bound else .missing;
+        }
+    };
 
-        var members: u32 = 0;
+    fn bindMember(self: *Session, kind: graph.MemberKind, digest: ?[32]u8) SessionError!MemberBinding {
+        var binder = MemberBinder{ .kind = kind, .digest = digest };
         var graph_index: u32 = 0;
         while (graph_index < self.certificate.graph.len()) : (graph_index += 1) {
             try self.budget.spend(1);
             const member = try self.certificate.graph.get(graph_index);
-            if (member.kind != .tool_catalog) continue;
-            members += 1;
-            // The graph refuses a duplicate (kind, ordinal) at binding, so a
-            // second catalog member carries a nonzero ordinal and is refused
-            // here rather than counted.
-            if (member.ordinal != 0 or !std.mem.eql(u8, &member.digest, &catalog_digest)) {
+            if (binder.visit(member)) |mismatch| return mismatch;
+        }
+        return binder.finish();
+    }
+
+    fn checkBoundBytes(self: *Session, comptime kind: graph.MemberKind, bytes: ?[]const u8) SessionError!?Outcome {
+        const stage: verdict.Stage = if (kind == .tool_catalog) .tool_catalog else .declaration;
+        const missing_code: verdict.ReasonCode = if (kind == .tool_catalog) .tool_catalog_member_missing else .declaration_member_missing;
+        const undecodable_code: verdict.ReasonCode = if (kind == .tool_catalog) .tool_catalog_undecodable else .declaration_undecodable;
+        const mismatch_code: verdict.ReasonCode = if (kind == .tool_catalog) .tool_catalog_digest_mismatch else .declaration_digest_mismatch;
+        const digest: ?[32]u8 = if (bytes) |supplied| blk: {
+            if (kind == .tool_catalog) {
+                _ = tool_catalog.decode(supplied) catch return reject(stage, undecodable_code, .none);
+                break :blk tool_catalog.digest(supplied);
+            } else {
+                _ = declaration.decode(supplied) catch return reject(stage, undecodable_code, .none);
+                break :blk declaration.digest(supplied);
+            }
+        } else null;
+        switch (try self.bindMember(kind, digest)) {
+            .missing => if (bytes != null) return reject(stage, missing_code, .none),
+            .bound => {},
+            .mismatch => |member| {
+                if (bytes == null) return reject(stage, missing_code, memberSubject(member));
                 return .{ .state = .integrity_verified, .rejection = .{
-                    .stage = .tool_catalog,
-                    .code = .tool_catalog_digest_mismatch,
+                    .stage = stage,
+                    .code = mismatch_code,
                     .subject = memberSubject(member),
                     .expected = .{ .digest = member.digest },
-                    .actual = .{ .digest = catalog_digest },
+                    .actual = .{ .digest = digest.? },
                     .recertifiable = true,
                 } };
-            }
-        }
-        if (members != 1) {
-            return reject(.tool_catalog, .tool_catalog_member_missing, .none);
+            },
         }
         return null;
     }
 
-    /// Relate the supplied `ZTDCL1` bytes to the one `declaration` graph
-    /// member, as `checkToolCatalog` does for the catalog. The member's
-    /// digest is already bound to the executable root; this stage ties it to
-    /// bytes the kernel decoded itself.
-    ///
-    /// Bytes with no member, and a member with no bytes, are both refused: a
-    /// declaration the graph does not commit to is not accepted, and a
-    /// commitment to a declaration nobody supplied cannot be checked.
+    fn checkToolCatalog(self: *Session) SessionError!?Outcome {
+        return self.checkBoundBytes(.tool_catalog, self.tool_catalog);
+    }
+
     fn checkDeclaration(self: *Session) SessionError!?Outcome {
-        const bytes = self.declaration orelse {
-            var graph_index: u32 = 0;
-            while (graph_index < self.certificate.graph.len()) : (graph_index += 1) {
-                try self.budget.spend(1);
-                const member = try self.certificate.graph.get(graph_index);
-                if (member.kind == .declaration) {
-                    return reject(.declaration, .declaration_member_missing, memberSubject(member));
-                }
-            }
-            return null;
-        };
-
-        _ = declaration.decode(bytes) catch
-            return reject(.declaration, .declaration_undecodable, .none);
-        const declaration_digest = declaration.digest(bytes);
-
-        var members: u32 = 0;
-        var graph_index: u32 = 0;
-        while (graph_index < self.certificate.graph.len()) : (graph_index += 1) {
-            try self.budget.spend(1);
-            const member = try self.certificate.graph.get(graph_index);
-            if (member.kind != .declaration) continue;
-            members += 1;
-            // The graph refuses a duplicate (kind, ordinal) at binding, so a
-            // second declaration member carries a nonzero ordinal and is
-            // refused here rather than counted.
-            if (member.ordinal != 0 or !std.mem.eql(u8, &member.digest, &declaration_digest)) {
-                return .{ .state = .integrity_verified, .rejection = .{
-                    .stage = .declaration,
-                    .code = .declaration_digest_mismatch,
-                    .subject = memberSubject(member),
-                    .expected = .{ .digest = member.digest },
-                    .actual = .{ .digest = declaration_digest },
-                    .recertifiable = true,
-                } };
-            }
-        }
-        if (members != 1) {
-            return reject(.declaration, .declaration_member_missing, .none);
-        }
-        return null;
+        return self.checkBoundBytes(.declaration, self.declaration);
     }
 
     const InvariantOutcome = union(enum) {
@@ -506,40 +484,46 @@ const Session = struct {
         rejected: Outcome,
     };
 
+    const InvariantSite = union(enum) {
+        refused: verdict.ReasonCode,
+        covered: bool,
+    };
+
     /// Relate the structured specification, proof IR, translation witnesses,
     /// and independently decoded final-bytecode ledger calls.
     fn checkInvariantCoverage(self: *Session) SessionError!InvariantOutcome {
         const zero = [_]u8{0} ** 32;
         const declared_digest = self.certificate.identity.invariant_spec_digest;
-        const configured = !std.mem.eql(u8, &declared_digest, &zero);
+        if (std.mem.eql(u8, &declared_digest, &zero)) return self.checkUnconfiguredInvariants();
+        return self.checkConfiguredInvariants(declared_digest);
+    }
 
-        if (!configured) {
-            if (self.invariant_spec != null) {
-                return .{ .rejected = reject(.invariant_coverage, .invariant_spec_digest_mismatch, .none) };
-            }
-            if (self.certificate.invariants.len() != 0 or self.observed_invariant_operations.len != 0) {
-                return .{ .rejected = reject(.invariant_coverage, .invariant_spec_missing, .none) };
-            }
-            var graph_index: u32 = 0;
-            while (graph_index < self.certificate.graph.len()) : (graph_index += 1) {
-                try self.budget.spend(1);
-                const member = try self.certificate.graph.get(graph_index);
-                if (member.kind == .invariant_spec or member.kind == .invariant_ledger_adapter) {
-                    return .{ .rejected = reject(.invariant_coverage, .invariant_spec_missing, .{
-                        .graph_member = .{ .kind = @intFromEnum(member.kind), .ordinal = member.ordinal },
-                    }) };
-                }
-            }
-            var node_index: u32 = 0;
-            while (node_index < self.certificate.ir.len()) : (node_index += 1) {
-                try self.budget.spend(1);
-                if ((try self.certificate.ir.get(node_index)).tag == .ledger_call) {
-                    return .{ .rejected = reject(.invariant_coverage, .invariant_spec_missing, .{ .ir_node = node_index }) };
-                }
-            }
-            return .{ .covered = .{} };
+    fn checkUnconfiguredInvariants(self: *Session) SessionError!InvariantOutcome {
+        if (self.invariant_spec != null) {
+            return .{ .rejected = reject(.invariant_coverage, .invariant_spec_digest_mismatch, .none) };
         }
+        if (self.certificate.invariants.len() != 0 or self.observed_invariant_operations.len != 0) {
+            return .{ .rejected = reject(.invariant_coverage, .invariant_spec_missing, .none) };
+        }
+        var graph_index: u32 = 0;
+        while (graph_index < self.certificate.graph.len()) : (graph_index += 1) {
+            try self.budget.spend(1);
+            const member = try self.certificate.graph.get(graph_index);
+            if (member.kind == .invariant_spec or member.kind == .invariant_ledger_adapter) {
+                return .{ .rejected = reject(.invariant_coverage, .invariant_spec_missing, memberSubject(member)) };
+            }
+        }
+        var node_index: u32 = 0;
+        while (node_index < self.certificate.ir.len()) : (node_index += 1) {
+            try self.budget.spend(1);
+            if ((try self.certificate.ir.get(node_index)).tag == .ledger_call) {
+                return .{ .rejected = reject(.invariant_coverage, .invariant_spec_missing, .{ .ir_node = node_index }) };
+            }
+        }
+        return .{ .covered = .{} };
+    }
 
+    fn checkConfiguredInvariants(self: *Session, declared_digest: [32]u8) SessionError!InvariantOutcome {
         const spec_bytes = self.invariant_spec orelse
             return .{ .rejected = reject(.invariant_coverage, .invariant_spec_missing, .none) };
         const spec = invariant.decode(spec_bytes) catch
@@ -555,28 +539,21 @@ const Session = struct {
             } } };
         }
 
-        var spec_members: u32 = 0;
-        var adapter_members: u32 = 0;
-        const adapter_digest = invariant.adapterDigest();
+        var spec_binder = MemberBinder{ .kind = .invariant_spec, .digest = spec_digest };
+        var adapter_binder = MemberBinder{ .kind = .invariant_ledger_adapter, .digest = invariant.adapterDigest() };
         var graph_index: u32 = 0;
         while (graph_index < self.certificate.graph.len()) : (graph_index += 1) {
             try self.budget.spend(1);
             const member = try self.certificate.graph.get(graph_index);
             switch (member.kind) {
                 .invariant_spec => {
-                    spec_members += 1;
-                    if (member.ordinal != 0 or !std.mem.eql(u8, &member.digest, &spec_digest)) {
-                        return .{ .rejected = reject(.invariant_coverage, .invariant_spec_digest_mismatch, .{
-                            .graph_member = .{ .kind = @intFromEnum(member.kind), .ordinal = member.ordinal },
-                        }) };
+                    if (spec_binder.visit(member)) |_| {
+                        return .{ .rejected = reject(.invariant_coverage, .invariant_spec_digest_mismatch, memberSubject(member)) };
                     }
                 },
                 .invariant_ledger_adapter => {
-                    adapter_members += 1;
-                    if (member.ordinal != 0 or !std.mem.eql(u8, &member.digest, &adapter_digest)) {
-                        return .{ .rejected = reject(.invariant_coverage, .invariant_adapter_identity_mismatch, .{
-                            .graph_member = .{ .kind = @intFromEnum(member.kind), .ordinal = member.ordinal },
-                        }) };
+                    if (adapter_binder.visit(member)) |_| {
+                        return .{ .rejected = reject(.invariant_coverage, .invariant_adapter_identity_mismatch, memberSubject(member)) };
                     }
                 },
                 // exhaustive: this walk counts the two invariant members and
@@ -589,10 +566,10 @@ const Session = struct {
                 else => {},
             }
         }
-        if (spec_members != 1) {
+        if (spec_binder.finish() == .missing) {
             return .{ .rejected = reject(.invariant_coverage, .invariant_spec_member_missing, .none) };
         }
-        if (adapter_members != 1) {
+        if (adapter_binder.finish() == .missing) {
             return .{ .rejected = reject(.invariant_coverage, .invariant_adapter_member_missing, .none) };
         }
         if (self.certificate.invariants.len() == 0 and self.observed_invariant_operations.len == 0) {
@@ -644,57 +621,15 @@ const Session = struct {
                 return .{ .rejected = reject(.invariant_coverage, .invariant_member_extra, .{ .code_offset = supplied.code_offset }) };
             }
             const observed = self.observed_invariant_operations[index];
-            if (previous_observed) |previous| {
-                if (invariant.ObservedOperation.order(previous, observed) != .lt) {
-                    return .{ .rejected = reject(.invariant_coverage, .invariant_observed_mismatch, .{ .code_offset = observed.code_offset }) };
-                }
+            var subject: verdict.Subject = .{ .code_offset = supplied.code_offset };
+            switch (try self.checkInvariantSite(supplied, observed, previous_observed, &subject)) {
+                .refused => |code| return .{ .rejected = reject(.invariant_coverage, code, subject) },
+                .covered => |writes| {
+                    result.covered += 1;
+                    if (writes) result.writes += 1;
+                },
             }
             previous_observed = observed;
-            if (observed.function_ordinal != supplied.function_ordinal or
-                observed.code_offset != supplied.code_offset or
-                observed.operation != supplied.operation)
-            {
-                return .{ .rejected = reject(.invariant_coverage, .invariant_observed_mismatch, .{ .code_offset = supplied.code_offset }) };
-            }
-
-            if (supplied.ir_node >= self.certificate.ir.len()) {
-                return .{ .rejected = reject(.invariant_coverage, .invariant_member_extra, .{ .ir_node = supplied.ir_node }) };
-            }
-            const node = try self.certificate.ir.get(supplied.ir_node);
-            if (node.tag != .ledger_call) {
-                return .{ .rejected = reject(.invariant_coverage, .invariant_member_extra, .{ .ir_node = supplied.ir_node }) };
-            }
-            if (node.aux >= invariant.catalog.len) {
-                return .{ .rejected = reject(.invariant_coverage, .invariant_operation_unknown, .{ .ir_node = supplied.ir_node }) };
-            }
-            if (self.invariant_nodes.get(supplied.ir_node)) {
-                return .{ .rejected = reject(.invariant_coverage, .invariant_member_duplicate, .{ .ir_node = supplied.ir_node }) };
-            }
-            self.invariant_nodes.set(supplied.ir_node, true);
-            const expected = invariant.catalog[node.aux];
-            if (supplied.operation != expected.operation) {
-                return .{ .rejected = reject(.invariant_coverage, .invariant_operation_mismatch, .{ .ir_node = supplied.ir_node }) };
-            }
-            if (supplied.sink != expected.sink) {
-                return .{ .rejected = reject(.invariant_coverage, .invariant_sink_mismatch, .{ .ir_node = supplied.ir_node }) };
-            }
-            if (supplied.impl_id != expected.impl_id) {
-                return .{ .rejected = reject(.invariant_coverage, .invariant_impl_identity_mismatch, .{ .ir_node = supplied.ir_node }) };
-            }
-
-            if (supplied.translation_index >= self.certificate.translation.len()) {
-                return .{ .rejected = reject(.invariant_coverage, .invariant_translation_missing, .{ .ir_node = supplied.ir_node }) };
-            }
-            const emission = try self.certificate.translation.get(supplied.translation_index);
-            if (emission.kind != .emission or emission.ir_node != supplied.ir_node or
-                emission.scope_ir_node != supplied.scope_ir_node or supplied.code_offset < emission.code_start or
-                @as(u64, supplied.code_offset) >= @as(u64, emission.code_start) + emission.code_len)
-            {
-                return .{ .rejected = reject(.invariant_coverage, .invariant_translation_missing, .{ .ir_node = supplied.ir_node }) };
-            }
-
-            result.covered += 1;
-            if (expected.writes) result.writes += 1;
         }
         if (self.observed_invariant_operations.len > self.certificate.invariants.len()) {
             const extra = self.observed_invariant_operations[self.certificate.invariants.len()];
@@ -714,10 +649,53 @@ const Session = struct {
                 return .{ .rejected = reject(.invariant_coverage, .invariant_member_missing, .{ .ir_node = node_index }) };
             }
         }
-        if (!result.ready()) {
-            return .{ .rejected = reject(.invariant_coverage, .invariant_member_missing, .none) };
-        }
+        std.debug.assert(result.ready());
         return .{ .covered = result };
+    }
+
+    fn checkInvariantSite(
+        self: *Session,
+        supplied: cert_mod.InvariantWitness,
+        observed: invariant.ObservedOperation,
+        previous_observed: ?invariant.ObservedOperation,
+        subject: *verdict.Subject,
+    ) SessionError!InvariantSite {
+        if (previous_observed) |previous| {
+            if (invariant.ObservedOperation.order(previous, observed) != .lt) {
+                subject.* = .{ .code_offset = observed.code_offset };
+                return .{ .refused = .invariant_observed_mismatch };
+            }
+        }
+        if (observed.function_ordinal != supplied.function_ordinal or
+            observed.code_offset != supplied.code_offset or
+            observed.operation != supplied.operation)
+        {
+            return .{ .refused = .invariant_observed_mismatch };
+        }
+
+        subject.* = .{ .ir_node = supplied.ir_node };
+        if (supplied.ir_node >= self.certificate.ir.len()) return .{ .refused = .invariant_member_extra };
+        const node = try self.certificate.ir.get(supplied.ir_node);
+        if (node.tag != .ledger_call) return .{ .refused = .invariant_member_extra };
+        if (node.aux >= invariant.catalog.len) return .{ .refused = .invariant_operation_unknown };
+        if (self.invariant_nodes.get(supplied.ir_node)) return .{ .refused = .invariant_member_duplicate };
+        self.invariant_nodes.set(supplied.ir_node, true);
+
+        const expected = invariant.catalog[node.aux];
+        if (supplied.operation != expected.operation) return .{ .refused = .invariant_operation_mismatch };
+        if (supplied.sink != expected.sink) return .{ .refused = .invariant_sink_mismatch };
+        if (supplied.impl_id != expected.impl_id) return .{ .refused = .invariant_impl_identity_mismatch };
+        if (supplied.translation_index >= self.certificate.translation.len()) {
+            return .{ .refused = .invariant_translation_missing };
+        }
+        const emission = try self.certificate.translation.get(supplied.translation_index);
+        if (emission.kind != .emission or emission.ir_node != supplied.ir_node or
+            emission.scope_ir_node != supplied.scope_ir_node or supplied.code_offset < emission.code_start or
+            @as(u64, supplied.code_offset) >= @as(u64, emission.code_start) + emission.code_len)
+        {
+            return .{ .refused = .invariant_translation_missing };
+        }
+        return .{ .covered = expected.writes };
     }
 
     const GuardOutcome = union(enum) {
@@ -863,76 +841,67 @@ const Session = struct {
     /// The IR has to be a forest of the shape the wire form promises before any
     /// fold over it means anything: ids in order, children contiguous and after
     /// their parent, parents before their children.
-    fn checkIrShape(self: *Session) SessionError!?Outcome {
-        const count = self.certificate.ir.len();
-        if (count == 0) return reject(.evidence_check, .proof_node_unknown, .none);
+    const IrShape = union(enum) { entry: u32, rejected: Outcome };
 
+    fn checkIrShape(self: *Session) SessionError!IrShape {
+        const count = self.certificate.ir.len();
         var handler_count: u32 = 0;
+        var entry: u32 = 0;
         var index: u32 = 0;
         while (index < count) : (index += 1) {
             try self.budget.spend(1);
             const node = try self.certificate.ir.get(index);
 
-            if (node.id != index) return reject(.evidence_check, .proof_node_unknown, .{ .ir_node = index });
+            if (node.id != index) return .{ .rejected = reject(.evidence_check, .proof_node_unknown, .{ .ir_node = index }) };
             if (node.is_handler) {
                 if (node.tag != .function) {
-                    return reject(.evidence_check, .proof_node_unknown, .{ .ir_node = index });
+                    return .{ .rejected = reject(.evidence_check, .proof_node_unknown, .{ .ir_node = index }) };
                 }
                 handler_count += 1;
+                entry = node.id;
             }
             if (index == 0) {
-                if (node.parent != 0) return reject(.evidence_check, .proof_node_cycle, .{ .ir_node = index });
+                if (node.parent != 0) return .{ .rejected = reject(.evidence_check, .proof_node_cycle, .{ .ir_node = index }) };
                 self.depths.set(index, 1);
             } else if (node.parent >= index) {
                 // A parent at or after its child is a cycle in a tree that is
                 // supposed to be ordered. Refusing here is what makes the fold
                 // below a single reverse sweep instead of a search.
-                return reject(.evidence_check, .proof_node_cycle, .{ .ir_node = index });
+                return .{ .rejected = reject(.evidence_check, .proof_node_cycle, .{ .ir_node = index }) };
             } else {
                 const parent = try self.certificate.ir.get(node.parent);
                 const parent_end = @as(u64, parent.first_child) + parent.child_count;
                 if (index < parent.first_child or index >= parent_end) {
-                    return reject(.evidence_check, .proof_node_parent_mismatch, .{ .ir_node = index });
+                    return .{ .rejected = reject(.evidence_check, .proof_node_parent_mismatch, .{ .ir_node = index }) };
                 }
                 const parent_depth = self.depths.get(node.parent);
                 if (parent_depth >= self.policy.limits.max_depth) {
-                    return reject(.limits, .proof_depth_exceeded, .{ .ir_node = index });
+                    return .{ .rejected = reject(.limits, .proof_depth_exceeded, .{ .ir_node = index }) };
                 }
                 self.depths.set(index, parent_depth + 1);
             }
 
             if (index == 0 and self.policy.limits.max_depth < 1) {
-                return reject(.limits, .proof_depth_exceeded, .{ .ir_node = index });
+                return .{ .rejected = reject(.limits, .proof_depth_exceeded, .{ .ir_node = index }) };
             }
 
             if (node.child_count == 0) continue;
             if (node.first_child <= index) {
-                return reject(.evidence_check, .proof_node_cycle, .{ .ir_node = index });
+                return .{ .rejected = reject(.evidence_check, .proof_node_cycle, .{ .ir_node = index }) };
             }
             const end = @as(u64, node.first_child) + node.child_count;
-            if (end > count) return reject(.evidence_check, .proof_node_unknown, .{ .ir_node = index });
+            if (end > count) return .{ .rejected = reject(.evidence_check, .proof_node_unknown, .{ .ir_node = index }) };
             var child_id = node.first_child;
             while (@as(u64, child_id) < end) : (child_id += 1) {
                 try self.budget.spend(1);
                 const child = try self.certificate.ir.get(child_id);
                 if (child.parent != index) {
-                    return reject(.evidence_check, .proof_node_parent_mismatch, .{ .ir_node = child_id });
+                    return .{ .rejected = reject(.evidence_check, .proof_node_parent_mismatch, .{ .ir_node = child_id }) };
                 }
             }
         }
-        if (handler_count != 1) return reject(.evidence_check, .proof_node_unknown, .none);
-        return null;
-    }
-
-    /// The entry function is the unique compiler-selected handler marker that
-    /// participates in the proof-IR root.
-    fn entryFunction(self: *Session) SessionError!?u32 {
-        var index: u32 = 0;
-        while (index < self.certificate.ir.len()) : (index += 1) {
-            const node = try self.certificate.ir.get(index);
-            if (node.is_handler) return node.id;
-        }
-        return null;
+        if (handler_count != 1) return .{ .rejected = reject(.evidence_check, .proof_node_unknown, .none) };
+        return .{ .entry = entry };
     }
 
     /// Reconstruct the obligation set and compare it, member for member, with
@@ -942,10 +911,7 @@ const Session = struct {
     /// raise the bar on an obligation; it must not be able to remove one,
     /// because a set a policy can shrink is a set a producer can arrange to
     /// have shrunk.
-    fn checkObligationSet(self: *Session) SessionError!?Outcome {
-        const entry = (try self.entryFunction()) orelse
-            return reject(.obligation_reconstruction, .obligation_subject_unknown, .none);
-
+    fn checkObligationSet(self: *Session, entry: u32) SessionError!?Outcome {
         const expected_count = @typeInfo(ps.Property).@"enum".fields.len;
         if (self.certificate.obligations.len() != expected_count) {
             return reject(
@@ -978,19 +944,6 @@ const Session = struct {
             }
         }
 
-        // Every property in the alphabet appears. The count and the ordering
-        // above make one pass enough to say so.
-        var seen = std.EnumSet(ps.Property).initEmpty();
-        index = 0;
-        while (index < self.certificate.obligations.len()) : (index += 1) {
-            seen.insert((try self.certificate.obligations.get(index)).property);
-        }
-        inline for (@typeInfo(ps.Property).@"enum".fields) |field| {
-            const property: ps.Property = @enumFromInt(field.value);
-            if (!seen.contains(property)) {
-                return reject(.obligation_reconstruction, .obligation_missing, .{ .property = property });
-            }
-        }
         return null;
     }
 
@@ -1181,7 +1134,61 @@ const Session = struct {
 
     /// Check each obligation's evidence, then grade what was established and
     /// ask the policy whether it is enough.
-    fn checkEvidence(self: *Session) SessionError!Outcome {
+    const EvidenceCheck = union(enum) {
+        rejected: Outcome,
+        established: verdict.AssuranceGrade,
+        not_established,
+    };
+
+    fn checkEvidenceEntry(self: *Session, entry: cert_mod.Evidence, property: ps.Property) SessionError!EvidenceCheck {
+        const claim = classify(entry, property) orelse
+            return .{ .rejected = reject(.evidence_check, .evidence_edge_invalid, .{ .property = property }) };
+
+        if (entry.node_id >= self.certificate.ir.len()) {
+            return .{ .rejected = reject(.evidence_check, .proof_node_unknown, .{ .ir_node = entry.node_id }) };
+        }
+
+        switch (claim) {
+            .not_established => return .not_established,
+            .solver => {
+                if (!self.policy.allow_solver_edges) {
+                    return .{ .rejected = reject(.solver, .solver_edge_not_permitted, .{ .property = property }) };
+                }
+                if (entry.aux >= self.certificate.solver.len()) {
+                    return .{ .rejected = reject(.solver, .solver_query_too_large, .{ .property = property }) };
+                }
+                const query = try self.certificate.solver.get(entry.aux);
+                if (query.obligation_index != entry.obligation_index) {
+                    return .{ .rejected = reject(.solver, .solver_query_mismatch, .{ .property = property }) };
+                }
+                if (entry.aux >= self.solver_results.len or !self.solver_results[entry.aux]) {
+                    return .{ .rejected = reject(.solver, .solver_inconclusive, .{ .property = property }) };
+                }
+            },
+            .proved => |rule| {
+                const node = try self.certificate.ir.get(entry.node_id);
+                const derived = self.ruleAt(node) orelse
+                    return .{ .rejected = reject(.evidence_check, .rule_premise_unmet, .{ .rule = rule }) };
+                if (derived != rule) {
+                    return .{ .rejected = reject(.evidence_check, .rule_premise_unmet, .{ .rule = rule }) };
+                }
+            },
+            .translation_validated => |rule| {
+                if (self.certificate.translation.len() == 0) {
+                    return .{ .rejected = reject(.translation_check, .witness_missing, .{ .rule = rule }) };
+                }
+            },
+            .trusted => {
+                if (!try self.trustedEdgeDeclared(entry.node_id)) {
+                    return .{ .rejected = reject(.evidence_check, .trusted_edge_undeclared, .{ .ir_node = entry.node_id }) };
+                }
+            },
+            .tested => {},
+        }
+        return .{ .established = entry.edge.grade().? };
+    }
+
+    fn checkEvidence(self: *Session, entry_function: u32) SessionError!Outcome {
         var grades = [_]?verdict.AssuranceGrade{null} ** (@typeInfo(ps.Property).@"enum".fields.len);
         var answered = [_]bool{false} ** grades.len;
         var refused = [_]bool{false} ** grades.len;
@@ -1197,82 +1204,18 @@ const Session = struct {
             const slot = @intFromEnum(obligation.property) - 1;
             answered[slot] = true;
 
-            if (!validEvidenceShape(entry, obligation.property)) {
-                return reject(.evidence_check, .evidence_edge_invalid, .{ .property = obligation.property });
-            }
-
-            // Every edge names a node, whether or not it carries a rule. An
-            // edge at a node the IR does not have states nothing.
-            if (entry.node_id >= self.certificate.ir.len()) {
-                return reject(.evidence_check, .proof_node_unknown, .{ .ir_node = entry.node_id });
-            }
-
-            if (entry.edge == .not_established) {
-                refused[slot] = true;
-                continue;
-            }
-
-            if (entry.edge == .solver) {
-                if (!self.policy.allow_solver_edges) {
-                    return reject(.solver, .solver_edge_not_permitted, .{ .property = obligation.property });
-                }
-                // `aux` names the query in the certificate's solver section.
-                if (entry.aux >= self.certificate.solver.len()) {
-                    return reject(.solver, .solver_query_too_large, .{ .property = obligation.property });
-                }
-                const query = try self.certificate.solver.get(entry.aux);
-                if (query.obligation_index != entry.obligation_index or
-                    !solverKindApplies(query.query_kind, obligation.property))
-                {
-                    return reject(.solver, .solver_query_mismatch, .{ .property = obligation.property });
-                }
-                if (entry.aux >= self.solver_results.len or !self.solver_results[entry.aux]) {
-                    // No answer, or an answer that was not "discharged". Both
-                    // are inconclusive, and inconclusive is a rejection.
-                    return reject(.solver, .solver_inconclusive, .{ .property = obligation.property });
-                }
-            }
-
-            if (entry.rule) |rule| {
-                const node = try self.certificate.ir.get(entry.node_id);
-                switch (rule.family()) {
-                    // `validEvidenceShape` already tied each family to its edge
-                    // and property, so a mismatch was refused above as
-                    // `evidence_edge_invalid`.
-                    .totality => {
-                        std.debug.assert(entry.edge == .proved and obligation.property == .response_total);
-                        // The consumer derives the rule itself and compares. A
-                        // producer that cites a rule which does not apply here
-                        // is refused even when the fold happens to agree.
-                        const derived = self.ruleAt(node) orelse
-                            return reject(.evidence_check, .rule_premise_unmet, .{ .rule = rule });
-                        if (derived != rule) {
-                            return reject(.evidence_check, .rule_premise_unmet, .{ .rule = rule });
-                        }
-                    },
-                    .translation => {
-                        std.debug.assert(entry.edge == .translation_validated);
-                        if (self.certificate.translation.len() == 0) {
-                            return reject(.translation_check, .witness_missing, .{ .rule = rule });
-                        }
-                    },
-                }
-            }
-
-            if (entry.edge == .trusted and entry.rule == null) {
-                // A declared edge has to be disclosed in the trusted inventory,
-                // not only used. Otherwise the certificate leans on something it
-                // never wrote down.
-                if (!try self.trustedEdgeDeclared(entry.node_id)) {
-                    return reject(.evidence_check, .trusted_edge_undeclared, .{ .ir_node = entry.node_id });
-                }
-            }
-
-            if (entry.edge.grade()) |grade| {
-                grades[slot] = if (grades[slot]) |existing|
-                    verdict.AssuranceGrade.weakest(existing, grade)
-                else
-                    grade;
+            switch (try self.checkEvidenceEntry(entry, obligation.property)) {
+                .rejected => |rejection| return rejection,
+                .not_established => {
+                    refused[slot] = true;
+                    continue;
+                },
+                .established => |grade| {
+                    grades[slot] = if (grades[slot]) |existing|
+                        verdict.AssuranceGrade.weakest(existing, grade)
+                    else
+                        grade;
+                },
             }
         }
 
@@ -1304,8 +1247,6 @@ const Session = struct {
         // Totality is the one obligation the consumer settles for itself. A
         // certificate claiming it for a handler whose fold says otherwise is a
         // fabricated property, and no amount of evidence changes that.
-        const entry_function = (try self.entryFunction()) orelse
-            return reject(.obligation_reconstruction, .obligation_subject_unknown, .none);
         if (!refused[totality_slot] and grades[totality_slot] != null and !self.total.get(entry_function)) {
             return .{
                 .state = .integrity_verified,
@@ -1325,9 +1266,14 @@ const Session = struct {
                 return reject(.evidence_check, .obligation_without_evidence, .{ .property = property });
             }
         }
+        return self.applyEvidencePolicy(grades[0..], refused[0..]);
+    }
 
-        // Everything above is what the consumer established. What follows is
-        // whether the consumer wanted it.
+    fn applyEvidencePolicy(
+        self: *Session,
+        grades: []const ?verdict.AssuranceGrade,
+        refused: []const bool,
+    ) SessionError!Outcome {
         var property_verdicts: verdict.PropertyVerdicts = .{};
         inline for (@typeInfo(ps.Property).@"enum".fields) |field| {
             const property: ps.Property = @enumFromInt(field.value);
@@ -1414,22 +1360,29 @@ const Session = struct {
     }
 };
 
-fn validEvidenceShape(entry: cert_mod.Evidence, property: ps.Property) bool {
-    return switch (entry.edge) {
-        .proved => entry.rule != null and
-            entry.rule.?.family() == .totality and
-            property == .response_total,
-        .translation_validated => entry.rule != null and
-            entry.rule.?.family() == .translation and
-            property == .response_total,
-        .solver, .trusted => entry.rule == null and property == .response_total,
-        .tested, .not_established => entry.rule == null,
-    };
-}
+const Claim = union(enum) {
+    proved: ps.Rule,
+    translation_validated: ps.Rule,
+    solver,
+    trusted,
+    tested,
+    not_established,
+};
 
-fn solverKindApplies(kind: cert_mod.SolverQueryKind, property: ps.Property) bool {
-    return switch (kind) {
-        .opcode_equivalence => property == .response_total,
+fn classify(entry: cert_mod.Evidence, property: ps.Property) ?Claim {
+    return switch (entry.edge) {
+        .proved => if (entry.rule) |rule|
+            if (rule.family() == .totality and property == .response_total) .{ .proved = rule } else null
+        else
+            null,
+        .translation_validated => if (entry.rule) |rule|
+            if (rule.family() == .translation and property == .response_total) .{ .translation_validated = rule } else null
+        else
+            null,
+        .solver => if (entry.rule == null and property == .response_total) .solver else null,
+        .trusted => if (entry.rule == null and property == .response_total) .trusted else null,
+        .tested => if (entry.rule == null) .tested else null,
+        .not_established => if (entry.rule == null) .not_established else null,
     };
 }
 
@@ -1494,24 +1447,16 @@ fn bindExecutableGraph(
 
         hasher.push(claimed) catch |err| return bindingRejection(switch (err) {
             error.DuplicateMember => .graph_member_duplicate,
-            else => .graph_member_out_of_order,
+            error.NotOrdered, error.CountExceeded => .graph_member_out_of_order,
         }, memberSubject(claimed));
-
-        // Advance past anything the consumer observed that the certificate does
-        // not mention: extra executable bytes are the dangerous direction.
-        while (observed_index < observed.len and
-            graph.Member.order(observed[observed_index], claimed) == .lt)
-        {
-            return bindingRejection(.graph_member_extra, memberSubject(observed[observed_index]));
-        }
 
         if (observed_index >= observed.len) {
             return bindingRejection(.graph_member_missing, memberSubject(claimed));
         }
         const seen = observed[observed_index];
         switch (graph.Member.order(seen, claimed)) {
+            .lt => return bindingRejection(.graph_member_extra, memberSubject(seen)),
             .gt => return bindingRejection(.graph_member_missing, memberSubject(claimed)),
-            .lt => unreachable, // handled above
             .eq => {
                 if (!std.mem.eql(u8, &seen.digest, &claimed.digest)) {
                     return .{
@@ -1549,42 +1494,34 @@ fn bindExecutableGraph(
         };
     }
 
-    // The proof IR is itself a graph member, so the IR root the certificate
-    // states must be the digest the inventory committed to.
-    var ir_index: u32 = 0;
-    while (ir_index < certificate.graph.len()) : (ir_index += 1) {
-        const member = certificate.graph.get(ir_index) catch break;
-        if (member.kind != .proof_ir) continue;
-        if (!std.mem.eql(u8, &member.digest, &certificate.identity.ir_root)) {
+    if (checkGraphMemberDigest(certificate, .proof_ir, certificate.identity.ir_root, .proof_ir_digest_mismatch)) |rejection| return rejection;
+    if (checkGraphMemberDigest(certificate, .proof_certificate, certificate_digest, .proof_certificate_digest_mismatch)) |rejection| return rejection;
+
+    return null;
+}
+
+fn checkGraphMemberDigest(
+    certificate: cert_mod.Certificate,
+    kind: graph.MemberKind,
+    digest: [32]u8,
+    code: verdict.ReasonCode,
+) ?Rejection {
+    var index: u32 = 0;
+    while (index < certificate.graph.len()) : (index += 1) {
+        const member = certificate.graph.get(index) catch break;
+        if (member.kind != kind) continue;
+        if (!std.mem.eql(u8, &member.digest, &digest)) {
             return .{
                 .stage = .artifact_binding,
-                .code = .proof_ir_digest_mismatch,
+                .code = code,
                 .subject = memberSubject(member),
                 .expected = .{ .digest = member.digest },
-                .actual = .{ .digest = certificate.identity.ir_root },
+                .actual = .{ .digest = digest },
                 .recertifiable = true,
             };
         }
         break;
     }
-
-    var certificate_index: u32 = 0;
-    while (certificate_index < certificate.graph.len()) : (certificate_index += 1) {
-        const member = certificate.graph.get(certificate_index) catch break;
-        if (member.kind != .proof_certificate) continue;
-        if (!std.mem.eql(u8, &member.digest, &certificate_digest)) {
-            return .{
-                .stage = .artifact_binding,
-                .code = .proof_certificate_digest_mismatch,
-                .subject = memberSubject(member),
-                .expected = .{ .digest = member.digest },
-                .actual = .{ .digest = certificate_digest },
-                .recertifiable = true,
-            };
-        }
-        break;
-    }
-
     return null;
 }
 

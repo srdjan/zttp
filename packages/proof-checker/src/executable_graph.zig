@@ -127,13 +127,12 @@ pub const Member = struct {
     }
 };
 
-pub const Error = error{
-    EmptyGraph,
-    NotOrdered,
-    DuplicateMember,
-    MissingRequiredKind,
-    ZeroCommitment,
-};
+pub const InitError = error{EmptyGraph};
+pub const PushError = error{ CountExceeded, DuplicateMember, NotOrdered };
+pub const RequiredKindsError = error{MissingRequiredKind};
+pub const FinishError = error{ NotOrdered, ZeroCommitment };
+pub const ComputeRootError = error{ EmptyGraph, DuplicateMember, NotOrdered, ZeroCommitment };
+pub const CheckRequiredKindsError = error{ EmptyGraph, DuplicateMember, NotOrdered, MissingRequiredKind };
 
 /// SHA-256 over the exact bytes of one member. Producers hash the same buffer
 /// they embed; the consumer hashes the same buffer it loads.
@@ -156,7 +155,7 @@ pub const RootHasher = struct {
     seen_kinds: std.EnumSet(MemberKind) = std.EnumSet(MemberKind).initEmpty(),
     remaining: u32,
 
-    pub fn init(count: u32) Error!RootHasher {
+    pub fn init(count: u32) InitError!RootHasher {
         if (count == 0) return error.EmptyGraph;
         var hasher = Sha256.init(.{});
         hasher.update(domain);
@@ -166,8 +165,8 @@ pub const RootHasher = struct {
         return .{ .hasher = hasher, .remaining = count };
     }
 
-    pub fn push(self: *RootHasher, member: Member) Error!void {
-        if (self.remaining == 0) return error.NotOrdered;
+    pub fn push(self: *RootHasher, member: Member) PushError!void {
+        if (self.remaining == 0) return error.CountExceeded;
         if (self.previous) |prev| {
             switch (Member.order(prev, member)) {
                 .lt => {},
@@ -190,14 +189,14 @@ pub const RootHasher = struct {
     }
 
     /// Every kind a production artifact must commit was pushed.
-    pub fn checkRequiredKinds(self: RootHasher) Error!void {
+    pub fn checkRequiredKinds(self: RootHasher) RequiredKindsError!void {
         inline for (@typeInfo(MemberKind).@"enum".fields) |field| {
             const kind: MemberKind = @enumFromInt(field.value);
             if (kind.required() and !self.seen_kinds.contains(kind)) return error.MissingRequiredKind;
         }
     }
 
-    pub fn finish(self: *RootHasher) Error![32]u8 {
+    pub fn finish(self: *RootHasher) FinishError![32]u8 {
         if (self.remaining != 0) return error.NotOrdered;
         const root = self.hasher.finalResult();
         if (std.mem.allEqual(u8, &root, 0)) return error.ZeroCommitment;
@@ -210,16 +209,22 @@ pub const RootHasher = struct {
 /// Refuses an empty graph, a member out of canonical order, and a duplicate
 /// (kind, ordinal). Ordering is part of the commitment, so a producer cannot
 /// reshuffle members and keep the root.
-pub fn computeRoot(members: []const Member) Error![32]u8 {
+pub fn computeRoot(members: []const Member) ComputeRootError![32]u8 {
     var hasher = try RootHasher.init(@intCast(members.len));
-    for (members) |member| try hasher.push(member);
+    for (members) |member| hasher.push(member) catch |err| switch (err) {
+        error.CountExceeded => unreachable,
+        error.DuplicateMember, error.NotOrdered => |public_err| return public_err,
+    };
     return hasher.finish();
 }
 
 /// Whether the inventory carries every kind a production artifact must commit.
-pub fn checkRequiredKinds(members: []const Member) Error!void {
+pub fn checkRequiredKinds(members: []const Member) CheckRequiredKindsError!void {
     var hasher = try RootHasher.init(@intCast(members.len));
-    for (members) |member| try hasher.push(member);
+    for (members) |member| hasher.push(member) catch |err| switch (err) {
+        error.CountExceeded => unreachable,
+        error.DuplicateMember, error.NotOrdered => |public_err| return public_err,
+    };
     try hasher.checkRequiredKinds();
 }
 
@@ -332,7 +337,7 @@ test "a duplicate member is refused" {
 test "the streaming root refuses too many and too few members" {
     var too_many = try RootHasher.init(1);
     try too_many.push(m(.dep_bytecode, 0, 1));
-    try testing.expectError(error.NotOrdered, too_many.push(m(.dep_bytecode, 1, 2)));
+    try testing.expectError(error.CountExceeded, too_many.push(m(.dep_bytecode, 1, 2)));
 
     var too_few = try RootHasher.init(2);
     try too_few.push(m(.dep_bytecode, 0, 1));

@@ -60,20 +60,17 @@ packages/zts/src/type_checker.zig extractIsBytesGuard catch-return
 # can never grant one it did not earn.
 packages/proof-checker/src/checker.zig markDeclared catch-continue
 
-# Both entries reject. The `catch return` is `budget.spend(2)` answering with a
-# Rejection value - this function returns `?Rejection` and non-null IS the
-# refusal - so exhausting the work budget refuses the artifact rather than
-# accepting it.
-#
-# The `catch break` entries are the two searches for the proof_ir and
-# proof_certificate graph members, and they read indices the root-folding loop
-# directly above already read successfully: that loop walks the same 0..len
-# range and returns `.graph_member_missing` on any failure, so it has bound
-# every member before either search starts. If a decode somehow failed here the
-# search would end without finding its member, and the executable-root
-# comparison the loop above performs has already covered those bytes.
+# The `catch return` rejects an artifact that exhausts the budget. This
+# function returns `?Rejection`, and a non-null value refuses the artifact.
 packages/proof-checker/src/checker.zig bindExecutableGraph catch-return
-packages/proof-checker/src/checker.zig bindExecutableGraph catch-break
+
+# A tool catalog or declaration decode failure returns an undecodable
+# rejection. It cannot turn an invalid byte sequence into an accepted one.
+packages/proof-checker/src/checker.zig checkBoundBytes catch-return
+
+# The graph-root loop above these searches has already read every member and
+# rejected a failed read. A failed read here cannot bypass that binding.
+packages/proof-checker/src/checker.zig checkGraphMemberDigest catch-break
 
 # Null means "no certificate-owned members", and this value only ever
 # populates the OBSERVED graph the kernel decides against. Omitting a member

@@ -25,10 +25,6 @@ pub const SemanticState = enum(u8) {
     /// minimum grades.
     policy_accepted = 4,
 
-    pub fn atLeast(self: SemanticState, other: SemanticState) bool {
-        return @intFromEnum(self) >= @intFromEnum(other);
-    }
-
     pub fn name(self: SemanticState) []const u8 {
         return @tagName(self);
     }
@@ -337,7 +333,6 @@ pub fn writeApplicabilityForKind(
     artifact: WriteApplicability,
     kind: invariant.Kind,
 ) WriteApplicability {
-    if (artifact == .not_applicable) return .not_applicable;
     if (declared_kind_bits & invariant.kindBit(kind) == 0) return .not_applicable;
     if (!invariant.kindInfo(kind).applies_to_writes) return .not_applicable;
     return artifact;
@@ -478,16 +473,6 @@ pub const Assessment = struct {
         };
     }
 };
-
-test "semantic states are ordered and never skipped backwards" {
-    try std.testing.expect(SemanticState.policy_accepted.atLeast(.proof_checked));
-    try std.testing.expect(SemanticState.proof_checked.atLeast(.integrity_verified));
-    try std.testing.expect(!SemanticState.integrity_verified.atLeast(.proof_checked));
-    inline for (@typeInfo(SemanticState).@"enum".fields) |field| {
-        const state: SemanticState = @enumFromInt(field.value);
-        try std.testing.expect(state.atLeast(state));
-    }
-}
 
 test "weakest edge dominates" {
     try std.testing.expectEqual(AssuranceGrade.trusted, AssuranceGrade.weakest(.proved, .trusted));
