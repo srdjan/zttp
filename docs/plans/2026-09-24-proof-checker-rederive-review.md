@@ -1,7 +1,23 @@
 # Review: rederiving the acceptance kernel (`packages/proof-checker`)
 
-Status: findings and plan only. Nothing here is implemented. Owner: this repository.
-Measured on 2026-09-24 against commit `dea0eddc`.
+Status: plan accepted 2026-09-25. Owner: this repository. Measured on 2026-09-24 against
+commit `dea0eddc`. Implemented so far: the trusted-node fix, the kernel build mode, and
+the removal of `rule_family_mismatch` (see "Owner decisions"). Phases 0 to 4 are not started.
+
+## Owner decisions (2026-09-25)
+
+1. **Kernel build mode: `ReleaseSafe` in release builds.** Done in `0384765a`. All three
+   declarations of the kernel dependency (root, `packages/runtime`, `packages/tools`) compute
+   the same mode, so they still dedup into one module. Measured on the kernel fixture: about
+   1.5 us per `check` call under `ReleaseFast` and about 1.95 us under `ReleaseSafe`, paid
+   once per start in `Server.start`. A real handler certificate was not measured.
+2. **`rule_family_mismatch`: removed, number 1503 retired.** Done in `ecacf029` and
+   `45e80999`. The policy hash did not move: it covers the zts rule registry, and zts does not
+   import the kernel. Only the vocabulary envelope changed.
+3. **`Assessment` redesign (T1): accepted for Phase 4, after Phase 0.**
+4. **`work_spent` (M4): keep the count identical** with one walk over both member kinds, so
+   Phase 2 is a pure refactor. Its acceptance check is that every `Assessment` from the kernel
+   suite and the ratchet corpus is identical before and after.
 
 ## 1. Executive summary
 
@@ -140,7 +156,7 @@ Measured draft of M4 to M6 plus T2 (restructure only), T3, and T4: `checker.zig`
 from 59 to 39, production lines from 2373 to 2238. All 183 tests pass on a fresh cache. One
 behavioral side effect: the work spent on the invariant fixtures rises by 9 to 10 units,
 because the spec and adapter are walked separately. A single two-kind walk restores the old
-figure. Decide which before implementing, because `work_spent` is part of the `Assessment`.
+figure. Decided: keep the old figure (owner decision 4).
 
 **M7. `normalizeEndpoint` (`residual.zig:341`, CC 25).** Split it into `parseScheme`,
 `authorityOf`, `splitHostPort`, and `canonicalHost`, and replace the hand-rolled
@@ -187,9 +203,8 @@ Rederive the evidence stage as `classify(entry, property) ?Claim` with
 `Claim = union(enum) { proved: Rule, translation_validated: Rule, solver, trusted, tested,
 not_established }`, handled by one exhaustive switch. Measured: `checkEvidence` goes from
 CC 46 to 16, and the total branch count stays flat, as expected for a type-driven change.
-Removing the reason code changes the published vocabulary envelope, so it moves the policy
-hash and needs `scripts/verify.sh`. The alternative is to keep the code and make it
-reachable. The owner decides between these two.
+Decided and done: the reason code was removed (owner decision 2). The policy hash did not
+move; only the vocabulary envelope changed.
 
 **T3. The entry function is found three times.** `checkIrShape` already forces exactly one
 handler. Return `union { entry: u32, rejected: Outcome }` from it and pass the entry on
@@ -303,8 +318,8 @@ its boundary.
   undefined behavior in production. Every such site checked in this review has an explicit
   guard, but section 4 shows that many guards are not pinned by a test. Option: build the
   kernel dependency as `ReleaseSafe` whenever the root is not `Debug`. The kernel runs at
-  artifact validation, so a safety panic refuses the artifact. The cost is not measured yet.
-  Measure it with `zig build test-proof-ratchet` before deciding.
+  artifact validation, so a safety panic refuses the artifact. Decided and done (owner
+  decision 1).
 - **Enum bitmasks without a width guard.** `GuardKind` into `u8` (`checker.zig:794`),
   `AddressScope` into `u8` (`residual.zig:220`), and `Property` into `u16`
   (`verdict.zig:428-451`). A new member past the width is undefined behavior in
@@ -407,8 +422,8 @@ Verify: Phase 0 commands plus `zig build test-proof-ratchet-drift`,
 Expected: branches 998 to about 805 (-108 from M1 and -85 from M2 plus M3, both measured).
 Mutation kill rate held.
 
-**Phase 2: checker restructuring (M4, M5, M6, T3, T4, M8, and the `Claim` restructure from T2).** Keep `rule_family_mismatch` in the enum for now; its removal is a Phase 4 decision. Decide the `work_spent` question
-in M4 first.
+**Phase 2: checker restructuring (M4, M5, M6, T3, T4, M8, and the `Claim` restructure from T2).** Keep the `work_spent` count identical (owner decision 4).
+The unreachable `rule_family_mismatch` branches are already gone.
 Verify: Phase 1 commands plus `zig build test-cli` (end-to-end acceptance in
 `build_command.zig`), `zig build test-proof-ratchet`, `zig build test-invariant-drift`.
 The invariant drift gate pins six exact `checker.zig` test names
@@ -420,13 +435,13 @@ Verify: Phase 1 commands plus the runtime unit root that holds
 `proof_activation.zig:345-349` (run by `zig build test`).
 Expected: `residual.zig` maxCC 25 to 8, -5 branches (measured on its own).
 
-**Phase 4: type-driven public changes (T1, T2, T5, T6, T7).** Each one needs an owner decision
-before it starts: T1 changes the public `Assessment`, and T2 moves the policy hash.
+**Phase 4: type-driven public changes (T1, T5, T6, T7).** T1 is accepted (owner decision 3).
+T5 to T7 still need an owner decision before they start. T2 is done.
 Verify: `bash scripts/verify.sh` on a clean tree. This covers
 `test-vocab-envelope-drift` and the policy-hash pins.
 Expected: the branch count may rise. Success means the compiler refuses the contradictory
 `Assessment` shapes, `contract_runtime.zig:428` and the two defensive tests in
-`server.zig:4674-4694` are deleted, and no advertised reason code lacks a producer.
+`server.zig:4674-4694` are deleted.
 
 ## 9. What not to touch
 
