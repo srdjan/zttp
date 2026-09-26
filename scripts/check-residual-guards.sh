@@ -313,7 +313,7 @@ if exact_matches "$checker_catalog" "$tmp_dir/probe-extra"; then
   note "the extra-row invalidation probe passed"
 fi
 
-if ! grep -Fq 'residual_guards_drift_step.dependOn(&host_test_runs[i].step);' build.zig; then
+if ! grep -Fq 'residual_guards_drift_step.dependOn(&host_test_runs[i].step);' build/host_tests.zig; then
   note "the named gate no longer depends on compiled stand-in evidence"
 fi
 

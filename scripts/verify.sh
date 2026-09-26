@@ -6,7 +6,7 @@
 #
 # Sequential by design: the build graph may run the pool-heavy `test` and
 # `test-zruntime` roots in parallel and reintroduce the macOS teardown TRAP
-# that build.zig (see the comment above the test step) warns about. We invoke
+# that build/runtime_tests.zig (see the comment at test-zruntime) warns about. We invoke
 # them as separate processes here rather than adding a `verify` build step.
 #
 # The docs drift and link gates are NOT separate steps here: `test-docs-drift`
@@ -202,8 +202,8 @@ if [ "$release_mode" = true ]; then
   zig build release-provenance
 fi
 
-step "zig fmt --check build.zig packages/  (ci.yml: Check formatting)"
-zig fmt --check build.zig packages/
+step "zig fmt --check build.zig build/ packages/  (ci.yml: Check formatting)"
+zig fmt --check build.zig build/ packages/
 
 printf '\n========================================\n'
 if [ "$release_mode" = true ]; then

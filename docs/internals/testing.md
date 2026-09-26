@@ -12,7 +12,7 @@ matches apart from generated evidence. Every ordinary source commit fails that
 check until the corpus is replayed and both pages republished, so it belongs to
 the release path (`release.yml`, `RELEASE_CHECKLIST.md`) rather than to CI.
 
-The authority is `build.zig`. When the two disagree, `build.zig` is right and
+The authority is `build.zig` and `build/`. When the two disagree, the build is right and
 this document is stale.
 
 ## What `zig build test` Runs
@@ -24,7 +24,7 @@ Two runtime test roots:
 | (no separate step) | `runtime_main_tests` (`main.zig`) | `runtime_cli`, `cli_shared`, `server`, `edge_server`, `studio`, `proof_adapter` |
 | `test-cli` | `cli_main_tests` (`cli_main.zig`) | `dev_cli` and its dependencies: deploy, pi_app wiring, `zts_cli` delegation |
 
-The host test roots, declared in the `host_test_roots` table in `build.zig`.
+The host test roots, declared in the `host_test_roots` table in `build/host_tests.zig`.
 `scripts/check-docs-drift.sh` binds this table to that one, so a root added
 there without a row here fails `zig build test-docs-drift`:
 
@@ -57,7 +57,7 @@ there without a row here fails `zig build test-docs-drift`:
 | `test-standin` | `packages/pi/src/standin_tests.zig` |
 
 `test-standin` compiles with its filters pinned to the literal `stand-in`
-(the `standin_only` row in `host_test_roots`, applied at `build.zig:356`), so a
+(the `standin_only` row in `host_test_roots`, applied at `build/host_tests.zig:130`), so a
 test in that root whose name omits the token never runs.
 A gate in `packages/pi/src/standin_range_tests.zig` enforces the naming rule the
 filter depends on. See "Adding A Test Root" for the rule behind it.
@@ -188,7 +188,7 @@ passed, 0 failed" and exited 0.
 
 The general form of that mistake now has its own gate.
 `scripts/check-script-reachability.sh` asserts that every script under
-`scripts/` is invoked by `build.zig`, another script, or CI - or carries a row
+`scripts/` is invoked by `build.zig` or `build/`, another script, or CI - or carries a row
 in `scripts/manual-scripts.allow` saying why a developer runs it by hand. It
 found `scripts/test-zruntime.sh`, which invoked `zig test` on
 `packages/runtime/src/zruntime.zig`, a file deleted in the monorepo
@@ -198,7 +198,7 @@ build outside the tree, two block on a server or a model run, one is machine
 setup, and one regenerates a doc whose drift is already gated.
 
 The build-step form of the same question is `zig build test-step-coverage`,
-which lives in `build.zig` because only a build can answer it. A named step is
+which lives in `build/step_coverage.zig` because only a build can answer it. A named step is
 not what the aggregate step depends on: `test_step.dependOn(&run_server_tests
 .step)` names the Run step, and `b.step("test-server", ...)` names a separate
 top-level step over the same Run, so "is `test-server` reachable from `test`"
@@ -282,7 +282,7 @@ Reassess this limitation when the pinned Zig toolchain changes.
 
 This is a shortening device for the edit loop, not a way to establish anything.
 A filtered run is never evidence: `-Dtest-filter` is wired to `.filters` on every
-test artifact (`build.zig:13-18`), so an artifact holding no test the filter
+test artifact (`build/Context.zig:62-73`), so an artifact holding no test the filter
 matches runs zero tests and exits 0, and the aggregate step reports a pass for
 it. A filtered run was measured here reporting "2 passed" while the named test's
 assertion had been sabotaged to expect an impossible error, because that run
@@ -299,14 +299,14 @@ alongside the code they cover; there is no separate test directory.
 Zig takes the filter at compile time, so it has to be a build option. The
 `-- --test-filter ...` form this document used to show does not filter at all:
 the run executes every test in the root and reports success, which reads as a
-single passing test to whoever wrote the command. `build.zig` records what that
+single passing test to whoever wrote the command. `build/Context.zig` records what that
 cost once - a live recording meant for one case cleared every committed
 cassette.
 
 ## Adding A Test Root
 
 A new root under `packages/tools/` or `packages/pi/` is a row in the
-`host_test_roots` table in `build.zig`, which creates its named step and adds
+`host_test_roots` table in `build/host_tests.zig`, which creates its named step and adds
 it to the aggregate in one place. Set `project_config` when the root resolves a
 project SQL schema through the shared `project_config` module, and `pi_modules`
 when it consumes the shared tool cores through the `zts_cli` named module.
@@ -371,7 +371,7 @@ the proof-checker, ZTS, native module, runtime activation,
 project-configuration, and developer CLI test roots to pass, plus the gate's
 own tests under `zig build test-invariant-gate`.
 `scripts/check-invariants.sh` is now only a wrapper that invokes the build
-step. The developer CLI root is `cli_main.zig`, and `build.zig` names it
+step. The developer CLI root is `cli_main.zig`, and `build/runtime_tests.zig` names it
 because it is the only root that compiles and runs the tests in
 `packages/runtime/src/proofs/invariant_report.zig`; without it the gate's
 evidence table would name a test nothing made run.

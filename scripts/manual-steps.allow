@@ -1,6 +1,6 @@
 # Build steps whose work nothing runs automatically, and why that is correct.
 #
-# Enforced in both directions by the step-coverage gate in build.zig, which
+# Enforced in both directions by the step-coverage gate in build/step_coverage.zig, which
 # walks the real dependency graph rather than parsing source: a top-level step
 # whose dependency closure is not reached by `zig build test`, by a step
 # `scripts/verify.sh` or a CI workflow invokes, or by a shell gate one of those
@@ -53,7 +53,7 @@ expert-qualification manual-model-spend
 provable-reach manual-model-spend
 
 # Needs a local MLX server, which this project never starts or manages. The
-# absence from the aggregate step is stated at its definition in build.zig.
+# absence from the aggregate step is stated at its definition in build/host_tests.zig.
 test-expert-mlx-e2e needs-local-server
 
 # Needs Chrome and Node, which are not build dependencies of this repository.

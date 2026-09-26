@@ -36,6 +36,7 @@
         "LICENSE",
         "RELEASE_CHECKLIST.md",
         "SECURITY.md",
+        "build",
         "build.zig",
         "build.zig.zon",
         "docs",

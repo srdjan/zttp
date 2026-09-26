@@ -36,7 +36,7 @@ fail() {
 # Where an invocation can legitimately come from. A script referenced only by
 # itself does not count, which is what makes self-reference in a usage string
 # harmless.
-search_roots=(build.zig scripts .github)
+search_roots=(build.zig build scripts .github)
 for root in "${search_roots[@]}"; do
   [[ -e "$root" ]] || fail "search root '$root' does not exist; this gate would look for invocations in fewer places than it claims"
 done

@@ -23,7 +23,7 @@ share the same `zts` engine and contract logic.
 | `packages/proof-checker/` | The consumer acceptance kernel. A leaf: it imports `std` and its own siblings, allocates nothing, and reaches no filesystem, clock, process, network, or signer. It decides whether an artifact may serve. |
 | `packages/pi/` | Compiler-in-the-loop expert agent linked into `zttp` only. |
 
-`build.zig` wires the packages, build options, tests, smoke checks, and release
+`build.zig` and the files under `build/` wire the packages, build options, tests, smoke checks, and release
 steps.
 
 ## Request Flow

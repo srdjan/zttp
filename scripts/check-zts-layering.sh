@@ -76,14 +76,14 @@ RANK = {name: i for i, name in enumerate(TIERS)}
 SPLIT = ["zts-base", "zts-contracts", "zts", "zts-compiler", "zts-umbrella"]
 
 # The build-module name each tier is declared under, and the root source file
-# that module compiles, both read out of `build.zig` rather than copied here.
-# A hand-copy goes stale silently: rename a module in build.zig and every
+# that module compiles, both read out of `build/packages.zig` rather than copied here.
+# A hand-copy goes stale silently: rename a module in build/packages.zig and every
 # by-name import stops matching, so the direction rule below would report a pass
-# having examined nothing. `zts_roots` is the ordered table build.zig itself
+# having examined nothing. `zts_roots` is the ordered table build/packages.zig itself
 # uses to build the five test binaries, and its order is tier order, so the
 # tiers zip onto it positionally. The engine tier is named `zts` in the manifest
 # but declared as `zts-engine`; the module actually named `zts` is the umbrella.
-BUILD_ZIG = "build.zig"
+BUILD_ZIG = "build/packages.zig"
 ROOTS_TABLE = re.compile(
     r'\.\{\s*\.name\s*=\s*"([^"]+)"\s*,\s*\.src\s*=\s*"src/([^"]+)"\s*\}'
 )

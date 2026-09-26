@@ -11,7 +11,7 @@
 # contract change, and review the diff before committing - a golden that moves
 # without an intended reason means the gate just caught a regression.
 #
-# Each command mirrors an addExpertGolden entry in build.zig's
+# Each command mirrors an addExpertGolden entry in build/goldens.zig's
 # contract_golden_step.
 #
 # Usage (from anywhere; the script cd's to the repo root):
@@ -30,7 +30,7 @@ zig build
 echo ">> regenerating fixtures under $FIXTURES"
 
 # `check` exits non-zero for handlers carrying warnings; that exit code is part
-# of the pinned contract (see build.zig), so capture stdout regardless.
+# of the pinned contract (see build/goldens.zig), so capture stdout regardless.
 for pair in \
   "plain_ts.ts:plain_ts" \
   "jsx.tsx:jsx" \

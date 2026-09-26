@@ -315,7 +315,7 @@ done < <(sed -n 's/^ *\.v1_feature_name = "\(.*\)",$/\1/p' "$restrictions_regist
 # ---------------------------------------------------------------------------
 # Host test root coverage.
 #
-# docs/internals/testing.md tables the host_test_roots entries in build.zig and
+# docs/internals/testing.md tables the host_test_roots entries in build/host_tests.zig and
 # names itself stale whenever the two disagree. Nothing enforced that: the doc
 # said "Nine host test roots" while build.zig declared twenty-one, and
 # test-standin - the root the stand-in filter convention exists for - had no row
@@ -325,7 +325,7 @@ done < <(sed -n 's/^ *\.v1_feature_name = "\(.*\)",$/\1/p' "$restrictions_regist
 # ---------------------------------------------------------------------------
 
 testing_doc="docs/internals/testing.md"
-build_file="build.zig"
+build_file="build/host_tests.zig"
 
 [[ -f "$testing_doc" ]] || fail "missing $testing_doc"
 [[ -f "$build_file" ]] || fail "missing $build_file"

@@ -8,7 +8,7 @@
 # the diff before committing.
 #
 # Each command here mirrors an addExpertGolden/addExpertMetaGolden entry in
-# build.zig. The exit-code-only checks (addExpertExitCheck) do not pin stdout
+# build/goldens.zig. The exit-code-only checks (addExpertExitCheck) do not pin stdout
 # and need no fixture, so they are not regenerated here.
 #
 # Usage (from anywhere; the script cd's to the repo root):
