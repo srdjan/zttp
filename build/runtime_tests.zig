@@ -12,8 +12,8 @@ pub const UnitRuns = struct {
 };
 
 /// The runtime (main.zig) and dev CLI (cli_main.zig) unit roots. Both are
-/// evidence for the invariant drift gate.
-pub fn addUnit(ctx: Context, invariant_drift_step: *std.Build.Step) UnitRuns {
+/// evidence for the invariant drift gate; build/proof_gates.zig wires that.
+pub fn addUnit(ctx: Context) UnitRuns {
     const b = ctx.b;
     const runtime_dep = ctx.runtime_dep;
 
@@ -32,7 +32,6 @@ pub fn addUnit(ctx: Context, invariant_drift_step: *std.Build.Step) UnitRuns {
     // `scripts/verify.sh` runs it separately.
     Context.attachEmbeddedHandlerStub(unit_tests, runtime_dep, ctx.zts_mod);
     const run_unit_tests = b.addRunArtifact(unit_tests);
-    invariant_drift_step.dependOn(&run_unit_tests.step);
 
     // Dev-CLI-side tests (cli_main.zig root) — covers dev_cli and its
     // dependencies (deploy, pi_app wiring, zts_cli delegation).
@@ -48,16 +47,6 @@ pub fn addUnit(ctx: Context, invariant_drift_step: *std.Build.Step) UnitRuns {
     const run_cli_tests = b.addRunArtifact(cli_tests);
     const cli_test_step = b.step("test-cli", "Run developer CLI unit tests");
     cli_test_step.dependOn(&run_cli_tests.step);
-
-    // The invariant status renderer is anchored from `cli_main.zig`, so this
-    // root is the only one that compiles and runs its tests. The drift gate
-    // asserts that the renderer's source states write applicability before
-    // its counts and keeps the deployment assumption outside every branch;
-    // both are source scans, and a source scan proves nothing about what the
-    // renderer produced. Naming a test in the gate's evidence table without
-    // this dependency would be the gate claiming a test ran when nothing made
-    // it compile.
-    invariant_drift_step.dependOn(&run_cli_tests.step);
 
     return .{ .run_unit_tests = run_unit_tests, .run_cli_tests = run_cli_tests };
 }

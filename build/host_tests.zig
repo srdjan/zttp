@@ -92,15 +92,18 @@ const host_test_roots = [_]HostTestRoot{
     .{ .owner = .pi, .src = "src/standin_tests.zig", .step = "test-standin", .desc = "Run the deterministic stand-in through the real expert loop", .project_config = true, .pi_modules = true, .standin_only = true },
 };
 
-pub const Runs = [host_test_roots.len]*std.Build.Step.Run;
+pub const Result = struct {
+    /// The Run step of each root, in table order, for the aggregate `test` step.
+    runs: [host_test_roots.len]*std.Build.Step.Run,
+    /// The `test-project-config` root, evidence for the invariant drift gate.
+    project_config: *std.Build.Step.Run,
+};
 
-/// Build every root in `host_test_roots` and the MLX gate. Returns the Run
-/// step of each root, in table order, for the aggregate `test` step.
-pub fn add(ctx: Context, gates: proof_gates.Result) Runs {
+/// Build every root in `host_test_roots` and the MLX gate.
+pub fn add(ctx: Context, gates: proof_gates.Result) Result {
     const b = ctx.b;
     const optimize = ctx.optimize;
     const residual_guards_drift_step = gates.residual_guards_drift_step;
-    const invariant_drift_step = gates.invariant_drift_step;
 
     const standin_range_doc = b.addOptions();
     standin_range_doc.addOption(
@@ -120,7 +123,8 @@ pub fn add(ctx: Context, gates: proof_gates.Result) Runs {
         @embedFile("../scripts/unseeded-rules.allow"),
     );
 
-    var host_test_runs: Runs = undefined;
+    var host_test_runs: [host_test_roots.len]*std.Build.Step.Run = undefined;
+    var project_config_run: ?*std.Build.Step.Run = null;
     for (host_test_roots, 0..) |root, i| {
         const owner_dep = switch (root.owner) {
             .tools => ctx.tools_dep,
@@ -156,7 +160,7 @@ pub fn add(ctx: Context, gates: proof_gates.Result) Runs {
         // named gate so a broken probe cannot be reported as guard agreement.
         if (root.standin_only) residual_guards_drift_step.dependOn(&host_test_runs[i].step);
         if (std.mem.eql(u8, root.step, "test-project-config")) {
-            invariant_drift_step.dependOn(&host_test_runs[i].step);
+            project_config_run = host_test_runs[i];
         }
     }
 
@@ -182,5 +186,8 @@ pub fn add(ctx: Context, gates: proof_gates.Result) Runs {
     const mlx_e2e_step = b.step("test-expert-mlx-e2e", "Run the real local MLX expert flow");
     mlx_e2e_step.dependOn(&run_mlx_e2e_tests.step);
 
-    return host_test_runs;
+    return .{
+        .runs = host_test_runs,
+        .project_config = project_config_run orelse @panic("host_test_roots has no test-project-config row"),
+    };
 }

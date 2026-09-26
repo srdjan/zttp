@@ -207,6 +207,9 @@ pub fn add(ctx: Context, pkgs: packages.Result) Result {
     const proof_review_pkg_test_step = b.step("test-proof-review", "Run zttp proof-review package tests");
     proof_review_pkg_test_step.dependOn(&run_proof_review_pkg_tests.step);
 
+    // The remaining evidence roots do not exist yet; build.zig passes them to
+    // addInvariantDriftEvidence once they do.
+
     return .{
         .proof_checker_purity = proof_checker_purity.run,
         .script_reachability = script_reachability.run,
@@ -218,4 +221,30 @@ pub fn add(ctx: Context, pkgs: packages.Result) Result {
         .run_proof_ratchet_tests = run_proof_ratchet_tests,
         .run_proof_review_pkg_tests = run_proof_review_pkg_tests,
     };
+}
+
+/// The invariant drift gate's evidence roots that other files create. All of
+/// the gate's build wiring stays in this file because
+/// packages/tools/src/invariant_drift_gate.zig reads it as text, and its
+/// mutation probes edit that text.
+pub fn addInvariantDriftEvidence(
+    invariant_drift_step: *std.Build.Step,
+    run_project_config_tests: *std.Build.Step.Run,
+    run_unit_tests: *std.Build.Step.Run,
+    run_cli_tests: *std.Build.Step.Run,
+) void {
+    // The tools root that collects invariant_author.zig through its
+    // re-export from project_config.zig.
+    invariant_drift_step.dependOn(&run_project_config_tests.step);
+    // The runtime root (main.zig).
+    invariant_drift_step.dependOn(&run_unit_tests.step);
+    // The invariant status renderer is anchored from `cli_main.zig`, so the
+    // developer CLI root is the only one that compiles and runs its tests.
+    // The drift gate asserts that the renderer's source states write
+    // applicability before its counts and keeps the deployment assumption
+    // outside every branch; both are source scans, and a source scan proves
+    // nothing about what the renderer produced. Naming a test in the gate's
+    // evidence table without this dependency would be the gate claiming a
+    // test ran when nothing made it compile.
+    invariant_drift_step.dependOn(&run_cli_tests.step);
 }

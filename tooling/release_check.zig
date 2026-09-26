@@ -48,7 +48,7 @@ const ci_gate_markers = [_][]const u8{
 };
 
 // `test-docs-drift`, `test-doc-links` and `test-examples` are dependencies of
-// `zig build test` and are asserted against `build.zig` in
+// `zig build test` and are asserted against the build sources in
 // `build_gate_markers`. The verifier must carry every other repository gate
 // explicitly as a `verify.sh` line.
 const verify_script_markers = [_][]const u8{
@@ -71,7 +71,7 @@ const verify_script_markers = [_][]const u8{
     "zts module-spec-render --check",
     "zts meta --json",
     "zig build release-provenance",
-    "zig fmt --check build.zig packages/",
+    "zig fmt --check build.zig build/ packages/",
 };
 
 const release_permission_marker = "contents: write";
@@ -403,7 +403,7 @@ fn releaseProvenancePasses(allocator: std.mem.Allocator) bool {
 }
 
 fn addReleaseGateCheck(allocator: std.mem.Allocator, passport: *ReleasePassport) !void {
-    const build_zig = readOptionalFile(allocator, "build.zig", 1024 * 1024);
+    const build_zig = readBuildSources(allocator);
     defer if (build_zig) |bytes| allocator.free(bytes);
     const ci_yml = readOptionalFile(allocator, ".github/workflows/ci.yml", 512 * 1024);
     defer if (ci_yml) |bytes| allocator.free(bytes);
@@ -609,6 +609,36 @@ fn readOptionalFile(allocator: std.mem.Allocator, path: []const u8, max_size: us
     return zts.file_io.readFile(allocator, path, max_size) catch null;
 }
 
+/// build.zig and every build/*.zig, joined. The build graph is split across
+/// those files, so a step name can be declared in any of them.
+fn readBuildSources(allocator: std.mem.Allocator) ?[]u8 {
+    return readBuildSourcesOrError(allocator) catch null;
+}
+
+fn readBuildSourcesOrError(allocator: std.mem.Allocator) ![]u8 {
+    const root = try zts.file_io.readFile(allocator, "build.zig", 1024 * 1024);
+    var acc: std.ArrayList(u8) = .fromOwnedSlice(root);
+    errdefer acc.deinit(allocator);
+
+    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    const io = io_backend.io();
+    var dir = std.Io.Dir.cwd().openDir(io, "build", .{ .iterate = true }) catch |err| switch (err) {
+        error.FileNotFound => return acc.toOwnedSlice(allocator),
+        else => return err,
+    };
+    defer dir.close(io);
+    var it = dir.iterate();
+    while (try it.next(io)) |entry| {
+        if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, ".zig")) continue;
+        const text = try dir.readFileAlloc(io, entry.name, allocator, .limited(1024 * 1024));
+        defer allocator.free(text);
+        try acc.append(allocator, '\n');
+        try acc.appendSlice(allocator, text);
+    }
+    return acc.toOwnedSlice(allocator);
+}
+
 fn containsAny(haystack: []const u8, needles: []const []const u8) bool {
     for (needles) |needle| {
         if (std.mem.indexOf(u8, haystack, needle) != null) return true;
@@ -682,7 +712,7 @@ test "release gate requirements require semantics and doctor wiring" {
         "bash scripts/check-decision-registry.sh\nbash scripts/check-meta-drift.sh\n" ++
         "bash scripts/check-agent-determinism.sh\nbash scripts/check-semantics-spec.sh\n" ++
         "zts module-spec-render --check\nzts meta --json\n" ++
-        "zig build release-provenance\nzig fmt --check build.zig packages/\n";
+        "zig build release-provenance\nzig fmt --check build.zig build/ packages/\n";
 
     try std.testing.expect(releaseGateRequirementsPresent(build_zig, ci_yml, release_yml, verify_sh));
     try std.testing.expect(!releaseGateRequirementsPresent(build_zig, ci_yml, "zig build test\n", verify_sh));
@@ -935,7 +965,7 @@ fn writeReleaseDoctorFixture(io: std.Io, tmp: *std.testing.TmpDir, opts: Release
         \\zts module-spec-render --check
         \\zts meta --json
         \\zig build release-provenance
-        \\zig fmt --check build.zig packages/
+        \\zig fmt --check build.zig build/ packages/
         ,
     });
     try tmp.dir.writeFile(io, .{
@@ -1018,4 +1048,30 @@ fn writeReleaseDoctorFixture(io: std.Io, tmp: *std.testing.TmpDir, opts: Release
         .sub_path = "packages/runtime/src/proofs_cli.zig",
         .data = "badge\nbundle\nverify\n",
     });
+}
+
+test "release gate markers are read from build.zig and build/*.zig together" {
+    const testing = std.testing;
+
+    var io_backend = std.Io.Threaded.init(testing.allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    const io = io_backend.io();
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const old_cwd = try chdirTmpForTest(&tmp);
+    defer testing.allocator.free(old_cwd);
+    defer std.Io.Threaded.chdir(old_cwd) catch {};
+
+    // The root file names no gate; the step declarations live under build/.
+    try tmp.dir.writeFile(io, .{ .sub_path = "build.zig", .data = "// orchestrator\n" });
+    try tmp.dir.createDirPath(io, "build");
+    try tmp.dir.writeFile(io, .{ .sub_path = "build/smoke.zig", .data = "// smoke-v1 test-panic-isolation smoke-getting-started smoke-demo smoke-studio\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "build/gates.zig", .data = "// test-module-governance test-capability-audit test-docs-drift test-evidence-marker test-examples\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "build/notes.txt", .data = "// not a build file\n" });
+
+    const sources = readBuildSources(testing.allocator) orelse return error.BuildSourcesUnread;
+    defer testing.allocator.free(sources);
+    try testing.expect(containsAll(sources, &build_gate_markers));
+    try testing.expect(std.mem.indexOf(u8, sources, "not a build file") == null);
 }

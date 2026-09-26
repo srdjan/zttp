@@ -25,7 +25,7 @@ pub fn build(b: *std.Build) void {
 
     const pkgs = packages.add(ctx);
     const proofs = proof_gates.add(ctx, pkgs);
-    const host_test_runs = host_tests.add(ctx, proofs);
+    const host = host_tests.add(ctx, proofs);
     const capability_audit = repo_gates.addCapabilityAudit(ctx);
     const tools = tooling.add(ctx);
     const gates = repo_gates.add(ctx, tools);
@@ -33,13 +33,14 @@ pub fn build(b: *std.Build) void {
     const wasm_publish_test_step = wasm.add(ctx);
     const golden = goldens.add(ctx, bins);
     artifacts.addRunSteps(ctx, bins);
-    const unit = runtime_tests.addUnit(ctx, proofs.invariant_drift_step);
+    const unit = runtime_tests.addUnit(ctx);
+    proof_gates.addInvariantDriftEvidence(proofs.invariant_drift_step, host.project_config, unit.run_unit_tests, unit.run_cli_tests);
 
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&unit.run_unit_tests.step);
     test_step.dependOn(&unit.run_cli_tests.step);
     // Every host test root from the table in build/host_tests.zig.
-    for (host_test_runs) |run| test_step.dependOn(&run.step);
+    for (host.runs) |run| test_step.dependOn(&run.step);
     test_step.dependOn(&capability_audit.step);
     test_step.dependOn(&gates.module_boundary.step);
     test_step.dependOn(&gates.release_workflow.step);

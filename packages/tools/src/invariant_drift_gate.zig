@@ -94,7 +94,7 @@ const paths = std.EnumArray(Input, []const u8).init(.{
     .report = "packages/runtime/src/proofs/invariant_report.zig",
     .docs = "docs/verification.md",
     .concepts = "CONCEPTS.md",
-    .build = "build.zig",
+    .build = "build/proof_gates.zig",
 });
 
 /// Compiled behavioral evidence. The gate proves the marker is present; the
@@ -1794,22 +1794,22 @@ fn validate(arena: std.mem.Allocator, gate: *Gate, model: Model) !void {
     // --- the build wiring that makes this gate run at all --------------------
     const build_text = model.text.get(.build);
     if (std.mem.indexOf(u8, build_text, "b.step(\"test-invariant-drift\"") == null) {
-        return gate.reject(.build_step_missing, "build.zig declares no test-invariant-drift step", .{});
+        return gate.reject(.build_step_missing, "{s} declares no test-invariant-drift step", .{paths.get(.build)});
     }
     const run_variable = blk: {
         const at = std.mem.indexOf(u8, build_text, "b.addRunArtifact(invariant_gate_exe)") orelse
-            return gate.reject(.build_side_effects, "build.zig does not run the invariant gate binary", .{});
+            return gate.reject(.build_side_effects, "{s} does not run the invariant gate binary", .{paths.get(.build)});
         const line_start = if (std.mem.lastIndexOfScalar(u8, build_text[0..at], '\n')) |nl| nl + 1 else 0;
         const line = std.mem.trim(u8, build_text[line_start..at], " \t");
         if (!std.mem.startsWith(u8, line, "const ")) {
-            return gate.reject(.build_side_effects, "build.zig does not bind the invariant gate run step to a name", .{});
+            return gate.reject(.build_side_effects, "{s} does not bind the invariant gate run step to a name", .{paths.get(.build)});
         }
         break :blk identifierAt(line, "const ".len);
     };
     var side_effect_buffer: [128]u8 = undefined;
     const side_effect_needle = try std.fmt.bufPrint(&side_effect_buffer, "{s}.has_side_effects = true;", .{run_variable});
     if (std.mem.indexOf(u8, build_text, side_effect_needle) == null) {
-        return gate.reject(.build_side_effects, "build.zig does not force '{s}' to rerun; a Run step caches on its arguments, not on the files it reads", .{run_variable});
+        return gate.reject(.build_side_effects, "{s} does not force '{s}' to rerun; a Run step caches on its arguments, not on the files it reads", .{ paths.get(.build), run_variable });
     }
     if (countOccurrences(build_text, "invariant_drift_step.dependOn(") < 5) {
         return gate.reject(.build_evidence_dependencies, "test-invariant-drift depends on {d} steps, expected the gate plus at least four compiled evidence roots", .{countOccurrences(build_text, "invariant_drift_step.dependOn(")});
@@ -1827,7 +1827,7 @@ fn validate(arena: std.mem.Allocator, gate: *Gate, model: Model) !void {
         );
     }
     if (std.mem.indexOf(u8, build_text, "scripts/check-invariants.sh") != null) {
-        return gate.reject(.build_replaced_gate, "build.zig still runs the replaced invariant shell gate", .{});
+        return gate.reject(.build_replaced_gate, "{s} still runs the replaced invariant shell gate", .{paths.get(.build)});
     }
 }
 
