@@ -57,7 +57,7 @@ unit test passes. Every refusal test passes. The digests compare equal, because
 they are the same value arriving twice. There is no runtime symptom at all. Only
 a source-level gate can hold this property, and that gate is
 `packages/tools/src/invariant_drift_gate.zig`, run by the build as
-`zig build test-invariant-drift` (`build.zig:311`).
+`zig build test-invariant-drift` (declared in `build/proof_gates.zig`).
 
 The friction is what happened next. The gate went through four review rounds. In
 each round the gate was read, and in each round the reading said the gate was
@@ -85,7 +85,7 @@ The harness has five steps. None of them needs new code in the gate.
 
 **1. Build the gate as its own binary.** Its exit status must be its own verdict
 and nothing else. This repo already installs it separately for that reason, at
-`build.zig:329-336`, with the comment: "The gate binary on its own, so a single
+the `invariant-gate` step in `build/proof_gates.zig`, with the comment: "The gate binary on its own, so a single
 mutation probe can be run directly and read from its exit status. Routing a
 probe through the aggregate step above would mix the gate's verdict with seven
 test suites."
@@ -649,7 +649,7 @@ row for `compiler_resolver_missing`:
 > paths are reported as a probe failure, never as agreement.
 
 Finally, the gate's own tests hang off the same build step as the gate, at
-`build.zig:317-326`, for the reason recorded there: "A probe is code. One that
+the `invariant_gate_tests` wiring in `build/proof_gates.zig`, for the reason recorded there: "A probe is code. One that
 does not compile runs no check, and a failed build and a passing gate both emit
 no failure message." That is the rule from
 [docs/solutions/conventions/difference-is-not-the-claim-and-a-probe-must-compile.md](difference-is-not-the-claim-and-a-probe-must-compile.md),

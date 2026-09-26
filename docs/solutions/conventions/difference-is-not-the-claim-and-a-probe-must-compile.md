@@ -350,15 +350,15 @@ zig build test -j1 --summary all
 
 `server.zig` is not a test root of its own. Its tests compile into the
 `unit_tests` artifact rooted at `packages/runtime/src/main.zig`
-(`build.zig:1239-1251`), which reaches the file through the
+(`addUnit` in `build/runtime_tests.zig`), which reaches the file through the
 `_ = @import("server.zig");` in that root's test block
 (`packages/runtime/src/main.zig:30`), and `zig build test` runs that artifact
-(`build.zig:1282`). The narrower `zig build test-invariant-drift` runs the same
-artifact (`build.zig:1253`).
+(`build.zig`). The narrower `zig build test-invariant-drift` runs the same
+artifact (`addInvariantDriftEvidence` in `build/proof_gates.zig`).
 
 `zig build test -j1 -Dtest-filter=SIGTERM --summary all` is convenient while you
 iterate on the probe, but its result is not evidence. `-Dtest-filter` reaches
-`.filters` on every test artifact (`build.zig:13-18`), so an artifact the filter
+`.filters` on every test artifact (`test_filters` in `build/Context.zig`), so an artifact the filter
 matches nothing in runs zero tests and exits 0, which is the exit status a pass
 also gives. Take the verdict from the unfiltered step.
 

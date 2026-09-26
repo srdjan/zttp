@@ -101,8 +101,8 @@ when the page's `corpusVersion`, `rulesTotal` or `rulesTripped` differ from the
 run (`:4490-4492`). It runs when `on_headline and !evidencePublicationMode()`
 (`:4901-4903`), and `evidencePublicationMode()` is `ZTTP_EVIDENCE_PUBLISH`
 equal to `"1"` (`:4058-4061`). `test-expert-app` is a host test root
-(`build.zig:470`) and every host root is a dependency of the aggregate `test`
-step (`build.zig:1312`), which `scripts/verify.sh:59-64` runs. So after the
+(`host_test_roots` in `build/host_tests.zig`) and every host root is a dependency
+of the aggregate `test` step (`for (host.runs)` in `build.zig`), which `scripts/verify.sh:59-64` runs. So after the
 re-record every plain `zig build test` was red on the stale page and would stay
 red until the page was regenerated. The publisher runs its replay as
 `ZTTP_EVIDENCE_PUBLISH=1 zig build test-expert-app`
@@ -193,8 +193,8 @@ the state a prompt edit leaves behind.
 Two smaller rules follow from the same morning.
 
 **A refusal names its exit.** The deleted floor's message at `:105` named the
-identity and nothing else. Compare the step-coverage gate's failure text at
-`build.zig:1677`, which ends "Run the step from scripts/verify.sh, a CI
+identity and nothing else. Compare the step-coverage gate's failure text in
+`build/step_coverage.zig`, which ends "Run the step from scripts/verify.sh, a CI
 workflow, or `zig build test`; or add a row to scripts/manual-steps.allow with
 the reason a human asks for it." A reader of the first message has to work out
 whether they are looking at a defect or a first. A reader of the second is told
@@ -256,16 +256,15 @@ refusal got, and a reviewer's neutral observation about a path near it is a
 place to look.
 
 The contrast that landed the same morning shows the shape that does not have
-this defect. `69e134d8` was caught by `test-step-coverage` (`build.zig:1675`),
-which walks `b.top_level_steps.values()` at build time (`:1615`), so its
+this defect. `69e134d8` was caught by `test-step-coverage` (`build/step_coverage.zig`),
+which walks `b.top_level_steps.values()` at build time, so its
 universe of inputs is the live graph and a step added an hour ago is in it the
-moment it exists. The gate is bidirectional: a step nothing runs fails
-(`:1648-1651`), a row for a step something now runs fails (`:1652-1655`), and a
-row naming a step that no longer exists fails (`:1658-1669`). It is a
-dependency of `zig build test` (`:1684`), which `scripts/verify.sh:59-64` runs,
+moment it exists. The gate is bidirectional: a step nothing runs fails,
+a row for a step something now runs fails, and a row naming a step that no
+longer exists fails. It is a dependency of `zig build test`, which `scripts/verify.sh:59-64` runs,
 and `69e134d8`'s body records "Found by scripts/verify.sh, not by the previous
 commit's narrower runs." It refused two new steps, named both exits, and the
-fix was one line (`build.zig:1322`) and one allowlist row with its reason
+fix was one line in the aggregate `test` step of `build.zig` and one allowlist row with its reason
 (`scripts/manual-steps.allow:77-83`). The gate did not know in advance whether
 the new steps were defects or firsts. It refused loudly, said what each answer
 would look like, and let a human sort them. That is what a first-occurrence
@@ -364,7 +363,7 @@ what makes admitting a first safe.
 
 ### 5. The instance that was caught
 
-`69e134d8`, one line at `build.zig:1322`:
+`69e134d8`, one line in the aggregate `test` step of `build.zig`:
 
 ```zig
 test_step.dependOn(&run_coverage_union_tests.step);

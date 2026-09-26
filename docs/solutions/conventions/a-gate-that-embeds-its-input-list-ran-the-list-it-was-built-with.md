@@ -28,7 +28,7 @@ tags:
 
 ## Context
 
-`zig build test-proof-checker-mutants` applies each row of `packages/tools/src/proof_checker_mutants.zon` to a private copy of the acceptance kernel, compiles the kernel's suite, runs it, and fails when a mutant survives, when a row no longer matches the source, or when a row marked equivalent is killed (`docs/internals/testing.md:333-341`). The runner is `packages/tools/src/proof_checker_mutants.zig`, wired at `build.zig:253-269`.
+`zig build test-proof-checker-mutants` applies each row of `packages/tools/src/proof_checker_mutants.zon` to a private copy of the acceptance kernel, compiles the kernel's suite, runs it, and fails when a mutant survives, when a row no longer matches the source, or when a row marked equivalent is killed (`docs/internals/testing.md:333-341`). The runner is `packages/tools/src/proof_checker_mutants.zig`, wired in `build/proof_gates.zig` under the `test-proof-checker-mutants` step.
 
 As introduced in commit `81cd5896`, the runner held its list at compile time:
 
@@ -52,7 +52,7 @@ The list edit was uncommitted when the fix landed. The committed list carries 25
 
 **A gate whose input is data reads that data at run time, through a build-tracked file argument, and never compiles it into its own binary.**
 
-The list is now the runner's third argument. The build passes it with `addFileArg`, beside the compiler path and the kernel directory (`build.zig:264-266`):
+The list is now the runner's third argument. The build passes it with `addFileArg`, beside the compiler path and the kernel directory (`build/proof_gates.zig`, `proof_checker_mutants_cmd`):
 
 ```zig
 proof_checker_mutants_cmd.addArg(b.graph.zig_exe);
@@ -82,7 +82,7 @@ The argument for this shape does not need the cache mechanism. Whatever binary t
 
 **Print the input count on every run.** The runner reports `running {d} rows` before it starts a worker (`:129-132`). That line was the only visible sign that the gate held a different list from the tree. A count that does not match the file you just edited is the earliest and cheapest signal this class gives.
 
-**`has_side_effects` reruns the executable. It does not rebuild it.** The Run step already carried `has_side_effects = true` before the fix (`build.zig:267`). The comment on the invariant drift gate states what that flag covers (`build.zig:319-322`): a Run step is cached on its executable and its arguments, never on the files the program reads at run time, so a gate that reads files at run time needs the flag to rerun. This document is the other half of that pair. The flag reruns whatever executable the compile step produced, and when the executable itself is stale, rerunning it reruns the stale list. A file argument places the list on the run side, where the flag and the argument tracking both apply.
+**`has_side_effects` reruns the executable. It does not rebuild it.** The Run step already carried `has_side_effects = true` before the fix (`proof_checker_mutants_cmd.has_side_effects` in `build/proof_gates.zig`). The comment on the invariant drift gate states what that flag covers (the "`has_side_effects` is load-bearing" comment in `build/proof_gates.zig`): a Run step is cached on its executable and its arguments, never on the files the program reads at run time, so a gate that reads files at run time needs the flag to rerun. This document is the other half of that pair. The flag reruns whatever executable the compile step produced, and when the executable itself is stale, rerunning it reruns the stale list. A file argument places the list on the run side, where the flag and the argument tracking both apply.
 
 **When a gate reports an item that the source no longer contains, suspect a stale build product first, and confirm with a fresh `--cache-dir`.** A row that does not exist cannot be re-anchored. The instruction in the message was correct for a live row and impossible for this one, and that impossibility is the diagnostic. The confirmation is one command with an empty cache directory. If the fresh build gives a different count or a different verdict, the input the gate held was not the input in the tree, and no amount of re-reading the gate's source will show it.
 
@@ -124,11 +124,11 @@ The compile-versus-run separation, which the same session touched. A hand-run of
 
 ## Related Issues
 
-- `CONCEPTS.md`, the Gate and Probe entries (`:274-294`) - the whole class in one place; this document adds a fourth failure shape to it, the stale input
+- `CONCEPTS.md`, the Gate and Probe entries under "Guarding the repo" - the whole class in one place; this document adds a fourth failure shape to it, the stale input
 - [a-gate-that-counts-nothing-still-reports-a-pass](a-gate-that-counts-nothing-still-reports-a-pass.md) - the floor-on-input rule this runner already satisfied while running the wrong input
 - [difference-is-not-the-claim-and-a-probe-must-compile](difference-is-not-the-claim-and-a-probe-must-compile.md) - the probe-must-compile and exit-code rules, which the runner's compile-then-run split implements per row
 - [a-gate-can-be-non-vacuous-and-still-porous](a-gate-can-be-non-vacuous-and-still-porous.md) - the mutation method this gate exists to apply to the kernel
 - `docs/internals/testing.md:333-341` - the gate's entry, including the earlier stale-cache finding at the mutant level
-- `build.zig:319-322` - the `has_side_effects` comment that states what the flag covers, and by omission what it does not
+- `build/proof_gates.zig`, the "`has_side_effects` is load-bearing" comment - states what the flag covers, and by omission what it does not
 - Commit `f5e94184` - the fix: file argument in `build.zig`, `loadList` in the runner
 - Commit `81cd5896` - the gate as introduced, with the `@import`
