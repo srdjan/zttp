@@ -10,7 +10,27 @@ For releases prior to v0.16 see git tags and [RELEASE_CHECKLIST.md](RELEASE_CHEC
 
 ## [Unreleased]
 
-## [0.21.0] - 2026-09-25
+## [0.21.1] - 2026-09-26
+
+A maintenance release. The shipped binaries behave as in 0.21.0; artifacts,
+certificates, and bundles built by 0.21.0 remain valid.
+
+### Changed
+
+- **The build graph is split across `build/*.zig`.** `build.zig` is now a
+  short orchestrator over thirteen files, one per area (package tests, proof
+  gates, host test roots, repository gates, tooling, the installed binaries,
+  wasm, goldens, runtime tests, bench, smoke, step coverage). Step names,
+  descriptions, `-D` options, and the dependency graph are unchanged:
+  `zig build -l` and `zig build -h` print the same output as 0.21.0.
+  Contributors who format or grep the build must include `build/`;
+  `zig fmt --check build.zig build/ packages/` is the CI form.
+
+### Fixed
+
+- **`release-check` reads every build file.** Its release-gate markers are
+  searched in `build.zig` and `build/*.zig` together, and its verifier
+  marker expects the `zig fmt` line that covers `build/`.
 
 ### Breaking changes
 
@@ -704,7 +724,8 @@ See git tags and `RELEASE_CHECKLIST.md` for the record of shipped items. Known-i
 - Static file path traversal via symlinks blocked with check-before-open + `follow_symlinks=false`.
 - HandlerPool test flake under the build runner (root cause was the closure destroyFull bug above).
 
-[Unreleased]: https://github.com/srdjan/zigttp/compare/v0.21.0...HEAD
+[Unreleased]: https://github.com/srdjan/zigttp/compare/v0.21.1...HEAD
+[0.21.1]: https://github.com/srdjan/zigttp/compare/v0.21.0...v0.21.1
 [0.21.0]: https://github.com/srdjan/zigttp/compare/v0.20.0...v0.21.0
 [0.20.0]: https://github.com/srdjan/zigttp/compare/v0.19.0...v0.20.0
 [0.19.0]: https://github.com/srdjan/zigttp/compare/v0.18.0...v0.19.0
