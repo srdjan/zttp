@@ -938,7 +938,7 @@ pub const version = struct {
     pub const major = 0;
     pub const minor = 20;
     pub const patch = 0;
-    pub const string = "0.21.0";
+    pub const string = "0.21.1";
 };
 
 /// Create a new standalone context (not pooled)
@@ -984,7 +984,7 @@ test "version" {
     try std.testing.expectEqual(@as(comptime_int, 0), version.major);
     try std.testing.expectEqual(@as(comptime_int, 20), version.minor);
     try std.testing.expectEqual(@as(comptime_int, 0), version.patch);
-    try std.testing.expectEqualStrings("0.21.0", version.string);
+    try std.testing.expectEqualStrings("0.21.1", version.string);
 }
 
 test "ContractProof projects proof metadata through the stable surface" {
