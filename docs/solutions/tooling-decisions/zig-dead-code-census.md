@@ -160,7 +160,8 @@ instead of asserting the change was safe.
 **Proving there are no unreachable files.** A basename grep for
 `@import("ratelimit.zig")` misses `@import("data/ratelimit.zig")` and reports
 40 false positives. Walk the real graph instead: collect roots from every
-`build.zig`'s `.path("...zig")` plus each package's `root.zig` and test
+`build.zig`'s `.path("...zig")` (and, since the root build was split, every
+`build/*.zig` file's) plus each package's `root.zig` and test
 roots, then BFS over `@import` targets resolved relative to the importing
 file's directory. That returned 450 of 450 sources reachable, with only the 8
 `build.zig` scripts unreached - a definitive answer rather than a noisy list.

@@ -231,8 +231,8 @@ The regression contract covers the failure at four boundaries:
   `null_type_idx` and an observable `OutOfMemory` pool failure
   (`packages/zts/src/type_env.zig:1923`).
 - The real CLI matrix accepts the complete value and rejects the value missing
-  member 17 with exit 1 and an exact `ZTS203` JSON golden (`build.zig:708`). The
-  aggregate `test` step depends on that matrix (`build.zig:839`).
+  member 17 with exit 1 and an exact `ZTS203` JSON golden (`test-generic-intersection-cli-matrix` in `build/goldens.zig`). The
+  aggregate `test` step in `build.zig` depends on that matrix.
 - A mutation that restored the 16-member prefix made both the unit regression
   and the rejecting CLI case fail. That proves the gates are sensitive to the
   original truncation rather than merely exercising nearby code.

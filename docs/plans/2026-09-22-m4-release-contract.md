@@ -117,7 +117,7 @@ not raise them.
 P1, the vocabulary envelope, is met. The envelope is
 [consumer-contract-envelope.json](../consumer-contract-envelope.json), derived
 from `packages/tools/src/vocab_envelope.zig`, and the gate is
-`zig build test-vocab-envelope-drift` (`build.zig:338`). The contract text still
+`zig build test-vocab-envelope-drift` (declared in `build/proof_gates.zig`). The contract text still
 says the envelope does not exist (`docs/consumer-contract.md:48-50`, `:466-467`).
 That text is stale; its correction is separate work. If T3 adds an executable-graph
 member kind, the published member-kind count changes and T3 must regenerate the

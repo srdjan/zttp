@@ -154,7 +154,7 @@ that exercises extensions, legacy backfills, and rate-limit ownership
 Finally, keep the serializer's byte contract independent from decoder tests. The
 build defines byte-identical public contract goldens specifically so a
 behavior-preserving refactor cannot move serialized output accidentally
-(`build.zig:662-672`).
+(`test-contract-golden` in `build/goldens.zig`).
 
 ## Why This Matters
 

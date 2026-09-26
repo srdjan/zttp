@@ -198,9 +198,9 @@ The same review found four test gates in this area that printed numbers nobody w
 
 **A hand-written row list never compared to the table it covers.** The sequence gate is the only check on tool ordering and the at-most-one-edit rule, and it drives a literal array of six `SequenceCase` rows. A seventh range entry would simply have had no row and escaped the check while the gate still reported success. Fix: one line, `try testing.expectEqual(range.entries.len, cases.len);` (`packages/pi/src/standin_range_tests.zig:190`).
 
-**A test binary whose filter excluded any test not named for it.** The stand-in test roots are compiled with `.filters = &.{"stand-in"}` (`build.zig:316`), so a test whose name omits that token never runs and never reports. Nothing enforced the naming rule the filter depends on. Fix: a gate that `@embedFile`s both roots, fails on any `test "` declaration at column zero without `stand-in` in its name, and guards itself with a floor on how many declarations it saw (`packages/pi/src/standin_range_tests.zig:282-310`).
+**A test binary whose filter excluded any test not named for it.** The stand-in test roots are compiled with `.filters = &.{"stand-in"}` (the `standin_only` row, applied in `build/host_tests.zig`), so a test whose name omits that token never runs and never reports. Nothing enforced the naming rule the filter depends on. Fix: a gate that `@embedFile`s both roots, fails on any `test "` declaration at column zero without `stand-in` in its name, and guards itself with a floor on how many declarations it saw (`packages/pi/src/standin_range_tests.zig:282-310`).
 
-**An executable compiled by no gate.** `zttp-standin` is deliberately not installed, so nothing forced it to compile and a break would surface only when somebody ran the step by hand. Fix: `test_step.dependOn(&standin_exe.step);` (`build.zig:792`), which compiles it without installing it.
+**An executable compiled by no gate.** `zttp-standin` is deliberately not installed, so nothing forced it to compile and a break would surface only when somebody ran the step by hand. Fix: `test_step.dependOn(&tools.standin_exe.step);` (the aggregate `test` step in `build.zig`), which compiles it without installing it.
 
 ## Why This Works
 

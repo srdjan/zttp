@@ -326,7 +326,7 @@ its boundary.
   a node that differs above 16 bits. The widened comparison has no test of its own: that
   needs more than 65,536 IR nodes, and the default limit forbids it.
 - **The kernel runs without runtime safety in release binaries.** Releases build
-  `-Doptimize=ReleaseFast` (`.github/workflows/release.yml:129`), and `build.zig:226-229`
+  `-Doptimize=ReleaseFast` (`.github/workflows/release.yml:129`), and the root build (then `build.zig:226-229`; since 0384765a `proof_checker_optimize` in `build/Context.zig` selects ReleaseSafe)
   passes that mode into the kernel dependency. An out-of-range cast, a slice outside its
   bounds, or overflow reached from certificate bytes is a panic in the Debug tests and
   undefined behavior in production. Every such site checked in this review has an explicit

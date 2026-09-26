@@ -66,7 +66,7 @@ runs inside the connect. It is not an owned file of T1b.
 
 The connect part is simple. `std.posix.poll` is public (`std/posix.zig:1003`),
 and `socket`, `fcntl`, `connect`, and `getsockopt` are available as libc
-externs (`std/c.zig:10725-10737`). zttp links libc (`build.zig:142` and the
+externs (`std/c.zig:10725-10737`). zttp links libc (`link_libc = true` in `build/packages.zig` and the
 other `link_libc = true` rows).
 
 The problem is the step after the connect. `RequestOptions.connection` takes
