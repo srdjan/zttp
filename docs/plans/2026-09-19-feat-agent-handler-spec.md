@@ -50,11 +50,11 @@ tool catalog and strict schema subset, `ZTCAT1` binding as graph member 19,
 bearer-token identity and scope, per-tool grants, the declaration ceiling,
 credential injection, and finite outbound deadlines. The
 [M5 release contract](2026-09-27-m5-agent-handler-release-contract.md) resumes
-the remaining work. Its section 4 lists the facts at `e6f33dfc` that supersede
-rows of the table below: the tool-dispatch refusal, the single grant slot, the
-allow-all on a null grant, the 30 s handler deadline, and the verifier's walk
-that skips closures. The rows below on the response, fetch, pool, and Studio
-surfaces still hold at `e6f33dfc`. WebSocket support has since been removed.
+the remaining work. Its section 4 adds facts at `e6f33dfc` that the table below
+omits: the agent-route gap, the single grant slot, the allow-all on a null
+grant, the 30 s server handler deadline, and the verifier's walk that skips
+closures. The response, fetch, pool, and Studio rows still hold at `e6f33dfc`;
+the credential and catalog paragraphs below are superseded. WebSocket is gone.
 
 Revalidated on 2026-09-20 against committed local `main` at `e223381e`.
 The original source baseline was `2d57147b`.
@@ -71,7 +71,7 @@ these paths before implementation.
 
 | Existing surface | Consequence for this enhancement |
 | --- | --- |
-| `packages/runtime/src/http_types.zig`, `HttpResponse` | A response owns one complete byte slice. It has no stream producer. |
+| `packages/runtime/src/http_types.zig`, `HttpResponse` | A response carries one complete byte slice, owned or borrowed. It has no stream producer. |
 | `packages/runtime/src/server_response.zig`, `buildDynamicResponseHeader` | Ordinary responses use the complete body length for framing. An SSE content type alone cannot produce streaming. |
 | `packages/runtime/src/runtime_http.zig`, `readResponseBody` and `fetchSyncResult` | Outbound fetch reads the entire body before constructing a JS response. |
 | `packages/runtime/src/studio.zig` and the Studio branch in `server.zig` | Studio has a separate SSE socket path. It is not a public handler stream API. |
@@ -87,8 +87,8 @@ these paths before implementation.
 The core response, fetch, pool, and Studio streaming surfaces are unchanged from
 the original baseline. Fetch already enforces endpoint and resolved-address
 restrictions, byte limits, and an exchange deadline, and does not follow redirects.
-It still accepts handler-provided headers and has no deployment-owned credential
-resolver or injection step.
+At `e223381e` it had no deployment-owned credential resolver or injection step;
+M4 T6 added both on the synchronous `fetch` path.
 
 Existing recorders also do not supply the proposed turn contract.
 `packages/runtime/src/trace_request_recorder.zig` captures request/response data
@@ -106,10 +106,10 @@ depend on promises, `async` functions, or browser `ReadableStream` support.
 U1 must preserve the existing schema-byte and inferred-type contracts when it
 uses that writer.
 
-`ApiSchemaInfo` currently records a name and schema JSON. Contract JSON carries
-those schemas, but `packages/runtime/src/contract_runtime.zig` does not carry a
-tool catalog or its argument/result validators. U1 must implement that transfer
-and acceptance path; serialized API documentation is not executable tool authority.
+At `e223381e`, `packages/runtime/src/contract_runtime.zig` carried no tool
+catalog or argument/result validators. M4 T3 added that path: the runtime lowers
+the accepted `ZTCAT1` catalog into `AcceptedCatalog` and validates tool inputs
+and outputs. Serialized API documentation is still not executable tool authority.
 
 ---
 

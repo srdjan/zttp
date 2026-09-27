@@ -6,7 +6,7 @@ index when a plan starts, closes, or moves to the archive.
 
 | Document | Role and status | Work authority |
 |---|---|---|
-| [M5: release contract for agent handlers](2026-09-27-m5-agent-handler-release-contract.md) | Proposed 2026-09-27; owner answered the four scope questions | Needs owner acceptance of the text before A1 starts |
+| [M5: release contract for agent handlers](2026-09-27-m5-agent-handler-release-contract.md) | Proposed 2026-09-27; owner answered decisions 1 to 4; two review rounds folded in | Needs owner acceptance, including proposed decision 5, of the text before A1 starts |
 | [Proof-checker rederive review](2026-09-24-proof-checker-rederive-review.md) | Implemented 2026-09-25; Phases 0 to 4 committed, results and section 7 leftovers at the end of the plan | Owner accepted the plan and answered its four decisions |
 | [M4: release contract for scoped tool routes](2026-09-22-m4-release-contract.md) | Accepted 2026-09-22; T1a to T7 complete | Owner accepted the contract on 2026-09-22 |
 | [M4 T7: reference tools and documentation](2026-09-24-m4-t7-reference-tools-design.md) | Implemented 2026-09-24; U1 to U3 complete | Owner accepted the design and answered its six questions |
