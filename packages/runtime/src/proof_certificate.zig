@@ -50,6 +50,10 @@ pub const Error = error{
     /// stops filling `invariant_adapter_digest`, which is why it is a refusal
     /// rather than an assertion.
     MissingInvariantAdapterDigest,
+    /// The encoded certificate does not decode under the default consumer
+    /// limits, so every consumer would refuse it. A proof larger than those
+    /// limits reaches this, and so would an encoder the decoder disagrees with.
+    CertificateExceedsConsumerLimits,
 };
 
 /// What the contract says the compiler discharged. Read once, at the call site
@@ -352,8 +356,8 @@ pub fn build(allocator: std.mem.Allocator, inputs: Inputs) Error!Built {
     // member. A second canonical encoding writes that graph root into identity.
     const provisional = try cert.encode(parts, bytes);
     var budget = pcc.limits.Budget.init(.{});
-    const decoded = cert.decode(provisional, .{}, &budget) catch unreachable;
-    const certificate_digest = cert.commitmentDigest(provisional, decoded) catch unreachable;
+    const decoded = cert.decode(provisional, .{}, &budget) catch return error.CertificateExceedsConsumerLimits;
+    const certificate_digest = cert.commitmentDigest(provisional, decoded) catch return error.CertificateExceedsConsumerLimits;
 
     var found_certificate_member = false;
     for (built_members) |*member| {
