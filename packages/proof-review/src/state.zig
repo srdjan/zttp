@@ -93,7 +93,11 @@ pub fn load(allocator: std.mem.Allocator) !Store {
 
     for (entries_value.array.items) |item| {
         if (item != .object) return error.InvalidDeployState;
-        try entries.append(allocator, try parseEntry(allocator, item.object));
+        var entry = try parseEntry(allocator, item.object);
+        entries.append(allocator, entry) catch |err| {
+            entry.deinit(allocator);
+            return err;
+        };
     }
 
     return .{ .entries = try entries.toOwnedSlice(allocator) };
@@ -165,7 +169,11 @@ fn parseEntry(allocator: std.mem.Allocator, obj: std.json.ObjectMap) !Entry {
     }
     for (managed_value.array.items) |item| {
         if (item != .string) return error.InvalidDeployState;
-        try managed.append(allocator, try allocator.dupe(u8, item.string));
+        const key = try allocator.dupe(u8, item.string);
+        managed.append(allocator, key) catch |err| {
+            allocator.free(key);
+            return err;
+        };
     }
     var last_review_facts: ?review.ReviewFacts = null;
     errdefer if (last_review_facts) |*facts| facts.deinit(allocator);
@@ -179,11 +187,20 @@ fn parseEntry(allocator: std.mem.Allocator, obj: std.json.ObjectMap) !Entry {
     // old struct-literal form, a later dupe failing leaked the already-duped
     // earlier fields (fields evaluate left to right, and the literal as a whole
     // has no cleanup).
-    const name = json_util.dupeRequired(allocator, obj, "name") catch return error.InvalidDeployState;
+    const name = json_util.dupeRequired(allocator, obj, "name") catch |err| switch (err) {
+        error.MissingField => return error.InvalidDeployState,
+        else => return err,
+    };
     errdefer allocator.free(name);
-    const scope_id = json_util.dupeRequired(allocator, obj, "scopeId") catch return error.InvalidDeployState;
+    const scope_id = json_util.dupeRequired(allocator, obj, "scopeId") catch |err| switch (err) {
+        error.MissingField => return error.InvalidDeployState,
+        else => return err,
+    };
     errdefer allocator.free(scope_id);
-    const service_id = json_util.dupeRequired(allocator, obj, "serviceId") catch return error.InvalidDeployState;
+    const service_id = json_util.dupeRequired(allocator, obj, "serviceId") catch |err| switch (err) {
+        error.MissingField => return error.InvalidDeployState,
+        else => return err,
+    };
     errdefer allocator.free(service_id);
     const region = try json_util.dupeOptional(allocator, obj, "region");
     errdefer if (region) |v| allocator.free(v);
@@ -254,4 +271,43 @@ test "state store round trips entries" {
     defer loaded.deinit(std.testing.allocator);
 
     try std.testing.expect(loaded.get(.northflank, "demo") != null);
+}
+
+test "state load releases owned entries on allocation failure" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const old_cwd = try std.process.currentPathAlloc(std.testing.io, allocator);
+    defer allocator.free(old_cwd);
+    var tmp_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const tmp_path_len = try tmp.dir.realPath(std.testing.io, &tmp_path_buf);
+    try std.Io.Threaded.chdir(tmp_path_buf[0..tmp_path_len]);
+    defer std.Io.Threaded.chdir(old_cwd) catch {};
+
+    try ensureStateDir();
+    const source =
+        \\{"version":1,"entries":[
+        \\  {"provider":"northflank","name":"first","scopeId":"one","serviceId":"service-one","managedEnvKeys":["A","B"]},
+        \\  {"provider":"northflank","name":"second","scopeId":"two","serviceId":"service-two","managedEnvKeys":["C","D"]}
+        \\]}
+    ;
+    try zts.file_io.writeFile(allocator, statePath(), source);
+
+    var probe = std.testing.FailingAllocator.init(allocator, .{ .fail_index = std.math.maxInt(usize) });
+    var successful = try load(probe.allocator());
+    const allocation_count = probe.alloc_index;
+    successful.deinit(probe.allocator());
+    try std.testing.expect(allocation_count > 0);
+
+    for (0..allocation_count) |fail_at| {
+        var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = fail_at });
+        const result = load(failing.allocator());
+        if (result) |loaded| {
+            var owned = loaded;
+            owned.deinit(failing.allocator());
+        } else |err| {
+            try std.testing.expectEqual(error.OutOfMemory, err);
+        }
+    }
 }
