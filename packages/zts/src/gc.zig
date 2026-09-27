@@ -137,19 +137,25 @@ pub const TenuredHeap = struct {
         // freeRaw / premature free.
         if (self.object_index.get(ptr)) |existing| return existing;
         const header: *heap.MemBlockHeader = @ptrCast(@alignCast(ptr));
-        self.allocated += accountedBytesForHeader(header);
         if (self.free_indices.items.len != 0) {
             const idx = self.free_indices.items[self.free_indices.items.len - 1];
-            self.free_indices.items.len -= 1;
             try self.ensureMarkCapacity(idx);
+            try self.object_index.ensureUnusedCapacity(1);
+
+            self.free_indices.items.len -= 1;
             self.objects.items[idx] = ptr;
-            try self.object_index.put(ptr, idx);
+            self.object_index.putAssumeCapacityNoClobber(ptr, idx);
+            self.allocated += accountedBytesForHeader(header);
             return idx;
         }
         const idx = self.objects.items.len;
         try self.ensureMarkCapacity(idx);
-        try self.objects.append(self.allocator, ptr);
-        try self.object_index.put(ptr, idx);
+        try self.objects.ensureUnusedCapacity(self.allocator, 1);
+        try self.object_index.ensureUnusedCapacity(1);
+
+        self.objects.appendAssumeCapacity(ptr);
+        self.object_index.putAssumeCapacityNoClobber(ptr, idx);
+        self.allocated += accountedBytesForHeader(header);
         return idx;
     }
 
@@ -1735,6 +1741,41 @@ test "TenuredHeap grows mark bitvector" {
     tenured.setMark(last_idx);
     try std.testing.expect(tenured.isMarked(last_idx));
     try std.testing.expect(tenured.mark_bitvector.len >= (last_idx / 64 + 1));
+}
+
+test "TenuredHeap registration leaves no tracked pointer on OOM" {
+    const DummyObj = struct {
+        header: heap.MemBlockHeader,
+        value: u64,
+    };
+
+    const Probe = struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            var tenured = try TenuredHeap.init(allocator, 64);
+            defer tenured.deinit();
+
+            var obj = DummyObj{
+                .header = heap.MemBlockHeader.init(.object, @sizeOf(DummyObj)),
+                .value = 1,
+            };
+            const ptr: *anyopaque = &obj;
+            const objects_len = tenured.objects.items.len;
+            const free_indices_len = tenured.free_indices.items.len;
+            const allocated = tenured.allocated;
+
+            _ = tenured.registerObject(ptr) catch |err| {
+                try std.testing.expectEqual(@as(?usize, null), tenured.getIndex(ptr));
+                try std.testing.expectEqual(objects_len, tenured.objects.items.len);
+                try std.testing.expectEqual(free_indices_len, tenured.free_indices.items.len);
+                try std.testing.expectEqual(allocated, tenured.allocated);
+                return err;
+            };
+
+            try std.testing.expect(tenured.getIndex(ptr) != null);
+        }
+    };
+
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Probe.run, .{});
 }
 
 test "TenuredHeap registration is OOM-safe under FailingAllocator" {
