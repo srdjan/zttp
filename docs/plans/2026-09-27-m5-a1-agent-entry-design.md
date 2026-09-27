@@ -1,8 +1,8 @@
 # M5 A1 design note: the agent entry, its admission, and grants
 
-Status: proposed on 2026-09-27, revised after one review round (a design
-critique and a citation check). It needs the owner's answers to section 8
-before code starts. Unit A1 of the
+Status: accepted by the owner on 2026-09-27, with the recommended answer to each
+question in section 8 (section 9 records them). Revised once after a design
+critique and a citation check before acceptance. Unit A1 of the
 [M5 release contract](2026-09-27-m5-agent-handler-release-contract.md) is
 written against the approach this note names; check C-A1 is its completion
 check.
@@ -376,3 +376,32 @@ after push, pop, and unwind.
 This default is recommended and is not a question unless the owner objects:
 the kind byte first in each entry, with the tool layout otherwise unchanged
 after it.
+
+## 9. Decisions
+
+The owner accepted the recommended answer to Q1 to Q8 on 2026-09-27, and the
+default on the kind byte. For Q6 the owner approved the re-record runs it
+names: one at the close of A1 if A1 makes cassettes stale, and another only if
+A3 or A4 moves the hashes again. Q7 changes the contract's A1 text; the
+contract records it.
+
+## 10. Implementation units
+
+A1 lands in four commits, each with its own tests passing unfiltered.
+
+- **U1. Carriage.** The `agent` member in `ToolEntry`, the builder's reading
+  of it and the new refusal reasons with census cases, contract version 23 in
+  the writer and parser, `ZTCAT1` schema 4 in the encoder and the kernel
+  decoder with one mutant row per new guard, the runtime cross-check, the
+  consumer-contract section 4.6 text, and the envelope.
+- **U2. Build rules and exports.** The egress and indirect-dispatch lists and
+  their census, the agent-route reach rules, the workflow refusal in tool
+  routes (Q8), the `callTool` placement refusal, the `agentPrompt` and inert
+  `callTool` exports, the `toolInput` label probe as a test, and the hash pins.
+- **U3. Runtime.** Agent admission, `agentPrompt`, the frame stack, the agent
+  grant fields and their fetch refusals, the ambient refusal (Q3), the
+  null-grant refusal and the 503 before install (Q4), and the deadline check at
+  promotion and dev install (Q7).
+- **U4. Close.** `test-expert-app`; the approved re-record if it is stale, then
+  convergence and coverage in that order; the full gate; C-A1 evidence in this
+  note.

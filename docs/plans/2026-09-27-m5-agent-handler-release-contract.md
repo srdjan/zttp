@@ -214,9 +214,11 @@ envelope source.
   the agent grant.
 - A null grant under an agent handler refuses the call. The grant slot saves
   exactly one outer grant, and a second push is a runtime refusal.
-- `HandlerInstance.init` refuses to start when an agent entry's turn deadline,
-  plus a margin for terminal bookkeeping, is not below the handler deadline.
-  This follows T1a's startup refusals.
+- The runtime refuses to serve when an agent entry's turn deadline, plus a
+  margin for terminal bookkeeping, is not below the handler deadline. The A1
+  design note (Q7, accepted 2026-09-27) places this check at catalog promotion
+  and at the dev catalog install, not in `HandlerInstance.init`, which cannot
+  see the accepted catalog in every mode.
 
 The design note decides the literal's shape. Completion: check C-A1.
 
