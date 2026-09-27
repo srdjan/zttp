@@ -14,6 +14,7 @@
 const std = @import("std");
 const sdk = @import("zttp-sdk");
 const util = @import("../internal/util.zig");
+const state_limits = @import("../internal/state_limits.zig");
 
 const MODULE_STATE_SLOT: usize = 5; // module_slots.Slot.cache
 
@@ -151,8 +152,8 @@ pub const CacheStore = struct {
             .lru_tail = null,
             .total_entries = 0,
             .total_bytes = 0,
-            .max_entries = 10_000,
-            .max_bytes = 16 * 1024 * 1024,
+            .max_entries = state_limits.max_entries,
+            .max_bytes = state_limits.max_bytes,
         };
     }
 
@@ -216,6 +217,11 @@ pub const CacheStore = struct {
     }
 
     fn set(self: *CacheStore, ns: []const u8, key: []const u8, val: []const u8, ttl: ?i64, now_s: i64) !void {
+        const new_byte_size = try cacheEntryByteSize(ns, key, val);
+        if (self.max_entries == 0 or new_byte_size > self.max_bytes) {
+            return error.CacheCapacityExceeded;
+        }
+
         const ns_cache = try self.getOrCreateNamespace(ns);
 
         if (ns_cache.entries.get(key)) |existing| {
@@ -223,26 +229,26 @@ pub const CacheStore = struct {
             // fails we return the error with the entry still intact, rather than
             // leaving `cache_value` dangling for the next get to read freed memory.
             const new_value = try self.allocator.dupe(u8, val);
+            errdefer self.allocator.free(new_value);
+
+            self.promoteToHead(existing);
+            while (self.total_bytes - existing.byte_size > self.max_bytes - new_byte_size) {
+                if (self.total_entries <= 1 or !self.evictLru()) {
+                    return error.CacheCapacityExceeded;
+                }
+            }
+
             self.total_bytes -= existing.byte_size;
             self.allocator.free(existing.cache_value);
             existing.cache_value = new_value;
-            existing.byte_size = existing.key.len + existing.ns.len + existing.cache_value.len;
+            existing.byte_size = new_byte_size;
             existing.expires_at = expiresAt(now_s, ttl);
             self.total_bytes += existing.byte_size;
-            self.promoteToHead(existing);
-            // Overwriting with a larger value can push total_bytes past the
-            // budget; shed LRU entries like the insert path does. The just-
-            // written entry is at the head, so evictLru (tail-first) sheds
-            // others first; the total_entries > 1 guard keeps us from evicting
-            // it when it is the sole entry.
-            while (self.total_entries > 1 and self.total_bytes >= self.max_bytes) {
-                if (!self.evictLru()) break;
-            }
             return;
         }
 
-        while (self.total_entries >= self.max_entries or self.total_bytes >= self.max_bytes) {
-            if (!self.evictLru()) break;
+        while (self.total_entries >= self.max_entries or self.total_bytes > self.max_bytes - new_byte_size) {
+            if (!self.evictLru()) return error.CacheCapacityExceeded;
         }
 
         const entry = try self.allocator.create(CacheEntry);
@@ -260,7 +266,7 @@ pub const CacheStore = struct {
             .ns = ns_owned,
             .cache_value = val_owned,
             .expires_at = expiresAt(now_s, ttl),
-            .byte_size = key_owned.len + ns_owned.len + val_owned.len,
+            .byte_size = new_byte_size,
             .prev = null,
             .next = null,
         };
@@ -325,6 +331,11 @@ pub const CacheStore = struct {
         entry.next = null;
     }
 };
+
+fn cacheEntryByteSize(ns: []const u8, key: []const u8, val: []const u8) !usize {
+    const key_and_ns = std.math.add(usize, key.len, ns.len) catch return error.CacheCapacityExceeded;
+    return std.math.add(usize, key_and_ns, val.len) catch error.CacheCapacityExceeded;
+}
 
 fn getOrCreateStore(handle: *sdk.ModuleHandle) !*CacheStore {
     if (sdk.getModuleState(handle, CacheStore, MODULE_STATE_SLOT)) |store| return store;
@@ -574,6 +585,61 @@ test "CacheStore: overwrite existing key" {
     try store.set("ns", "key", "new", null, 1000);
     try std.testing.expectEqualStrings("new", store.get("ns", "key", 1000).?);
     try std.testing.expectEqual(@as(usize, 1), store.total_entries);
+}
+
+test "CacheStore: byte budget accounts for the incoming entry" {
+    var store = CacheStore.init(std.testing.allocator);
+    defer store.deinitSelf();
+    store.max_bytes = 6;
+
+    try store.set("n", "a", "1234", null, 1000);
+    try std.testing.expectEqual(@as(usize, 6), store.total_bytes);
+
+    try store.set("n", "b", "1", null, 1000);
+    try std.testing.expect(store.get("n", "a", 1000) == null);
+    try std.testing.expectEqualStrings("1", store.get("n", "b", 1000).?);
+    try std.testing.expect(store.total_bytes <= store.max_bytes);
+}
+
+test "CacheStore: oversized insert is rejected without exceeding the budget" {
+    var store = CacheStore.init(std.testing.allocator);
+    defer store.deinitSelf();
+    store.max_bytes = 5;
+
+    try std.testing.expectError(
+        error.CacheCapacityExceeded,
+        store.set("n", "key", "12", null, 1000),
+    );
+    try std.testing.expectEqual(@as(usize, 0), store.total_entries);
+    try std.testing.expectEqual(@as(usize, 0), store.total_bytes);
+}
+
+test "CacheStore: oversized overwrite preserves the existing value" {
+    var store = CacheStore.init(std.testing.allocator);
+    defer store.deinitSelf();
+    store.max_bytes = 6;
+
+    try store.set("n", "k", "old", null, 1000);
+    try std.testing.expectError(
+        error.CacheCapacityExceeded,
+        store.set("n", "k", "12345", null, 1000),
+    );
+    try std.testing.expectEqualStrings("old", store.get("n", "k", 1000).?);
+    try std.testing.expect(store.total_bytes <= store.max_bytes);
+}
+
+test "CacheStore: larger overwrite evicts older entries to stay in budget" {
+    var store = CacheStore.init(std.testing.allocator);
+    defer store.deinitSelf();
+    store.max_bytes = 9;
+
+    try store.set("n", "a", "1", null, 1000);
+    try store.set("n", "b", "1", null, 1000);
+    try store.set("n", "a", "1234567", null, 1000);
+
+    try std.testing.expectEqualStrings("1234567", store.get("n", "a", 1000).?);
+    try std.testing.expect(store.get("n", "b", 1000) == null);
+    try std.testing.expect(store.total_bytes <= store.max_bytes);
 }
 
 test "CacheStore: stats tracking" {
