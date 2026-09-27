@@ -118,7 +118,7 @@ The type checker tests inferred schema types. `test-precompile` checks emitted
 schema bytes, raw JSON retention, dynamic inputs, and JSON binding behavior.
 
 The audits and gates: `test-capability-audit`, `test-module-boundary`,
-`test-proof-checker-purity`, `test-proof-ratchet`, `test-proof-ratchet-drift`,
+`test-proof-checker-purity`, `test-kernel-safety`, `test-proof-ratchet`, `test-proof-ratchet-drift`,
 `test-residual-guards-drift`, `test-invariant-drift`, `test-proof-swallow`,
 `test-zts-layering`, `test-module-governance`,
 `test-runtime-purity`, `test-contract-golden`, `test-expert-golden`,
@@ -329,6 +329,16 @@ does not reference or that carries no test. It also refuses mutable statics,
 outside tests. Its floors are 14 source files and 265 tests. Its reason-code
 census requires every `ReasonCode` member to be named inside a kernel test
 block, or to carry a row in the script that states why no input produces it.
+
+`zig build test-kernel-safety` keeps runtime safety on in the kernel inside
+ReleaseFast release binaries. On Zig 0.16.0 a dependency module's optimize
+mode does not isolate safety from the root module, so every non-test kernel
+function begins with `@setRuntimeSafety(true)`. The gate parses each kernel file
+and fails on a function without that first statement, on `std.debug.assert` or
+`@setRuntimeSafety(false)` outside a test, and on fewer than 16 files or 300
+functions. A ReleaseFast probe must abort on an out-of-bounds index in an
+annotated function of an imported module, which only happens when the setting
+works.
 
 `zig build test-proof-checker-mutants` measures whether that suite can see a
 change. It applies each row of `packages/tools/src/proof_checker_mutants.zon`

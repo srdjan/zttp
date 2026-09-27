@@ -1,8 +1,9 @@
 # Review: rederiving the acceptance kernel (`packages/proof-checker`)
 
 Status: implemented 2026-09-25. Owner: this repository. Measured on 2026-09-24 against
-commit `dea0eddc`. The trusted-node fix, the kernel build mode, the removal of
-`rule_family_mismatch`, and Phases 0 to 4 are committed. See "Results" at the end.
+commit `dea0eddc`. The trusted-node fix, the removal of `rule_family_mismatch`, and Phases 0 to 4
+are committed. The kernel build mode was committed but had no effect; see the correction
+under owner decision 1. See "Results" at the end.
 
 ## Owner decisions (2026-09-25)
 
@@ -333,14 +334,17 @@ its boundary.
   a node that differs above 16 bits. The widened comparison has no test of its own: that
   needs more than 65,536 IR nodes, and the default limit forbids it.
 - **The kernel runs without runtime safety in release binaries.** Releases build
-  `-Doptimize=ReleaseFast` (`.github/workflows/release.yml:129`), and the root build (then `build.zig:226-229`; since 0384765a `proof_checker_optimize` in `build/Context.zig` selects ReleaseSafe)
+  `-Doptimize=ReleaseFast` (`.github/workflows/release.yml:129`), and the root build (then `build.zig:226-229`)
   passes that mode into the kernel dependency. An out-of-range cast, a slice outside its
   bounds, or overflow reached from certificate bytes is a panic in the Debug tests and
   undefined behavior in production. Every such site checked in this review has an explicit
   guard, but section 4 shows that many guards are not pinned by a test. Option: build the
   kernel dependency as `ReleaseSafe` whenever the root is not `Debug`. The kernel runs at
-  artifact validation, so a safety panic refuses the artifact. Decided and done (owner
-  decision 1).
+  artifact validation, so a safety panic refuses the artifact. Decided (owner decision 1)
+  and committed in 0384765a, but on Zig 0.16.0 a dependency's optimize mode does not
+  isolate runtime safety from the root, so it had no effect. Replaced in ae26ba69 by
+  `@setRuntimeSafety(true)` in every non-test kernel function, enforced by
+  `zig build test-kernel-safety`.
 - **Enum bitmasks without a width guard.** `GuardKind` into `u8` (`checker.zig:794`),
   `AddressScope` into `u8` (`residual.zig:220`), and `Property` into `u16`
   (`verdict.zig:428-451`). A new member past the width is undefined behavior in
@@ -370,8 +374,8 @@ its boundary.
   catalog, and endpoint normalization each have a producer copy. Each has a drift check,
   with one exception: the tool-catalog magic is duplicated (`tools/src/tool_catalog_encoding.zig:17`
   and `tool_catalog.zig:56`) and not compared at compile time. The schema is compared.
-- **Panics a certificate might reach.** `checker.zig:105` (`std.debug.assert`, undefined
-  behavior in ReleaseFast) and `checker.zig:1509` must be shown to be unreachable from input
+- **Panics a certificate might reach.** `checker.zig:105` (`std.debug.assert`, then undefined
+  behavior in ReleaseFast; since ae26ba69 a `safety.check` that always panics) and `checker.zig:1509` must be shown to be unreachable from input
   bytes. M6 deletes the second. The `certificate.zig` prongs were checked and are guarded by
   `:745`.
 
