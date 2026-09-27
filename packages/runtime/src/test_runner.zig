@@ -336,7 +336,10 @@ fn runOneTest(
     const request = test_case.request orelse {
         const msg = std.fmt.allocPrint(allocator, "no request defined", .{}) catch
             return .{ .pass = false, .name = test_case.name, .failures = failures, .err = error.OutOfMemory };
-        failures.append(allocator, msg) catch {};
+        failures.append(allocator, msg) catch {
+            allocator.free(msg);
+            return .{ .pass = false, .name = test_case.name, .failures = failures, .err = error.OutOfMemory };
+        };
         return .{ .pass = false, .name = test_case.name, .failures = failures, .err = null };
     };
 
@@ -377,7 +380,11 @@ fn runOneTest(
 
     var headers_list: std.ArrayListUnmanaged(HttpHeader) = .empty;
     defer headers_list.deinit(allocator);
-    parseHeadersFromJson(allocator, request.headers_json, &headers_list) catch {};
+    // A request sent without its headers is a different request; fail the
+    // scenario rather than run it.
+    parseHeadersFromJson(allocator, request.headers_json, &headers_list) catch |err| {
+        return .{ .pass = false, .name = test_case.name, .failures = failures, .err = err };
+    };
 
     // Split req.path and parse req.query exactly as the live server does, via
     // the shared helper every recorded-request consumer uses. Without it,
@@ -416,8 +423,9 @@ fn runOneTest(
                 .allocator = allocator,
             };
             defer not_implemented.deinit();
-            checkAssertions(allocator, &not_implemented, &test_case.assertions, &failures);
-            if (options.strict_replay) checkReplayState(allocator, &replay_state, &failures);
+            recordChecks(allocator, &not_implemented, &test_case.assertions, &replay_state, options, &failures) catch |check_err| {
+                return .{ .pass = false, .name = test_case.name, .failures = failures, .err = check_err };
+            };
             return .{
                 .pass = failures.items.len == 0,
                 .name = test_case.name,
@@ -429,9 +437,9 @@ fn runOneTest(
     };
     defer response.deinit();
 
-    checkAssertions(allocator, &response, &test_case.assertions, &failures);
-
-    if (options.strict_replay) checkReplayState(allocator, &replay_state, &failures);
+    recordChecks(allocator, &response, &test_case.assertions, &replay_state, options, &failures) catch |err| {
+        return .{ .pass = false, .name = test_case.name, .failures = failures, .err = err };
+    };
 
     // NOTE (RS1/RS2): serve --test deliberately does NOT fail on
     // replay_state.divergences. The counter conflates real drift (a reordered
@@ -452,27 +460,44 @@ fn runOneTest(
     };
 }
 
+/// Record the response assertions and, under strict replay, the replay checks.
+/// An error means a failure could not be recorded, so the caller must not read
+/// the list as a pass.
+fn recordChecks(
+    allocator: std.mem.Allocator,
+    response: *const HttpResponse,
+    assertions: *const TestAssertions,
+    replay_state: *const trace.ReplayState,
+    options: RunOneOptions,
+    failures: *std.ArrayList([]const u8),
+) error{OutOfMemory}!void {
+    try checkAssertions(allocator, response, assertions, failures);
+    if (options.strict_replay) try checkReplayState(allocator, replay_state, failures);
+}
+
 fn checkReplayState(
     allocator: std.mem.Allocator,
     replay_state: *const trace.ReplayState,
     failures: *std.ArrayList([]const u8),
-) void {
+) error{OutOfMemory}!void {
     if (replay_state.divergences != 0) {
-        const message = std.fmt.allocPrint(
+        const message = try std.fmt.allocPrint(
             allocator,
             "runtime scenario replay diverged {d} time(s)",
             .{replay_state.divergences},
-        ) catch return;
-        failures.append(allocator, message) catch allocator.free(message);
+        );
+        errdefer allocator.free(message);
+        try failures.append(allocator, message);
     }
     const unconsumed = replay_state.unconsumedCount();
     if (unconsumed != 0) {
-        const message = std.fmt.allocPrint(
+        const message = try std.fmt.allocPrint(
             allocator,
             "runtime scenario left {d} I/O expectation(s) unconsumed",
             .{unconsumed},
-        ) catch return;
-        failures.append(allocator, message) catch allocator.free(message);
+        );
+        errdefer allocator.free(message);
+        try failures.append(allocator, message);
     }
 }
 
@@ -650,9 +675,10 @@ fn appendScenarioFailure(
     failures: *std.ArrayList([]const u8),
     comptime format: []const u8,
     args: anytype,
-) void {
-    const message = std.fmt.allocPrint(allocator, format, args) catch return;
-    failures.append(allocator, message) catch allocator.free(message);
+) error{OutOfMemory}!void {
+    const message = try std.fmt.allocPrint(allocator, format, args);
+    errdefer allocator.free(message);
+    try failures.append(allocator, message);
 }
 
 fn compareExpectedEvent(
@@ -662,7 +688,7 @@ fn compareExpectedEvent(
     index: usize,
     expected: ExpectedEvent,
     actual: trace.DurableEvent,
-) void {
+) error{OutOfMemory}!void {
     const actual_kind: ExpectedEventKind = switch (actual) {
         .step_start => .step_start,
         .step_result => .step_result,
@@ -671,7 +697,7 @@ fn compareExpectedEvent(
         else => unreachable,
     };
     if (actual_kind != expected.kind) {
-        appendScenarioFailure(
+        try appendScenarioFailure(
             allocator,
             failures,
             "run '{s}' event {d}: expected {s}, found {s}",
@@ -688,7 +714,7 @@ fn compareExpectedEvent(
         else => unreachable,
     };
     if (!std.mem.eql(u8, actual_name, expected.name)) {
-        appendScenarioFailure(
+        try appendScenarioFailure(
             allocator,
             failures,
             "run '{s}' event {d}: expected name '{s}', found '{s}'",
@@ -701,7 +727,7 @@ fn compareExpectedEvent(
         defer if (needle.ptr != fixture_needle.ptr) allocator.free(needle);
         switch (actual) {
             .step_result => |event| if (std.mem.indexOf(u8, event.result_json, needle) == null) {
-                appendScenarioFailure(
+                try appendScenarioFailure(
                     allocator,
                     failures,
                     "run '{s}' event {d}: result does not contain '{s}'",
@@ -716,7 +742,7 @@ fn compareExpectedEvent(
         defer if (needle.ptr != fixture_needle.ptr) allocator.free(needle);
         switch (actual) {
             .resume_signal => |event| if (std.mem.indexOf(u8, event.payload_json, needle) == null) {
-                appendScenarioFailure(
+                try appendScenarioFailure(
                     allocator,
                     failures,
                     "run '{s}' event {d}: payload does not contain '{s}'",
@@ -743,7 +769,7 @@ fn assertDurableRun(
     defer allocator.free(path);
     const source = readFile(allocator, path) catch |err| switch (err) {
         error.FileNotFound => {
-            appendScenarioFailure(
+            try appendScenarioFailure(
                 allocator,
                 failures,
                 "run '{s}': durable oplog is missing",
@@ -756,7 +782,7 @@ fn assertDurableRun(
     defer allocator.free(source);
 
     const counts = scanStrictDurableOplog(allocator, source, expected_run.run_key) catch |err| {
-        appendScenarioFailure(
+        try appendScenarioFailure(
             allocator,
             failures,
             "run '{s}': invalid durable oplog ({s})",
@@ -765,7 +791,7 @@ fn assertDurableRun(
         return;
     };
     if (counts.run != 1 or counts.request != 1) {
-        appendScenarioFailure(
+        try appendScenarioFailure(
             allocator,
             failures,
             "run '{s}': expected one run and request envelope, found {d} and {d}",
@@ -774,7 +800,7 @@ fn assertDurableRun(
     }
     const expected_terminal_count: usize = if (expected_run.complete) 1 else 0;
     if (counts.response != expected_terminal_count or counts.complete != expected_terminal_count) {
-        appendScenarioFailure(
+        try appendScenarioFailure(
             allocator,
             failures,
             "run '{s}': expected response/complete counts {d}/{d}, found {d}/{d}",
@@ -789,7 +815,7 @@ fn assertDurableRun(
     }
 
     var durable_log = trace.parseDurableOplog(allocator, source) catch |err| {
-        appendScenarioFailure(
+        try appendScenarioFailure(
             allocator,
             failures,
             "run '{s}': durable oplog could not be decoded ({s})",
@@ -802,7 +828,7 @@ fn assertDurableRun(
         !std.mem.eql(u8, durable_log.run_key.?, expected_run.run_key) or
         durable_log.request == null or durable_log.complete != expected_run.complete)
     {
-        appendScenarioFailure(
+        try appendScenarioFailure(
             allocator,
             failures,
             "run '{s}': typed durable envelope disagrees with the expectation",
@@ -816,7 +842,7 @@ fn assertDurableRun(
         // every declared replay row to be consumed once without divergence.
         .io => {},
         .wait_timer, .resume_timer => {
-            appendScenarioFailure(
+            try appendScenarioFailure(
                 allocator,
                 failures,
                 "run '{s}': found an undeclared timer event",
@@ -825,7 +851,7 @@ fn assertDurableRun(
         },
         .step_start, .step_result, .wait_signal, .resume_signal => {
             const expected = expectedEventAt(assertions, expected_run.run_key, actual_index) orelse {
-                appendScenarioFailure(
+                try appendScenarioFailure(
                     allocator,
                     failures,
                     "run '{s}': found extra durable event {d}",
@@ -834,7 +860,7 @@ fn assertDurableRun(
                 actual_index += 1;
                 continue;
             };
-            compareExpectedEvent(
+            try compareExpectedEvent(
                 allocator,
                 failures,
                 expected_run.run_key,
@@ -847,7 +873,7 @@ fn assertDurableRun(
     };
     const wanted_count = expectedEventCount(assertions, expected_run.run_key);
     if (actual_index != wanted_count) {
-        appendScenarioFailure(
+        try appendScenarioFailure(
             allocator,
             failures,
             "run '{s}': expected {d} durable events, found {d}",
@@ -867,7 +893,7 @@ fn assertQueueResult(
 
     if (try workflow_queue.readDead(allocator, durable_dir, id)) |dead| {
         defer allocator.free(dead);
-        appendScenarioFailure(
+        try appendScenarioFailure(
             allocator,
             failures,
             "queue '{s}/{s}': item is dead-lettered",
@@ -876,7 +902,7 @@ fn assertQueueResult(
         return;
     }
     const result = (try workflow_queue.readResult(allocator, durable_dir, id)) orelse {
-        appendScenarioFailure(
+        try appendScenarioFailure(
             allocator,
             failures,
             "queue '{s}/{s}': completed result is missing",
@@ -887,7 +913,7 @@ fn assertQueueResult(
     defer allocator.free(result);
 
     var parsed = std.json.parseFromSlice(std.json.Value, allocator, result, .{}) catch {
-        appendScenarioFailure(
+        try appendScenarioFailure(
             allocator,
             failures,
             "queue '{s}/{s}': completed result is invalid JSON",
@@ -899,7 +925,7 @@ fn assertQueueResult(
     const object = switch (parsed.value) {
         .object => |object| object,
         else => {
-            appendScenarioFailure(
+            try appendScenarioFailure(
                 allocator,
                 failures,
                 "queue '{s}/{s}': completed result is not an object",
@@ -909,7 +935,7 @@ fn assertQueueResult(
         },
     };
     const status_value = object.get("status") orelse {
-        appendScenarioFailure(
+        try appendScenarioFailure(
             allocator,
             failures,
             "queue '{s}/{s}': completed result has no status",
@@ -921,7 +947,7 @@ fn assertQueueResult(
         .integer => |value| std.math.cast(u16, value),
         else => null,
     } orelse {
-        appendScenarioFailure(
+        try appendScenarioFailure(
             allocator,
             failures,
             "queue '{s}/{s}': completed result has an invalid status",
@@ -930,7 +956,7 @@ fn assertQueueResult(
         return;
     };
     if (status != expected.status) {
-        appendScenarioFailure(
+        try appendScenarioFailure(
             allocator,
             failures,
             "queue '{s}/{s}': expected status {d}, found {d}",
@@ -941,7 +967,7 @@ fn assertQueueResult(
         const needle = trace.unescapeJson(allocator, fixture_needle) catch fixture_needle;
         defer if (needle.ptr != fixture_needle.ptr) allocator.free(needle);
         const body_value = object.get("body") orelse {
-            appendScenarioFailure(
+            try appendScenarioFailure(
                 allocator,
                 failures,
                 "queue '{s}/{s}': completed result has no body",
@@ -952,7 +978,7 @@ fn assertQueueResult(
         const body = switch (body_value) {
             .string => |value| value,
             else => {
-                appendScenarioFailure(
+                try appendScenarioFailure(
                     allocator,
                     failures,
                     "queue '{s}/{s}': completed result body is not a string",
@@ -962,7 +988,7 @@ fn assertQueueResult(
             },
         };
         if (std.mem.indexOf(u8, body, needle) == null) {
-            appendScenarioFailure(
+            try appendScenarioFailure(
                 allocator,
                 failures,
                 "queue '{s}/{s}': body does not contain '{s}'",
@@ -985,7 +1011,7 @@ fn assertSignalArtifacts(
         allocator.free(artifacts);
     }
     if (artifacts.len != expected_count) {
-        appendScenarioFailure(
+        try appendScenarioFailure(
             allocator,
             failures,
             "expected {d} signal artifacts, found {d}",
@@ -1050,13 +1076,14 @@ fn checkAssertions(
     response: *const HttpResponse,
     assertions: *const TestAssertions,
     failures: *std.ArrayList([]const u8),
-) void {
+) error{OutOfMemory}!void {
     if (assertions.status) |expected_status| {
         if (response.status != expected_status) {
-            const msg = std.fmt.allocPrint(allocator, "expected status: {d}, actual status: {d}", .{
+            const msg = try std.fmt.allocPrint(allocator, "expected status: {d}, actual status: {d}", .{
                 expected_status, response.status,
-            }) catch return;
-            failures.append(allocator, msg) catch {};
+            });
+            errdefer allocator.free(msg);
+            try failures.append(allocator, msg);
         }
     }
 
@@ -1065,10 +1092,11 @@ fn checkAssertions(
         defer if (unescaped.ptr != expected_body.ptr) allocator.free(unescaped);
 
         if (!std.mem.eql(u8, response.body, unescaped)) {
-            const msg = std.fmt.allocPrint(allocator, "body mismatch:\n        expected: {s}\n        actual:   {s}", .{
+            const msg = try std.fmt.allocPrint(allocator, "body mismatch:\n        expected: {s}\n        actual:   {s}", .{
                 truncate(unescaped, 200), truncate(response.body, 200),
-            }) catch return;
-            failures.append(allocator, msg) catch {};
+            });
+            errdefer allocator.free(msg);
+            try failures.append(allocator, msg);
         }
     }
 
@@ -1077,10 +1105,11 @@ fn checkAssertions(
         defer if (unescaped.ptr != needle.ptr) allocator.free(unescaped);
 
         if (std.mem.indexOf(u8, response.body, unescaped) == null) {
-            const msg = std.fmt.allocPrint(allocator, "body does not contain: {s}\n        actual body: {s}", .{
+            const msg = try std.fmt.allocPrint(allocator, "body does not contain: {s}\n        actual body: {s}", .{
                 truncate(unescaped, 100), truncate(response.body, 200),
-            }) catch return;
-            failures.append(allocator, msg) catch {};
+            });
+            errdefer allocator.free(msg);
+            try failures.append(allocator, msg);
         }
     }
 
@@ -1088,7 +1117,7 @@ fn checkAssertions(
     if (assertions.headers_json) |expected_headers_json| {
         var expected_headers: std.ArrayListUnmanaged(HttpHeader) = .empty;
         defer expected_headers.deinit(allocator);
-        parseHeadersFromJson(allocator, expected_headers_json, &expected_headers) catch return;
+        try parseHeadersFromJson(allocator, expected_headers_json, &expected_headers);
 
         for (expected_headers.items) |expected| {
             var found = false;
@@ -1101,10 +1130,11 @@ fn checkAssertions(
                 }
             }
             if (!found) {
-                const msg = std.fmt.allocPrint(allocator, "missing header: {s}: {s}", .{
+                const msg = try std.fmt.allocPrint(allocator, "missing header: {s}: {s}", .{
                     expected.key, expected.value,
-                }) catch return;
-                failures.append(allocator, msg) catch {};
+                });
+                errdefer allocator.free(msg);
+                try failures.append(allocator, msg);
             }
         }
     }
@@ -1751,7 +1781,7 @@ test "checkAssertions: status match passes" {
     var response = HttpResponse.init(std.testing.allocator);
     response.status = 200;
     var failures: std.ArrayList([]const u8) = .empty;
-    checkAssertions(std.testing.allocator, &response, &assertions, &failures);
+    try checkAssertions(std.testing.allocator, &response, &assertions, &failures);
     try std.testing.expectEqual(@as(usize, 0), failures.items.len);
 }
 
@@ -1760,7 +1790,7 @@ test "checkAssertions: status mismatch fails" {
     var response = HttpResponse.init(std.testing.allocator);
     response.status = 200;
     var failures: std.ArrayList([]const u8) = .empty;
-    checkAssertions(std.testing.allocator, &response, &assertions, &failures);
+    try checkAssertions(std.testing.allocator, &response, &assertions, &failures);
     defer {
         for (failures.items) |msg| std.testing.allocator.free(msg);
         failures.deinit(std.testing.allocator);
@@ -1774,7 +1804,7 @@ test "checkAssertions: bodyContains match passes" {
     var response = HttpResponse.init(std.testing.allocator);
     response.body = "{\"greeting\":\"hello world\"}";
     var failures: std.ArrayList([]const u8) = .empty;
-    checkAssertions(std.testing.allocator, &response, &assertions, &failures);
+    try checkAssertions(std.testing.allocator, &response, &assertions, &failures);
     try std.testing.expectEqual(@as(usize, 0), failures.items.len);
 }
 
@@ -1783,7 +1813,7 @@ test "checkAssertions: bodyContains mismatch fails" {
     var response = HttpResponse.init(std.testing.allocator);
     response.body = "{\"greeting\":\"hello\"}";
     var failures: std.ArrayList([]const u8) = .empty;
-    checkAssertions(std.testing.allocator, &response, &assertions, &failures);
+    try checkAssertions(std.testing.allocator, &response, &assertions, &failures);
     defer {
         for (failures.items) |msg| std.testing.allocator.free(msg);
         failures.deinit(std.testing.allocator);
@@ -1964,4 +1994,20 @@ test "runOneTest: req.query is populated from the url query string" {
 
     try std.testing.expect(result.err == null);
     try std.testing.expect(result.pass);
+}
+
+test "checkAssertions: a failure that cannot be recorded is an error, not a pass" {
+    // The verdict is `failures.items.len == 0`, so a mismatch whose message
+    // could not be allocated used to read as a passing scenario.
+    const assertions = TestAssertions{ .status = 404 };
+    var response = HttpResponse.init(std.testing.allocator);
+    response.status = 200;
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    var failures: std.ArrayList([]const u8) = .empty;
+    defer failures.deinit(std.testing.allocator);
+    try std.testing.expectError(
+        error.OutOfMemory,
+        checkAssertions(failing.allocator(), &response, &assertions, &failures),
+    );
+    try std.testing.expectEqual(@as(usize, 0), failures.items.len);
 }
