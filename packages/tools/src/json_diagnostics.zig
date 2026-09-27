@@ -1220,8 +1220,11 @@ test "every diagnostic code names exactly one diagnostic" {
     // `unterminated_string`: the stripper runs before the parser and hits an
     // unterminated literal first, so it raises the parser band's existing
     // ZTS008 rather than a second code for one fault.
+    // `nesting_too_deep`: the stripper checks type syntax that is removed
+    // before the parser checks expression syntax. Both report ZTS044.
     const shared_codes = [_]struct { code: []const u8, kinds: [2][]const u8 }{
         .{ .code = "ZTS008", .kinds = .{ "unterminated_string", "unterminated_string" } },
+        .{ .code = "ZTS044", .kinds = .{ "nesting_too_deep", "nesting_too_deep" } },
     };
 
     const mappers = .{

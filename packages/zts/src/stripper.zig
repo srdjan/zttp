@@ -27,6 +27,8 @@ pub const TypeMap = type_map_mod.TypeMap;
 pub const TypeMapEntry = type_map_mod.TypeMapEntry;
 pub const TypeMapKind = type_map_mod.TypeMapKind;
 
+const max_nesting_depth: u16 = 512;
+
 pub const StripError = error{
     UnsupportedAngleBracketAssertion,
     UnsupportedAnyType,
@@ -34,6 +36,7 @@ pub const StripError = error{
     UnclosedGeneric,
     UnterminatedString,
     UnterminatedComment,
+    NestingTooDeep,
     OutOfMemory,
     ComptimeEvaluationFailed,
     /// 'as' type assertion is not supported
@@ -116,6 +119,9 @@ pub const StripDiagnosticKind = enum {
     readonly_array_type_alias,
     /// A source-level `void` type. Absence has one name.
     void_type,
+    /// Type syntax exceeded the parser's nesting limit while the stripper was
+    /// scanning syntax that the parser does not see.
+    nesting_too_deep,
 
     pub fn message(self: StripDiagnosticKind) []const u8 {
         return switch (self) {
@@ -135,6 +141,7 @@ pub const StripDiagnosticKind = enum {
             .array_type_alias => "`Array<T>` is not a type spelling in this profile; write `T[]`",
             .readonly_array_type_alias => "`ReadonlyArray<T>` is not a type spelling in this profile; write `readonly T[]`",
             .void_type => "`void` is not a type spelling in this profile; write `undefined`",
+            .nesting_too_deep => "type syntax nests too deeply; simplify or split it (nesting limit is 512)",
         };
     }
 };
@@ -730,9 +737,9 @@ const Stripper = struct {
 
             // Check for generic arrow: = <T>(...)
             if (self.pos < self.source.len and self.source[self.pos] == '<' and !self.tsx_mode) {
-                if (self.looksLikeGenericArrow()) {
+                if (try self.looksLikeGenericArrow()) {
                     const generic_start = self.pos;
-                    if (self.skipBalancedAngles()) {
+                    if (try self.skipBalancedAngles()) {
                         try self.rejectRemovedTypeFormInType(generic_start + 1, self.pos - 1);
                         // Record generic params (content inside angle brackets)
                         self.recordTypeAnnotation(.generic_params, generic_start + 1, self.pos - 1, 0, 0);
@@ -747,7 +754,7 @@ const Stripper = struct {
 
             // Check for arrow function params
             if (self.pos < self.source.len and self.source[self.pos] == '(') {
-                if (self.looksLikeArrowFunction()) {
+                if (try self.looksLikeArrowFunction()) {
                     try self.handleArrowFunction();
                 }
             }
@@ -763,7 +770,7 @@ const Stripper = struct {
         // rejects them (ENG-15). The strict detector requires a confirming
         // `=>` so a ternary branch like `cond ? (a) : (b)` is not mistaken for
         // an arrow.
-        if (c == '(' and self.looksLikeArrowFunctionStrict()) {
+        if (c == '(' and try self.looksLikeArrowFunctionStrict()) {
             try self.handleArrowFunction();
             self.in_expression = true;
             return;
@@ -864,7 +871,7 @@ const Stripper = struct {
         // Check for generic params <T, U>
         if (self.pos < self.source.len and self.source[self.pos] == '<') {
             const generic_start = self.pos;
-            if (self.skipBalancedAngles()) {
+            if (try self.skipBalancedAngles()) {
                 try self.rejectRemovedTypeFormInType(generic_start + 1, self.pos - 1);
                 // Record generic params in TypeMap (inside the angle brackets)
                 self.recordTypeAnnotation(.generic_params, generic_start + 1, self.pos - 1, fn_name_start, fn_name_end);
@@ -945,7 +952,7 @@ const Stripper = struct {
             const c = self.source[self.pos];
 
             if (c == '(') {
-                paren_depth += 1;
+                try self.increaseNestingDepth(&paren_depth, brace_depth, bracket_depth, 0);
                 self.output.append(self.allocator, c) catch return StripError.OutOfMemory;
                 self.pos += 1;
                 self.col += 1;
@@ -961,7 +968,7 @@ const Stripper = struct {
             }
 
             if (c == '{') {
-                brace_depth += 1;
+                try self.increaseNestingDepth(&brace_depth, paren_depth, bracket_depth, 0);
                 self.output.append(self.allocator, c) catch return StripError.OutOfMemory;
                 self.pos += 1;
                 self.col += 1;
@@ -975,7 +982,7 @@ const Stripper = struct {
                 continue;
             }
             if (c == '[') {
-                bracket_depth += 1;
+                try self.increaseNestingDepth(&bracket_depth, paren_depth, brace_depth, 0);
                 self.output.append(self.allocator, c) catch return StripError.OutOfMemory;
                 self.pos += 1;
                 self.col += 1;
@@ -1148,7 +1155,7 @@ const Stripper = struct {
         self.output.appendSlice(self.allocator, self.source[ws_start..self.pos]) catch return StripError.OutOfMemory;
     }
 
-    fn looksLikeArrowFunction(self: *Self) bool {
+    fn looksLikeArrowFunction(self: *Self) StripError!bool {
         // Scan ahead to check if this is (params) => or (params): Type =>
         // vs just a parenthesized expression like (foo as number)
         const saved_pos = self.pos;
@@ -1167,7 +1174,7 @@ const Stripper = struct {
         // Scan to find matching )
         while (self.pos < self.source.len and paren_depth > 0) {
             const c = self.source[self.pos];
-            if (c == '(') paren_depth += 1;
+            if (c == '(') try self.increaseNestingDepth(&paren_depth, 0, 0, 0);
             if (c == ')') paren_depth -= 1;
             if (c == '"' or c == '\'' or c == '`') {
                 self.skipString(c) catch return false;
@@ -1208,7 +1215,7 @@ const Stripper = struct {
     /// would misread a ternary branch `cond ? (a) : (b)` as an arrow. Errs
     /// toward false (no strip) on anything ambiguous, so it never corrupts a
     /// non-arrow.
-    fn looksLikeArrowFunctionStrict(self: *Self) bool {
+    fn looksLikeArrowFunctionStrict(self: *Self) StripError!bool {
         const saved_pos = self.pos;
         const saved_line = self.line;
         const saved_col = self.col;
@@ -1227,7 +1234,7 @@ const Stripper = struct {
                 self.skipString(c) catch return false;
                 continue;
             }
-            if (c == '(') paren_depth += 1;
+            if (c == '(') try self.increaseNestingDepth(&paren_depth, 0, 0, 0);
             if (c == ')') paren_depth -= 1;
             self.pos += 1;
         }
@@ -1249,7 +1256,7 @@ const Stripper = struct {
         // left the construct without reaching an arrow (e.g. the ternary case).
         if (self.source[self.pos] == ':') {
             self.pos += 1;
-            var depth: i32 = 0;
+            var depth: u16 = 0;
             while (self.pos < self.source.len) {
                 const c = self.source[self.pos];
                 if (c == '"' or c == '\'' or c == '`') {
@@ -1263,7 +1270,7 @@ const Stripper = struct {
                     continue;
                 }
                 if (c == '(' or c == '[' or c == '{' or c == '<') {
-                    depth += 1;
+                    try self.increaseNestingDepth(&depth, 0, 0, 0);
                 } else if (c == ')' or c == ']' or c == '}') {
                     if (depth == 0) return false;
                     depth -= 1;
@@ -1324,7 +1331,7 @@ const Stripper = struct {
         return false;
     }
 
-    fn looksLikeGenericArrow(self: *Self) bool {
+    fn looksLikeGenericArrow(self: *Self) StripError!bool {
         // Check if <...> is followed by ( for arrow function. This is a pure
         // probe: skipBalancedAngles advances self.line/col across newlines, so
         // restore all of pos/line/col (not just pos) to keep it side-effect-free.
@@ -1338,7 +1345,7 @@ const Stripper = struct {
         }
 
         // Skip <...>
-        if (!self.skipBalancedAngles()) return false;
+        if (!try self.skipBalancedAngles()) return false;
 
         // Skip whitespace
         while (self.pos < self.source.len and (self.source[self.pos] == ' ' or
@@ -1386,20 +1393,20 @@ const Stripper = struct {
             }
 
             if (c == '(') {
-                paren_depth += 1;
+                try self.increaseNestingDepth(&paren_depth, angle_depth, bracket_depth, brace_depth);
             } else if (c == ')') {
                 if (paren_depth == 0) return; // End of params
                 paren_depth -= 1;
             } else if (c == '<') {
-                angle_depth += 1;
+                try self.increaseNestingDepth(&angle_depth, paren_depth, bracket_depth, brace_depth);
             } else if (c == '>') {
                 if (angle_depth > 0) angle_depth -= 1;
             } else if (c == '[') {
-                bracket_depth += 1;
+                try self.increaseNestingDepth(&bracket_depth, paren_depth, angle_depth, brace_depth);
             } else if (c == ']') {
                 if (bracket_depth > 0) bracket_depth -= 1;
             } else if (c == '{') {
-                brace_depth += 1;
+                try self.increaseNestingDepth(&brace_depth, paren_depth, angle_depth, bracket_depth);
             } else if (c == '}') {
                 if (brace_depth > 0) brace_depth -= 1;
             } else if (c == ',' and paren_depth == 0 and angle_depth == 0 and bracket_depth == 0 and brace_depth == 0) {
@@ -1549,7 +1556,7 @@ const Stripper = struct {
         var generic_end: usize = 0;
         if (self.pos < self.source.len and self.source[self.pos] == '<') {
             generic_start = self.pos;
-            if (!self.skipBalancedAngles()) {
+            if (!try self.skipBalancedAngles()) {
                 self.pos = span_start;
                 self.line = span_start_line;
                 self.col = span_start_col;
@@ -1610,7 +1617,7 @@ const Stripper = struct {
 
         if (is_interface and self.pos < self.source.len and self.source[self.pos] == '{') {
             type_body_start = self.pos;
-            self.skipBalancedBraces();
+            try self.skipBalancedBraces();
             type_body_end = self.pos;
         }
 
@@ -1997,7 +2004,7 @@ const Stripper = struct {
             }
 
             if (c == '(') {
-                paren_depth += 1;
+                try self.increaseNestingDepth(&paren_depth, 0, 0, 0);
             } else if (c == ')') {
                 paren_depth -= 1;
             }
@@ -2104,7 +2111,7 @@ const Stripper = struct {
             // rule, a balanced `<...>` of type syntax whose closing `>` lands
             // directly on `(` is a type-argument list, not a comparison; only
             // then fall through to the strip below.
-            if (!self.looksLikeCallTypeArguments()) return false;
+            if (!try self.looksLikeCallTypeArguments()) return false;
             is_call_type_arguments = true;
         }
 
@@ -2120,7 +2127,7 @@ const Stripper = struct {
         const start = self.pos;
         const start_line = self.line;
         const start_col = self.col;
-        if (!self.skipBalancedAngles()) {
+        if (!try self.skipBalancedAngles()) {
             self.pos = start;
             self.line = start_line;
             self.col = start_col;
@@ -2195,7 +2202,7 @@ const Stripper = struct {
     /// contain (`&&`, `||`, arithmetic, a top-level `?`/`:`/`;`, an unbalanced
     /// closer) means comparison, so the probe rejects and the source passes
     /// through unchanged. Side-effect-free: pos/line/col are restored.
-    fn looksLikeCallTypeArguments(self: *Self) bool {
+    fn looksLikeCallTypeArguments(self: *Self) StripError!bool {
         const saved_pos = self.pos;
         const saved_line = self.line;
         const saved_col = self.col;
@@ -2238,19 +2245,19 @@ const Stripper = struct {
                 }
                 angle_depth -= 1;
             } else if (c == '<') {
-                angle_depth += 1;
+                try self.increaseNestingDepth(&angle_depth, paren_depth, bracket_depth, brace_depth);
             } else if (c == '(') {
-                paren_depth += 1;
+                try self.increaseNestingDepth(&paren_depth, angle_depth, bracket_depth, brace_depth);
             } else if (c == ')') {
                 if (paren_depth == 0) return false;
                 paren_depth -= 1;
             } else if (c == '[') {
-                bracket_depth += 1;
+                try self.increaseNestingDepth(&bracket_depth, angle_depth, paren_depth, brace_depth);
             } else if (c == ']') {
                 if (bracket_depth == 0) return false;
                 bracket_depth -= 1;
             } else if (c == '{') {
-                brace_depth += 1;
+                try self.increaseNestingDepth(&brace_depth, angle_depth, paren_depth, bracket_depth);
             } else if (c == '}') {
                 if (brace_depth == 0) return false;
                 brace_depth -= 1;
@@ -2304,6 +2311,18 @@ const Stripper = struct {
     /// is null. The matching `StripError` is still returned by the caller.
     fn recordDiagnostic(self: *Self, kind: StripDiagnosticKind) void {
         self.recordDiagnosticAt(kind, self.line, self.col);
+    }
+
+    fn increaseNestingDepth(self: *Self, depth: *u16, other_a: u16, other_b: u16, other_c: u16) StripError!void {
+        const total = @as(u32, depth.*) + @as(u32, other_a) + @as(u32, other_b) + @as(u32, other_c);
+        if (total >= max_nesting_depth) {
+            if (self.report_errors) {
+                std.log.err("{}:{}: {s}", .{ self.line, self.col, StripDiagnosticKind.nesting_too_deep.message() });
+            }
+            self.recordDiagnostic(.nesting_too_deep);
+            return StripError.NestingTooDeep;
+        }
+        depth.* += 1;
     }
 
     /// The scalar bases a nominal declaration may brand. Records, tuples,
@@ -2727,19 +2746,19 @@ const Stripper = struct {
 
             // Track nesting
             if (c == '(') {
-                paren_depth += 1;
+                try self.increaseNestingDepth(&paren_depth, bracket_depth, angle_depth, brace_depth);
             } else if (c == ')') {
                 if (paren_depth > 0) paren_depth -= 1;
             } else if (c == '[') {
-                bracket_depth += 1;
+                try self.increaseNestingDepth(&bracket_depth, paren_depth, angle_depth, brace_depth);
             } else if (c == ']') {
                 if (bracket_depth > 0) bracket_depth -= 1;
             } else if (c == '<') {
-                angle_depth += 1;
+                try self.increaseNestingDepth(&angle_depth, paren_depth, bracket_depth, brace_depth);
             } else if (c == '>') {
                 if (angle_depth > 0) angle_depth -= 1;
             } else if (c == '{') {
-                brace_depth += 1;
+                try self.increaseNestingDepth(&brace_depth, paren_depth, bracket_depth, angle_depth);
             } else if (c == '}') {
                 if (brace_depth > 0) brace_depth -= 1;
             }
@@ -2884,7 +2903,7 @@ const Stripper = struct {
         return self.pos > 0 and self.source[self.pos - 1] == '=';
     }
 
-    fn skipBalancedAngles(self: *Self) bool {
+    fn skipBalancedAngles(self: *Self) StripError!bool {
         if (self.pos >= self.source.len or self.source[self.pos] != '<') return false;
 
         self.pos += 1;
@@ -2914,12 +2933,12 @@ const Stripper = struct {
             }
 
             if (c == '<') {
-                depth += 1;
+                try self.increaseNestingDepth(&depth, 0, 0, 0);
             } else if (c == '>' and !self.isArrowGreaterThan()) {
                 depth -= 1;
             } else if (c == '(' or c == '[' or c == '{') {
                 // These must be balanced within the generic
-                self.skipMatchingBracket(c);
+                try self.skipMatchingBracket(c);
                 continue;
             }
 
@@ -2935,7 +2954,7 @@ const Stripper = struct {
         return depth == 0;
     }
 
-    fn skipBalancedBraces(self: *Self) void {
+    fn skipBalancedBraces(self: *Self) StripError!void {
         if (self.pos >= self.source.len or self.source[self.pos] != '{') return;
 
         self.pos += 1;
@@ -2951,7 +2970,7 @@ const Stripper = struct {
             }
 
             if (c == '{') {
-                depth += 1;
+                try self.increaseNestingDepth(&depth, 0, 0, 0);
             } else if (c == '}') {
                 depth -= 1;
             }
@@ -2966,7 +2985,7 @@ const Stripper = struct {
         }
     }
 
-    fn skipMatchingBracket(self: *Self, open: u8) void {
+    fn skipMatchingBracket(self: *Self, open: u8) StripError!void {
         const close: u8 = switch (open) {
             '(' => ')',
             '[' => ']',
@@ -2987,7 +3006,7 @@ const Stripper = struct {
             }
 
             if (c == open) {
-                depth += 1;
+                try self.increaseNestingDepth(&depth, 0, 0, 0);
             } else if (c == close) {
                 depth -= 1;
             }
@@ -3048,7 +3067,7 @@ const Stripper = struct {
                 if (c == '$' and self.pos + 1 < self.source.len and self.source[self.pos + 1] == '{') {
                     self.pos += 2;
                     self.col += 2;
-                    var depth: usize = 1;
+                    var depth: u16 = 1;
                     while (self.pos < self.source.len and depth > 0) {
                         const ic = self.source[self.pos];
                         // Strings and nested templates inside the interpolation
@@ -3065,7 +3084,7 @@ const Stripper = struct {
                             self.col += 2;
                             continue;
                         }
-                        if (ic == '{') depth += 1;
+                        if (ic == '{') try self.increaseNestingDepth(&depth, 0, 0, 0);
                         if (ic == '}') depth -= 1;
                         if (ic == '\n') {
                             self.line += 1;
@@ -3304,6 +3323,39 @@ test "structural declaration stripped" {
     defer @constCast(&result).deinit();
     const trimmed = std.mem.trim(u8, result.code, " \n\r\t");
     try std.testing.expectEqual(@as(usize, 0), trimmed.len);
+}
+
+test "deep type nesting is refused with a diagnostic" {
+    const cases = [_]struct {
+        open: []const u8,
+        close: []const u8,
+    }{
+        .{ .open = "[", .close = "]" },
+        .{ .open = "Array<", .close = ">" },
+        .{ .open = "{ a: ", .close = "}" },
+    };
+
+    for (cases) |case| {
+        var source: std.ArrayListUnmanaged(u8) = .empty;
+        defer source.deinit(std.testing.allocator);
+        try source.appendSlice(std.testing.allocator, "structural Deep = ");
+        for (0..max_nesting_depth + 1) |_| {
+            try source.appendSlice(std.testing.allocator, case.open);
+        }
+        try source.appendSlice(std.testing.allocator, "string");
+        for (0..max_nesting_depth + 1) |_| {
+            try source.appendSlice(std.testing.allocator, case.close);
+        }
+        try source.appendSlice(std.testing.allocator, ";");
+
+        var diag: ?StripDiagnostic = null;
+        try std.testing.expectError(
+            StripError.NestingTooDeep,
+            strip(std.testing.allocator, source.items, .{ .diagnostic_out = &diag }),
+        );
+        try std.testing.expectEqual(StripDiagnosticKind.nesting_too_deep, diag.?.kind);
+        try std.testing.expectEqual(@as(u32, 1), diag.?.line);
+    }
 }
 
 /// Assert stripped output ignoring how wide the blanking is. The stripper

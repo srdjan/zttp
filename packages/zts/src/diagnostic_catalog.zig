@@ -182,6 +182,7 @@ pub fn prepareSourceCode(kind: PrepareSourceKind) []const u8 {
 
 pub fn stripCode(kind: StripKind) []const u8 {
     return switch (kind) {
+        .nesting_too_deep => "ZTS044",
         .any_type => "ZTS041",
         .as_assertion => "ZTS042",
         .satisfies_assertion => "ZTS043",
@@ -393,7 +394,10 @@ fn prepareSourceMetadata(kind: PrepareSourceKind) Metadata {
 fn stripMetadata(kind: StripKind) Metadata {
     return .{
         .code = stripCode(kind),
-        .family = if (kind == .unterminated_string) .syntax else .source_profile,
+        .family = switch (kind) {
+            .unterminated_string, .nesting_too_deep => .syntax,
+            else => .source_profile,
+        },
         .risk = .correctness,
     };
 }
@@ -628,9 +632,10 @@ test "only explicitly shared semantic faults have multiple producers" {
     // as one semantic fault with two producers - the verifier kind set and the
     // contract spec kind set - but only the contract half ever constructed
     // anything: no code path built the three verifier variants, so the second
-    // producer was declared and never wired. Deleting them leaves ZTS008 as
-    // the only genuinely shared code.
-    const shared_codes = [_][]const u8{"ZTS008"};
+    // producer was declared and never wired. ZTS008 is shared by the parser
+    // and stripper. ZTS044 is shared because type syntax is stripped before
+    // the parser can check its depth.
+    const shared_codes = [_][]const u8{ "ZTS008", "ZTS044" };
     var duplicate_count: usize = 0;
     for (all_entries, 0..) |entry, index| {
         for (all_entries[index + 1 ..]) |other| {

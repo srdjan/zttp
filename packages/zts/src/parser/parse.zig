@@ -171,6 +171,12 @@ pub const Parser = struct {
     // diagnostic instead of a stack-overflow SIGSEGV that crashes the host.
     recursion_depth: u32 = 0,
 
+    // The largest infix/postfix path built by a nested expression. Propagate
+    // it to the enclosing Pratt loop when a grouped or aggregate expression
+    // becomes the left operand of another chain.
+    expression_chain_depth: u32 = 0,
+    expression_frames: u32 = 0,
+
     /// Maximum recursive-descent nesting. Far above any hand-written handler
     /// (real code rarely nests past ~30) yet well under the worker-thread stack
     /// budget. Roughly V8's parser nesting tolerance.
@@ -1570,6 +1576,18 @@ pub const Parser = struct {
             return error.ParseError;
         }
 
+        const parent_chain_depth = self.expression_chain_depth;
+        const has_parent_expression = self.expression_frames > 0;
+        self.expression_frames += 1;
+        self.expression_chain_depth = 0;
+        defer {
+            self.expression_frames -= 1;
+            self.expression_chain_depth = if (has_parent_expression)
+                @max(parent_chain_depth, self.expression_chain_depth)
+            else
+                0;
+        }
+
         // Check for arrow function
         if (self.isArrowFunction()) {
             return self.parseArrowFunction();
@@ -1577,11 +1595,25 @@ pub const Parser = struct {
 
         var left = try self.parsePrefixExpr();
 
+        // Pratt parsing builds left-deep trees without increasing
+        // recursion_depth. Bound those trees before later AST walkers recurse
+        // through one frame per binary, call, or member node.
+        var chain_depth = self.expression_chain_depth;
         while (true) {
             const prec = self.getInfixPrecedence(self.current.type);
             if (@intFromEnum(prec) <= @intFromEnum(min_prec)) break;
 
+            if (@max(chain_depth, self.expression_chain_depth) >= self.recursionLimit()) {
+                self.errors.addErrorAt(.nesting_too_deep, self.current, "expression chain nests too deeply; simplify or split it (nesting limit is 512)");
+                return error.ParseError;
+            }
             left = try self.parseInfixExpr(left, prec);
+            chain_depth = @max(chain_depth, self.expression_chain_depth) + 1;
+            if (chain_depth > self.recursionLimit()) {
+                self.errors.addErrorAt(.nesting_too_deep, self.previous, "expression chain nests too deeply; simplify or split it (nesting limit is 512)");
+                return error.ParseError;
+            }
+            self.expression_chain_depth = chain_depth;
         }
 
         return left;
@@ -3436,6 +3468,68 @@ test "resource limit: deeply nested parentheses yield a diagnostic, not a crash"
     };
     // Pathological nesting must not parse successfully.
     try std.testing.expect(false);
+}
+
+test "resource limit: left-deep expression chains yield nesting diagnostic" {
+    const allocator = std.testing.allocator;
+    const cases = [_]struct { prefix: []const u8, step: []const u8 }{
+        .{ .prefix = "const x = 1", .step = " + 1" },
+        .{ .prefix = "const x = f", .step = "()" },
+        .{ .prefix = "const x = o", .step = ".b" },
+        .{ .prefix = "const x = o", .step = "[0]" },
+    };
+
+    for (cases) |case| {
+        var source: std.ArrayList(u8) = .empty;
+        defer source.deinit(allocator);
+        try source.appendSlice(allocator, case.prefix);
+        for (0..Parser.max_recursion_depth + 1) |_| {
+            try source.appendSlice(allocator, case.step);
+        }
+        try source.append(allocator, ';');
+
+        var parser = try Parser.init(allocator, source.items);
+        defer parser.deinit();
+        try std.testing.expectError(error.ParseError, parser.parse());
+        try std.testing.expect(parser.hasErrors());
+        try std.testing.expectEqual(error_mod.ErrorKind.nesting_too_deep, parser.getErrors()[0].kind);
+    }
+}
+
+test "resource limit: left-deep chain at limit parses" {
+    const allocator = std.testing.allocator;
+    var source: std.ArrayList(u8) = .empty;
+    defer source.deinit(allocator);
+    try source.appendSlice(allocator, "const x = 1");
+    for (0..Parser.max_recursion_depth) |_| {
+        try source.appendSlice(allocator, " + 1");
+    }
+    try source.appendSlice(allocator, "; const y = 1");
+    for (0..Parser.max_recursion_depth) |_| {
+        try source.appendSlice(allocator, " + 1");
+    }
+    try source.append(allocator, ';');
+
+    var parser = try Parser.init(allocator, source.items);
+    defer parser.deinit();
+    _ = try parser.parse();
+    try std.testing.expect(!parser.hasErrors());
+}
+
+test "resource limit: grouped chains share one depth budget" {
+    const allocator = std.testing.allocator;
+    var source: std.ArrayList(u8) = .empty;
+    defer source.deinit(allocator);
+    try source.appendSlice(allocator, "const x = (1");
+    for (0..300) |_| try source.appendSlice(allocator, " + 1");
+    try source.append(allocator, ')');
+    for (0..300) |_| try source.appendSlice(allocator, " + 1");
+    try source.append(allocator, ';');
+
+    var parser = try Parser.init(allocator, source.items);
+    defer parser.deinit();
+    try std.testing.expectError(error.ParseError, parser.parse());
+    try std.testing.expectEqual(error_mod.ErrorKind.nesting_too_deep, parser.getErrors()[0].kind);
 }
 
 test "resource limit: too many call arguments yields a diagnostic, not a crash" {
