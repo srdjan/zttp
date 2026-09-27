@@ -70,7 +70,9 @@ pub fn init(b: *std.Build) Context {
         "test-filter",
         "Run only tests whose name contains this substring",
     );
-    const test_filters: []const []const u8 = if (test_filter) |f| &.{f} else &.{};
+    // `&.{f}` would point at an array in this function's frame, which is gone
+    // once `init` returns the Context; copy it into the build allocator.
+    const test_filters: []const []const u8 = if (test_filter) |f| b.dupeStrings(&.{f}) else &.{};
     const bench_optimize: std.builtin.OptimizeMode = .ReleaseFast;
     const perf_histogram_enabled = b.option(bool, "perf_histogram", "Enable interpreter opcode histogram collection") orelse false;
     const studio_enabled = b.option(bool, "studio", "Compile the browser proof workbench (zttp studio) into the dev CLI") orelse false;
