@@ -115,6 +115,9 @@ pub const HandlerResult = struct {
     surface: SurfaceDelta = .{},
     counterexamples: []const Counterexample = &.{},
     signed: bool = false,
+    /// Why a requested receipt was not written. The verdict does not depend
+    /// on it; the gate reports it on stderr.
+    sign_failure: ?anyerror = null,
 };
 
 pub const Skipped = struct {
@@ -684,6 +687,9 @@ pub fn run(
             continue;
         };
         if (hr.signed) signed_rows += 1;
+        if (hr.sign_failure) |err| {
+            try stderr.print("zttp proofs gate: no signed receipt for `{s}`: {s}\n", .{ path, @errorName(err) });
+        }
         try results.append(arena, hr);
     }
 
@@ -814,11 +820,16 @@ fn analyzeHandler(
     defer diff.deinit(gpa);
 
     var signed = false;
+    var sign_failure: ?anyerror = null;
     if (sign) {
-        // Best-effort: append a signed kind=equivalence row from the contracts
-        // already in hand. A failure never changes the verdict.
-        equivalence_probe_lib.recordEquivalenceReceiptFromContracts(gpa, path, before_contract.?, after_contract.?, shared.nowUnixMs()) catch {};
-        signed = true;
+        // Append a signed kind=equivalence row from the contracts already in
+        // hand. A failure never changes the verdict, but the report must not
+        // claim a receipt that was not written.
+        if (equivalence_probe_lib.recordEquivalenceReceiptFromContracts(gpa, path, before_contract.?, after_contract.?, shared.nowUnixMs())) |_| {
+            signed = true;
+        } else |err| {
+            sign_failure = err;
+        }
     }
 
     return .{
@@ -828,6 +839,7 @@ fn analyzeHandler(
         .surface = try extractSurface(arena, &diff),
         .counterexamples = try extractCounterexamples(arena, &diff),
         .signed = signed,
+        .sign_failure = sign_failure,
     };
 }
 

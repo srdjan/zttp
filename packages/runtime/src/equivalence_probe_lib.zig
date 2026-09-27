@@ -75,8 +75,9 @@ pub fn recordEquivalenceReceiptWithKey(
 
 /// Sign and append a `kind=equivalence` row from already-compiled contracts,
 /// loading the persistent attest key. Callers that have just compiled the two
-/// versions (e.g. `proofs gate`) use this to avoid recompiling them. Same
-/// best-effort contract as the source-bytes entry points.
+/// versions (e.g. `proofs gate`) use this to avoid recompiling them. Unlike
+/// the PI seam, every failure is returned, so a caller that reports a receipt
+/// reports one that was written.
 pub fn recordEquivalenceReceiptFromContracts(
     allocator: std.mem.Allocator,
     handler_path: []const u8,
@@ -84,7 +85,7 @@ pub fn recordEquivalenceReceiptFromContracts(
     after_contract: *const zq.HandlerContract,
     applied_at_unix_ms: i64,
 ) anyerror!void {
-    const signer = identity.loadOrCreate(allocator) catch return;
+    const signer = try identity.loadOrCreate(allocator);
     return signAndAppend(allocator, handler_path, before_contract, after_contract, applied_at_unix_ms, signer.key_pair);
 }
 
@@ -96,14 +97,14 @@ fn signAndAppend(
     applied_at_unix_ms: i64,
     key_pair: Ed25519.KeyPair,
 ) anyerror!void {
-    var diff = contract_diff.diffContracts(allocator, before_contract, after_contract) catch return;
+    var diff = try contract_diff.diffContracts(allocator, before_contract, after_contract);
     defer diff.deinit(allocator);
 
     const classification = diff.behavioralVerdict();
     const scope = zq.ContractProof.claimScope(after_contract);
 
-    const before_hash = contractHashHex(allocator, before_contract) catch return;
-    const after_hash = contractHashHex(allocator, after_contract) catch return;
+    const before_hash = try contractHashHex(allocator, before_contract);
+    const after_hash = try contractHashHex(allocator, after_contract);
 
     var preserved: u32 = 0;
     var response_changed: u32 = 0;
@@ -129,10 +130,10 @@ fn signAndAppend(
         .laws_fired = diff.laws_used.items,
     };
 
-    var envelope = equivalence_receipt.sign(allocator, verdict, key_pair) catch return;
+    var envelope = try equivalence_receipt.sign(allocator, verdict, key_pair);
     defer envelope.deinit(allocator);
 
-    var facts = minimalFacts(allocator, &after_hash) catch return;
+    var facts = try minimalFacts(allocator, &after_hash);
     defer facts.deinit(allocator);
 
     const payload: proof_ledger.EquivalencePayload = .{
