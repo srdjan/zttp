@@ -1155,13 +1155,26 @@ pub fn refuseCredentialBreach(
     refs: ?[]const handler_contract.CredentialRef,
     filename: []const u8,
 ) !void {
-    const configured = refs orelse return;
-    const breach = handler_contract.firstCredentialBreach(contract, configured) orelse return;
+    const configured = refs orelse blk: {
+        for (contract.tools.items) |tool| {
+            if (tool.agent != null) break :blk &.{};
+        }
+        return;
+    };
+    const refusal = handler_contract.firstCredentialRefusal(contract, configured) orelse return;
+    const breach = refusal.breach;
     if (!builtin.is_test) {
-        debugPrint(
-            "Credential refused {s}: tool \"{s}\" names credential \"{s}\" at {s}: {s}\n",
-            .{ filename, breach.tool, breach.credential, breach.endpoint, breach.reason.sentence() },
-        );
+        if (refusal.agent_reason) |reason| {
+            debugPrint(
+                "Credential refused {s}: ZTS513 {s}: tool \"{s}\" names credential \"{s}\" at {s}: {s}\n",
+                .{ filename, @tagName(reason), breach.tool, breach.credential, breach.endpoint, reason.sentence() },
+            );
+        } else {
+            debugPrint(
+                "Credential refused {s}: tool \"{s}\" names credential \"{s}\" at {s}: {s}\n",
+                .{ filename, breach.tool, breach.credential, breach.endpoint, breach.reason.sentence() },
+            );
+        }
     }
     return error.CredentialBreached;
 }

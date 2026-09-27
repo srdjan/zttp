@@ -14,27 +14,41 @@
 //!
 //! ```text
 //! magic            8 bytes  "ZTCAT1\0\0"
-//! schema           u16      2
+//! schema           u16      4
 //! entry_count      u16      1..64
 //! entry, entry_count times, strictly increasing by name bytes:
+//!   kind             u8      0 tool, 1 agent
 //!   name             string  1..64
 //!   method           string  1..16, uppercase ASCII A-Z
 //!   path             string  1..512, starts with "/"
 //!   description      string  1..4096
-//!   input_name       string  1..64
-//!   input_schema     string  1..65536
-//!   output_name      string  1..64
-//!   output_schema    string  1..65536
-//!   max_input_bytes  u32     1..1048576
-//!   scope_tenant     string  0, or 1..64: the input field bound to the tenant
-//!   scope_subject    string  0, or 1..64: the input field bound to the subject
-//!   export_count     u16     0..256
-//!   export, export_count times, strictly increasing by (module, name):
-//!     module           string  1..64
-//!     name             string  1..64
-//!   credential_count u16     0..64
-//!   credential, credential_count times, strictly increasing by bytes:
-//!     name             string  1..64: a credential the tool may use
+//!   tool, when kind is 0, keeps the schema 3 layout:
+//!     input_name       string  1..64
+//!     input_schema     string  1..65536
+//!     output_name      string  1..64
+//!     output_schema    string  1..65536
+//!     max_input_bytes  u32     1..1048576
+//!     scope_tenant     string  0, or 1..64
+//!     scope_subject    string  0, or 1..64
+//!     export_count     u16     0..256
+//!     exports          export_count pairs of module string, name string
+//!     credential_count u16     0..64
+//!     credentials      credential_count name strings
+//!   agent, when kind is 1:
+//!     max_input_bytes  u32     1..1048576
+//!     export_count     u16     0..256
+//!     exports          export_count pairs of module string, name string
+//!                      each 1..64 bytes, strictly increasing by (module, name)
+//!     tool_count       u16     1..64
+//!     tool_name        string  1..64, tool_count times, strictly increasing
+//!     endpoint         string  1..512, normalized scheme://host:port
+//!     credential       string  1..64
+//!     rounds           u32     1..64
+//!     tool_calls       u32     1..256
+//!     calls_per_round  u32     1..tool_calls
+//!     argument_bytes   u32     1..1048576
+//!     result_bytes     u32     1..1048576
+//!     turn_deadline_ms u32     1..600000
 //! trailing bytes: refused
 //! ```
 //!
@@ -44,20 +58,18 @@
 //! string property of the input schema is a build rule, and the runtime finds
 //! the field in the compiled schema it validates with.
 //!
-//! Schema 2 (M4 T5) added the two scope fields. Schema 3 (M4 T6) added the
-//! credential names: the tool's credential grant, which the runtime checks
-//! before it injects a credential. The kernel checks their lengths, encoding,
-//! and order; that each names a reference the project defines is a build
-//! rule. Schemas 1 and 2 are refused: no artifact carrying them exists
-//! outside tests.
+//! Schema 2 (M4 T5) added scope fields. Schema 3 (M4 T6) added credential
+//! names. Schema 4 (M5 A1) adds the entry kind and agent entry layout. Older
+//! schemas are refused.
 
 const std = @import("std");
+const residual = @import("residual.zig");
 const wire = @import("wire.zig");
 
 const Reader = wire.Reader;
 
 pub const magic = "ZTCAT1\x00\x00";
-pub const schema_version: u16 = 3;
+pub const schema_version: u16 = 4;
 pub const header_size: usize = magic.len + 2 + 2;
 
 pub const digest_domain = "zttp-tool-catalog-v1";
@@ -77,6 +89,13 @@ pub const max_exports: u16 = 256;
 pub const max_export_field_bytes: u32 = 64;
 pub const max_credentials: u16 = 64;
 pub const max_credential_name_bytes: u32 = 64;
+pub const max_agent_tools: u16 = max_entries;
+pub const max_endpoint_bytes: u32 = @intCast(residual.max_endpoint_bytes);
+pub const max_agent_rounds: u32 = 64;
+pub const max_agent_tool_calls: u32 = 256;
+pub const max_agent_argument_bytes: u32 = max_max_input_bytes;
+pub const max_agent_result_bytes: u32 = max_max_input_bytes;
+pub const max_agent_turn_deadline_ms: u32 = 600000;
 
 /// Every refusal the decoder can report. Closed, and each member names one
 /// distinct defect so a diagnostic can say which rule the bytes broke.
@@ -84,6 +103,7 @@ pub const DecodeError = error{
     Truncated,
     BadMagic,
     UnsupportedSchema,
+    EntryKindInvalid,
     EntryCountOutOfRange,
     NameLength,
     MethodInvalid,
@@ -109,6 +129,21 @@ pub const DecodeError = error{
     /// Credential names must be strictly increasing by byte order, which also
     /// refuses a duplicate.
     CredentialsNotOrdered,
+    AgentToolCountOutOfRange,
+    AgentToolNameLength,
+    AgentToolsNotOrdered,
+    AgentToolUnknown,
+    AgentToolIsAgent,
+    AgentEndpointLength,
+    AgentEndpointNotNormalized,
+    AgentCredentialNameLength,
+    AgentRoundsOutOfRange,
+    AgentToolCallsOutOfRange,
+    AgentToolCallsPerRoundOutOfRange,
+    AgentToolCallsPerRoundExceedsToolCalls,
+    AgentArgumentBytesOutOfRange,
+    AgentResultBytesOutOfRange,
+    AgentTurnDeadlineMsOutOfRange,
     InvalidUtf8,
     TrailingData,
 };
@@ -125,12 +160,32 @@ pub const Export = struct {
     }
 };
 
+pub const EntryKind = enum(u8) { tool = 0, agent = 1 };
+
+pub const AgentLimits = struct {
+    rounds: u32,
+    tool_calls: u32,
+    tool_calls_per_round: u32,
+    argument_bytes: u32,
+    result_bytes: u32,
+    turn_deadline_ms: u32,
+};
+
 pub const ExportIterator = wire.Iterator(Export, DecodeError, readExport);
 /// Length-prefixed names, one after another.
 pub const NameIterator = wire.Iterator([]const u8, DecodeError, readCredential);
+pub const AgentToolIterator = wire.Iterator([]const u8, DecodeError, readAgentTool);
 pub const EntryIterator = wire.Iterator(Entry, DecodeError, readEntry);
 
+pub const Agent = struct {
+    tools: AgentToolIterator,
+    provider_endpoint: []const u8,
+    provider_credential: []const u8,
+    limits: AgentLimits,
+};
+
 pub const Entry = struct {
+    kind: EntryKind,
     name: []const u8,
     method: []const u8,
     path: []const u8,
@@ -147,6 +202,7 @@ pub const Entry = struct {
     exports: ExportIterator,
     /// The credential names the tool may use (schema 3).
     credentials: NameIterator,
+    agent: ?Agent,
 };
 
 /// A decoded catalog. Only `decode` builds one, so the bytes it holds have
@@ -173,6 +229,11 @@ fn readCredential(reader: *Reader) DecodeError![]const u8 {
     return reader.string(u32, 1, max_credential_name_bytes, error.CredentialNameLength);
 }
 
+fn readAgentTool(reader: *Reader) DecodeError![]const u8 {
+    @setRuntimeSafety(true);
+    return reader.string(u32, 1, max_name_bytes, error.AgentToolNameLength);
+}
+
 /// A scope field: length 0 means absent.
 fn readScope(reader: *Reader) DecodeError!?[]const u8 {
     @setRuntimeSafety(true);
@@ -180,51 +241,96 @@ fn readScope(reader: *Reader) DecodeError!?[]const u8 {
     return if (out.len == 0) null else out;
 }
 
-/// Read one entry's fields with length bounds only, and step over its exports.
+fn emptyExports(bytes: []const u8, pos: usize) ExportIterator {
+    @setRuntimeSafety(true);
+    return .{ .bytes = bytes[0..pos], .pos = pos, .remaining = 0 };
+}
+
+fn emptyNames(bytes: []const u8, pos: usize) NameIterator {
+    @setRuntimeSafety(true);
+    return .{ .bytes = bytes[0..pos], .pos = pos, .remaining = 0 };
+}
+
+fn readAgent(reader: *Reader) DecodeError!Agent {
+    @setRuntimeSafety(true);
+    const tool_count = try reader.int(u16);
+    if (tool_count == 0 or tool_count > max_agent_tools) return error.AgentToolCountOutOfRange;
+    var tools = AgentToolIterator{ .bytes = reader.bytes, .pos = reader.pos, .remaining = tool_count };
+    try tools.skipAll(reader);
+    tools.bytes = reader.bytes[0..reader.pos];
+    const provider_endpoint = try reader.string(u32, 1, max_endpoint_bytes, error.AgentEndpointLength);
+    const provider_credential = try reader.string(u32, 1, max_credential_name_bytes, error.AgentCredentialNameLength);
+    const limits = AgentLimits{
+        .rounds = try reader.int(u32),
+        .tool_calls = try reader.int(u32),
+        .tool_calls_per_round = try reader.int(u32),
+        .argument_bytes = try reader.int(u32),
+        .result_bytes = try reader.int(u32),
+        .turn_deadline_ms = try reader.int(u32),
+    };
+    return .{ .tools = tools, .provider_endpoint = provider_endpoint, .provider_credential = provider_credential, .limits = limits };
+}
+
+/// Read one entry's fields with length bounds and step over its variable lists.
 fn readEntry(reader: *Reader) DecodeError!Entry {
     @setRuntimeSafety(true);
+    const kind: EntryKind = switch (try reader.int(u8)) {
+        0 => .tool,
+        1 => .agent,
+        else => return error.EntryKindInvalid,
+    };
     const name = try reader.string(u32, 1, max_name_bytes, error.NameLength);
     const method = try reader.string(u32, 1, max_method_bytes, error.MethodInvalid);
     const path = try reader.string(u32, 1, max_path_bytes, error.PathInvalid);
     const description = try reader.string(u32, 1, max_description_bytes, error.DescriptionLength);
-    const input_name = try reader.string(u32, 1, max_schema_name_bytes, error.SchemaNameLength);
-    const input_schema = try reader.string(u32, 1, max_schema_bytes, error.SchemaLength);
-    const output_name = try reader.string(u32, 1, max_schema_name_bytes, error.SchemaNameLength);
-    const output_schema = try reader.string(u32, 1, max_schema_bytes, error.SchemaLength);
-    const max_input_bytes = try reader.int(u32);
-    if (max_input_bytes < min_max_input_bytes or max_input_bytes > max_max_input_bytes) {
-        return error.MaxInputBytesOutOfRange;
-    }
-    const scope_tenant = try readScope(reader);
-    const scope_subject = try readScope(reader);
-    const export_count = try reader.int(u16);
-    if (export_count > max_exports) return error.ExportCountOutOfRange;
-
-    var exports = ExportIterator{ .bytes = reader.bytes, .pos = reader.pos, .remaining = export_count };
-    try exports.skipAll(reader);
-    exports.bytes = reader.bytes[0..reader.pos];
-
-    const credential_count = try reader.int(u16);
-    if (credential_count > max_credentials) return error.CredentialCountOutOfRange;
-    var credentials = NameIterator{ .bytes = reader.bytes, .pos = reader.pos, .remaining = credential_count };
-    try credentials.skipAll(reader);
-    credentials.bytes = reader.bytes[0..reader.pos];
-
-    return .{
+    const empty = reader.bytes[reader.pos..reader.pos];
+    var entry = Entry{
+        .kind = kind,
         .name = name,
         .method = method,
         .path = path,
         .description = description,
-        .input_name = input_name,
-        .input_schema = input_schema,
-        .output_name = output_name,
-        .output_schema = output_schema,
-        .max_input_bytes = max_input_bytes,
-        .scope_tenant = scope_tenant,
-        .scope_subject = scope_subject,
-        .exports = exports,
-        .credentials = credentials,
+        .input_name = empty,
+        .input_schema = empty,
+        .output_name = empty,
+        .output_schema = empty,
+        .max_input_bytes = 0,
+        .scope_tenant = null,
+        .scope_subject = null,
+        .exports = emptyExports(reader.bytes, reader.pos),
+        .credentials = emptyNames(reader.bytes, reader.pos),
+        .agent = null,
     };
+    if (kind == .tool) {
+        entry.input_name = try reader.string(u32, 1, max_schema_name_bytes, error.SchemaNameLength);
+        entry.input_schema = try reader.string(u32, 1, max_schema_bytes, error.SchemaLength);
+        entry.output_name = try reader.string(u32, 1, max_schema_name_bytes, error.SchemaNameLength);
+        entry.output_schema = try reader.string(u32, 1, max_schema_bytes, error.SchemaLength);
+    }
+    entry.max_input_bytes = try reader.int(u32);
+    if (entry.max_input_bytes < min_max_input_bytes or entry.max_input_bytes > max_max_input_bytes) {
+        return error.MaxInputBytesOutOfRange;
+    }
+    if (kind == .tool) {
+        entry.scope_tenant = try readScope(reader);
+        entry.scope_subject = try readScope(reader);
+    }
+    const export_count = try reader.int(u16);
+    if (export_count > max_exports) return error.ExportCountOutOfRange;
+    entry.exports = .{ .bytes = reader.bytes, .pos = reader.pos, .remaining = export_count };
+    try entry.exports.skipAll(reader);
+    entry.exports.bytes = reader.bytes[0..reader.pos];
+    switch (kind) {
+        .tool => {
+            const credential_count = try reader.int(u16);
+            if (credential_count > max_credentials) return error.CredentialCountOutOfRange;
+            entry.credentials = .{ .bytes = reader.bytes, .pos = reader.pos, .remaining = credential_count };
+            try entry.credentials.skipAll(reader);
+            entry.credentials.bytes = reader.bytes[0..reader.pos];
+        },
+        .agent => entry.agent = try readAgent(reader),
+    }
+    return entry;
 }
 
 fn validUtf8(bytes: []const u8) DecodeError!void {
@@ -242,10 +348,12 @@ fn validateEntry(entry: Entry) DecodeError!void {
     try validUtf8(entry.name);
     try validUtf8(entry.path);
     try validUtf8(entry.description);
-    try validUtf8(entry.input_name);
-    try validUtf8(entry.input_schema);
-    try validUtf8(entry.output_name);
-    try validUtf8(entry.output_schema);
+    if (entry.kind == .tool) {
+        try validUtf8(entry.input_name);
+        try validUtf8(entry.input_schema);
+        try validUtf8(entry.output_name);
+        try validUtf8(entry.output_schema);
+    }
     if (entry.scope_tenant) |field| try validUtf8(field);
     if (entry.scope_subject) |field| try validUtf8(field);
 
@@ -262,6 +370,27 @@ fn validateEntry(entry: Entry) DecodeError!void {
     while (try credentials.next()) |name| {
         try validUtf8(name);
         if (credential_order.step(name) != .lt) return error.CredentialsNotOrdered;
+    }
+
+    if (entry.agent) |agent| {
+        var tools = agent.tools;
+        var tool_order = wire.Ascending([]const u8, wire.bytesOrder){};
+        while (try tools.next()) |name| {
+            try validUtf8(name);
+            if (tool_order.step(name) != .lt) return error.AgentToolsNotOrdered;
+        }
+        try validUtf8(agent.provider_endpoint);
+        try validUtf8(agent.provider_credential);
+        var normalized_buf: [max_endpoint_bytes]u8 = undefined;
+        const normalized = residual.normalize(.endpoint_v1, agent.provider_endpoint, &normalized_buf) catch return error.AgentEndpointNotNormalized;
+        if (!std.mem.eql(u8, normalized, agent.provider_endpoint)) return error.AgentEndpointNotNormalized;
+        if (agent.limits.rounds == 0 or agent.limits.rounds > max_agent_rounds) return error.AgentRoundsOutOfRange;
+        if (agent.limits.tool_calls == 0 or agent.limits.tool_calls > max_agent_tool_calls) return error.AgentToolCallsOutOfRange;
+        if (agent.limits.tool_calls_per_round == 0 or agent.limits.tool_calls_per_round > max_agent_tool_calls) return error.AgentToolCallsPerRoundOutOfRange;
+        if (agent.limits.tool_calls_per_round > agent.limits.tool_calls) return error.AgentToolCallsPerRoundExceedsToolCalls;
+        if (agent.limits.argument_bytes == 0 or agent.limits.argument_bytes > max_agent_argument_bytes) return error.AgentArgumentBytesOutOfRange;
+        if (agent.limits.result_bytes == 0 or agent.limits.result_bytes > max_agent_result_bytes) return error.AgentResultBytesOutOfRange;
+        if (agent.limits.turn_deadline_ms == 0 or agent.limits.turn_deadline_ms > max_agent_turn_deadline_ms) return error.AgentTurnDeadlineMsOutOfRange;
     }
 }
 
@@ -282,6 +411,25 @@ pub fn decode(bytes: []const u8) DecodeError!Catalog {
     if (!reader.atEnd()) return error.TrailingData;
 
     const catalog = Catalog{ .bytes = bytes, .entry_count = entry_count };
+
+    // An agent may refer only to tool entries in this same catalog.
+    var agent_entries = catalog.entries();
+    while (try agent_entries.next()) |entry| {
+        const agent = entry.agent orelse continue;
+        var names = agent.tools;
+        while (try names.next()) |name| {
+            var candidates = catalog.entries();
+            var found: ?EntryKind = null;
+            while (try candidates.next()) |candidate| {
+                if (std.mem.eql(u8, name, candidate.name)) {
+                    found = candidate.kind;
+                    break;
+                }
+            }
+            const kind = found orelse return error.AgentToolUnknown;
+            if (kind == .agent) return error.AgentToolIsAgent;
+        }
+    }
 
     // Routes: at most 64 entries, so a pairwise scan bounds the work without a
     // table. Every read below is over bytes the loop above already accepted.
@@ -318,7 +466,23 @@ pub const test_support = struct {
 
     pub const SampleExport = struct { module: []const u8, name: []const u8 };
 
+    pub const SampleAgent = struct {
+        exports: []const SampleExport = &.{},
+        tools: []const []const u8,
+        provider_endpoint: []const u8 = "https://api.example.com:443",
+        provider_credential: []const u8 = "provider",
+        limits: AgentLimits = .{
+            .rounds = 4,
+            .tool_calls = 8,
+            .tool_calls_per_round = 4,
+            .argument_bytes = 4096,
+            .result_bytes = 16384,
+            .turn_deadline_ms = 20000,
+        },
+    };
+
     pub const SampleEntry = struct {
+        kind: u8 = @intFromEnum(EntryKind.tool),
         name: []const u8,
         method: []const u8 = "POST",
         path: []const u8,
@@ -332,14 +496,36 @@ pub const test_support = struct {
         scope_subject: ?[]const u8 = null,
         exports: []const SampleExport = &.{},
         credentials: []const []const u8 = &.{},
+        agent: ?SampleAgent = null,
     };
 
     pub fn writeEntry(w: *Writer, entry: SampleEntry) void {
         @setRuntimeSafety(true);
+        w.int(u8, entry.kind);
         w.string(entry.name);
         w.string(entry.method);
         w.string(entry.path);
         w.string(entry.description);
+        if (entry.kind == @intFromEnum(EntryKind.agent)) {
+            w.int(u32, entry.max_input_bytes);
+            const agent = entry.agent orelse @panic("agent test entry needs agent fields");
+            w.int(u16, @intCast(agent.exports.len));
+            for (agent.exports) |item| {
+                w.string(item.module);
+                w.string(item.name);
+            }
+            w.int(u16, @intCast(agent.tools.len));
+            for (agent.tools) |name| w.string(name);
+            w.string(agent.provider_endpoint);
+            w.string(agent.provider_credential);
+            w.int(u32, agent.limits.rounds);
+            w.int(u32, agent.limits.tool_calls);
+            w.int(u32, agent.limits.tool_calls_per_round);
+            w.int(u32, agent.limits.argument_bytes);
+            w.int(u32, agent.limits.result_bytes);
+            w.int(u32, agent.limits.turn_deadline_ms);
+            return;
+        }
         w.string(entry.input_name);
         w.string(entry.input_schema);
         w.string(entry.output_name);
@@ -494,12 +680,121 @@ test "GET and POST may share one path" {
     try testing.expectEqual(@as(?Entry, null), try it.next());
 }
 
+test "an agent at every limit maximum decodes through its zero-copy view" {
+    const limits = AgentLimits{
+        .rounds = max_agent_rounds,
+        .tool_calls = max_agent_tool_calls,
+        .tool_calls_per_round = max_agent_tool_calls,
+        .argument_bytes = max_agent_argument_bytes,
+        .result_bytes = max_agent_result_bytes,
+        .turn_deadline_ms = max_agent_turn_deadline_ms,
+    };
+    const entries = [_]test_support.SampleEntry{
+        .{
+            .kind = @intFromEnum(EntryKind.agent),
+            .name = "agent",
+            .path = "/agent",
+            .max_input_bytes = max_max_input_bytes,
+            .agent = .{
+                .tools = &.{ "alpha", "zeta" },
+                .provider_endpoint = "https://[2001:db8::1]:443",
+                .limits = limits,
+            },
+        },
+        .{ .name = "alpha", .path = "/alpha" },
+        .{ .name = "zeta", .path = "/zeta" },
+    };
+    var buf: [2048]u8 = undefined;
+    var w = test_support.Writer{ .buf = &buf };
+    test_support.writeCatalog(&w, &entries);
+    const catalog = try decode(w.bytes());
+    var iterator = catalog.entries();
+    const entry = (try iterator.next()) orelse return error.TestMissingEntry;
+    try testing.expectEqual(EntryKind.agent, entry.kind);
+    try testing.expectEqualStrings("", entry.input_name);
+    try testing.expectEqualStrings("", entry.output_schema);
+    try testing.expect(entry.scope_tenant == null and entry.scope_subject == null);
+    var exports = entry.exports;
+    try testing.expectEqual(@as(?Export, null), try exports.next());
+    var credentials = entry.credentials;
+    try testing.expectEqual(@as(?[]const u8, null), try credentials.next());
+    const agent = entry.agent orelse return error.TestMissingAgent;
+    try testing.expectEqualStrings("https://[2001:db8::1]:443", agent.provider_endpoint);
+    try testing.expectEqual(limits, agent.limits);
+    var names = agent.tools;
+    try testing.expectEqualStrings("alpha", (try names.next()) orelse return error.TestMissingName);
+    try testing.expectEqualStrings("zeta", (try names.next()) orelse return error.TestMissingName);
+    try testing.expectEqual(@as(?[]const u8, null), try names.next());
+}
+
+test "agent exports decode in order" {
+    const expected = [_]test_support.SampleExport{
+        .{ .module = "zttp:fetch", .name = "fetch" },
+        .{ .module = "zttp:fetch", .name = "fetchWithRetry" },
+        .{ .module = "zttp:tool", .name = "callTool" },
+    };
+    var buf: [2048]u8 = undefined;
+    var w = test_support.Writer{ .buf = &buf };
+    test_support.writeCatalog(&w, &.{
+        .{ .kind = @intFromEnum(EntryKind.agent), .name = "agent", .path = "/agent", .agent = .{
+            .exports = &expected,
+            .tools = &.{"lookup"},
+        } },
+        .{ .name = "lookup", .path = "/lookup" },
+    });
+    const catalog = try decode(w.bytes());
+    var entries = catalog.entries();
+    const entry = (try entries.next()) orelse return error.TestMissingEntry;
+    var exports = entry.exports;
+    for (expected) |pair| {
+        const actual = (try exports.next()) orelse return error.TestMissingExport;
+        try testing.expectEqualStrings(pair.module, actual.module);
+        try testing.expectEqualStrings(pair.name, actual.name);
+    }
+    try testing.expectEqual(@as(?Export, null), try exports.next());
+}
+
+test "unordered agent exports are refused" {
+    const unordered = [_][2]test_support.SampleExport{
+        .{ .{ .module = "z", .name = "a" }, .{ .module = "a", .name = "a" } },
+        .{ .{ .module = "a", .name = "z" }, .{ .module = "a", .name = "a" } },
+        .{ .{ .module = "a", .name = "a" }, .{ .module = "a", .name = "a" } },
+    };
+    for (unordered) |pairs| {
+        var buf: [2048]u8 = undefined;
+        var w = test_support.Writer{ .buf = &buf };
+        test_support.writeCatalog(&w, &.{
+            .{ .kind = @intFromEnum(EntryKind.agent), .name = "agent", .path = "/agent", .agent = .{
+                .exports = &pairs,
+                .tools = &.{"lookup"},
+            } },
+            .{ .name = "lookup", .path = "/lookup" },
+        });
+        try testing.expectError(error.ExportsNotOrdered, decode(w.bytes()));
+    }
+}
+
+test "agent export counts above the bound are refused" {
+    const exports = [_]test_support.SampleExport{.{ .module = "a", .name = "a" }} ** (max_exports + 1);
+    var buf: [8192]u8 = undefined;
+    var w = test_support.Writer{ .buf = &buf };
+    test_support.writeCatalog(&w, &.{
+        .{ .kind = @intFromEnum(EntryKind.agent), .name = "agent", .path = "/agent", .agent = .{
+            .exports = &exports,
+            .tools = &.{"lookup"},
+        } },
+        .{ .name = "lookup", .path = "/lookup" },
+    });
+    try testing.expectError(error.ExportCountOutOfRange, decode(w.bytes()));
+}
+
 const DecodeSite = enum {
     short_header,
     integer_body,
     string_body,
     magic,
     schema,
+    entry_kind,
     entry_count,
     name_length,
     method_length,
@@ -536,6 +831,21 @@ const DecodeSite = enum {
     name_order,
     trailing_data,
     duplicate_route,
+    agent_tool_count,
+    agent_tool_name_length,
+    agent_tool_order,
+    agent_tool_unknown,
+    agent_tool_is_agent,
+    agent_endpoint_length,
+    agent_endpoint_normalization,
+    agent_credential_name_length,
+    agent_rounds,
+    agent_tool_calls,
+    agent_tool_calls_per_round,
+    agent_tool_calls_relation,
+    agent_argument_bytes,
+    agent_result_bytes,
+    agent_turn_deadline_ms,
 };
 
 const Case = struct {
@@ -561,6 +871,7 @@ fn truncatedString(w: *test_support.Writer) void {
     w.raw(magic);
     w.int(u16, schema_version);
     w.int(u16, 1);
+    w.int(u8, @intFromEnum(EntryKind.tool));
     w.int(u32, 1);
 }
 
@@ -602,12 +913,22 @@ fn schemaTwo(w: *test_support.Writer) void {
     test_support.writeEntry(w, test_support.sample_entries[0]);
 }
 
+/// Schema 3 is the immediately previous layout and is refused outright.
+fn schemaThree(w: *test_support.Writer) void {
+    @setRuntimeSafety(true);
+    w.raw(magic);
+    w.int(u16, 3);
+    w.int(u16, 1);
+    test_support.writeEntry(w, test_support.sample_entries[0]);
+}
+
 /// An entry with no exports that claims one credential more than the bound.
 fn tooManyCredentials(w: *test_support.Writer) void {
     @setRuntimeSafety(true);
     w.raw(magic);
     w.int(u16, schema_version);
     w.int(u16, 1);
+    w.int(u8, @intFromEnum(EntryKind.tool));
     const fields = [_][]const u8{ "echo", "POST", "/x", "d", "I", "{}", "O", "{}" };
     for (fields) |value| w.string(value);
     w.int(u32, 1);
@@ -641,6 +962,7 @@ fn claimLength(w: *test_support.Writer, field: usize, len: u32) void {
     w.raw(magic);
     w.int(u16, schema_version);
     w.int(u16, 1);
+    w.int(u8, @intFromEnum(EntryKind.tool));
     const fields = [_][]const u8{ "echo", "POST", "/x", "d", "I", "{}", "O", "{}" };
     for (fields[0..field]) |value| w.string(value);
     w.int(u32, len);
@@ -666,6 +988,7 @@ fn tooManyExports(w: *test_support.Writer) void {
     w.raw(magic);
     w.int(u16, schema_version);
     w.int(u16, 1);
+    w.int(u8, @intFromEnum(EntryKind.tool));
     const fields = [_][]const u8{ "echo", "POST", "/x", "d", "I", "{}", "O", "{}" };
     for (fields) |value| w.string(value);
     w.int(u32, 1);
@@ -681,6 +1004,7 @@ fn scopeTooLong(w: *test_support.Writer) void {
     w.raw(magic);
     w.int(u16, schema_version);
     w.int(u16, 1);
+    w.int(u8, @intFromEnum(EntryKind.tool));
     const fields = [_][]const u8{ "echo", "POST", "/x", "d", "I", "{}", "O", "{}" };
     for (fields) |value| w.string(value);
     w.int(u32, 1);
@@ -690,6 +1014,48 @@ fn scopeTooLong(w: *test_support.Writer) void {
 
 const scope_65 = "s" ** (max_scope_field_bytes + 1);
 const scope_64 = "s" ** max_scope_field_bytes;
+const agent_name_65 = "n" ** (max_name_bytes + 1);
+const endpoint_513 = "e" ** (max_endpoint_bytes + 1);
+
+const valid_agent_limits = AgentLimits{
+    .rounds = 4,
+    .tool_calls = 8,
+    .tool_calls_per_round = 4,
+    .argument_bytes = 4096,
+    .result_bytes = 16384,
+    .turn_deadline_ms = 20000,
+};
+const valid_z_tool = test_support.SampleEntry{ .name = "z", .path = "/z" };
+
+fn sampleAgent(tools: []const []const u8, limits: AgentLimits) test_support.SampleAgent {
+    @setRuntimeSafety(true);
+    return .{ .tools = tools, .limits = limits };
+}
+
+fn sampleAgentEntry(name: []const u8, path: []const u8, tools: []const []const u8, limits: AgentLimits) test_support.SampleEntry {
+    @setRuntimeSafety(true);
+    return .{
+        .kind = @intFromEnum(EntryKind.agent),
+        .name = name,
+        .path = path,
+        .agent = sampleAgent(tools, limits),
+    };
+}
+
+fn tooManyAgentTools(w: *test_support.Writer) void {
+    @setRuntimeSafety(true);
+    w.raw(magic);
+    w.int(u16, schema_version);
+    w.int(u16, 1);
+    w.int(u8, @intFromEnum(EntryKind.agent));
+    w.string("a");
+    w.string("POST");
+    w.string("/agent");
+    w.string("agent");
+    w.int(u32, 4096);
+    w.int(u16, 0);
+    w.int(u16, max_agent_tools + 1);
+}
 
 const e = test_support.sample_entries;
 
@@ -701,6 +1067,8 @@ const cases = [_]Case{
     .{ .site = .magic, .expected = error.BadMagic, .custom = badMagic },
     .{ .site = .schema, .expected = error.UnsupportedSchema, .custom = unsupportedSchema },
     .{ .site = .schema, .expected = error.UnsupportedSchema, .custom = schemaTwo },
+    .{ .site = .schema, .expected = error.UnsupportedSchema, .custom = schemaThree },
+    .{ .site = .entry_kind, .expected = error.EntryKindInvalid, .entries = &.{.{ .kind = 2, .name = "a", .path = "/x" }} },
     .{ .site = .entry_count, .expected = error.EntryCountOutOfRange, .custom = zeroEntries },
     .{ .site = .entry_count, .expected = error.EntryCountOutOfRange, .custom = tooManyEntries },
     .{ .site = .name_length, .expected = error.NameLength, .entries = &.{.{ .name = "", .path = "/x" }} },
@@ -750,6 +1118,180 @@ const cases = [_]Case{
     .{ .site = .export_module_utf8, .expected = error.InvalidUtf8, .entries = &.{.{ .name = "a", .path = "/x", .exports = &.{.{ .module = "\x80", .name = "f" }} }} },
     .{ .site = .export_name_utf8, .expected = error.InvalidUtf8, .entries = &.{.{ .name = "a", .path = "/x", .exports = &.{.{ .module = "m", .name = "\x80" }} }} },
     .{ .site = .trailing_data, .expected = error.TrailingData, .custom = sampleWithTrailingByte },
+    .{ .site = .agent_tool_count, .expected = error.AgentToolCountOutOfRange, .entries = &.{ sampleAgentEntry("a", "/agent", &.{}, valid_agent_limits), valid_z_tool } },
+    .{ .site = .agent_tool_count, .expected = error.AgentToolCountOutOfRange, .custom = tooManyAgentTools },
+    .{ .site = .agent_tool_name_length, .expected = error.AgentToolNameLength, .entries = &.{ sampleAgentEntry("a", "/agent", &.{""}, valid_agent_limits), valid_z_tool } },
+    .{ .site = .agent_tool_name_length, .expected = error.AgentToolNameLength, .entries = &.{ sampleAgentEntry("a", "/agent", &.{agent_name_65}, valid_agent_limits), valid_z_tool } },
+    .{ .site = .agent_tool_order, .expected = error.AgentToolsNotOrdered, .entries = &.{
+        .{ .name = "a", .path = "/a" },
+        .{ .name = "b", .path = "/b" },
+        sampleAgentEntry("c", "/agent", &.{ "b", "a" }, valid_agent_limits),
+    } },
+    .{ .site = .agent_tool_order, .expected = error.AgentToolsNotOrdered, .entries = &.{
+        sampleAgentEntry("a", "/agent", &.{ "z", "z" }, valid_agent_limits),
+        valid_z_tool,
+    } },
+    .{ .site = .agent_tool_unknown, .expected = error.AgentToolUnknown, .entries = &.{
+        .{ .name = "a", .path = "/a" },
+        sampleAgentEntry("b", "/agent", &.{"missing"}, valid_agent_limits),
+    } },
+    .{ .site = .agent_tool_is_agent, .expected = error.AgentToolIsAgent, .entries = &.{
+        sampleAgentEntry("a", "/agent-a", &.{"b"}, valid_agent_limits),
+        sampleAgentEntry("b", "/agent-b", &.{"z"}, valid_agent_limits),
+        .{ .name = "z", .path = "/z" },
+    } },
+    .{ .site = .agent_endpoint_length, .expected = error.AgentEndpointLength, .entries = &.{ .{
+        .kind = @intFromEnum(EntryKind.agent),
+        .name = "a",
+        .path = "/agent",
+        .agent = .{ .tools = &.{"z"}, .provider_endpoint = endpoint_513 },
+    }, valid_z_tool } },
+    .{ .site = .agent_endpoint_length, .expected = error.AgentEndpointLength, .entries = &.{ .{
+        .kind = @intFromEnum(EntryKind.agent),
+        .name = "a",
+        .path = "/agent",
+        .agent = .{ .tools = &.{"z"}, .provider_endpoint = "" },
+    }, valid_z_tool } },
+    .{ .site = .agent_endpoint_normalization, .expected = error.AgentEndpointNotNormalized, .entries = &.{ .{
+        .kind = @intFromEnum(EntryKind.agent),
+        .name = "a",
+        .path = "/agent",
+        .agent = .{ .tools = &.{"z"}, .provider_endpoint = "HTTPS://API.EXAMPLE.COM" },
+    }, valid_z_tool } },
+    .{ .site = .agent_endpoint_normalization, .expected = error.AgentEndpointNotNormalized, .entries = &.{ .{
+        .kind = @intFromEnum(EntryKind.agent),
+        .name = "a",
+        .path = "/agent",
+        .agent = .{ .tools = &.{"z"}, .provider_endpoint = "ftp://api.example.com:21" },
+    }, valid_z_tool } },
+    .{ .site = .agent_endpoint_normalization, .expected = error.AgentEndpointNotNormalized, .entries = &.{ .{
+        .kind = @intFromEnum(EntryKind.agent),
+        .name = "a",
+        .path = "/agent",
+        .agent = .{ .tools = &.{"z"}, .provider_endpoint = "https://api.example.com:00443" },
+    }, valid_z_tool } },
+    .{ .site = .agent_endpoint_normalization, .expected = error.AgentEndpointNotNormalized, .entries = &.{ .{
+        .kind = @intFromEnum(EntryKind.agent),
+        .name = "a",
+        .path = "/agent",
+        .agent = .{ .tools = &.{"z"}, .provider_endpoint = "https://api.example.com/path" },
+    }, valid_z_tool } },
+    .{ .site = .agent_credential_name_length, .expected = error.AgentCredentialNameLength, .entries = &.{ .{
+        .kind = @intFromEnum(EntryKind.agent),
+        .name = "a",
+        .path = "/agent",
+        .agent = .{ .tools = &.{"z"}, .provider_credential = credential_65 },
+    }, valid_z_tool } },
+    .{ .site = .agent_credential_name_length, .expected = error.AgentCredentialNameLength, .entries = &.{ .{
+        .kind = @intFromEnum(EntryKind.agent),
+        .name = "a",
+        .path = "/agent",
+        .agent = .{ .tools = &.{"z"}, .provider_credential = "" },
+    }, valid_z_tool } },
+    .{ .site = .agent_rounds, .expected = error.AgentRoundsOutOfRange, .entries = &.{ sampleAgentEntry("a", "/agent", &.{"z"}, .{
+        .rounds = 0,
+        .tool_calls = 8,
+        .tool_calls_per_round = 4,
+        .argument_bytes = 4096,
+        .result_bytes = 16384,
+        .turn_deadline_ms = 20000,
+    }), valid_z_tool } },
+    .{ .site = .agent_rounds, .expected = error.AgentRoundsOutOfRange, .entries = &.{ sampleAgentEntry("a", "/agent", &.{"z"}, .{
+        .rounds = max_agent_rounds + 1,
+        .tool_calls = 8,
+        .tool_calls_per_round = 4,
+        .argument_bytes = 4096,
+        .result_bytes = 16384,
+        .turn_deadline_ms = 20000,
+    }), valid_z_tool } },
+    .{ .site = .agent_tool_calls, .expected = error.AgentToolCallsOutOfRange, .entries = &.{ sampleAgentEntry("a", "/agent", &.{"z"}, .{
+        .rounds = 4,
+        .tool_calls = 0,
+        .tool_calls_per_round = 4,
+        .argument_bytes = 4096,
+        .result_bytes = 16384,
+        .turn_deadline_ms = 20000,
+    }), valid_z_tool } },
+    .{ .site = .agent_tool_calls, .expected = error.AgentToolCallsOutOfRange, .entries = &.{ sampleAgentEntry("a", "/agent", &.{"z"}, .{
+        .rounds = 4,
+        .tool_calls = max_agent_tool_calls + 1,
+        .tool_calls_per_round = 4,
+        .argument_bytes = 4096,
+        .result_bytes = 16384,
+        .turn_deadline_ms = 20000,
+    }), valid_z_tool } },
+    .{ .site = .agent_tool_calls_per_round, .expected = error.AgentToolCallsPerRoundOutOfRange, .entries = &.{ sampleAgentEntry("a", "/agent", &.{"z"}, .{
+        .rounds = 4,
+        .tool_calls = 8,
+        .tool_calls_per_round = 0,
+        .argument_bytes = 4096,
+        .result_bytes = 16384,
+        .turn_deadline_ms = 20000,
+    }), valid_z_tool } },
+    .{ .site = .agent_tool_calls_per_round, .expected = error.AgentToolCallsPerRoundOutOfRange, .entries = &.{ sampleAgentEntry("a", "/agent", &.{"z"}, .{
+        .rounds = 4,
+        .tool_calls = max_agent_tool_calls,
+        .tool_calls_per_round = max_agent_tool_calls + 1,
+        .argument_bytes = 4096,
+        .result_bytes = 16384,
+        .turn_deadline_ms = 20000,
+    }), valid_z_tool } },
+    .{ .site = .agent_tool_calls_relation, .expected = error.AgentToolCallsPerRoundExceedsToolCalls, .entries = &.{ sampleAgentEntry("a", "/agent", &.{"z"}, .{
+        .rounds = 4,
+        .tool_calls = 8,
+        .tool_calls_per_round = 9,
+        .argument_bytes = 4096,
+        .result_bytes = 16384,
+        .turn_deadline_ms = 20000,
+    }), valid_z_tool } },
+    .{ .site = .agent_argument_bytes, .expected = error.AgentArgumentBytesOutOfRange, .entries = &.{ sampleAgentEntry("a", "/agent", &.{"z"}, .{
+        .rounds = 4,
+        .tool_calls = 8,
+        .tool_calls_per_round = 4,
+        .argument_bytes = max_agent_argument_bytes + 1,
+        .result_bytes = 16384,
+        .turn_deadline_ms = 20000,
+    }), valid_z_tool } },
+    .{ .site = .agent_argument_bytes, .expected = error.AgentArgumentBytesOutOfRange, .entries = &.{ sampleAgentEntry("a", "/agent", &.{"z"}, .{
+        .rounds = 4,
+        .tool_calls = 8,
+        .tool_calls_per_round = 4,
+        .argument_bytes = 0,
+        .result_bytes = 16384,
+        .turn_deadline_ms = 20000,
+    }), valid_z_tool } },
+    .{ .site = .agent_result_bytes, .expected = error.AgentResultBytesOutOfRange, .entries = &.{ sampleAgentEntry("a", "/agent", &.{"z"}, .{
+        .rounds = 4,
+        .tool_calls = 8,
+        .tool_calls_per_round = 4,
+        .argument_bytes = 4096,
+        .result_bytes = 0,
+        .turn_deadline_ms = 20000,
+    }), valid_z_tool } },
+    .{ .site = .agent_result_bytes, .expected = error.AgentResultBytesOutOfRange, .entries = &.{ sampleAgentEntry("a", "/agent", &.{"z"}, .{
+        .rounds = 4,
+        .tool_calls = 8,
+        .tool_calls_per_round = 4,
+        .argument_bytes = 4096,
+        .result_bytes = max_agent_result_bytes + 1,
+        .turn_deadline_ms = 20000,
+    }), valid_z_tool } },
+    .{ .site = .agent_turn_deadline_ms, .expected = error.AgentTurnDeadlineMsOutOfRange, .entries = &.{ sampleAgentEntry("a", "/agent", &.{"z"}, .{
+        .rounds = 4,
+        .tool_calls = 8,
+        .tool_calls_per_round = 4,
+        .argument_bytes = 4096,
+        .result_bytes = 16384,
+        .turn_deadline_ms = 0,
+    }), valid_z_tool } },
+    .{ .site = .agent_turn_deadline_ms, .expected = error.AgentTurnDeadlineMsOutOfRange, .entries = &.{ sampleAgentEntry("a", "/agent", &.{"z"}, .{
+        .rounds = 4,
+        .tool_calls = 8,
+        .tool_calls_per_round = 4,
+        .argument_bytes = 4096,
+        .result_bytes = 16384,
+        .turn_deadline_ms = max_agent_turn_deadline_ms + 1,
+    }), valid_z_tool } },
 };
 
 test "every refusal case decodes to its exact error" {
@@ -823,6 +1365,7 @@ test "a catalog at the entry and export bounds decodes" {
         const name: [2]u8 = .{ 'a' + @as(u8, @intCast(index / 26)), 'a' + @as(u8, @intCast(index % 26)) };
         const path: [3]u8 = .{ '/', name[0], name[1] };
         if (index == 0) {
+            w.int(u8, @intFromEnum(EntryKind.tool));
             const fields = [_][]const u8{ &name, "POST", &path, "d", "I", "{}", "O", "{}" };
             for (fields) |value| w.string(value);
             w.int(u32, 1);

@@ -272,15 +272,43 @@ fn writeContractJsonVersion(
         try writeJsonString(writer, tool.route);
         try writer.writeAll(",\n      \"description\": ");
         try writeJsonString(writer, tool.description);
-        try writer.writeAll(",\n      \"" ++ comptime contractKey(json_version, "inputSchema") ++ "\": { \"name\": ");
-        try writeJsonString(writer, tool.input_schema_name);
-        try writer.writeAll(", \"json\": ");
-        try writeJsonString(writer, tool.input_schema_json);
-        try writer.writeAll(" },\n      \"" ++ comptime contractKey(json_version, "outputSchema") ++ "\": { \"name\": ");
-        try writeJsonString(writer, tool.output_schema_name);
-        try writer.writeAll(", \"json\": ");
-        try writeJsonString(writer, tool.output_schema_json);
-        try writer.print(" }},\n      \"" ++ comptime contractKey(json_version, "maxInputBytes") ++ "\": {d},\n", .{tool.max_input_bytes});
+        if (tool.agent == null) {
+            try writer.writeAll(",\n      \"" ++ comptime contractKey(json_version, "inputSchema") ++ "\": { \"name\": ");
+            try writeJsonString(writer, tool.input_schema_name);
+            try writer.writeAll(", \"json\": ");
+            try writeJsonString(writer, tool.input_schema_json);
+            try writer.writeAll(" },\n      \"" ++ comptime contractKey(json_version, "outputSchema") ++ "\": { \"name\": ");
+            try writeJsonString(writer, tool.output_schema_name);
+            try writer.writeAll(", \"json\": ");
+            try writeJsonString(writer, tool.output_schema_json);
+            try writer.writeAll(" }");
+        }
+        try writer.print(",\n      \"" ++ comptime contractKey(json_version, "maxInputBytes") ++ "\": {d},\n", .{tool.max_input_bytes});
+        if (tool.agent) |agent| {
+            const tool_calls_key = comptime contractKey(json_version, "toolCalls");
+            const tool_calls_per_round_key = comptime contractKey(json_version, "toolCallsPerRound");
+            const argument_bytes_key = comptime contractKey(json_version, "argumentBytes");
+            const result_bytes_key = comptime contractKey(json_version, "resultBytes");
+            const turn_deadline_ms_key = comptime contractKey(json_version, "turnDeadlineMs");
+            try writer.writeAll("      \"agent\": { \"tools\": [");
+            for (agent.tools.items, 0..) |name, j| {
+                if (j > 0) try writer.writeAll(", ");
+                try writeJsonString(writer, name);
+            }
+            try writer.writeAll("], \"provider\": { \"endpoint\": ");
+            try writeJsonString(writer, agent.provider_endpoint);
+            try writer.writeAll(", \"credential\": ");
+            try writeJsonString(writer, agent.provider_credential);
+            try writer.writeAll(" }, \"limits\": {");
+            try writer.print(" \"rounds\": {d}, \"" ++ tool_calls_key ++ "\": {d}, \"" ++ tool_calls_per_round_key ++ "\": {d}, \"" ++ argument_bytes_key ++ "\": {d}, \"" ++ result_bytes_key ++ "\": {d}, \"" ++ turn_deadline_ms_key ++ "\": {d} }} }},\n", .{
+                agent.limits.rounds,
+                agent.limits.tool_calls,
+                agent.limits.tool_calls_per_round,
+                agent.limits.argument_bytes,
+                agent.limits.result_bytes,
+                agent.limits.turn_deadline_ms,
+            });
+        }
         // `scope` (M4 T5) is written only when the entry binds a field, so a
         // catalog without one keeps its earlier bytes.
         if (tool.scope_tenant != null or tool.scope_subject != null) {
@@ -1610,6 +1638,35 @@ test "version 1 keeps its version and camelCase keys" {
     defer allocator.free(output);
     try std.testing.expect(std.mem.indexOf(u8, output, "\"version\": 1") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "\"serviceCalls\": []") != null);
+}
+
+test "agent JSON writes only the agent shape and round trips its exports" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{"version":23,"handler":{"path":"agent.ts"},"tools":[
+        \\{"name":"lookup","route":"POST /tools/lookup","description":"Lookup.","inputSchema":{"name":"In","json":"{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{}}"},"outputSchema":{"name":"Out","json":"{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{}}"},"maxInputBytes":64,"reachableExports":[]},
+        \\{"name":"assistant","route":"POST /agent","description":"Answer.","maxInputBytes":8192,"agent":{"tools":["lookup"],"provider":{"endpoint":"https://api.example:443","credential":"provider"},"limits":{"rounds":4,"toolCalls":8,"toolCallsPerRound":4,"argumentBytes":4096,"resultBytes":16384,"turnDeadlineMs":20000}},"reachableExports":[{"module":"zttp:fetch","name":"fetch"}],"credentials":[{"name":"provider","endpoint":"https://api.example:443"}]}
+        \\]}
+    ;
+    var contract = try handler_contract.parseFromJson(allocator, json);
+    defer contract.deinit(allocator);
+
+    inline for (.{ JsonVersion.v1, JsonVersion.v2 }) |version| {
+        const output = try writeTestContractJson(allocator, &contract, version);
+        defer allocator.free(output);
+        try std.testing.expect(std.mem.indexOf(u8, output, "\"agent\":") != null);
+        try std.testing.expect(std.mem.indexOf(u8, output, if (version == .v1) "\"toolCallsPerRound\": 4" else "\"tool_calls_per_round\": 4") != null);
+        try std.testing.expect(std.mem.indexOf(u8, output, "{ \"module\": \"zttp:fetch\", \"name\": \"fetch\" }") != null);
+
+        var round_trip = try handler_contract.parseFromJson(allocator, output);
+        defer round_trip.deinit(allocator);
+        const agent_entry = round_trip.tools.items[1];
+        const agent = agent_entry.agent orelse return error.TestExpectedAgent;
+        try std.testing.expectEqualStrings("", agent_entry.input_schema_name);
+        try std.testing.expectEqualStrings("lookup", agent.tools.items[0]);
+        try std.testing.expectEqual(@as(usize, 1), agent_entry.reachable_exports.items.len);
+        try std.testing.expectEqualStrings("provider", agent_entry.credentials.items[0].name);
+    }
 }
 
 /// Collect every object key in `value`, in document order, including nested

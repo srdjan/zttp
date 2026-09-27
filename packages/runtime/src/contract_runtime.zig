@@ -58,12 +58,21 @@ pub const ToolSummary = struct {
     /// Uppercase ASCII, split from the route key at its first space.
     method: []const u8,
     path: []const u8,
+    description: []const u8 = "",
     max_input_bytes: u32,
     scope_tenant: ?[]const u8 = null,
     scope_subject: ?[]const u8 = null,
     /// The distinct credential names the tool's route names (M4 T6), sorted.
     /// Owned.
     credentials: []const []const u8 = &.{},
+    agent: ?AgentSummary = null,
+};
+
+pub const AgentSummary = struct {
+    tools: []const []const u8,
+    provider_endpoint: []const u8,
+    provider_credential: []const u8,
+    limits: zq.handler_contract.AgentLimits,
 };
 
 /// One module export a tool may call. Borrows from `AcceptedCatalog.bytes`.
@@ -117,21 +126,51 @@ pub const AcceptedTool = struct {
     }
 };
 
+/// One accepted agent entry. It has no compiled schemas because U3 owns agent
+/// request admission and prompt validation.
+pub const AcceptedAgent = struct {
+    name: []const u8,
+    method: []const u8,
+    path: []const u8,
+    description: []const u8,
+    max_input_bytes: u32,
+    /// The agent route's grant, lowered from the accepted catalog bytes.
+    /// The slice is owned by the catalog; its strings borrow from those bytes.
+    exports: []Export,
+    tools: []const []const u8,
+    provider_endpoint: []const u8,
+    provider_credential: []const u8,
+    limits: zq.handler_contract.AgentLimits,
+
+    pub fn allowsExport(self: *const AcceptedAgent, module: []const u8, name: []const u8) bool {
+        for (self.exports) |exp| {
+            if (std.mem.eql(u8, exp.module, module) and std.mem.eql(u8, exp.name, name)) return true;
+        }
+        return false;
+    }
+};
+
+pub const AcceptedCatalogEntry = struct {
+    name: []const u8,
+    method: []const u8,
+    path: []const u8,
+    max_input_bytes: u32,
+    kind: union(enum) {
+        tool: AcceptedTool,
+        agent: AcceptedAgent,
+    },
+};
+
 /// The tool catalog lowered from the section bytes that passed acceptance,
 /// never from producer output. Owns a copy of those bytes and every compiled
 /// schema.
 pub const AcceptedCatalog = struct {
     allocator: std.mem.Allocator,
     bytes: []const u8,
-    entries: []AcceptedTool,
+    entries: []AcceptedCatalogEntry,
 
     pub fn deinit(self: *AcceptedCatalog) void {
-        for (self.entries) |*entry| {
-            entry.input.deinit();
-            entry.output.deinit();
-            self.allocator.free(entry.exports);
-            self.allocator.free(entry.credentials);
-        }
+        for (self.entries) |*entry| deinitAcceptedEntry(self.allocator, entry);
         self.allocator.free(self.entries);
         self.allocator.free(self.bytes);
         self.* = undefined;
@@ -139,21 +178,45 @@ pub const AcceptedCatalog = struct {
 
     pub fn find(self: *const AcceptedCatalog, name: []const u8) ?*const AcceptedTool {
         for (self.entries) |*entry| {
-            if (std.mem.eql(u8, entry.name, name)) return entry;
+            if (!std.mem.eql(u8, entry.name, name)) continue;
+            return switch (entry.kind) {
+                .tool => |*tool| tool,
+                .agent => null,
+            };
         }
         return null;
     }
 
     /// The tool served on this request, matched the way `routerMatch` matches a
     /// route key: the method without regard to case, and the path with `:param`
-    /// segments as wildcards.
+    /// segments as wildcards. Agent entries are excluded. U3 adds their
+    /// separate admission path.
     pub fn match(self: *const AcceptedCatalog, method: []const u8, path: []const u8) ?*const AcceptedTool {
         for (self.entries) |*entry| {
-            if (std.ascii.eqlIgnoreCase(entry.method, method) and matchPath(entry.path, path)) return entry;
+            if (!std.ascii.eqlIgnoreCase(entry.method, method) or !matchPath(entry.path, path)) continue;
+            return switch (entry.kind) {
+                .tool => |*tool| tool,
+                .agent => null,
+            };
         }
         return null;
     }
 };
+
+fn deinitAcceptedEntry(allocator: std.mem.Allocator, entry: *AcceptedCatalogEntry) void {
+    switch (entry.kind) {
+        .tool => |*tool| {
+            tool.input.deinit();
+            tool.output.deinit();
+            allocator.free(tool.exports);
+            allocator.free(tool.credentials);
+        },
+        .agent => |*agent| {
+            allocator.free(agent.exports);
+            allocator.free(agent.tools);
+        },
+    }
+}
 
 /// Why a promotion that the kernel accepted still refuses to start.
 /// The verdict of a tool body check: `ok`, or a refusal reason and byte offset.
@@ -486,46 +549,96 @@ fn lowerAcceptedCatalog(allocator: std.mem.Allocator, bytes: []const u8) Promote
     errdefer allocator.free(owned);
     const catalog = pcc.tool_catalog.decode(owned) catch return error.AcceptedToolCatalogUndecodable;
 
-    const entries = try allocator.alloc(AcceptedTool, catalog.entry_count);
+    const entries = try allocator.alloc(AcceptedCatalogEntry, catalog.entry_count);
     var filled: usize = 0;
     errdefer {
-        for (entries[0..filled]) |*entry| {
-            entry.input.deinit();
-            entry.output.deinit();
-            allocator.free(entry.exports);
-            allocator.free(entry.credentials);
-        }
+        for (entries[0..filled]) |*entry| deinitAcceptedEntry(allocator, entry);
         allocator.free(entries);
     }
 
     var iterator = catalog.entries();
     while (iterator.next() catch return error.AcceptedToolCatalogUndecodable) |entry| {
         if (filled >= entries.len) return error.AcceptedToolCatalogUndecodable;
-        const exports = try lowerAcceptedExports(allocator, entry.exports);
-        errdefer allocator.free(exports);
-        const credentials = try lowerAcceptedCredentials(allocator, entry.credentials);
-        errdefer allocator.free(credentials);
-        var input = try compileAcceptedSchema(allocator, entry.input_schema);
-        errdefer input.deinit();
-        const output = try compileAcceptedSchema(allocator, entry.output_schema);
-        entries[filled] = .{
-            .name = entry.name,
-            .method = entry.method,
-            .path = entry.path,
-            .max_input_bytes = entry.max_input_bytes,
-            .scope_tenant = entry.scope_tenant,
-            .scope_subject = entry.scope_subject,
-            .exports = exports,
-            .credentials = credentials,
-            .input_name = entry.input_name,
-            .input = input,
-            .output = output,
+        entries[filled] = switch (entry.kind) {
+            .tool => blk: {
+                const exports = try lowerAcceptedExports(allocator, entry.exports);
+                errdefer allocator.free(exports);
+                const credentials = try lowerAcceptedCredentials(allocator, entry.credentials);
+                errdefer allocator.free(credentials);
+                var input = try compileAcceptedSchema(allocator, entry.input_schema);
+                errdefer input.deinit();
+                const output = try compileAcceptedSchema(allocator, entry.output_schema);
+                break :blk .{
+                    .name = entry.name,
+                    .method = entry.method,
+                    .path = entry.path,
+                    .max_input_bytes = entry.max_input_bytes,
+                    .kind = .{ .tool = .{
+                        .name = entry.name,
+                        .method = entry.method,
+                        .path = entry.path,
+                        .max_input_bytes = entry.max_input_bytes,
+                        .scope_tenant = entry.scope_tenant,
+                        .scope_subject = entry.scope_subject,
+                        .exports = exports,
+                        .credentials = credentials,
+                        .input_name = entry.input_name,
+                        .input = input,
+                        .output = output,
+                    } },
+                };
+            },
+            .agent => blk: {
+                const agent = entry.agent orelse return error.AcceptedToolCatalogUndecodable;
+                const exports = try lowerAcceptedExports(allocator, entry.exports);
+                errdefer allocator.free(exports);
+                const tools = try lowerAcceptedAgentTools(allocator, agent.tools);
+                errdefer allocator.free(tools);
+                break :blk .{
+                    .name = entry.name,
+                    .method = entry.method,
+                    .path = entry.path,
+                    .max_input_bytes = entry.max_input_bytes,
+                    .kind = .{ .agent = .{
+                        .name = entry.name,
+                        .method = entry.method,
+                        .path = entry.path,
+                        .description = entry.description,
+                        .max_input_bytes = entry.max_input_bytes,
+                        .exports = exports,
+                        .tools = tools,
+                        .provider_endpoint = agent.provider_endpoint,
+                        .provider_credential = agent.provider_credential,
+                        .limits = .{
+                            .rounds = agent.limits.rounds,
+                            .tool_calls = agent.limits.tool_calls,
+                            .tool_calls_per_round = agent.limits.tool_calls_per_round,
+                            .argument_bytes = agent.limits.argument_bytes,
+                            .result_bytes = agent.limits.result_bytes,
+                            .turn_deadline_ms = agent.limits.turn_deadline_ms,
+                        },
+                    } },
+                };
+            },
         };
         filled += 1;
     }
     if (filled != entries.len) return error.AcceptedToolCatalogUndecodable;
 
     return .{ .allocator = allocator, .bytes = owned, .entries = entries };
+}
+
+fn lowerAcceptedAgentTools(allocator: std.mem.Allocator, iterator: pcc.tool_catalog.AgentToolIterator) PromoteError![]const []const u8 {
+    const tools = try allocator.alloc([]const u8, iterator.remaining);
+    errdefer allocator.free(tools);
+    var walk = iterator;
+    var index: usize = 0;
+    while (walk.next() catch return error.AcceptedToolCatalogUndecodable) |name| : (index += 1) {
+        if (index >= tools.len) return error.AcceptedToolCatalogUndecodable;
+        tools[index] = name;
+    }
+    if (index != tools.len) return error.AcceptedToolCatalogUndecodable;
+    return tools;
 }
 
 /// The entry's export list as slices into the accepted bytes the iterator
@@ -578,17 +691,55 @@ fn crossCheckToolCatalog(catalog: *const AcceptedCatalog, contract_tools: []cons
         } else return error.ToolCatalogContractMismatch;
     }
     for (contract_tools) |tool| {
-        const entry = catalog.find(tool.name) orelse return error.ToolCatalogContractMismatch;
+        const entry = findCatalogEntry(catalog, tool.name) orelse return error.ToolCatalogContractMismatch;
         if (!std.mem.eql(u8, entry.method, tool.method) or
             !std.mem.eql(u8, entry.path, tool.path) or
-            entry.max_input_bytes != tool.max_input_bytes or
-            !optionalStringsEqual(entry.scope_tenant, tool.scope_tenant) or
-            !optionalStringsEqual(entry.scope_subject, tool.scope_subject) or
-            !stringListsEqual(entry.credentials, tool.credentials))
+            entry.max_input_bytes != tool.max_input_bytes)
         {
             return error.ToolCatalogContractMismatch;
         }
+        switch (entry.kind) {
+            .tool => |accepted| {
+                if (tool.agent != null or
+                    !optionalStringsEqual(accepted.scope_tenant, tool.scope_tenant) or
+                    !optionalStringsEqual(accepted.scope_subject, tool.scope_subject) or
+                    !stringListsEqual(accepted.credentials, tool.credentials))
+                {
+                    return error.ToolCatalogContractMismatch;
+                }
+            },
+            .agent => |accepted| {
+                const expected = tool.agent orelse return error.ToolCatalogContractMismatch;
+                if (tool.scope_tenant != null or tool.scope_subject != null or
+                    tool.credentials.len != 1 or
+                    !std.mem.eql(u8, tool.credentials[0], accepted.provider_credential) or
+                    !std.mem.eql(u8, accepted.description, tool.description) or
+                    !stringListsEqual(accepted.tools, expected.tools) or
+                    !std.mem.eql(u8, accepted.provider_endpoint, expected.provider_endpoint) or
+                    !std.mem.eql(u8, accepted.provider_credential, expected.provider_credential) or
+                    !agentLimitsEqual(accepted.limits, expected.limits))
+                {
+                    return error.ToolCatalogContractMismatch;
+                }
+            },
+        }
     }
+}
+
+fn findCatalogEntry(catalog: *const AcceptedCatalog, name: []const u8) ?*const AcceptedCatalogEntry {
+    for (catalog.entries) |*entry| {
+        if (std.mem.eql(u8, entry.name, name)) return entry;
+    }
+    return null;
+}
+
+fn agentLimitsEqual(a: zq.handler_contract.AgentLimits, b: zq.handler_contract.AgentLimits) bool {
+    return a.rounds == b.rounds and
+        a.tool_calls == b.tool_calls and
+        a.tool_calls_per_round == b.tool_calls_per_round and
+        a.argument_bytes == b.argument_bytes and
+        a.result_bytes == b.result_bytes and
+        a.turn_deadline_ms == b.turn_deadline_ms;
 }
 
 fn stringListsEqual(a: []const []const u8, b: []const []const u8) bool {
@@ -1071,19 +1222,28 @@ pub fn fromHandlerContract(allocator: std.mem.Allocator, hc: *const HandlerContr
         errdefer allocator.free(method);
         const path = try allocator.dupe(u8, tool.route[space + 1 ..]);
         errdefer allocator.free(path);
+        const description = try allocator.dupe(u8, tool.description);
+        errdefer allocator.free(description);
         const scope_tenant = if (tool.scope_tenant) |field| try allocator.dupe(u8, field) else null;
         errdefer if (scope_tenant) |field| allocator.free(field);
         const scope_subject = if (tool.scope_subject) |field| try allocator.dupe(u8, field) else null;
         errdefer if (scope_subject) |field| allocator.free(field);
         const credentials = try distinctCredentialNames(allocator, tool.credentials.items);
+        errdefer {
+            for (credentials) |credential| allocator.free(credential);
+            allocator.free(credentials);
+        }
+        const agent = if (tool.agent) |agent| try dupeAgentSummary(allocator, agent) else null;
         tools.appendAssumeCapacity(.{
             .name = name,
             .method = method,
             .path = path,
+            .description = description,
             .max_input_bytes = tool.max_input_bytes,
             .scope_tenant = scope_tenant,
             .scope_subject = scope_subject,
             .credentials = credentials,
+            .agent = agent,
         });
     }
 
@@ -1151,6 +1311,29 @@ pub fn fromHandlerContract(allocator: std.mem.Allocator, hc: *const HandlerContr
     } };
 }
 
+fn dupeAgentSummary(allocator: std.mem.Allocator, source: zq.handler_contract.AgentEntry) !AgentSummary {
+    var tools: std.ArrayList([]const u8) = .empty;
+    errdefer {
+        for (tools.items) |name| allocator.free(name);
+        tools.deinit(allocator);
+    }
+    try tools.ensureTotalCapacity(allocator, source.tools.items.len);
+    for (source.tools.items) |name| tools.appendAssumeCapacity(try allocator.dupe(u8, name));
+    const tools_owned = try tools.toOwnedSlice(allocator);
+    errdefer {
+        for (tools_owned) |name| allocator.free(name);
+        allocator.free(tools_owned);
+    }
+    const provider_endpoint = try allocator.dupe(u8, source.provider_endpoint);
+    errdefer allocator.free(provider_endpoint);
+    return .{
+        .tools = tools_owned,
+        .provider_endpoint = provider_endpoint,
+        .provider_credential = try allocator.dupe(u8, source.provider_credential),
+        .limits = source.limits,
+    };
+}
+
 /// The distinct names of a contract tool's credentials, in their sorted order:
 /// the same grant the `ZTCAT1` encoder writes, so the startup cross-check
 /// compares like with like. Owned, each name included.
@@ -1175,8 +1358,15 @@ fn freeToolSummaryItems(allocator: std.mem.Allocator, tools: []const ToolSummary
         allocator.free(tool.name);
         allocator.free(tool.method);
         allocator.free(tool.path);
+        allocator.free(tool.description);
         if (tool.scope_tenant) |field| allocator.free(field);
         if (tool.scope_subject) |field| allocator.free(field);
+        if (tool.agent) |agent| {
+            for (agent.tools) |name| allocator.free(name);
+            allocator.free(agent.tools);
+            allocator.free(agent.provider_endpoint);
+            allocator.free(agent.provider_credential);
+        }
     }
 }
 
@@ -2504,6 +2694,190 @@ test "promotion lowers the accepted tool catalog and compiles every schema" {
     // buffer, so it outlives the section it was lowered from.
     @memset(&buf, 0);
     try std.testing.expectEqualStrings("alpha", catalog.find("alpha").?.name);
+}
+
+test "agent catalog lowering has no schemas and matching excludes the agent route" {
+    const names = [_][]const u8{"lookup"};
+    const entries = [_]catalog_test_support.SampleEntry{
+        .{
+            .kind = @intFromEnum(pcc.tool_catalog.EntryKind.agent),
+            .name = "assistant",
+            .path = "/agent",
+            .description = "Answer questions.",
+            .max_input_bytes = 8192,
+            .agent = .{ .tools = &names },
+        },
+        .{ .name = "lookup", .path = "/tools/lookup", .input_schema = closed_test_schema, .output_schema = closed_test_schema },
+    };
+    var buf: [2048]u8 = undefined;
+    var catalog = try lowerAcceptedCatalog(std.testing.allocator, testCatalog(&buf, &entries));
+    defer catalog.deinit();
+
+    try std.testing.expectEqual(@as(usize, 2), catalog.entries.len);
+    const agent = switch (catalog.entries[0].kind) {
+        .agent => |value| value,
+        .tool => return error.TestExpectedAgent,
+    };
+    try std.testing.expectEqualStrings("assistant", agent.name);
+    try std.testing.expectEqualStrings("lookup", agent.tools[0]);
+    try std.testing.expectEqualStrings("https://api.example.com:443", agent.provider_endpoint);
+    try std.testing.expectEqual(@as(u32, 4), agent.limits.rounds);
+    try std.testing.expect(catalog.find("assistant") == null);
+    try std.testing.expect(catalog.match("POST", "/agent") == null);
+    try std.testing.expect(catalog.match("POST", "/tools/lookup") != null);
+}
+
+test "producer agent lowering preserves its reachable exports" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { sha256 } from "zttp:crypto";
+        \\import { toolCatalog } from "zttp:tool";
+        \\import { routerMatch } from "zttp:router";
+        \\import { schemaCompile } from "zttp:validate";
+        \\schemaCompile("In", "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{}}");
+        \\schemaCompile("Out", "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{}}");
+        \\function lookup(req) { return Response.json({}); }
+        \\function assistant(req) { return Response.json({ digest: sha256("x") }); }
+        \\const routes = { "POST /tools/lookup": lookup, "POST /agent": assistant };
+        \\toolCatalog({
+        \\  lookup: { route: "POST /tools/lookup", description: "Look up one value.", input: "In", output: "Out", maxInputBytes: 4096 },
+        \\  assistant: {
+        \\    route: "POST /agent",
+        \\    description: "Answer questions.",
+        \\    maxInputBytes: 8192,
+        \\    agent: {
+        \\      tools: ["lookup"],
+        \\      provider: { endpoint: "https://api.example.com", credential: "provider" },
+        \\      limits: { rounds: 4, toolCalls: 8, toolCallsPerRound: 4, argumentBytes: 4096, resultBytes: 16384, turnDeadlineMs: 20000 }
+        \\    }
+        \\  }
+        \\});
+        \\function handler(req) {
+        \\  const found = routerMatch(routes, req);
+        \\  if (found !== undefined) return found.handler(req);
+        \\  return Response.json({}, { status: 404 });
+        \\}
+    ;
+    var contract = try zq.pipeline.extractContract(allocator, source, "agent.ts", .{
+        .strict = false,
+        .version = "test",
+    });
+    defer contract.deinit(allocator);
+
+    var built_agent: ?*const zq.handler_contract.ToolEntry = null;
+    for (contract.tools.items) |*entry| {
+        if (!std.mem.eql(u8, entry.name, "assistant")) continue;
+        if (entry.agent == null) return error.TestExpectedAgent;
+        built_agent = entry;
+    }
+    const built = built_agent orelse return error.TestExpectedAgent;
+    try std.testing.expect(built.reachable_exports.items.len > 0);
+    var catalog = (try lowerProducerToolCatalog(allocator, contract.tools.items)) orelse
+        return error.TestExpectedCatalog;
+    defer catalog.deinit();
+
+    var lowered: ?*const AcceptedAgent = null;
+    for (catalog.entries) |*entry| {
+        if (!std.mem.eql(u8, entry.name, built.name)) continue;
+        lowered = switch (entry.kind) {
+            .agent => |*agent| agent,
+            .tool => return error.TestExpectedAgent,
+        };
+    }
+    const agent = lowered orelse return error.TestExpectedAgent;
+    try std.testing.expectEqual(built.reachable_exports.items.len, agent.exports.len);
+    for (built.reachable_exports.items, agent.exports) |expected, actual| {
+        try std.testing.expectEqualStrings(expected.module, actual.module);
+        try std.testing.expectEqualStrings(expected.name, actual.name);
+    }
+    try std.testing.expect(agent.allowsExport("zttp:crypto", "sha256"));
+    try std.testing.expect(!agent.allowsExport("zttp:text", "slugify"));
+}
+
+test "agent catalog cross-check compares every agent field" {
+    const names = [_][]const u8{"lookup"};
+    const credentials = [_][]const u8{"provider"};
+    const entries = [_]catalog_test_support.SampleEntry{
+        .{
+            .kind = @intFromEnum(pcc.tool_catalog.EntryKind.agent),
+            .name = "assistant",
+            .path = "/agent",
+            .description = "Answer questions.",
+            .max_input_bytes = 8192,
+            .agent = .{ .tools = &names },
+        },
+        .{ .name = "lookup", .path = "/tools/lookup", .input_schema = closed_test_schema, .output_schema = closed_test_schema },
+    };
+    var buf: [2048]u8 = undefined;
+    var catalog = try lowerAcceptedCatalog(std.testing.allocator, testCatalog(&buf, &entries));
+    defer catalog.deinit();
+
+    const limits = zq.handler_contract.AgentLimits{
+        .rounds = 4,
+        .tool_calls = 8,
+        .tool_calls_per_round = 4,
+        .argument_bytes = 4096,
+        .result_bytes = 16384,
+        .turn_deadline_ms = 20000,
+    };
+    const good_agent = AgentSummary{
+        .tools = &names,
+        .provider_endpoint = "https://api.example.com:443",
+        .provider_credential = "provider",
+        .limits = limits,
+    };
+    const lookup = ToolSummary{ .name = "lookup", .method = "POST", .path = "/tools/lookup", .max_input_bytes = 4096 };
+    const good = ToolSummary{
+        .name = "assistant",
+        .method = "POST",
+        .path = "/agent",
+        .description = "Answer questions.",
+        .max_input_bytes = 8192,
+        .credentials = &credentials,
+        .agent = good_agent,
+    };
+    try crossCheckToolCatalog(&catalog, &.{ good, lookup });
+
+    var cases: [11]ToolSummary = undefined;
+    for (&cases) |*case| case.* = good;
+    cases[0].description = "Changed.";
+    var changed_agent = good_agent;
+    changed_agent.tools = &.{"other"};
+    cases[1].agent = changed_agent;
+    changed_agent = good_agent;
+    changed_agent.provider_endpoint = "https://other.example:443";
+    cases[2].agent = changed_agent;
+    changed_agent = good_agent;
+    changed_agent.provider_credential = "other";
+    cases[3].agent = changed_agent;
+    cases[4].credentials = &.{"other"};
+    changed_agent = good_agent;
+    changed_agent.limits.rounds += 1;
+    cases[5].agent = changed_agent;
+    changed_agent = good_agent;
+    changed_agent.limits.tool_calls += 1;
+    cases[6].agent = changed_agent;
+    changed_agent = good_agent;
+    changed_agent.limits.tool_calls_per_round += 1;
+    cases[7].agent = changed_agent;
+    changed_agent = good_agent;
+    changed_agent.limits.argument_bytes += 1;
+    cases[8].agent = changed_agent;
+    changed_agent = good_agent;
+    changed_agent.limits.result_bytes += 1;
+    cases[9].agent = changed_agent;
+    changed_agent = good_agent;
+    changed_agent.limits.turn_deadline_ms += 1;
+    cases[10].agent = changed_agent;
+    for (cases) |changed| {
+        try std.testing.expectError(error.ToolCatalogContractMismatch, crossCheckToolCatalog(&catalog, &.{ changed, lookup }));
+    }
+
+    var wrong_kind = lookup;
+    wrong_kind.name = "assistant";
+    wrong_kind.path = "/agent";
+    wrong_kind.max_input_bytes = 8192;
+    try std.testing.expectError(error.ToolCatalogContractMismatch, crossCheckToolCatalog(&catalog, &.{ wrong_kind, lookup }));
 }
 
 test "promotion refuses a contract tool list that disagrees with the accepted catalog" {

@@ -316,7 +316,7 @@
     "certificate_schema": 4,
     "proof_system": 3,
     "semantics_epoch": 1,
-    "handler_contract_version": 22,
+    "handler_contract_version": 23,
     "agent_protocol_schema": 2,
     "policy_hash": "6ae21f9cbdf8240b130c77e7b258cb149dcae7890cdfc047d1ee01849d146f3a",
     "module_registry_hash": "e56627d1bafd5720330d4c28861ad3664df9529431e1f2d615717bf0b00db8bd"

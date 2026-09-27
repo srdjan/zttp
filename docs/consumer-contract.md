@@ -442,9 +442,11 @@ the entry binds no input field to that identity.
 
 ```text
 magic            8 bytes  "ZTCAT1\0\0"
-schema           u16      3
+schema           u16      4
 entry_count      u16      1..64
 entry, entry_count times, strictly increasing by name bytes:
+  kind             u8      0 (tool) or 1 (agent)
+tool entry (kind 0):
   name             string  1..64 bytes
   method           string  1..16 bytes, uppercase ASCII A-Z
   path             string  1..512 bytes, starts with "/"
@@ -463,6 +465,27 @@ entry, entry_count times, strictly increasing by name bytes:
   credential_count u16     0..64
   credential, credential_count times, strictly increasing by bytes:
     name             string  1..64 bytes: a credential the tool may use
+agent entry (kind 1):
+  name             string  1..64 bytes
+  method           string  1..16 bytes, uppercase ASCII A-Z
+  path             string  1..512 bytes, starts with "/"
+  description      string  1..4096 bytes
+  max_input_bytes  u32     1..1048576: the prompt byte bound
+  export_count     u16     0..256
+  export, export_count times, strictly increasing by (module, name):
+    module           string  1..64 bytes
+    name             string  1..64 bytes
+  tool_count       u16     1..64
+  tool_name, tool_count times, strictly increasing by bytes:
+    name             string  1..64 bytes: names a tool entry in this catalog
+  provider_endpoint   string  1..512 bytes, normalized scheme://host:port
+  provider_credential string  1..64 bytes
+  rounds              u32     1..64
+  tool_calls          u32     1..256
+  tool_calls_per_round u32     1..tool_calls
+  argument_bytes      u32     1..1048576
+  result_bytes        u32     1..1048576
+  turn_deadline_ms    u32     1..600000
 trailing bytes: refused
 ```
 
@@ -470,7 +493,12 @@ Strict increase refuses a duplicate name, a duplicate export, and a duplicate cr
 No two entries share a (method, path) route. Schema 2 added the scope fields, which carry
 the entry's `scope` binding (M4 T5). Schema 3 added the credential names, which are the
 tool's credential grant (M4 T6): the literal `credential` names its route passes to
-`fetch`. The kernel accepts schema 3 only and checks each name's length, encoding, and
+`fetch`. Schema 4 adds the entry kind byte and agent entries (M5 A1 U1). An agent
+entry carries its export grant, tool names, provider endpoint, provider credential, and
+six limits. The runtime takes its export grant from these accepted bytes. It has no
+schema strings or scope. Its tool names must name tool entries,
+and cannot name an agent entry. The kernel accepts schema 4 only and refuses schemas
+1, 2, and 3. It checks each name's length, encoding, and
 order; that each names a reference in zttp.json at the endpoint its call reaches is a build
 rule. The build admits a scope field only when
 it names a required top-level string property of the input schema; the kernel checks its
@@ -492,7 +520,10 @@ requires exactly one `tool_catalog` graph member with ordinal 0 carrying it
 (`packages/proof-checker/src/tool_catalog.zig`). The kernel does not check that a schema is
 inside the closed tool schema subset, because that needs an allocating parser; the runtime
 compiles every schema from the accepted bytes and refuses to start when one does not
-compile.
+compile. Agent entries have no compiled schemas. Contract version 23 carries the
+agent member and its reachable exports; schema 4 carries the agent fields listed
+above. Agent routes are excluded from tool-route matching in U1. U3 adds their
+request admission.
 
 ### 4.7 Canonical declaration form (P4)
 
@@ -621,7 +652,7 @@ Pinned identities, each compared by equality:
 | Certificate schema | 4 | `packages/proof-checker/src/proof_system.zig` |
 | Proof system | `zttp_pcc_v3` = 3 | `packages/proof-checker/src/proof_system.zig` |
 | Semantics epoch | 1 | `packages/proof-checker/src/proof_system.zig` |
-| Handler contract version | 22 | `packages/zts/src/contract_types.zig` |
+| Handler contract version | 23 | `packages/zts/src/contract_types.zig` |
 | Agent protocol schema | 2 | [Agent Protocol v2](internals/agent-protocol-v2.md) |
 
 ### 6.1 The vocabulary envelope

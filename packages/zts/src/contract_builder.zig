@@ -1481,15 +1481,16 @@ pub const ContractBuilder = struct {
     // Phase 4f: Tool catalog (M4 T2, ZTS513)
     // -----------------------------------------------------------------
 
-    /// The five required fields first, then the optional `scope` (M4 T5).
-    const catalog_fields = [_][]const u8{ "route", "description", "input", "output", "maxInputBytes", "scope" };
-    const required_catalog_fields = 5;
+    /// Common entry fields, the tool-only schema and scope fields, and the
+    /// agent-only field.
+    const catalog_fields = [_][]const u8{ "route", "description", "input", "output", "maxInputBytes", "scope", "agent" };
     const field_route = 0;
     const field_description = 1;
     const field_input = 2;
     const field_output = 3;
     const field_max_input_bytes = 4;
     const field_scope = 5;
+    const field_agent = 6;
 
     /// Read the `toolCatalog` literal against the build rules of the T2 design
     /// note, section 5. On any refusal the catalog contributes no entry.
@@ -1528,6 +1529,10 @@ pub const ContractBuilder = struct {
             try self.readToolEntry(contract, &state, name, prop_idx, prop.value);
         }
 
+        if (contract.spec_diagnostics.items.len == diagnostics_before) {
+            try self.validateAgentToolNames(contract, &state);
+        }
+
         // Rule 8: a tool handler is tool-only. Checked only for a catalog with
         // no other refusal: an entry refused for another reason claims no route,
         // and reporting its route as untooled as well would be a cascade, not a
@@ -1559,6 +1564,7 @@ pub const ContractBuilder = struct {
         names: std.ArrayList([]const u8) = .empty,
         /// Indices into `route_functions`.
         claimed_routes: std.ArrayList(usize) = .empty,
+        agent_count: usize = 0,
 
         fn deinit(state: *CatalogState, allocator: std.mem.Allocator) void {
             for (state.entries.items) |*entry| entry.deinit(allocator);
@@ -1620,19 +1626,31 @@ pub const ContractBuilder = struct {
             }
             fields[slot] = field.value;
         }
-        for (fields[0..required_catalog_fields], catalog_fields[0..required_catalog_fields]) |field, field_name| {
+        const required_common = [_]usize{ field_route, field_description, field_max_input_bytes };
+        for (required_common) |slot| {
+            const field = fields[slot];
             if (field != null_node) continue;
-            try self.refuseToolCatalog(contract, .entry_field_missing, name, entry_node, field_name);
+            try self.refuseToolCatalog(contract, .entry_field_missing, name, entry_node, catalog_fields[slot]);
+            readable = false;
+        }
+        const has_input = fields[field_input] != null_node;
+        const has_output = fields[field_output] != null_node;
+        const has_agent = fields[field_agent] != null_node;
+        const is_tool = has_input and has_output and !has_agent;
+        const is_agent = has_agent and !has_input and !has_output;
+        if (!is_tool and !is_agent) {
+            try self.refuseToolCatalog(contract, .entry_kind_invalid, name, entry_node, null);
+            readable = false;
+        }
+        if (is_agent and fields[field_scope] != null_node) {
+            try self.refuseToolCatalog(contract, .agent_scope_forbidden, name, fields[field_scope], null);
             readable = false;
         }
         if (!readable) return;
 
         const route_key = (try self.catalogString(contract, name, fields[field_route], "route")) orelse return;
         const description = (try self.catalogString(contract, name, fields[field_description], "description")) orelse return;
-        const input_name = (try self.catalogString(contract, name, fields[field_input], "input")) orelse return;
-        const output_name = (try self.catalogString(contract, name, fields[field_output], "output")) orelse return;
         if (description.len == 0) return self.refuseToolCatalog(contract, .entry_not_literal, name, fields[field_description], "description is empty");
-        const scope = (try self.readToolScope(contract, name, fields[field_scope])) orelse return;
 
         const max_input_bytes = self.getLiteralNumber(fields[field_max_input_bytes]) orelse
             return self.refuseToolCatalog(contract, .max_input_bytes_invalid, name, fields[field_max_input_bytes], null);
@@ -1650,6 +1668,16 @@ pub const ContractBuilder = struct {
         }
         try state.claimed_routes.append(self.allocator, route_index);
 
+        if (is_agent) {
+            if (state.agent_count != 0) {
+                return self.refuseToolCatalog(contract, .agent_repeated, name, fields[field_agent], null);
+            }
+            return self.readAgentEntry(contract, state, name, route_key, description, @intCast(max_input_bytes), route_index, fields[field_agent]);
+        }
+
+        const input_name = (try self.catalogString(contract, name, fields[field_input], "input")) orelse return;
+        const output_name = (try self.catalogString(contract, name, fields[field_output], "output")) orelse return;
+        const scope = (try self.readToolScope(contract, name, fields[field_scope])) orelse return;
         const input_json = try self.catalogSchema(contract, name, fields[field_input], input_name);
         const output_json = try self.catalogSchema(contract, name, fields[field_output], output_name);
         const input_schema = input_json orelse return;
@@ -1703,6 +1731,357 @@ pub const ContractBuilder = struct {
         entry.credentials = walk.credentials;
         walk.credentials = .empty;
         try state.entries.append(self.allocator, entry);
+    }
+
+    const agent_fields = [_][]const u8{ "tools", "provider", "limits" };
+    const agent_provider_fields = [_][]const u8{ "endpoint", "credential" };
+    const agent_limit_fields = [_][]const u8{
+        "rounds",
+        "toolCalls",
+        "toolCallsPerRound",
+        "argumentBytes",
+        "resultBytes",
+        "turnDeadlineMs",
+    };
+
+    fn readAgentEntry(
+        self: *ContractBuilder,
+        contract: *HandlerContract,
+        state: *CatalogState,
+        name: []const u8,
+        route_key: []const u8,
+        description: []const u8,
+        max_input_bytes: u32,
+        route_index: usize,
+        agent_node: NodeIndex,
+    ) !void {
+        const obj_node = self.resolveObjectLiteralNode(agent_node) orelse
+            return self.refuseToolCatalog(contract, .agent_not_literal, name, agent_node, null);
+        const obj = self.ir_view.getObject(obj_node) orelse
+            return self.refuseToolCatalog(contract, .agent_not_literal, name, agent_node, null);
+        var fields = [_]NodeIndex{null_node} ** agent_fields.len;
+        var readable = true;
+        var i: u16 = 0;
+        while (i < obj.properties_count) : (i += 1) {
+            const prop_idx = self.ir_view.getListIndex(obj.properties_start, i);
+            const prop = self.literalProperty(prop_idx) orelse {
+                try self.refuseToolCatalog(contract, .agent_not_literal, name, prop_idx, null);
+                readable = false;
+                continue;
+            };
+            const key = self.getObjectPropertyKey(prop.key) orelse {
+                try self.refuseToolCatalog(contract, .agent_not_literal, name, prop_idx, null);
+                readable = false;
+                continue;
+            };
+            const slot = for (agent_fields, 0..) |known, index| {
+                if (std.mem.eql(u8, known, key)) break index;
+            } else {
+                try self.refuseToolCatalog(contract, .agent_field_unknown, name, prop_idx, key);
+                readable = false;
+                continue;
+            };
+            if (fields[slot] != null_node) {
+                try self.refuseToolCatalog(contract, .agent_field_repeated, name, prop_idx, key);
+                readable = false;
+                continue;
+            }
+            fields[slot] = prop.value;
+        }
+        for (fields, agent_fields) |field, field_name| {
+            if (field != null_node) continue;
+            try self.refuseToolCatalog(contract, .agent_field_missing, name, obj_node, field_name);
+            readable = false;
+        }
+        if (!readable) return;
+
+        var tools = (try self.readAgentTools(contract, name, fields[0])) orelse return;
+        defer {
+            for (tools.items) |tool| self.allocator.free(tool);
+            tools.deinit(self.allocator);
+        }
+        var provider = (try self.readAgentProvider(contract, name, fields[1])) orelse return;
+        defer provider.deinit(self.allocator);
+        const limits = (try self.readAgentLimits(contract, name, fields[2])) orelse return;
+
+        const fn_node = self.route_functions.items[route_index].fn_node orelse
+            return self.refuseToolCatalog(contract, .route_table_dynamic, name, agent_node, route_key);
+        var walk = try self.collectToolExports(fn_node, "");
+        defer walk.deinit(self.allocator);
+        if (walk.incomplete) {
+            return self.refuseToolCatalog(contract, .exports_unanalyzable, name, agent_node, route_key);
+        }
+
+        var entry = contract_types.ToolEntry{
+            .name = &.{},
+            .route = &.{},
+            .description = &.{},
+            .input_schema_name = &.{},
+            .input_schema_json = &.{},
+            .output_schema_name = &.{},
+            .output_schema_json = &.{},
+            .max_input_bytes = max_input_bytes,
+        };
+        errdefer entry.deinit(self.allocator);
+        entry.name = try self.allocator.dupe(u8, name);
+        entry.route = try self.allocator.dupe(u8, route_key);
+        entry.description = try self.allocator.dupe(u8, description);
+        entry.input_schema_name = try self.allocator.dupe(u8, "");
+        entry.input_schema_json = try self.allocator.dupe(u8, "");
+        entry.output_schema_name = try self.allocator.dupe(u8, "");
+        entry.output_schema_json = try self.allocator.dupe(u8, "");
+        entry.reachable_exports = walk.exports;
+        walk.exports = .empty;
+
+        try entry.credentials.append(self.allocator, .{ .name = &.{}, .endpoint = &.{} });
+        entry.credentials.items[0].name = try self.allocator.dupe(u8, provider.credential);
+        entry.credentials.items[0].endpoint = try self.allocator.dupe(u8, provider.endpoint);
+        entry.agent = .{
+            .tools = tools,
+            .provider_endpoint = provider.endpoint,
+            .provider_credential = provider.credential,
+            .limits = limits,
+        };
+        tools = .empty;
+        provider = .{};
+        try state.entries.append(self.allocator, entry);
+        state.agent_count += 1;
+    }
+
+    fn readAgentTools(
+        self: *ContractBuilder,
+        contract: *HandlerContract,
+        name: []const u8,
+        node: NodeIndex,
+    ) !?std.ArrayList([]const u8) {
+        if (self.ir_view.getTag(node) != .array_literal) {
+            try self.refuseToolCatalog(contract, .agent_tools_not_literal, name, node, null);
+            return null;
+        }
+        const array = self.ir_view.getArray(node) orelse {
+            try self.refuseToolCatalog(contract, .agent_tools_not_literal, name, node, null);
+            return null;
+        };
+        if (array.elements_count == 0) {
+            try self.refuseToolCatalog(contract, .agent_tools_not_literal, name, node, "tools is empty");
+            return null;
+        }
+        var tools: std.ArrayList([]const u8) = .empty;
+        defer {
+            for (tools.items) |tool| self.allocator.free(tool);
+            tools.deinit(self.allocator);
+        }
+        for (0..array.elements_count) |index| {
+            const item_node = self.ir_view.getListIndex(array.elements_start, @intCast(index));
+            const tool_name = self.getLiteralString(item_node) orelse {
+                try self.refuseToolCatalog(contract, .agent_tools_not_literal, name, item_node, null);
+                return null;
+            };
+            if (tool_name.len == 0) {
+                try self.refuseToolCatalog(contract, .agent_tools_not_literal, name, item_node, "tool name is empty");
+                return null;
+            }
+            if (json_utils.containsString(tools.items, tool_name)) {
+                try self.refuseToolCatalog(contract, .agent_tool_duplicate, name, item_node, tool_name);
+                return null;
+            }
+            try tools.append(self.allocator, &.{});
+            tools.items[tools.items.len - 1] = try self.allocator.dupe(u8, tool_name);
+        }
+        std.mem.sort([]const u8, tools.items, {}, struct {
+            fn lessThan(_: void, lhs: []const u8, rhs: []const u8) bool {
+                return std.mem.lessThan(u8, lhs, rhs);
+            }
+        }.lessThan);
+        const result = tools;
+        tools = .empty;
+        return result;
+    }
+
+    const AgentProvider = struct {
+        endpoint: []const u8 = &.{},
+        credential: []const u8 = &.{},
+
+        fn deinit(self: *AgentProvider, allocator: std.mem.Allocator) void {
+            allocator.free(self.endpoint);
+            allocator.free(self.credential);
+        }
+    };
+
+    fn readAgentProvider(
+        self: *ContractBuilder,
+        contract: *HandlerContract,
+        name: []const u8,
+        node: NodeIndex,
+    ) !?AgentProvider {
+        const obj_node = self.resolveObjectLiteralNode(node) orelse {
+            try self.refuseToolCatalog(contract, .agent_provider_not_literal, name, node, null);
+            return null;
+        };
+        const obj = self.ir_view.getObject(obj_node) orelse {
+            try self.refuseToolCatalog(contract, .agent_provider_not_literal, name, node, null);
+            return null;
+        };
+        var fields = [_]NodeIndex{null_node} ** agent_provider_fields.len;
+        var readable = true;
+        var i: u16 = 0;
+        while (i < obj.properties_count) : (i += 1) {
+            const prop_idx = self.ir_view.getListIndex(obj.properties_start, i);
+            const prop = self.literalProperty(prop_idx) orelse {
+                try self.refuseToolCatalog(contract, .agent_provider_not_literal, name, prop_idx, null);
+                readable = false;
+                continue;
+            };
+            const key = self.getObjectPropertyKey(prop.key) orelse {
+                try self.refuseToolCatalog(contract, .agent_provider_not_literal, name, prop_idx, null);
+                readable = false;
+                continue;
+            };
+            const slot = for (agent_provider_fields, 0..) |known, index| {
+                if (std.mem.eql(u8, known, key)) break index;
+            } else {
+                try self.refuseToolCatalog(contract, .agent_provider_field_unknown, name, prop_idx, key);
+                readable = false;
+                continue;
+            };
+            if (fields[slot] != null_node) {
+                try self.refuseToolCatalog(contract, .agent_provider_field_repeated, name, prop_idx, key);
+                readable = false;
+                continue;
+            }
+            fields[slot] = prop.value;
+        }
+        for (fields, agent_provider_fields) |field, field_name| {
+            if (field != null_node) continue;
+            try self.refuseToolCatalog(contract, .agent_provider_field_missing, name, obj_node, field_name);
+            readable = false;
+        }
+        if (!readable) return null;
+        const raw_endpoint = self.getLiteralString(fields[0]) orelse {
+            try self.refuseToolCatalog(contract, .agent_provider_value_invalid, name, fields[0], "endpoint");
+            return null;
+        };
+        const credential = self.getLiteralString(fields[1]) orelse {
+            try self.refuseToolCatalog(contract, .agent_provider_value_invalid, name, fields[1], "credential");
+            return null;
+        };
+        if (raw_endpoint.len == 0 or credential.len == 0) {
+            try self.refuseToolCatalog(contract, .agent_provider_value_invalid, name, node, null);
+            return null;
+        }
+        var endpoint_buf: [endpoint.max_endpoint_bytes]u8 = undefined;
+        const canonical = endpoint.normalize(raw_endpoint, &endpoint_buf) catch {
+            try self.refuseToolCatalog(contract, .agent_provider_endpoint_invalid, name, fields[0], raw_endpoint);
+            return null;
+        };
+        const owned_endpoint = try self.allocator.dupe(u8, canonical);
+        errdefer self.allocator.free(owned_endpoint);
+        return .{
+            .endpoint = owned_endpoint,
+            .credential = try self.allocator.dupe(u8, credential),
+        };
+    }
+
+    fn readAgentLimits(
+        self: *ContractBuilder,
+        contract: *HandlerContract,
+        name: []const u8,
+        node: NodeIndex,
+    ) !?contract_types.AgentLimits {
+        const obj_node = self.resolveObjectLiteralNode(node) orelse {
+            try self.refuseToolCatalog(contract, .agent_limits_not_literal, name, node, null);
+            return null;
+        };
+        const obj = self.ir_view.getObject(obj_node) orelse {
+            try self.refuseToolCatalog(contract, .agent_limits_not_literal, name, node, null);
+            return null;
+        };
+        var fields = [_]NodeIndex{null_node} ** agent_limit_fields.len;
+        var readable = true;
+        var i: u16 = 0;
+        while (i < obj.properties_count) : (i += 1) {
+            const prop_idx = self.ir_view.getListIndex(obj.properties_start, i);
+            const prop = self.literalProperty(prop_idx) orelse {
+                try self.refuseToolCatalog(contract, .agent_limits_not_literal, name, prop_idx, null);
+                readable = false;
+                continue;
+            };
+            const key = self.getObjectPropertyKey(prop.key) orelse {
+                try self.refuseToolCatalog(contract, .agent_limits_not_literal, name, prop_idx, null);
+                readable = false;
+                continue;
+            };
+            const slot = for (agent_limit_fields, 0..) |known, index| {
+                if (std.mem.eql(u8, known, key)) break index;
+            } else {
+                try self.refuseToolCatalog(contract, .agent_limit_field_unknown, name, prop_idx, key);
+                readable = false;
+                continue;
+            };
+            if (fields[slot] != null_node) {
+                try self.refuseToolCatalog(contract, .agent_limit_field_repeated, name, prop_idx, key);
+                readable = false;
+                continue;
+            }
+            fields[slot] = prop.value;
+        }
+        for (fields, agent_limit_fields) |field, field_name| {
+            if (field != null_node) continue;
+            try self.refuseToolCatalog(contract, .agent_limit_field_missing, name, obj_node, field_name);
+            readable = false;
+        }
+        if (!readable) return null;
+
+        const maxima = [_]u32{
+            contract_types.max_agent_rounds,
+            contract_types.max_agent_tool_calls,
+            contract_types.max_agent_tool_calls,
+            contract_types.max_agent_argument_bytes,
+            contract_types.max_agent_result_bytes,
+            contract_types.max_agent_turn_deadline_ms,
+        };
+        var values: [agent_limit_fields.len]u32 = undefined;
+        for (fields, maxima, 0..) |field, maximum, index| {
+            const value = self.getLiteralNumber(field) orelse {
+                try self.refuseToolCatalog(contract, .agent_limit_invalid, name, field, agent_limit_fields[index]);
+                return null;
+            };
+            if (value <= 0 or value > maximum) {
+                try self.refuseToolCatalog(contract, .agent_limit_invalid, name, field, agent_limit_fields[index]);
+                return null;
+            }
+            values[index] = @intCast(value);
+        }
+        if (values[2] > values[1]) {
+            try self.refuseToolCatalog(contract, .agent_tool_calls_per_round_invalid, name, fields[2], null);
+            return null;
+        }
+        return .{
+            .rounds = values[0],
+            .tool_calls = values[1],
+            .tool_calls_per_round = values[2],
+            .argument_bytes = values[3],
+            .result_bytes = values[4],
+            .turn_deadline_ms = values[5],
+        };
+    }
+
+    fn validateAgentToolNames(self: *ContractBuilder, contract: *HandlerContract, state: *const CatalogState) !void {
+        for (state.entries.items) |entry| {
+            const agent = entry.agent orelse continue;
+            for (agent.tools.items) |tool_name| {
+                const target = for (state.entries.items) |candidate| {
+                    if (std.mem.eql(u8, candidate.name, tool_name)) break candidate;
+                } else {
+                    try self.refuseToolCatalog(contract, .agent_tool_unknown, entry.name, 0, tool_name);
+                    return;
+                };
+                if (target.agent != null) {
+                    try self.refuseToolCatalog(contract, .agent_tool_is_agent, entry.name, 0, tool_name);
+                    return;
+                }
+            }
+        }
     }
 
     /// A string-literal catalog field, or null after refusing it.
@@ -6631,9 +7010,48 @@ fn toolCatalogOf(comptime entries: []const u8) []const u8 {
     return "toolCatalog({ " ++ entries ++ " });";
 }
 
+const agent_test_limits =
+    "{ rounds: 4, toolCalls: 8, toolCallsPerRound: 4, argumentBytes: 4096, resultBytes: 16384, turnDeadlineMs: 20000 }";
+const agent_test_provider =
+    "{ endpoint: \"https://api.deepseek.com/chat/completions\", credential: \"provider\" }";
+const agent_test_value =
+    "{ tools: [\"ta\"], provider: " ++ agent_test_provider ++ ", limits: " ++ agent_test_limits ++ " }";
+
+fn agentEntry(comptime name: []const u8, comptime route: []const u8, comptime agent_value: []const u8) []const u8 {
+    return name ++ ": { route: \"" ++ route ++ "\", description: \"agent\", maxInputBytes: 8192, agent: " ++ agent_value ++ " }";
+}
+
+fn agentSource(comptime agent_value: []const u8) []const u8 {
+    return toolSource(
+        "function assistant(req) { return Response.json({}); }",
+        "\"POST /a\": a, \"POST /agent\": assistant",
+        toolCatalogOf(tool_test_entry ++ ", " ++ agentEntry("assistant", "POST /agent", agent_value)),
+    );
+}
+
+fn agentLimitSource(
+    comptime rounds: []const u8,
+    comptime tool_calls: []const u8,
+    comptime per_round: []const u8,
+    comptime argument_bytes: []const u8,
+    comptime result_bytes: []const u8,
+    comptime deadline_ms: []const u8,
+) []const u8 {
+    return agentSource(
+        "{ tools: [\"ta\"], provider: " ++ agent_test_provider ++ ", limits: { rounds: " ++ rounds ++
+            ", toolCalls: " ++ tool_calls ++
+            ", toolCallsPerRound: " ++ per_round ++
+            ", argumentBytes: " ++ argument_bytes ++
+            ", resultBytes: " ++ result_bytes ++
+            ", turnDeadlineMs: " ++ deadline_ms ++ " } }",
+    );
+}
+
 const ToolRefusalCase = struct {
     reason: contract_types.ToolCatalogRefusal,
     source: []const u8,
+    /// Project credential references for late agent-credential refusals.
+    refs: ?[]const u8 = null,
 };
 
 const tool_refusal_cases = [_]ToolRefusalCase{
@@ -6645,6 +7063,31 @@ const tool_refusal_cases = [_]ToolRefusalCase{
     .{ .reason = .entry_field_missing, .source = toolSource("", "\"POST /a\": a", toolCatalogOf("ta: { route: \"POST /a\", description: \"d\", input: \"In\", output: \"Out\" }")) },
     .{ .reason = .entry_field_unknown, .source = toolSource("", "\"POST /a\": a", toolCatalogOf("ta: { route: \"POST /a\", description: \"d\", input: \"In\", output: \"Out\", maxInputBytes: 64, tags: \"all\" }")) },
     .{ .reason = .entry_field_repeated, .source = toolSource("", "\"POST /a\": a", toolCatalogOf("ta: { route: \"POST /a\", route: \"POST /a\", description: \"d\", input: \"In\", output: \"Out\", maxInputBytes: 64 }")) },
+    .{ .reason = .entry_kind_invalid, .source = toolSource("", "\"POST /a\": a", toolCatalogOf("ta: { route: \"POST /a\", description: \"d\", input: \"In\", output: \"Out\", maxInputBytes: 64, agent: " ++ agent_test_value ++ " }")) },
+    .{ .reason = .agent_scope_forbidden, .source = toolSource("function assistant(req) { return Response.json({}); }", "\"POST /a\": a, \"POST /agent\": assistant", toolCatalogOf(tool_test_entry ++ ", assistant: { route: \"POST /agent\", description: \"agent\", maxInputBytes: 64, scope: { tenant: \"id\" }, agent: " ++ agent_test_value ++ " }")) },
+    .{ .reason = .agent_not_literal, .source = agentSource("7") },
+    .{ .reason = .agent_field_missing, .source = agentSource("{ tools: [\"ta\"], provider: " ++ agent_test_provider ++ " }") },
+    .{ .reason = .agent_field_unknown, .source = agentSource("{ tools: [\"ta\"], provider: " ++ agent_test_provider ++ ", limits: " ++ agent_test_limits ++ ", model: \"x\" }") },
+    .{ .reason = .agent_field_repeated, .source = agentSource("{ tools: [\"ta\"], tools: [\"ta\"], provider: " ++ agent_test_provider ++ ", limits: " ++ agent_test_limits ++ " }") },
+    .{ .reason = .agent_tools_not_literal, .source = agentSource("{ tools: [], provider: " ++ agent_test_provider ++ ", limits: " ++ agent_test_limits ++ " }") },
+    .{ .reason = .agent_tools_not_literal, .source = agentSource("{ tools: [toolName], provider: " ++ agent_test_provider ++ ", limits: " ++ agent_test_limits ++ " }") },
+    .{ .reason = .agent_tool_duplicate, .source = agentSource("{ tools: [\"ta\", \"ta\"], provider: " ++ agent_test_provider ++ ", limits: " ++ agent_test_limits ++ " }") },
+    .{ .reason = .agent_tool_unknown, .source = agentSource("{ tools: [\"missing\"], provider: " ++ agent_test_provider ++ ", limits: " ++ agent_test_limits ++ " }") },
+    .{ .reason = .agent_tool_is_agent, .source = agentSource("{ tools: [\"assistant\"], provider: " ++ agent_test_provider ++ ", limits: " ++ agent_test_limits ++ " }") },
+    .{ .reason = .agent_provider_not_literal, .source = agentSource("{ tools: [\"ta\"], provider: 7, limits: " ++ agent_test_limits ++ " }") },
+    .{ .reason = .agent_provider_field_missing, .source = agentSource("{ tools: [\"ta\"], provider: { endpoint: \"https://api.deepseek.com\" }, limits: " ++ agent_test_limits ++ " }") },
+    .{ .reason = .agent_provider_field_unknown, .source = agentSource("{ tools: [\"ta\"], provider: { endpoint: \"https://api.deepseek.com\", credential: \"provider\", model: \"x\" }, limits: " ++ agent_test_limits ++ " }") },
+    .{ .reason = .agent_provider_field_repeated, .source = agentSource("{ tools: [\"ta\"], provider: { endpoint: \"https://api.deepseek.com\", endpoint: \"https://api.deepseek.com\", credential: \"provider\" }, limits: " ++ agent_test_limits ++ " }") },
+    .{ .reason = .agent_provider_endpoint_invalid, .source = agentSource("{ tools: [\"ta\"], provider: { endpoint: \"no-endpoint\", credential: \"provider\" }, limits: " ++ agent_test_limits ++ " }") },
+    .{ .reason = .agent_provider_value_invalid, .source = agentSource("{ tools: [\"ta\"], provider: { endpoint: \"https://api.deepseek.com\", credential: 7 }, limits: " ++ agent_test_limits ++ " }") },
+    .{ .reason = .agent_provider_value_invalid, .source = agentSource("{ tools: [\"ta\"], provider: { endpoint: providerUrl, credential: \"provider\" }, limits: " ++ agent_test_limits ++ " }") },
+    .{ .reason = .agent_limits_not_literal, .source = agentSource("{ tools: [\"ta\"], provider: " ++ agent_test_provider ++ ", limits: 7 }") },
+    .{ .reason = .agent_limit_field_missing, .source = agentSource("{ tools: [\"ta\"], provider: " ++ agent_test_provider ++ ", limits: { rounds: 4, toolCalls: 8, toolCallsPerRound: 4, argumentBytes: 4096, resultBytes: 16384 } }") },
+    .{ .reason = .agent_limit_field_unknown, .source = agentSource("{ tools: [\"ta\"], provider: " ++ agent_test_provider ++ ", limits: { rounds: 4, toolCalls: 8, toolCallsPerRound: 4, argumentBytes: 4096, resultBytes: 16384, turnDeadlineMs: 20000, turns: 4 } }") },
+    .{ .reason = .agent_limit_field_repeated, .source = agentSource("{ tools: [\"ta\"], provider: " ++ agent_test_provider ++ ", limits: { rounds: 4, rounds: 4, toolCalls: 8, toolCallsPerRound: 4, argumentBytes: 4096, resultBytes: 16384, turnDeadlineMs: 20000 } }") },
+    .{ .reason = .agent_limit_invalid, .source = agentSource("{ tools: [\"ta\"], provider: " ++ agent_test_provider ++ ", limits: { rounds: 0, toolCalls: 8, toolCallsPerRound: 4, argumentBytes: 4096, resultBytes: 16384, turnDeadlineMs: 20000 } }") },
+    .{ .reason = .agent_tool_calls_per_round_invalid, .source = agentSource("{ tools: [\"ta\"], provider: " ++ agent_test_provider ++ ", limits: { rounds: 4, toolCalls: 8, toolCallsPerRound: 9, argumentBytes: 4096, resultBytes: 16384, turnDeadlineMs: 20000 } }") },
+    .{ .reason = .agent_repeated, .source = toolSource("function assistant(req) { return Response.json({}); }\nfunction assistant2(req) { return Response.json({}); }", "\"POST /a\": a, \"POST /agent\": assistant, \"POST /agent2\": assistant2", toolCatalogOf(tool_test_entry ++ ", " ++ agentEntry("assistant", "POST /agent", agent_test_value) ++ ", " ++ agentEntry("assistant2", "POST /agent2", agent_test_value))) },
     .{ .reason = .duplicate_name, .source = toolSource("", "\"POST /a\": a", toolCatalogOf(tool_test_entry ++ ", " ++ tool_test_entry)) },
     .{ .reason = .duplicate_route, .source = toolSource("", "\"POST /a\": a", toolCatalogOf(tool_test_entry ++ ", tb: { route: \"POST /a\", description: \"d\", input: \"In\", output: \"Out\", maxInputBytes: 64 }")) },
     .{ .reason = .route_table_dynamic, .source = tool_test_head ++ "function makeRoutes() { return { \"POST /a\": a }; }\nconst routes = makeRoutes();\n" ++ toolCatalogOf(tool_test_entry) ++ "\n" ++ tool_test_handler },
@@ -6680,6 +7123,14 @@ const tool_refusal_cases = [_]ToolRefusalCase{
     .{ .reason = .credential_sender_unsupported, .source = fetchToolSource("function c(req) { fetch(\"https://api.example/v1\", { credential: \"w\", durable: { key: \"k\" } }); return Response.json({}); }") },
     .{ .reason = .tool_input_mismatch, .source = toolInputSource("function c(req) { const r = toolInput(\"Out\", req); return Response.json({}); }") },
     .{ .reason = .tool_input_not_literal, .source = toolInputSource("function c(req) { const r = toolInput(req.method, req); return Response.json({}); }") },
+    .{ .reason = .agent_credential_unknown, .source = agentSource(agent_test_value), .refs = "{}" },
+    .{
+        .reason = .agent_credential_endpoint_mismatch,
+        .source = agentSource(agent_test_value),
+        .refs =
+        \\{"provider": {"env": "P", "endpoint": "https://api.deepseek.com:8443", "header": "authorization", "methods": ["POST"], "paths": ["/"]}}
+        ,
+    },
 };
 
 /// A one-tool handler whose route function `c` is `route_fn`, with both
@@ -6719,6 +7170,16 @@ const tool_refusal_unreached = [_]struct { reason: contract_types.ToolCatalogRef
 fn expectToolRefusal(case: ToolRefusalCase) !void {
     var contract = try buildTestContract(case.source);
     defer contract.deinit(std.testing.allocator);
+    if (case.refs) |refs_json| {
+        for (contract.spec_diagnostics.items) |d| try std.testing.expect(d.kind != .tool_catalog_refused);
+        var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, refs_json, .{});
+        defer parsed.deinit();
+        const refs = (try contract_types.credential_ref.parseConfig(std.testing.allocator, parsed.value)).ok;
+        defer contract_types.credential_ref.freeAll(std.testing.allocator, refs);
+        const refusal = contract_types.firstCredentialRefusal(&contract, refs) orelse return error.TestExpectedRefusal;
+        try std.testing.expectEqual(case.reason, refusal.agent_reason orelse return error.TestExpectedAgentRefusal);
+        return;
+    }
     var seen = false;
     var refusals: usize = 0;
     for (contract.spec_diagnostics.items) |d| {
@@ -6740,6 +7201,44 @@ test "a tool catalog is refused for each build rule it breaks" {
     for (tool_refusal_cases) |case| try expectToolRefusal(case);
 }
 
+const agent_limit_refusal_cases = [_]ToolRefusalCase{
+    .{ .reason = .agent_limit_invalid, .source = agentLimitSource("0", "8", "4", "4096", "16384", "20000") },
+    .{ .reason = .agent_limit_invalid, .source = agentLimitSource("4", "0", "4", "4096", "16384", "20000") },
+    .{ .reason = .agent_limit_invalid, .source = agentLimitSource("4", "8", "0", "4096", "16384", "20000") },
+    .{ .reason = .agent_limit_invalid, .source = agentLimitSource("4", "8", "4", "0", "16384", "20000") },
+    .{ .reason = .agent_limit_invalid, .source = agentLimitSource("4", "8", "4", "4096", "0", "20000") },
+    .{ .reason = .agent_limit_invalid, .source = agentLimitSource("4", "8", "4", "4096", "16384", "0") },
+    .{ .reason = .agent_limit_invalid, .source = agentLimitSource("65", "8", "4", "4096", "16384", "20000") },
+    .{ .reason = .agent_limit_invalid, .source = agentLimitSource("4", "257", "4", "4096", "16384", "20000") },
+    .{ .reason = .agent_limit_invalid, .source = agentLimitSource("4", "256", "257", "4096", "16384", "20000") },
+    .{ .reason = .agent_limit_invalid, .source = agentLimitSource("4", "8", "4", "1048577", "16384", "20000") },
+    .{ .reason = .agent_limit_invalid, .source = agentLimitSource("4", "8", "4", "4096", "1048577", "20000") },
+    .{ .reason = .agent_limit_invalid, .source = agentLimitSource("4", "8", "4", "4096", "16384", "600001") },
+    .{ .reason = .agent_limit_invalid, .source = agentLimitSource("1.5", "8", "4", "4096", "16384", "20000") },
+    .{ .reason = .agent_limit_invalid, .source = agentLimitSource("4", "1.5", "1", "4096", "16384", "20000") },
+    .{ .reason = .agent_limit_invalid, .source = agentLimitSource("4", "8", "1.5", "4096", "16384", "20000") },
+    .{ .reason = .agent_limit_invalid, .source = agentLimitSource("4", "8", "4", "1.5", "16384", "20000") },
+    .{ .reason = .agent_limit_invalid, .source = agentLimitSource("4", "8", "4", "4096", "1.5", "20000") },
+    .{ .reason = .agent_limit_invalid, .source = agentLimitSource("4", "8", "4", "4096", "16384", "1.5") },
+};
+
+test "every agent limit refuses zero non-integer and values over its maximum" {
+    for (agent_limit_refusal_cases) |case| try expectToolRefusal(case);
+}
+
+test "agent limits admit every named maximum" {
+    var contract = try buildTestContract(agentLimitSource("64", "256", "256", "1048576", "1048576", "600000"));
+    defer contract.deinit(std.testing.allocator);
+    for (contract.spec_diagnostics.items) |d| try std.testing.expect(d.kind != .tool_catalog_refused);
+    const agent = contract.tools.items[1].agent orelse return error.TestExpectedAgent;
+    try std.testing.expectEqual(contract_types.max_agent_rounds, agent.limits.rounds);
+    try std.testing.expectEqual(contract_types.max_agent_tool_calls, agent.limits.tool_calls);
+    try std.testing.expectEqual(contract_types.max_agent_tool_calls, agent.limits.tool_calls_per_round);
+    try std.testing.expectEqual(contract_types.max_agent_argument_bytes, agent.limits.argument_bytes);
+    try std.testing.expectEqual(contract_types.max_agent_result_bytes, agent.limits.result_bytes);
+    try std.testing.expectEqual(contract_types.max_agent_turn_deadline_ms, agent.limits.turn_deadline_ms);
+}
+
 test "every tool catalog refusal is driven by a case or names why none can reach it" {
     for (std.meta.tags(contract_types.ToolCatalogRefusal)) |reason| {
         var covered = false;
@@ -6756,6 +7255,82 @@ test "every tool catalog refusal is driven by a case or names why none can reach
             std.debug.print("ToolCatalogRefusal.{s} has no case\n", .{@tagName(reason)});
             return error.TestCensusGap;
         }
+    }
+}
+
+test "a well-formed agent entry carries its sorted tools provider limits and route reach" {
+    const source = comptime "import { sha256 } from \"zttp:crypto\";\n" ++ toolSource(
+        "function assistant(req) { sha256(\"x\"); return Response.json({}); }",
+        "\"POST /a\": a, \"POST /agent\": assistant",
+        toolCatalogOf(tool_test_entry ++ ", " ++ agentEntry("assistant", "POST /agent", agent_test_value)),
+    );
+    var contract = try buildTestContract(source);
+    defer contract.deinit(std.testing.allocator);
+    for (contract.spec_diagnostics.items) |d| try std.testing.expect(d.kind != .tool_catalog_refused);
+    try std.testing.expectEqual(@as(usize, 2), contract.tools.items.len);
+    const entry = contract.tools.items[1];
+    const agent = entry.agent orelse return error.TestExpectedAgent;
+    try std.testing.expectEqualStrings("", entry.input_schema_name);
+    try std.testing.expectEqualStrings("", entry.input_schema_json);
+    try std.testing.expectEqualStrings("", entry.output_schema_name);
+    try std.testing.expectEqualStrings("", entry.output_schema_json);
+    try std.testing.expectEqual(@as(usize, 1), agent.tools.items.len);
+    try std.testing.expectEqualStrings("ta", agent.tools.items[0]);
+    try std.testing.expectEqualStrings("https://api.deepseek.com:443", agent.provider_endpoint);
+    try std.testing.expectEqualStrings("provider", agent.provider_credential);
+    try std.testing.expectEqual(@as(u32, 4), agent.limits.rounds);
+    try std.testing.expectEqual(@as(u32, 8), agent.limits.tool_calls);
+    try std.testing.expectEqual(@as(u32, 4), agent.limits.tool_calls_per_round);
+    try std.testing.expectEqual(@as(u32, 4096), agent.limits.argument_bytes);
+    try std.testing.expectEqual(@as(u32, 16384), agent.limits.result_bytes);
+    try std.testing.expectEqual(@as(u32, 20000), agent.limits.turn_deadline_ms);
+    try std.testing.expectEqual(@as(usize, 1), entry.credentials.items.len);
+    try std.testing.expectEqualStrings("provider", entry.credentials.items[0].name);
+    try std.testing.expectEqualStrings("https://api.deepseek.com:443", entry.credentials.items[0].endpoint);
+    try std.testing.expectEqual(@as(usize, 1), entry.reachable_exports.items.len);
+    try std.testing.expectEqualStrings("zttp:crypto", entry.reachable_exports.items[0].module);
+    try std.testing.expectEqualStrings("sha256", entry.reachable_exports.items[0].name);
+}
+
+test "an agent stores tool names in ascending order" {
+    const second_tool = "tb: { route: \"POST /b\", description: \"b\", input: \"In\", output: \"Out\", maxInputBytes: 64 }";
+    const agent_value = "{ tools: [\"tb\", \"ta\"], provider: " ++ agent_test_provider ++ ", limits: " ++ agent_test_limits ++ " }";
+    const source = toolSource(
+        "function b(req) { return Response.json({}); }\nfunction assistant(req) { return Response.json({}); }",
+        "\"POST /a\": a, \"POST /b\": b, \"POST /agent\": assistant",
+        toolCatalogOf(tool_test_entry ++ ", " ++ second_tool ++ ", " ++ agentEntry("assistant", "POST /agent", agent_value)),
+    );
+    var contract = try buildTestContract(source);
+    defer contract.deinit(std.testing.allocator);
+    const agent = contract.tools.items[2].agent orelse return error.TestExpectedAgent;
+    try std.testing.expectEqualStrings("ta", agent.tools.items[0]);
+    try std.testing.expectEqualStrings("tb", agent.tools.items[1]);
+}
+
+test "agent credential reference refusals map each breach to its ZTS513 reason" {
+    const allocator = std.testing.allocator;
+    var contract = try buildTestContract(agentSource(agent_test_value));
+    defer contract.deinit(allocator);
+
+    const cases = [_]struct {
+        refs: []const u8,
+        reason: contract_types.ToolCatalogRefusal,
+    }{
+        .{ .refs = "{}", .reason = .agent_credential_unknown },
+        .{
+            .refs =
+            \\{"provider": {"env": "P", "endpoint": "https://api.deepseek.com:8443", "header": "authorization", "methods": ["POST"], "paths": ["/"]}}
+            ,
+            .reason = .agent_credential_endpoint_mismatch,
+        },
+    };
+    for (cases) |case| {
+        var parsed = try std.json.parseFromSlice(std.json.Value, allocator, case.refs, .{});
+        defer parsed.deinit();
+        const refs = (try contract_types.credential_ref.parseConfig(allocator, parsed.value)).ok;
+        defer contract_types.credential_ref.freeAll(allocator, refs);
+        const refusal = contract_types.firstCredentialRefusal(&contract, refs) orelse return error.TestExpectedRefusal;
+        try std.testing.expectEqual(case.reason, refusal.agent_reason orelse return error.TestExpectedAgentRefusal);
     }
 }
 

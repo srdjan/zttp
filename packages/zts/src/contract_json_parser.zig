@@ -150,6 +150,41 @@ const ToolScopeWire = struct {
     subject: ?WireString = null,
 };
 
+const AgentProviderWire = struct {
+    endpoint: WireString = .{ .bytes = "" },
+    credential: WireString = .{ .bytes = "" },
+};
+
+const AgentLimitsWire = struct {
+    rounds: WireU32 = .{ .value = null },
+    toolCalls: WireU32 = .{ .value = null },
+    toolCallsPerRound: WireU32 = .{ .value = null },
+    argumentBytes: WireU32 = .{ .value = null },
+    resultBytes: WireU32 = .{ .value = null },
+    turnDeadlineMs: WireU32 = .{ .value = null },
+};
+
+const AgentLimitsWireV2 = struct {
+    rounds: WireU32 = .{ .value = null },
+    tool_calls: WireU32 = .{ .value = null },
+    tool_calls_per_round: WireU32 = .{ .value = null },
+    argument_bytes: WireU32 = .{ .value = null },
+    result_bytes: WireU32 = .{ .value = null },
+    turn_deadline_ms: WireU32 = .{ .value = null },
+};
+
+const AgentWire = struct {
+    tools: []const WireString = &.{},
+    provider: AgentProviderWire = .{},
+    limits: AgentLimitsWire = .{},
+};
+
+const AgentWireV2 = struct {
+    tools: []const WireString = &.{},
+    provider: AgentProviderWire = .{},
+    limits: AgentLimitsWireV2 = .{},
+};
+
 const ToolAuthWire = struct {
     keyEnv: ?WireString = null,
     tenantClaim: ?WireString = null,
@@ -167,6 +202,7 @@ const CredentialWire = struct {
 
 const ToolWire = struct {
     scope: ?ToolScopeWire = null,
+    agent: RawJson = .{ .bytes = "" },
     name: WireString = .{ .bytes = "" },
     route: WireString = .{ .bytes = "" },
     description: WireString = .{ .bytes = "" },
@@ -752,7 +788,7 @@ fn projectContract(
     try projectWorkflowCalls(allocator, wire.workflowCalls, &contract);
     try projectAffordances(allocator, wire.affordances, &contract);
     contract.affordances_dynamic = wire.affordancesDynamic;
-    try projectTools(allocator, wire.tools, &contract);
+    try projectTools(allocator, wire.tools, contract.version == 2, &contract);
     try projectToolAuth(allocator, wire.toolAuth, &contract);
     try projectCredentials(allocator, wire.credentials, &contract);
     try projectClassifications(allocator, wire.classifications, &contract);
@@ -1007,6 +1043,7 @@ fn projectAffordances(
 fn projectTools(
     allocator: std.mem.Allocator,
     wires: []const ToolWire,
+    snake_case: bool,
     contract: *HandlerContract,
 ) !void {
     try contract.tools.ensureTotalCapacity(allocator, wires.len);
@@ -1054,8 +1091,19 @@ fn projectTools(
             if (std.mem.eql(u8, prior.name, entry.name)) return error.InvalidToolCatalog;
             if (std.mem.eql(u8, prior.route, entry.route)) return error.InvalidToolCatalog;
         }
-        if (!try schemaInSubset(allocator, entry.input_schema_name, entry.input_schema_json)) return error.InvalidToolCatalog;
-        if (!try schemaInSubset(allocator, entry.output_schema_name, entry.output_schema_json)) return error.InvalidToolCatalog;
+        if (wire.agent.bytes.len != 0) {
+            if (wire.scope != null or entry.scope_tenant != null or entry.scope_subject != null or
+                entry.input_schema_name.len != 0 or entry.input_schema_json.len != 0 or
+                entry.output_schema_name.len != 0 or entry.output_schema_json.len != 0)
+            {
+                return error.InvalidToolCatalog;
+            }
+            if (entry.credentials.items.len != 0) return error.InvalidToolCatalog;
+            entry.agent = try projectAgentJson(allocator, wire.agent.bytes, snake_case);
+        } else {
+            if (!try schemaInSubset(allocator, entry.input_schema_name, entry.input_schema_json)) return error.InvalidToolCatalog;
+            if (!try schemaInSubset(allocator, entry.output_schema_name, entry.output_schema_json)) return error.InvalidToolCatalog;
+        }
         for (entry.reachable_exports.items, 0..) |exp, j| {
             if (exp.module.len == 0 or exp.name.len == 0) return error.InvalidToolCatalog;
             if (j > 0 and !contract_types.ToolExport.lessThan({}, entry.reachable_exports.items[j - 1], exp)) {
@@ -1063,8 +1111,144 @@ fn projectTools(
             }
         }
         try projectToolCredentials(allocator, wire.credentials, &entry);
+        if (entry.agent) |agent| {
+            if (entry.credentials.items.len != 1 or
+                !std.mem.eql(u8, entry.credentials.items[0].name, agent.provider_credential) or
+                !std.mem.eql(u8, entry.credentials.items[0].endpoint, agent.provider_endpoint))
+            {
+                return error.InvalidToolCatalog;
+            }
+        }
         contract.tools.appendAssumeCapacity(entry);
     }
+
+    var agent_count: usize = 0;
+    for (contract.tools.items) |entry| {
+        const agent = entry.agent orelse continue;
+        agent_count += 1;
+        if (agent_count > 1) return error.InvalidToolCatalog;
+        for (agent.tools.items) |tool_name| {
+            for (contract.tools.items) |candidate| {
+                if (!std.mem.eql(u8, candidate.name, tool_name)) continue;
+                if (candidate.agent != null) return error.InvalidToolCatalog;
+                break;
+            } else return error.InvalidToolCatalog;
+        }
+    }
+}
+
+fn projectAgentJson(allocator: std.mem.Allocator, json: []const u8, snake_case: bool) !contract_types.AgentEntry {
+    const options = std.json.ParseOptions{
+        .duplicate_field_behavior = .@"error",
+        .ignore_unknown_fields = false,
+        .max_value_len = json.len,
+        .allocate = .alloc_if_needed,
+    };
+    if (snake_case) {
+        var parsed = std.json.parseFromSlice(AgentWireV2, allocator, json, options) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.InvalidToolCatalog,
+        };
+        defer parsed.deinit();
+        const wire = parsed.value;
+        return projectAgentWire(
+            allocator,
+            wire.tools,
+            wire.provider,
+            wire.limits.rounds,
+            wire.limits.tool_calls,
+            wire.limits.tool_calls_per_round,
+            wire.limits.argument_bytes,
+            wire.limits.result_bytes,
+            wire.limits.turn_deadline_ms,
+        );
+    }
+    var parsed = std.json.parseFromSlice(AgentWire, allocator, json, options) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.InvalidToolCatalog,
+    };
+    defer parsed.deinit();
+    const wire = parsed.value;
+    return projectAgentWire(
+        allocator,
+        wire.tools,
+        wire.provider,
+        wire.limits.rounds,
+        wire.limits.toolCalls,
+        wire.limits.toolCallsPerRound,
+        wire.limits.argumentBytes,
+        wire.limits.resultBytes,
+        wire.limits.turnDeadlineMs,
+    );
+}
+
+fn projectAgentWire(
+    allocator: std.mem.Allocator,
+    tool_wires: []const WireString,
+    provider: AgentProviderWire,
+    rounds_wire: WireU32,
+    tool_calls_wire: WireU32,
+    tool_calls_per_round_wire: WireU32,
+    argument_bytes_wire: WireU32,
+    result_bytes_wire: WireU32,
+    turn_deadline_ms_wire: WireU32,
+) !contract_types.AgentEntry {
+    if (tool_wires.len == 0) return error.InvalidToolCatalog;
+
+    var tools: std.ArrayList([]const u8) = .empty;
+    errdefer {
+        for (tools.items) |name| allocator.free(name);
+        tools.deinit(allocator);
+    }
+    try tools.ensureTotalCapacity(allocator, tool_wires.len);
+    for (tool_wires, 0..) |tool_wire, index| {
+        const name = try decodeWireString(allocator, tool_wire);
+        errdefer allocator.free(name);
+        if (name.len == 0) return error.InvalidToolCatalog;
+        if (index > 0 and std.mem.order(u8, tools.items[index - 1], name) != .lt) {
+            return error.InvalidToolCatalog;
+        }
+        tools.appendAssumeCapacity(name);
+    }
+
+    const endpoint = try decodeWireString(allocator, provider.endpoint);
+    errdefer allocator.free(endpoint);
+    const credential = try decodeWireString(allocator, provider.credential);
+    errdefer allocator.free(credential);
+    if (endpoint.len == 0 or credential.len == 0) return error.InvalidToolCatalog;
+    var endpoint_buf: [endpoint_rule.max_endpoint_bytes]u8 = undefined;
+    const canonical = endpoint_rule.normalize(endpoint, &endpoint_buf) catch return error.InvalidToolCatalog;
+    if (!std.mem.eql(u8, endpoint, canonical)) return error.InvalidToolCatalog;
+
+    const rounds = rounds_wire.value orelse return error.InvalidToolCatalog;
+    const tool_calls = tool_calls_wire.value orelse return error.InvalidToolCatalog;
+    const tool_calls_per_round = tool_calls_per_round_wire.value orelse return error.InvalidToolCatalog;
+    const argument_bytes = argument_bytes_wire.value orelse return error.InvalidToolCatalog;
+    const result_bytes = result_bytes_wire.value orelse return error.InvalidToolCatalog;
+    const turn_deadline_ms = turn_deadline_ms_wire.value orelse return error.InvalidToolCatalog;
+    if (rounds == 0 or rounds > contract_types.max_agent_rounds or
+        tool_calls == 0 or tool_calls > contract_types.max_agent_tool_calls or
+        tool_calls_per_round == 0 or tool_calls_per_round > tool_calls or
+        argument_bytes == 0 or argument_bytes > contract_types.max_agent_argument_bytes or
+        result_bytes == 0 or result_bytes > contract_types.max_agent_result_bytes or
+        turn_deadline_ms == 0 or turn_deadline_ms > contract_types.max_agent_turn_deadline_ms)
+    {
+        return error.InvalidToolCatalog;
+    }
+
+    return .{
+        .tools = tools,
+        .provider_endpoint = endpoint,
+        .provider_credential = credential,
+        .limits = .{
+            .rounds = rounds,
+            .tool_calls = tool_calls,
+            .tool_calls_per_round = tool_calls_per_round,
+            .argument_bytes = argument_bytes,
+            .result_bytes = result_bytes,
+            .turn_deadline_ms = turn_deadline_ms,
+        },
+    };
 }
 
 /// Project one tool's credential grant (M4 T6). The build writes each name
@@ -2122,6 +2306,104 @@ test "parseFromJson compatibility matrix preserves unknown fields and enum fallb
     try std.testing.expectEqualStrings("{\"type\": \"integer\"}", contract.api.routes.items[0].query_params.items[0].schema_json);
 }
 
+fn agentContractJson(
+    comptime tools: []const u8,
+    comptime provider: []const u8,
+    comptime limits: []const u8,
+    comptime agent_extra: []const u8,
+    comptime entry_extra: []const u8,
+    comptime credentials: []const u8,
+) []const u8 {
+    return
+    \\{"version":23,"handler":{"path":"agent.ts"},"tools":[
+    \\{"name":"lookup","route":"POST /tools/lookup","description":"Lookup.",
+    \\ "inputSchema":{"name":"In","json":"{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{}}"},
+    \\ "outputSchema":{"name":"Out","json":"{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{}}"},
+    \\ "maxInputBytes":64,"reachableExports":[]},
+    \\{"name":"assistant","route":"POST /agent","description":"Answer.","maxInputBytes":8192,
+    \\ "agent":{"tools":
+    ++ tools ++
+        \\,"provider":
+    ++ provider ++
+        \\,"limits":
+    ++ limits ++ agent_extra ++
+        \\},"reachableExports":[{"module":"zttp:fetch","name":"fetch"}],"credentials":
+    ++ credentials ++ entry_extra ++
+        \\}]}
+    ;
+}
+
+const valid_agent_provider = "{\"endpoint\":\"https://api.example:443\",\"credential\":\"provider\"}";
+const valid_agent_limits = "{\"rounds\":4,\"toolCalls\":8,\"toolCallsPerRound\":4,\"argumentBytes\":4096,\"resultBytes\":16384,\"turnDeadlineMs\":20000}";
+const valid_agent_credentials = "[{\"name\":\"provider\",\"endpoint\":\"https://api.example:443\"}]";
+
+test "agent contract JSON preserves every field and reachable export" {
+    const allocator = std.testing.allocator;
+    const json = agentContractJson("[\"lookup\"]", valid_agent_provider, valid_agent_limits, "", "", valid_agent_credentials);
+    var contract = try parseFromJson(allocator, json);
+    defer contract.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 2), contract.tools.items.len);
+    const entry = contract.tools.items[1];
+    const agent = entry.agent orelse return error.TestExpectedAgent;
+    try std.testing.expectEqualStrings("assistant", entry.name);
+    try std.testing.expectEqualStrings("", entry.input_schema_json);
+    try std.testing.expectEqual(@as(usize, 1), entry.reachable_exports.items.len);
+    try std.testing.expectEqualStrings("zttp:fetch", entry.reachable_exports.items[0].module);
+    try std.testing.expectEqualStrings("lookup", agent.tools.items[0]);
+    try std.testing.expectEqualStrings("https://api.example:443", agent.provider_endpoint);
+    try std.testing.expectEqualStrings("provider", agent.provider_credential);
+    try std.testing.expectEqual(@as(u32, 4), agent.limits.rounds);
+    try std.testing.expectEqual(@as(u32, 8), agent.limits.tool_calls);
+    try std.testing.expectEqual(@as(u32, 4), agent.limits.tool_calls_per_round);
+    try std.testing.expectEqual(@as(u32, 4096), agent.limits.argument_bytes);
+    try std.testing.expectEqual(@as(u32, 16384), agent.limits.result_bytes);
+    try std.testing.expectEqual(@as(u32, 20000), agent.limits.turn_deadline_ms);
+    try std.testing.checkAllAllocationFailures(allocator, parseAllocationFixture, .{json});
+}
+
+test "agent contract JSON refuses malformed fields and relations as an invalid catalog" {
+    const Case = struct { name: []const u8, json: []const u8 };
+    const cases = [_]Case{
+        .{ .name = "rounds", .json = agentContractJson("[\"lookup\"]", valid_agent_provider, "{\"rounds\":0,\"toolCalls\":8,\"toolCallsPerRound\":4,\"argumentBytes\":4096,\"resultBytes\":16384,\"turnDeadlineMs\":20000}", "", "", valid_agent_credentials) },
+        .{ .name = "toolCalls", .json = agentContractJson("[\"lookup\"]", valid_agent_provider, "{\"rounds\":4,\"toolCalls\":0,\"toolCallsPerRound\":4,\"argumentBytes\":4096,\"resultBytes\":16384,\"turnDeadlineMs\":20000}", "", "", valid_agent_credentials) },
+        .{ .name = "toolCallsPerRound relation", .json = agentContractJson("[\"lookup\"]", valid_agent_provider, "{\"rounds\":4,\"toolCalls\":8,\"toolCallsPerRound\":9,\"argumentBytes\":4096,\"resultBytes\":16384,\"turnDeadlineMs\":20000}", "", "", valid_agent_credentials) },
+        .{ .name = "argumentBytes", .json = agentContractJson("[\"lookup\"]", valid_agent_provider, "{\"rounds\":4,\"toolCalls\":8,\"toolCallsPerRound\":4,\"argumentBytes\":0,\"resultBytes\":16384,\"turnDeadlineMs\":20000}", "", "", valid_agent_credentials) },
+        .{ .name = "resultBytes", .json = agentContractJson("[\"lookup\"]", valid_agent_provider, "{\"rounds\":4,\"toolCalls\":8,\"toolCallsPerRound\":4,\"argumentBytes\":4096,\"resultBytes\":0,\"turnDeadlineMs\":20000}", "", "", valid_agent_credentials) },
+        .{ .name = "turnDeadlineMs", .json = agentContractJson("[\"lookup\"]", valid_agent_provider, "{\"rounds\":4,\"toolCalls\":8,\"toolCallsPerRound\":4,\"argumentBytes\":4096,\"resultBytes\":16384,\"turnDeadlineMs\":0}", "", "", valid_agent_credentials) },
+        .{ .name = "rounds maximum", .json = agentContractJson("[\"lookup\"]", valid_agent_provider, "{\"rounds\":65,\"toolCalls\":8,\"toolCallsPerRound\":4,\"argumentBytes\":4096,\"resultBytes\":16384,\"turnDeadlineMs\":20000}", "", "", valid_agent_credentials) },
+        .{ .name = "toolCalls maximum", .json = agentContractJson("[\"lookup\"]", valid_agent_provider, "{\"rounds\":4,\"toolCalls\":257,\"toolCallsPerRound\":4,\"argumentBytes\":4096,\"resultBytes\":16384,\"turnDeadlineMs\":20000}", "", "", valid_agent_credentials) },
+        .{ .name = "toolCallsPerRound maximum", .json = agentContractJson("[\"lookup\"]", valid_agent_provider, "{\"rounds\":4,\"toolCalls\":256,\"toolCallsPerRound\":257,\"argumentBytes\":4096,\"resultBytes\":16384,\"turnDeadlineMs\":20000}", "", "", valid_agent_credentials) },
+        .{ .name = "argumentBytes maximum", .json = agentContractJson("[\"lookup\"]", valid_agent_provider, "{\"rounds\":4,\"toolCalls\":8,\"toolCallsPerRound\":4,\"argumentBytes\":1048577,\"resultBytes\":16384,\"turnDeadlineMs\":20000}", "", "", valid_agent_credentials) },
+        .{ .name = "resultBytes maximum", .json = agentContractJson("[\"lookup\"]", valid_agent_provider, "{\"rounds\":4,\"toolCalls\":8,\"toolCallsPerRound\":4,\"argumentBytes\":4096,\"resultBytes\":1048577,\"turnDeadlineMs\":20000}", "", "", valid_agent_credentials) },
+        .{ .name = "turnDeadlineMs maximum", .json = agentContractJson("[\"lookup\"]", valid_agent_provider, "{\"rounds\":4,\"toolCalls\":8,\"toolCallsPerRound\":4,\"argumentBytes\":4096,\"resultBytes\":16384,\"turnDeadlineMs\":600001}", "", "", valid_agent_credentials) },
+        .{ .name = "empty tool name", .json = agentContractJson("[\"\"]", valid_agent_provider, valid_agent_limits, "", "", valid_agent_credentials) },
+        .{ .name = "unknown tool", .json = agentContractJson("[\"missing\"]", valid_agent_provider, valid_agent_limits, "", "", valid_agent_credentials) },
+        .{ .name = "agent tool", .json = agentContractJson("[\"assistant\"]", valid_agent_provider, valid_agent_limits, "", "", valid_agent_credentials) },
+        .{ .name = "scope", .json = agentContractJson("[\"lookup\"]", valid_agent_provider, valid_agent_limits, "", ",\"scope\":{}", valid_agent_credentials) },
+        .{ .name = "credential relation", .json = agentContractJson("[\"lookup\"]", valid_agent_provider, valid_agent_limits, "", "", "[{\"name\":\"other\",\"endpoint\":\"https://api.example:443\"}]") },
+        .{ .name = "unknown agent field", .json = agentContractJson("[\"lookup\"]", valid_agent_provider, valid_agent_limits, ",\"extra\":true", "", valid_agent_credentials) },
+        .{ .name = "version 2 limit spelling", .json = agentContractJson("[\"lookup\"]", valid_agent_provider, valid_agent_limits, ",\"tool_calls\":99999999999999999999", "", valid_agent_credentials) },
+    };
+    for (cases) |case| {
+        std.testing.expectError(error.InvalidToolCatalog, parseFromJson(std.testing.allocator, case.json)) catch |err| {
+            std.debug.print("agent case '{s}' returned the wrong result\n", .{case.name});
+            return err;
+        };
+    }
+    try std.testing.expectError(error.InvalidToolCatalog, parseFromJson(std.testing.allocator,
+        \\{"version":23,"handler":{"path":"agent.ts"},"tools":[{"name":"x","route":"POST /x","description":"x","maxInputBytes":1,"agent":null}]}
+    ));
+
+    const wrong_v1_limit_in_v2 =
+        \\{"version":2,"handler":{"path":"agent.ts"},"tools":[
+        \\{"name":"lookup","route":"POST /tools/lookup","description":"Lookup.","input_schema":{"name":"In","json":"{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{}}"},"output_schema":{"name":"Out","json":"{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{}}"},"max_input_bytes":64,"reachable_exports":[]},
+        \\{"name":"assistant","route":"POST /agent","description":"Answer.","max_input_bytes":8192,"agent":{"tools":["lookup"],"provider":{"endpoint":"https://api.example:443","credential":"provider"},"limits":{"rounds":4,"tool_calls":8,"tool_calls_per_round":4,"argument_bytes":4096,"result_bytes":16384,"turn_deadline_ms":20000,"toolCalls":99999999999999999999}},"reachable_exports":[],"credentials":[{"name":"provider","endpoint":"https://api.example:443"}]}
+        \\]}
+    ;
+    try std.testing.expectError(error.InvalidToolCatalog, parseFromJson(std.testing.allocator, wrong_v1_limit_in_v2));
+}
+
 test "parseFromJson compatibility matrix preserves legacy API response backfill" {
     const allocator = std.testing.allocator;
     const json =
@@ -2179,7 +2461,7 @@ test "parseFromJson compatibility matrix preserves duplicate trailing and overfl
         version: u32,
     }{
         .{ .json = "{\"version\":1,\"version\":23} trailing", .version = 23 },
-        .{ .json = "{\"version\":99999999999999999999}", .version = 22 },
+        .{ .json = "{\"version\":99999999999999999999}", .version = 23 },
     };
     for (cases) |case| {
         var contract = try parseFromJson(std.testing.allocator, case.json);
@@ -2202,7 +2484,7 @@ test "parseFromJson keeps raw structural keys and appends repeated collections" 
     var contract = try parseFromJson(std.testing.allocator, json);
     defer contract.deinit(std.testing.allocator);
 
-    try std.testing.expectEqual(@as(u32, 22), contract.version);
+    try std.testing.expectEqual(@as(u32, 23), contract.version);
     try std.testing.expectEqual(@as(usize, 2), contract.modules.items.len);
     try std.testing.expectEqualStrings("zttp:env", contract.modules.items[0]);
     try std.testing.expectEqualStrings("zttp:cache", contract.modules.items[1]);

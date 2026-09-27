@@ -15,6 +15,7 @@ const module_binding = @import("zts-base").module_authorization;
 const profile_identity = @import("zts-base").profile_identity;
 // The consumer declaration and the profile table its ceiling names (M4 T5b).
 const declaration = @import("zts-base").declaration;
+const tool_schema = @import("zts-base").tool_schema;
 /// Credential references (M4 T6): the canonical type and its loader.
 pub const credential_ref = @import("zts-base").credential_ref;
 pub const CredentialRef = credential_ref.CredentialRef;
@@ -1520,10 +1521,60 @@ pub const ToolCatalogRefusal = enum {
     catalog_repeated,
     /// An entry is not an object literal, or a field is not a literal of its type.
     entry_not_literal,
-    /// An entry lacks `route`, `description`, `input`, `output`, or `maxInputBytes`.
+    /// An entry lacks `route`, `description`, or `maxInputBytes`.
     entry_field_missing,
-    /// An entry has a field other than those five and the optional `scope`.
+    /// An entry has a field outside the closed tool-or-agent entry shape.
     entry_field_unknown,
+    /// An entry declares both tool schemas and an agent, or neither form.
+    entry_kind_invalid,
+    /// An agent entry declares a tool-only `scope` field.
+    agent_scope_forbidden,
+    /// `agent` is not an object literal.
+    agent_not_literal,
+    /// `agent` lacks `tools`, `provider`, or `limits`.
+    agent_field_missing,
+    /// `agent` holds a field other than `tools`, `provider`, and `limits`.
+    agent_field_unknown,
+    /// `agent` names the same field twice.
+    agent_field_repeated,
+    /// `agent.tools` is not a non-empty array of string literals.
+    agent_tools_not_literal,
+    /// `agent.tools` names one tool more than once.
+    agent_tool_duplicate,
+    /// `agent.tools` names no entry in this catalog.
+    agent_tool_unknown,
+    /// `agent.tools` names an agent entry instead of a tool entry.
+    agent_tool_is_agent,
+    /// `agent.provider` is not an object literal.
+    agent_provider_not_literal,
+    /// `agent.provider` lacks `endpoint` or `credential`.
+    agent_provider_field_missing,
+    /// `agent.provider` holds a field other than `endpoint` and `credential`.
+    agent_provider_field_unknown,
+    /// `agent.provider` names the same field twice.
+    agent_provider_field_repeated,
+    /// The provider endpoint is not a literal endpoint that can be normalized.
+    agent_provider_endpoint_invalid,
+    /// An agent provider field is not a non-empty string literal.
+    agent_provider_value_invalid,
+    /// The provider credential has no reference in zttp.json.
+    agent_credential_unknown,
+    /// The provider endpoint differs from its zttp.json credential reference.
+    agent_credential_endpoint_mismatch,
+    /// `agent.limits` is not an object literal.
+    agent_limits_not_literal,
+    /// `agent.limits` lacks one of its six required fields.
+    agent_limit_field_missing,
+    /// `agent.limits` holds a field outside its closed six-field shape.
+    agent_limit_field_unknown,
+    /// `agent.limits` names the same field twice.
+    agent_limit_field_repeated,
+    /// An agent limit is not a positive integer literal within its named maximum.
+    agent_limit_invalid,
+    /// `toolCallsPerRound` is greater than `toolCalls`.
+    agent_tool_calls_per_round_invalid,
+    /// M5a admits at most one agent entry in a handler catalog.
+    agent_repeated,
     /// Two entries have the same name.
     duplicate_name,
     /// Two entries name the same route.
@@ -1589,9 +1640,34 @@ pub const ToolCatalogRefusal = enum {
             .catalog_not_literal => "the toolCatalog argument must be an object literal whose keys are literal tool names",
             .catalog_not_module_scope => "call toolCatalog as a statement at module scope, not inside a function or expression",
             .catalog_repeated => "call toolCatalog once; a handler has one catalog",
-            .entry_not_literal => "each entry must be an object literal whose fields are literals: strings for route, description, input, and output, and an integer for maxInputBytes",
-            .entry_field_missing => "each entry needs route, description, input, output, and maxInputBytes",
-            .entry_field_unknown => "an entry may hold only route, description, input, output, maxInputBytes, and scope",
+            .entry_not_literal => "each entry must be an object literal whose fields use their required literal shapes",
+            .entry_field_missing => "each entry needs route, description, and maxInputBytes",
+            .entry_field_unknown => "an entry may hold only route, description, input, output, maxInputBytes, scope, and agent",
+            .entry_kind_invalid => "an entry must declare either input and output or agent, never both and never neither",
+            .agent_scope_forbidden => "an agent entry may not declare scope",
+            .agent_not_literal => "agent must be an object literal",
+            .agent_field_missing => "agent needs tools, provider, and limits",
+            .agent_field_unknown => "agent may hold only tools, provider, and limits",
+            .agent_field_repeated => "agent names the same field twice",
+            .agent_tools_not_literal => "agent.tools must be a non-empty array of string literals",
+            .agent_tool_duplicate => "agent.tools may name each tool once",
+            .agent_tool_unknown => "each agent.tools name must name an entry in the same catalog",
+            .agent_tool_is_agent => "each agent.tools name must name a tool entry, not an agent entry",
+            .agent_provider_not_literal => "agent.provider must be an object literal",
+            .agent_provider_field_missing => "agent.provider needs endpoint and credential",
+            .agent_provider_field_unknown => "agent.provider may hold only endpoint and credential",
+            .agent_provider_field_repeated => "agent.provider names the same field twice",
+            .agent_provider_endpoint_invalid => "agent.provider.endpoint must be a literal URL with a normalizable endpoint",
+            .agent_provider_value_invalid => "agent provider fields must be non-empty string literals",
+            .agent_credential_unknown => "the agent provider credential must name a credential reference in zttp.json",
+            .agent_credential_endpoint_mismatch => "the agent provider endpoint must match the endpoint of its zttp.json credential reference",
+            .agent_limits_not_literal => "agent.limits must be an object literal",
+            .agent_limit_field_missing => "agent.limits needs rounds, toolCalls, toolCallsPerRound, argumentBytes, resultBytes, and turnDeadlineMs",
+            .agent_limit_field_unknown => "agent.limits may hold only rounds, toolCalls, toolCallsPerRound, argumentBytes, resultBytes, and turnDeadlineMs",
+            .agent_limit_field_repeated => "agent.limits names the same field twice",
+            .agent_limit_invalid => "each agent limit must be a positive integer literal no larger than its named maximum",
+            .agent_tool_calls_per_round_invalid => "toolCallsPerRound must not be greater than toolCalls",
+            .agent_repeated => "a handler catalog may hold at most one agent entry",
             .duplicate_name => "two entries have the same tool name",
             .duplicate_route => "two entries name the same route",
             .route_table_dynamic => "the routerMatch table must be an object literal so every tool route is known at build time",
@@ -1638,6 +1714,40 @@ pub const ToolExport = struct {
     }
 };
 
+pub const max_agent_endpoint_bytes = @import("zts-base").endpoint.max_endpoint_bytes;
+pub const max_agent_rounds: u32 = 64;
+pub const max_agent_tool_calls: u32 = 256;
+pub const max_agent_argument_bytes: u32 = tool_schema.max_input_bytes_ceiling;
+pub const max_agent_result_bytes: u32 = tool_schema.max_input_bytes_ceiling;
+pub const max_agent_turn_deadline_ms: u32 = 600000;
+
+/// The closed execution bounds of one agent entry. These are encoding bounds,
+/// not recommended defaults.
+pub const AgentLimits = struct {
+    rounds: u32,
+    tool_calls: u32,
+    tool_calls_per_round: u32,
+    argument_bytes: u32,
+    result_bytes: u32,
+    turn_deadline_ms: u32,
+};
+
+/// The agent-only part of a tool catalog entry. Every string is owned. Tool
+/// names are stored in ascending byte order.
+pub const AgentEntry = struct {
+    tools: std.ArrayList([]const u8),
+    provider_endpoint: []const u8,
+    provider_credential: []const u8,
+    limits: AgentLimits,
+
+    pub fn deinit(self: *AgentEntry, allocator: std.mem.Allocator) void {
+        for (self.tools.items) |tool| allocator.free(tool);
+        self.tools.deinit(allocator);
+        allocator.free(self.provider_endpoint);
+        allocator.free(self.provider_credential);
+    }
+};
+
 /// One entry of the handler's tool catalog (M4 T2), read from the literal
 /// argument of `zttp:tool`'s `toolCatalog`. The schema texts are the literal
 /// `schemaCompile` sources the entry names, carried here so the catalog stands
@@ -1667,6 +1777,9 @@ pub const ToolEntry = struct {
     /// sorted with `ToolCredential.lessThan`. The names are the tool's
     /// credential grant.
     credentials: std.ArrayList(ToolCredential) = .empty,
+    /// Present when this catalog entry is an agent route. Agent entries keep
+    /// both schema names and schema JSON fields empty.
+    agent: ?AgentEntry = null,
 
     pub fn deinit(self: *ToolEntry, allocator: std.mem.Allocator) void {
         allocator.free(self.name);
@@ -1682,6 +1795,7 @@ pub const ToolEntry = struct {
         self.reachable_exports.deinit(allocator);
         for (self.credentials.items) |*c| c.deinit(allocator);
         self.credentials.deinit(allocator);
+        if (self.agent) |*agent| agent.deinit(allocator);
     }
 };
 
@@ -1749,6 +1863,27 @@ pub fn firstCredentialBreach(contract: *const HandlerContract, refs: []const Cre
         }
     }
     return null;
+}
+
+/// A credential breach with its agent-specific ZTS513 reason when the
+/// breached catalog entry is an agent. The credential lookup and endpoint
+/// comparison stay in `firstCredentialBreach`.
+pub const CredentialRefusal = struct {
+    breach: CredentialBreach,
+    agent_reason: ?ToolCatalogRefusal,
+};
+
+pub fn firstCredentialRefusal(contract: *const HandlerContract, refs: []const CredentialRef) ?CredentialRefusal {
+    const breach = firstCredentialBreach(contract, refs) orelse return null;
+    const agent_reason: ?ToolCatalogRefusal = for (contract.tools.items) |tool| {
+        if (!std.mem.eql(u8, tool.name, breach.tool)) continue;
+        if (tool.agent == null) break null;
+        break switch (breach.reason) {
+            .credential_unknown => .agent_credential_unknown,
+            .credential_endpoint_mismatch => .agent_credential_endpoint_mismatch,
+        };
+    } else null;
+    return .{ .breach = breach, .agent_reason = agent_reason };
 }
 
 /// Where a tool handler's runtime finds the key and the tenant (M4 T5 design
@@ -2298,7 +2433,7 @@ pub const HoleSummary = struct {
 };
 
 pub const HandlerContract = struct {
-    version: u32 = 22,
+    version: u32 = 23,
     handler: HandlerLoc,
     routes: std.ArrayList(RouteInfo),
     modules: std.ArrayList([]const u8), // each entry owned

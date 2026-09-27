@@ -15,13 +15,19 @@ const ToolEntry = zts.handler_contract.ToolEntry;
 const tool_schema = zts.tool_schema;
 
 pub const magic = "ZTCAT1\x00\x00";
-/// Schema 2 (M4 T5) carries each entry's scope fields, and schema 3 (M4 T6)
-/// its credential names. The kernel decoder accepts this one schema only.
-pub const schema_version: u16 = 3;
+/// Schema 4 (M5 A1) prefixes each entry with its kind and carries agent entries.
+/// The kernel decoder accepts this one schema only.
+pub const schema_version: u16 = 4;
 
 comptime {
     if (schema_version != pcc.tool_catalog.schema_version) @compileError("ZTCAT1 encoder and kernel decoder disagree on the schema");
     if (!std.mem.eql(u8, magic, pcc.tool_catalog.magic)) @compileError("ZTCAT1 encoder and kernel decoder disagree on the magic");
+    if (pcc.tool_catalog.max_endpoint_bytes != zts.handler_contract.max_agent_endpoint_bytes) @compileError("ZTCAT1 endpoint bounds disagree");
+    if (pcc.tool_catalog.max_agent_rounds != zts.handler_contract.max_agent_rounds) @compileError("ZTCAT1 agent round bounds disagree");
+    if (pcc.tool_catalog.max_agent_tool_calls != zts.handler_contract.max_agent_tool_calls) @compileError("ZTCAT1 agent tool-call bounds disagree");
+    if (pcc.tool_catalog.max_agent_argument_bytes != zts.handler_contract.max_agent_argument_bytes) @compileError("ZTCAT1 agent argument bounds disagree");
+    if (pcc.tool_catalog.max_agent_result_bytes != zts.handler_contract.max_agent_result_bytes) @compileError("ZTCAT1 agent result bounds disagree");
+    if (pcc.tool_catalog.max_agent_turn_deadline_ms != zts.handler_contract.max_agent_turn_deadline_ms) @compileError("ZTCAT1 agent deadline bounds disagree");
 }
 
 pub const EncodeError = std.mem.Allocator.Error || error{
@@ -57,12 +63,28 @@ pub fn encode(allocator: std.mem.Allocator, tools: []const ToolEntry) EncodeErro
         const path = tool.route[space + 1 ..];
         if (method.len == 0 or path.len == 0) return error.RouteKeyInvalid;
 
+        try appendInt(allocator, &out, u8, if (tool.agent == null) @intFromEnum(pcc.tool_catalog.EntryKind.tool) else @intFromEnum(pcc.tool_catalog.EntryKind.agent));
         try appendString(allocator, &out, tool.name);
         const upper = try std.ascii.allocUpperString(allocator, method);
         defer allocator.free(upper);
         try appendString(allocator, &out, upper);
         try appendString(allocator, &out, path);
         try appendString(allocator, &out, tool.description);
+        if (tool.agent) |agent| {
+            try appendInt(allocator, &out, u32, tool.max_input_bytes);
+            try appendExports(allocator, &out, tool.reachable_exports.items);
+            try appendInt(allocator, &out, u16, std.math.cast(u16, agent.tools.items.len) orelse return error.CatalogRefused);
+            for (agent.tools.items) |name| try appendString(allocator, &out, name);
+            try appendString(allocator, &out, agent.provider_endpoint);
+            try appendString(allocator, &out, agent.provider_credential);
+            try appendInt(allocator, &out, u32, agent.limits.rounds);
+            try appendInt(allocator, &out, u32, agent.limits.tool_calls);
+            try appendInt(allocator, &out, u32, agent.limits.tool_calls_per_round);
+            try appendInt(allocator, &out, u32, agent.limits.argument_bytes);
+            try appendInt(allocator, &out, u32, agent.limits.result_bytes);
+            try appendInt(allocator, &out, u32, agent.limits.turn_deadline_ms);
+            continue;
+        }
         try appendString(allocator, &out, tool.input_schema_name);
         try appendCanonicalSchema(allocator, &out, tool.input_schema_json);
         try appendString(allocator, &out, tool.output_schema_name);
@@ -75,11 +97,7 @@ pub fn encode(allocator: std.mem.Allocator, tools: []const ToolEntry) EncodeErro
             if (scope_field != null and field.len == 0) return error.CatalogRefused;
             try appendString(allocator, &out, field);
         }
-        try appendInt(allocator, &out, u16, std.math.cast(u16, tool.reachable_exports.items.len) orelse return error.CatalogRefused);
-        for (tool.reachable_exports.items) |exp| {
-            try appendString(allocator, &out, exp.module);
-            try appendString(allocator, &out, exp.name);
-        }
+        try appendExports(allocator, &out, tool.reachable_exports.items);
         // The grant is the distinct names. The contract sorts its credentials
         // by (name, endpoint), so equal names are adjacent.
         var distinct: usize = 0;
@@ -101,6 +119,14 @@ pub fn encode(allocator: std.mem.Allocator, tools: []const ToolEntry) EncodeErro
 
 fn entryNameLess(tools: []const ToolEntry, a: usize, b: usize) bool {
     return std.mem.lessThan(u8, tools[a].name, tools[b].name);
+}
+
+fn appendExports(allocator: std.mem.Allocator, out: *std.ArrayList(u8), exports: []const zts.handler_contract.ToolExport) EncodeError!void {
+    try appendInt(allocator, out, u16, std.math.cast(u16, exports.len) orelse return error.CatalogRefused);
+    for (exports) |exp| {
+        try appendString(allocator, out, exp.module);
+        try appendString(allocator, out, exp.name);
+    }
 }
 
 fn appendInt(allocator: std.mem.Allocator, out: *std.ArrayList(u8), comptime T: type, value: T) !void {
@@ -168,6 +194,46 @@ fn testEntry(allocator: std.mem.Allocator, name: []const u8, route: []const u8, 
     return entry;
 }
 
+fn testAgentEntry(allocator: std.mem.Allocator, name: []const u8, route: []const u8, tools: []const []const u8, exports: []const [2][]const u8) !ToolEntry {
+    var entry = try testEntry(allocator, name, route, exports);
+    errdefer entry.deinit(allocator);
+    allocator.free(entry.input_schema_name);
+    entry.input_schema_name = &.{};
+    allocator.free(entry.input_schema_json);
+    entry.input_schema_json = &.{};
+    allocator.free(entry.output_schema_name);
+    entry.output_schema_name = &.{};
+    allocator.free(entry.output_schema_json);
+    entry.output_schema_json = &.{};
+
+    var agent = zts.handler_contract.AgentEntry{
+        .tools = .empty,
+        .provider_endpoint = &.{},
+        .provider_credential = &.{},
+        .limits = .{
+            .rounds = 4,
+            .tool_calls = 8,
+            .tool_calls_per_round = 4,
+            .argument_bytes = 4096,
+            .result_bytes = 16384,
+            .turn_deadline_ms = 20000,
+        },
+    };
+    errdefer agent.deinit(allocator);
+    agent.provider_endpoint = try allocator.dupe(u8, "https://api.example.com:443");
+    agent.provider_credential = try allocator.dupe(u8, "provider");
+    for (tools) |tool| {
+        const owned = try allocator.dupe(u8, tool);
+        errdefer allocator.free(owned);
+        try agent.tools.append(allocator, owned);
+    }
+    try entry.credentials.append(allocator, .{ .name = &.{}, .endpoint = &.{} });
+    entry.credentials.items[0].name = try allocator.dupe(u8, agent.provider_credential);
+    entry.credentials.items[0].endpoint = try allocator.dupe(u8, agent.provider_endpoint);
+    entry.agent = agent;
+    return entry;
+}
+
 test "an empty catalog encodes to nothing" {
     try testing.expectEqual(@as(?[]u8, null), try encode(testing.allocator, &.{}));
 }
@@ -201,6 +267,80 @@ test "entries are sorted, routes split, and schemas canonical in the encoding" {
     try testing.expectEqualStrings("zttp:crypto", exp.module);
     try testing.expectEqualStrings("sha256", exp.name);
     try testing.expect((try it.next()) == null);
+}
+
+test "schema 4 inserts only the kind byte before a tool's schema 3 body" {
+    const allocator = testing.allocator;
+    var tools = [_]ToolEntry{try testEntry(allocator, "alpha", "POST /a", &.{})};
+    defer tools[0].deinit(allocator);
+    const bytes = (try encode(allocator, &tools)) orelse return error.TestExpectedBytes;
+    defer allocator.free(bytes);
+
+    var legacy_buf: [1024]u8 = undefined;
+    var legacy = pcc.tool_catalog.test_support.Writer{ .buf = &legacy_buf };
+    legacy.raw(magic);
+    legacy.int(u16, 3);
+    legacy.int(u16, 1);
+    legacy.string("alpha");
+    legacy.string("POST");
+    legacy.string("/a");
+    legacy.string("Look up one order.");
+    legacy.string("In");
+    legacy.string("{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"id\":{\"type\":\"string\",\"maxLength\":8}},\"required\":[\"id\"]}");
+    legacy.string("Out");
+    legacy.string("{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{},\"required\":[]}");
+    legacy.int(u32, 4096);
+    legacy.string("");
+    legacy.string("");
+    legacy.int(u16, 0);
+    legacy.int(u16, 0);
+
+    try testing.expectEqual(@as(u8, @intFromEnum(pcc.tool_catalog.EntryKind.tool)), bytes[pcc.tool_catalog.header_size]);
+    try testing.expectEqualSlices(
+        u8,
+        legacy.bytes()[pcc.tool_catalog.header_size..],
+        bytes[pcc.tool_catalog.header_size + 1 ..],
+    );
+}
+
+test "an agent entry encodes its exports tools provider and limits" {
+    const allocator = testing.allocator;
+    const expected_exports = [_][2][]const u8{
+        .{ "zttp:fetch", "fetch" },
+        .{ "zttp:tool", "callTool" },
+    };
+    var tools = [_]ToolEntry{
+        try testAgentEntry(allocator, "assistant", "POST /agent", &.{"lookup"}, &expected_exports),
+        try testEntry(allocator, "lookup", "POST /lookup", &.{}),
+    };
+    defer for (&tools) |*entry| entry.deinit(allocator);
+
+    const bytes = (try encode(allocator, &tools)) orelse return error.TestExpectedBytes;
+    defer allocator.free(bytes);
+    const catalog = try pcc.tool_catalog.decode(bytes);
+    var entries = catalog.entries();
+    const assistant = (try entries.next()) orelse return error.TestMissingEntry;
+    try testing.expectEqual(pcc.tool_catalog.EntryKind.agent, assistant.kind);
+    try testing.expectEqualStrings("", assistant.input_schema);
+    var exports = assistant.exports;
+    for (expected_exports) |pair| {
+        const actual = (try exports.next()) orelse return error.TestMissingExport;
+        try testing.expectEqualStrings(pair[0], actual.module);
+        try testing.expectEqualStrings(pair[1], actual.name);
+    }
+    try testing.expectEqual(@as(?pcc.tool_catalog.Export, null), try exports.next());
+    const agent = assistant.agent orelse return error.TestMissingAgent;
+    var names = agent.tools;
+    try testing.expectEqualStrings("lookup", (try names.next()) orelse return error.TestMissingName);
+    try testing.expectEqual(@as(?[]const u8, null), try names.next());
+    try testing.expectEqualStrings("https://api.example.com:443", agent.provider_endpoint);
+    try testing.expectEqualStrings("provider", agent.provider_credential);
+    try testing.expectEqual(@as(u32, 4), agent.limits.rounds);
+    try testing.expectEqual(@as(u32, 8), agent.limits.tool_calls);
+    try testing.expectEqual(@as(u32, 4), agent.limits.tool_calls_per_round);
+    try testing.expectEqual(@as(u32, 4096), agent.limits.argument_bytes);
+    try testing.expectEqual(@as(u32, 16384), agent.limits.result_bytes);
+    try testing.expectEqual(@as(u32, 20000), agent.limits.turn_deadline_ms);
 }
 
 test "the encoding does not depend on source order or schema spelling" {

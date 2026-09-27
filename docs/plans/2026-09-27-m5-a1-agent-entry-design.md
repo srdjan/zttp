@@ -197,10 +197,15 @@ credential.
 `ZTCAT1` moves to schema 4. Each entry now starts with a u8 kind: 0 for a tool,
 1 for an agent. A tool entry keeps the schema 3 layout after the kind byte. An
 agent entry has the name, method, path, description, and `max_input_bytes`
-(the prompt bound) as a tool has, then a u16 count and the tool names, the
-provider endpoint, the provider credential name, and the six limits as u32. It
-has no schema strings, no scope, and no export list; its grant is carried in
-section 5's form. The kernel decoder refuses, each as its own decode error with
+(the prompt bound) as a tool has, then its export list in the tool layout (a u16
+count and strictly ordered module and name pairs), then a u16 count and the tool
+names, the provider endpoint, the provider credential name, and the six limits
+as u32. It has no schema strings and no scope. The export list is the agent
+route's export grant. The runtime takes every route's grant from the accepted
+bytes alone, and the contract's `reachable_exports` are not cross-checked
+(`contract_runtime.zig:56-67`), so a grant left out of `ZTCAT1` would have no
+artifact binding. The note as first accepted omitted this list; the U1 review
+found the gap. The kernel decoder refuses, each as its own decode error with
 a mutant row in `proof_checker_mutants.zon`:
 
 - a kind other than 0 or 1;
@@ -389,7 +394,9 @@ contract records it.
 
 A1 lands in four commits, each with its own tests passing unfiltered.
 
-- **U1. Carriage.** The `agent` member in `ToolEntry`, the builder's reading
+- **U1. Carriage.** Done 2026-09-27: full `zig build test`, `test-zruntime`,
+  `test-proof-checker-mutants`, `test-module-boundary`, `test-precompile`, fmt,
+  and the docs gates pass; four removed-check probes each failed a test. The `agent` member in `ToolEntry`, the builder's reading
   of it and the new refusal reasons with census cases, contract version 23 in
   the writer and parser, `ZTCAT1` schema 4 in the encoder and the kernel
   decoder with one mutant row per new guard, the runtime cross-check, the

@@ -37,17 +37,23 @@ pub const max_declaration_section_bytes: usize = blk: {
 };
 
 /// The largest `ZTCAT1` section the reader accepts, derived from the kernel's
-/// own per-field bounds so the two cannot drift. One entry is eight u32 length
-/// prefixes, each string at its maximum, the u32 byte bound, the u16 export
-/// count, and `max_exports` exports of two prefixed strings each. The catalog
-/// is the header plus `max_entries` such entries. Anything larger cannot
-/// decode, so it is refused before it is copied.
+/// own per-field bounds. Schema 4 adds a kind byte to each entry. A tool entry
+/// includes schemas, scopes, exports, and credentials; an agent entry includes
+/// tool names, a provider, and six limits. Use the larger entry bound so either
+/// kind fits. Anything larger cannot decode and is refused before it is copied.
 pub const max_tool_catalog_section_bytes: usize = blk: {
     const cat = @import("zttp_proof_checker").tool_catalog;
     const strings: usize = 8 * 4 + cat.max_name_bytes + cat.max_method_bytes + cat.max_path_bytes +
         cat.max_description_bytes + 2 * cat.max_schema_name_bytes + 2 * cat.max_schema_bytes;
     const exports: usize = @as(usize, cat.max_exports) * (2 * 4 + 2 * cat.max_export_field_bytes);
-    const entry: usize = strings + 4 + 2 + exports;
+    const scopes: usize = 2 * (4 + cat.max_scope_field_bytes);
+    const credentials: usize = 2 + @as(usize, cat.max_credentials) * (4 + cat.max_credential_name_bytes);
+    const tool_entry: usize = 1 + strings + 4 + scopes + 2 + exports + credentials;
+    const agent_entry: usize = 1 + 4 * 4 + cat.max_name_bytes + cat.max_method_bytes +
+        cat.max_path_bytes + cat.max_description_bytes + 4 + 2 +
+        @as(usize, cat.max_agent_tools) * (4 + cat.max_name_bytes) +
+        4 + cat.max_endpoint_bytes + 4 + cat.max_credential_name_bytes + 6 * 4;
+    const entry = @max(tool_entry, agent_entry);
     break :blk cat.header_size + @as(usize, cat.max_entries) * entry;
 };
 pub const TRAILER_SIZE: usize = 32;
@@ -1579,6 +1585,66 @@ test "payload parser rejects oversized and duplicate tool catalog sections" {
     try writeSection(&encoded, allocator, .tool_catalog, "first");
     try writeSection(&encoded, allocator, .tool_catalog, "second");
     try std.testing.expectError(error.DuplicatePayloadSection, parse(allocator, encoded.items));
+}
+
+test "payload catalog bound admits a schema 4 catalog with every tool field at its maximum" {
+    const allocator = std.testing.allocator;
+    const cat = @import("zttp_proof_checker").tool_catalog;
+    const storage = try allocator.alloc(u8, max_tool_catalog_section_bytes);
+    defer allocator.free(storage);
+    var writer = cat.test_support.Writer{ .buf = storage };
+    writer.raw(cat.magic);
+    writer.int(u16, cat.schema_version);
+    writer.int(u16, cat.max_entries);
+
+    var export_names: [cat.max_exports][cat.max_export_field_bytes]u8 = undefined;
+    var exports: [cat.max_exports]cat.test_support.SampleExport = undefined;
+    const module = [_]u8{'m'} ** cat.max_export_field_bytes;
+    for (&export_names, &exports, 0..) |*name, *item, i| {
+        @memset(name, 'a');
+        name[0] = 'a' + @as(u8, @intCast(i / 26));
+        name[1] = 'a' + @as(u8, @intCast(i % 26));
+        item.* = .{ .module = &module, .name = name };
+    }
+    var credentials: [cat.max_credentials][]const u8 = undefined;
+    for (&credentials, 0..) |*name, i| name.* = &export_names[i];
+    const method = [_]u8{'P'} ** cat.max_method_bytes;
+    const description = [_]u8{'d'} ** cat.max_description_bytes;
+    const schema_name = [_]u8{'s'} ** cat.max_schema_name_bytes;
+    const schema = [_]u8{'s'} ** cat.max_schema_bytes;
+    const scope = [_]u8{'s'} ** cat.max_scope_field_bytes;
+    for (0..cat.max_entries) |i| {
+        var name = [_]u8{'a'} ** cat.max_name_bytes;
+        name[0] = 'a' + @as(u8, @intCast(i / 26));
+        name[1] = 'a' + @as(u8, @intCast(i % 26));
+        var path = [_]u8{'p'} ** cat.max_path_bytes;
+        path[0] = '/';
+        path[1] = name[0];
+        path[2] = name[1];
+        cat.test_support.writeEntry(&writer, .{
+            .name = &name,
+            .method = &method,
+            .path = &path,
+            .description = &description,
+            .input_name = &schema_name,
+            .input_schema = &schema,
+            .output_name = &schema_name,
+            .output_schema = &schema,
+            .scope_tenant = &scope,
+            .scope_subject = &scope,
+            .exports = &exports,
+            .credentials = &credentials,
+        });
+    }
+    const bytes = writer.bytes();
+    _ = try cat.decode(bytes);
+    try std.testing.expectEqual(max_tool_catalog_section_bytes, bytes.len);
+    const policy = zts.RuntimePolicy{};
+    const payload = try serializePayload(allocator, .{ .bytecode = "code", .policy = &policy, .tool_catalog_section = bytes });
+    defer allocator.free(payload);
+    const parsed = (try parse(allocator, payload)) orelse return error.TestMissingPayload;
+    defer parsed.deinit(allocator);
+    try std.testing.expectEqualSlices(u8, bytes, parsed.tool_catalog_section orelse return error.TestMissingCatalog);
 }
 
 test "roundtrip: payload with a declaration section" {

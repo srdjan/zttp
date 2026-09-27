@@ -79,6 +79,14 @@ pub const WorkflowCallInfo = contract_types.WorkflowCallInfo;
 pub const EmittedAffordance = contract_types.EmittedAffordance;
 pub const ToolEntry = contract_types.ToolEntry;
 pub const ToolExport = contract_types.ToolExport;
+pub const AgentLimits = contract_types.AgentLimits;
+pub const AgentEntry = contract_types.AgentEntry;
+pub const max_agent_endpoint_bytes = contract_types.max_agent_endpoint_bytes;
+pub const max_agent_rounds = contract_types.max_agent_rounds;
+pub const max_agent_tool_calls = contract_types.max_agent_tool_calls;
+pub const max_agent_argument_bytes = contract_types.max_agent_argument_bytes;
+pub const max_agent_result_bytes = contract_types.max_agent_result_bytes;
+pub const max_agent_turn_deadline_ms = contract_types.max_agent_turn_deadline_ms;
 pub const ToolAuth = contract_types.ToolAuth;
 /// Credential references (M4 T6): the canonical type and its loader.
 pub const credential_ref = contract_types.credential_ref;
@@ -87,6 +95,8 @@ pub const ToolCredential = contract_types.ToolCredential;
 pub const CredentialBreachReason = contract_types.CredentialBreachReason;
 pub const CredentialBreach = contract_types.CredentialBreach;
 pub const firstCredentialBreach = contract_types.firstCredentialBreach;
+pub const CredentialRefusal = contract_types.CredentialRefusal;
+pub const firstCredentialRefusal = contract_types.firstCredentialRefusal;
 pub const ClassificationReport = contract_types.ClassificationReport;
 pub const ClassificationLabel = contract_types.ClassificationLabel;
 pub const ClassificationStatus = contract_types.ClassificationStatus;
@@ -1263,7 +1273,7 @@ test "writeContractJson minimal" {
     output = aw.toArrayList();
 
     // Should be valid-looking JSON with expected fields
-    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"version\": 22") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"version\": 23") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"handler.ts\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"modules\": []") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"serviceCalls\": []") != null);
@@ -2229,7 +2239,7 @@ test "a contract with no declaration writes an empty classifications array" {
     defer out.deinit();
     try writeContractJson(&contract, &out.writer);
     try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"classifications\": [],") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"version\": 22,") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"version\": 23,") != null);
 }
 
 test "a contract with no ceiling writes ceiling null and reads it back as null" {
