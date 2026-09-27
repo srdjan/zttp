@@ -401,7 +401,9 @@ A1 lands in four commits, each with its own tests passing unfiltered.
   the writer and parser, `ZTCAT1` schema 4 in the encoder and the kernel
   decoder with one mutant row per new guard, the runtime cross-check, the
   consumer-contract section 4.6 text, and the envelope.
-- **U2. Build rules and exports.** The egress and indirect-dispatch lists and
+- **U2. Build rules and exports.** Done 2026-09-27: all gates pass except
+  `test-expert-app`, whose 16 DeepSeek cassettes the new exports made stale; the
+  approved re-record (Q6) follows in its own commits. The egress and indirect-dispatch lists and
   their census, the agent-route reach rules, the workflow refusal in tool
   routes (Q8), the `callTool` placement refusal, the `agentPrompt` and inert
   `callTool` exports, the `toolInput` label probe as a test, and the hash pins.

@@ -69,7 +69,8 @@ EXPECTED_RESTRICTION_HASH="3409f9e0490c698e67dcd1e7a6e3465f0d14c50e0a611bbe96520
 # Moved 2026-09-18: zttp:ledger adds protected post and balance exports.
 # Moved 2026-09-23: zttp:tool joins, the inert toolCatalog declaration of M4 T2.
 # Moved 2026-09-24: zttp:tool adds toolInput, a tool's gate-validated input (M4 T7).
-EXPECTED_BUILTIN_HASH="e56627d1bafd5720330d4c28861ad3664df9529431e1f2d615717bf0b00db8bd"
+# Moved 2026-09-27: zttp:tool adds agentPrompt and callTool (M5 A1 U2).
+EXPECTED_BUILTIN_HASH="1c6ed893dcb89d44dd94d1faea25ff2bf600da0d288f876ee8eede8b3f95066f"
 
 fail() {
   printf 'meta drift: %s\n' "$1" >&2

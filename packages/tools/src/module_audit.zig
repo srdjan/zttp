@@ -637,6 +637,7 @@ const label_abstain_rows = [_]LabelAbstainRow{
     .{ .specifier = "zttp:fetch", .export_name = "fetchWithRetry", .reason = "response comes from the network; labelled `.external` at the source" },
     .{ .specifier = "zttp:service", .export_name = "serviceCall", .reason = "response comes from the peer service; labelled `.external`" },
     .{ .specifier = "zttp:env", .export_name = "env", .reason = "value comes from the host; labelled `.secret` at the source" },
+    .{ .specifier = "zttp:tool", .export_name = "agentPrompt", .reason = "prompt comes from the admitted request, with no arguments; labelled `.user_input` at the source, and admission does not validate it for egress" },
     .{ .specifier = "zttp:id", .export_name = "uuid", .reason = "a fresh draw, unrelated to any argument" },
     .{ .specifier = "zttp:id", .export_name = "ulid", .reason = "a fresh draw, unrelated to any argument" },
     .{ .specifier = "zttp:id", .export_name = "nanoid", .reason = "a fresh draw, unrelated to any argument" },

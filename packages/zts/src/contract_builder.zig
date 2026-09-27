@@ -1496,7 +1496,7 @@ pub const ContractBuilder = struct {
     /// note, section 5. On any refusal the catalog contributes no entry.
     fn buildToolCatalog(self: *ContractBuilder, contract: *HandlerContract, root: NodeIndex, handler_fn: ?NodeIndex) !void {
         const calls = self.tool_catalog_calls.items;
-        if (calls.len == 0) return;
+        if (calls.len == 0) return self.checkUncatalogedCallTool(contract, handler_fn);
         if (calls.len > 1) return self.refuseToolCatalog(contract, .catalog_repeated, "toolCatalog", calls[1], null);
 
         const call_idx = calls[0];
@@ -1544,6 +1544,10 @@ pub const ContractBuilder = struct {
                 defer self.allocator.free(subject);
                 try self.refuseToolCatalog(contract, .route_untooled, subject, route.key_node, null);
             }
+        }
+
+        if (contract.spec_diagnostics.items.len == diagnostics_before) {
+            try self.checkCatalogRouteReach(contract, &state);
         }
 
         // The shared dispatch runs for every tool, under every tool's grant, so
@@ -1672,7 +1676,7 @@ pub const ContractBuilder = struct {
             if (state.agent_count != 0) {
                 return self.refuseToolCatalog(contract, .agent_repeated, name, fields[field_agent], null);
             }
-            return self.readAgentEntry(contract, state, name, route_key, description, @intCast(max_input_bytes), route_index, fields[field_agent]);
+            return self.readAgentEntry(contract, state, name, route_key, description, @intCast(max_input_bytes), fields[field_agent]);
         }
 
         const input_name = (try self.catalogString(contract, name, fields[field_input], "input")) orelse return;
@@ -1683,27 +1687,6 @@ pub const ContractBuilder = struct {
         const input_schema = input_json orelse return;
         const output_schema = output_json orelse return;
         if (!try self.checkToolScope(contract, name, fields[field_scope], input_name, input_schema, scope)) return;
-
-        // A resolved route always has a function: an unresolved value sets
-        // `api_routes_dynamic`, which returned above.
-        const fn_node = self.route_functions.items[route_index].fn_node orelse
-            return self.refuseToolCatalog(contract, .route_table_dynamic, name, fields[field_route], route_key);
-        var walk = try self.collectToolExports(fn_node, input_name);
-        defer walk.deinit(self.allocator);
-        if (walk.incomplete) {
-            return self.refuseToolCatalog(contract, .exports_unanalyzable, name, fields[field_route], route_key);
-        }
-        if (walk.refusal) |refusal| {
-            return self.refuseToolCatalog(contract, refusal.reason, name, refusal.node, refusal.detail);
-        }
-        // Decision 6: a tool may not read state a separate call wrote. Checked
-        // over the whole reach, so a helper that reads the cache counts too.
-        for (walk.exports.items) |exp| {
-            if (!isCrossCallRead(exp.module, exp.name)) continue;
-            const detail = try std.fmt.allocPrint(self.allocator, "{s}.{s}", .{ exp.module, exp.name });
-            defer self.allocator.free(detail);
-            return self.refuseToolCatalog(contract, .cross_call_read, name, fields[field_route], detail);
-        }
 
         var entry = contract_types.ToolEntry{
             .name = &.{},
@@ -1725,11 +1708,6 @@ pub const ContractBuilder = struct {
         entry.output_schema_json = try self.allocator.dupe(u8, output_schema);
         if (scope.tenant) |field| entry.scope_tenant = try self.allocator.dupe(u8, field);
         if (scope.subject) |field| entry.scope_subject = try self.allocator.dupe(u8, field);
-        entry.reachable_exports = walk.exports;
-        walk.exports = .empty;
-        std.mem.sort(contract_types.ToolCredential, walk.credentials.items, {}, contract_types.ToolCredential.lessThan);
-        entry.credentials = walk.credentials;
-        walk.credentials = .empty;
         try state.entries.append(self.allocator, entry);
     }
 
@@ -1752,7 +1730,6 @@ pub const ContractBuilder = struct {
         route_key: []const u8,
         description: []const u8,
         max_input_bytes: u32,
-        route_index: usize,
         agent_node: NodeIndex,
     ) !void {
         const obj_node = self.resolveObjectLiteralNode(agent_node) orelse
@@ -1804,14 +1781,6 @@ pub const ContractBuilder = struct {
         defer provider.deinit(self.allocator);
         const limits = (try self.readAgentLimits(contract, name, fields[2])) orelse return;
 
-        const fn_node = self.route_functions.items[route_index].fn_node orelse
-            return self.refuseToolCatalog(contract, .route_table_dynamic, name, agent_node, route_key);
-        var walk = try self.collectToolExports(fn_node, "");
-        defer walk.deinit(self.allocator);
-        if (walk.incomplete) {
-            return self.refuseToolCatalog(contract, .exports_unanalyzable, name, agent_node, route_key);
-        }
-
         var entry = contract_types.ToolEntry{
             .name = &.{},
             .route = &.{},
@@ -1830,9 +1799,6 @@ pub const ContractBuilder = struct {
         entry.input_schema_json = try self.allocator.dupe(u8, "");
         entry.output_schema_name = try self.allocator.dupe(u8, "");
         entry.output_schema_json = try self.allocator.dupe(u8, "");
-        entry.reachable_exports = walk.exports;
-        walk.exports = .empty;
-
         try entry.credentials.append(self.allocator, .{ .name = &.{}, .endpoint = &.{} });
         entry.credentials.items[0].name = try self.allocator.dupe(u8, provider.credential);
         entry.credentials.items[0].endpoint = try self.allocator.dupe(u8, provider.endpoint);
@@ -2084,6 +2050,125 @@ pub const ContractBuilder = struct {
         }
     }
 
+    fn checkUncatalogedCallTool(
+        self: *ContractBuilder,
+        contract: *HandlerContract,
+        handler_fn: ?NodeIndex,
+    ) !void {
+        if (handler_fn) |fn_node| {
+            var walk = try self.collectToolExports(fn_node, .{ .kind = .uncataloged });
+            defer walk.deinit(self.allocator);
+            if (walk.refusal) |refusal| {
+                return self.refuseToolCatalog(contract, refusal.reason, "handler", refusal.node, refusal.detail);
+            }
+            for (walk.exports.items) |exp| {
+                if (!std.mem.eql(u8, exp.module, "zttp:tool") or !std.mem.eql(u8, exp.name, "callTool")) continue;
+                return self.refuseToolCatalog(contract, .call_tool_outside_agent, "handler", fn_node, "zttp:tool.callTool");
+            }
+            return;
+        }
+
+        for (self.route_functions.items) |route| {
+            const fn_node = route.fn_node orelse continue;
+            var walk = try self.collectToolExports(fn_node, .{ .kind = .uncataloged });
+            defer walk.deinit(self.allocator);
+            if (walk.refusal) |refusal| {
+                return self.refuseToolCatalog(contract, refusal.reason, "handler", refusal.node, refusal.detail);
+            }
+            for (walk.exports.items) |exp| {
+                if (!std.mem.eql(u8, exp.module, "zttp:tool") or !std.mem.eql(u8, exp.name, "callTool")) continue;
+                return self.refuseToolCatalog(contract, .call_tool_outside_agent, "handler", fn_node, "zttp:tool.callTool");
+            }
+        }
+    }
+
+    fn checkCatalogRouteReach(
+        self: *ContractBuilder,
+        contract: *HandlerContract,
+        state: *CatalogState,
+    ) !void {
+        var tool_route_functions: std.ArrayList(NodeIndex) = .empty;
+        defer tool_route_functions.deinit(self.allocator);
+        for (state.entries.items) |entry| {
+            if (entry.agent != null) continue;
+            const route_index = self.findRouteFunction(entry.route) orelse
+                return self.refuseToolCatalog(contract, .route_unknown, entry.name, 0, entry.route);
+            const fn_node = self.route_functions.items[route_index].fn_node orelse
+                return self.refuseToolCatalog(contract, .route_table_dynamic, entry.name, 0, entry.route);
+            try tool_route_functions.append(self.allocator, fn_node);
+        }
+
+        for (state.entries.items) |*entry| {
+            const route_index = self.findRouteFunction(entry.route) orelse
+                return self.refuseToolCatalog(contract, .route_unknown, entry.name, 0, entry.route);
+            const fn_node = self.route_functions.items[route_index].fn_node orelse
+                return self.refuseToolCatalog(contract, .route_table_dynamic, entry.name, 0, entry.route);
+            if (entry.agent != null and std.mem.indexOfScalar(NodeIndex, tool_route_functions.items, fn_node) != null) {
+                return self.refuseToolCatalog(contract, .agent_tool_route_call, entry.name, fn_node, "the agent and a tool share one route function");
+            }
+            const rules: RouteReachRules = if (entry.agent) |agent| .{
+                .kind = .agent,
+                .provider_endpoint = agent.provider_endpoint,
+                .provider_credential = agent.provider_credential,
+                .tool_route_functions = tool_route_functions.items,
+            } else .{
+                .kind = .tool,
+                .input_name = entry.input_schema_name,
+            };
+            var walk = try self.collectToolExports(fn_node, rules);
+            defer walk.deinit(self.allocator);
+            if (walk.incomplete) {
+                return self.refuseToolCatalog(contract, .exports_unanalyzable, entry.name, fn_node, entry.route);
+            }
+            if (walk.refusal) |refusal| {
+                return self.refuseToolCatalog(contract, refusal.reason, entry.name, refusal.node, refusal.detail);
+            }
+
+            for (walk.exports.items) |exp| {
+                const reason: ?contract_types.ToolCatalogRefusal = if (entry.agent == null) tool: {
+                    if (std.mem.eql(u8, exp.module, "zttp:tool") and std.mem.eql(u8, exp.name, "callTool")) {
+                        break :tool .call_tool_outside_agent;
+                    }
+                    if (isIndirectDispatchExport(exp.module, exp.name)) {
+                        break :tool .indirect_dispatch;
+                    }
+                    if (isCrossCallRead(exp.module, exp.name)) {
+                        break :tool .cross_call_read;
+                    }
+                    break :tool null;
+                } else agent: {
+                    if (isIndirectDispatchExport(exp.module, exp.name)) break :agent .indirect_dispatch;
+                    if (isCrossCallRead(exp.module, exp.name)) break :agent .agent_cross_call_read;
+                    if (std.mem.eql(u8, exp.module, "zttp:queue") and std.mem.eql(u8, exp.name, "send")) {
+                        break :agent .agent_queue_send;
+                    }
+                    if (std.mem.eql(u8, exp.module, "zttp:durable") and std.mem.eql(u8, exp.name, "signal")) {
+                        break :agent .agent_durable_signal;
+                    }
+                    if (isEgressExport(exp.module, exp.name) and
+                        !(std.mem.eql(u8, exp.module, "zttp:fetch") and std.mem.eql(u8, exp.name, "fetch")))
+                    {
+                        break :agent .agent_egress;
+                    }
+                    break :agent null;
+                };
+                if (reason) |refusal_reason| {
+                    const detail = try std.fmt.allocPrint(self.allocator, "{s}.{s}", .{ exp.module, exp.name });
+                    defer self.allocator.free(detail);
+                    return self.refuseToolCatalog(contract, refusal_reason, entry.name, fn_node, detail);
+                }
+            }
+
+            entry.reachable_exports = walk.exports;
+            walk.exports = .empty;
+            if (entry.agent == null) {
+                std.mem.sort(contract_types.ToolCredential, walk.credentials.items, {}, contract_types.ToolCredential.lessThan);
+                entry.credentials = walk.credentials;
+                walk.credentials = .empty;
+            }
+        }
+    }
+
     /// A string-literal catalog field, or null after refusing it.
     fn catalogString(
         self: *ContractBuilder,
@@ -2215,6 +2300,39 @@ pub const ContractBuilder = struct {
         .{ .module = "zttp:durable", .names = &.{"waitSignal"} },
     };
 
+    const ClosedExport = struct { module: []const u8, name: []const u8 };
+
+    /// Exports that can send data outside the current handler invocation.
+    const egress_exports = [_]ClosedExport{
+        .{ .module = "zttp:fetch", .name = "fetch" },
+        .{ .module = "zttp:fetch", .name = "fetchWithRetry" },
+        .{ .module = "zttp:service", .name = "serviceCall" },
+        .{ .module = "zttp:io", .name = "parallel" },
+        .{ .module = "zttp:io", .name = "race" },
+    };
+
+    /// Exports that run another handler outside the current route grant.
+    const indirect_dispatch_exports = [_]ClosedExport{
+        .{ .module = "zttp:workflow", .name = "call" },
+        .{ .module = "zttp:workflow", .name = "fanout" },
+        .{ .module = "zttp:workflow", .name = "follow" },
+    };
+
+    fn hasClosedExport(rows: []const ClosedExport, module: []const u8, name: []const u8) bool {
+        for (rows) |row| {
+            if (std.mem.eql(u8, row.module, module) and std.mem.eql(u8, row.name, name)) return true;
+        }
+        return false;
+    }
+
+    fn isEgressExport(module: []const u8, name: []const u8) bool {
+        return hasClosedExport(&egress_exports, module, name);
+    }
+
+    fn isIndirectDispatchExport(module: []const u8, name: []const u8) bool {
+        return hasClosedExport(&indirect_dispatch_exports, module, name);
+    }
+
     fn isCrossCallRead(module: []const u8, export_name: []const u8) bool {
         for (cross_call_reads) |row| {
             if (!std.mem.eql(u8, row.module, module)) continue;
@@ -2308,6 +2426,16 @@ pub const ContractBuilder = struct {
         detail: []const u8,
     };
 
+    const RouteReachKind = enum { uncataloged, tool, agent };
+
+    const RouteReachRules = struct {
+        kind: RouteReachKind,
+        input_name: []const u8 = "",
+        provider_endpoint: []const u8 = "",
+        provider_credential: []const u8 = "",
+        tool_route_functions: []const NodeIndex = &.{},
+    };
+
     const ExportWalk = struct {
         exports: std.ArrayList(contract_types.ToolExport) = .empty,
         seen: std.AutoHashMapUnmanaged(NodeIndex, void) = .empty,
@@ -2321,9 +2449,7 @@ pub const ContractBuilder = struct {
         direct_callees: std.AutoHashMapUnmanaged(NodeIndex, void) = .empty,
         /// The first credential rule the route breaks, which refuses the tool.
         refusal: ?WalkRefusal = null,
-        /// The route's catalog input schema, the only name `toolInput` may pass
-        /// (M4 T7). Empty outside a tool route, where nothing is compared.
-        input_name: []const u8 = "",
+        rules: RouteReachRules,
 
         fn deinit(walk: *ExportWalk, allocator: std.mem.Allocator) void {
             for (walk.credentials.items) |*c| c.deinit(allocator);
@@ -2341,8 +2467,8 @@ pub const ContractBuilder = struct {
     /// over-approximates the call graph, which is the safe direction for a list
     /// that becomes a grant: a callback passed by name, a function held in a
     /// const, or an export handed around as a value is still counted.
-    fn collectToolExports(self: *ContractBuilder, fn_node: NodeIndex, input_name: []const u8) !ExportWalk {
-        var walk: ExportWalk = .{ .input_name = input_name };
+    fn collectToolExports(self: *ContractBuilder, fn_node: NodeIndex, rules: RouteReachRules) !ExportWalk {
+        var walk: ExportWalk = .{ .rules = rules };
         errdefer walk.deinit(self.allocator);
         try self.walkToolExports(&walk, fn_node);
         std.mem.sort(contract_types.ToolExport, walk.exports.items, {}, contract_types.ToolExport.lessThan);
@@ -2354,7 +2480,7 @@ pub const ContractBuilder = struct {
     /// remains is the shared dispatch, which runs under every tool's grant and
     /// so may reach only `routerMatch`.
     fn checkToolDispatch(self: *ContractBuilder, contract: *HandlerContract, handler_fn: NodeIndex) !void {
-        var walk: ExportWalk = .{};
+        var walk: ExportWalk = .{ .rules = .{ .kind = .tool } };
         defer walk.deinit(self.allocator);
         for (self.route_functions.items) |route| {
             if (route.fn_node) |fn_node| try walk.seen.put(self.allocator, fn_node, {});
@@ -2429,6 +2555,8 @@ pub const ContractBuilder = struct {
             },
             .call, .method_call => {
                 const call = self.ir_view.getCall(node) orelse return self.markIncomplete(walk);
+                self.checkCallToolPlacement(walk, call);
+                self.checkAgentToolRouteCall(walk, call);
                 try self.checkToolFetchCall(walk, node, call);
                 self.checkToolInputCall(walk, call);
                 try self.walkToolExports(walk, call.callee);
@@ -2532,7 +2660,11 @@ pub const ContractBuilder = struct {
         for (self.factsRef().imports.items) |record| {
             if (record.slot != binding.slot) continue;
             if (isFetchExport(record.module_specifier, record.imported_name, "fetch") and !walk.direct_callees.contains(node)) {
-                self.walkRefuse(walk, .fetch_as_value, node, "fetch");
+                switch (walk.rules.kind) {
+                    .tool => self.walkRefuse(walk, .fetch_as_value, node, "fetch"),
+                    .agent => self.walkRefuse(walk, .agent_fetch_endpoint, node, "fetch is not called directly"),
+                    .uncataloged => {},
+                }
             }
             return self.addToolExport(walk, record.module_specifier, record.imported_name);
         }
@@ -2545,6 +2677,13 @@ pub const ContractBuilder = struct {
             .undeclared_global => {},
             .global => {
                 const decl_init = self.findModuleScopeInit(binding.slot) orelse return self.markIncomplete(walk);
+                if (walk.rules.kind == .agent) {
+                    for (walk.rules.tool_route_functions) |tool_fn| {
+                        if (decl_init != tool_fn) continue;
+                        self.walkRefuse(walk, .agent_tool_route_call, node, "a tool route function");
+                        break;
+                    }
+                }
                 try self.walkToolExports(walk, decl_init);
             },
         }
@@ -2564,13 +2703,31 @@ pub const ContractBuilder = struct {
     /// schema with a string literal. A helper that two routes share is walked
     /// once per route, so it is checked against each route's input.
     fn checkToolInputCall(self: *const ContractBuilder, walk: *ExportWalk, call: Node.CallExpr) void {
-        if (walk.input_name.len == 0) return;
+        if (walk.rules.kind != .tool or walk.rules.input_name.len == 0) return;
         const export_name = self.importedCallee(call.callee, "zttp:tool") orelse return;
         if (!std.mem.eql(u8, export_name, "toolInput")) return;
         if (call.args_count == 0) return self.walkRefuse(walk, .tool_input_not_literal, call.callee, "toolInput");
         const name_node = self.ir_view.getListIndex(call.args_start, 0);
         const name = self.getLiteralString(name_node) orelse return self.walkRefuse(walk, .tool_input_not_literal, name_node, "toolInput");
-        if (!std.mem.eql(u8, name, walk.input_name)) self.walkRefuse(walk, .tool_input_mismatch, name_node, name);
+        if (!std.mem.eql(u8, name, walk.rules.input_name)) self.walkRefuse(walk, .tool_input_mismatch, name_node, name);
+    }
+
+    fn checkCallToolPlacement(self: *const ContractBuilder, walk: *ExportWalk, call: Node.CallExpr) void {
+        if (walk.rules.kind == .agent) return;
+        const export_name = self.importedCallee(call.callee, "zttp:tool") orelse return;
+        if (std.mem.eql(u8, export_name, "callTool")) {
+            self.walkRefuse(walk, .call_tool_outside_agent, call.callee, "zttp:tool.callTool");
+        }
+    }
+
+    fn checkAgentToolRouteCall(self: *const ContractBuilder, walk: *ExportWalk, call: Node.CallExpr) void {
+        if (walk.rules.kind != .agent) return;
+        const called = self.resolveFunctionNode(call.callee) orelse return;
+        for (walk.rules.tool_route_functions) |tool_fn| {
+            if (called != tool_fn) continue;
+            self.walkRefuse(walk, .agent_tool_route_call, call.callee, "a tool route function");
+            return;
+        }
     }
 
     /// The export of `specifier` that a callee names, or null.
@@ -2594,9 +2751,14 @@ pub const ContractBuilder = struct {
     /// The runtime refuses a credential on every sender but a plain `fetch`, so
     /// a `fetchWithRetry` whose options the build cannot see is not refused here.
     fn checkToolFetchCall(self: *ContractBuilder, walk: *ExportWalk, node: NodeIndex, call: Node.CallExpr) !void {
+        if (walk.rules.kind == .uncataloged) return;
         const export_name = self.importedCallee(call.callee, "zttp:fetch") orelse return;
         const is_fetch = std.mem.eql(u8, export_name, "fetch");
         if (is_fetch) try walk.direct_callees.put(self.allocator, call.callee, {});
+        if (walk.rules.kind == .agent) {
+            if (is_fetch) self.checkAgentFetchCall(walk, node, call);
+            return;
+        }
         if (call.args_count == 0) return;
 
         const first = self.ir_view.getListIndex(call.args_start, 0);
@@ -2660,6 +2822,62 @@ pub const ContractBuilder = struct {
         const owned_endpoint = try self.allocator.dupe(u8, canonical);
         errdefer self.allocator.free(owned_endpoint);
         try walk.credentials.append(self.allocator, .{ .name = owned_name, .endpoint = owned_endpoint });
+    }
+
+    /// An agent can send only a plain fetch to its provider endpoint. The URL
+    /// and provider credential stay literal, and the options object cannot
+    /// hide a durable request behind a spread or computed key. Endpoint
+    /// comparison uses `endpoint.normalize`, so any path on the provider's
+    /// scheme, host, and port is accepted.
+    fn checkAgentFetchCall(self: *const ContractBuilder, walk: *ExportWalk, node: NodeIndex, call: Node.CallExpr) void {
+        if (call.args_count == 0) {
+            return self.walkRefuse(walk, .agent_fetch_endpoint, node, "the URL is missing");
+        }
+        const url_node = self.ir_view.getListIndex(call.args_start, 0);
+        const url = self.getLiteralString(url_node) orelse
+            return self.walkRefuse(walk, .agent_fetch_endpoint, url_node, "the URL is not a string literal");
+        var endpoint_buf: [endpoint.max_endpoint_bytes]u8 = undefined;
+        const canonical = endpoint.normalize(url, &endpoint_buf) catch
+            return self.walkRefuse(walk, .agent_fetch_endpoint, url_node, "the URL names no endpoint");
+        if (!std.mem.eql(u8, canonical, walk.rules.provider_endpoint)) {
+            return self.walkRefuse(walk, .agent_fetch_endpoint, url_node, "the URL does not match the provider endpoint");
+        }
+
+        if (call.args_count < 2) {
+            return self.walkRefuse(walk, .agent_fetch_options, node, "the options argument is missing");
+        }
+        const options_node = self.ir_view.getListIndex(call.args_start, 1);
+        if (self.ir_view.getTag(options_node) != .object_literal) {
+            return self.walkRefuse(walk, .agent_fetch_options, options_node, "the options are not an object literal");
+        }
+        const obj = self.ir_view.getObject(options_node) orelse
+            return self.walkRefuse(walk, .agent_fetch_options, options_node, "the options are unreadable");
+        var credential_node: NodeIndex = null_node;
+        var has_durable = false;
+        var k: u16 = 0;
+        while (k < obj.properties_count) : (k += 1) {
+            const prop_idx = self.ir_view.getListIndex(obj.properties_start, k);
+            const prop = self.literalProperty(prop_idx) orelse
+                return self.walkRefuse(walk, .agent_fetch_options, prop_idx, "a spread or computed option");
+            const key = self.getObjectPropertyKey(prop.key) orelse
+                return self.walkRefuse(walk, .agent_fetch_options, prop_idx, "a computed option key");
+            if (std.mem.eql(u8, key, "credential")) {
+                if (credential_node != null_node) {
+                    return self.walkRefuse(walk, .agent_fetch_options, prop_idx, "credential is repeated");
+                }
+                credential_node = prop.value;
+            }
+            if (std.mem.eql(u8, key, "durable")) has_durable = true;
+        }
+        if (credential_node == null_node) {
+            return self.walkRefuse(walk, .agent_fetch_options, options_node, "credential is missing");
+        }
+        const credential = self.getLiteralString(credential_node) orelse
+            return self.walkRefuse(walk, .agent_fetch_credential, credential_node, "credential is not a string literal");
+        if (!std.mem.eql(u8, credential, walk.rules.provider_credential)) {
+            return self.walkRefuse(walk, .agent_fetch_credential, credential_node, "credential does not match the provider credential");
+        }
+        if (has_durable) self.walkRefuse(walk, .agent_fetch_durable, options_node, "durable");
     }
 
     fn addToolExport(self: *ContractBuilder, walk: *ExportWalk, module: []const u8, name: []const u8) !void {
@@ -7029,6 +7247,22 @@ fn agentSource(comptime agent_value: []const u8) []const u8 {
     );
 }
 
+fn agentReachSource(comptime imports: []const u8, comptime assistant_body: []const u8) []const u8 {
+    return imports ++ "\n" ++ toolSource(
+        "function assistant(req) { " ++ assistant_body ++ " return Response.json({}); }",
+        "\"POST /a\": a, \"POST /agent\": assistant",
+        toolCatalogOf(tool_test_entry ++ ", " ++ agentEntry("assistant", "POST /agent", agent_test_value)),
+    );
+}
+
+fn toolReachSource(comptime imports: []const u8, comptime tool_body: []const u8) []const u8 {
+    return imports ++ "\n" ++ toolSource(
+        "function c(req) { " ++ tool_body ++ " return Response.json({}); }",
+        "\"POST /a\": c",
+        toolCatalogOf(tool_test_entry),
+    );
+}
+
 fn agentLimitSource(
     comptime rounds: []const u8,
     comptime tool_calls: []const u8,
@@ -7111,6 +7345,31 @@ const tool_refusal_cases = [_]ToolRefusalCase{
     .{ .reason = .cross_call_read, .source = "import { cacheGet } from \"zttp:cache\";\n" ++ toolSource("function c(req) { cacheGet(\"n\", \"k\"); return Response.json({}); }", "\"POST /a\": c", toolCatalogOf(tool_test_entry)) },
     // Reached through a helper, and from a module the rule covers whole.
     .{ .reason = .cross_call_read, .source = "import { sqlExec } from \"zttp:sql\";\n" ++ toolSource("function write() { return sqlExec(\"x\", {}); }\nfunction c(req) { write(); return Response.json({}); }", "\"POST /a\": c", toolCatalogOf(tool_test_entry)) },
+    .{ .reason = .agent_cross_call_read, .source = agentReachSource("import { cacheGet } from \"zttp:cache\";", "cacheGet(\"n\", \"k\");") },
+    .{ .reason = .indirect_dispatch, .source = toolReachSource("import { call } from \"zttp:workflow\";", "call(\"other\", {});") },
+    .{ .reason = .indirect_dispatch, .source = agentReachSource("import { fanout } from \"zttp:workflow\";", "fanout([]);") },
+    .{ .reason = .agent_egress, .source = agentReachSource("import { serviceCall } from \"zttp:service\";", "serviceCall(\"other\", \"POST /x\", {});") },
+    .{ .reason = .agent_queue_send, .source = agentReachSource("import { send } from \"zttp:queue\";", "send(\"q\", {});") },
+    .{ .reason = .agent_durable_signal, .source = agentReachSource("import { signal } from \"zttp:durable\";", "signal(\"key\", \"ready\", {});") },
+    .{
+        .reason = .agent_tool_route_call,
+        .source = toolSource(
+            "function assistant(req) { const runTool = a; runTool(req); return Response.json({}); }",
+            "\"POST /a\": a, \"POST /agent\": assistant",
+            // Agent first proves that route-kind discovery does not depend on
+            // catalog entry order. The alias proves the mention-based reach
+            // cannot bypass the rule by changing the direct callee.
+            toolCatalogOf(agentEntry("assistant", "POST /agent", agent_test_value) ++ ", " ++ tool_test_entry),
+        ),
+    },
+    .{ .reason = .agent_fetch_endpoint, .source = agentReachSource("import { fetch } from \"zttp:fetch\";", "fetch(\"https://other.example/v1\", { credential: \"provider\" });") },
+    .{ .reason = .agent_fetch_endpoint, .source = agentReachSource("import { fetch } from \"zttp:fetch\";", "fetch();") },
+    .{ .reason = .agent_fetch_options, .source = agentReachSource("import { fetch } from \"zttp:fetch\";", "fetch(\"https://api.deepseek.com/chat/completions\");") },
+    .{ .reason = .agent_fetch_options, .source = agentReachSource("import { fetch } from \"zttp:fetch\";", "const options = { credential: \"provider\" }; fetch(\"https://api.deepseek.com/chat/completions\", { ...options });") },
+    .{ .reason = .agent_fetch_credential, .source = agentReachSource("import { fetch } from \"zttp:fetch\";", "fetch(\"https://api.deepseek.com/chat/completions\", { credential: \"other\" });") },
+    .{ .reason = .agent_fetch_durable, .source = agentReachSource("import { fetch } from \"zttp:fetch\";", "fetch(\"https://api.deepseek.com/chat/completions\", { credential: \"provider\", durable: { key: \"turn\" } });") },
+    .{ .reason = .call_tool_outside_agent, .source = toolReachSource("import { callTool } from \"zttp:tool\";", "const invoke = callTool; invoke(\"1\", \"ta\", \"{}\");") },
+    .{ .reason = .call_tool_outside_agent, .source = "import { callTool } from \"zttp:tool\";\n" ++ toolSource("function c(req) { callTool(\"1\", \"ta\", \"{}\"); return Response.json({}); }", "\"POST /a\": c", "") },
     .{ .reason = .dispatch_reaches_export, .source = "import { sha256 } from \"zttp:crypto\";\n" ++ tool_test_head ++ "\nconst routes = { \"POST /a\": a };\n" ++ toolCatalogOf(tool_test_entry) ++ "\nfunction handler(req) {\n  sha256(\"x\");\n  const found = routerMatch(routes, req);\n  if (found !== undefined) return found.handler(req);\n  return Response.json({}, { status: 404 });\n}\n" },
     // M4 T6: the build must see every options object a tool route hands fetch.
     .{ .reason = .fetch_arguments_not_literal, .source = fetchToolSource("function c(req) { const u = \"https://api.example/v1\"; fetch(u); return Response.json({}); }") },
@@ -7292,6 +7551,24 @@ test "a well-formed agent entry carries its sorted tools provider limits and rou
     try std.testing.expectEqualStrings("sha256", entry.reachable_exports.items[0].name);
 }
 
+test "an agent can fetch a path on its provider endpoint and callTool" {
+    const source = comptime agentReachSource(
+        "import { fetch } from \"zttp:fetch\";\nimport { callTool } from \"zttp:tool\";",
+        "fetch(\"https://api.deepseek.com/v2/chat\", { credential: \"provider\" }); callTool(\"1\", \"ta\", \"{}\");",
+    );
+    var contract = try buildTestContract(source);
+    defer contract.deinit(std.testing.allocator);
+    for (contract.spec_diagnostics.items) |diagnostic| {
+        if (diagnostic.kind != .tool_catalog_refused) continue;
+        std.debug.print("unexpected ZTS513 {s}\n", .{diagnostic.spec_name});
+        return error.TestUnexpectedRefusal;
+    }
+    try std.testing.expectEqual(@as(usize, 2), contract.tools.items.len);
+    const entry = contract.tools.items[1];
+    try std.testing.expect(entry.agent != null);
+    try std.testing.expectEqual(@as(usize, 2), entry.reachable_exports.items.len);
+}
+
 test "an agent stores tool names in ascending order" {
     const second_tool = "tb: { route: \"POST /b\", description: \"b\", input: \"In\", output: \"Out\", maxInputBytes: 64 }";
     const agent_value = "{ tools: [\"tb\", \"ta\"], provider: " ++ agent_test_provider ++ ", limits: " ++ agent_test_limits ++ " }";
@@ -7461,6 +7738,130 @@ test "a tool that writes the cache is admitted while a cache read is refused" {
     try std.testing.expectEqual(@as(usize, 1), exports.len);
     try std.testing.expectEqualStrings("zttp:cache", exports[0].module);
     try std.testing.expectEqualStrings("cacheSet", exports[0].name);
+}
+
+const EgressCensusAllowance = struct {
+    module: ?[]const u8,
+    name: []const u8,
+    reason: []const u8,
+};
+
+/// The analyzer cannot import runtime/handler_instance.zig without reversing
+/// the package tiers. These two names are the installed ambient I/O natives
+/// from that file. The strict checker deliberately excludes both from
+/// `known_globals.names`, so handler source cannot use them in the ZTS model.
+const runtime_ambient_io_globals = [_][]const u8{ "httpRequest", "fetchSync" };
+
+const egress_census_allowlist = [_]EgressCensusAllowance{
+    .{ .module = "zttp:workflow", .name = "saga", .reason = "saga invokes local step callbacks and does not dispatch another handler" },
+    .{ .module = null, .name = "Array", .reason = "language constructor, not I/O" },
+    .{ .module = null, .name = "Boolean", .reason = "language constructor, not I/O" },
+    .{ .module = null, .name = "Date", .reason = "language clock object, not outbound I/O" },
+    .{ .module = null, .name = "Headers", .reason = "local HTTP value constructor, not I/O" },
+    .{ .module = null, .name = "JSON", .reason = "language namespace, not I/O" },
+    .{ .module = null, .name = "Math", .reason = "language namespace, not I/O" },
+    .{ .module = null, .name = "Number", .reason = "language constructor, not I/O" },
+    .{ .module = null, .name = "Object", .reason = "language namespace, not I/O" },
+    .{ .module = null, .name = "Request", .reason = "local HTTP value constructor, not I/O" },
+    .{ .module = null, .name = "Response", .reason = "local HTTP value constructor, not I/O" },
+    .{ .module = null, .name = "String", .reason = "language constructor, not I/O" },
+    .{ .module = null, .name = "assert", .reason = "local assertion helper, not I/O" },
+    .{ .module = null, .name = "h", .reason = "local HTML node constructor, not I/O" },
+    .{ .module = null, .name = "hole", .reason = "compile-time synthesis marker, not I/O" },
+    .{ .module = null, .name = "isBytes", .reason = "local type predicate, not I/O" },
+    .{ .module = null, .name = "isDict", .reason = "local type predicate, not I/O" },
+    .{ .module = null, .name = "parseFloat", .reason = "language parser, not I/O" },
+    .{ .module = null, .name = "parseInt", .reason = "language parser, not I/O" },
+    .{ .module = null, .name = "range", .reason = "local array constructor, not I/O" },
+    .{ .module = null, .name = "renderToString", .reason = "local HTML renderer, not I/O" },
+    .{ .module = null, .name = "requestBody", .reason = "reads the current inbound request only" },
+    .{ .module = null, .name = "requestJson", .reason = "reads the current inbound request only" },
+    .{ .module = null, .name = "requestText", .reason = "reads the current inbound request only" },
+    .{ .module = null, .name = "resource", .reason = "constructs a local hypermedia value, not I/O" },
+    .{ .module = null, .name = "httpRequest", .reason = "runtime-only legacy ambient I/O native rejected by the strict checker" },
+    .{ .module = null, .name = "fetchSync", .reason = "runtime-only legacy ambient I/O native rejected by the strict checker" },
+};
+
+fn bindingDeclaresCapability(binding: module_binding.ModuleBinding, capability: module_binding.ModuleCapability) bool {
+    for (binding.required_capabilities) |candidate| {
+        if (candidate == capability) return true;
+    }
+    return false;
+}
+
+fn censusAllowance(module: ?[]const u8, name: []const u8) ?EgressCensusAllowance {
+    for (egress_census_allowlist) |row| {
+        if (row.module == null and module == null and std.mem.eql(u8, row.name, name)) return row;
+        if (row.module) |row_module| {
+            const candidate_module = module orelse continue;
+            if (std.mem.eql(u8, row_module, candidate_module) and std.mem.eql(u8, row.name, name)) return row;
+        }
+    }
+    return null;
+}
+
+fn isRuntimeAmbientIoGlobal(name: []const u8) bool {
+    return json_utils.containsString(&runtime_ambient_io_globals, name);
+}
+
+test "egress and indirect dispatch lists census module and ambient I/O surfaces" {
+    for (ContractBuilder.egress_exports) |row| {
+        if (builtin_modules.findExport(row.module, row.name) == null) {
+            std.debug.print("egress list names no export: {s}.{s}\n", .{ row.module, row.name });
+            return error.TestEgressExportUnknown;
+        }
+        try std.testing.expect(!ContractBuilder.isIndirectDispatchExport(row.module, row.name));
+    }
+    for (ContractBuilder.indirect_dispatch_exports) |row| {
+        if (builtin_modules.findExport(row.module, row.name) == null) {
+            std.debug.print("indirect dispatch list names no export: {s}.{s}\n", .{ row.module, row.name });
+            return error.TestIndirectDispatchExportUnknown;
+        }
+        try std.testing.expect(!ContractBuilder.isEgressExport(row.module, row.name));
+    }
+
+    for (builtin_modules.all) |binding| {
+        const census_module = bindingDeclaresCapability(binding, .network) or
+            std.mem.eql(u8, binding.specifier, "zttp:io") or
+            std.mem.eql(u8, binding.specifier, "zttp:workflow");
+        if (!census_module) continue;
+        for (binding.exports) |func| {
+            const classified = ContractBuilder.isEgressExport(binding.specifier, func.name) or
+                ContractBuilder.isIndirectDispatchExport(binding.specifier, func.name) or
+                censusAllowance(binding.specifier, func.name) != null;
+            if (!classified) {
+                std.debug.print("I/O or dispatch export has no census row: {s}.{s}\n", .{ binding.specifier, func.name });
+                return error.TestEgressCensusGap;
+            }
+        }
+    }
+
+    for (known_globals.names) |name| {
+        const maps_to_io_export = ContractBuilder.isEgressExport("zttp:io", name);
+        if (!maps_to_io_export and censusAllowance(null, name) == null) {
+            std.debug.print("known ambient global has no census row: {s}\n", .{name});
+            return error.TestAmbientCensusGap;
+        }
+    }
+    for (runtime_ambient_io_globals) |name| {
+        try std.testing.expect(!known_globals.isKnownGlobalFunction(name));
+        try std.testing.expect(censusAllowance(null, name) != null);
+    }
+
+    for (egress_census_allowlist) |row| {
+        try std.testing.expect(row.reason.len > 0);
+        if (row.module) |module| {
+            const binding = builtin_modules.fromSpecifier(module) orelse return error.TestStaleEgressAllowance;
+            const candidate_module = bindingDeclaresCapability(binding.*, .network) or
+                std.mem.eql(u8, module, "zttp:io") or std.mem.eql(u8, module, "zttp:workflow");
+            if (!candidate_module or builtin_modules.findExport(module, row.name) == null) {
+                return error.TestStaleEgressAllowance;
+            }
+        } else if (!known_globals.isKnownGlobalFunction(row.name) and !isRuntimeAmbientIoGlobal(row.name)) {
+            std.debug.print("ambient allowance matches no known global: {s}\n", .{row.name});
+            return error.TestStaleEgressAllowance;
+        }
+    }
 }
 
 test "every builtin export that declares an unknown return label is a refused cross-call read" {

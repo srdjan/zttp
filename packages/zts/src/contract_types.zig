@@ -1611,6 +1611,30 @@ pub const ToolCatalogRefusal = enum {
     /// (decision 6): a `zttp:cache` read, any `zttp:sql` export,
     /// `queue.receive`, or `durable.waitSignal`.
     cross_call_read,
+    /// An agent route reaches an export that reads state a separate call wrote.
+    agent_cross_call_read,
+    /// A tool or agent route reaches workflow dispatch, which runs another
+    /// handler outside the current route grant.
+    indirect_dispatch,
+    /// An agent route reaches an egress sender other than plain `fetch`.
+    agent_egress,
+    /// An agent route reaches `queue.send`.
+    agent_queue_send,
+    /// An agent route reaches `durable.signal`.
+    agent_durable_signal,
+    /// An agent route calls a route function claimed by a tool entry.
+    agent_tool_route_call,
+    /// A plain `fetch` in an agent route does not use the provider endpoint.
+    agent_fetch_endpoint,
+    /// A plain `fetch` in an agent route has no literal options object with a
+    /// `credential` field.
+    agent_fetch_options,
+    /// A plain `fetch` in an agent route does not name the provider credential.
+    agent_fetch_credential,
+    /// A plain `fetch` in an agent route has a `durable` option.
+    agent_fetch_durable,
+    /// `callTool` is reached from a route that is not an agent route.
+    call_tool_outside_agent,
     /// The handler's shared dispatch, outside every route function, reaches a
     /// module export other than `routerMatch`. At runtime no tool's grant
     /// holds it, so every tool request would fail on it.
@@ -1683,6 +1707,17 @@ pub const ToolCatalogRefusal = enum {
             .scope_unknown_key => "scope may hold only tenant and subject",
             .scope_field_invalid => "a scope value must name a required top-level string property of the input schema",
             .cross_call_read => "a tool route may not reach an export that reads state a separate call wrote: zttp:cache reads, zttp:sql, queue.receive, or durable.waitSignal",
+            .agent_cross_call_read => "an agent route may not reach an export that reads state a separate call wrote: zttp:cache reads, zttp:sql, queue.receive, or durable.waitSignal",
+            .indirect_dispatch => "a tool or agent route may not reach workflow.call, workflow.fanout, or workflow.follow because the dispatched handler runs outside the route grant",
+            .agent_egress => "an agent route may use plain zttp:fetch.fetch only; every other egress sender is refused",
+            .agent_queue_send => "an agent route may not reach queue.send",
+            .agent_durable_signal => "an agent route may not reach durable.signal",
+            .agent_tool_route_call => "an agent route may not call a route function claimed by a tool entry",
+            .agent_fetch_endpoint => "an agent route fetch URL must be a string literal whose normalized endpoint matches the provider endpoint",
+            .agent_fetch_options => "an agent route fetch needs an object-literal options argument with no spread and with a credential field",
+            .agent_fetch_credential => "an agent route fetch credential must be the provider credential string literal",
+            .agent_fetch_durable => "an agent route fetch may not use the durable option",
+            .call_tool_outside_agent => "callTool may be reached only from an agent route",
             .dispatch_reaches_export => "the handler's dispatch outside the route functions may call only routerMatch: no tool's grant holds any other export",
             .fetch_arguments_not_literal => "in a tool route, fetch takes a string literal URL and, when present, an object literal of options with no spread, so the build sees every credential it names",
             .fetch_as_value => "in a tool route, call fetch directly; a fetch passed or stored as a value could name a credential the build cannot see",

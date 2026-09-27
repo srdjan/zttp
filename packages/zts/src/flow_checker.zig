@@ -3731,6 +3731,104 @@ test "FlowChecker proves no_secret_leakage for a benign module fetch" {
     try std.testing.expect(checker.getProperties().no_secret_leakage);
 }
 
+test "FlowChecker keeps a secret passed through toolInput in its parsed value" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { env } from "zttp:env";
+        \\import { toolInput } from "zttp:tool";
+        \\function handler(req) {
+        \\  const parsed = toolInput("Input", { body: env("SECRET_KEY") });
+        \\  return Response.json(parsed.value);
+        \\}
+    ;
+
+    var parser = try @import("zts-engine").parser.JsParser.init(allocator, source);
+    var atoms = atom_table.AtomTable.init(allocator);
+    defer atoms.deinit();
+    parser.setAtomTable(&atoms);
+    defer parser.deinit();
+    const root = try parser.parse();
+    const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    const handler_fn = @import("handler_verifier.zig").findHandlerFunction(ir_view, root) orelse
+        return error.HandlerNotFound;
+
+    var checker = FlowChecker.init(allocator, ir_view, &atoms);
+    defer checker.deinit();
+    _ = try checker.check(handler_fn);
+
+    var secret_response_count: usize = 0;
+    for (checker.getDiagnostics()) |diagnostic| {
+        if (diagnostic.kind == .secret_in_response) secret_response_count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), secret_response_count);
+    try std.testing.expect(!checker.getProperties().no_secret_leakage);
+}
+
+test "FlowChecker accepts a literal passed through toolInput and returned" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { toolInput } from "zttp:tool";
+        \\function handler(req) {
+        \\  const parsed = toolInput("Input", { body: "\"safe\"" });
+        \\  return Response.json(parsed.value);
+        \\}
+    ;
+
+    var parser = try @import("zts-engine").parser.JsParser.init(allocator, source);
+    var atoms = atom_table.AtomTable.init(allocator);
+    defer atoms.deinit();
+    parser.setAtomTable(&atoms);
+    defer parser.deinit();
+    const root = try parser.parse();
+    const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    const handler_fn = @import("handler_verifier.zig").findHandlerFunction(ir_view, root) orelse
+        return error.HandlerNotFound;
+
+    var checker = FlowChecker.init(allocator, ir_view, &atoms);
+    defer checker.deinit();
+    _ = try checker.check(handler_fn);
+
+    for (checker.getDiagnostics()) |diagnostic| {
+        try std.testing.expect(diagnostic.kind != .secret_in_response);
+    }
+    try std.testing.expect(checker.getProperties().no_secret_leakage);
+}
+
+test "FlowChecker keeps agentPrompt user input on a fetch body" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { fetch } from "zttp:fetch";
+        \\import { agentPrompt } from "zttp:tool";
+        \\function handler(req) {
+        \\  const prompt = agentPrompt();
+        \\  fetch("https://provider.example.com", { method: "POST", body: prompt.value });
+        \\  return Response.json({ ok: true });
+        \\}
+    ;
+
+    var parser = try @import("zts-engine").parser.JsParser.init(allocator, source);
+    var atoms = atom_table.AtomTable.init(allocator);
+    defer atoms.deinit();
+    parser.setAtomTable(&atoms);
+    defer parser.deinit();
+    const root = try parser.parse();
+    const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    const handler_fn = @import("handler_verifier.zig").findHandlerFunction(ir_view, root) orelse
+        return error.HandlerNotFound;
+
+    var checker = FlowChecker.init(allocator, ir_view, &atoms);
+    defer checker.deinit();
+    _ = try checker.check(handler_fn);
+
+    var unvalidated_egress_count: usize = 0;
+    for (checker.getDiagnostics()) |diagnostic| {
+        if (diagnostic.kind == .unvalidated_input_in_egress) unvalidated_egress_count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), unvalidated_egress_count);
+    try std.testing.expect(!checker.getProperties().input_validated);
+    try std.testing.expect(!checker.getProperties().injection_safe);
+}
+
 test "FlowChecker records validated defended path reaching an HTML response" {
     const allocator = std.testing.allocator;
     const source =

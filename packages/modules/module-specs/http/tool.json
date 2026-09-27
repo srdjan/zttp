@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "specifier": "zttp:tool",
   "source": "packages/modules/src/http/tool.zig",
-  "summary": "Call toolCatalog({...}) once at module scope with an object literal; each entry names a routerMatch route key and two schemaCompile names, and every route in the table must have an entry. A tool reads its validated input with toolInput(inputSchemaName, req).",
+  "summary": "Call toolCatalog({...}) once at module scope with an object literal; each entry names a routerMatch route key. A tool reads its validated input with toolInput(inputSchemaName, req), and an agent reads its admitted prompt with agentPrompt(). callTool(callId, name, argsJson) is reserved for agent routes.",
   "requiredCapabilities": [],
   "exports": [
     {
@@ -41,6 +41,27 @@
         {
           "category": "request_schema"
         }
+      ]
+    },
+    {
+      "name": "agentPrompt",
+      "effect": "read",
+      "returns": "result",
+      "failureSeverity": "critical"
+    },
+    {
+      "name": "callTool",
+      "effect": "write",
+      "returns": "result",
+      "params": [
+        "string",
+        "string",
+        "string"
+      ],
+      "paramNames": [
+        "callId",
+        "name",
+        "argsJson"
       ]
     }
   ]
