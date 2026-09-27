@@ -11,6 +11,7 @@
 
 const std = @import("std");
 const sdk = @import("zttp-sdk");
+const state_limits = @import("../internal/state_limits.zig");
 
 const MODULE_STATE_SLOT: usize = 8; // module_slots.Slot.ratelimit
 
@@ -59,12 +60,18 @@ const RateEntry = struct {
 pub const RateStore = struct {
     allocator: std.mem.Allocator,
     entries: std.StringHashMap(RateEntry),
+    max_entries: usize,
+    total_key_bytes: usize,
+    max_key_bytes: usize,
     check_count: u32 = 0,
 
     fn init(allocator: std.mem.Allocator) RateStore {
         return .{
             .allocator = allocator,
             .entries = std.StringHashMap(RateEntry).init(allocator),
+            .max_entries = state_limits.max_entries,
+            .total_key_bytes = 0,
+            .max_key_bytes = state_limits.max_bytes,
         };
     }
 
@@ -101,8 +108,9 @@ pub const RateStore = struct {
         }
 
         for (expired.items) |key| {
-            if (self.entries.fetchRemove(key)) |_| {
-                self.allocator.free(key);
+            if (self.entries.fetchRemove(key)) |removed| {
+                self.total_key_bytes -= removed.key.len;
+                self.allocator.free(removed.key);
             }
         }
     }
@@ -147,6 +155,22 @@ pub const RateStore = struct {
             };
         }
 
+        if (key.len > self.max_key_bytes) return error.RateStoreCapacityExceeded;
+
+        if (self.entries.count() >= self.max_entries or
+            self.total_key_bytes > self.max_key_bytes - key.len)
+        {
+            // A full store gets an immediate expiry sweep instead of waiting
+            // for the periodic sweep. If every retained window is still live,
+            // fail closed for a new key and keep the established key set.
+            self.evictExpired(now);
+            if (self.entries.count() >= self.max_entries or
+                self.total_key_bytes > self.max_key_bytes - key.len)
+            {
+                return error.RateStoreCapacityExceeded;
+            }
+        }
+
         const owned_key = try self.allocator.dupe(u8, key);
         errdefer self.allocator.free(owned_key);
         try self.entries.put(owned_key, .{
@@ -154,6 +178,7 @@ pub const RateStore = struct {
             .window_start = now,
             .window_sec = window_sec,
         });
+        self.total_key_bytes += owned_key.len;
         return .{
             .allowed = true,
             .remaining = if (limit > 1) limit - 1 else 0,
@@ -163,6 +188,7 @@ pub const RateStore = struct {
 
     fn reset(self: *RateStore, key: []const u8) bool {
         if (self.entries.fetchRemove(key)) |kv| {
+            self.total_key_bytes -= kv.key.len;
             self.allocator.free(kv.key);
             return true;
         }
@@ -197,7 +223,10 @@ fn rateCheckImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const sdk.JS
     const now_s = @divTrunc(now_ms, 1000);
 
     const store = getOrCreateStore(handle) catch return sdk.JSValue.undefined_val;
-    const result = store.check(key, limit, window_sec, now_s) catch return sdk.JSValue.undefined_val;
+    const result = store.check(key, limit, window_sec, now_s) catch |err| return switch (err) {
+        error.RateStoreCapacityExceeded => rateStoreCapacityResult(handle),
+        error.OutOfMemory => sdk.JSValue.undefined_val,
+    };
 
     if (result.allowed) {
         const val_obj = try sdk.createObject(handle);
@@ -213,6 +242,13 @@ fn rateCheckImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const sdk.JS
     const retry_after_ms = result.reset_at_ms - now_ms;
     const retry_sec = @divTrunc(@max(@as(i64, 0), retry_after_ms), 1000);
     try sdk.objectSet(handle, err_obj, "retryAfter", sdk.numberFromF64(@floatFromInt(retry_sec)));
+    return sdk.resultErrValue(handle, err_obj);
+}
+
+fn rateStoreCapacityResult(handle: *sdk.ModuleHandle) !sdk.JSValue {
+    const err_obj = try sdk.createObject(handle);
+    const tag_str = try sdk.createString(handle, "rate_store_capacity");
+    try sdk.objectSet(handle, err_obj, "tag", tag_str);
     return sdk.resultErrValue(handle, err_obj);
 }
 
@@ -278,4 +314,60 @@ test "RateStore: independent keys" {
 
     const r4 = try store.check("key-b", 1, 60, 1001);
     try std.testing.expect(!r4.allowed);
+}
+
+test "RateStore: capacity rejects a new live key" {
+    var store = RateStore.init(std.testing.allocator);
+    defer store.deinitSelf();
+    store.max_entries = 2;
+
+    _ = try store.check("a", 1, 60, 1000);
+    _ = try store.check("b", 1, 60, 1000);
+    try std.testing.expectError(
+        error.RateStoreCapacityExceeded,
+        store.check("c", 1, 60, 1000),
+    );
+    try std.testing.expectEqual(@as(u32, 2), store.entries.count());
+    try std.testing.expect(store.entries.contains("a"));
+    try std.testing.expect(store.entries.contains("b"));
+}
+
+test "RateStore: capacity sweep admits a key after expiry" {
+    var store = RateStore.init(std.testing.allocator);
+    defer store.deinitSelf();
+    store.max_entries = 1;
+
+    _ = try store.check("expired", 1, 1, 1000);
+    try std.testing.expectEqual(@as(usize, "expired".len), store.total_key_bytes);
+    _ = try store.check("replacement", 1, 60, 1001);
+
+    try std.testing.expectEqual(@as(u32, 1), store.entries.count());
+    try std.testing.expectEqual(@as(usize, "replacement".len), store.total_key_bytes);
+    try std.testing.expect(!store.entries.contains("expired"));
+    try std.testing.expect(store.entries.contains("replacement"));
+}
+
+test "RateStore: key byte capacity rejects a new live key" {
+    var store = RateStore.init(std.testing.allocator);
+    defer store.deinitSelf();
+    store.max_key_bytes = 3;
+
+    _ = try store.check("ab", 1, 60, 1000);
+    try std.testing.expectError(
+        error.RateStoreCapacityExceeded,
+        store.check("cd", 1, 60, 1000),
+    );
+    try std.testing.expectEqual(@as(usize, 2), store.total_key_bytes);
+    try std.testing.expect(store.entries.contains("ab"));
+    try std.testing.expect(!store.entries.contains("cd"));
+}
+
+test "RateStore: reset releases owned key bytes" {
+    var store = RateStore.init(std.testing.allocator);
+    defer store.deinitSelf();
+
+    _ = try store.check("reset-me", 1, 60, 1000);
+    try std.testing.expectEqual(@as(usize, "reset-me".len), store.total_key_bytes);
+    try std.testing.expect(store.reset("reset-me"));
+    try std.testing.expectEqual(@as(usize, 0), store.total_key_bytes);
 }
