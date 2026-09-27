@@ -6,6 +6,7 @@ index when a plan starts, closes, or moves to the archive.
 
 | Document | Role and status | Work authority |
 |---|---|---|
+| [M5: release contract for agent handlers](2026-09-27-m5-agent-handler-release-contract.md) | Proposed 2026-09-27; owner answered the four scope questions | Needs owner acceptance of the text before A1 starts |
 | [Proof-checker rederive review](2026-09-24-proof-checker-rederive-review.md) | Implemented 2026-09-25; Phases 0 to 4 committed, results and section 7 leftovers at the end of the plan | Owner accepted the plan and answered its four decisions |
 | [M4: release contract for scoped tool routes](2026-09-22-m4-release-contract.md) | Accepted 2026-09-22; T1a to T7 complete | Owner accepted the contract on 2026-09-22 |
 | [M4 T7: reference tools and documentation](2026-09-24-m4-t7-reference-tools-design.md) | Implemented 2026-09-24; U1 to U3 complete | Owner accepted the design and answered its six questions |
@@ -19,7 +20,7 @@ index when a plan starts, closes, or moves to the archive.
 | [D1: type system](2026-07-30-014-d1-type-system-design.md) | Retained design reference; language phases complete | No new work scheduled |
 | [D2: effects and purity](2026-07-30-015-d2-effects-purity-design.md) | Retained design reference; language phases complete | No new work scheduled |
 | [D3: canonical form and wire](2026-07-30-016-d3-canonical-form-wire-design.md) | Retained design reference; language phases complete | No new work scheduled |
-| [Custom LLM agent handlers](2026-09-19-feat-agent-handler-spec.md) | Proposed; parked | Roadmap M4 requires a product decision before implementation |
+| [Custom LLM agent handlers](2026-09-19-feat-agent-handler-spec.md) | Proposed; baseline refreshed 2026-09-27 at `e6f33dfc`; resumed by M5 | M4 delivered its catalog, scope, and credential parts; the M5 contract states the rest |
 
 [Archived execution records](../archive/README.md) preserve completed work,
 superseded plans, and historical measurements. The reset ledger's remaining

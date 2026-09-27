@@ -10,7 +10,7 @@ work from reference designs. [Product proposals](zttp-next/README.md) and
 ## Milestones
 
 M1, M2, and M3 are complete.
-M4 has an accepted release contract and is in progress. No release date is assigned.
+M4 is complete: T1a to T7 are delivered. M5 has a proposed release contract. No release date is assigned.
 
 | Milestone | Status | Dependency | Next action | Completion evidence |
 |---|---|---|---|---|
@@ -18,6 +18,7 @@ M4 has an accepted release contract and is in progress. No release date is assig
 | M2: bounded correctness and assurance | Complete, 2026-09-22 | Three implementation units committed and reviewed; affected suites and mutation probes pass | Select the next milestone | [Completion record](archive/plans/2026-09-21-bounded-correctness-assurance.md); full local gate passed at `181d31d4`; public response regression test; selected lifecycle and decoder cases reject deliberate wrong behavior; affected unfiltered suites pass |
 | M3: provable-set reach measurement | Complete, 2026-09-21 | Current DeepSeek default; pilot and full run authorized | Keep the used suite as regression evidence; select a new suite before a new holdout claim | [Full fresh report](provable-reach.md#first-full-measurement): 8/8 reached, 4/4 in each mode, with all selected tasks and source, policy, model, budget, and runtime evidence retained |
 | M4: next release boundary | Contract accepted 2026-09-22; T1a to T7 complete | M1 proposal inventory and current strategy | Delivered T1a to T7 of the [release contract](plans/2026-09-22-m4-release-contract.md) in order | One accepted release contract states scope, threat model, dependencies, and completion checks |
+| M5: agent handlers | Proposed 2026-09-27; owner answered the four scope questions | M4 complete | Owner accepts the [release contract](plans/2026-09-27-m5-agent-handler-release-contract.md), then A1 design note | M5a: a buffered agent route passes checks C-A1 to C-A6; M5b then adds streaming |
 
 M2's source evidence is `packages/zts/src/http.zig`,
 `packages/runtime/src/server_response.zig`, and the conditional test gaps in
@@ -306,7 +307,7 @@ a product decision and current usage evidence.
 
 | Proposal | Status | Dependency | Next action | Completion evidence |
 |---|---|---|---|---|
-| Custom agent handlers and tool-profile v1 | Parked; M4 candidates | Product owner selects the release boundary | Compare overlapping catalog, capability, streaming, and artifact work | One accepted contract and reconciled implementation scope, or an explicit deferral |
+| Custom agent handlers and tool-profile v1 | Reconciled: M4 delivered the tool profile; M5 resumes agent handlers | M5 contract acceptance | See the M5 row | One accepted contract and reconciled implementation scope, or an explicit deferral |
 | Broader tool platform, confidential hosting, and cloud adapters | Parked | A customer need and an accepted threat model | Evaluate separately from the current handler product | Recorded accept/defer decision and a bounded plan for any accepted work |
 | Predictable-performance advisory plan | Proposed; old baseline | Fresh process-level measurements | Revalidate the measurement unit before any optimization | Retained receipts identify a current bottleneck and justify a selected change |
 | [Consumer contract v1](consumer-contract.md) | Proposed | A consumer that commits to lowering into the declaration | Decide whether to accept producer obligations P1 to P14, starting with the published vocabulary envelope and its drift gate | The envelope exists, a gate compares a source-derived inventory against it for equality and fails on a missing or empty input, and one consumer's declaration reaches an admissibility answer |

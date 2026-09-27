@@ -2,7 +2,7 @@
 title: Custom LLM Agent Handlers - Specification
 type: feat
 date: 2026-09-19
-last_reviewed: 2026-09-20
+last_reviewed: 2026-09-27
 product_contract_source: user-request
 status: proposed
 ---
@@ -43,6 +43,18 @@ delivery milestone, not completion of this enhancement.
 ---
 
 ## Current Baseline
+
+Refreshed on 2026-09-27 against local `main` at `e6f33dfc`. Since the
+revalidation below, M4 delivered most of U1 and the credential part of U3: the
+tool catalog and strict schema subset, `ZTCAT1` binding as graph member 19,
+bearer-token identity and scope, per-tool grants, the declaration ceiling,
+credential injection, and finite outbound deadlines. The
+[M5 release contract](2026-09-27-m5-agent-handler-release-contract.md) resumes
+the remaining work. Its section 4 lists the facts at `e6f33dfc` that supersede
+rows of the table below: the tool-dispatch refusal, the single grant slot, the
+allow-all on a null grant, the 30 s handler deadline, and the verifier's walk
+that skips closures. The rows below on the response, fetch, pool, and Studio
+surfaces still hold at `e6f33dfc`. WebSocket support has since been removed.
 
 Revalidated on 2026-09-20 against committed local `main` at `e223381e`.
 The original source baseline was `2d57147b`.
