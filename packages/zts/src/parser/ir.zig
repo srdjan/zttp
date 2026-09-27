@@ -20,26 +20,10 @@ pub const ScopeId = u16;
 /// Sentinel value for "no scope"
 pub const null_scope: ScopeId = std.math.maxInt(ScopeId);
 
-/// Pack an index-list start/count pair into a single u32.
-/// Layout: low 16 bits = start index, high 16 bits = count.
-fn packListRef(start: NodeIndex, count: u16) u32 {
-    const start16: u16 = @truncate(start);
-    std.debug.assert(start == start16);
-    return @as(u32, start16) | (@as(u32, count) << 16);
-}
-
-/// Unpack an index-list start/count pair encoded by `packListRef`.
 const ListRef = struct {
     start: NodeIndex,
     count: u16,
 };
-
-fn unpackListRef(packed_value: u32) ListRef {
-    return .{
-        .start = @as(NodeIndex, packed_value & 0xFFFF),
-        .count = @as(u16, @truncate(packed_value >> 16)),
-    };
-}
 
 /// Reference to a variable binding
 pub const BindingRef = struct {
@@ -900,6 +884,20 @@ pub const IRStore = struct {
         return start;
     }
 
+    /// Store a list reference without narrowing its 32-bit start offset.
+    fn addListRef(self: *IRStore, start: NodeIndex, count: u16) !u32 {
+        return self.addExtra(&.{ start, count });
+    }
+
+    fn getListRef(self: *const IRStore, extra_start: u32) ?ListRef {
+        const start: usize = extra_start;
+        if (start >= self.extra.items.len or self.extra.items.len - start < 2) return null;
+        return .{
+            .start = self.extra.items[start],
+            .count = @intCast(self.extra.items[start + 1]),
+        };
+    }
+
     /// Get node tag
     pub fn getTag(self: *const IRStore, idx: NodeIndex) NodeTag {
         return self.tags.items[idx];
@@ -993,10 +991,11 @@ pub const IRStore = struct {
     pub fn getCallData(self: *const IRStore, idx: NodeIndex) ?Node.CallExpr {
         if (idx >= self.data.items.len) return null;
         const d = self.data.items[idx];
+        const list_ref = self.getListRef(d.b) orelse return null;
         return .{
             .callee = d.a,
-            .args_start = @as(u16, @truncate(d.b >> 8)),
-            .args_count = @truncate(d.b),
+            .args_start = list_ref.start,
+            .args_count = @intCast(list_ref.count),
         };
     }
 
@@ -1041,10 +1040,8 @@ pub const IRStore = struct {
             },
             .call => blk: {
                 const c = node.data.call;
-                // Pack: a = callee, b = args_count(8) | args_start(16)
-                const b_val = @as(u32, c.args_count) |
-                    (@as(u32, @as(u16, @truncate(c.args_start))) << 8);
-                break :blk self.addNode(.call, loc, .{ .a = c.callee, .b = b_val });
+                const list_ref = try self.addListRef(c.args_start, c.args_count);
+                break :blk self.addNode(.call, loc, .{ .a = c.callee, .b = list_ref });
             },
             .member_access => blk: {
                 const m = node.data.member;
@@ -1153,23 +1150,26 @@ pub const IRStore = struct {
             },
             .switch_stmt => blk: {
                 const s = node.data.switch_stmt;
+                const list_ref = try self.addListRef(s.cases_start, s.cases_count);
                 break :blk self.addNode(.switch_stmt, loc, .{
                     .a = s.discriminant,
-                    .b = @as(u32, @as(u16, @truncate(s.cases_start))) | (@as(u32, s.cases_count) << 16),
+                    .b = list_ref,
                 });
             },
             .case_clause => blk: {
                 const c = node.data.case_clause;
+                const list_ref = try self.addListRef(c.body_start, c.body_count);
                 break :blk self.addNode(.case_clause, loc, .{
                     .a = c.test_expr,
-                    .b = @as(u32, @as(u16, @truncate(c.body_start))) | (@as(u32, c.body_count) << 16),
+                    .b = list_ref,
                 });
             },
             .match_expr => blk: {
                 const m = node.data.match_expr;
+                const list_ref = try self.addListRef(m.arms_start, m.arms_count);
                 break :blk self.addNode(.match_expr, loc, .{
                     .a = m.discriminant,
-                    .b = @as(u32, @as(u16, @truncate(m.arms_start))) | (@as(u32, m.arms_count) << 16),
+                    .b = list_ref,
                 });
             },
             .match_arm => blk: {
@@ -1242,9 +1242,10 @@ pub const IRStore = struct {
             // --- Imports/Exports ---
             .import_decl => blk: {
                 const i = node.data.import_decl;
+                const list_ref = try self.addListRef(i.specifiers_start, i.specifiers_count);
                 break :blk self.addNode(.import_decl, loc, .{
                     .a = i.module_idx,
-                    .b = packListRef(i.specifiers_start, i.specifiers_count),
+                    .b = list_ref,
                 });
             },
             .import_specifier => blk: {
@@ -1279,9 +1280,8 @@ pub const IRStore = struct {
             // --- Call variants ---
             .method_call => blk: {
                 const c = node.data.call;
-                const b_val = @as(u32, c.args_count) |
-                    (@as(u32, @as(u16, @truncate(c.args_start))) << 8);
-                break :blk self.addNode(.method_call, loc, .{ .a = c.callee, .b = b_val });
+                const list_ref = try self.addListRef(c.args_start, c.args_count);
+                break :blk self.addNode(.method_call, loc, .{ .a = c.callee, .b = list_ref });
             },
 
             // --- Object method/accessor ---
@@ -1504,6 +1504,62 @@ test "IRStore extra data" {
     try std.testing.expectEqual(@as(u32, 20), retrieved[1]);
     try std.testing.expectEqual(@as(u32, 30), retrieved[2]);
     try std.testing.expectEqual(@as(u32, 40), retrieved[3]);
+}
+
+test "IRStore list references preserve offsets above u16" {
+    const allocator = std.testing.allocator;
+    var store = IRStore.init(allocator);
+    defer store.deinit();
+
+    var constants = ConstantPool.init(allocator);
+    defer constants.deinit();
+
+    const padding = try allocator.alloc(NodeIndex, std.math.maxInt(u16) + 1);
+    defer allocator.free(padding);
+    @memset(padding, null_node);
+    _ = try store.addIndexList(padding);
+    const high_start = try store.addIndexList(&.{ 1, 2, 3, 4, 5, 6, 7 });
+    try std.testing.expect(high_start > std.math.maxInt(u16));
+
+    const loc = SourceLocation{ .line = 1, .column = 1, .offset = 0 };
+    const call_idx = try store.add(.{
+        .tag = .call,
+        .loc = loc,
+        .data = .{ .call = .{ .callee = 10, .args_start = high_start, .args_count = 2 } },
+    });
+    const method_call_idx = try store.add(.{
+        .tag = .method_call,
+        .loc = loc,
+        .data = .{ .call = .{ .callee = 11, .args_start = high_start, .args_count = 3 } },
+    });
+    const switch_idx = try store.add(.{
+        .tag = .switch_stmt,
+        .loc = loc,
+        .data = .{ .switch_stmt = .{ .discriminant = 12, .cases_start = high_start, .cases_count = 4 } },
+    });
+    const case_idx = try store.add(.{
+        .tag = .case_clause,
+        .loc = loc,
+        .data = .{ .case_clause = .{ .test_expr = 13, .body_start = high_start, .body_count = 5 } },
+    });
+    const match_idx = try store.add(.{
+        .tag = .match_expr,
+        .loc = loc,
+        .data = .{ .match_expr = .{ .discriminant = 14, .arms_start = high_start, .arms_count = 6 } },
+    });
+    const import_idx = try store.add(.{
+        .tag = .import_decl,
+        .loc = loc,
+        .data = .{ .import_decl = .{ .module_idx = 15, .specifiers_start = high_start, .specifiers_count = 7 } },
+    });
+
+    const view = IrView.fromIRStore(&store, &constants);
+    try std.testing.expectEqual(high_start, view.getCall(call_idx).?.args_start);
+    try std.testing.expectEqual(high_start, view.getCall(method_call_idx).?.args_start);
+    try std.testing.expectEqual(high_start, view.getSwitchStmt(switch_idx).?.cases_start);
+    try std.testing.expectEqual(high_start, view.getCaseClause(case_idx).?.body_start);
+    try std.testing.expectEqual(high_start, view.getMatchExpr(match_idx).?.arms_start);
+    try std.testing.expectEqual(high_start, view.getImportDecl(import_idx).?.specifiers_start);
 }
 
 test "IRStore memory efficiency" {
@@ -1983,11 +2039,11 @@ pub const IrView = struct {
             .ir_store => |ir| blk: {
                 if (idx >= ir.data.items.len) break :blk null;
                 const d = ir.data.items[idx];
-                const list_ref = unpackListRef(d.b);
+                const list_ref = ir.getListRef(d.b) orelse break :blk null;
                 break :blk .{
                     .discriminant = d.a,
                     .cases_start = list_ref.start,
-                    .cases_count = @truncate(list_ref.count),
+                    .cases_count = @intCast(list_ref.count),
                 };
             },
         };
@@ -2000,7 +2056,7 @@ pub const IrView = struct {
             .ir_store => |ir| blk: {
                 if (idx >= ir.data.items.len) break :blk null;
                 const d = ir.data.items[idx];
-                const list_ref = unpackListRef(d.b);
+                const list_ref = ir.getListRef(d.b) orelse break :blk null;
                 break :blk .{
                     .test_expr = d.a,
                     .body_start = list_ref.start,
@@ -2017,11 +2073,11 @@ pub const IrView = struct {
             .ir_store => |ir| blk: {
                 if (idx >= ir.data.items.len) break :blk null;
                 const d = ir.data.items[idx];
-                const list_ref = unpackListRef(d.b);
+                const list_ref = ir.getListRef(d.b) orelse break :blk null;
                 break :blk .{
                     .discriminant = d.a,
                     .arms_start = list_ref.start,
-                    .arms_count = @truncate(list_ref.count),
+                    .arms_count = @intCast(list_ref.count),
                 };
             },
         };
@@ -2119,18 +2175,17 @@ pub const IrView = struct {
     // ============ Module Accessors ============
 
     /// Get import declaration data
-    /// Packing: a = module_idx, b = specifiers_start_low16 | (specifiers_count << 16)
     pub fn getImportDecl(self: IrView, idx: NodeIndex) ?Node.ImportDecl {
         return switch (self.impl) {
             .node_list => |nl| if (nl.get(idx)) |node| node.data.import_decl else null,
             .ir_store => |ir| blk: {
                 if (idx >= ir.data.items.len) break :blk null;
                 const d = ir.data.items[idx];
-                const list_ref = unpackListRef(d.b);
+                const list_ref = ir.getListRef(d.b) orelse break :blk null;
                 break :blk .{
                     .module_idx = @truncate(d.a),
                     .specifiers_start = list_ref.start,
-                    .specifiers_count = @truncate(list_ref.count),
+                    .specifiers_count = @intCast(list_ref.count),
                 };
             },
         };
