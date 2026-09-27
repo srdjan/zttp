@@ -45,7 +45,7 @@ No test failed and no gate objected. A probe showed the defect: a certificate wi
 
 `scripts/check-proof-swallow.sh` covers `checker.zig` (line 59) and stayed green, because nothing was discarded. The kernel returned a wrong answer. `markDeclared` (`checker.zig:1011`) skips out-of-range evidence with `continue`, and that skip has a row in `scripts/proof-swallow.allow` (line 61). The row was correct in isolation: an unmarked node costs the producer a declaration. But no other stage refused the same evidence, so the skip was the only place that saw the bad node id, and it said nothing.
 
-The defect is a wrong verdict, not undefined behavior: no out-of-range index is ever dereferenced, and `@truncate` is defined. The build mode matters for a different reason. Releases build with `-Doptimize=ReleaseFast` (`.github/workflows/release.yml:129`), and when this defect was found the root build passed that `optimize` to the `zttp_proof_checker` dependency. Runtime safety was therefore off in production, and that is why the audit that found this defect inventoried every safety-sensitive builtin in the kernel. Since commit 0384765a a release build compiles the kernel ReleaseSafe instead (`proof_checker_optimize` in `build/Context.zig`), so an unchecked site there is now a panic that refuses to serve rather than undefined behavior.
+The defect is a wrong verdict, not undefined behavior: no out-of-range index is ever dereferenced, and `@truncate` is defined. The build mode matters for a different reason. Releases build with `-Doptimize=ReleaseFast` (`.github/workflows/release.yml:129`), and when this defect was found the root build passed that `optimize` to the `zttp_proof_checker` dependency. Runtime safety was therefore off in production, and that is why the audit that found this defect inventoried every safety-sensitive builtin in the kernel. Commit 0384765a tried to fix this by compiling the kernel dependency ReleaseSafe, but on Zig 0.16.0 runtime safety follows the root module, so that pin changed nothing. Every non-test kernel function now begins with `@setRuntimeSafety(true)`, which does hold under a ReleaseFast root, and `zig build test-kernel-safety` enforces it; an unchecked site there is now a panic that refuses to serve rather than undefined behavior.
 
 ## What Didn't Work
 
@@ -167,7 +167,7 @@ The inventory discloses the same absent node on purpose. The disclosure is what 
 
 **Use a fresh cache for each mutant.** A reused `--cache-dir` can report a stale pass for a mutant that keeps the file size.
 
-**Open item.** Building the kernel dependency ReleaseSafe would turn a missed guard into a panic instead of undefined behavior. The cost is not measured; this needs to be measured before a decision.
+**Closed item.** A missed guard in the kernel is now a panic, through per-function `@setRuntimeSafety(true)` rather than the dependency optimize mode, which does not isolate safety on Zig 0.16.0. The cost of that change is not measured.
 
 ## Related
 

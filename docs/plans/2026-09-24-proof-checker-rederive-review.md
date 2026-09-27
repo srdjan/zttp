@@ -11,6 +11,11 @@ commit `dea0eddc`. The trusted-node fix, the kernel build mode, the removal of
    the same mode, so they still dedup into one module. Measured on the kernel fixture: about
    1.5 us per `check` call under `ReleaseFast` and about 1.95 us under `ReleaseSafe`, paid
    once per start in `Server.start`. A real handler certificate was not measured.
+   **Correction (2026-09-26):** the pin had no effect. On Zig 0.16.0 runtime safety follows
+   the root module, so a ReleaseSafe dependency under a ReleaseFast root runs with no checks
+   (measured with a two-module probe). The pin is removed; every non-test kernel function
+   now begins with `@setRuntimeSafety(true)`, enforced by `zig build test-kernel-safety`.
+   The timing difference above therefore did not come from runtime safety.
 2. **`rule_family_mismatch`: removed, number 1503 retired.** Done in `ecacf029` and
    `45e80999`. The policy hash did not move: it covers the zts rule registry, and zts does not
    import the kernel. Only the vocabulary envelope changed.
