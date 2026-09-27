@@ -15,7 +15,9 @@ commit `dea0eddc`. The trusted-node fix, the kernel build mode, the removal of
    the root module, so a ReleaseSafe dependency under a ReleaseFast root runs with no checks
    (measured with a two-module probe). The pin is removed; every non-test kernel function
    now begins with `@setRuntimeSafety(true)`, enforced by `zig build test-kernel-safety`.
-   The timing difference above therefore did not come from runtime safety.
+   The timing above came from a standalone benchmark with the kernel under a ReleaseSafe
+   root, so it likely reflects the real cost of runtime safety, but not what the shipped
+   binary paid.
 2. **`rule_family_mismatch`: removed, number 1503 retired.** Done in `ecacf029` and
    `45e80999`. The policy hash did not move: it covers the zts rule registry, and zts does not
    import the kernel. Only the vocabulary envelope changed.
