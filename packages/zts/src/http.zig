@@ -787,8 +787,10 @@ fn getStringArgWithCtx(val: value.JSValue, ctx: ?*context.Context) ![]const u8 {
         if (rope.kind == .leaf) {
             return rope.payload.leaf.data();
         }
-        // Flatten concat rope and cache result
-        // Use arena when available to avoid leaking heap memory on arena reset
+        // Flatten concat rope and cache result. Nothing frees a cached leaf,
+        // so with a context the flat copy comes from the request arena, or
+        // from the context's own allocator when there is no arena or it is
+        // full, and never from libc.
         if (ctx) |c| {
             if (c.hybrid) |hybrid| {
                 if (rope.flattenWithArena(hybrid.arena)) |flat| {
@@ -798,7 +800,10 @@ fn getStringArgWithCtx(val: value.JSValue, ctx: ?*context.Context) ![]const u8 {
                 }
             }
         }
-        const flat = try rope.flatten(std.heap.c_allocator);
+        const flat = if (ctx) |c|
+            try rope.flatten(c.allocator)
+        else
+            try rope.flatten(std.heap.c_allocator);
         rope.kind = .leaf;
         rope.payload = .{ .leaf = flat };
         return flat.data();

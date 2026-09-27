@@ -8,7 +8,7 @@ const string = h.string;
 // Aliased helpers for use in this module
 const allocFloat = h.allocFloat;
 const toNumber = h.toNumber;
-const getStringData = h.getStringData;
+const getStringDataCtx = h.getStringDataCtx;
 const createArrayWithPrototype = h.createArrayWithPrototype;
 
 // ============================================================================
@@ -23,7 +23,7 @@ const createArrayWithPrototype = h.createArrayWithPrototype;
 /// object, as they are in JavaScript.
 pub fn numberConstructor(ctx: *context.Context, _: value.JSValue, args: []const value.JSValue) value.JSValue {
     if (args.len == 0) return value.JSValue.fromInt(0);
-    return allocFloat(ctx, coerceToNumber(args[0]));
+    return allocFloat(ctx, coerceToNumber(ctx, args[0]));
 }
 
 /// Number.isInteger(value) - Returns true if value is an integer
@@ -218,14 +218,14 @@ pub fn numberParseInt(ctx: *context.Context, _: value.JSValue, args: []const val
 /// Coerce a JS value to a number following ToNumber, returning the f64 or NaN.
 /// Strings are trimmed then parsed in full (a trailing non-numeric tail yields
 /// NaN, unlike parseFloat); an all-whitespace/empty string coerces to 0.
-fn coerceToNumber(val: value.JSValue) f64 {
+fn coerceToNumber(ctx: *context.Context, val: value.JSValue) f64 {
     if (val.isInt()) return @floatFromInt(val.getInt());
     if (val.isFloat()) return val.getFloat64();
     if (val.isNull()) return 0; // null -> 0
     if (val.isUndefined()) return std.math.nan(f64); // undefined -> NaN
     if (val.isTrue()) return 1;
     if (val.isFalse()) return 0;
-    if (getStringData(val)) |text| {
+    if (getStringDataCtx(val, ctx)) |text| {
         const trimmed = std.mem.trim(u8, text, " \t\n\r");
         if (trimmed.len == 0) return 0; // "" / whitespace -> 0
         return std.fmt.parseFloat(f64, trimmed) catch std.math.nan(f64);
@@ -235,20 +235,20 @@ fn coerceToNumber(val: value.JSValue) f64 {
 }
 
 /// Global isNaN - coerces argument to number first (unlike Number.isNaN)
-pub fn globalIsNaN(_: *context.Context, _: value.JSValue, args: []const value.JSValue) value.JSValue {
+pub fn globalIsNaN(ctx: *context.Context, _: value.JSValue, args: []const value.JSValue) value.JSValue {
     if (args.len == 0) return value.JSValue.fromBool(true); // isNaN(undefined) = true
 
-    return value.JSValue.fromBool(std.math.isNan(coerceToNumber(args[0])));
+    return value.JSValue.fromBool(std.math.isNan(coerceToNumber(ctx, args[0])));
 }
 
 /// Global isFinite - coerces argument to number first (unlike Number.isFinite)
-pub fn globalIsFinite(_: *context.Context, _: value.JSValue, args: []const value.JSValue) value.JSValue {
+pub fn globalIsFinite(ctx: *context.Context, _: value.JSValue, args: []const value.JSValue) value.JSValue {
     if (args.len == 0) return value.JSValue.fromBool(false); // isFinite(undefined) = false
 
     // Same ToNumber coercion as globalIsNaN, so isFinite("42") is true and
     // isFinite("x")/isFinite({}) are false (the prior code returned false for
     // every string and object, including numeric strings).
-    return value.JSValue.fromBool(std.math.isFinite(coerceToNumber(args[0])));
+    return value.JSValue.fromBool(std.math.isFinite(coerceToNumber(ctx, args[0])));
 }
 
 /// Global range(end) or range(start, end) or range(start, end, step)
@@ -387,4 +387,41 @@ test "globalIsNaN coerces ToNumber; Number.isNaN does not ENG12" {
     try std.testing.expect(!numberIsNaN(ctx, undef, &.{value.JSValue.fromPtr(alpha_str)}).toBoolean());
     try std.testing.expect(!numberIsNaN(ctx, undef, &.{value.JSValue.fromInt(42)}).toBoolean());
     try std.testing.expect(numberIsNaN(ctx, undef, &.{value.JSValue.nan_val}).toBoolean());
+}
+
+test "Number() flattens a concat rope into the request arena, not libc" {
+    // A concat rope has no bytes of its own. Coercing it flattens it and caches
+    // the flat string in the rope node, so the flat copy must come from an
+    // allocator whose lifetime covers the rope. Before this was context-aware,
+    // Number/isNaN/isFinite flattened through std.heap.c_allocator and nothing
+    // ever freed the copy: one leak per call, invisible to the testing allocator.
+    const allocator = std.testing.allocator;
+    const gc_mod = @import("../gc.zig");
+    const arena_mod = @import("../arena.zig");
+
+    var gc_state = try gc_mod.GC.init(allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    var req_arena = try arena_mod.Arena.init(allocator, .{ .size = 4096 });
+    defer req_arena.deinit();
+    var hybrid = arena_mod.HybridAllocator{
+        .persistent = allocator,
+        .arena = &req_arena,
+    };
+    ctx.setHybridAllocator(&hybrid);
+
+    const left = string.createStringWithArena(&req_arena, "  12") orelse return error.OutOfMemory;
+    const right = string.createStringWithArena(&req_arena, "34  ") orelse return error.OutOfMemory;
+    const rope = string.createRopeFromStringsWithArena(&req_arena, left, right) orelse return error.OutOfMemory;
+    const rope_val = value.JSValue.fromPtr(rope);
+    try std.testing.expect(rope_val.isRope());
+
+    const undef = value.JSValue.undefined_val;
+    const result = numberConstructor(ctx, undef, &.{rope_val});
+    try std.testing.expectEqual(@as(f64, 1234), result.toNumber() orelse return error.TestUnexpectedResult);
+
+    const flat = rope.asLeaf() orelse return error.TestUnexpectedResult;
+    try std.testing.expect(req_arena.contains(flat));
 }

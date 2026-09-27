@@ -178,14 +178,18 @@ pub fn getStringDataImpl(val: value.JSValue, ctx: ?*context.Context) ?[]const u8
         if (rope.kind == .leaf) {
             return rope.payload.leaf.data();
         }
-        // Concat rope: flatten and cache by converting to leaf
+        // Concat rope: flatten and cache by converting to leaf. Nothing frees
+        // a cached leaf, so with a context the flat copy comes from the
+        // allocator that owns the context's strings, as in
+        // Context.createStringPtr, and never from libc.
         if (ctx) |c| {
-            if (c.hybrid) |h| {
-                const flat = rope.flattenWithArena(h.arena) orelse return null;
-                rope.kind = .leaf;
-                rope.payload = .{ .leaf = flat };
-                return flat.data();
-            }
+            const flat = if (c.hybrid) |h|
+                rope.flattenWithArena(h.arena) orelse return null
+            else
+                rope.flatten(c.allocator) catch return null;
+            rope.kind = .leaf;
+            rope.payload = .{ .leaf = flat };
+            return flat.data();
         }
         // Static analyzer builds never execute runtime helpers. Keep the
         // no-context fallback from retaining libc in the freestanding module.
