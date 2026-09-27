@@ -75,6 +75,11 @@ answer, and re-relates the translation witnesses. It is a leaf with no I/O, no
 allocator, and no dependency on the compiler or the server, so what an auditor
 has to read to trust an acceptance is one directory.
 
+Its runtime safety checks stay on in release builds, so a guard it lacks turns
+bad input into a refusal to serve rather than undefined behavior. That holds
+only because each of its functions turns safety on in its own body: the build
+mode of the module that contains it does not decide this.
+
 ### Assurance grade
 How strong the weakest link in a certificate's chain is: proved, translation
 validated, solver assumed, tested, or trusted. An obligation's grade is the
@@ -294,6 +299,8 @@ Every failure above is a Gate that permits what it should refuse. A Gate can als
 A deliberate edit that must make a Gate fail. It is how a Gate is shown to be load-bearing rather than merely green, because without one a Gate that checks nothing and a Gate that checks correctly look the same from outside. A Probe names the check it expects to reject it, and one caught by a different check is a Probe failure rather than agreement, since a rejection for the wrong reason says nothing about the check the Probe was written for.
 
 The word covers two things worth keeping apart. One is a Probe a Gate carries and can run against itself, which holds the named cases caught as the Gate changes. The other is a one-off edit a reviewer applies to a copy of the Gate's inputs. Only the second can find a case nobody named, so a Gate whose whole assurance is the first kind is assured against its author's imagination and nothing wider.
+
+A Probe must turn on a check that exists only when the property it tests holds. A Probe whose expected outcome happens whether or not the property holds, such as one that aborts unconditionally where it meant to show a safety check firing, gets that outcome either way and shows nothing.
 
 ### Frozen signature corpus
 The generated type surface of every virtual-module export, used as a Gate's input so that adding an export adds a case by construction and the corpus cannot drift from what it describes.
