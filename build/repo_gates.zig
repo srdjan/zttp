@@ -10,6 +10,7 @@ pub fn addCapabilityAudit(ctx: Context) *std.Build.Step.Run {
 }
 
 pub const Result = struct {
+    kernel_safety_step: *std.Build.Step,
     module_boundary: *std.Build.Step.Run,
     release_workflow: *std.Build.Step.Run,
     proof_swallow: *std.Build.Step.Run,
@@ -23,6 +24,41 @@ pub const Result = struct {
 };
 
 pub fn add(ctx: Context, tools: tooling.Result) Result {
+    const b = ctx.b;
+
+    const kernel_safety = ctx.addGate(&.{ "/bin/bash", "scripts/check-kernel-safety.sh" }, "test-kernel-safety", "Check local runtime safety in the acceptance kernel");
+    kernel_safety.run.has_side_effects = true;
+
+    // A ReleaseFast root disables safety in imported modules on Zig 0.16.0.
+    // The function-local setting in safety.check must still turn a failed
+    // invariant into a panic with a stable diagnostic.
+    const kernel_safety_probe_mod = b.createModule(.{
+        .root_source_file = b.path("build/kernel_safety_release_probe.zig"),
+        .target = b.graph.host,
+        .optimize = .ReleaseFast,
+    });
+    kernel_safety_probe_mod.addImport("zttp_proof_checker", ctx.proofCheckerMod());
+    kernel_safety_probe_mod.addImport("kernel_safety_probe_dep", b.createModule(.{
+        .root_source_file = b.path("build/kernel_safety_probe_dep.zig"),
+        .target = b.graph.host,
+        .optimize = .ReleaseFast,
+    }));
+    const kernel_safety_probe = b.addExecutable(.{
+        .name = "kernel-safety-release-probe",
+        .root_module = kernel_safety_probe_mod,
+    });
+    const run_kernel_safety_probe = b.addRunArtifact(kernel_safety_probe);
+    run_kernel_safety_probe.expectStdErrMatch("proof-checker invariant violated");
+    run_kernel_safety_probe.addArg("check");
+    run_kernel_safety_probe.addCheck(.{ .expect_term = .{ .signal = .ABRT } });
+    kernel_safety.step.dependOn(&run_kernel_safety_probe.step);
+
+    const run_kernel_safety_index_probe = b.addRunArtifact(kernel_safety_probe);
+    run_kernel_safety_index_probe.addArg("index");
+    run_kernel_safety_index_probe.expectStdErrMatch("index out of bounds");
+    run_kernel_safety_index_probe.addCheck(.{ .expect_term = .{ .signal = .ABRT } });
+    kernel_safety.step.dependOn(&run_kernel_safety_index_probe.step);
+
     const module_boundary = ctx.addGate(&.{ "/bin/bash", "scripts/test-module-boundary.sh" }, "test-module-boundary", "Check consumer reach into zts internals against the allowlist");
     const release_workflow = ctx.addGate(&.{ "/bin/bash", "scripts/test-release-workflow.sh" }, "test-release-workflow", "Check release workflow invariants");
     const proof_swallow = ctx.addGate(&.{ "/bin/bash", "scripts/check-proof-swallow.sh" }, "test-proof-swallow", "Check the proof pipeline for unreviewed swallowed errors");
@@ -47,6 +83,7 @@ pub fn add(ctx: Context, tools: tooling.Result) Result {
     const doc_links = ctx.addGate(&.{ "/bin/bash", "scripts/audit-docs.sh" }, "test-doc-links", "Check docs for broken relative links");
 
     return .{
+        .kernel_safety_step = kernel_safety.step,
         .module_boundary = module_boundary.run,
         .release_workflow = release_workflow.run,
         .proof_swallow = proof_swallow.run,

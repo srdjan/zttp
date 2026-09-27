@@ -160,17 +160,13 @@ pub fn init(b: *std.Build) Context {
         .report_format = b.option([]const u8, "report", "Emit structured build report (values: json)"),
     };
 
-    // Consumer acceptance kernel. A release build keeps runtime safety in the
-    // kernel. Its guards are the only thing between certificate bytes and an
-    // out-of-range cast or slice, which ReleaseFast turns into undefined
-    // behavior and ReleaseSafe turns into a panic. The kernel runs once,
-    // before the pool exists, so that panic is a refusal to serve. Measured
-    // cost: about 30% per `check` call on the kernel fixture, roughly half a
-    // microsecond, paid once per start.
-    const proof_checker_optimize: std.builtin.OptimizeMode = if (optimize == .Debug) .Debug else .ReleaseSafe;
+    // Consumer acceptance kernel. Each function enables runtime safety with
+    // @setRuntimeSafety(true), enforced by test-kernel-safety. On Zig 0.16.0,
+    // a dependency module's optimize mode does not isolate runtime safety
+    // from a ReleaseFast root module.
     const proof_checker_dep = b.dependency("zttp_proof_checker", .{
         .target = target,
-        .optimize = proof_checker_optimize,
+        .optimize = optimize,
     });
 
     // Pass perf_histogram so the build-graph dedups this dep with the one

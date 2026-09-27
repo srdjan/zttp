@@ -882,7 +882,8 @@ fn withoutComments(arena: std.mem.Allocator, text: []const u8) ![]u8 {
 }
 
 /// The body of the named function with every comment blanked and every run of
-/// whitespace collapsed to one space.
+/// whitespace collapsed to one space. The kernel safety prefix is removed
+/// when it is the first statement. The kernel safety gate checks that prefix.
 ///
 /// Pinning a body this way compares the statements rather than the layout, so
 /// `zig fmt` and an explanatory comment are both free, and any change to what
@@ -907,7 +908,10 @@ fn normalizedBody(arena: std.mem.Allocator, text: []const u8, signature: []const
         length += 1;
         after_space = false;
     }
-    return std.mem.trim(u8, out[0..length], " ");
+    const normalized = std.mem.trim(u8, out[0..length], " ");
+    const safety_prefix = "@setRuntimeSafety(true); ";
+    if (std.mem.startsWith(u8, normalized, safety_prefix)) return normalized[safety_prefix.len..];
+    return normalized;
 }
 
 /// What `InvariantVerdicts.writeApplicability` must decide from.
@@ -3355,6 +3359,35 @@ test "a function body is delimited by brace depth" {
     const body = functionBody(source, "fn outer(") orelse return error.TestUnexpectedResult;
     try testing.expect(std.mem.indexOf(u8, body, ".a = 1") != null);
     try testing.expect(std.mem.indexOf(u8, body, "fn outer") == null);
+}
+
+test "body normalization ignores a leading kernel safety statement" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const source =
+        \\pub fn checked() bool {
+        \\    @setRuntimeSafety(true);
+        \\    return true;
+        \\}
+    ;
+    const body = (try normalizedBody(arena.allocator(), source, "pub fn checked(")) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("return true;", body);
+
+    const misplaced =
+        \\pub fn checked() bool {
+        \\    const value = true;
+        \\    @setRuntimeSafety(true);
+        \\    return value;
+        \\}
+    ;
+    const misplaced_body = (try normalizedBody(arena.allocator(), misplaced, "pub fn checked(")) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings(
+        "const value = true; @setRuntimeSafety(true); return value;",
+        misplaced_body,
+    );
 }
 
 test "call arguments split at top level and not inside a nested call" {

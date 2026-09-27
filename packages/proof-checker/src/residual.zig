@@ -25,6 +25,7 @@ pub const GuardKind = enum(u8) {
     sql_write = 5,
 
     pub fn fromWire(value: u8) ?GuardKind {
+        @setRuntimeSafety(true);
         return switch (value) {
             1 => .env_key,
             2 => .egress_endpoint,
@@ -36,10 +37,12 @@ pub const GuardKind = enum(u8) {
     }
 
     pub fn name(self: GuardKind) []const u8 {
+        @setRuntimeSafety(true);
         return @tagName(self);
     }
 
     pub fn normalization(self: GuardKind) Normalization {
+        @setRuntimeSafety(true);
         return switch (self) {
             .env_key, .cache_namespace, .sql_read, .sql_write => .identifier_exact_v1,
             .egress_endpoint => .endpoint_v1,
@@ -47,6 +50,7 @@ pub const GuardKind = enum(u8) {
     }
 
     pub fn section(self: GuardKind) PolicySection {
+        @setRuntimeSafety(true);
         return switch (self) {
             .env_key => .env,
             .egress_endpoint => .egress,
@@ -56,6 +60,7 @@ pub const GuardKind = enum(u8) {
     }
 
     pub fn sink(self: GuardKind) SinkId {
+        @setRuntimeSafety(true);
         return switch (self) {
             .env_key => .env_read,
             .egress_endpoint => .egress_connect,
@@ -65,6 +70,7 @@ pub const GuardKind = enum(u8) {
     }
 
     pub fn family(self: GuardKind) Family {
+        @setRuntimeSafety(true);
         return switch (self) {
             .env_key => .env,
             .egress_endpoint => .egress,
@@ -83,6 +89,7 @@ pub const Family = enum(u3) {
     sql = 3,
 
     pub fn bit(self: Family) u8 {
+        @setRuntimeSafety(true);
         return @as(u8, 1) << @intFromEnum(self);
     }
 };
@@ -91,10 +98,12 @@ pub const FamilySet = struct {
     bits: u8 = 0,
 
     pub fn with(self: FamilySet, family: Family) FamilySet {
+        @setRuntimeSafety(true);
         return .{ .bits = self.bits | family.bit() };
     }
 
     pub fn contains(self: FamilySet, family: Family) bool {
+        @setRuntimeSafety(true);
         return self.bits & family.bit() != 0;
     }
 };
@@ -122,10 +131,12 @@ pub const Normalization = enum(u8) {
     endpoint_v1 = 2,
 
     pub fn fromWire(value: u8) ?Normalization {
+        @setRuntimeSafety(true);
         return std.enums.fromInt(Normalization, value);
     }
 
     pub fn name(self: Normalization) []const u8 {
+        @setRuntimeSafety(true);
         return @tagName(self);
     }
 };
@@ -147,10 +158,12 @@ pub const SinkId = enum(u8) {
     sql_execute = 4,
 
     pub fn fromWire(value: u8) ?SinkId {
+        @setRuntimeSafety(true);
         return std.enums.fromInt(SinkId, value);
     }
 
     pub fn name(self: SinkId) []const u8 {
+        @setRuntimeSafety(true);
         return @tagName(self);
     }
 };
@@ -163,10 +176,12 @@ pub const PolicySection = enum(u8) {
     sql = 4,
 
     pub fn fromWire(value: u8) ?PolicySection {
+        @setRuntimeSafety(true);
         return std.enums.fromInt(PolicySection, value);
     }
 
     pub fn name(self: PolicySection) []const u8 {
+        @setRuntimeSafety(true);
         return @tagName(self);
     }
 };
@@ -185,14 +200,17 @@ pub const AddressScope = enum(u8) {
     unspecified = 6,
 
     pub fn fromWire(value: u8) ?AddressScope {
+        @setRuntimeSafety(true);
         return std.enums.fromInt(AddressScope, value);
     }
 
     pub fn name(self: AddressScope) []const u8 {
+        @setRuntimeSafety(true);
         return @tagName(self);
     }
 
     pub fn bit(self: AddressScope) u8 {
+        @setRuntimeSafety(true);
         return @as(u8, 1) << @intCast(@intFromEnum(self) - 1);
     }
 };
@@ -209,20 +227,24 @@ pub const ScopeSet = struct {
     bits: u8 = 0,
 
     pub fn contains(self: ScopeSet, scope: AddressScope) bool {
+        @setRuntimeSafety(true);
         return self.bits & scope.bit() != 0;
     }
 
     pub fn with(self: ScopeSet, scope: AddressScope) ScopeSet {
+        @setRuntimeSafety(true);
         return .{ .bits = self.bits | scope.bit() };
     }
 
     pub fn isEmpty(self: ScopeSet) bool {
+        @setRuntimeSafety(true);
         return self.bits == 0;
     }
 
     /// Reject a byte that names a scope outside the alphabet, so an unknown bit
     /// cannot be read as "some scope we do not model, allow it".
     pub fn fromWire(bits: u8) ?ScopeSet {
+        @setRuntimeSafety(true);
         var known: u8 = 0;
         inline for (@typeInfo(AddressScope).@"enum".fields) |field| {
             const scope: AddressScope = @enumFromInt(field.value);
@@ -285,6 +307,7 @@ pub const NormalizeError = error{
 /// has its own copy in `packages/zts/src/endpoint.zig`, pinned by the
 /// differential test in `packages/runtime/src/proof_activation.zig`.
 pub fn normalize(rule: Normalization, value: []const u8, out: []u8) NormalizeError![]const u8 {
+    @setRuntimeSafety(true);
     return switch (rule) {
         .identifier_exact_v1 => normalizeIdentifier(value, out),
         .endpoint_v1 => normalizeEndpoint(value, out),
@@ -292,6 +315,7 @@ pub fn normalize(rule: Normalization, value: []const u8, out: []u8) NormalizeErr
 }
 
 fn normalizeIdentifier(value: []const u8, out: []u8) NormalizeError![]const u8 {
+    @setRuntimeSafety(true);
     if (value.len == 0) return error.Empty;
     if (value.len > max_identifier_bytes) return error.TooLong;
     if (value.len > out.len) return error.TooLong;
@@ -310,6 +334,7 @@ const Scheme = enum {
     https,
 
     fn defaultPort(self: Scheme) u16 {
+        @setRuntimeSafety(true);
         return switch (self) {
             .http => 80,
             .https => 443,
@@ -317,11 +342,13 @@ const Scheme = enum {
     }
 
     fn text(self: Scheme) []const u8 {
+        @setRuntimeSafety(true);
         return @tagName(self);
     }
 };
 
 fn normalizeEndpoint(value: []const u8, out: []u8) NormalizeError![]const u8 {
+    @setRuntimeSafety(true);
     if (value.len == 0) return error.Empty;
     if (value.len > max_endpoint_bytes) return error.TooLong;
 
@@ -342,6 +369,7 @@ fn normalizeEndpoint(value: []const u8, out: []u8) NormalizeError![]const u8 {
 }
 
 fn parseScheme(value: []const u8) NormalizeError!struct { scheme: Scheme, rest: []const u8 } {
+    @setRuntimeSafety(true);
     const separator = std.mem.indexOf(u8, value, "://") orelse return error.Malformed;
     const scheme = blk: {
         if (std.ascii.eqlIgnoreCase(value[0..separator], "http")) break :blk Scheme.http;
@@ -352,6 +380,7 @@ fn parseScheme(value: []const u8) NormalizeError!struct { scheme: Scheme, rest: 
 }
 
 fn authorityOf(rest: []const u8) NormalizeError![]const u8 {
+    @setRuntimeSafety(true);
     // Everything from the first path, query, or fragment byte is not part of
     // the endpoint. The guard authorizes a destination, not a request.
     const authority = if (std.mem.indexOfAny(u8, rest, "/?#")) |cut| rest[0..cut] else rest;
@@ -363,6 +392,7 @@ fn authorityOf(rest: []const u8) NormalizeError![]const u8 {
 }
 
 fn splitHostPort(authority: []const u8) NormalizeError!struct { host: []const u8, port: ?u16 } {
+    @setRuntimeSafety(true);
     var host = authority;
     var port: ?u16 = null;
     if (authority[0] == '[') {
@@ -381,6 +411,7 @@ fn splitHostPort(authority: []const u8) NormalizeError!struct { host: []const u8
 }
 
 fn canonicalHost(raw: []const u8) NormalizeError![]const u8 {
+    @setRuntimeSafety(true);
     // One trailing dot is the same name in DNS; more than one is not a name.
     const host = std.mem.trimEnd(u8, raw, ".");
     if (host.len == 0 or raw.len - host.len > 1) return error.Malformed;
@@ -391,6 +422,7 @@ fn canonicalHost(raw: []const u8) NormalizeError![]const u8 {
 }
 
 fn parsePort(text: []const u8) NormalizeError!u16 {
+    @setRuntimeSafety(true);
     if (text.len == 0 or text.len > 5) return error.Malformed;
     var port: u32 = 0;
     for (text) |byte| {
@@ -451,6 +483,7 @@ pub const catalog = [_]CatalogEntry{
 
 /// The catalog entry for one export argument, if the consumer guards it.
 pub fn lookup(module: []const u8, export_name: []const u8, arg_index: u8) ?CatalogEntry {
+    @setRuntimeSafety(true);
     const index = lookupIndex(module, export_name, arg_index) orelse return null;
     return catalog[index];
 }
@@ -459,6 +492,7 @@ pub fn lookup(module: []const u8, export_name: []const u8, arg_index: u8) ?Catal
 /// resolves the row from its own table rather than from anything the producer
 /// wrote down about it.
 pub fn lookupIndex(module: []const u8, export_name: []const u8, arg_index: u8) ?u32 {
+    @setRuntimeSafety(true);
     for (catalog, 0..) |entry, index| {
         if (entry.arg_index != arg_index) continue;
         if (!std.mem.eql(u8, entry.module, module)) continue;

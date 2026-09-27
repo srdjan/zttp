@@ -53,6 +53,7 @@ pub const Policy = struct {
     /// before checking, and the checker runs it again so a hand-built policy
     /// cannot skip it.
     pub fn validate(self: Policy) Error!void {
+        @setRuntimeSafety(true);
         if (self.required.len == 0) return error.EmptyRequirementSet;
         if (self.schema_versions.len == 0) return error.EmptySchemaVersionSet;
         if (self.proof_systems.len == 0) return error.EmptyProofSystemSet;
@@ -65,6 +66,7 @@ pub const Policy = struct {
     }
 
     pub fn acceptsSchema(self: Policy, schema: u16) bool {
+        @setRuntimeSafety(true);
         for (self.schema_versions) |candidate| {
             if (candidate == schema) return true;
         }
@@ -72,6 +74,7 @@ pub const Policy = struct {
     }
 
     pub fn acceptsProofSystem(self: Policy, system: ps.ProofSystem) bool {
+        @setRuntimeSafety(true);
         for (self.proof_systems) |candidate| {
             if (candidate == system) return true;
         }
@@ -79,6 +82,7 @@ pub const Policy = struct {
     }
 
     pub fn acceptsEpoch(self: Policy, epoch: u32) bool {
+        @setRuntimeSafety(true);
         for (self.semantics_epochs) |candidate| {
             if (candidate == epoch) return true;
         }
@@ -86,6 +90,7 @@ pub const Policy = struct {
     }
 
     pub fn requirementFor(self: Policy, property: ps.Property) ?Requirement {
+        @setRuntimeSafety(true);
         for (self.required) |requirement| {
             if (requirement.property == property) return requirement;
         }
@@ -97,6 +102,7 @@ pub const Policy = struct {
     /// not require induces no obligation and cannot be smuggled in by the
     /// producer's supplied list.
     pub fn requires(self: Policy, property: ps.Property) bool {
+        @setRuntimeSafety(true);
         return self.requirementFor(property) != null;
     }
 };

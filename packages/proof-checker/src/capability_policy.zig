@@ -49,6 +49,7 @@ pub const Section = struct {
     tagged: bool = false,
 
     pub fn get(self: Section, index: u16) DecodeError!Entry {
+        @setRuntimeSafety(true);
         if (index >= self.count) return error.Truncated;
         var cursor: usize = 0;
         var seen: u16 = 0;
@@ -59,11 +60,13 @@ pub const Section = struct {
     }
 
     fn skip(self: Section, cursor: usize) DecodeError!usize {
+        @setRuntimeSafety(true);
         const entry = try self.read(cursor, null);
         return cursor + entry.encoded_len;
     }
 
     fn read(self: Section, cursor: usize, max_entry_bytes: ?usize) DecodeError!Entry {
+        @setRuntimeSafety(true);
         var at = cursor;
         var read_only = false;
         if (self.tagged) {
@@ -94,10 +97,12 @@ pub const Section = struct {
     /// `residual.max_lookup_comparisons` key comparisons at the entry cap, and
     /// the cap is a compile-time property of that constant.
     pub fn allows(self: Section, normalized: []const u8) DecodeError!bool {
+        @setRuntimeSafety(true);
         return (try self.find(normalized)) != null;
     }
 
     pub fn find(self: Section, normalized: []const u8) DecodeError!?Entry {
+        @setRuntimeSafety(true);
         var ignored: usize = 0;
         return self.findCounting(normalized, &ignored);
     }
@@ -105,6 +110,7 @@ pub const Section = struct {
     /// `find`, reporting what it cost. The counter is how the comparison bound
     /// is checked against the search rather than against a formula about it.
     fn findCounting(self: Section, normalized: []const u8, comparisons: *usize) DecodeError!?Entry {
+        @setRuntimeSafety(true);
         if (!self.enabled) return null;
         if (self.count == 0) return null;
         var low: u16 = 0;
@@ -140,6 +146,7 @@ pub const Policy = struct {
     digest: [32]u8 = [_]u8{0} ** 32,
 
     pub fn section(self: *const Policy, which: residual.PolicySection) Section {
+        @setRuntimeSafety(true);
         return switch (which) {
             .env => self.env,
             .egress => self.egress,
@@ -150,11 +157,13 @@ pub const Policy = struct {
 
     /// Whether the category a guard kind needs is configured at all.
     pub fn categoryEnabled(self: *const Policy, kind: residual.GuardKind) bool {
+        @setRuntimeSafety(true);
         return self.section(kind.section()).enabled;
     }
 };
 
 fn maxEntryBytes(which: residual.PolicySection) usize {
+    @setRuntimeSafety(true);
     return switch (which) {
         .egress => residual.max_endpoint_bytes,
         .env, .cache, .sql => residual.max_identifier_bytes,
@@ -168,6 +177,7 @@ fn decodeSection(
     reader: *wire.Reader,
     which: residual.PolicySection,
 ) DecodeError!Section {
+    @setRuntimeSafety(true);
     const enabled_byte = try reader.int(u8);
     if (enabled_byte > 1) return error.ReservedFieldNonZero;
     const count = try reader.int(u16);
@@ -205,6 +215,7 @@ fn decodeSection(
 /// recomputed here from the bytes rather than accepted, so a caller cannot hand
 /// the kernel one artifact's policy and another artifact's hash.
 pub fn decode(bytes: []const u8, expected_digest: [32]u8) DecodeError!Policy {
+    @setRuntimeSafety(true);
     if (bytes.len > residual.max_policy_bytes) return error.PolicyTooLarge;
 
     var digest: [32]u8 = undefined;
@@ -241,16 +252,19 @@ const Builder = struct {
     len: usize = 0,
 
     fn byte(self: *Builder, value: u8) void {
+        @setRuntimeSafety(true);
         self.buffer[self.len] = value;
         self.len += 1;
     }
 
     fn u16le(self: *Builder, value: u16) void {
+        @setRuntimeSafety(true);
         std.mem.writeInt(u16, self.buffer[self.len..][0..2], value, .little);
         self.len += 2;
     }
 
     fn section(self: *Builder, enabled: bool, entries: []const []const u8) void {
+        @setRuntimeSafety(true);
         self.byte(if (enabled) 1 else 0);
         self.u16le(@intCast(entries.len));
         for (entries) |entry| {
@@ -261,6 +275,7 @@ const Builder = struct {
     }
 
     fn sqlSection(self: *Builder, enabled: bool, entries: []const []const u8, read_only: bool) void {
+        @setRuntimeSafety(true);
         self.byte(if (enabled) 1 else 0);
         self.u16le(@intCast(entries.len));
         for (entries) |entry| {
@@ -272,10 +287,12 @@ const Builder = struct {
     }
 
     fn bytes(self: *const Builder) []const u8 {
+        @setRuntimeSafety(true);
         return self.buffer[0..self.len];
     }
 
     fn digest(self: *const Builder) [32]u8 {
+        @setRuntimeSafety(true);
         var out: [32]u8 = undefined;
         Sha256.hash(self.bytes(), &out, .{});
         return out;
@@ -283,6 +300,7 @@ const Builder = struct {
 };
 
 fn sample() Builder {
+    @setRuntimeSafety(true);
     var b = Builder{};
     b.section(true, &.{ "API_KEY", "DATABASE_URL" });
     b.section(true, &.{ "https://a.example.com:443", "https://b.example.com:443" });

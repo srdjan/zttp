@@ -439,6 +439,7 @@ test "metric maps every current package bucket" {
     const cases = [_]struct { path: []const u8, expected: Package }{
         .{ .path = "packages/modules/src/root.zig", .expected = .modules },
         .{ .path = "packages/pi/src/root.zig", .expected = .pi },
+        .{ .path = "packages/proof-checker/src/root.zig", .expected = .proof_checker },
         .{ .path = "packages/proof-review/src/root.zig", .expected = .proof_review },
         .{ .path = "packages/runtime/src/root.zig", .expected = .runtime },
         .{ .path = "packages/tools/src/root.zig", .expected = .tools },
@@ -498,6 +499,7 @@ test "metric collection enforces the required package floor" {
             &.{
                 "packages/modules/src/root.zig",
                 "packages/pi/src/standin_main.zig",
+                "packages/proof-checker/src/root.zig",
                 "packages/proof-review/src/root.zig",
                 "packages/tools/src/precompile.zig",
                 "packages/zts/src/root.zig",

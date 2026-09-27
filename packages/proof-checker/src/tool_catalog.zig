@@ -118,6 +118,7 @@ pub const Export = struct {
     name: []const u8,
 
     pub fn order(a: Export, b: Export) std.math.Order {
+        @setRuntimeSafety(true);
         const by_module = std.mem.order(u8, a.module, b.module);
         if (by_module != .eq) return by_module;
         return std.mem.order(u8, a.name, b.name);
@@ -155,28 +156,33 @@ pub const Catalog = struct {
     entry_count: u16,
 
     pub fn entries(self: Catalog) EntryIterator {
+        @setRuntimeSafety(true);
         return .{ .bytes = self.bytes, .pos = header_size, .remaining = self.entry_count };
     }
 };
 
 fn readExport(reader: *Reader) DecodeError!Export {
+    @setRuntimeSafety(true);
     const module = try reader.string(u32, 1, max_export_field_bytes, error.ExportFieldLength);
     const name = try reader.string(u32, 1, max_export_field_bytes, error.ExportFieldLength);
     return .{ .module = module, .name = name };
 }
 
 fn readCredential(reader: *Reader) DecodeError![]const u8 {
+    @setRuntimeSafety(true);
     return reader.string(u32, 1, max_credential_name_bytes, error.CredentialNameLength);
 }
 
 /// A scope field: length 0 means absent.
 fn readScope(reader: *Reader) DecodeError!?[]const u8 {
+    @setRuntimeSafety(true);
     const out = try reader.string(u32, 0, max_scope_field_bytes, error.ScopeFieldLength);
     return if (out.len == 0) null else out;
 }
 
 /// Read one entry's fields with length bounds only, and step over its exports.
 fn readEntry(reader: *Reader) DecodeError!Entry {
+    @setRuntimeSafety(true);
     const name = try reader.string(u32, 1, max_name_bytes, error.NameLength);
     const method = try reader.string(u32, 1, max_method_bytes, error.MethodInvalid);
     const path = try reader.string(u32, 1, max_path_bytes, error.PathInvalid);
@@ -222,10 +228,12 @@ fn readEntry(reader: *Reader) DecodeError!Entry {
 }
 
 fn validUtf8(bytes: []const u8) DecodeError!void {
+    @setRuntimeSafety(true);
     if (!std.unicode.utf8ValidateSlice(bytes)) return error.InvalidUtf8;
 }
 
 fn validateEntry(entry: Entry) DecodeError!void {
+    @setRuntimeSafety(true);
     for (entry.method) |byte| {
         if (byte < 'A' or byte > 'Z') return error.MethodInvalid;
     }
@@ -259,6 +267,7 @@ fn validateEntry(entry: Entry) DecodeError!void {
 
 /// Decode and validate canonical catalog bytes.
 pub fn decode(bytes: []const u8) DecodeError!Catalog {
+    @setRuntimeSafety(true);
     var reader = try wire.header(bytes, magic, schema_version);
     const entry_count = try reader.int(u16);
     if (entry_count < min_entries or entry_count > max_entries) return error.EntryCountOutOfRange;
@@ -294,6 +303,7 @@ pub fn decode(bytes: []const u8) DecodeError!Catalog {
 /// Domain-separated SHA-256 over the whole encoding. The digest a graph member
 /// carries for these bytes.
 pub fn digest(bytes: []const u8) [32]u8 {
+    @setRuntimeSafety(true);
     return wire.domainDigest(digest_domain, bytes);
 }
 
@@ -325,6 +335,7 @@ pub const test_support = struct {
     };
 
     pub fn writeEntry(w: *Writer, entry: SampleEntry) void {
+        @setRuntimeSafety(true);
         w.string(entry.name);
         w.string(entry.method);
         w.string(entry.path);
@@ -346,6 +357,7 @@ pub const test_support = struct {
     }
 
     pub fn writeCatalog(w: *Writer, entries: []const SampleEntry) void {
+        @setRuntimeSafety(true);
         w.raw(magic);
         w.int(u16, schema_version);
         w.int(u16, @intCast(entries.len));
@@ -378,6 +390,7 @@ pub const test_support = struct {
 
     /// The two-entry sample catalog, written into `buf`.
     pub fn sample(buf: []u8) []const u8 {
+        @setRuntimeSafety(true);
         var w = Writer{ .buf = buf };
         writeCatalog(&w, &sample_entries);
         return w.bytes();
@@ -534,14 +547,17 @@ const Case = struct {
 };
 
 fn shortHeader(w: *test_support.Writer) void {
+    @setRuntimeSafety(true);
     w.raw("ZTCAT");
 }
 
 fn truncatedInteger(w: *test_support.Writer) void {
+    @setRuntimeSafety(true);
     w.raw(magic);
 }
 
 fn truncatedString(w: *test_support.Writer) void {
+    @setRuntimeSafety(true);
     w.raw(magic);
     w.int(u16, schema_version);
     w.int(u16, 1);
@@ -549,16 +565,19 @@ fn truncatedString(w: *test_support.Writer) void {
 }
 
 fn sampleWithTrailingByte(w: *test_support.Writer) void {
+    @setRuntimeSafety(true);
     test_support.writeCatalog(w, &test_support.sample_entries);
     w.raw(&.{0});
 }
 
 fn sampleTruncated(w: *test_support.Writer) void {
+    @setRuntimeSafety(true);
     test_support.writeCatalog(w, &test_support.sample_entries);
     w.len -= 1;
 }
 
 fn badMagic(w: *test_support.Writer) void {
+    @setRuntimeSafety(true);
     w.raw("ZTCAT2\x00\x00");
     w.int(u16, schema_version);
     w.int(u16, 1);
@@ -567,6 +586,7 @@ fn badMagic(w: *test_support.Writer) void {
 
 /// Schema 1, the layout before the scope fields, is refused outright.
 fn unsupportedSchema(w: *test_support.Writer) void {
+    @setRuntimeSafety(true);
     w.raw(magic);
     w.int(u16, 1);
     w.int(u16, 1);
@@ -575,6 +595,7 @@ fn unsupportedSchema(w: *test_support.Writer) void {
 
 /// Schema 2, the layout before the credential names, is refused too.
 fn schemaTwo(w: *test_support.Writer) void {
+    @setRuntimeSafety(true);
     w.raw(magic);
     w.int(u16, 2);
     w.int(u16, 1);
@@ -583,6 +604,7 @@ fn schemaTwo(w: *test_support.Writer) void {
 
 /// An entry with no exports that claims one credential more than the bound.
 fn tooManyCredentials(w: *test_support.Writer) void {
+    @setRuntimeSafety(true);
     w.raw(magic);
     w.int(u16, schema_version);
     w.int(u16, 1);
@@ -598,12 +620,14 @@ fn tooManyCredentials(w: *test_support.Writer) void {
 const credential_65 = "c" ** (max_credential_name_bytes + 1);
 
 fn zeroEntries(w: *test_support.Writer) void {
+    @setRuntimeSafety(true);
     w.raw(magic);
     w.int(u16, schema_version);
     w.int(u16, 0);
 }
 
 fn tooManyEntries(w: *test_support.Writer) void {
+    @setRuntimeSafety(true);
     w.raw(magic);
     w.int(u16, schema_version);
     w.int(u16, max_entries + 1);
@@ -613,6 +637,7 @@ fn tooManyEntries(w: *test_support.Writer) void {
 /// `len` bytes without carrying them. The length bound fires before the body is
 /// required.
 fn claimLength(w: *test_support.Writer, field: usize, len: u32) void {
+    @setRuntimeSafety(true);
     w.raw(magic);
     w.int(u16, schema_version);
     w.int(u16, 1);
@@ -622,18 +647,22 @@ fn claimLength(w: *test_support.Writer, field: usize, len: u32) void {
 }
 
 fn descriptionTooLong(w: *test_support.Writer) void {
+    @setRuntimeSafety(true);
     claimLength(w, 3, max_description_bytes + 1);
 }
 
 fn schemaTooLong(w: *test_support.Writer) void {
+    @setRuntimeSafety(true);
     claimLength(w, 5, max_schema_bytes + 1);
 }
 
 fn nameTooLong(w: *test_support.Writer) void {
+    @setRuntimeSafety(true);
     claimLength(w, 0, max_name_bytes + 1);
 }
 
 fn tooManyExports(w: *test_support.Writer) void {
+    @setRuntimeSafety(true);
     w.raw(magic);
     w.int(u16, schema_version);
     w.int(u16, 1);
@@ -648,6 +677,7 @@ fn tooManyExports(w: *test_support.Writer) void {
 /// A scope field that claims one byte more than the bound, without carrying
 /// it. The length bound fires before the body is required.
 fn scopeTooLong(w: *test_support.Writer) void {
+    @setRuntimeSafety(true);
     w.raw(magic);
     w.int(u16, schema_version);
     w.int(u16, 1);

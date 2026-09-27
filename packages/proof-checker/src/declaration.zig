@@ -115,6 +115,7 @@ pub const Classification = struct {
     reason: []const u8,
 
     fn order(a: Classification, b: Classification) std.math.Order {
+        @setRuntimeSafety(true);
         if (a.source_kind != b.source_kind) {
             return std.math.order(@intFromEnum(a.source_kind), @intFromEnum(b.source_kind));
         }
@@ -131,6 +132,7 @@ pub const Ceiling = struct {
     exclude_pos: usize,
 
     pub fn excludes(self: Ceiling) ExcludeIterator {
+        @setRuntimeSafety(true);
         return .{ .bytes = self.exclude_bytes, .pos = self.exclude_pos, .remaining = self.exclude_count };
     }
 };
@@ -143,6 +145,7 @@ pub const Declaration = struct {
     ceiling: ?Ceiling,
 
     pub fn classifications(self: Declaration) ClassificationIterator {
+        @setRuntimeSafety(true);
         return .{ .bytes = self.bytes, .pos = header_size, .remaining = self.classification_count };
     }
 };
@@ -153,11 +156,13 @@ pub const ClassificationIterator = wire.Iterator(Classification, DecodeError, re
 pub const ExcludeIterator = wire.Iterator([]const u8, DecodeError, readExclude);
 
 fn readExclude(reader: *Reader) DecodeError![]const u8 {
+    @setRuntimeSafety(true);
     return reader.string(u32, min_exclude_bytes, max_exclude_bytes, error.ExcludeInvalid);
 }
 
 /// Read one classification with every field rule applied.
 fn readClassification(reader: *Reader) DecodeError!Classification {
+    @setRuntimeSafety(true);
     const kind_byte = try reader.int(u8);
     if (kind_byte > 1) return error.SourceKindInvalid;
     const source_name = try reader.string(u32, 1, max_source_name_bytes, error.SourceNameLength);
@@ -183,6 +188,7 @@ fn readClassification(reader: *Reader) DecodeError!Classification {
 /// 1 to 16 dot-separated segments, each `[A-Za-z_][A-Za-z0-9_]*` and at most
 /// 64 bytes.
 fn validPath(path: []const u8) DecodeError!void {
+    @setRuntimeSafety(true);
     var count: usize = 0;
     var segments = std.mem.splitScalar(u8, path, '.');
     while (segments.next()) |segment| {
@@ -197,6 +203,7 @@ fn validPath(path: []const u8) DecodeError!void {
 }
 
 fn validExclude(entry: []const u8) DecodeError!void {
+    @setRuntimeSafety(true);
     if (!std.mem.startsWith(u8, entry, exclude_prefix)) return error.ExcludeInvalid;
     for (entry) |c| {
         const ok = (c >= 'a' and c <= 'z') or (c >= '0' and c <= '9') or
@@ -207,6 +214,7 @@ fn validExclude(entry: []const u8) DecodeError!void {
 
 /// Decode and validate canonical declaration bytes.
 pub fn decode(bytes: []const u8) DecodeError!Declaration {
+    @setRuntimeSafety(true);
     var reader = try wire.header(bytes, magic, schema_version);
     const count = try reader.int(u16);
     if (count > max_classifications) return error.ClassificationCountOutOfRange;
@@ -250,6 +258,7 @@ pub fn decode(bytes: []const u8) DecodeError!Declaration {
 /// Domain-separated SHA-256 over the whole encoding. The digest a graph member
 /// carries for these bytes.
 pub fn digest(bytes: []const u8) [32]u8 {
+    @setRuntimeSafety(true);
     return wire.domainDigest(digest_domain, bytes);
 }
 
@@ -278,6 +287,7 @@ pub const test_support = struct {
     };
 
     pub fn writeClassification(w: *Writer, item: SampleClassification) void {
+        @setRuntimeSafety(true);
         w.int(u8, item.source_kind);
         w.string(item.source_name);
         w.string(item.path);
@@ -287,6 +297,7 @@ pub const test_support = struct {
     }
 
     pub fn writeDeclaration(w: *Writer, items: []const SampleClassification, ceiling: ?SampleCeiling) void {
+        @setRuntimeSafety(true);
         w.raw(magic);
         w.int(u16, schema_version);
         w.int(u16, @intCast(items.len));
@@ -311,6 +322,7 @@ pub const test_support = struct {
     /// The two-classification sample with an `adapter` ceiling, written into
     /// `buf`.
     pub fn sample(buf: []u8) []const u8 {
+        @setRuntimeSafety(true);
         var w = Writer{ .buf = buf };
         writeDeclaration(&w, &sample_classifications, sample_ceiling);
         return w.bytes();
@@ -451,10 +463,12 @@ const Case = struct {
 };
 
 fn truncatedInteger(w: *test_support.Writer) void {
+    @setRuntimeSafety(true);
     w.raw(magic);
 }
 
 fn truncatedString(w: *test_support.Writer) void {
+    @setRuntimeSafety(true);
     w.raw(magic);
     w.int(u16, schema_version);
     w.int(u16, 1);
@@ -463,20 +477,24 @@ fn truncatedString(w: *test_support.Writer) void {
 }
 
 fn sampleWithTrailingByte(w: *test_support.Writer) void {
+    @setRuntimeSafety(true);
     test_support.writeDeclaration(w, &test_support.sample_classifications, test_support.sample_ceiling);
     w.raw(&.{0});
 }
 
 fn sampleTruncated(w: *test_support.Writer) void {
+    @setRuntimeSafety(true);
     test_support.writeDeclaration(w, &test_support.sample_classifications, test_support.sample_ceiling);
     w.len -= 1;
 }
 
 fn shortMagic(w: *test_support.Writer) void {
+    @setRuntimeSafety(true);
     w.raw("ZTDCL");
 }
 
 fn badMagic(w: *test_support.Writer) void {
+    @setRuntimeSafety(true);
     w.raw("ZTDCL2\x00\x00");
     w.int(u16, schema_version);
     w.int(u16, 0);
@@ -484,6 +502,7 @@ fn badMagic(w: *test_support.Writer) void {
 }
 
 fn unsupportedSchema(w: *test_support.Writer) void {
+    @setRuntimeSafety(true);
     w.raw(magic);
     w.int(u16, 2);
     w.int(u16, 0);
@@ -491,6 +510,7 @@ fn unsupportedSchema(w: *test_support.Writer) void {
 }
 
 fn tooManyClassifications(w: *test_support.Writer) void {
+    @setRuntimeSafety(true);
     w.raw(magic);
     w.int(u16, schema_version);
     w.int(u16, max_classifications + 1);
@@ -500,6 +520,7 @@ fn tooManyClassifications(w: *test_support.Writer) void {
 /// field `field` claims `len` bytes without carrying them. The length bound
 /// fires before the body is required. Fields: 0 source_name, 1 path, 2 reason.
 fn claimLength(w: *test_support.Writer, field: usize, len: u32) void {
+    @setRuntimeSafety(true);
     w.raw(magic);
     w.int(u16, schema_version);
     w.int(u16, 1);
@@ -514,18 +535,22 @@ fn claimLength(w: *test_support.Writer, field: usize, len: u32) void {
 }
 
 fn sourceNameTooLong(w: *test_support.Writer) void {
+    @setRuntimeSafety(true);
     claimLength(w, 0, max_source_name_bytes + 1);
 }
 
 fn pathTooLong(w: *test_support.Writer) void {
+    @setRuntimeSafety(true);
     claimLength(w, 1, max_path_bytes + 1);
 }
 
 fn reasonTooLong(w: *test_support.Writer) void {
+    @setRuntimeSafety(true);
     claimLength(w, 2, max_reason_bytes + 1);
 }
 
 fn tooManyExcludes(w: *test_support.Writer) void {
+    @setRuntimeSafety(true);
     w.raw(magic);
     w.int(u16, schema_version);
     w.int(u16, 0);
@@ -535,6 +560,7 @@ fn tooManyExcludes(w: *test_support.Writer) void {
 }
 
 fn excludeTooLong(w: *test_support.Writer) void {
+    @setRuntimeSafety(true);
     w.raw(magic);
     w.int(u16, schema_version);
     w.int(u16, 0);
@@ -594,6 +620,7 @@ const cases = [_]Case{
 };
 
 fn ceilingFlagTwo(w: *test_support.Writer) void {
+    @setRuntimeSafety(true);
     w.raw(magic);
     w.int(u16, schema_version);
     w.int(u16, 0);

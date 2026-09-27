@@ -48,6 +48,7 @@ pub const DecodeError = error{
 
 /// Map a decode failure onto the stable public reason code.
 pub fn reasonFor(err: DecodeError) ReasonCode {
+    @setRuntimeSafety(true);
     return switch (err) {
         error.CertificateTooLarge => .certificate_too_large,
         error.Truncated => .truncated_input,
@@ -84,10 +85,12 @@ pub const SectionTag = enum(u16) {
     invariant = 11,
 
     pub fn fromWire(value: u16) ?SectionTag {
+        @setRuntimeSafety(true);
         return std.enums.fromInt(SectionTag, value);
     }
 
     pub fn required(self: SectionTag) bool {
+        @setRuntimeSafety(true);
         return switch (self) {
             .identity, .graph, .obligations, .proof_ir, .evidence => true,
             .translation, .rewrites, .trusted, .solver, .residual, .invariant => false,
@@ -134,6 +137,7 @@ pub const SubjectKind = enum(u8) {
     function = 2,
 
     pub fn fromWire(value: u8) ?SubjectKind {
+        @setRuntimeSafety(true);
         return std.enums.fromInt(SubjectKind, value);
     }
 };
@@ -145,6 +149,7 @@ pub const Obligation = struct {
 
     /// Canonical obligation order: property, then subject kind, then subject id.
     pub fn order(a: Obligation, b: Obligation) std.math.Order {
+        @setRuntimeSafety(true);
         const pa = @intFromEnum(a.property);
         const pb = @intFromEnum(b.property);
         if (pa != pb) return std.math.order(pa, pb);
@@ -198,12 +203,14 @@ pub const EdgeKind = enum(u8) {
     not_established = 6,
 
     pub fn fromWire(value: u8) ?EdgeKind {
+        @setRuntimeSafety(true);
         return std.enums.fromInt(EdgeKind, value);
     }
 
     /// The grade an edge of this kind contributes when it holds. An edge that
     /// establishes nothing contributes no grade.
     pub fn grade(self: EdgeKind) ?verdict.AssuranceGrade {
+        @setRuntimeSafety(true);
         return switch (self) {
             .proved => .proved,
             .translation_validated => .translation_validated,
@@ -216,6 +223,7 @@ pub const EdgeKind = enum(u8) {
 
     /// Whether the consumer re-runs work for this edge, or only records it.
     pub fn checked(self: EdgeKind) bool {
+        @setRuntimeSafety(true);
         return switch (self) {
             .proved, .translation_validated, .solver => true,
             .tested, .trusted, .not_established => false,
@@ -246,6 +254,7 @@ pub const WitnessKind = enum(u8) {
     jump = 2,
 
     pub fn fromWire(value: u8) ?WitnessKind {
+        @setRuntimeSafety(true);
         return std.enums.fromInt(WitnessKind, value);
     }
 };
@@ -266,6 +275,7 @@ pub const Witness = struct {
     /// Canonical witness order. Emissions precede jumps within a scope so the
     /// checker can validate the interval structure in one bounded pass.
     pub fn order(a: Witness, b: Witness) std.math.Order {
+        @setRuntimeSafety(true);
         if (a.scope_ir_node != b.scope_ir_node) return std.math.order(a.scope_ir_node, b.scope_ir_node);
         const a_kind = @intFromEnum(a.kind);
         const b_kind = @intFromEnum(b.kind);
@@ -300,6 +310,7 @@ pub const TrustedFamily = enum(u8) {
     opcode = 2,
 
     pub fn fromWire(value: u8) ?TrustedFamily {
+        @setRuntimeSafety(true);
         return std.enums.fromInt(TrustedFamily, value);
     }
 };
@@ -335,6 +346,7 @@ pub const ResidualObligation = struct {
     /// Canonical order: by the operation this is about. Kind follows from the
     /// catalog, so ordering by kind first would order by a derived value.
     pub fn order(a: ResidualObligation, b: ResidualObligation) std.math.Order {
+        @setRuntimeSafety(true);
         return std.math.order(a.operation_id, b.operation_id);
     }
 };
@@ -354,6 +366,7 @@ pub const InvariantWitness = struct {
 
     /// Canonical order follows the independently observed final-code location.
     pub fn order(a: InvariantWitness, b: InvariantWitness) std.math.Order {
+        @setRuntimeSafety(true);
         if (a.function_ordinal != b.function_ordinal) return std.math.order(a.function_ordinal, b.function_ordinal);
         if (a.code_offset != b.code_offset) return std.math.order(a.code_offset, b.code_offset);
         if (a.ir_node != b.ir_node) return std.math.order(a.ir_node, b.ir_node);
@@ -370,6 +383,7 @@ pub const SolverQueryKind = enum(u16) {
     opcode_equivalence = 1,
 
     pub fn fromWire(value: u16) ?SolverQueryKind {
+        @setRuntimeSafety(true);
         return std.enums.fromInt(SolverQueryKind, value);
     }
 };
@@ -385,6 +399,7 @@ pub const SolverQuery = struct {
 
 /// A fixed-width record table living inside the caller's buffer.
 pub fn Table(comptime Record: type, comptime record_size: usize) type {
+    @setRuntimeSafety(true);
     return struct {
         const Self = @This();
 
@@ -392,10 +407,12 @@ pub fn Table(comptime Record: type, comptime record_size: usize) type {
         count: u32 = 0,
 
         pub fn len(self: Self) u32 {
+            @setRuntimeSafety(true);
             return self.count;
         }
 
         pub fn get(self: Self, index: u32) DecodeError!Record {
+            @setRuntimeSafety(true);
             if (index >= self.count) return error.Truncated;
             const start = @as(usize, index) * record_size;
             return decodeRecord(Record, self.bytes[start..][0..record_size]);
@@ -415,24 +432,29 @@ pub const ResidualTable = Table(ResidualObligation, residual_record_size);
 pub const InvariantTable = Table(InvariantWitness, invariant_record_size);
 
 fn u16At(bytes: []const u8, offset: usize) u16 {
+    @setRuntimeSafety(true);
     return std.mem.readInt(u16, bytes[offset..][0..2], .little);
 }
 
 fn u32At(bytes: []const u8, offset: usize) u32 {
+    @setRuntimeSafety(true);
     return std.mem.readInt(u32, bytes[offset..][0..4], .little);
 }
 
 fn i32At(bytes: []const u8, offset: usize) i32 {
+    @setRuntimeSafety(true);
     return std.mem.readInt(i32, bytes[offset..][0..4], .little);
 }
 
 fn requireZero(bytes: []const u8) DecodeError!void {
+    @setRuntimeSafety(true);
     for (bytes) |byte| {
         if (byte != 0) return error.ReservedFieldNonZero;
     }
 }
 
 fn decodeRecord(comptime Record: type, bytes: []const u8) DecodeError!Record {
+    @setRuntimeSafety(true);
     return switch (Record) {
         graph_mod.Member => blk: {
             const kind = graph_mod.MemberKind.fromWire(u16At(bytes, 0)) orelse return error.UnknownEnumMember;
@@ -594,6 +616,7 @@ const Slot = struct {
 };
 
 fn slot(comptime tag: SectionTag) Slot {
+    @setRuntimeSafety(true);
     return switch (tag) {
         .identity => .{ .part_field = "identity", .cert_field = "identity", .limit_field = "", .record_size = identity_size },
         .graph => .{ .part_field = "graph", .cert_field = "graph", .limit_field = "max_graph_members", .record_size = graph_record_size },
@@ -610,6 +633,7 @@ fn slot(comptime tag: SectionTag) Slot {
 }
 
 fn countLimitFor(tag: SectionTag, limits: Limits) u32 {
+    @setRuntimeSafety(true);
     return switch (tag) {
         .identity => 1,
         inline else => |case| @field(limits, slot(case).limit_field),
@@ -617,6 +641,7 @@ fn countLimitFor(tag: SectionTag, limits: Limits) u32 {
 }
 
 fn recordSizeFor(tag: SectionTag) usize {
+    @setRuntimeSafety(true);
     return switch (tag) {
         inline else => |case| slot(case).record_size,
     };
@@ -625,6 +650,7 @@ fn recordSizeFor(tag: SectionTag) usize {
 /// Bounded decode. Validates the container, the section table, every record's
 /// fixed shape, and every enum-bearing field, then returns cursors into `bytes`.
 pub fn decode(bytes: []const u8, limits: Limits, budget: *Budget) DecodeError!Certificate {
+    @setRuntimeSafety(true);
     return decodeAccepting(bytes, &[_]u16{ps.schema_version}, limits, budget);
 }
 
@@ -639,6 +665,7 @@ pub fn decodeAccepting(
     limits: Limits,
     budget: *Budget,
 ) DecodeError!Certificate {
+    @setRuntimeSafety(true);
     if (bytes.len > limits.max_certificate_bytes) return error.CertificateTooLarge;
     if (bytes.len < header_size) return error.Truncated;
     try budget.spend(bytes.len / 64 + 1);
@@ -710,6 +737,7 @@ fn decodeSection(
     limits: Limits,
     budget: *Budget,
 ) DecodeError!void {
+    @setRuntimeSafety(true);
     switch (tag) {
         .identity => {
             if (payload.len != identity_size) return error.SectionLengthMismatch;
@@ -753,6 +781,7 @@ fn decodeSection(
 pub const residual_plan_domain = "zttp-residual-plan-v1";
 
 fn foldResidual(hasher: *std.crypto.hash.sha2.Sha256, obligation: ResidualObligation) void {
+    @setRuntimeSafety(true);
     hasher.update(&[_]u8{
         @intFromEnum(obligation.kind),
         @intFromEnum(obligation.normalization),
@@ -772,6 +801,7 @@ fn foldResidual(hasher: *std.crypto.hash.sha2.Sha256, obligation: ResidualObliga
 /// so "this handler guards nothing" is one value a reader can recognize instead
 /// of a hash they would have to know to compare against.
 pub fn residualPlanDigest(obligations: []const ResidualObligation) [32]u8 {
+    @setRuntimeSafety(true);
     if (obligations.len == 0) return [_]u8{0} ** 32;
     var hasher = std.crypto.hash.sha2.Sha256.init(.{});
     hasher.update(residual_plan_domain);
@@ -784,6 +814,7 @@ pub fn residualPlanDigest(obligations: []const ResidualObligation) [32]u8 {
 
 /// The same fold over a decoded table.
 pub fn residualPlanDigestFromTable(table: ResidualTable) DecodeError![32]u8 {
+    @setRuntimeSafety(true);
     if (table.len() == 0) return [_]u8{0} ** 32;
     var hasher = std.crypto.hash.sha2.Sha256.init(.{});
     hasher.update(residual_plan_domain);
@@ -801,6 +832,7 @@ pub fn residualPlanDigestFromTable(table: ResidualTable) DecodeError![32]u8 {
 pub const ir_root_domain = "zttp-proof-ir-root-v2";
 
 fn foldIrNode(hasher: *std.crypto.hash.sha2.Sha256, node: IrNode) void {
+    @setRuntimeSafety(true);
     var scratch: [4]u8 = undefined;
     std.mem.writeInt(u32, &scratch, node.id, .little);
     hasher.update(&scratch);
@@ -825,6 +857,7 @@ fn foldIrNode(hasher: *std.crypto.hash.sha2.Sha256, node: IrNode) void {
 /// the same package, so a certificate's `ir_root` and the value the consumer
 /// recomputes cannot come from two formulas that drifted apart.
 pub fn irRootFromNodes(nodes: []const IrNode) [32]u8 {
+    @setRuntimeSafety(true);
     var hasher = std.crypto.hash.sha2.Sha256.init(.{});
     hasher.update(ir_root_domain);
     var count_le: [4]u8 = undefined;
@@ -836,6 +869,7 @@ pub fn irRootFromNodes(nodes: []const IrNode) [32]u8 {
 
 /// The same fold over a decoded table.
 pub fn irRootFromTable(table: IrTable) DecodeError![32]u8 {
+    @setRuntimeSafety(true);
     var hasher = std.crypto.hash.sha2.Sha256.init(.{});
     hasher.update(ir_root_domain);
     var count_le: [4]u8 = undefined;
@@ -859,6 +893,7 @@ pub const commitment_domain = "zttp-proof-certificate-commitment-v1";
 /// is excluded: evidence, translation witnesses, rewrites, trusted edges, and
 /// solver queries all move the commitment.
 pub fn commitmentDigest(bytes: []const u8, certificate: Certificate) DecodeError![32]u8 {
+    @setRuntimeSafety(true);
     var hasher = std.crypto.hash.sha2.Sha256.init(.{});
     hasher.update(commitment_domain);
 
@@ -913,6 +948,7 @@ pub const EncodeError = error{BufferTooSmall};
 
 /// Bytes `encode` needs for `parts`.
 pub fn encodedSize(parts: Parts) usize {
+    @setRuntimeSafety(true);
     var total: usize = header_size;
     inline for (@typeInfo(SectionTag).@"enum".fields) |field| {
         const tag: SectionTag = @enumFromInt(field.value);
@@ -931,6 +967,7 @@ const Cursor = struct {
     at: usize = 0,
 
     fn need(self: *Cursor, n: usize) EncodeError![]u8 {
+        @setRuntimeSafety(true);
         if (self.at + n > self.buf.len) return error.BufferTooSmall;
         const slice = self.buf[self.at..][0..n];
         self.at += n;
@@ -938,35 +975,43 @@ const Cursor = struct {
     }
 
     fn u8At(self: *Cursor, value: u8) EncodeError!void {
+        @setRuntimeSafety(true);
         (try self.need(1))[0] = value;
     }
 
     fn u16At(self: *Cursor, value: u16) EncodeError!void {
+        @setRuntimeSafety(true);
         std.mem.writeInt(u16, (try self.need(2))[0..2], value, .little);
     }
 
     fn u32At(self: *Cursor, value: u32) EncodeError!void {
+        @setRuntimeSafety(true);
         std.mem.writeInt(u32, (try self.need(4))[0..4], value, .little);
     }
 
     fn i32At(self: *Cursor, value: i32) EncodeError!void {
+        @setRuntimeSafety(true);
         std.mem.writeInt(i32, (try self.need(4))[0..4], value, .little);
     }
 
     fn u64At(self: *Cursor, value: u64) EncodeError!void {
+        @setRuntimeSafety(true);
         std.mem.writeInt(u64, (try self.need(8))[0..8], value, .little);
     }
 
     fn zeros(self: *Cursor, n: usize) EncodeError!void {
+        @setRuntimeSafety(true);
         @memset(try self.need(n), 0);
     }
 
     fn raw(self: *Cursor, bytes: []const u8) EncodeError!void {
+        @setRuntimeSafety(true);
         @memcpy(try self.need(bytes.len), bytes);
     }
 };
 
 fn sectionCount(parts: Parts) u16 {
+    @setRuntimeSafety(true);
     var count: u16 = 0;
     inline for (@typeInfo(SectionTag).@"enum".fields) |field| {
         const tag: SectionTag = @enumFromInt(field.value);
@@ -983,6 +1028,7 @@ fn sectionCount(parts: Parts) u16 {
 /// ascending tag order; empty optional sections are omitted rather than written
 /// with a zero count, so one set of parts has exactly one encoding.
 pub fn encode(parts: Parts, out: []u8) EncodeError![]u8 {
+    @setRuntimeSafety(true);
     var cursor = Cursor{ .buf = out };
     try cursor.u64At(magic);
     try cursor.u16At(parts.schema_version);
@@ -997,6 +1043,7 @@ pub fn encode(parts: Parts, out: []u8) EncodeError![]u8 {
 }
 
 fn encodeSection(comptime tag: SectionTag, parts: Parts, cursor: *Cursor) EncodeError!void {
+    @setRuntimeSafety(true);
     if (tag != .identity) {
         if (!tag.required() and @field(parts, slot(tag).part_field).len == 0) return;
     }
@@ -1137,6 +1184,7 @@ fn encodeSection(comptime tag: SectionTag, parts: Parts, cursor: *Cursor) Encode
 }
 
 fn writeTable(cursor: *Cursor, tag: SectionTag, count: usize, record_size: usize) EncodeError!void {
+    @setRuntimeSafety(true);
     try cursor.u16At(@intFromEnum(tag));
     try cursor.u32At(@intCast(4 + count * record_size));
     try cursor.u32At(@intCast(count));
@@ -1150,6 +1198,7 @@ const testing = std.testing;
 
 pub const fixture = struct {
     pub fn digest(seed: u8) [32]u8 {
+        @setRuntimeSafety(true);
         var out: [32]u8 = undefined;
         @memset(&out, seed);
         return out;
@@ -1163,6 +1212,7 @@ pub const fixture = struct {
         obligations: []const Obligation,
         evidence: []const Evidence,
     ) Parts {
+        @setRuntimeSafety(true);
         return .{
             .identity = .{
                 .executable_root = digest(0),
@@ -1179,6 +1229,7 @@ pub const fixture = struct {
 };
 
 fn minimalGraph() [8]graph_mod.Member {
+    @setRuntimeSafety(true);
     var members = [_]graph_mod.Member{
         .{ .kind = .main_bytecode, .ordinal = 0, .digest = fixture.digest(1) },
         .{ .kind = .contract_bytes, .ordinal = 0, .digest = fixture.digest(2) },
@@ -1191,6 +1242,7 @@ fn minimalGraph() [8]graph_mod.Member {
     };
     std.mem.sort(graph_mod.Member, &members, {}, struct {
         fn lt(_: void, a: graph_mod.Member, b: graph_mod.Member) bool {
+            @setRuntimeSafety(true);
             return graph_mod.Member.order(a, b) == .lt;
         }
     }.lt);
@@ -1198,6 +1250,7 @@ fn minimalGraph() [8]graph_mod.Member {
 }
 
 fn buildMinimal(buf: []u8) ![]u8 {
+    @setRuntimeSafety(true);
     const members = minimalGraph();
     const ir = [_]IrNode{
         .{ .id = 0, .tag = .function, .parent = 0, .first_child = 1, .child_count = 1, .digest = fixture.digest(20) },
@@ -1215,6 +1268,7 @@ fn buildMinimal(buf: []u8) ![]u8 {
 }
 
 fn buildAllSections(buf: []u8) ![]u8 {
+    @setRuntimeSafety(true);
     const members = minimalGraph();
     const ir = [_]IrNode{
         .{ .id = 0, .tag = .function, .is_handler = true, .parent = 0, .first_child = 1, .child_count = 1, .digest = fixture.digest(20) },
@@ -1303,6 +1357,7 @@ test "the encoder refuses a buffer that cannot hold the certificate" {
 }
 
 fn sectionHeaderOffset(bytes: []const u8, records: []const u8) usize {
+    @setRuntimeSafety(true);
     // The four-byte table count sits between the section header and records.
     return @intFromPtr(records.ptr) - @intFromPtr(bytes.ptr) - 4 - section_header_size;
 }
@@ -1310,6 +1365,7 @@ fn sectionHeaderOffset(bytes: []const u8, records: []const u8) usize {
 const TestSection = struct { start: usize, payload: usize, length: usize };
 
 fn testSection(bytes: []const u8, tag: SectionTag) TestSection {
+    @setRuntimeSafety(true);
     var at: usize = header_size;
     while (at < bytes.len) {
         const length = u32At(bytes, at + 2);
@@ -1482,6 +1538,7 @@ test "certificate decode charges table framing and every record" {
 }
 
 fn probeDecodeError(comptime expected: DecodeError) !void {
+    @setRuntimeSafety(true);
     var buf: [4096]u8 = undefined;
     const bytes = try buildMinimal(&buf);
 

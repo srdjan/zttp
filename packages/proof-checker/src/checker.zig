@@ -16,6 +16,7 @@ const limits_mod = @import("limits.zig");
 const policy_mod = @import("policy.zig");
 const ps = @import("proof_system.zig");
 const residual = @import("residual.zig");
+const safety = @import("safety.zig");
 const tool_catalog = @import("tool_catalog.zig");
 const verdict = @import("verdict.zig");
 
@@ -32,18 +33,22 @@ const SemanticState = verdict.SemanticState;
 /// stack keeps the acceptance path off a large frame in whatever thread the
 /// server happens to run startup on.
 pub fn scratchBytes(limits: limits_mod.Limits) usize {
+    @setRuntimeSafety(true);
     return irBitBytes(limits) * 3 + depthBytes(limits) + rangeStackBytes(limits);
 }
 
 fn irBitBytes(limits: limits_mod.Limits) usize {
+    @setRuntimeSafety(true);
     return (@as(usize, limits.max_ir_nodes) + 7) / 8;
 }
 
 fn depthBytes(limits: limits_mod.Limits) usize {
+    @setRuntimeSafety(true);
     return @as(usize, limits.max_ir_nodes) * @sizeOf(u16);
 }
 
 fn rangeStackBytes(limits: limits_mod.Limits) usize {
+    @setRuntimeSafety(true);
     return @as(usize, limits.max_witnesses) * @sizeOf(u64);
 }
 
@@ -51,17 +56,20 @@ const BitSet = struct {
     bytes: []u8,
 
     fn init(bytes: []u8) BitSet {
+        @setRuntimeSafety(true);
         @memset(bytes, 0);
         return .{ .bytes = bytes };
     }
 
     fn get(self: BitSet, index: u32) bool {
+        @setRuntimeSafety(true);
         const byte = index / 8;
         if (byte >= self.bytes.len) return false;
         return (self.bytes[byte] >> @intCast(index % 8)) & 1 == 1;
     }
 
     fn set(self: BitSet, index: u32, value: bool) void {
+        @setRuntimeSafety(true);
         const byte = index / 8;
         if (byte >= self.bytes.len) return;
         const mask = @as(u8, 1) << @intCast(index % 8);
@@ -77,11 +85,13 @@ const DepthTable = struct {
     bytes: []u8,
 
     fn get(self: DepthTable, index: u32) u16 {
+        @setRuntimeSafety(true);
         const start = @as(usize, index) * @sizeOf(u16);
         return std.mem.readInt(u16, self.bytes[start..][0..2], .little);
     }
 
     fn set(self: DepthTable, index: u32, value: u16) void {
+        @setRuntimeSafety(true);
         const start = @as(usize, index) * @sizeOf(u16);
         std.mem.writeInt(u16, self.bytes[start..][0..2], value, .little);
     }
@@ -92,21 +102,25 @@ const RangeStack = struct {
     len: u32 = 0,
 
     fn reset(self: *RangeStack) void {
+        @setRuntimeSafety(true);
         self.len = 0;
     }
 
     fn last(self: RangeStack) ?u64 {
+        @setRuntimeSafety(true);
         if (self.len == 0) return null;
         const start = @as(usize, self.len - 1) * @sizeOf(u64);
         return std.mem.readInt(u64, self.bytes[start..][0..8], .little);
     }
 
     fn pop(self: *RangeStack) void {
-        std.debug.assert(self.len > 0);
+        @setRuntimeSafety(true);
+        safety.check(self.len > 0);
         self.len -= 1;
     }
 
     fn push(self: *RangeStack, value: u64) void {
+        @setRuntimeSafety(true);
         const start = @as(usize, self.len) * @sizeOf(u64);
         std.mem.writeInt(u64, self.bytes[start..][0..8], value, .little);
         self.len += 1;
@@ -176,11 +190,13 @@ fn rejectAt(
     limits: limits_mod.Limits,
     rejection: Rejection,
 ) Assessment {
+    @setRuntimeSafety(true);
     return Assessment.reject(reached, provenance, development_only, rejection, budget.spent(limits));
 }
 
 /// Run semantic acceptance over one certificate and one recomputed inventory.
 pub fn check(inputs: Inputs, policy: Policy) Assessment {
+    @setRuntimeSafety(true);
     var budget = Budget.init(policy.limits);
     const limits = policy.limits;
 
@@ -358,6 +374,7 @@ const Session = struct {
     const SessionError = cert_mod.DecodeError;
 
     fn reject(stage: verdict.Stage, code: verdict.ReasonCode, subject: verdict.Subject) Outcome {
+        @setRuntimeSafety(true);
         return .{
             .state = .integrity_verified,
             .rejection = .{
@@ -370,6 +387,7 @@ const Session = struct {
     }
 
     fn run(self: *Session) SessionError!Outcome {
+        @setRuntimeSafety(true);
         // The proof IR is a graph member, so its root is already bound to the
         // artifact. Recomputing it here is what ties the section the checker is
         // about to walk to that commitment.
@@ -420,6 +438,7 @@ const Session = struct {
         found: bool = false,
 
         fn visit(self: *MemberBinder, member: graph.Member) ?MemberBinding {
+            @setRuntimeSafety(true);
             if (member.kind != self.kind) return null;
             if (self.digest == null) return .{ .mismatch = member };
             if (self.found) return .{ .mismatch = member };
@@ -431,11 +450,13 @@ const Session = struct {
         }
 
         fn finish(self: MemberBinder) MemberBinding {
+            @setRuntimeSafety(true);
             return if (self.found) .bound else .missing;
         }
     };
 
     fn bindMember(self: *Session, kind: graph.MemberKind, digest: ?[32]u8) SessionError!MemberBinding {
+        @setRuntimeSafety(true);
         var binder = MemberBinder{ .kind = kind, .digest = digest };
         var graph_index: u32 = 0;
         while (graph_index < self.certificate.graph.len()) : (graph_index += 1) {
@@ -447,6 +468,7 @@ const Session = struct {
     }
 
     fn checkBoundBytes(self: *Session, comptime kind: graph.MemberKind, bytes: ?[]const u8) SessionError!?Outcome {
+        @setRuntimeSafety(true);
         const stage: verdict.Stage = if (kind == .tool_catalog) .tool_catalog else .declaration;
         const missing_code: verdict.ReasonCode = if (kind == .tool_catalog) .tool_catalog_member_missing else .declaration_member_missing;
         const undecodable_code: verdict.ReasonCode = if (kind == .tool_catalog) .tool_catalog_undecodable else .declaration_undecodable;
@@ -479,10 +501,12 @@ const Session = struct {
     }
 
     fn checkToolCatalog(self: *Session) SessionError!?Outcome {
+        @setRuntimeSafety(true);
         return self.checkBoundBytes(.tool_catalog, self.tool_catalog);
     }
 
     fn checkDeclaration(self: *Session) SessionError!?Outcome {
+        @setRuntimeSafety(true);
         return self.checkBoundBytes(.declaration, self.declaration);
     }
 
@@ -499,6 +523,7 @@ const Session = struct {
     /// Relate the structured specification, proof IR, translation witnesses,
     /// and independently decoded final-bytecode ledger calls.
     fn checkInvariantCoverage(self: *Session) SessionError!InvariantOutcome {
+        @setRuntimeSafety(true);
         const zero = [_]u8{0} ** 32;
         const declared_digest = self.certificate.identity.invariant_spec_digest;
         if (std.mem.eql(u8, &declared_digest, &zero)) return self.checkUnconfiguredInvariants();
@@ -506,6 +531,7 @@ const Session = struct {
     }
 
     fn checkUnconfiguredInvariants(self: *Session) SessionError!InvariantOutcome {
+        @setRuntimeSafety(true);
         if (self.invariant_spec != null) {
             return .{ .rejected = reject(.invariant_coverage, .invariant_spec_digest_mismatch, .none) };
         }
@@ -531,6 +557,7 @@ const Session = struct {
     }
 
     fn checkConfiguredInvariants(self: *Session, declared_digest: [32]u8) SessionError!InvariantOutcome {
+        @setRuntimeSafety(true);
         const spec_bytes = self.invariant_spec orelse
             return .{ .rejected = reject(.invariant_coverage, .invariant_spec_missing, .none) };
         const spec = invariant.decode(spec_bytes) catch
@@ -656,7 +683,7 @@ const Session = struct {
                 return .{ .rejected = reject(.invariant_coverage, .invariant_member_missing, .{ .ir_node = node_index }) };
             }
         }
-        std.debug.assert(result.ready());
+        safety.check(result.ready());
         return .{ .covered = result };
     }
 
@@ -667,6 +694,7 @@ const Session = struct {
         previous_observed: ?invariant.ObservedOperation,
         subject: *verdict.Subject,
     ) SessionError!InvariantSite {
+        @setRuntimeSafety(true);
         if (previous_observed) |previous| {
             if (invariant.ObservedOperation.order(previous, observed) != .lt) {
                 subject.* = .{ .code_offset = observed.code_offset };
@@ -719,6 +747,7 @@ const Session = struct {
     /// reads a guard kind, a rule, a sink, or a policy section from the
     /// producer as an answer - only as a claim to compare.
     fn checkGuardCoverage(self: *Session) SessionError!GuardOutcome {
+        @setRuntimeSafety(true);
         var verdicts = verdict.GuardVerdicts{};
 
         // The plan the certificate carries must be the plan its identity names,
@@ -851,6 +880,7 @@ const Session = struct {
     const IrShape = union(enum) { entry: u32, rejected: Outcome };
 
     fn checkIrShape(self: *Session) SessionError!IrShape {
+        @setRuntimeSafety(true);
         const count = self.certificate.ir.len();
         var handler_count: u32 = 0;
         var entry: u32 = 0;
@@ -919,6 +949,7 @@ const Session = struct {
     /// because a set a policy can shrink is a set a producer can arrange to
     /// have shrunk.
     fn checkObligationSet(self: *Session, entry: u32) SessionError!?Outcome {
+        @setRuntimeSafety(true);
         const expected_count = @typeInfo(ps.Property).@"enum".fields.len;
         if (self.certificate.obligations.len() != expected_count) {
             return reject(
@@ -961,6 +992,7 @@ const Session = struct {
     /// about the shape of a proof, and letting them stand in here would let a
     /// producer buy totality with a weaker word than the one it costs.
     fn markDeclared(self: *Session) SessionError!void {
+        @setRuntimeSafety(true);
         var index: u32 = 0;
         while (index < self.certificate.evidence.len()) : (index += 1) {
             try self.budget.spend(1);
@@ -976,6 +1008,7 @@ const Session = struct {
     /// The consumer's own totality fold. Children always have larger ids than
     /// their parent, so one reverse sweep settles it.
     fn foldTotality(self: *Session) SessionError!void {
+        @setRuntimeSafety(true);
         var index: u32 = self.certificate.ir.len();
         while (index > 0) {
             index -= 1;
@@ -995,6 +1028,7 @@ const Session = struct {
     }
 
     fn anyChildTotal(self: *Session, node: cert_mod.IrNode) bool {
+        @setRuntimeSafety(true);
         var i: u32 = 0;
         while (i < node.child_count) : (i += 1) {
             if (self.total.get(node.first_child + i)) return true;
@@ -1003,6 +1037,7 @@ const Session = struct {
     }
 
     fn allChildrenTotal(self: *Session, node: cert_mod.IrNode) bool {
+        @setRuntimeSafety(true);
         if (node.child_count == 0) return false;
         var i: u32 = 0;
         while (i < node.child_count) : (i += 1) {
@@ -1013,6 +1048,7 @@ const Session = struct {
 
     /// The rule that closes totality at `node`, derived here rather than read.
     fn ruleAt(self: *Session, node: cert_mod.IrNode) ?ps.Rule {
+        @setRuntimeSafety(true);
         return switch (node.tag) {
             .return_node => .return_total,
             .sequence => if (self.anyChildTotal(node)) .sequence_member_total else null,
@@ -1034,6 +1070,7 @@ const Session = struct {
     /// the instructions the witnesses describe; that edge is disclosed as
     /// trusted rather than implied.
     fn checkTranslation(self: *Session) SessionError!?Outcome {
+        @setRuntimeSafety(true);
         const witnesses = self.certificate.translation;
         if (witnesses.len() == 0) return null;
 
@@ -1111,6 +1148,7 @@ const Session = struct {
     }
 
     fn checkRewrites(self: *Session) SessionError!?Outcome {
+        @setRuntimeSafety(true);
         var index: u32 = 0;
         while (index < self.certificate.rewrites.len()) : (index += 1) {
             try self.budget.spend(1);
@@ -1148,6 +1186,7 @@ const Session = struct {
     };
 
     fn checkEvidenceEntry(self: *Session, entry: cert_mod.Evidence, property: ps.Property) SessionError!EvidenceCheck {
+        @setRuntimeSafety(true);
         const claim = classify(entry, property) orelse
             return .{ .rejected = reject(.evidence_check, .evidence_edge_invalid, .{ .property = property }) };
 
@@ -1196,6 +1235,7 @@ const Session = struct {
     }
 
     fn checkEvidence(self: *Session, entry_function: u32) SessionError!Outcome {
+        @setRuntimeSafety(true);
         var grades = [_]?verdict.AssuranceGrade{null} ** (@typeInfo(ps.Property).@"enum".fields.len);
         var answered = [_]bool{false} ** grades.len;
         var refused = [_]bool{false} ** grades.len;
@@ -1281,6 +1321,7 @@ const Session = struct {
         grades: []const ?verdict.AssuranceGrade,
         refused: []const bool,
     ) SessionError!Outcome {
+        @setRuntimeSafety(true);
         var property_verdicts: verdict.PropertyVerdicts = .{};
         inline for (@typeInfo(ps.Property).@"enum".fields) |field| {
             const property: ps.Property = @enumFromInt(field.value);
@@ -1343,6 +1384,7 @@ const Session = struct {
     }
 
     fn countDisclosedEdges(self: *Session) SessionError!u32 {
+        @setRuntimeSafety(true);
         var count: u32 = 0;
         var index: u32 = 0;
         while (index < self.certificate.evidence.len()) : (index += 1) {
@@ -1357,6 +1399,7 @@ const Session = struct {
     }
 
     fn trustedEdgeDeclared(self: *Session, node_id: u32) SessionError!bool {
+        @setRuntimeSafety(true);
         var index: u32 = 0;
         while (index < self.certificate.trusted.len()) : (index += 1) {
             try self.budget.spend(1);
@@ -1377,6 +1420,7 @@ const Claim = union(enum) {
 };
 
 fn classify(entry: cert_mod.Evidence, property: ps.Property) ?Claim {
+    @setRuntimeSafety(true);
     return switch (entry.edge) {
         .proved => if (entry.rule) |rule|
             if (rule.family() == .totality and property == .response_total) .{ .proved = rule } else null
@@ -1394,6 +1438,7 @@ fn classify(entry: cert_mod.Evidence, property: ps.Property) ?Claim {
 }
 
 fn reconstructed(property: ps.Property, entry: u32) cert_mod.Obligation {
+    @setRuntimeSafety(true);
     return if (property.subjectIsEntryFunction())
         .{ .property = property, .subject_kind = .function, .subject_id = entry }
     else
@@ -1401,6 +1446,7 @@ fn reconstructed(property: ps.Property, entry: u32) cert_mod.Obligation {
 }
 
 fn obligationSubject(obligation: cert_mod.Obligation) verdict.Subject {
+    @setRuntimeSafety(true);
     return .{ .obligation = .{
         .property = obligation.property,
         .subject_id = obligation.subject_id,
@@ -1408,6 +1454,7 @@ fn obligationSubject(obligation: cert_mod.Obligation) verdict.Subject {
 }
 
 fn bindingRejection(code: verdict.ReasonCode, subject: verdict.Subject) Rejection {
+    @setRuntimeSafety(true);
     return .{
         .stage = .artifact_binding,
         .code = code,
@@ -1417,6 +1464,7 @@ fn bindingRejection(code: verdict.ReasonCode, subject: verdict.Subject) Rejectio
 }
 
 fn memberSubject(member: graph.Member) verdict.Subject {
+    @setRuntimeSafety(true);
     return .{ .graph_member = .{ .kind = @intFromEnum(member.kind), .ordinal = member.ordinal } };
 }
 
@@ -1431,6 +1479,7 @@ fn bindExecutableGraph(
     observed: []const graph.Member,
     budget: *Budget,
 ) ?Rejection {
+    @setRuntimeSafety(true);
     if (std.mem.allEqual(u8, &certificate.identity.executable_root, 0)) {
         return bindingRejection(.zero_commitment, .none);
     }
@@ -1513,6 +1562,7 @@ fn checkGraphMemberDigest(
     digest: [32]u8,
     code: verdict.ReasonCode,
 ) ?Rejection {
+    @setRuntimeSafety(true);
     var index: u32 = 0;
     while (index < certificate.graph.len()) : (index += 1) {
         const member = certificate.graph.get(index) catch break;
@@ -1539,6 +1589,7 @@ fn checkGraphMemberDigest(
 const testing = std.testing;
 
 fn expectAt(result: Assessment, stage: verdict.Stage, code: verdict.ReasonCode) !void {
+    @setRuntimeSafety(true);
     try testing.expect(result.rejection() != null);
     try testing.expectEqual(stage, result.rejection().?.stage);
     try testing.expectEqual(code, result.rejection().?.code);
@@ -1546,8 +1597,10 @@ fn expectAt(result: Assessment, stage: verdict.Stage, code: verdict.ReasonCode) 
 
 /// Bind test parts with the same public encoder and root calculation as a producer.
 fn encodeBoundTestParts(buffer: []u8, source: cert_mod.Parts, members: []graph.Member) !usize {
+    @setRuntimeSafety(true);
     std.mem.sort(graph.Member, members, {}, struct {
         fn lt(_: void, a: graph.Member, b: graph.Member) bool {
+            @setRuntimeSafety(true);
             return graph.Member.order(a, b) == .lt;
         }
     }.lt);
@@ -1570,6 +1623,7 @@ fn encodeBoundTestParts(buffer: []u8, source: cert_mod.Parts, members: []graph.M
 
 pub const test_support = struct {
     pub fn digest(seed: u8) [32]u8 {
+        @setRuntimeSafety(true);
         var out: [32]u8 = undefined;
         @memset(&out, seed);
         return out;
@@ -1593,14 +1647,17 @@ pub const test_support = struct {
         const scratch_len = scratchBytes(.{});
 
         pub fn bytes(self: *const Fixture) []const u8 {
+            @setRuntimeSafety(true);
             return self.buffer[0..self.len];
         }
 
         pub fn graphMembers(self: *const Fixture) []const graph.Member {
+            @setRuntimeSafety(true);
             return &self.members;
         }
 
         pub fn parts(self: *Fixture) cert_mod.Parts {
+            @setRuntimeSafety(true);
             return .{
                 .identity = .{
                     .executable_root = graph.computeRoot(&self.members) catch unreachable,
@@ -1619,9 +1676,11 @@ pub const test_support = struct {
         }
 
         pub fn encode(self: *Fixture) !void {
+            @setRuntimeSafety(true);
             var members = self.members;
             std.mem.sort(graph.Member, &members, {}, struct {
                 fn lt(_: void, a: graph.Member, b: graph.Member) bool {
+                    @setRuntimeSafety(true);
                     return graph.Member.order(a, b) == .lt;
                 }
             }.lt);
@@ -1636,6 +1695,7 @@ pub const test_support = struct {
         }
 
         pub fn encodeParts(self: *Fixture, certificate_parts: cert_mod.Parts) !void {
+            @setRuntimeSafety(true);
             var built = certificate_parts;
             for (&self.members) |*member| {
                 if (member.kind == .proof_certificate) member.digest = [_]u8{0} ** 32;
@@ -1654,6 +1714,7 @@ pub const test_support = struct {
         }
 
         pub fn inputs(self: *Fixture) Inputs {
+            @setRuntimeSafety(true);
             return .{
                 .certificate = self.bytes(),
                 .observed_graph = self.graphMembers(),
@@ -1680,14 +1741,17 @@ pub const test_support = struct {
         scratch: [Fixture.scratch_len]u8 = undefined,
 
         pub fn bytes(self: *const GuardedFixture) []const u8 {
+            @setRuntimeSafety(true);
             return self.buffer[0..self.len];
         }
 
         pub fn policySlice(self: *const GuardedFixture) []const u8 {
+            @setRuntimeSafety(true);
             return self.policy_bytes[0..self.policy_len];
         }
 
         pub fn policyDigest(self: *const GuardedFixture) [32]u8 {
+            @setRuntimeSafety(true);
             var out: [32]u8 = undefined;
             std.crypto.hash.sha2.Sha256.hash(self.policySlice(), &out, .{});
             return out;
@@ -1695,6 +1759,7 @@ pub const test_support = struct {
 
         /// Serialize an env-only capability policy with one allowed key.
         pub fn writePolicy(self: *GuardedFixture, entries: []const []const u8) void {
+            @setRuntimeSafety(true);
             var at: usize = 0;
             self.policy_bytes[at] = 1;
             at += 1;
@@ -1723,6 +1788,7 @@ pub const test_support = struct {
         /// stronger negative than an absent policy: every supplied byte would
         /// cover the SQL row if the independent family gate were missing.
         pub fn writeSqlPolicy(self: *GuardedFixture, name: []const u8, read_only: bool) void {
+            @setRuntimeSafety(true);
             var at: usize = 0;
             for (0..3) |_| {
                 self.policy_bytes[at] = 0;
@@ -1746,6 +1812,7 @@ pub const test_support = struct {
         }
 
         pub fn parts(self: *GuardedFixture) cert_mod.Parts {
+            @setRuntimeSafety(true);
             return .{
                 .identity = .{
                     .executable_root = [_]u8{0} ** 32,
@@ -1764,8 +1831,10 @@ pub const test_support = struct {
         }
 
         pub fn encode(self: *GuardedFixture) !void {
+            @setRuntimeSafety(true);
             std.mem.sort(graph.Member, &self.members, {}, struct {
                 fn lt(_: void, a: graph.Member, b: graph.Member) bool {
+                    @setRuntimeSafety(true);
                     return graph.Member.order(a, b) == .lt;
                 }
             }.lt);
@@ -1799,6 +1868,7 @@ pub const test_support = struct {
         }
 
         pub fn inputs(self: *GuardedFixture) Inputs {
+            @setRuntimeSafety(true);
             return .{
                 .certificate = self.bytes(),
                 .observed_graph = &self.members,
@@ -1809,6 +1879,7 @@ pub const test_support = struct {
     };
 
     pub fn buildGuarded() !GuardedFixture {
+        @setRuntimeSafety(true);
         var fixture = GuardedFixture{
             .members = .{
                 .{ .kind = .main_bytecode, .ordinal = 0, .digest = digest(1) },
@@ -1868,6 +1939,7 @@ pub const test_support = struct {
     }
 
     fn testedFor(index: u32) cert_mod.Evidence {
+        @setRuntimeSafety(true);
         return .{
             .obligation_index = index,
             .edge = .tested,
@@ -1878,6 +1950,7 @@ pub const test_support = struct {
     }
 
     pub fn build() !Fixture {
+        @setRuntimeSafety(true);
         var fixture = Fixture{
             .members = .{
                 .{ .kind = .main_bytecode, .ordinal = 0, .digest = digest(1) },
@@ -1994,6 +2067,7 @@ const InvariantTestFixture = struct {
     scratch: [scratchBytes(.{})]u8 = undefined,
 
     fn parts(self: *InvariantTestFixture, invariant_witnesses: []const cert_mod.InvariantWitness) cert_mod.Parts {
+        @setRuntimeSafety(true);
         return .{
             .identity = .{
                 .executable_root = graph.computeRoot(&self.members) catch unreachable,
@@ -2013,12 +2087,14 @@ const InvariantTestFixture = struct {
     }
 
     fn encodeWith(self: *InvariantTestFixture, invariant_witnesses: []const cert_mod.InvariantWitness) !void {
+        @setRuntimeSafety(true);
         for (&self.members) |*member| {
             if (member.kind == .proof_ir) member.digest = cert_mod.irRootFromNodes(&self.ir);
             if (member.kind == .proof_certificate) member.digest = [_]u8{0} ** 32;
         }
         std.mem.sort(graph.Member, &self.members, {}, struct {
             fn lessThan(_: void, a: graph.Member, b: graph.Member) bool {
+                @setRuntimeSafety(true);
                 return graph.Member.order(a, b) == .lt;
             }
         }.lessThan);
@@ -2038,6 +2114,7 @@ const InvariantTestFixture = struct {
     }
 
     fn inputs(self: *InvariantTestFixture) Inputs {
+        @setRuntimeSafety(true);
         return .{
             .certificate = self.buffer[0..self.len],
             .observed_graph = &self.members,
@@ -2049,10 +2126,12 @@ const InvariantTestFixture = struct {
 };
 
 fn buildInvariantFixture() !InvariantTestFixture {
+    @setRuntimeSafety(true);
     return buildInvariantFixtureFor(test_invariant_spec);
 }
 
 fn buildInvariantFixtureFor(spec: []const u8) !InvariantTestFixture {
+    @setRuntimeSafety(true);
     var fixture = InvariantTestFixture{
         .spec = spec,
         .members = .{
@@ -2128,6 +2207,7 @@ fn buildInvariantFixtureFor(spec: []const u8) !InvariantTestFixture {
 /// writing a posting group. Nothing else moves: the call site is still named by
 /// the proof IR, still witnessed, and still independently observed.
 fn buildBalanceOnlyInvariantFixtureFor(spec: []const u8) !InvariantTestFixture {
+    @setRuntimeSafety(true);
     var fixture = try buildInvariantFixtureFor(spec);
     fixture.ir[2].aux = 1;
     fixture.invariant_witnesses[0].operation = .balance;
@@ -2977,6 +3057,7 @@ fn encodeGuardedParts(
     fixture: *test_support.GuardedFixture,
     certificate_parts: cert_mod.Parts,
 ) !void {
+    @setRuntimeSafety(true);
     var built = certificate_parts;
     for (&fixture.members) |*member| {
         if (member.kind == .proof_certificate) member.digest = [_]u8{0} ** 32;
@@ -4060,12 +4141,14 @@ test "scratchBytes covers three bits per node at the configured bound" {
 /// The minimal accepted artifact plus `extra` tool catalog members, one per
 /// ordinal from zero, each carrying the digest of `catalog`.
 fn CatalogFixture(comptime extra: usize) type {
+    @setRuntimeSafety(true);
     return BindingFixture(extra, 0);
 }
 
 /// The minimal accepted artifact plus `extra` declaration members, one per
 /// ordinal from zero, each carrying the digest of `declarationBytes`.
 fn DeclarationFixture(comptime extra: usize) type {
+    @setRuntimeSafety(true);
     return BindingFixture(0, extra);
 }
 
@@ -4074,6 +4157,7 @@ fn DeclarationFixture(comptime extra: usize) type {
 /// kind. `inputs` supplies the catalog bytes when `catalogs` is not zero, and
 /// the declaration bytes when `declarations` is not zero.
 fn BindingFixture(comptime catalogs: usize, comptime declarations: usize) type {
+    @setRuntimeSafety(true);
     return struct {
         const Self = @This();
 
@@ -4087,19 +4171,23 @@ fn BindingFixture(comptime catalogs: usize, comptime declarations: usize) type {
         len: usize = 0,
 
         fn catalog(self: *const Self) []const u8 {
+            @setRuntimeSafety(true);
             return self.catalog_buf[0..self.catalog_len];
         }
 
         fn declarationBytes(self: *const Self) []const u8 {
+            @setRuntimeSafety(true);
             return self.declaration_buf[0..self.declaration_len];
         }
 
         fn encode(self: *Self) !void {
+            @setRuntimeSafety(true);
             for (&self.members) |*member| {
                 if (member.kind == .proof_certificate) member.digest = [_]u8{0} ** 32;
             }
             std.mem.sort(graph.Member, &self.members, {}, struct {
                 fn lessThan(_: void, a: graph.Member, b: graph.Member) bool {
+                    @setRuntimeSafety(true);
                     return graph.Member.order(a, b) == .lt;
                 }
             }.lessThan);
@@ -4118,6 +4206,7 @@ fn BindingFixture(comptime catalogs: usize, comptime declarations: usize) type {
         }
 
         fn inputs(self: *Self) Inputs {
+            @setRuntimeSafety(true);
             return .{
                 .certificate = self.buffer[0..self.len],
                 .observed_graph = &self.members,
@@ -4128,6 +4217,7 @@ fn BindingFixture(comptime catalogs: usize, comptime declarations: usize) type {
         }
 
         fn build() !Self {
+            @setRuntimeSafety(true);
             var self = Self{ .base = try test_support.build(), .members = undefined };
             self.catalog_len = tool_catalog.test_support.sample(&self.catalog_buf).len;
             self.declaration_len = declaration.test_support.sample(&self.declaration_buf).len;
@@ -4147,6 +4237,7 @@ fn BindingFixture(comptime catalogs: usize, comptime declarations: usize) type {
 }
 
 fn expectRejected(result: Assessment, code: verdict.ReasonCode) !void {
+    @setRuntimeSafety(true);
     const rejection = result.rejection() orelse {
         std.debug.print("expected {s}, accepted\n", .{code.text()});
         return error.TestUnexpectedResult;
@@ -4291,6 +4382,7 @@ test "a tool catalog and a declaration each matching their member are accepted" 
 /// The fixture's declaration with one byte of a reason changed. The bytes
 /// still decode, so only the digest can refuse them.
 fn tamperedDeclaration(original: []const u8, out: *[1024]u8) []const u8 {
+    @setRuntimeSafety(true);
     @memcpy(out[0..original.len], original);
     const at = std.mem.indexOf(u8, original, "Payment token.").?;
     out[at] = 'p';
@@ -4397,6 +4489,7 @@ test "every declaration reason code is observed" {
 const ReasonProbe = enum { root_mismatch, zero_root, trailing_member, missing_evidence, fabricated_totality };
 
 fn runReasonProbe(probe: ReasonProbe) !Assessment {
+    @setRuntimeSafety(true);
     var fixture = try test_support.build();
     switch (probe) {
         .root_mismatch => {
@@ -4437,6 +4530,7 @@ fn runReasonProbe(probe: ReasonProbe) !Assessment {
 /// A code not in the probe table needs a named public-entry test or a closed
 /// decoder mechanism here. Adding an enum member requires a new row or probe.
 fn reasonAllowlist(code: verdict.ReasonCode) ?[]const u8 {
+    @setRuntimeSafety(true);
     return switch (code) {
         .executable_root_mismatch,
         .zero_commitment,

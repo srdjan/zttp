@@ -42,6 +42,7 @@ pub fn build(b: *std.Build) void {
     // Every host test root from the table in build/host_tests.zig.
     for (host.runs) |run| test_step.dependOn(&run.step);
     test_step.dependOn(&capability_audit.step);
+    test_step.dependOn(gates.kernel_safety_step);
     test_step.dependOn(&gates.module_boundary.step);
     test_step.dependOn(&gates.release_workflow.step);
     test_step.dependOn(&gates.proof_swallow.step);

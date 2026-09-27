@@ -26,6 +26,7 @@ pub const SemanticState = enum(u8) {
     policy_accepted = 4,
 
     pub fn name(self: SemanticState) []const u8 {
+        @setRuntimeSafety(true);
         return @tagName(self);
     }
 };
@@ -44,6 +45,7 @@ pub const ProvenanceState = enum(u8) {
     trusted_origin = 4,
 
     pub fn name(self: ProvenanceState) []const u8 {
+        @setRuntimeSafety(true);
         return @tagName(self);
     }
 };
@@ -63,15 +65,18 @@ pub const AssuranceGrade = enum(u8) {
 
     /// The weaker of two grades. This is the only way a grade is combined.
     pub fn weakest(a: AssuranceGrade, b: AssuranceGrade) AssuranceGrade {
+        @setRuntimeSafety(true);
         return if (@intFromEnum(a) >= @intFromEnum(b)) a else b;
     }
 
     pub fn atLeastAsStrongAs(self: AssuranceGrade, floor: AssuranceGrade) bool {
+        @setRuntimeSafety(true);
         return @intFromEnum(self) <= @intFromEnum(floor);
     }
 
     /// Wire encoding is one-based so that zero can mean "no grade stated".
     pub fn fromWire(value: u8) ?AssuranceGrade {
+        @setRuntimeSafety(true);
         return switch (value) {
             1 => .proved,
             2 => .translation_validated,
@@ -83,10 +88,12 @@ pub const AssuranceGrade = enum(u8) {
     }
 
     pub fn toWire(self: AssuranceGrade) u8 {
+        @setRuntimeSafety(true);
         return @as(u8, @intFromEnum(self)) + 1;
     }
 
     pub fn name(self: AssuranceGrade) []const u8 {
+        @setRuntimeSafety(true);
         return @tagName(self);
     }
 };
@@ -113,6 +120,7 @@ pub const Stage = enum(u8) {
     declaration = 13,
 
     pub fn name(self: Stage) []const u8 {
+        @setRuntimeSafety(true);
         return @tagName(self);
     }
 };
@@ -246,6 +254,7 @@ pub const ReasonCode = enum(u16) {
     declaration_member_missing = 2203,
 
     pub fn text(self: ReasonCode) []const u8 {
+        @setRuntimeSafety(true);
         return @tagName(self);
     }
 };
@@ -286,6 +295,7 @@ pub const GuardVerdicts = struct {
     /// true for a handler with none, which is the honest answer: it has nothing
     /// to guard.
     pub fn ready(self: GuardVerdicts) bool {
+        @setRuntimeSafety(true);
         return self.required == self.covered;
     }
 };
@@ -333,6 +343,7 @@ pub fn writeApplicabilityForKind(
     artifact: WriteApplicability,
     kind: invariant.Kind,
 ) WriteApplicability {
+    @setRuntimeSafety(true);
     if (declared_kind_bits & invariant.kindBit(kind) == 0) return .not_applicable;
     if (!invariant.kindInfo(kind).applies_to_writes) return .not_applicable;
     return artifact;
@@ -354,6 +365,7 @@ pub const InvariantVerdicts = struct {
     kind_bits: u32 = 0,
 
     pub fn ready(self: InvariantVerdicts) bool {
+        @setRuntimeSafety(true);
         return self.configured and self.required > 0 and self.required == self.covered;
     }
 
@@ -366,6 +378,7 @@ pub const InvariantVerdicts = struct {
     /// rejects before this is ever reached. Deciding here from anything but
     /// that count would answer a question already answered.
     pub fn writeApplicability(self: InvariantVerdicts) WriteApplicability {
+        @setRuntimeSafety(true);
         if (!self.configured) return .not_applicable;
         return if (self.writes == 0) .vacuous else .covered;
     }
@@ -374,6 +387,7 @@ pub const InvariantVerdicts = struct {
     /// the accepted specification declared; nothing is recomputed from the
     /// document. See `writeApplicabilityForKind` for why this is degenerate.
     pub fn writeApplicabilityFor(self: InvariantVerdicts, kind: invariant.Kind) WriteApplicability {
+        @setRuntimeSafety(true);
         return writeApplicabilityForKind(self.kind_bits, self.writeApplicability(), kind);
     }
 };
@@ -399,10 +413,12 @@ pub const PropertyVerdicts = struct {
     entries: [count]Entry = [_]Entry{.none} ** count,
 
     fn slot(property: proof_system.Property) usize {
+        @setRuntimeSafety(true);
         return @intFromEnum(property) - 1;
     }
 
     pub fn gradeFor(self: PropertyVerdicts, property: proof_system.Property) ?AssuranceGrade {
+        @setRuntimeSafety(true);
         return switch (self.entries[slot(property)]) {
             .none => null,
             .graded, .accepted => |grade| grade,
@@ -410,10 +426,12 @@ pub const PropertyVerdicts = struct {
     }
 
     pub fn accepted(self: PropertyVerdicts, property: proof_system.Property) bool {
+        @setRuntimeSafety(true);
         return self.entries[slot(property)] == .accepted;
     }
 
     pub fn recordGrade(self: *PropertyVerdicts, property: proof_system.Property, grade: AssuranceGrade) void {
+        @setRuntimeSafety(true);
         self.entries[slot(property)] = switch (self.entries[slot(property)]) {
             .accepted => .{ .accepted = grade },
             .none, .graded => .{ .graded = grade },
@@ -421,6 +439,7 @@ pub const PropertyVerdicts = struct {
     }
 
     pub fn accept(self: *PropertyVerdicts, property: proof_system.Property, grade: AssuranceGrade) void {
+        @setRuntimeSafety(true);
         self.entries[slot(property)] = .{ .accepted = grade };
     }
 };
@@ -432,6 +451,7 @@ pub const Reached = union(enum) {
     proof_checked: ?AssuranceGrade,
 
     pub fn semantic(self: Reached) SemanticState {
+        @setRuntimeSafety(true);
         return switch (self) {
             .parsed => .parsed,
             .integrity_verified => .integrity_verified,
@@ -470,10 +490,12 @@ pub const Assessment = struct {
     invariants: InvariantVerdicts = .{},
 
     pub fn accepted(self: Assessment) bool {
+        @setRuntimeSafety(true);
         return self.outcome == .accepted;
     }
 
     pub fn semantic(self: Assessment) SemanticState {
+        @setRuntimeSafety(true);
         return switch (self.outcome) {
             .accepted => .policy_accepted,
             .rejected => |failure| failure.reached.semantic(),
@@ -481,6 +503,7 @@ pub const Assessment = struct {
     }
 
     pub fn grade(self: Assessment) ?AssuranceGrade {
+        @setRuntimeSafety(true);
         return switch (self.outcome) {
             .accepted => |success| success.grade,
             .rejected => |failure| switch (failure.reached) {
@@ -491,6 +514,7 @@ pub const Assessment = struct {
     }
 
     pub fn rejection(self: Assessment) ?Rejection {
+        @setRuntimeSafety(true);
         return switch (self.outcome) {
             .accepted => null,
             .rejected => |failure| failure.rejection,
@@ -499,6 +523,7 @@ pub const Assessment = struct {
 
     /// Null means decoding stopped before the certificate identity was known.
     pub fn developmentOnly(self: Assessment) ?bool {
+        @setRuntimeSafety(true);
         return switch (self.outcome) {
             .accepted => |success| success.development_only,
             .rejected => |failure| failure.development_only,
@@ -512,6 +537,7 @@ pub const Assessment = struct {
         refusal: Rejection,
         work_spent: u64,
     ) Assessment {
+        @setRuntimeSafety(true);
         return .{
             .outcome = .{ .rejected = .{
                 .reached = reached,

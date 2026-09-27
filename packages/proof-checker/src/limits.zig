@@ -55,10 +55,12 @@ pub const Budget = struct {
     remaining: u64,
 
     pub fn init(limits: Limits) Budget {
+        @setRuntimeSafety(true);
         return .{ .remaining = limits.max_work };
     }
 
     pub fn spend(self: *Budget, units: u64) BudgetError!void {
+        @setRuntimeSafety(true);
         if (units > self.remaining) {
             self.remaining = 0;
             return error.WorkBudgetExhausted;
@@ -67,6 +69,7 @@ pub const Budget = struct {
     }
 
     pub fn spent(self: Budget, limits: Limits) u64 {
+        @setRuntimeSafety(true);
         return limits.max_work - self.remaining;
     }
 };

@@ -9,6 +9,10 @@
 //! does not sign, and it does not replace any runtime control. A certificate it
 //! accepts still has to pass structural bytecode verification, capability
 //! enforcement, isolation, and every request-time check.
+//!
+//! Every production function enables runtime safety in its own body. A module
+//! optimization mode does not isolate runtime safety from a ReleaseFast root
+//! module on Zig 0.16.0. The kernel safety gate enforces this local setting.
 
 pub const capability_policy = @import("capability_policy.zig");
 pub const certificate = @import("certificate.zig");
@@ -20,6 +24,7 @@ pub const invariant = @import("invariant.zig");
 pub const policy = @import("policy.zig");
 pub const proof_system = @import("proof_system.zig");
 pub const residual = @import("residual.zig");
+pub const safety = @import("safety.zig");
 pub const tool_catalog = @import("tool_catalog.zig");
 pub const verdict = @import("verdict.zig");
 pub const wire = @import("wire.zig");

@@ -22,6 +22,7 @@ pub const ProofSystem = enum(u16) {
     zttp_pcc_v3 = 3,
 
     pub fn fromWire(value: u16) ?ProofSystem {
+        @setRuntimeSafety(true);
         return std.enums.fromInt(ProofSystem, value);
     }
 };
@@ -55,6 +56,7 @@ pub const Property = enum(u16) {
     capability_bounded = 8,
 
     pub fn fromWire(value: u16) ?Property {
+        @setRuntimeSafety(true);
         return std.enums.fromInt(Property, value);
     }
 
@@ -65,6 +67,7 @@ pub const Property = enum(u16) {
     /// producer's word for which node that is. Everything else is stated once
     /// about the handler.
     pub fn subjectIsEntryFunction(self: Property) bool {
+        @setRuntimeSafety(true);
         return switch (self) {
             .response_total => true,
             .results_checked,
@@ -87,6 +90,7 @@ pub const Property = enum(u16) {
     /// pins the count in both directions: it fails when the count drops, and it
     /// fails when the published residual list stops matching this switch.
     pub fn consumerChecked(self: Property) bool {
+        @setRuntimeSafety(true);
         return switch (self) {
             // Totality is folded over the proof IR by the consumer and related
             // to the final bytecode by the translation witnesses.
@@ -108,6 +112,7 @@ pub const Property = enum(u16) {
 
     /// How many properties the consumer re-derives. The ratchet floor.
     pub fn consumerCheckedCount() usize {
+        @setRuntimeSafety(true);
         var count: usize = 0;
         inline for (@typeInfo(Property).@"enum".fields) |field| {
             const property: Property = @enumFromInt(field.value);
@@ -117,6 +122,7 @@ pub const Property = enum(u16) {
     }
 
     pub fn name(self: Property) []const u8 {
+        @setRuntimeSafety(true);
         return @tagName(self);
     }
 };
@@ -153,6 +159,7 @@ pub const Rule = enum(u16) {
     rewrite_compaction = 8,
 
     pub fn fromWire(value: u16) ?Rule {
+        @setRuntimeSafety(true);
         return std.enums.fromInt(Rule, value);
     }
 
@@ -160,6 +167,7 @@ pub const Rule = enum(u16) {
     /// source-level obligation, or the reverse, is a category error the checker
     /// refuses rather than silently accepts.
     pub fn family(self: Rule) RuleFamily {
+        @setRuntimeSafety(true);
         return switch (self) {
             .return_total,
             .branch_both_arms_total,
@@ -203,6 +211,7 @@ pub const NodeTag = enum(u16) {
     ledger_call = 8,
 
     pub fn fromWire(value: u16) ?NodeTag {
+        @setRuntimeSafety(true);
         return std.enums.fromInt(NodeTag, value);
     }
 
@@ -210,6 +219,7 @@ pub const NodeTag = enum(u16) {
     /// Every other tag must leave it zero, so the field cannot become a place
     /// to smuggle data past the decoder.
     pub fn usesAux(self: NodeTag) bool {
+        @setRuntimeSafety(true);
         return self == .capability_call or self == .ledger_call;
     }
 };
@@ -230,6 +240,7 @@ pub const TrustReason = enum(u16) {
     deferred_family = 5,
 
     pub fn fromWire(value: u16) ?TrustReason {
+        @setRuntimeSafety(true);
         return std.enums.fromInt(TrustReason, value);
     }
 };

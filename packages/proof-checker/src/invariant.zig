@@ -79,6 +79,7 @@ pub const Kind = enum(u16) {
     declared_accounts_v1 = 2,
 
     pub fn fromWire(value: u16) ?Kind {
+        @setRuntimeSafety(true);
         return std.enums.fromInt(Kind, value);
     }
 };
@@ -124,6 +125,7 @@ pub const kind_table = std.EnumArray(Kind, KindInfo).init(.{
 });
 
 pub fn kindInfo(kind: Kind) KindInfo {
+    @setRuntimeSafety(true);
     return kind_table.get(kind);
 }
 
@@ -164,6 +166,7 @@ comptime {
 /// carries the same layout out of acceptance, so a reader that asks about one
 /// kind asks through this rather than restating the shift.
 pub fn kindBit(kind: Kind) u32 {
+    @setRuntimeSafety(true);
     return @as(u32, 1) << @intCast(kindInfo(kind).wire_ordinal - 1);
 }
 
@@ -190,6 +193,7 @@ pub const Spec = struct {
     kind_bytes: []const u8,
 
     pub fn currency(self: Spec, index: u16) DecodeError!Currency {
+        @setRuntimeSafety(true);
         if (index >= self.currency_count) return error.Truncated;
         const start = @as(usize, index) * currency_record_size;
         const record = self.currency_bytes[start..][0..currency_record_size];
@@ -198,6 +202,7 @@ pub const Spec = struct {
 
     /// The kind declared at `index`, in canonical wire-ordinal order.
     pub fn kindAt(self: Spec, index: u16) DecodeError!Kind {
+        @setRuntimeSafety(true);
         return (try self.recordAt(index)).kind;
     }
 
@@ -210,6 +215,7 @@ pub const Spec = struct {
     /// caller to opposite conclusions, and collapsing them into null is how a
     /// missing obligation reads as a discharged one.
     pub fn payloadFor(self: Spec, kind: Kind) DecodeError!?[]const u8 {
+        @setRuntimeSafety(true);
         var index: u16 = 0;
         while (index < self.kind_count) : (index += 1) {
             const record = try self.recordAt(index);
@@ -219,6 +225,7 @@ pub const Spec = struct {
     }
 
     pub fn declares(self: Spec, kind: Kind) DecodeError!bool {
+        @setRuntimeSafety(true);
         return (try self.payloadFor(kind)) != null;
     }
 
@@ -228,6 +235,7 @@ pub const Spec = struct {
     /// length, so the checks here cannot fire on bytes it returned; they keep
     /// the walk total for a `Spec` built any other way.
     fn recordAt(self: Spec, index: u16) DecodeError!Record {
+        @setRuntimeSafety(true);
         if (index >= self.kind_count) return error.Truncated;
         switch (self.kinds) {
             .v1 => |kind| return .{ .kind = kind, .payload = self.kind_bytes[0..0] },
@@ -255,11 +263,13 @@ pub const Spec = struct {
 /// predicate the decoder does. A candidate that names bytes this refuses would
 /// otherwise be drafted, pasted, and refused again at load time.
 pub fn validLedgerByte(byte: u8) bool {
+    @setRuntimeSafety(true);
     return std.ascii.isAlphanumeric(byte) or byte == '-' or byte == '_' or byte == '.';
 }
 
 /// Public for the same reason as `validLedgerByte` above.
 pub fn validCurrencyCode(code: [3]u8) bool {
+    @setRuntimeSafety(true);
     for (code) |byte| {
         if (byte < 'A' or byte > 'Z') return false;
     }
@@ -280,6 +290,7 @@ pub const AccountMatcherTag = enum(u8) {
     prefix = 2,
 
     pub fn fromWire(value: u8) ?AccountMatcherTag {
+        @setRuntimeSafety(true);
         return std.enums.fromInt(AccountMatcherTag, value);
     }
 };
@@ -294,6 +305,7 @@ pub const AccountMatcher = struct {
     value: []const u8,
 
     pub fn matches(self: AccountMatcher, account: []const u8) bool {
+        @setRuntimeSafety(true);
         return switch (self.tag) {
             .exact => std.mem.eql(u8, self.value, account),
             .prefix => std.mem.startsWith(u8, account, self.value),
@@ -303,6 +315,7 @@ pub const AccountMatcher = struct {
     /// Canonical order: by tag, then by byte value. The order is a property of
     /// the bytes, so two documents declaring the same set encode identically.
     pub fn order(a: AccountMatcher, b: AccountMatcher) std.math.Order {
+        @setRuntimeSafety(true);
         const tags = std.math.order(@intFromEnum(a.tag), @intFromEnum(b.tag));
         if (tags != .eq) return tags;
         return std.mem.order(u8, a.value, b.value);
@@ -317,6 +330,7 @@ pub const AccountMatchers = struct {
     count: u16,
 
     pub fn at(self: AccountMatchers, index: u16) DecodeError!AccountMatcher {
+        @setRuntimeSafety(true);
         if (index >= self.count) return error.Truncated;
         var cursor: usize = 0;
         var position: u16 = 0;
@@ -340,6 +354,7 @@ pub const AccountMatchers = struct {
     /// opposite conclusions, and collapsing them into `false` would be the
     /// safe direction here but the wrong habit everywhere else.
     pub fn matches(self: AccountMatchers, account: []const u8) DecodeError!bool {
+        @setRuntimeSafety(true);
         var index: u16 = 0;
         while (index < self.count) : (index += 1) {
             if ((try self.at(index)).matches(account)) return true;
@@ -357,6 +372,7 @@ pub const AccountMatchers = struct {
 /// and no repeats. An empty prefix would accept every account, which is the
 /// one matcher that silently turns the whole invariant off.
 pub fn decodeAccountMatchers(payload: []const u8) DecodeError!AccountMatchers {
+    @setRuntimeSafety(true);
     if (payload.len < 2) return error.Truncated;
     const count = std.mem.readInt(u16, payload[0..2], .little);
     if (count == 0) return error.EmptyAccountMatcherSet;
@@ -396,6 +412,7 @@ pub fn decodeAccountMatchers(payload: []const u8) DecodeError!AccountMatchers {
 /// exhaustive, so a kind added to the catalog without a rule here fails to
 /// compile rather than accepting whatever bytes the record happens to hold.
 fn validateKindPayload(kind: Kind, payload: []const u8) DecodeError!void {
+    @setRuntimeSafety(true);
     switch (kind) {
         .balance_conservation_v1 => if (payload.len != 0) return error.UnexpectedKindPayload,
         .declared_accounts_v1 => _ = try decodeAccountMatchers(payload),
@@ -411,6 +428,7 @@ const Counts = struct {
 };
 
 fn decodeCounts(bytes: []const u8) DecodeError!Counts {
+    @setRuntimeSafety(true);
     const ledger_len = std.mem.readInt(u16, bytes[12..14], .little);
     const currency_count = std.mem.readInt(u16, bytes[14..16], .little);
     if (ledger_len == 0) return error.EmptyLedgerId;
@@ -434,6 +452,7 @@ const Common = struct {
 /// by both schemas. The caller has already placed `counts.common_end` inside
 /// `bytes`.
 fn decodeCommon(bytes: []const u8, counts: Counts) DecodeError!Common {
+    @setRuntimeSafety(true);
     const ledger_id = bytes[header_size..][0..counts.ledger_len];
     for (ledger_id) |byte| {
         if (!validLedgerByte(byte)) return error.InvalidLedgerId;
@@ -465,6 +484,7 @@ fn decodeCommon(bytes: []const u8, counts: Counts) DecodeError!Common {
 /// count, the same ledger and currency region, then that many records of wire
 /// ordinal u16 + payload length u16 + payload, ascending by ordinal.
 pub fn decode(bytes: []const u8) DecodeError!Spec {
+    @setRuntimeSafety(true);
     if (bytes.len > max_spec_bytes) return error.SpecTooLarge;
     if (bytes.len < header_size) return error.Truncated;
     if (!std.mem.eql(u8, bytes[0..8], magic)) return error.BadMagic;
@@ -476,6 +496,7 @@ pub fn decode(bytes: []const u8) DecodeError!Spec {
 }
 
 fn decodeV1(bytes: []const u8) DecodeError!Spec {
+    @setRuntimeSafety(true);
     const kind = Kind.fromWire(std.mem.readInt(u16, bytes[10..12], .little)) orelse
         return error.UnknownInvariantKind;
     // The required kind is mandatory under both schemas, and schema 1's header
@@ -501,6 +522,7 @@ fn decodeV1(bytes: []const u8) DecodeError!Spec {
 }
 
 fn decodeV2(bytes: []const u8) DecodeError!Spec {
+    @setRuntimeSafety(true);
     const kind_count = std.mem.readInt(u16, bytes[10..12], .little);
     if (kind_count > max_kinds) return error.TooManyKinds;
     const counts = try decodeCounts(bytes);
@@ -568,6 +590,7 @@ pub const digest_domain_v2 = "zttp-invariant-spec-v2";
 /// fall back to the schema 1 domain, which leaves every digest ever computed
 /// over schema 1 bytes exactly where it was.
 pub fn digestDomain(bytes: []const u8) []const u8 {
+    @setRuntimeSafety(true);
     if (bytes.len < 10) return digest_domain;
     return switch (std.mem.readInt(u16, bytes[8..10], .little)) {
         schema_version_v2 => digest_domain_v2,
@@ -576,6 +599,7 @@ pub fn digestDomain(bytes: []const u8) []const u8 {
 }
 
 pub fn digest(bytes: []const u8) [32]u8 {
+    @setRuntimeSafety(true);
     var hasher = std.crypto.hash.sha2.Sha256.init(.{});
     hasher.update(digestDomain(bytes));
     hasher.update(bytes);
@@ -672,12 +696,14 @@ pub const expected_adapter_manifest = AdapterManifest{
 pub const adapter_digest_domain = "zttp-invariant-adapter-v1";
 
 fn updateInt(comptime T: type, hasher: *std.crypto.hash.sha2.Sha256, value: T) void {
+    @setRuntimeSafety(true);
     var buffer: [@divExact(@typeInfo(T).int.bits, 8)]u8 = undefined;
     std.mem.writeInt(T, &buffer, value, .little);
     hasher.update(&buffer);
 }
 
 fn updateLengthPrefixed(hasher: *std.crypto.hash.sha2.Sha256, bytes: []const u8) void {
+    @setRuntimeSafety(true);
     updateInt(u64, hasher, bytes.len);
     hasher.update(bytes);
 }
@@ -696,6 +722,7 @@ fn updateLengthPrefixed(hasher: *std.crypto.hash.sha2.Sha256, bytes: []const u8)
 /// function decides the right thing. That gap is closed by the predicate's own
 /// tests, never here.
 pub fn adapterManifestDigest(manifest: AdapterManifest) [32]u8 {
+    @setRuntimeSafety(true);
     var hasher = std.crypto.hash.sha2.Sha256.init(.{});
     hasher.update(adapter_digest_domain);
     updateLengthPrefixed(&hasher, manifest.identity);
@@ -714,6 +741,7 @@ pub fn adapterManifestDigest(manifest: AdapterManifest) [32]u8 {
 /// compared against is computed by the producer from the adapter it linked,
 /// through `adapterManifestDigest` above.
 pub fn adapterDigest() [32]u8 {
+    @setRuntimeSafety(true);
     return adapterManifestDigest(expected_adapter_manifest);
 }
 
@@ -722,6 +750,7 @@ pub const Operation = enum(u8) {
     balance = 2,
 
     pub fn fromWire(value: u8) ?Operation {
+        @setRuntimeSafety(true);
         return std.enums.fromInt(Operation, value);
     }
 };
@@ -731,6 +760,7 @@ pub const SinkId = enum(u8) {
     ledger_balance = 2,
 
     pub fn fromWire(value: u8) ?SinkId {
+        @setRuntimeSafety(true);
         return std.enums.fromInt(SinkId, value);
     }
 };
@@ -758,6 +788,7 @@ pub const ObservedOperation = struct {
     operation: Operation,
 
     pub fn order(a: ObservedOperation, b: ObservedOperation) std.math.Order {
+        @setRuntimeSafety(true);
         if (a.function_ordinal != b.function_ordinal) return std.math.order(a.function_ordinal, b.function_ordinal);
         if (a.code_offset != b.code_offset) return std.math.order(a.code_offset, b.code_offset);
         return std.math.order(@intFromEnum(a.operation), @intFromEnum(b.operation));

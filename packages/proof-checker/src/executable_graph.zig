@@ -66,16 +66,19 @@ pub const MemberKind = enum(u16) {
     declaration = 20,
 
     pub fn fromWire(value: u16) ?MemberKind {
+        @setRuntimeSafety(true);
         return std.enums.fromInt(MemberKind, value);
     }
 
     pub fn name(self: MemberKind) []const u8 {
+        @setRuntimeSafety(true);
         return @tagName(self);
     }
 
     /// Kinds a production artifact must always carry. A graph missing one of
     /// these is not a smaller handler, it is an incomplete commitment.
     pub fn required(self: MemberKind) bool {
+        @setRuntimeSafety(true);
         return switch (self) {
             .main_bytecode,
             .contract_bytes,
@@ -120,6 +123,7 @@ pub const Member = struct {
     digest: [32]u8,
 
     pub fn order(a: Member, b: Member) std.math.Order {
+        @setRuntimeSafety(true);
         const ka = @intFromEnum(a.kind);
         const kb = @intFromEnum(b.kind);
         if (ka != kb) return std.math.order(ka, kb);
@@ -137,6 +141,7 @@ pub const CheckRequiredKindsError = error{ EmptyGraph, DuplicateMember, NotOrder
 /// SHA-256 over the exact bytes of one member. Producers hash the same buffer
 /// they embed; the consumer hashes the same buffer it loads.
 pub fn digestBytes(bytes: []const u8) [32]u8 {
+    @setRuntimeSafety(true);
     var out: [32]u8 = undefined;
     Sha256.hash(bytes, &out, .{});
     return out;
@@ -156,6 +161,7 @@ pub const RootHasher = struct {
     remaining: u32,
 
     pub fn init(count: u32) InitError!RootHasher {
+        @setRuntimeSafety(true);
         if (count == 0) return error.EmptyGraph;
         var hasher = Sha256.init(.{});
         hasher.update(domain);
@@ -166,6 +172,7 @@ pub const RootHasher = struct {
     }
 
     pub fn push(self: *RootHasher, member: Member) PushError!void {
+        @setRuntimeSafety(true);
         if (self.remaining == 0) return error.CountExceeded;
         if (self.previous) |prev| {
             switch (Member.order(prev, member)) {
@@ -190,6 +197,7 @@ pub const RootHasher = struct {
 
     /// Every kind a production artifact must commit was pushed.
     pub fn checkRequiredKinds(self: RootHasher) RequiredKindsError!void {
+        @setRuntimeSafety(true);
         inline for (@typeInfo(MemberKind).@"enum".fields) |field| {
             const kind: MemberKind = @enumFromInt(field.value);
             if (kind.required() and !self.seen_kinds.contains(kind)) return error.MissingRequiredKind;
@@ -197,6 +205,7 @@ pub const RootHasher = struct {
     }
 
     pub fn finish(self: *RootHasher) FinishError![32]u8 {
+        @setRuntimeSafety(true);
         if (self.remaining != 0) return error.NotOrdered;
         const root = self.hasher.finalResult();
         if (std.mem.allEqual(u8, &root, 0)) return error.ZeroCommitment;
@@ -210,6 +219,7 @@ pub const RootHasher = struct {
 /// (kind, ordinal). Ordering is part of the commitment, so a producer cannot
 /// reshuffle members and keep the root.
 pub fn computeRoot(members: []const Member) ComputeRootError![32]u8 {
+    @setRuntimeSafety(true);
     var hasher = try RootHasher.init(@intCast(members.len));
     for (members) |member| hasher.push(member) catch |err| switch (err) {
         error.CountExceeded => unreachable,
@@ -220,6 +230,7 @@ pub fn computeRoot(members: []const Member) ComputeRootError![32]u8 {
 
 /// Whether the inventory carries every kind a production artifact must commit.
 pub fn checkRequiredKinds(members: []const Member) CheckRequiredKindsError!void {
+    @setRuntimeSafety(true);
     var hasher = try RootHasher.init(@intCast(members.len));
     for (members) |member| hasher.push(member) catch |err| switch (err) {
         error.CountExceeded => unreachable,
@@ -231,12 +242,14 @@ pub fn checkRequiredKinds(members: []const Member) CheckRequiredKindsError!void 
 const testing = std.testing;
 
 fn m(kind: MemberKind, ordinal: u32, seed: u8) Member {
+    @setRuntimeSafety(true);
     var digest: [32]u8 = undefined;
     @memset(&digest, seed);
     return .{ .kind = kind, .ordinal = ordinal, .digest = digest };
 }
 
 fn fullGraph(buf: *[9]Member) []Member {
+    @setRuntimeSafety(true);
     buf.* = .{
         m(.main_bytecode, 0, 1),
         m(.contract_bytes, 0, 2),
@@ -250,6 +263,7 @@ fn fullGraph(buf: *[9]Member) []Member {
     };
     std.mem.sort(Member, buf, {}, struct {
         fn lt(_: void, a: Member, b: Member) bool {
+            @setRuntimeSafety(true);
             return Member.order(a, b) == .lt;
         }
     }.lt);
