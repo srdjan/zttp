@@ -284,7 +284,7 @@ fn buildRoutePlans(
     defer freeStringList(&used_type_names, allocator);
 
     for (schema_aliases.items) |alias| {
-        try used_type_names.append(allocator, try allocator.dupe(u8, alias.type_name));
+        try appendStringDupe(&used_type_names, allocator, alias.type_name);
     }
 
     for (contract.api.routes.items, 0..) |route, idx| {
@@ -373,6 +373,7 @@ fn buildRoutePlans(
                     const base_inline_name = try baseInlineResponseName(allocator, route);
                     defer allocator.free(base_inline_name);
                     var inline_name = try sanitizeTypeName(allocator, base_inline_name);
+                    errdefer allocator.free(inline_name);
                     try uniquifyOwnedName(allocator, &used_type_names, &inline_name);
                     try inline_aliases.append(allocator, .{
                         .route_index = idx,
@@ -400,6 +401,7 @@ fn buildRoutePlans(
         if (route.responses.items.len > 1) {
             // Multi-response: build a discriminated union, one arm per status code.
             var arms: std.ArrayList(UnionArm) = .empty;
+            defer arms.deinit(allocator);
             var skip_reason: ?[]const u8 = null;
 
             for (route.responses.items) |response| {
@@ -434,6 +436,7 @@ fn buildRoutePlans(
                         const base_name = try baseInlineResponseNameWithStatus(allocator, route, status);
                         defer allocator.free(base_name);
                         var inline_name = try sanitizeTypeName(allocator, base_name);
+                        errdefer allocator.free(inline_name);
                         try uniquifyOwnedName(allocator, &used_type_names, &inline_name);
                         try inline_aliases.append(allocator, .{
                             .route_index = idx,
@@ -449,7 +452,6 @@ fn buildRoutePlans(
             }
 
             if (skip_reason) |reason| {
-                arms.deinit(allocator);
                 try appendSkipped(skipped, allocator, idx, reason);
                 continue;
             }
@@ -458,6 +460,7 @@ fn buildRoutePlans(
             errdefer allocator.free(method_name);
             try uniquifyOwnedName(allocator, &used_method_names, &method_name);
             const arms_slice = try arms.toOwnedSlice(allocator);
+            errdefer allocator.free(arms_slice);
             try route_plans.append(allocator, .{
                 .route_index = idx,
                 .method_name = method_name,
@@ -495,6 +498,7 @@ fn buildRoutePlans(
                 const base_inline_name = try baseInlineResponseName(allocator, route);
                 defer allocator.free(base_inline_name);
                 var inline_name = try sanitizeTypeName(allocator, base_inline_name);
+                errdefer allocator.free(inline_name);
                 try uniquifyOwnedName(allocator, &used_type_names, &inline_name);
                 try inline_aliases.append(allocator, .{
                     .route_index = idx,
@@ -592,15 +596,27 @@ fn freeStringList(list: *std.ArrayList([]const u8), allocator: std.mem.Allocator
     list.deinit(allocator);
 }
 
+fn appendStringDupe(
+    list: *std.ArrayList([]const u8),
+    allocator: std.mem.Allocator,
+    value: []const u8,
+) !void {
+    const owned = try allocator.dupe(u8, value);
+    errdefer allocator.free(owned);
+    try list.append(allocator, owned);
+}
+
 fn appendSkipped(
     skipped: *std.ArrayList(SkippedOperation),
     allocator: std.mem.Allocator,
     route_index: usize,
     reason: []const u8,
 ) !void {
+    const owned_reason = try allocator.dupe(u8, reason);
+    errdefer allocator.free(owned_reason);
     try skipped.append(allocator, .{
         .route_index = route_index,
-        .reason = try allocator.dupe(u8, reason),
+        .reason = owned_reason,
     });
 }
 
@@ -1066,20 +1082,21 @@ fn uniquifyOwnedName(
     name: *[]u8,
 ) !void {
     if (!containsString(used_names.items, name.*)) {
-        try used_names.append(allocator, try allocator.dupe(u8, name.*));
+        try appendStringDupe(used_names, allocator, name.*);
         return;
     }
 
     const base = try allocator.dupe(u8, name.*);
     defer allocator.free(base);
-    allocator.free(name.*);
 
     var counter: usize = 2;
     while (true) : (counter += 1) {
         const candidate = try std.fmt.allocPrint(allocator, "{s}{d}", .{ base, counter });
+        errdefer allocator.free(candidate);
         if (!containsString(used_names.items, candidate)) {
+            try appendStringDupe(used_names, allocator, candidate);
+            allocator.free(name.*);
             name.* = candidate;
-            try used_names.append(allocator, try allocator.dupe(u8, candidate));
             return;
         }
         allocator.free(candidate);
@@ -1288,6 +1305,46 @@ test "writeTypeScriptClient emits inline response alias" {
     try std.testing.expect(std.mem.indexOf(u8, output.items, "export type GetHealthResponse = {") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "async getHealth(") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "TypedResponse<GetHealthResponse>") != null);
+}
+
+test "writeTypeScriptClient releases owned names on every allocation failure" {
+    const allocator = std.testing.allocator;
+
+    var schemas: std.ArrayList(ApiSchemaInfo) = .empty;
+    try schemas.append(allocator, .{
+        .name = try allocator.dupe(u8, "same-name"),
+        .schema_json = try allocator.dupe(u8, "{\"type\":\"string\"}"),
+    });
+    try schemas.append(allocator, .{
+        .name = try allocator.dupe(u8, "same_name"),
+        .schema_json = try allocator.dupe(u8, "{\"type\":\"boolean\"}"),
+    });
+
+    var contract = handler_contract.emptyContract(try allocator.dupe(u8, "handler.ts"));
+    contract.api.schemas = schemas;
+    defer contract.deinit(allocator);
+
+    var allocation_count: usize = 0;
+    {
+        var probe = std.testing.FailingAllocator.init(allocator, .{ .fail_index = std.math.maxInt(usize) });
+        var bytes: [16 * 1024]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&bytes);
+        try writeTypeScriptClient(&writer, probe.allocator(), &contract, .{});
+        allocation_count = probe.alloc_index;
+        try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "export type SameName = string;") != null);
+        try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "export type SameName2 = boolean;") != null);
+    }
+
+    var fail_index: usize = 0;
+    while (fail_index < allocation_count) : (fail_index += 1) {
+        var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = fail_index });
+        var bytes: [16 * 1024]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&bytes);
+        try std.testing.expectError(
+            error.OutOfMemory,
+            writeTypeScriptClient(&writer, failing.allocator(), &contract, .{}),
+        );
+    }
 }
 
 test "writeTypeScriptClient emits discriminated union for multi-response route" {
