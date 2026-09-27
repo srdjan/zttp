@@ -221,7 +221,7 @@ pub const LiveReloadState = struct {
             self.quest.maybeStart();
         }
 
-        while (self.server.running) {
+        while (self.server.running.load(.acquire)) {
             try std.Io.sleep(io, .fromMilliseconds(self.config.poll_interval_ms), .awake);
 
             const next_stamp = try computeStamp(io, self.watch_paths);

@@ -1481,7 +1481,7 @@ pub const Server = struct {
     embedded_bytecode: ?[]const u8,
     runtime_dep_bytecodes: ?[]const []const u8,
     static_cache: StaticFileCache,
-    running: bool,
+    running: std.atomic.Value(bool),
     request_count: std.atomic.Value(u64),
     conn_pool: ?*ConnectionPool,
     contract: ?ValidatedRuntimeContract,
@@ -1600,7 +1600,7 @@ pub const Server = struct {
                 cfg.static_cache_max_bytes,
                 cfg.static_cache_max_file_size,
             ),
-            .running = false,
+            .running = std.atomic.Value(bool).init(false),
             .request_count = std.atomic.Value(u64).init(0),
             .conn_pool = null,
             .contract = null,
@@ -2690,7 +2690,7 @@ pub const Server = struct {
         std.log.info("   Connection pool: {d} workers", .{worker_count});
 
         installShutdownSignals();
-        self.running = true;
+        self.running.store(true, .release);
 
         std.log.info("Server listening on http://{s}:{d}", .{ self.config.host, self.config.port });
         if (self.studio != null) {
@@ -2714,10 +2714,13 @@ pub const Server = struct {
         comptime work_fn: fn (@TypeOf(context)) void,
     ) !void {
         try self.start();
-        const thread = try std.Thread.spawn(.{}, work_fn, .{context});
+        const thread = std.Thread.spawn(.{}, work_fn, .{context}) catch |err| {
+            self.shutdown(self.config.timeout_ms);
+            return err;
+        };
         defer thread.join();
-        try self.acceptLoop();
-        self.shutdown(self.config.timeout_ms);
+        defer self.shutdown(self.config.timeout_ms);
+        return self.acceptLoop();
     }
 
     const AcceptWakeContext = struct {
@@ -2754,7 +2757,7 @@ pub const Server = struct {
             thread.join();
         };
 
-        while (self.running and !g_shutdown_requested.load(.monotonic)) {
+        while (self.running.load(.acquire) and !g_shutdown_requested.load(.monotonic)) {
             const stream = listener.accept(io) catch |err| switch (err) {
                 // Per-connection hiccup: drop it and keep serving.
                 error.ConnectionAborted => continue,
@@ -2801,7 +2804,7 @@ pub const Server = struct {
     /// executing when shutdown begins runs to completion, so only a non-zero
     /// `request_timeout_ms` bounds it.
     pub fn shutdown(self: *Self, grace_ms: u32) void {
-        self.running = false;
+        self.running.store(false, .release);
         // Close listener so a blocked accept() wakes immediately.
         if (self.evented_ready) {
             const io = self.io_backend.io();
@@ -4154,7 +4157,7 @@ fn runShutdownGraceScenario(scenario: ShutdownGraceScenario) !void {
     const accept_err_int = accept_error.load(.acquire);
     if (accept_err_int != 0) return @errorFromInt(accept_err_int);
 
-    try std.testing.expect(!server.running);
+    try std.testing.expect(!server.running.load(.acquire));
     try std.testing.expect(server.listener == null);
     try std.testing.expectEqual(@as(usize, 0), server.pool.?.getInUse());
     try std.testing.expectError(

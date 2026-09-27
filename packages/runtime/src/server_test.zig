@@ -56,7 +56,7 @@ test "Server.init/deinit round-trips an inline handler without leaking" {
 
     // init must not start the listener or pool; those are start()'s job.
     try std.testing.expect(srv.pool == null);
-    try std.testing.expect(!srv.running);
+    try std.testing.expect(!srv.running.load(.acquire));
 }
 
 test "Server.init auto-sizes the pool when pool_size is zero" {
@@ -337,7 +337,7 @@ test "B3: Server.shutdown() is safe before start" {
     defer srv.deinit();
     // Server is not started; shutdown must not crash on nil pool/listener.
     srv.shutdown(100);
-    try std.testing.expect(!srv.running);
+    try std.testing.expect(!srv.running.load(.acquire));
 }
 
 test "coverage note: health/readiness socket path is exercised in server.zig" {
