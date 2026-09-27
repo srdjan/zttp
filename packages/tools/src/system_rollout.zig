@@ -92,7 +92,7 @@ const HandlerVersion = struct {
     name: []const u8,
     old_idx: ?usize,
     new_idx: ?usize,
-    changed_bit: ?u5 = null,
+    changed_bit: ?usize = null,
     delta_index: ?usize = null,
 };
 
@@ -255,10 +255,11 @@ const Planner = struct {
     };
 
     fn selectedVersion(self: *Planner, item: HandlerVersion, mask: u32) ?SelectedVersion {
-        const deploy_new = if (item.changed_bit) |bit|
-            (mask & (@as(u32, 1) << bit)) != 0
-        else
-            false;
+        const deploy_new = if (item.changed_bit) |bit_index| blk: {
+            std.debug.assert(bit_index < 32);
+            const bit: u5 = @intCast(bit_index);
+            break :blk (mask & (@as(u32, 1) << bit)) != 0;
+        } else false;
 
         if (deploy_new) {
             const idx = item.new_idx orelse return null;
@@ -360,7 +361,7 @@ pub fn analyzeRollout(
     for (handlers.items) |*item| {
         if (item.old_idx == null) {
             try changed_names.append(allocator, try allocator.dupe(u8, item.name));
-            item.changed_bit = @intCast(changed_names.items.len - 1);
+            item.changed_bit = changed_names.items.len - 1;
             item.delta_index = deltas.items.len;
             try deltas.append(allocator, .{
                 .name = try allocator.dupe(u8, item.name),
@@ -372,7 +373,7 @@ pub fn analyzeRollout(
         }
         if (item.new_idx == null) {
             try changed_names.append(allocator, try allocator.dupe(u8, item.name));
-            item.changed_bit = @intCast(changed_names.items.len - 1);
+            item.changed_bit = changed_names.items.len - 1;
             item.delta_index = deltas.items.len;
             try deltas.append(allocator, .{
                 .name = try allocator.dupe(u8, item.name),
@@ -412,7 +413,7 @@ pub fn analyzeRollout(
         }
 
         try changed_names.append(allocator, try allocator.dupe(u8, item.name));
-        item.changed_bit = @intCast(changed_names.items.len - 1);
+        item.changed_bit = changed_names.items.len - 1;
         item.delta_index = deltas.items.len;
 
         const summary = try buildUpdateSummary(
