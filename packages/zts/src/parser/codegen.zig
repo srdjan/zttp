@@ -1626,6 +1626,32 @@ pub const CodeGen = struct {
         self.max_stack_depth = 0;
         self.current_stack_depth = 0;
 
+        // Until the restore below, the parent's buffers live only in the saved_*
+        // locals. A failure before then must free this function's buffers and
+        // put the parent's back, or Parser.deinit frees the child's and the
+        // parent's leak. After the restore, self holds the parent's live
+        // buffers again, so the flag stops this from freeing them.
+        var restored = false;
+        errdefer if (!restored) {
+            self.code.deinit(self.allocator);
+            self.constants.deinit(self.allocator);
+            self.upvalue_info.deinit(self.allocator);
+            self.line_table.deinit(self.allocator);
+            self.labels.deinit(self.allocator);
+            self.pending_jumps.deinit(self.allocator);
+            self.loop_stack.deinit(self.allocator);
+            self.code = saved_code;
+            self.constants = saved_constants;
+            self.upvalue_info = saved_upvalue_info;
+            self.line_table = saved_line_table;
+            self.labels = saved_labels;
+            self.pending_jumps = saved_pending_jumps;
+            self.loop_stack = saved_loop_stack;
+            self.current_scope = saved_scope;
+            self.max_stack_depth = saved_max_stack;
+            self.current_stack_depth = saved_current_stack;
+        };
+
         // Everything from here to the buffer restore belongs to this function's
         // own code buffer, label table, and optimization pass.
         if (self.witness) |recorder| try recorder.beginFunctionScope(node_idx);
@@ -1645,6 +1671,7 @@ pub const CodeGen = struct {
         // Get upvalue info from scope
         const scope = self.scopes.getScope(func.scope_id);
         var upvalue_info_list: std.ArrayList(UpvalueInfo) = .empty;
+        errdefer upvalue_info_list.deinit(self.allocator);
         for (scope.upvalues.items) |uv| {
             try upvalue_info_list.append(self.allocator, switch (uv.capture) {
                 .local => |index| .{ .is_local = true, .index = index },
@@ -1707,7 +1734,8 @@ pub const CodeGen = struct {
         self.labels.deinit(self.allocator);
         self.pending_jumps.deinit(self.allocator);
         self.loop_stack.deinit(self.allocator);
-        upvalue_info_list.deinit(self.allocator);
+        // upvalue_info_list is empty after toOwnedSlice; its errdefer covers
+        // the failure paths, and deinit here would leave it undefined for them.
 
         // Restore parent state (ic_cache_idx intentionally NOT restored -
         // it must keep incrementing to ensure unique IC indices across functions)
@@ -1721,6 +1749,7 @@ pub const CodeGen = struct {
         self.current_scope = saved_scope;
         self.max_stack_depth = saved_max_stack;
         self.current_stack_depth = saved_current_stack;
+        restored = true;
 
         // Add function bytecode to parent constants and emit opcode
         const func_idx = try self.addConstant(JSValue.fromExternPtr(func_bc));
@@ -2023,7 +2052,7 @@ pub const CodeGen = struct {
 
             const key_str_idx = self.ir.getStringIdx(prop.key) orelse continue;
             const key_str = self.ir.getString(key_str_idx) orelse continue;
-            const atom = self.resolveKeyAtom(key_str, key_str_idx) catch continue;
+            const atom = try self.resolveKeyAtom(key_str, key_str_idx);
 
             try self.emit(.dup);
             self.pushStack(1);
@@ -2051,7 +2080,7 @@ pub const CodeGen = struct {
 
             const key_str_idx = self.ir.getStringIdx(prop.key) orelse continue;
             const key_str = self.ir.getString(key_str_idx) orelse continue;
-            const atom = self.resolveKeyAtom(key_str, key_str_idx) catch continue;
+            const atom = try self.resolveKeyAtom(key_str, key_str_idx);
 
             try self.emit(.dup);
             self.pushStack(1);
@@ -2193,7 +2222,7 @@ pub const CodeGen = struct {
 
             const key_str_idx = self.ir.getStringIdx(prop.key) orelse continue;
             const key_str = self.ir.getString(key_str_idx) orelse continue;
-            const atom = self.resolveKeyAtom(key_str, key_str_idx) catch continue;
+            const atom = try self.resolveKeyAtom(key_str, key_str_idx);
 
             try self.emit(.dup);
             self.pushStack(1);

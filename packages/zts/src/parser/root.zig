@@ -457,3 +457,29 @@ test "prefix increment is rejected with helpful error" {
     try std.testing.expect(std.mem.indexOf(u8, err.message, "++x") != null);
     try std.testing.expect(std.mem.indexOf(u8, err.message, "x = x + 1") != null);
 }
+
+test "a match record key that cannot be interned fails codegen instead of dropping the field" {
+    // Codegen skipped a record-pattern field whose key atom could not be
+    // interned and emitted the rest, so the bytecode tested fewer fields than
+    // the proven IR. Every other name is interned first; the table is then
+    // full, so only the pattern key `zzkind` fails.
+    const allocator = std.testing.allocator;
+    var strings = string.StringTable.init(allocator);
+    defer strings.deinit();
+    var atoms = atom_table_mod.AtomTable.init(allocator);
+    defer atoms.deinit();
+    for ([_][]const u8{ "h", "zzq" }) |name| _ = try atoms.intern(name);
+    atoms.next_id = 0xFFFE;
+
+    var p = try Parser.init(allocator,
+        \\function h(zzq) {
+        \\  return match (zzq) {
+        \\    when { zzkind: "x" }: 200,
+        \\    default: 404
+        \\  };
+        \\}
+    , &strings, &atoms);
+    defer p.deinit();
+
+    try std.testing.expectError(error.OutOfMemory, p.parse());
+}
