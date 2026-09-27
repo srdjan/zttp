@@ -33,13 +33,22 @@ pub const DiagnosticItem = struct {
         message: []const u8,
         introduced_by_patch: ?bool,
     ) !DiagnosticItem {
+        const owned_code = try allocator.dupe(u8, code);
+        errdefer allocator.free(owned_code);
+        const owned_severity = try allocator.dupe(u8, severity);
+        errdefer allocator.free(owned_severity);
+        const owned_path = try allocator.dupe(u8, path);
+        errdefer allocator.free(owned_path);
+        const owned_message = try allocator.dupe(u8, message);
+        errdefer allocator.free(owned_message);
+
         return .{
-            .code = try allocator.dupe(u8, code),
-            .severity = try allocator.dupe(u8, severity),
-            .path = try allocator.dupe(u8, path),
+            .code = owned_code,
+            .severity = owned_severity,
+            .path = owned_path,
             .line = line,
             .column = column,
-            .message = try allocator.dupe(u8, message),
+            .message = owned_message,
             .introduced_by_patch = introduced_by_patch,
         };
     }
@@ -52,8 +61,9 @@ pub const DiagnosticItem = struct {
         help: ?[]const u8,
     ) !void {
         const text = help orelse return;
+        const owned = try allocator.dupe(u8, text);
         if (self.help) |old| allocator.free(old);
-        self.help = try allocator.dupe(u8, text);
+        self.help = owned;
     }
 
     pub fn clone(self: DiagnosticItem, allocator: std.mem.Allocator) !DiagnosticItem {
@@ -1755,6 +1765,57 @@ test "generic clone deep-copies nested slices and frees idempotently" {
     // Freeing twice is a no-op: the walk blanks pointer fields as it goes, so a
     // caller that deinits a payload it already released does not double free.
     copy.deinit(a);
+}
+
+test "DiagnosticItem init releases every field on allocation failure" {
+    const allocator = testing.allocator;
+
+    var success = false;
+    var fail_index: usize = 0;
+    while (fail_index < 8) : (fail_index += 1) {
+        var failing = testing.FailingAllocator.init(allocator, .{ .fail_index = fail_index });
+        if (DiagnosticItem.init(
+            failing.allocator(),
+            "ZTS001",
+            "error",
+            "handler.ts",
+            3,
+            7,
+            "unsupported feature",
+            true,
+        )) |value| {
+            var item = value;
+            item.deinit(failing.allocator());
+            success = true;
+            break;
+        } else |err| {
+            try testing.expectEqual(error.OutOfMemory, err);
+        }
+    }
+    try testing.expect(success);
+}
+
+test "DiagnosticItem setHelp preserves the old help when allocation fails" {
+    const allocator = testing.allocator;
+    var item = try DiagnosticItem.init(
+        allocator,
+        "ZTS001",
+        "error",
+        "handler.ts",
+        3,
+        7,
+        "unsupported feature",
+        true,
+    );
+    defer item.deinit(allocator);
+    try item.setHelp(allocator, "keep this fix");
+
+    var failing = testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    try testing.expectError(error.OutOfMemory, item.setHelp(failing.allocator(), "replacement fix"));
+    try testing.expectEqualStrings("keep this fix", item.help.?);
+
+    try item.setHelp(allocator, "replacement fix");
+    try testing.expectEqualStrings("replacement fix", item.help.?);
 }
 
 test "generic clone leaks nothing when an allocation fails partway" {
