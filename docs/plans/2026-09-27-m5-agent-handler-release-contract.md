@@ -1,9 +1,8 @@
 # M5: release contract for agent handlers
 
-Status: proposed on 2026-09-27. The owner answered decisions 1 to 4 of section
-2 on 2026-09-27. Decision 5 is proposed and is accepted with the text. The text
-as a whole needs owner acceptance before A1 starts. Each unit then gets a design
-note that the owner accepts, as in M4. Two review rounds (a design critique and
+Status: accepted by the owner on 2026-09-27, with decisions 1 to 5 of section 2.
+This authorizes A1 to A6 in order. Each unit gets a design note that the owner
+accepts before its code starts, as in M4. Two review rounds (a design critique and
 a citation check) are folded in.
 Baseline: local `main` at `e6f33dfc`. This contract resumes the work that the
 [M4 release contract](2026-09-22-m4-release-contract.md) parked, under the
@@ -14,7 +13,7 @@ consumes the [agent-handler specification](2026-09-19-feat-agent-handler-spec.md
 ## 1. Resume conditions
 
 The M4 contract states four conditions. Two hold, one holds for M5a only, and
-one is waived for M5a by proposed decision 5.
+one is waived for M5a by decision 5.
 
 1. **M4 is complete.** Holds. T1a to T7 are complete (`docs/roadmap.md`, M4 row).
 2. **No second catalog, schema, or dispatch table.** Holds. Every unit below
@@ -36,7 +35,8 @@ A new release contract states the resumed scope: this document.
 
 ## 2. Decision record
 
-The owner answered decisions 1 to 4 on 2026-09-27.
+The owner answered decisions 1 to 4 on 2026-09-27 and accepted decision 5 with
+the text on the same day.
 
 1. **Order: a buffered agent first.** M5a delivers an agent route that runs a
    bounded model and tool loop and returns one buffered response. A's U4 moves
@@ -65,7 +65,7 @@ The owner answered decisions 1 to 4 on 2026-09-27.
    boundaries. Handler code parses each event's JSON with `zttp:json` and owns
    all provider semantics. No provider client enters the runtime, so R23 and the
    runtime-purity gate hold unchanged.
-5. **Proposed: limits before measurement.** M5a ships with limits that each
+5. **Limits before measurement.** M5a ships with limits that each
    deployment must set, with no default values. A6 measures and then sets the
    defaults. Until A6 closes, the user guide states that no default is measured.
 
@@ -398,5 +398,4 @@ The HAL-FORMS projection and sequential static composition stay parked from M4.
 
 ## 10. Open questions
 
-Decision 5 is proposed and is accepted or rejected with the text. Each unit's
-design note carries its own questions for the owner.
+None for the contract. Each unit's design note carries its own questions for the owner.
