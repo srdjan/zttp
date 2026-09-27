@@ -1,0 +1,435 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <meta name="description" content="A source-linked study of useful Zig engineering patterns in Antfly, with limits and possible uses in zttp.">
+  <title>Patterns from Antfly's Zig code | zttp</title>
+  <script>
+    try {
+      const saved = localStorage.getItem("antfly-patterns-theme");
+      const preferred = matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+      document.documentElement.dataset.theme = saved === "dark" || saved === "light" ? saved : preferred;
+    } catch (_) {
+      document.documentElement.dataset.theme = "light";
+    }
+  </script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body, h1, h2, h3, p, figure, dl, dd, ol { margin: 0; }
+    button { font: inherit; }
+    :root {
+      color-scheme: light;
+      --page: #f5f3ec;
+      --surface: #fffefa;
+      --surface-alt: #eeeee6;
+      --ink: #182522;
+      --muted: #4c605a;
+      --line: #c8d1c8;
+      --accent: #006f5b;
+      --accent-soft: #dbefe7;
+      --blue: #1d526f;
+      --blue-soft: #dcebf1;
+      --warn: #754a12;
+      --warn-soft: #f7e9ce;
+      --shadow: 0 22px 70px rgb(19 42 34 / 8%);
+    }
+    :root[data-theme="dark"] {
+      color-scheme: dark;
+      --page: #111a18;
+      --surface: #192522;
+      --surface-alt: #20302b;
+      --ink: #eff5ef;
+      --muted: #b9cac0;
+      --line: #3c5148;
+      --accent: #82dbc0;
+      --accent-soft: #24453b;
+      --blue: #9ac9dc;
+      --blue-soft: #29414b;
+      --warn: #f1cf90;
+      --warn-soft: #4a3826;
+      --shadow: 0 22px 70px rgb(0 0 0 / 22%);
+    }
+    body {
+      min-width: 320px;
+      background: var(--page);
+      color: var(--ink);
+      font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.58;
+      text-rendering: optimizeLegibility;
+    }
+    body::before {
+      position: fixed;
+      inset: 0;
+      z-index: -1;
+      background-image: linear-gradient(rgb(85 126 105 / 6%) 1px, transparent 1px), linear-gradient(90deg, rgb(85 126 105 / 6%) 1px, transparent 1px);
+      background-size: 36px 36px;
+      content: "";
+      pointer-events: none;
+    }
+    a { color: var(--accent); text-underline-offset: .18em; }
+    a:hover { text-decoration-thickness: .13em; }
+    :where(a, button):focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
+    code {
+      font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+      font-size: .91em;
+      overflow-wrap: anywhere;
+    }
+    h1, h2, h3 { line-height: 1.12; letter-spacing: -.035em; text-wrap: balance; }
+    h1 { max-width: 12ch; font-size: clamp(3rem, 8vw, 6.3rem); letter-spacing: -.07em; }
+    h2 { font-size: clamp(1.7rem, 3vw, 2.8rem); }
+    h3 { font-size: clamp(1.28rem, 2vw, 1.75rem); }
+    p { max-width: 70ch; text-wrap: pretty; }
+    .skip {
+      position: absolute;
+      top: -5rem;
+      left: 1rem;
+      z-index: 10;
+      padding: .6rem .9rem;
+      background: var(--surface);
+    }
+    .skip:focus { top: 1rem; }
+    .shell { display: grid; grid-template-columns: 15.5rem minmax(0, 1fr); min-height: 100vh; }
+    .rail {
+      position: sticky;
+      top: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 1.6rem;
+      height: 100vh;
+      padding: 2rem 1.4rem;
+      border-right: 1px solid var(--line);
+      background: var(--surface);
+    }
+    .brand { color: var(--ink); font-weight: 800; font-size: 1.4rem; letter-spacing: -.06em; text-decoration: none; }
+    .brand span { color: var(--accent); }
+    .rail-label, .eyebrow, .kicker, dt, .source-label {
+      font-size: .7rem;
+      font-weight: 750;
+      letter-spacing: .11em;
+      text-transform: uppercase;
+    }
+    .rail-label { color: var(--muted); }
+    .rail nav { display: grid; gap: .12rem; }
+    .rail nav a {
+      display: block;
+      padding: .46rem .6rem;
+      border-radius: .5rem;
+      color: var(--muted);
+      font-size: .88rem;
+      text-decoration: none;
+    }
+    .rail nav a:hover, .rail nav a:focus-visible { background: var(--accent-soft); color: var(--ink); }
+    .rail-foot { margin-top: auto; font-size: .75rem; color: var(--muted); }
+    .theme-button {
+      align-self: flex-start;
+      padding: .45rem .7rem;
+      border: 1px solid var(--line);
+      border-radius: .5rem;
+      background: var(--surface);
+      color: var(--ink);
+      cursor: pointer;
+    }
+    .theme-button:hover { border-color: var(--accent); }
+    main { min-width: 0; }
+    .content { width: min(100% - clamp(2rem, 8vw, 8rem), 79rem); margin-inline: auto; }
+    .hero { padding-block: clamp(4rem, 9vw, 7rem) 4rem; }
+    .eyebrow { color: var(--accent); }
+    .hero h1 { margin-block: 1.1rem 1.4rem; }
+    .lead { max-width: 58ch; color: var(--muted); font-size: clamp(1.1rem, 1.7vw, 1.35rem); line-height: 1.5; }
+    .hero-meta { display: flex; flex-wrap: wrap; gap: .7rem; margin-top: 2rem; }
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      min-height: 2rem;
+      padding: .25rem .65rem;
+      border: 1px solid var(--line);
+      border-radius: 99px;
+      background: var(--surface);
+      color: var(--muted);
+      font-size: .8rem;
+    }
+    .pill.strong { border-color: var(--accent); color: var(--accent); }
+    .hero-note {
+      max-width: 58rem;
+      margin-top: 2rem;
+      padding: 1.2rem 1.4rem;
+      border-left: 4px solid var(--accent);
+      background: var(--accent-soft);
+    }
+    .section { padding-block: 3.4rem; border-top: 1px solid var(--line); scroll-margin-top: 2rem; }
+    .section-head { display: grid; grid-template-columns: minmax(0, 1fr) minmax(14rem, 30rem); gap: 2rem; align-items: end; margin-bottom: 2rem; }
+    .section-head p { color: var(--muted); }
+    .kicker { display: block; margin-bottom: .7rem; color: var(--accent); }
+    .map { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1rem; }
+    .map a {
+      display: flex;
+      flex-direction: column;
+      gap: .7rem;
+      min-height: 11rem;
+      padding: 1.35rem;
+      border: 1px solid var(--line);
+      border-radius: 1rem;
+      background: var(--surface);
+      box-shadow: var(--shadow);
+      color: var(--ink);
+      text-decoration: none;
+    }
+    .map a:hover { border-color: var(--accent); transform: translateY(-2px); }
+    .map strong { max-width: 22ch; font-size: 1.05rem; line-height: 1.28; }
+    .map span { color: var(--muted); font-size: .87rem; }
+    .map .number { color: var(--accent); font: 750 .76rem ui-monospace, monospace; letter-spacing: .05em; }
+    .pattern-list { display: grid; gap: 1.2rem; }
+    .pattern {
+      display: grid;
+      grid-template-columns: minmax(0, 1.45fr) minmax(16rem, .8fr);
+      gap: clamp(1.3rem, 4vw, 3.5rem);
+      padding: clamp(1.3rem, 3vw, 2.3rem);
+      border: 1px solid var(--line);
+      border-radius: 1.1rem;
+      background: var(--surface);
+      scroll-margin-top: 2rem;
+    }
+    .pattern h3 { margin-bottom: 1rem; }
+    .pattern .body-copy p + p { margin-top: .8rem; }
+    .pattern aside { padding: 1.1rem; border-radius: .8rem; background: var(--surface-alt); }
+    .pattern aside p { font-size: .9rem; }
+    .pattern aside p + p { margin-top: .85rem; }
+    .pattern aside strong { color: var(--blue); }
+    .source-links { display: flex; flex-wrap: wrap; gap: .45rem; margin-top: 1.25rem; }
+    .source-links a {
+      padding: .3rem .56rem;
+      border: 1px solid var(--line);
+      border-radius: .4rem;
+      color: var(--accent);
+      font: 650 .75rem ui-monospace, "SFMono-Regular", Consolas, monospace;
+      text-decoration: none;
+    }
+    .source-links a:hover { border-color: var(--accent); background: var(--accent-soft); }
+    .transfer { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1rem; }
+    .transfer article { padding: 1.3rem; border: 1px solid var(--line); border-radius: .9rem; background: var(--surface); }
+    .transfer h3 { margin-bottom: .7rem; font-size: 1.15rem; }
+    .transfer p { color: var(--muted); font-size: .94rem; }
+    .method { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 2rem; }
+    .method p + p { margin-top: .8rem; }
+    .method dl { display: grid; gap: 1rem; padding: 1.3rem; border: 1px solid var(--line); border-radius: .9rem; background: var(--surface); }
+    dt { color: var(--muted); }
+    dd { margin-top: .2rem; overflow-wrap: anywhere; }
+    .footer { padding-block: 2rem 3rem; border-top: 1px solid var(--line); color: var(--muted); font-size: .82rem; }
+    @media (max-width: 1050px) {
+      .shell { display: block; }
+      .rail { position: static; height: auto; flex-direction: row; align-items: center; flex-wrap: wrap; gap: 1rem; padding: .8rem 1.2rem; border-right: 0; border-bottom: 1px solid var(--line); }
+      .rail nav { display: flex; flex-wrap: wrap; gap: .1rem; }
+      .rail-label, .rail-foot { display: none; }
+      .theme-button { margin-left: auto; }
+    }
+    @media (max-width: 750px) {
+      .section-head, .pattern, .method { grid-template-columns: 1fr; }
+      .map, .transfer { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .rail nav { width: 100%; overflow-x: auto; flex-wrap: nowrap; }
+      .rail nav a { white-space: nowrap; }
+    }
+    @media (max-width: 520px) {
+      .map, .transfer { grid-template-columns: 1fr; }
+      .map a { min-height: 0; }
+      .content { width: min(100% - 2rem, 79rem); }
+      .section { padding-block: 2.6rem; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      html { scroll-behavior: auto; }
+      .map a:hover { transform: none; }
+    }
+    @media print {
+      :root { color-scheme: light; }
+      body { background: #fff; color: #111; }
+      body::before, .rail, .theme-button { display: none; }
+      .shell { display: block; }
+      .content { width: 100%; }
+      .hero { padding-block: 1rem 2rem; }
+      .section { padding-block: 1.2rem; }
+      .pattern { break-inside: avoid; box-shadow: none; }
+      a { color: #064; }
+      .map a, .transfer article { box-shadow: none; }
+    }
+  </style>
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+  <div class="shell">
+    <aside class="rail" aria-label="Page controls">
+      <a class="brand" href="../README.md">zttp<span>.</span></a>
+      <span class="rail-label">Antfly Zig study</span>
+      <nav aria-label="Sections">
+        <a href="#overview">Overview</a>
+        <a href="#patterns">Source patterns</a>
+        <a href="#transfer">Use in zttp</a>
+        <a href="#method">Sources and method</a>
+      </nav>
+      <button class="theme-button" id="theme-button" type="button" aria-label="Switch color theme">Switch theme</button>
+      <p class="rail-foot">Source snapshot: 27 September 2026</p>
+    </aside>
+    <main id="main">
+      <header class="hero content">
+        <p class="eyebrow">Repository study / Zig engineering</p>
+        <h1>Patterns from Antfly's Zig code</h1>
+        <p class="lead">Antfly's Zig tree contains useful examples of explicit ownership, bounded work, and checks that detect empty tests or stale generated source. This page selects patterns that have a clear source and a practical use in another Zig project.</p>
+        <div class="hero-meta">
+          <span class="pill strong">Source-linked observations</span>
+          <span class="pill">Pinned commit <code>1fc8a316142b</code></span>
+          <span class="pill">27 September 2026</span>
+        </div>
+        <p class="hero-note">The code sections report observed Antfly behavior. The “Use in zttp” notes suggest where a similar check could help this project.</p>
+      </header>
+
+      <section class="section content" id="overview" aria-labelledby="overview-title">
+        <div class="section-head">
+          <div><span class="kicker">Read the code by concern</span><h2 id="overview-title">What is worth carrying forward</h2></div>
+          <p>Each item links to a fixed Antfly commit. Open the code link to inspect the implementation. Read the limit before you apply the pattern.</p>
+        </div>
+        <nav class="map" aria-label="Pattern index">
+          <a href="#owner-graph"><span class="number">01 / BUILD</span><strong>Give selected build units an owner</strong><span>Named constructors and typed outputs.</span></a>
+          <a href="#generated-code"><span class="number">02 / GENERATED SOURCE</span><strong>Separate regeneration from drift checks</strong><span>Declared inputs and a check that does not edit files.</span></a>
+          <a href="#closed-sets"><span class="number">03 / INVARIANTS</span><strong>Prove closed sets at compile time</strong><span>Detect a missing or duplicate case before runtime.</span></a>
+          <a href="#diagnostics"><span class="number">04 / ERRORS</span><strong>Keep expected diagnostics as data</strong><span>Preserve detail and test allocation cleanup.</span></a>
+          <a href="#publication"><span class="number">05 / STATE</span><strong>Build state before you publish it</strong><span>Keep old state valid on failure or cancellation.</span></a>
+          <a href="#interfaces"><span class="number">06 / BOUNDARIES</span><strong>Make capabilities and limits explicit</strong><span>Pass resources and reject unbounded fallbacks.</span></a>
+          <a href="#test-selection"><span class="number">07 / TESTS</span><strong>Reject an empty test selection</strong><span>Fail when a filter has no tests and report leaks per test.</span></a>
+          <a href="#replay"><span class="number">08 / FAULT TESTS</span><strong>Record enough to replay a failure</strong><span>Save choices with their scenario and build context.</span></a>
+          <a href="#benchmarks"><span class="number">09 / BENCHMARKS</span><strong>Require evidence before a verdict</strong><span>Check sample coverage and correctness with speed.</span></a>
+        </nav>
+      </section>
+
+      <section class="section content" id="patterns" aria-labelledby="patterns-title">
+        <div class="section-head">
+          <div><span class="kicker">Code evidence</span><h2 id="patterns-title">Nine patterns with clear boundaries</h2></div>
+          <p>These are selective examples from a large tree. They are useful because they make a failure mode visible in code or in a test.</p>
+        </div>
+        <div class="pattern-list">
+          <article class="pattern" id="owner-graph">
+            <div class="body-copy">
+              <span class="kicker">01 / Build graph</span><h3>Give each build unit an owner</h3>
+              <p>The root build imports build modules for selected package and library units. Its <code>create()</code> function can return a typed <code>Artifacts</code> value. Other build code can use those artifacts instead of defining a second graph for them.</p>
+              <p>This makes those build steps easier to trace. It gives the owner a place to define generated files, tests, and link inputs.</p>
+              <div class="source-links"><a href="https://github.com/antflydb/antfly/blob/1fc8a316142b613819f3e746f98bf5aad202d6de/zig/build.zig#L15-L55">build.zig:15-55</a><a href="https://github.com/antflydb/antfly/blob/1fc8a316142b613819f3e746f98bf5aad202d6de/zig/build.zig#L89-L102">build.zig:89-102</a><a href="https://github.com/antflydb/antfly/blob/1fc8a316142b613819f3e746f98bf5aad202d6de/zig/lib/sql/build_support.zig#L16-L32">sql/build_support.zig:16-32</a></div>
+            </div>
+            <aside><p><strong>Use in zttp.</strong> Keep public step names in the root build. Move a build unit to its owner when that unit has enough inputs and outputs to need a clear boundary.</p><p><strong>Limit.</strong> More build modules add navigation cost. A small graph can stay in one file.</p></aside>
+          </article>
+          <article class="pattern" id="generated-code">
+            <div class="body-copy">
+              <span class="kicker">02 / Generated source</span><h3>Make drift checks read-only</h3>
+              <p>The SQL grammar build declares the grammar input and generated output. It provides one step to update checked-in source and another step to compare bytes without changing that source. The check also compiles the checked-in generated file.</p>
+              <p>This makes a drift result easy to trust: a check reports a mismatch, while a separate command performs the repair.</p>
+              <div class="source-links"><a href="https://github.com/antflydb/antfly/blob/1fc8a316142b613819f3e746f98bf5aad202d6de/zig/lib/sql/build_support.zig#L36-L64">sql/build_support.zig:36-64</a><a href="https://github.com/antflydb/antfly/blob/1fc8a316142b613819f3e746f98bf5aad202d6de/zig/build.zig#L249-L261">build.zig:249-261</a></div>
+            </div>
+            <aside><p><strong>Use in zttp.</strong> Apply this shape when a Zig tool writes a tracked table, schema, or documentation artifact. Make the source inputs and check step explicit.</p><p><strong>Limit.</strong> Antfly has other generators with different tool dependencies. The SQL path is the example here.</p></aside>
+          </article>
+          <article class="pattern" id="closed-sets">
+            <div class="body-copy">
+              <span class="kicker">03 / Compile time invariant</span><h3>Check that a closed set is complete</h3>
+              <p>Antfly keeps runtime archive link order in a separate array because link order differs from enum order. A <code>comptime</code> check rejects a duplicate and requires every enum value exactly once.</p>
+              <p>The array can change order without losing coverage. A new enum value causes a compile error until the build order covers it.</p>
+              <div class="source-links"><a href="https://github.com/antflydb/antfly/blob/1fc8a316142b613819f3e746f98bf5aad202d6de/zig/pkg/antfly/build/runtime.zig#L30-L57">runtime.zig:30-57</a></div>
+            </div>
+            <aside><p><strong>Use in zttp.</strong> Use this check for a closed registry or policy table whose order has meaning. Test both completeness and uniqueness.</p><p><strong>Limit.</strong> This does not help when the set is open at runtime. The cited file has a separate license; reuse the idea, not its code.</p></aside>
+          </article>
+          <article class="pattern" id="diagnostics">
+            <div class="body-copy">
+              <span class="kicker">04 / Error model</span><h3>Keep expected diagnostics as values</h3>
+              <p>The SQL lexer returns either tokens or a bounded diagnostic value. Allocation failure remains a Zig error. The implementation states who owns the returned memory and uses <code>errdefer</code> to clean partial work.</p>
+              <p>Tests cover public tokenization behavior and each allocation failure point. This checks the error path as well as the normal path.</p>
+              <div class="source-links"><a href="https://github.com/antflydb/antfly/blob/1fc8a316142b613819f3e746f98bf5aad202d6de/zig/lib/sql/lexer.zig#L70-L99">lexer.zig:70-99</a><a href="https://github.com/antflydb/antfly/blob/1fc8a316142b613819f3e746f98bf5aad202d6de/zig/lib/sql/lexer.zig#L589-L615">lexer.zig:589-615</a></div>
+            </div>
+            <aside><p><strong>Use in zttp.</strong> Keep an expected source error as structured data when a caller needs a location or reason. Test cleanup at allocation failure points.</p><p><strong>Limit.</strong> A simpler lexer entry point reduces the diagnostic to one error tag. Callers that need detail must choose the detailed API.</p></aside>
+          </article>
+          <article class="pattern" id="publication">
+            <div class="body-copy">
+              <span class="kicker">05 / Owned state</span><h3>Publish only complete state</h3>
+              <p>The in-memory object store builds the body, ETag, and metadata under cleanup guards. It checks cancellation during the copy. It replaces the old value or inserts a new value only after the new value is complete.</p>
+              <p>The cited tests check allocation cleanup while a read result is built. They also check that an already canceled write creates no object. The useful rule in the write code is to make the publication point easy to identify.</p>
+              <div class="source-links"><a href="https://github.com/antflydb/antfly/blob/1fc8a316142b613819f3e746f98bf5aad202d6de/zig/lib/objectstore/src/memory.zig#L102-L149">memory.zig:102-149</a><a href="https://github.com/antflydb/antfly/blob/1fc8a316142b613819f3e746f98bf5aad202d6de/zig/lib/objectstore/src/memory.zig#L492-L519">memory.zig:492-519</a></div>
+            </div>
+            <aside><p><strong>Use in zttp.</strong> Use this shape for state shared across requests: prepare the replacement in owned memory, then make one visible change.</p><p><strong>Limit.</strong> Antfly uses a fixed copy chunk in this path. A suitable size for another workload needs to be measured.</p></aside>
+          </article>
+          <article class="pattern" id="interfaces">
+            <div class="body-copy">
+              <span class="kicker">06 / Capability boundary</span><h3>Pass resources and state limits</h3>
+              <p>The object store client carries an allocator, an opaque context, and a table of operations. Optional operations show which capabilities a provider has. File upload takes an explicit <code>std.Io</code> value. Its fallback refuses an input above a stated size instead of reading without a bound.</p>
+              <p>The cancellation token is borrowed and states its lifetime rule. The interface keeps those resource choices visible to its caller.</p>
+              <div class="source-links"><a href="https://github.com/antflydb/antfly/blob/1fc8a316142b613819f3e746f98bf5aad202d6de/zig/lib/objectstore/src/client.zig#L22-L48">client.zig:22-48</a><a href="https://github.com/antflydb/antfly/blob/1fc8a316142b613819f3e746f98bf5aad202d6de/zig/lib/objectstore/src/client.zig#L73-L95">client.zig:73-95</a><a href="https://github.com/antflydb/antfly/blob/1fc8a316142b613819f3e746f98bf5aad202d6de/zig/lib/objectstore/src/types.zig#L18-L55">types.zig:18-55</a></div>
+            </div>
+            <aside><p><strong>Use in zttp.</strong> When a runtime interface supports several backends, show optional capabilities and resource limits in the API. Test each fallback as a separate behavior.</p><p><strong>Limit.</strong> Antfly uses <code>anyerror</code> in its vtable. That broad error set gives callers less error detail.</p></aside>
+          </article>
+          <article class="pattern" id="test-selection">
+            <div class="body-copy">
+              <span class="kicker">07 / Test runner</span><h3>Fail a test run that selects nothing</h3>
+              <p>Antfly's test runner counts matches for each requested filter. It exits with failure when a filter matches no declared test or when the full selection has no runnable tests. For each selected test, it creates fresh test memory and I/O state, tears both down, and records a memory leak as a failure.</p>
+              <p>This prevents a green result from a misspelled filter. It also links a leak to the test that caused it.</p>
+              <div class="source-links"><a href="https://github.com/antflydb/antfly/blob/1fc8a316142b613819f3e746f98bf5aad202d6de/zig/pkg/antfly/src/test_runner.zig#L82-L115">test_runner.zig:82-115</a><a href="https://github.com/antflydb/antfly/blob/1fc8a316142b613819f3e746f98bf5aad202d6de/zig/pkg/antfly/src/test_runner.zig#L126-L184">test_runner.zig:126-184</a><a href="https://github.com/antflydb/antfly/blob/1fc8a316142b613819f3e746f98bf5aad202d6de/zig/pkg/antfly/src/test_runner.zig#L229-L245">test_runner.zig:229-245</a></div>
+            </div>
+            <aside><p><strong>Use in zttp.</strong> Require a nonempty match before a filtered test result counts as evidence. This directly addresses the empty-filter risk described in <a href="../AGENTS.md">the repository rules</a>.</p><p><strong>Limit.</strong> Antfly has an explicit flag that permits an empty filter. A custom runner also adds maintenance work. The cited file has a separate license; reuse the rule, not its code.</p></aside>
+          </article>
+          <article class="pattern" id="replay">
+            <div class="body-copy">
+              <span class="kicker">08 / Deterministic tests</span><h3>Save the inputs needed to replay a fault</h3>
+              <p>Antfly's VOPR simulation checks a scenario's required declarations at compile time. Its choice source selects from enabled, typed transitions. A trace records the scenario version, source revision, target, build mode, budgets, fixture hashes, feature flags, and the selected transitions.</p>
+              <p>The runner checks the trace's scenario name and version. It also normalizes observations before it hashes them. That makes a failed simulation easier to replay and compare.</p>
+              <div class="source-links"><a href="https://github.com/antflydb/antfly/blob/1fc8a316142b613819f3e746f98bf5aad202d6de/zig/lib/vopr/src/scenario.zig#L13-L27">scenario.zig:13-27</a><a href="https://github.com/antflydb/antfly/blob/1fc8a316142b613819f3e746f98bf5aad202d6de/zig/lib/vopr/src/choice.zig#L51-L103">choice.zig:51-103</a><a href="https://github.com/antflydb/antfly/blob/1fc8a316142b613819f3e746f98bf5aad202d6de/zig/lib/vopr/src/trace.zig#L12-L61">trace.zig:12-61</a><a href="https://github.com/antflydb/antfly/blob/1fc8a316142b613819f3e746f98bf5aad202d6de/zig/lib/vopr/src/runner.zig#L571-L607">runner.zig:571-607</a></div>
+            </div>
+            <aside><p><strong>Use in zttp.</strong> If a concurrency or fault test uses a seed, save the choices and versioned context with a failed run. Check all context fields needed for a valid replay.</p><p><strong>Limit.</strong> Antfly records more context than its compatibility check compares. A simulation checks its model, so separate tests must check that the model represents production behavior. VOPR files have a separate license.</p></aside>
+          </article>
+          <article class="pattern" id="benchmarks">
+            <div class="body-copy">
+              <span class="kicker">09 / Performance evidence</span><h3>Require enough evidence before a speed verdict</h3>
+              <p>Antfly's database benchmark summary has minimum counts for measured work. It checks those counts with correctness, memory, and latency limits. It can also compare results with a stored baseline. A failed check returns an error.</p>
+              <p>This keeps a fast result from passing if the run did too little work or produced wrong output.</p>
+              <div class="source-links"><a href="https://github.com/antflydb/antfly/blob/1fc8a316142b613819f3e746f98bf5aad202d6de/zig/bench/storage/db_query_summary.zig#L255-L302">db_query_summary.zig:255-302</a><a href="https://github.com/antflydb/antfly/blob/1fc8a316142b613819f3e746f98bf5aad202d6de/zig/bench/storage/db_query_summary.zig#L689-L722">db_query_summary.zig:689-722</a><a href="https://github.com/antflydb/antfly/blob/1fc8a316142b613819f3e746f98bf5aad202d6de/zig/bench/storage/db_query_summary.zig#L1409-L1447">db_query_summary.zig:1409-1447</a><a href="https://github.com/antflydb/antfly/blob/1fc8a316142b613819f3e746f98bf5aad202d6de/zig/bench/storage/db_query_summary.zig#L1492-L1516">db_query_summary.zig:1492-1516</a></div>
+            </div>
+            <aside><p><strong>Use in zttp.</strong> Put a minimum workload and a correctness check beside each performance limit. Record the benchmark configuration with the result.</p><p><strong>Limit.</strong> Antfly's guardrails are optional and default limits can be open. A baseline field that is absent can become zero during parsing. Validate the baseline schema before relying on a comparison.</p></aside>
+          </article>
+        </div>
+      </section>
+
+      <section class="section content" id="transfer" aria-labelledby="transfer-title">
+        <div class="section-head">
+          <div><span class="kicker">Practical use</span><h2 id="transfer-title">Where to start in zttp</h2></div>
+          <p>Apply a pattern only where a real change needs it. These checks are small enough to attach to the next relevant unit of work.</p>
+        </div>
+        <div class="transfer">
+          <article><h3>For a test gate</h3><p>Check that it selected at least one test. Fail on an empty filter before the run can count as evidence.</p></article>
+          <article><h3>For mutable runtime state</h3><p>Build the replacement before a shared reference changes. Test failure and cancellation at the point before publication.</p></article>
+          <article><h3>For generated artifacts</h3><p>Give regeneration and drift checks separate steps. Make the drift check read-only and compile the tracked result when it is source code.</p></article>
+        </div>
+      </section>
+
+      <section class="section content" id="method" aria-labelledby="method-title">
+        <div class="section-head">
+          <div><span class="kicker">Scope</span><h2 id="method-title">Sources and method</h2></div>
+          <p>This is a code reading, not a performance comparison or a full audit of Antfly.</p>
+        </div>
+        <div class="method">
+          <div>
+            <p>The study uses the <a href="https://github.com/antflydb/antfly/tree/1fc8a316142b613819f3e746f98bf5aad202d6de/zig">Antfly Zig tree at commit <code>1fc8a316142b613819f3e746f98bf5aad202d6de</code></a>. The commit date is 27 September 2026. Every pattern above links to implementation code. Test links are included where the selected behavior has a direct test.</p>
+            <p>The <a href="https://github.com/antflydb/antfly/blob/1fc8a316142b613819f3e746f98bf5aad202d6de/zig/README.md">Zig README</a> and <a href="https://github.com/antflydb/antfly/blob/1fc8a316142b613819f3e746f98bf5aad202d6de/zig/TESTING.md">testing guide</a> give context for the build and test layout. The recommendations are judgments based on the cited code. They need local design and verification before use.</p>
+          </div>
+          <dl>
+            <div><dt>Included</dt><dd>Build structure, generated source, compile time checks, diagnostics, state ownership, resource bounds, test selection, fault replay, and benchmark evidence.</dd></div>
+            <div><dt>Excluded</dt><dd>Performance claims, database design verdicts, and claims about all Antfly packages.</dd></div>
+            <div><dt>Local context</dt><dd><a href="internals/architecture.md">zttp architecture</a> and <a href="internals/testing.md">zttp test steps</a>.</dd></div>
+          </dl>
+        </div>
+      </section>
+      <footer class="footer content">A source-linked engineering note for zttp. Review the pinned Antfly code before you copy a design choice.</footer>
+    </main>
+  </div>
+  <script>
+    const themeButton = document.getElementById("theme-button");
+    themeButton.addEventListener("click", () => {
+      const next = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
+      document.documentElement.dataset.theme = next;
+      try { localStorage.setItem("antfly-patterns-theme", next); } catch (_) {}
+    });
+  </script>
+</body>
+</html>

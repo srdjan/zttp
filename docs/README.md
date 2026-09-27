@@ -36,6 +36,9 @@ The [product proposals](zttp-next/README.md) and repository-level
 
 ## Reference
 
+- [Patterns from Antfly's Zig Code](antfly-zig-patterns.html) - a source-linked
+  study of build ownership, generated source checks, compile-time invariants,
+  diagnostics, state publication, test gates, fault replay, and benchmarks.
 - [Contracts and Auto-Sandboxing](contracts-and-sandboxing.md) - handler
   contracts, least-privilege runtime policy, OpenAPI/SDK emit, replay,
   upgrade checks, and `Proof<T, P>`.
