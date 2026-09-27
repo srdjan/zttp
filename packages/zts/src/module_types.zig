@@ -275,7 +275,7 @@ pub fn populateModuleTypes(env: *TypeEnv, pool: *TypePool, allocator: std.mem.Al
             applyReturnFromParam(func, &sig, env, pool, allocator);
 
             const owned = env.internName(func.name);
-            env.fn_sigs_by_name.put(allocator, owned, sig) catch {};
+            env.fn_sigs_by_name.put(allocator, owned, sig) catch env.markAllocationFailure();
         }
     }
 }
@@ -509,4 +509,62 @@ test "populateModuleTypes keeps fetchWithRetry options optional" {
     try std.testing.expectEqual(@as(u8, 3), sig.param_count);
     try std.testing.expectEqual(@as(u8, 1), sig.required_param_count orelse sig.param_count);
     try std.testing.expectEqual(pool.idx_string, sig.param_types[0]);
+}
+
+/// Test double: fails the allocation at `fail_index` and no other, so a single
+/// transient OOM is not masked by every later allocation also failing, which
+/// is what std.testing.FailingAllocator does.
+const FailOnceAllocator = struct {
+    parent: std.mem.Allocator,
+    fail_index: usize,
+    index: usize = 0,
+    failed: bool = false,
+
+    fn allocator(self: *FailOnceAllocator) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{
+            .alloc = alloc,
+            .resize = std.mem.Allocator.noResize,
+            .remap = std.mem.Allocator.noRemap,
+            .free = free,
+        } };
+    }
+
+    fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
+        const self: *FailOnceAllocator = @ptrCast(@alignCast(ctx));
+        defer self.index += 1;
+        if (self.index == self.fail_index) {
+            self.failed = true;
+            return null;
+        }
+        return self.parent.rawAlloc(len, alignment, ret_addr);
+    }
+
+    fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
+        const self: *FailOnceAllocator = @ptrCast(@alignCast(ctx));
+        self.parent.rawFree(memory, alignment, ret_addr);
+    }
+};
+
+test "a module signature the environment could not hold leaves it unhealthy" {
+    // Same shape as the request readers: a signature dropped under OOM must
+    // poison the environment rather than read as an export with no type.
+    var fail_index: usize = 0;
+    while (fail_index < 100_000) : (fail_index += 1) {
+        var failing: FailOnceAllocator = .{ .parent = std.testing.allocator, .fail_index = fail_index };
+        const allocator = failing.allocator();
+        var pool = TypePool.init(allocator);
+        defer pool.deinit(allocator);
+        var env = TypeEnv.init(allocator, &pool);
+        defer env.deinit();
+
+        populateModuleTypes(&env, &pool, allocator);
+
+        if (!failing.failed) break;
+        const healthy = !std.meta.isError(env.ensureHealthy()) and !std.meta.isError(pool.ensureHealthy());
+        if (!healthy) continue;
+        for ([_][]const u8{ "sha256", "env" }) |name| {
+            try std.testing.expect(env.getFnSigByName(name) != null);
+        }
+    } else return error.TestUnexpectedResult;
+    try std.testing.expect(fail_index > 0);
 }

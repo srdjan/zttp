@@ -436,7 +436,7 @@ pub const TypeEnv = struct {
     /// Record that the environment is missing something it was asked to hold.
     /// Callers that read annotations out of it must refuse to answer rather
     /// than report the gap as an absent declaration.
-    fn markAllocationFailure(self: *TypeEnv) void {
+    pub fn markAllocationFailure(self: *TypeEnv) void {
         self.allocation_failed = true;
     }
 

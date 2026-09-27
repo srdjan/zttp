@@ -235,7 +235,7 @@ fn registerReader(env: *TypeEnv, name: []const u8, request: TypeIndex, returns: 
     sig.param_count = 1;
     sig.param_types[0] = request;
     sig.return_type = returns;
-    env.fn_sigs_by_name.put(env.allocator, env.internName(name), sig) catch {};
+    env.fn_sigs_by_name.put(env.allocator, env.internName(name), sig) catch env.markAllocationFailure();
 }
 
 /// The registered `Response` type, or `null_type_idx` when nothing registered
@@ -455,4 +455,63 @@ test "isResponseConstructor names every constructor the runtime installs" {
         try std.testing.expect(isResponseConstructor(name));
     }
     try std.testing.expect(!isResponseConstructor("clone"));
+}
+
+/// Test double: fails the allocation at `fail_index` and no other, so a single
+/// transient OOM is not masked by every later allocation also failing, which
+/// is what std.testing.FailingAllocator does.
+const FailOnceAllocator = struct {
+    parent: std.mem.Allocator,
+    fail_index: usize,
+    index: usize = 0,
+    failed: bool = false,
+
+    fn allocator(self: *FailOnceAllocator) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{
+            .alloc = alloc,
+            .resize = std.mem.Allocator.noResize,
+            .remap = std.mem.Allocator.noRemap,
+            .free = free,
+        } };
+    }
+
+    fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
+        const self: *FailOnceAllocator = @ptrCast(@alignCast(ctx));
+        defer self.index += 1;
+        if (self.index == self.fail_index) {
+            self.failed = true;
+            return null;
+        }
+        return self.parent.rawAlloc(len, alignment, ret_addr);
+    }
+
+    fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
+        const self: *FailOnceAllocator = @ptrCast(@alignCast(ctx));
+        self.parent.rawFree(memory, alignment, ret_addr);
+    }
+};
+
+test "a request reader the environment could not hold leaves it unhealthy" {
+    // The type checker reads a missing signature as nothing to check, so a
+    // reader dropped under OOM must poison the environment, or the build
+    // passes with the check silently gone. Sweep every allocation.
+    var fail_index: usize = 0;
+    while (fail_index < 10_000) : (fail_index += 1) {
+        var failing: FailOnceAllocator = .{ .parent = std.testing.allocator, .fail_index = fail_index };
+        const allocator = failing.allocator();
+        var pool = TypePool.init(allocator);
+        defer pool.deinit(allocator);
+        var env = TypeEnv.init(allocator, &pool);
+        defer env.deinit();
+
+        populateHandlerAbiTypes(&env, &pool, allocator);
+
+        if (!failing.failed) break;
+        const healthy = !std.meta.isError(env.ensureHealthy()) and !std.meta.isError(pool.ensureHealthy());
+        if (!healthy) continue;
+        for ([_][]const u8{ "requestBody", "requestText", "requestJson" }) |name| {
+            try std.testing.expect(env.getFnSigByName(name) != null);
+        }
+    } else return error.TestUnexpectedResult;
+    try std.testing.expect(fail_index > 0);
 }
