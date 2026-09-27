@@ -33,7 +33,7 @@ publishing first-draft, intent, or round-trip measurements still requires the
 named model. Developing and verifying the harness, veto, salvage, repair, and
 hole-loop machinery does not.
 
-Recorded 2026-09-26 over corpus `e6801afae099`. The replay fails
+Recorded 2026-09-27 over corpus `e6801afae099`. The replay fails
 when this page drifts from the run, so it is regenerated in the same commit as
 whatever moved it, and `git log docs/coverage.json` is the history.
 
@@ -43,7 +43,7 @@ whatever moved it, and `git log docs/coverage.json` is the history.
 |---|---|---|
 | 61 | 4 | 57 |
 
-Tripped: `ZTS305`, `ZTS400`, `ZTS500`, `ZTS509`
+Tripped: `ZTS400`, `ZTS500`, `ZTS501`, `ZTS509`
 
 The list above is a fair description of what these prompts ask for and a poor
 description of what the compiler proves. It is the mechanical form of an
@@ -56,14 +56,14 @@ was wrong the first time the count moved. Nothing in this section restates a
 number the generator computes; the codes are printed, and a reader who wants the
 breakdown reads them.
 
-Untripped: `ZTS302`, `ZTS303`, `ZTS304`, `ZTS306`, `ZTS308`, `ZTS309`, `ZTS310`, `ZTS501`, `ZTS502`, `ZTS600`, `ZTS629`, `ZTS601`, `ZTS061`, `ZTS602`, `ZTS603`, `ZTS604`, `ZTS605`, `ZTS608`, `ZTS609`, `ZTS610`, `ZTS623`, `ZTS611`, `ZTS612`, `ZTS621`, `ZTS613`, `ZTS614`, `ZTS616`, `ZTS620`, `ZTS622`, `ZTS625`, `ZTS626`, `ZTS627`, `ZTS628`, `ZTS624`, `ZTS606`, `ZTS503`, `ZTS504`, `ZTS505`, `ZTS506`, `ZTS508`, `ZTS607`, `ZTS510`, `ZTS511`, `ZTS512`, `ZTS513`, `ZTS514`, `POL001`, `POL003`, `POL005`, `POL007`, `ZTS401`, `ZTS402`, `ZTS403`, `ZTS404`, `ZTS405`, `ZTS406`, `ZTS407`
+Untripped: `ZTS302`, `ZTS303`, `ZTS304`, `ZTS305`, `ZTS306`, `ZTS308`, `ZTS309`, `ZTS310`, `ZTS502`, `ZTS600`, `ZTS629`, `ZTS601`, `ZTS061`, `ZTS602`, `ZTS603`, `ZTS604`, `ZTS605`, `ZTS608`, `ZTS609`, `ZTS610`, `ZTS623`, `ZTS611`, `ZTS612`, `ZTS621`, `ZTS613`, `ZTS614`, `ZTS616`, `ZTS620`, `ZTS622`, `ZTS625`, `ZTS626`, `ZTS627`, `ZTS628`, `ZTS624`, `ZTS606`, `ZTS503`, `ZTS504`, `ZTS505`, `ZTS506`, `ZTS508`, `ZTS607`, `ZTS510`, `ZTS511`, `ZTS512`, `ZTS513`, `ZTS514`, `POL001`, `POL003`, `POL005`, `POL007`, `ZTS401`, `ZTS402`, `ZTS403`, `ZTS404`, `ZTS405`, `ZTS406`, `ZTS407`
 
 ## What this corpus has ever reached
 
 The row above is one draw. The same prompts, seeds, provider, model and
 compiler have measured a different set each time they were recorded, because a
 rule is counted only when the model happens to make the mistake that trips it.
-Across the 5 published runs of corpus `e6801afae099`, the
+Across the 6 published runs of corpus `e6801afae099`, the
 tripped set took 3 distinct shapes, the smallest naming
 3 rules and the largest 4.
 
@@ -127,7 +127,7 @@ since covered. Neither list can drift from the registry without failing a build.
 
 ## Codes the registry does not carry
 
-`ZTS200`, `ZTS203`
+`ZTS001`, `ZTS202`, `ZTS203`
 
 These are real diagnostics the corpus trips that no `rule_registry` entry
 carries - the parser, stripper, bool-checker, and type-checker families. The
