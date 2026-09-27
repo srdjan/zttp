@@ -391,7 +391,7 @@ const FsDurableStore = struct {
         const dir_path_z = try self.allocator.dupeZ(u8, dir_path);
         defer self.allocator.free(dir_path_z);
 
-        const dir = c.opendir(dir_path_z) orelse return;
+        const dir = c.opendir(dir_path_z) orelse return error.OpenSignalDirectoryFailed;
         defer _ = c.closedir(dir);
 
         while (c.readdir(dir)) |entry| {
@@ -402,10 +402,7 @@ const FsDurableStore = struct {
             const full_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir_path, name });
             errdefer allocator.free(full_path);
 
-            const source = zq.file_io.readFile(allocator, full_path, 1024 * 1024) catch {
-                allocator.free(full_path);
-                continue;
-            };
+            const source = try zq.file_io.readFile(allocator, full_path, 1024 * 1024);
             defer allocator.free(source);
 
             // One torn or malformed signal file must not poison every scan
@@ -702,10 +699,16 @@ fn parseSignalEnvelope(allocator: std.mem.Allocator, source: []const u8) !Parsed
         else => null,
     } else null;
 
+    const owned_key = try allocator.dupe(u8, key.string);
+    errdefer allocator.free(owned_key);
+    const owned_name = try allocator.dupe(u8, name.string);
+    errdefer allocator.free(owned_name);
+    const owned_payload = try allocator.dupe(u8, payload.string);
+
     return .{
-        .key = try allocator.dupe(u8, key.string),
-        .name = try allocator.dupe(u8, name.string),
-        .payload_json = try allocator.dupe(u8, payload.string),
+        .key = owned_key,
+        .name = owned_name,
+        .payload_json = owned_payload,
         .at_ms = at_ms,
         .allocator = allocator,
     };
@@ -817,6 +820,71 @@ fn lessThanSignalArtifactPath(_: void, lhs: SignalArtifact, rhs: SignalArtifact)
 }
 
 const writeAll = trace.writeAll;
+
+fn parseSignalEnvelopeAllocationFixture(allocator: std.mem.Allocator) !void {
+    var parsed = try parseSignalEnvelope(
+        allocator,
+        "{\"key\":\"order:oom\",\"name\":\"approved\",\"payload_json\":\"{}\"}",
+    );
+    defer parsed.deinit();
+}
+
+test "signal envelope parsing cleans every allocation failure" {
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        parseSignalEnvelopeAllocationFixture,
+        .{},
+    );
+}
+
+test "durable signal scan reports a directory open failure" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const durable_dir = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}", .{tmp_dir.sub_path});
+
+    var store = FsDurableStore.init(allocator, durable_dir);
+    // Model a directory that disappeared after initialization. A scan must
+    // report the failed open instead of claiming that no signals exist.
+    store.dirs_ready = true;
+    try std.testing.expectError(
+        error.OpenSignalDirectoryFailed,
+        store.scanSignals(allocator, unixMillis()),
+    );
+}
+
+test "durable signal scan reports a signal read failure" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const durable_dir = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}", .{tmp_dir.sub_path});
+
+    var store = FsDurableStore.init(allocator, durable_dir);
+    try store.ensureDirs();
+    const unreadable_path = try std.fmt.allocPrint(
+        allocator,
+        "{s}/signals/signal-directory.json",
+        .{durable_dir},
+    );
+    try store.ensureDir(unreadable_path);
+
+    const result = store.scanSignals(allocator, unixMillis());
+    if (result) |signals| {
+        defer {
+            for (signals) |*signal| signal.deinit();
+            allocator.free(signals);
+        }
+        return error.ExpectedSignalReadFailure;
+    } else |_| {}
+}
 
 test "durable store enqueue and consume immediate signal" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
