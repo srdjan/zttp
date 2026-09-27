@@ -1381,7 +1381,15 @@ const record_corpus = [_]RecordCase{
         // pin this case lands on is still a property of the draft rather than
         // of the handler being right, and the `uuid` stub gap that decides it
         // is unchanged.
-        .expect_committed_intent_pass = true,
+        //
+        // Fifth pass, 2026-09-27 (M5 A1 U2 re-record), and the pin moves to
+        // false. The draft wrote the right shape and sourced both ids from
+        // `zttp:crypto`.`hmacSha256(key, ...)`, which the spec also does not
+        // stub, and `zttp test` reported "runtime scenario replay diverged 2
+        // time(s)" on the reserve-then-charge test. This is inferred to be the
+        // third pass's stub gap with a different module call; the literal
+        // counterfactual was not run for this draw.
+        .expect_committed_intent_pass = false,
         .prompt = "Create a durable handler in handler.ts using zttp:durable that runs a " ++
             "two-step order workflow via run() and step(): a `reserve` step returning " ++
             "{ reservationId }, then a `charge` step returning { chargeId }. Respond 201 " ++
@@ -1540,7 +1548,12 @@ const record_corpus = [_]RecordCase{
         // things. Neither was the model failing the task: run 4 applied no edit
         // to run, and the 2026-08-27 draft did the task and was marked down for
         // a step name and an egress call nobody asked it to make.
-        .expect_committed_intent_pass = true,
+        //
+        // 2026-09-27 (M5 A1 U2 re-record): the pin moves to false, and this
+        // time the model did fail the task. The draft calls
+        // `zttp:workflow`.`call("notify", ...)` inside the `run` callback, the
+        // nested dispatch the case exists to measure.
+        .expect_committed_intent_pass = false,
     },
     .{
         .name = "workflow-saga-compensation",
