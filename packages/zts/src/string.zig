@@ -1024,16 +1024,27 @@ pub const StringTable = struct {
                 }
             }
             // Hash collision - add to existing bucket
+            try self.strings.ensureUnusedCapacity(self.allocator, 1);
+            try list.ensureUnusedCapacity(self.allocator, 1);
             const new_str = try self.createString(s, hash);
-            try list.append(self.allocator, new_str);
+            self.strings.appendAssumeCapacity(new_str);
+            list.appendAssumeCapacity(new_str);
+            self.intern_count += 1;
             return new_str;
         }
 
         // Create new bucket
-        const new_str = try self.createString(s, hash);
+        try self.strings.ensureUnusedCapacity(self.allocator, 1);
+        try self.buckets.ensureUnusedCapacity(1);
         var list = StringList.empty;
-        try list.append(self.allocator, new_str);
-        try self.buckets.put(hash, list);
+        errdefer list.deinit(self.allocator);
+        try list.ensureUnusedCapacity(self.allocator, 1);
+        const new_str = try self.createString(s, hash);
+
+        self.strings.appendAssumeCapacity(new_str);
+        list.appendAssumeCapacity(new_str);
+        self.buckets.putAssumeCapacityNoClobber(hash, list);
+        self.intern_count += 1;
         return new_str;
     }
 
@@ -1041,6 +1052,7 @@ pub const StringTable = struct {
     fn createString(self: *StringTable, s: []const u8, hash: u64) !*JSString {
         const total_size = @sizeOf(JSString) + s.len;
         const mem = try self.allocator.alignedAlloc(u8, std.mem.Alignment.of(JSString), total_size);
+        errdefer self.allocator.free(mem);
 
         const str: *JSString = @ptrCast(@alignCast(mem.ptr));
         str.* = .{
@@ -1058,8 +1070,6 @@ pub const StringTable = struct {
         // Copy string data after header
         @memcpy(str.dataMut(), s);
 
-        try self.strings.append(self.allocator, str);
-        self.intern_count += 1;
         return str;
     }
 
@@ -1531,6 +1541,32 @@ test "string interning" {
     const stats = table.getStats();
     try std.testing.expectEqual(@as(usize, 2), stats.interned); // "hello" and "world"
     try std.testing.expectEqual(@as(usize, 1), stats.hits); // Second "hello" was a hit
+}
+
+test "string interning releases every partial allocation on OOM" {
+    const Probe = struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            var table = StringTable.init(allocator);
+            defer table.deinit();
+
+            _ = table.intern("hello") catch |err| {
+                try std.testing.expectEqual(@as(usize, 0), table.getStats().interned);
+                try std.testing.expectEqual(@as(usize, 0), table.strings.items.len);
+                try std.testing.expectEqual(@as(u32, 0), table.buckets.count());
+                return err;
+            };
+            _ = table.intern("world") catch |err| {
+                try std.testing.expectEqual(@as(usize, 1), table.getStats().interned);
+                try std.testing.expectEqual(@as(usize, 1), table.strings.items.len);
+                try std.testing.expect(table.buckets.get(hashString("world")) == null);
+                return err;
+            };
+            const stats = table.getStats();
+            try std.testing.expectEqual(@as(usize, 2), stats.interned);
+        }
+    };
+
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Probe.run, .{});
 }
 
 test "string concatenation" {
