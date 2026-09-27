@@ -234,7 +234,7 @@ fn readU64(obj: std.json.ObjectMap, key: []const u8) u64 {
 fn readIndex(obj: std.json.ObjectMap) !u32 {
     const v = obj.get("index") orelse return ParseError.UnexpectedJsonShape;
     if (v != .integer) return ParseError.UnexpectedJsonShape;
-    if (v.integer < 0) return ParseError.UnexpectedJsonShape;
+    if (v.integer < 0 or v.integer > std.math.maxInt(u32)) return ParseError.UnexpectedJsonShape;
     return @intCast(v.integer);
 }
 
@@ -280,6 +280,18 @@ test "text_simple cassette: full happy path produces expected event shape" {
     try testing.expectEqualStrings("end_turn", list[5].message_delta.stop_reason.?);
     try testing.expectEqual(@as(u64, 5), list[5].message_delta.output_tokens.?);
     try testing.expect(list[6] == .message_stop);
+}
+
+test "content block index above u32 is rejected" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    const input =
+        \\event: content_block_stop
+        \\data: {"type":"content_block_stop","index":4294967296}
+        \\
+    ;
+    try testing.expectError(ParseError.UnexpectedJsonShape, parseAll(arena.allocator(), input));
 }
 
 test "text_multi_delta cassette: deltas concatenate into the full reply" {
