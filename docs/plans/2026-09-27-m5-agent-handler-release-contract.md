@@ -272,7 +272,9 @@ beside A1 and A2. Owned files: a new native module under
 
 Completion: check C-A3.
 
-**A4. `callTool`.** Depends on A1 and A2. Owned files:
+**A4. `callTool`.** Depends on A1 and A2. A4 also carries the `zttp:fetch` module
+summary and the `error?` and `details?` return fields that A2 deferred (A2
+design note, section 11), inside the re-record the owner approved for A4. Owned files:
 `packages/modules/src/http/tool.zig`, its module spec, `server.zig` (to share
 the validation and scope steps it runs inline at `:686-859`),
 `contract_runtime.zig`, `contract_builder.zig`, and
