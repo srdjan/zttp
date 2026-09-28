@@ -5,4 +5,5 @@ const test_shim = @import("zttp-sdk-test-shim");
 test {
     std.testing.refAllDecls(modules);
     std.testing.refAllDecls(test_shim);
+    _ = @import("net/sse.zig");
 }

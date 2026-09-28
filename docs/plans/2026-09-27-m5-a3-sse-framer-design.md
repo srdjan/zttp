@@ -245,8 +245,10 @@ defaults listed after them.
 
 ## 10. Implementation units
 
-- **U1. Strict JSON strings.** Section 4, with its tests. Moves no hash.
-- **U2. The framer core.** Section 3 as a pure Zig core in
+- **U1. Strict JSON strings.** Done 2026-09-28. Section 4, with its tests. Moves no hash.
+- **U2. The framer core.** Done 2026-09-28: `zig build test`,
+  `test-modules`, `test-reference-tools`, `test-expert-app`, and fmt pass; the
+  UTF-8, unterminated, event-count, and control-byte probes each failed a test. Section 3 as a pure Zig core in
   `packages/modules/src/net/sse.zig` with its corpus, census, and probes, tested
   through `test-modules` but not yet registered as a builtin. Moves no hash.
 - **U3. Registration.** After A4 closes: the binding and its JS layer, the
