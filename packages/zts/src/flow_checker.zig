@@ -22,6 +22,7 @@ const object = @import("zts-engine").object;
 const atom_table = @import("zts-engine").atom_table;
 const builtin_modules = @import("zts-engine").builtin_modules;
 const module_facts_mod = @import("module_facts.zig");
+const route_resolution = @import("route_resolution.zig");
 const type_checker_mod = @import("type_checker.zig");
 const mb = @import("zts-engine").module_binding;
 const bool_checker_mod = @import("bool_checker.zig");
@@ -1002,93 +1003,20 @@ pub const FlowChecker = struct {
     /// an object literal. A route value resolves when it is a function value or
     /// an identifier bound to one.
     fn scanRouteFunctionRoots(self: *FlowChecker) void {
-        const node_count = self.ir_view.nodeCount();
-        for (0..node_count) |idx_usize| {
-            const idx: NodeIndex = @intCast(idx_usize);
-            if (self.ir_view.getTag(idx) != .call) continue;
-            const call = self.ir_view.getCall(idx) orelse continue;
-            if (!self.isRouterMatchCallee(call.callee) or call.args_count == 0) continue;
-
-            const table_arg = self.ir_view.getListIndex(call.args_start, 0);
-            const table = self.resolveRouteTableForRoots(table_arg) orelse continue;
-            const obj = self.ir_view.getObject(table) orelse continue;
-            var i: u16 = 0;
-            while (i < obj.properties_count) : (i += 1) {
-                const prop_idx = self.ir_view.getListIndex(obj.properties_start, i);
-                if (self.ir_view.getTag(prop_idx) != .object_property) continue;
-                const prop = self.ir_view.getProperty(prop_idx) orelse continue;
-                self.appendRouteFunctionRoots(prop.value);
-            }
-            self.appendAssignedTableFunctions(table_arg);
-        }
-    }
-
-    fn appendRouteFunctionRoots(self: *FlowChecker, value: NodeIndex) void {
-        if (self.resolveInitialFunctionNode(value)) |fn_node| self.appendRouteFunctionRoot(fn_node);
-        if (self.ir_view.getTag(value) != .identifier) return;
-        const binding = self.ir_view.getBinding(value) orelse return;
-        const key = packBindingKey(binding.scope_id, binding.slot);
-        const node_count = self.ir_view.nodeCount();
-        for (0..node_count) |idx_usize| {
-            const idx: NodeIndex = @intCast(idx_usize);
-            if (self.ir_view.getTag(idx) != .assignment) continue;
-            const asgn = self.ir_view.getAssignment(idx) orelse continue;
-            const target = self.assignmentRootBinding(asgn.target) orelse continue;
-            if (packBindingKey(target.scope_id, target.slot) != key) continue;
-            const fn_node = self.resolveInitialFunctionNode(asgn.value) orelse continue;
-            self.appendRouteFunctionRoot(fn_node);
-        }
-    }
-
-    fn appendAssignedTableFunctions(self: *FlowChecker, table_arg: NodeIndex) void {
-        if (self.ir_view.getTag(table_arg) != .identifier) return;
-        const binding = self.ir_view.getBinding(table_arg) orelse return;
-        const key = packBindingKey(binding.scope_id, binding.slot);
-        const node_count = self.ir_view.nodeCount();
-        for (0..node_count) |idx_usize| {
-            const idx: NodeIndex = @intCast(idx_usize);
-            if (self.ir_view.getTag(idx) != .assignment) continue;
-            const asgn = self.ir_view.getAssignment(idx) orelse continue;
-            const target = self.assignmentRootBinding(asgn.target) orelse continue;
-            if (packBindingKey(target.scope_id, target.slot) != key) continue;
-            const fn_node = self.resolveInitialFunctionNode(asgn.value) orelse continue;
-            self.appendRouteFunctionRoot(fn_node);
-        }
+        const facts = self.resolveFacts() orelse return;
+        const resolver = route_resolution.Resolver.init(self.ir_view, self.atoms, facts);
+        var roots = resolver.routeRoots(self.allocator) catch {
+            self.markAllocationFailure();
+            return;
+        };
+        defer roots.deinit(self.allocator);
+        for (roots.functions.items) |function| self.appendRouteFunctionRoot(function);
+        if (roots.unresolved) _ = self.unknownRouteCallLabels();
     }
 
     fn appendRouteFunctionRoot(self: *FlowChecker, fn_node: NodeIndex) void {
         if (std.mem.indexOfScalar(NodeIndex, self.route_function_roots.items, fn_node) != null) return;
         self.route_function_roots.append(self.allocator, fn_node) catch self.markAllocationFailure();
-    }
-
-    fn isRouterMatchCallee(self: *const FlowChecker, callee: NodeIndex) bool {
-        if (self.ir_view.getTag(callee) != .identifier) return false;
-        const binding = self.ir_view.getBinding(callee) orelse return false;
-        const meta = self.module_fn_meta.get(binding.slot) orelse return false;
-        return std.mem.eql(u8, meta.module, "router") and std.mem.eql(u8, meta.func, "routerMatch");
-    }
-
-    fn resolveRouteTableForRoots(self: *const FlowChecker, node: NodeIndex) ?NodeIndex {
-        const tag = self.ir_view.getTag(node) orelse return null;
-        if (tag == .object_literal) return node;
-        if (tag != .identifier) return null;
-        const binding = self.ir_view.getBinding(node) orelse return null;
-        if (binding.kind != .global) return null;
-        const initializer = self.findBindingInitNode(binding) orelse return null;
-        return if (self.ir_view.getTag(initializer) == .object_literal) initializer else null;
-    }
-
-    fn resolveStableRouteTable(self: *const FlowChecker, node: NodeIndex) ?NodeIndex {
-        const tag = self.ir_view.getTag(node) orelse return null;
-        if (tag == .object_literal) return node;
-        if (tag != .identifier) return null;
-        const binding = self.ir_view.getBinding(node) orelse return null;
-        if (binding.kind != .global) return null;
-        const decl = self.findBindingDecl(binding) orelse return null;
-        if (self.bindingIsMutated(binding) or
-            self.bindingHasAlias(binding) or
-            self.bindingEscapesStableResolution(binding, true)) return null;
-        return if (self.ir_view.getTag(decl.init) == .object_literal) decl.init else null;
     }
 
     fn resolveLiteralObjectMethod(self: *const FlowChecker, node: NodeIndex) ?NodeIndex {
@@ -1099,13 +1027,8 @@ pub const FlowChecker = struct {
         const decl = self.findBindingDecl(binding) orelse return null;
         if (self.bindingIsMutated(binding) or
             self.bindingHasAlias(binding) or
-            self.bindingEscapesStableResolution(binding, false)) return null;
+            self.bindingEscapesStableResolution(binding)) return null;
         return if (self.ir_view.getTag(decl.init) == .object_literal) decl.init else null;
-    }
-
-    fn findBindingInitNode(self: *const FlowChecker, binding: ir.BindingRef) ?NodeIndex {
-        const decl = self.findBindingDecl(binding) orelse return null;
-        return if (decl.init != null_node) decl.init else null;
     }
 
     fn findBindingDecl(self: *const FlowChecker, binding: ir.BindingRef) ?Node.VarDecl {
@@ -1158,20 +1081,14 @@ pub const FlowChecker = struct {
 
     /// Stable object resolution is valid only while no other value can mutate
     /// the object. Reject bindings stored in aggregates, passed to unknown
-    /// calls, assigned elsewhere, or returned. The route table's direct use as
-    /// routerMatch's first argument is the one modeled escape.
-    fn bindingEscapesStableResolution(
-        self: *const FlowChecker,
-        binding: ir.BindingRef,
-        allow_router_match: bool,
-    ) bool {
-        return self.bindingEscapesStableResolutionDepth(binding, allow_router_match, 0);
+    /// calls, assigned elsewhere, or returned.
+    fn bindingEscapesStableResolution(self: *const FlowChecker, binding: ir.BindingRef) bool {
+        return self.bindingEscapesStableResolutionDepth(binding, 0);
     }
 
     fn bindingEscapesStableResolutionDepth(
         self: *const FlowChecker,
         binding: ir.BindingRef,
-        allow_router_match: bool,
         depth: u8,
     ) bool {
         if (depth >= max_summary_depth) return true;
@@ -1198,9 +1115,6 @@ pub const FlowChecker = struct {
                     for (0..call.args_count) |arg_index| {
                         const arg = self.ir_view.getListIndex(call.args_start, @intCast(arg_index));
                         if (!self.nodeContainsBinding(arg, key, 0)) continue;
-                        if (allow_router_match and arg_index == 0 and
-                            self.isRouterMatchCallee(call.callee) and
-                            self.nodeIsBinding(arg, key)) continue;
                         if (self.nodeIsBinding(arg, key) and
                             self.callKeepsArgumentLocal(call, arg_index, depth + 1)) continue;
                         return true;
@@ -1228,7 +1142,7 @@ pub const FlowChecker = struct {
             const array_binding = self.ir_view.getBinding(member.object) orelse return false;
             return !self.bindingIsMutated(array_binding) and
                 !self.bindingHasAlias(array_binding) and
-                !self.bindingEscapesStableResolutionDepth(array_binding, false, depth);
+                !self.bindingEscapesStableResolutionDepth(array_binding, depth);
         }
         const fn_node = self.resolveFunctionNode(call.callee) orelse return false;
         const func = self.ir_view.getFunction(fn_node) orelse return false;
@@ -1246,7 +1160,7 @@ pub const FlowChecker = struct {
         }
         return !self.bindingIsMutated(binding) and
             !self.bindingHasAlias(binding) and
-            !self.bindingEscapesStableResolutionDepth(binding, false, depth);
+            !self.bindingEscapesStableResolutionDepth(binding, depth);
     }
 
     fn nodeIsBinding(self: *const FlowChecker, node: NodeIndex, key: u64) bool {
@@ -1346,23 +1260,6 @@ pub const FlowChecker = struct {
             },
             // exhaustive: every other expression is not a statically resolved
             // function value, so dispatch adds `.unknown` instead of proving it.
-            else => null,
-        };
-    }
-
-    fn resolveInitialFunctionNode(self: *const FlowChecker, node: NodeIndex) ?NodeIndex {
-        const tag = self.ir_view.getTag(node) orelse return null;
-        return switch (tag) {
-            .function_expr, .arrow_function => node,
-            .identifier => blk: {
-                const binding = self.ir_view.getBinding(node) orelse break :blk null;
-                const initializer = self.findBindingInitNode(binding) orelse break :blk null;
-                const init_tag = self.ir_view.getTag(initializer) orelse break :blk null;
-                if (init_tag != .function_expr and init_tag != .arrow_function) break :blk null;
-                break :blk initializer;
-            },
-            // exhaustive: only these three shapes can name an initial route
-            // function. Other values add no root and make dispatch unknown.
             else => null,
         };
     }
@@ -2358,73 +2255,19 @@ pub const FlowChecker = struct {
     }
 
     fn routerDispatchLabels(self: *FlowChecker, callee: NodeIndex, call_data: Node.CallExpr) ?LabelSet {
-        if (self.ir_view.getTag(callee) != .member_access) return null;
-        const member = self.ir_view.getMember(callee) orelse return null;
-        const property = self.resolveAtomName(member.property) orelse return null;
-        if (!std.mem.eql(u8, property, "handler")) return null;
-        if (self.ir_view.getTag(member.object) != .identifier) return null;
+        const facts = self.resolveFacts() orelse return self.unknownRouteCallLabels();
+        const resolver = route_resolution.Resolver.init(self.ir_view, self.atoms, facts);
+        var targets = resolver.resolveDispatch(self.allocator, callee) catch {
+            self.markAllocationFailure();
+            return self.unknownRouteCallLabels();
+        } orelse return null;
+        defer targets.deinit(self.allocator);
 
-        const binding = self.ir_view.getBinding(member.object) orelse return null;
-        const unstable = self.bindingIsMutated(binding) or
-            self.bindingHasAlias(binding) or
-            self.bindingEscapesStableResolution(binding, false);
-        const key = packBindingKey(binding.scope_id, binding.slot);
-        const values = self.binding_value_nodes.get(key) orelse return null;
-        var matched = false;
-        var unresolved_value = false;
         var labels = LabelSet.empty;
-        for (values.items) |value| {
-            if (self.labelsFromRouterMatch(value, call_data)) |found| {
-                matched = true;
-                labels = LabelSet.merge(labels, found);
-            } else {
-                unresolved_value = true;
-            }
+        for (targets.functions.items) |function| {
+            labels = LabelSet.merge(labels, self.routeFunctionCallLabels(function, call_data));
         }
-        if (!matched) return null;
-        if (unstable) return self.unknownRouteCallLabels();
-        if (unresolved_value) labels.unknown = true;
-        return labels;
-    }
-
-    fn labelsFromRouterMatch(self: *FlowChecker, node: NodeIndex, dispatch: Node.CallExpr) ?LabelSet {
-        if (self.ir_view.getTag(node) != .call) return null;
-        const call = self.ir_view.getCall(node) orelse return null;
-        if (!self.isRouterMatchCallee(call.callee)) return null;
-        if (call.args_count == 0) return self.unknownRouteCallLabels();
-
-        const table_arg = self.ir_view.getListIndex(call.args_start, 0);
-        const table = self.resolveStableRouteTable(table_arg) orelse return self.unknownRouteCallLabels();
-        const obj = self.ir_view.getObject(table) orelse return self.unknownRouteCallLabels();
-        var labels = LabelSet.empty;
-        var resolved_count: usize = 0;
-        var unresolved = false;
-        var i: u16 = 0;
-        while (i < obj.properties_count) : (i += 1) {
-            const prop_idx = self.ir_view.getListIndex(obj.properties_start, i);
-            if (self.ir_view.getTag(prop_idx) != .object_property) {
-                labels.unknown = true;
-                unresolved = true;
-                continue;
-            }
-            const prop = self.ir_view.getProperty(prop_idx) orelse {
-                labels.unknown = true;
-                unresolved = true;
-                continue;
-            };
-            const fn_node = self.resolveFunctionNode(prop.value) orelse {
-                labels.unknown = true;
-                unresolved = true;
-                continue;
-            };
-            resolved_count += 1;
-            labels = LabelSet.merge(labels, self.routeFunctionCallLabels(fn_node, dispatch));
-        }
-        if (resolved_count == 0) {
-            labels.unknown = true;
-            unresolved = true;
-        }
-        if (unresolved) _ = self.unknownRouteCallLabels();
+        if (targets.unresolved) labels = LabelSet.merge(labels, self.unknownRouteCallLabels());
         return labels;
     }
 
@@ -2548,7 +2391,7 @@ pub const FlowChecker = struct {
                     if (self.bindingIsMutated(binding)) return null;
                     const kind = self.checkedBuiltinReceiverKind(node) orelse return null;
                     if (kind != .string and (self.bindingHasAlias(binding) or
-                        self.bindingEscapesStableResolution(binding, false)))
+                        self.bindingEscapesStableResolution(binding)))
                     {
                         return null;
                     }
@@ -2558,7 +2401,7 @@ pub const FlowChecker = struct {
                 if (self.bindingIsMutated(binding)) return null;
                 const kind = self.builtinReceiverKind(decl.init, depth + 1) orelse return null;
                 if (kind != .string and (self.bindingHasAlias(binding) or
-                    self.bindingEscapesStableResolution(binding, false)))
+                    self.bindingEscapesStableResolution(binding)))
                 {
                     return null;
                 }

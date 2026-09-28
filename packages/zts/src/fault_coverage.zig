@@ -16,12 +16,16 @@
 const std = @import("std");
 const mb = @import("zts-engine").module_binding;
 const builtin_modules = @import("zts-engine").builtin_modules;
+const atom_table = @import("zts-engine").atom_table;
+const parser_mod = @import("zts-engine").parser;
 const path_gen = @import("path_generator.zig");
+const handler_verifier = @import("handler_verifier.zig");
 
 const route_match = @import("zts-base").route_match;
 const Constraint = path_gen.Constraint;
 const StubInfo = path_gen.StubInfo;
 const GeneratedTest = path_gen.GeneratedTest;
+const IrView = parser_mod.IrView;
 
 // ---------------------------------------------------------------------------
 // External severity overrides
@@ -240,6 +244,24 @@ pub const FaultCoverageChecker = struct {
             // Determine external severity override for this test case's route
             const ext_override = self.lookupExternalOverride(test_case);
 
+            // Route-root paths are new inputs to this analysis. Seed every
+            // failable site on those paths, including calls whose result the
+            // route never branches on. A constraint below can prove that this
+            // exact site has a failure path. Another call to the same module
+            // function cannot lend it coverage. Handler-root behavior stays
+            // unchanged for sources that do not use routerMatch.
+            if (test_case.route_root) {
+                for (test_case.io_stubs.items) |stub| {
+                    _ = try self.getOrPutEntry(
+                        &seen_funcs,
+                        stub.module,
+                        stub.func,
+                        routedCallSiteId(test_case, stub.call_site, stub.seq),
+                        ext_override,
+                    );
+                }
+            }
+
             for (test_case.constraints) |c| {
                 const info: StubInfo = switch (c) {
                     .stub_truthy, .stub_falsy => |s| s,
@@ -251,45 +273,21 @@ pub const FaultCoverageChecker = struct {
                     else => continue,
                 };
 
-                const key = try std.fmt.allocPrint(self.allocator, "{s}\x00{s}", .{ info.module, info.func });
-                const gop = seen_funcs.getOrPut(self.allocator, key) catch |err| {
-                    self.allocator.free(key);
-                    return err;
-                };
-                if (!gop.found_existing) {
-                    var severity = lookupSeverity(info.module, info.func);
-                    // Elevate via external override (use the higher of the two)
-                    if (ext_override) |ext| {
-                        severity = maxSeverity(severity, ext.severity);
-                    }
-                    if (severity == .none) {
-                        _ = seen_funcs.remove(key);
-                        self.allocator.free(key);
-                        continue;
-                    }
-                    gop.value_ptr.* = .{
-                        .func = info.func,
-                        .module = info.module,
-                        .severity = severity,
-                        .has_failure_path = false,
-                        .failure_status = 0,
-                        .flagged = false,
-                    };
-                } else {
-                    self.allocator.free(key);
-                }
-
-                if (gop.value_ptr.severity == .none) {
-                    continue;
-                } else if (ext_override) |ext| {
-                    // Elevate existing entry if external override is more severe
-                    gop.value_ptr.severity = maxSeverity(gop.value_ptr.severity, ext.severity);
-                }
+                const entry = try self.getOrPutEntry(
+                    &seen_funcs,
+                    info.module,
+                    info.func,
+                    if (test_case.route_root)
+                        routedCallSiteId(test_case, info.call_site, 0)
+                    else
+                        0,
+                    ext_override,
+                ) orelse continue;
 
                 if (c.isFailure()) {
-                    gop.value_ptr.has_failure_path = true;
-                    gop.value_ptr.failure_status = test_case.expected_status;
-                    try self.checkFailurePath(gop.value_ptr, test_case, ext_override);
+                    entry.has_failure_path = true;
+                    entry.failure_status = test_case.expected_status;
+                    try self.checkFailurePath(entry, test_case, ext_override);
                 }
             }
         }
@@ -310,6 +308,60 @@ pub const FaultCoverageChecker = struct {
         for (func_names.items) |name| {
             try self.entries.append(self.allocator, seen_funcs.get(name).?);
         }
+    }
+
+    fn getOrPutEntry(
+        self: *FaultCoverageChecker,
+        seen: *std.StringHashMapUnmanaged(CallSiteEntry),
+        module: []const u8,
+        func: []const u8,
+        call_site: u64,
+        ext_override: ?ExternalSeverity,
+    ) !?*CallSiteEntry {
+        const key = try std.fmt.allocPrint(
+            self.allocator,
+            "{d}\x00{s}\x00{s}",
+            .{ call_site, module, func },
+        );
+        const gop = seen.getOrPut(self.allocator, key) catch |err| {
+            self.allocator.free(key);
+            return err;
+        };
+        if (!gop.found_existing) {
+            var severity = lookupSeverity(module, func);
+            if (ext_override) |ext| severity = maxSeverity(severity, ext.severity);
+            if (severity == .none) {
+                _ = seen.remove(key);
+                self.allocator.free(key);
+                return null;
+            }
+            gop.value_ptr.* = .{
+                .func = func,
+                .module = module,
+                .severity = severity,
+                .has_failure_path = false,
+                .failure_status = 0,
+                .flagged = false,
+            };
+        } else {
+            self.allocator.free(key);
+            if (ext_override) |ext| {
+                gop.value_ptr.severity = maxSeverity(gop.value_ptr.severity, ext.severity);
+            }
+        }
+        return gop.value_ptr;
+    }
+
+    fn routedCallSiteId(
+        test_case: GeneratedTest,
+        call_site: path_gen.NodeIndex,
+        fallback_seq: u32,
+    ) u64 {
+        const local_site: u32 = if (call_site == path_gen.null_node)
+            std.math.maxInt(u32) - fallback_seq
+        else
+            call_site;
+        return (@as(u64, test_case.root_function) << 32) | local_site;
     }
 
     fn checkFailurePath(
@@ -359,6 +411,22 @@ pub const FaultCoverageChecker = struct {
 
     fn lookupExternalOverride(self: *const FaultCoverageChecker, test_case: GeneratedTest) ?ExternalSeverity {
         const externals = self.external_severities orelse return null;
+        if (test_case.route_root) {
+            // Route roots do not yet carry the route table's method and path.
+            // Any configured route can conservatively reach this function, so
+            // use the strictest override. This can report a false positive when
+            // one function serves routes with different severities, but it
+            // cannot hide a critical failure behind the synthetic GET `/`.
+            var strictest: ?ExternalSeverity = null;
+            for (externals) |ext| {
+                if (strictest == null or
+                    severityRank(ext.severity) > severityRank(strictest.?.severity))
+                {
+                    strictest = ext;
+                }
+            }
+            return strictest;
+        }
         for (externals) |ext| {
             if (pathsMatch(ext.path, test_case.url) and
                 std.ascii.eqlIgnoreCase(ext.method, test_case.method))
@@ -453,6 +521,164 @@ fn lookupSeverity(module_name: []const u8, func_name: []const u8) mb.FailureSeve
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+const SourceFaultCoverage = struct {
+    clean: bool,
+    total_failable: u32,
+    paths_exhaustive: bool,
+};
+
+fn analyzeSourceFaultCoverage(allocator: std.mem.Allocator, source: []const u8) !SourceFaultCoverage {
+    var parser = try parser_mod.JsParser.init(allocator, source);
+    defer parser.deinit();
+    var atoms = atom_table.AtomTable.init(allocator);
+    defer atoms.deinit();
+    parser.setAtomTable(&atoms);
+
+    const root = try parser.parse();
+    const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    const handler_fn = handler_verifier.findHandlerFunction(ir_view, root) orelse
+        return error.HandlerNotFound;
+
+    var generator = path_gen.PathGenerator.init(allocator, ir_view, &atoms);
+    defer generator.deinit();
+    try generator.generate(handler_fn);
+
+    var checker = FaultCoverageChecker.init(allocator, generator.getTests());
+    defer checker.deinit();
+    try checker.analyze();
+    const report = checker.getReport();
+    return .{
+        .clean = report.isClean() and generator.routeDispatchesResolved(),
+        .total_failable = report.total_failable,
+        .paths_exhaustive = generator.pathsExhaustive(),
+    };
+}
+
+test "fault coverage checks routerMatch route functions" {
+    const direct_violation =
+        \\import { jwtVerify } from "zttp:auth";
+        \\function handler(req) {
+        \\  const auth = jwtVerify("token", "secret");
+        \\  if (!auth.ok) return Response.text("accepted");
+        \\  return Response.text("ok");
+        \\}
+    ;
+    const routed_violation =
+        \\import { jwtVerify } from "zttp:auth";
+        \\import { routerMatch } from "zttp:router";
+        \\function route(req) {
+        \\  const auth = jwtVerify("token", "secret");
+        \\  if (!auth.ok) return Response.text("accepted");
+        \\  return Response.text("ok");
+        \\}
+        \\const routes = { "GET /probe": route };
+        \\function handler(req) {
+        \\  const found = routerMatch(routes, req);
+        \\  if (found === undefined) return Response.text("not found", { status: 404 });
+        \\  return found.handler(req);
+        \\}
+    ;
+    const clean_routed =
+        \\import { jwtVerify } from "zttp:auth";
+        \\import { routerMatch } from "zttp:router";
+        \\function route(req) {
+        \\  const auth = jwtVerify("token", "secret");
+        \\  if (!auth.ok) return Response.text("unauthorized", { status: 401 });
+        \\  return Response.text("ok");
+        \\}
+        \\const routes = { "GET /probe": route };
+        \\function handler(req) {
+        \\  const found = routerMatch(routes, req);
+        \\  if (found === undefined) return Response.text("not found", { status: 404 });
+        \\  return found.handler(req);
+        \\}
+    ;
+
+    const direct = try analyzeSourceFaultCoverage(std.testing.allocator, direct_violation);
+    const routed = try analyzeSourceFaultCoverage(std.testing.allocator, routed_violation);
+    const clean = try analyzeSourceFaultCoverage(std.testing.allocator, clean_routed);
+
+    try std.testing.expect(!direct.clean);
+    try std.testing.expect(!routed.clean);
+    try std.testing.expect(clean.clean);
+    try std.testing.expectEqual(direct.total_failable + 1, routed.total_failable);
+    try std.testing.expectEqual(routed.total_failable, clean.total_failable);
+}
+
+test "fault coverage fails closed for unresolved routerMatch dispatch" {
+    const source =
+        \\import { routerMatch } from "zttp:router";
+        \\function handler(req) {
+        \\  const found = routerMatch(req.routes, req);
+        \\  if (found === undefined) return Response.text("not found", { status: 404 });
+        \\  return found.handler(req);
+        \\}
+    ;
+
+    const coverage = try analyzeSourceFaultCoverage(std.testing.allocator, source);
+    try std.testing.expect(!coverage.clean);
+    try std.testing.expect(!coverage.paths_exhaustive);
+}
+
+test "a routed call site cannot borrow fault coverage from the handler" {
+    const source =
+        \\import { jwtVerify } from "zttp:auth";
+        \\import { routerMatch } from "zttp:router";
+        \\function route(req) {
+        \\  jwtVerify("route-token", "secret");
+        \\  return Response.text("ok");
+        \\}
+        \\const routes = { "GET /probe": route };
+        \\function handler(req) {
+        \\  const auth = jwtVerify("handler-token", "secret");
+        \\  if (!auth.ok) return Response.text("unauthorized", { status: 401 });
+        \\  const found = routerMatch(routes, req);
+        \\  if (found === undefined) return Response.text("not found", { status: 404 });
+        \\  return found.handler(req);
+        \\}
+    ;
+
+    const coverage = try analyzeSourceFaultCoverage(std.testing.allocator, source);
+    try std.testing.expect(!coverage.clean);
+    try std.testing.expectEqual(@as(u32, 3), coverage.total_failable);
+}
+
+test "fault coverage fails closed when the handler discards a route response" {
+    const source =
+        \\import { jwtVerify } from "zttp:auth";
+        \\import { routerMatch } from "zttp:router";
+        \\function route(req) {
+        \\  const auth = jwtVerify("token", "secret");
+        \\  if (!auth.ok) return Response.text("unauthorized", { status: 401 });
+        \\  return Response.text("ok");
+        \\}
+        \\const routes = { "GET /probe": route };
+        \\function handler(req) {
+        \\  const found = routerMatch(routes, req);
+        \\  if (found === undefined) return Response.text("not found", { status: 404 });
+        \\  found.handler(req);
+        \\  return Response.text("discarded route response");
+        \\}
+    ;
+
+    const coverage = try analyzeSourceFaultCoverage(std.testing.allocator, source);
+    try std.testing.expect(!coverage.clean);
+    try std.testing.expect(!coverage.paths_exhaustive);
+}
+
+test "non-routed unbranched calls keep their prior fault coverage behavior" {
+    const source =
+        \\import { jwtVerify } from "zttp:auth";
+        \\function handler(req) {
+        \\  jwtVerify("token", "secret");
+        \\  return Response.text("ok");
+        \\}
+    ;
+
+    const coverage = try analyzeSourceFaultCoverage(std.testing.allocator, source);
+    try std.testing.expectEqual(@as(u32, 0), coverage.total_failable);
+}
 
 test "empty test list produces empty report" {
     const tests: []const GeneratedTest = &.{};
@@ -710,6 +936,54 @@ test "external severity elevates expected to critical" {
     // Diagnostic message should contain the external reason
     try std.testing.expect(report.diagnostics.len > 0);
     try std.testing.expectEqualStrings("Governed transition", report.diagnostics[0].message);
+}
+
+test "route roots use the strictest external severity" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { cacheGet } from "zttp:cache";
+        \\import { routerMatch } from "zttp:router";
+        \\function route(req) {
+        \\  const value = cacheGet("orders", "current");
+        \\  if (value === undefined) return Response.text("accepted");
+        \\  return Response.text(value);
+        \\}
+        \\const routes = { "POST /orders": route };
+        \\function handler(req) {
+        \\  const found = routerMatch(routes, req);
+        \\  if (found === undefined) return Response.text("not found", { status: 404 });
+        \\  return found.handler(req);
+        \\}
+    ;
+
+    var parser = try parser_mod.JsParser.init(allocator, source);
+    defer parser.deinit();
+    var atoms = atom_table.AtomTable.init(allocator);
+    defer atoms.deinit();
+    parser.setAtomTable(&atoms);
+    const root = try parser.parse();
+    const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    const handler_fn = handler_verifier.findHandlerFunction(ir_view, root) orelse
+        return error.HandlerNotFound;
+
+    var generator = path_gen.PathGenerator.init(allocator, ir_view, &atoms);
+    defer generator.deinit();
+    try generator.generate(handler_fn);
+
+    const overrides = [_]ExternalSeverity{.{
+        .path = "/orders",
+        .method = "POST",
+        .severity = .critical,
+        .reason = "order lookup must fail closed",
+    }};
+    var checker = FaultCoverageChecker.init(allocator, generator.getTests());
+    defer checker.deinit();
+    checker.setExternalSeverities(&overrides);
+    try checker.analyze();
+
+    const report = checker.getReport();
+    try std.testing.expect(!report.isClean());
+    try std.testing.expect(report.warning_count > 0);
 }
 
 test "external severity does not downgrade critical to expected" {

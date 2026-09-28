@@ -90,6 +90,9 @@ tools bytecode_cache
 # to zts-base so the compiler can enforce it (M4 T5b).
 tools capability_profiles
 tools contract_diff
+# The routed-property census iterates the flow PropertyTag enum so a new
+# property cannot silently omit its direct and routed rejection probes.
+tools counterexample
 tools declaration
 tools file_io
 tools handler_contract

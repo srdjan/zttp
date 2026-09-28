@@ -27,8 +27,12 @@ const injection_diagnostics = [_]ExpectedDiagnostic{
     .{ .code = "ZTS407", .severity = .warning },
     .{ .code = "ZTS500", .severity = .err },
 };
+// ZTS310 now also fails the declared state_isolated capsule (ZTS500), as the
+// other families' primary codes do. Before the routed-property fix, a
+// verifier error kept the false property value from reaching the capsule check.
 const state_diagnostics = [_]ExpectedDiagnostic{
     .{ .code = "ZTS310", .severity = .err },
+    .{ .code = "ZTS500", .severity = .err },
 };
 const capability_diagnostics = [_]ExpectedDiagnostic{
     .{ .code = "ZTS506", .severity = .err },

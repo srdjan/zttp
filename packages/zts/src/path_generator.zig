@@ -18,6 +18,7 @@ const object = @import("zts-engine").object;
 const atom_table = @import("zts-engine").atom_table;
 const builtin_modules = @import("zts-engine").builtin_modules;
 const module_facts_mod = @import("module_facts.zig");
+const route_resolution = @import("route_resolution.zig");
 const effect_inference = @import("effect_inference.zig");
 const mb = @import("zts-engine").module_binding;
 const bool_checker_mod = @import("bool_checker.zig");
@@ -25,9 +26,9 @@ const handler_contract = @import("zts-contracts").handler_contract;
 const contract_types = @import("zts-contracts").contract_types;
 
 const Node = ir.Node;
-const NodeIndex = ir.NodeIndex;
+pub const NodeIndex = ir.NodeIndex;
 const IrView = ir.IrView;
-const null_node = ir.null_node;
+pub const null_node = ir.null_node;
 const packBindingKey = bool_checker_mod.packBindingKey;
 
 // ---------------------------------------------------------------------------
@@ -55,6 +56,7 @@ pub const StubInfo = struct {
     module: []const u8,
     func: []const u8,
     returns: mb.ReturnKind,
+    call_site: NodeIndex = null_node,
 };
 
 // ---------------------------------------------------------------------------
@@ -66,6 +68,7 @@ pub const IoStub = struct {
     module: []const u8,
     func: []const u8,
     result_json: []const u8,
+    call_site: NodeIndex = null_node,
     /// Canonical arg signature (pipe-delimited), owned when non-null.
     /// See `handler_contract.PathIoCall.arg_signature` for the format.
     arg_signature: ?[]const u8 = null,
@@ -79,6 +82,9 @@ pub const GeneratedTest = struct {
     expected_status: u16,
     io_stubs: std.ArrayList(IoStub),
     constraints: []const Constraint = &.{},
+    /// True when this path begins at a function dispatched by `routerMatch`.
+    route_root: bool = false,
+    root_function: NodeIndex = null_node,
 };
 
 fn dupePathCondition(
@@ -166,7 +172,14 @@ pub const PathGenerator = struct {
     path_costs: std.ArrayList(PathCost),
     /// Completed test cases.
     tests: std.ArrayList(GeneratedTest),
+    /// Prefix of `tests` produced by the exported handler root.
+    handler_tests_end: usize,
     path_count: u32,
+    /// First path-cost snapshot produced by a route root. Null when the source
+    /// has no resolved route roots.
+    route_costs_start: ?usize,
+    walking_route_root: bool,
+    walking_root_function: NodeIndex,
     /// Set when a construct was walked as a representative skeleton rather than
     /// enumerated. A loop body is walked once, so the paths through iteration
     /// counts other than one - including zero - are never emitted. Spec gap 11:
@@ -178,6 +191,14 @@ pub const PathGenerator = struct {
     /// it is earned. Spec 5.6: no runtime stack cap may be presented as a
     /// termination proof.
     reaches_recursion: bool,
+    /// Set when a `routerMatch` route table or dispatched handler cannot be
+    /// resolved to a closed set of functions. Paths and cost facts are then
+    /// incomplete, so consumers must not treat the emitted set as exhaustive.
+    unresolved_route_dispatch: bool,
+    /// Number of calls through a handler value returned by `routerMatch`.
+    route_dispatch_count: u32,
+    /// Set when the handler does not return one routed response directly.
+    route_composition_unmodeled: bool,
 
     pub const MAX_PATHS = 1024;
 
@@ -260,9 +281,16 @@ pub const PathGenerator = struct {
             .retired_loop_descs = .empty,
             .path_costs = .empty,
             .tests = .empty,
+            .handler_tests_end = 0,
             .path_count = 0,
+            .route_costs_start = null,
+            .walking_route_root = false,
+            .walking_root_function = null_node,
             .summarized = false,
             .reaches_recursion = false,
+            .unresolved_route_dispatch = false,
+            .route_dispatch_count = 0,
+            .route_composition_unmodeled = false,
         };
     }
 
@@ -298,11 +326,70 @@ pub const PathGenerator = struct {
     /// Generate test cases for the given handler function.
     pub fn generate(self: *PathGenerator, handler_func: NodeIndex) !void {
         try self.scanImports();
-        try self.findHandlerBindings(handler_func);
-        try self.detectRecursionReach(handler_func);
+        const facts = try self.resolveFacts();
+        const resolver = route_resolution.Resolver.init(self.ir_view, self.atoms, facts);
+        var route_roots = try resolver.routeRoots(self.allocator);
+        defer route_roots.deinit(self.allocator);
+        self.unresolved_route_dispatch = route_roots.unresolved;
+        try self.scanRouteDispatches(&resolver);
 
-        const func = self.ir_view.getFunction(handler_func) orelse return;
+        try self.generateRoot(handler_func, false);
+        self.handler_tests_end = self.tests.items.len;
+        if (self.route_dispatch_count > 1 or
+            (self.route_dispatch_count > 0 and self.summarized))
+        {
+            self.route_composition_unmodeled = true;
+        }
+        if (route_roots.functions.items.len > 0 and self.route_dispatch_count > 0) {
+            self.route_costs_start = self.path_costs.items.len;
+        }
+        for (route_roots.functions.items) |route_function| {
+            if (route_function == handler_func) continue;
+            try self.generateRoot(route_function, true);
+        }
+    }
+
+    fn generateRoot(self: *PathGenerator, function: NodeIndex, route_root: bool) !void {
+        self.req_binding_key = null;
+        self.method_binding_key = null;
+        self.url_binding_key = null;
+        self.var_inits.clearRetainingCapacity();
+        self.constraints.clearRetainingCapacity();
+        self.io_seq.clearRetainingCapacity();
+        self.walking_route_root = route_root;
+        self.walking_root_function = function;
+
+        try self.findHandlerBindings(function);
+        try self.detectRecursionReach(function);
+        const func = self.ir_view.getFunction(function) orelse return;
         try self.walkPaths(func.body);
+    }
+
+    fn scanRouteDispatches(
+        self: *PathGenerator,
+        resolver: *const route_resolution.Resolver,
+    ) !void {
+        for (0..self.ir_view.nodeCount()) |idx_usize| {
+            const idx: NodeIndex = @intCast(idx_usize);
+            const tag = self.ir_view.getTag(idx) orelse continue;
+            if (tag != .call and tag != .method_call) continue;
+            const call = self.ir_view.getCall(idx) orelse return error.InvalidIR;
+            var targets = try resolver.resolveDispatch(self.allocator, call.callee) orelse continue;
+            defer targets.deinit(self.allocator);
+            self.route_dispatch_count += 1;
+            if (targets.unresolved) self.unresolved_route_dispatch = true;
+            if (!self.isDirectReturnValue(idx)) self.route_composition_unmodeled = true;
+        }
+    }
+
+    fn isDirectReturnValue(self: *const PathGenerator, call_node: NodeIndex) bool {
+        for (0..self.ir_view.nodeCount()) |idx_usize| {
+            const idx: NodeIndex = @intCast(idx_usize);
+            if (self.ir_view.getTag(idx) != .return_stmt) continue;
+            const value = self.ir_view.getOptValue(idx) orelse continue;
+            if (value == call_node) return true;
+        }
+        return false;
     }
 
     /// Record whether the handler reaches recursion, so the cost and coverage
@@ -334,7 +421,8 @@ pub const PathGenerator = struct {
         };
         // Same reason as above: a walk that could not allocate found no cycle
         // because it never looked.
-        self.reaches_recursion = analyzer.reachesRecursion(handler_fn.body) catch true;
+        const root_reaches_recursion = analyzer.reachesRecursion(handler_fn.body) catch true;
+        self.reaches_recursion = self.reaches_recursion or root_reaches_recursion;
     }
 
     fn findProgramRoot(self: *const PathGenerator) ?NodeIndex {
@@ -350,6 +438,12 @@ pub const PathGenerator = struct {
         return self.tests.items;
     }
 
+    /// Handler-root paths that can be emitted as runnable requests.
+    /// Route-root paths stay available through `getTests` for property checks.
+    pub fn getHandlerTests(self: *const PathGenerator) []const GeneratedTest {
+        return self.tests.items[0..self.handler_tests_end];
+    }
+
     /// Whether the emitted paths are the complete set. False when enumeration
     /// hit `MAX_PATHS`, and false when any construct was summarized rather than
     /// enumerated (spec gap 11). Every consumer that reports path coverage MUST
@@ -357,6 +451,13 @@ pub const PathGenerator = struct {
     /// them keep over-claiming.
     pub fn pathsExhaustive(self: *const PathGenerator) bool {
         return self.coverage() == .exhaustive;
+    }
+
+    /// Whether every `routerMatch` dispatch has a closed function target set
+    /// and returns its route result directly. Fault coverage uses this narrower
+    /// predicate so unknown or discarded route failures cannot prove clean.
+    pub fn routeDispatchesResolved(self: *const PathGenerator) bool {
+        return !self.unresolved_route_dispatch and !self.route_composition_unmodeled;
     }
 
     /// Why the enumerated paths are or are not the complete set. Reported
@@ -370,6 +471,12 @@ pub const PathGenerator = struct {
         summarized_loop,
         /// The handler reaches recursion, which the walk does not follow.
         recursion,
+        /// A dynamic or unstable `routerMatch` dispatch can reach a route body
+        /// that the generator did not enumerate.
+        unresolved_dispatch,
+        /// More than one dispatch, or a dispatch under summarized handler
+        /// control flow, cannot be composed from one route-root cost summary.
+        unmodeled_dispatch_composition,
 
         pub fn note(self: Coverage) []const u8 {
             return switch (self) {
@@ -377,12 +484,16 @@ pub const PathGenerator = struct {
                 .truncated => "limit reached",
                 .summarized_loop => "summarized: a loop body is walked once, not enumerated",
                 .recursion => "summarized: the handler reaches recursion, which is not followed",
+                .unresolved_dispatch => "unresolved: routerMatch dispatch can reach an unknown route function",
+                .unmodeled_dispatch_composition => "summarized: routerMatch dispatch composition is not modeled",
             };
         }
     };
 
     pub fn coverage(self: *const PathGenerator) Coverage {
         if (self.tests.items.len >= MAX_PATHS) return .truncated;
+        if (self.unresolved_route_dispatch) return .unresolved_dispatch;
+        if (self.route_composition_unmodeled) return .unmodeled_dispatch_composition;
         if (self.reaches_recursion) return .recursion;
         if (self.summarized) return .summarized_loop;
         return .exhaustive;
@@ -391,21 +502,18 @@ pub const PathGenerator = struct {
     /// Fold every enumerated path's io_seq multiplicities into a per-module
     /// worst-path CostEnvelope. Caller owns the result.
     pub fn buildCostEnvelope(self: *const PathGenerator, allocator: std.mem.Allocator) !contract_types.CostEnvelope {
-        // Truncation and summarization are different failures. Truncation
-        // means the cost of the paths that were dropped is unknown, so the
-        // total below is forced to unbounded. Summarization means the loop was
-        // walked once instead of enumerated, which loses path coverage but not
-        // the cost bound: `loopMultiplier` still carries the collection length
-        // symbolically. Only the first may touch `total`.
+        // Truncation and unsupported route dispatch composition make the
+        // emitted cost incomplete, so the total below is forced to unbounded.
+        // Ordinary loop summarization loses path coverage but not the cost
+        // bound: `loopMultiplier` still carries the collection length
+        // symbolically.
         const truncated = self.tests.items.len >= MAX_PATHS;
-        var envelope = contract_types.CostEnvelope{
-            .entries = .empty,
-            .total = .{ .constant = 0 },
-            .exhaustive = self.pathsExhaustive(),
-        };
-        errdefer envelope.deinit(allocator);
+        var handler_cost = contract_types.CostEnvelope{};
+        defer handler_cost.deinit(allocator);
+        var route_cost = contract_types.CostEnvelope{};
+        defer route_cost.deinit(allocator);
 
-        for (self.path_costs.items) |path_cost| {
+        for (self.path_costs.items, 0..) |path_cost, path_index| {
             var path_entries: std.ArrayList(ModuleCost) = .empty;
             defer path_entries.deinit(allocator);
 
@@ -425,37 +533,35 @@ pub const PathGenerator = struct {
                 }
             }
 
-            for (path_entries.items) |module_cost| {
-                if (findCostEntry(envelope.entries.items, module_cost.module)) |idx| {
-                    const candidate = contract_types.Bound.maxBorrowed(envelope.entries.items[idx].bound, module_cost.bound);
-                    const owned = try candidate.dupeOwned(allocator);
-                    envelope.entries.items[idx].bound.deinitOwned(allocator);
-                    envelope.entries.items[idx].bound = owned;
-                } else {
-                    const module = try allocator.dupe(u8, module_cost.module);
-                    errdefer allocator.free(module);
-                    var bound = try module_cost.bound.dupeOwned(allocator);
-                    errdefer bound.deinitOwned(allocator);
-                    try envelope.entries.append(allocator, .{
-                        .module = module,
-                        .bound = bound,
-                    });
-                }
-            }
-
-            const total_candidate = contract_types.Bound.maxBorrowed(envelope.total, path_total);
-            const owned_total = try total_candidate.dupeOwned(allocator);
-            envelope.total.deinitOwned(allocator);
-            envelope.total = owned_total;
+            const group = if (self.route_costs_start) |start|
+                (if (path_index >= start) &route_cost else &handler_cost)
+            else
+                &handler_cost;
+            try updateWorstPathCost(allocator, group, path_entries.items, path_total);
         }
 
-        if (truncated) {
-            const truncated_desc = try allocator.dupe(u8, "path enumeration truncated at 1024");
+        var envelope = if (self.route_costs_start != null)
+            try composeSequentialCosts(allocator, &handler_cost, &route_cost)
+        else
+            try handler_cost.dupeOwned(allocator);
+        errdefer envelope.deinit(allocator);
+        envelope.exhaustive = self.pathsExhaustive();
+
+        if (truncated or self.unresolved_route_dispatch or self.route_composition_unmodeled) {
+            const unbounded_desc = try allocator.dupe(
+                u8,
+                if (truncated)
+                    "path enumeration truncated at 1024"
+                else if (self.route_composition_unmodeled)
+                    "routerMatch dispatch composition is not modeled"
+                else
+                    "unresolved routerMatch dispatch",
+            );
             envelope.total.deinitOwned(allocator);
             envelope.total = .{ .unbounded = .{
                 .line = 0,
                 .column = 0,
-                .desc = truncated_desc,
+                .desc = unbounded_desc,
             } };
         } else if (self.reaches_recursion) {
             // The recursion's depth is not proven to decrease, and the
@@ -473,6 +579,65 @@ pub const PathGenerator = struct {
 
         std.mem.sort(contract_types.CostEntry, envelope.entries.items, {}, costEntryLessThan);
         return envelope;
+    }
+
+    fn updateWorstPathCost(
+        allocator: std.mem.Allocator,
+        group: *contract_types.CostEnvelope,
+        path_entries: []const ModuleCost,
+        path_total: contract_types.Bound,
+    ) !void {
+        for (path_entries) |module_cost| {
+            if (findCostEntry(group.entries.items, module_cost.module)) |idx| {
+                const candidate = contract_types.Bound.maxBorrowed(group.entries.items[idx].bound, module_cost.bound);
+                const owned = try candidate.dupeOwned(allocator);
+                group.entries.items[idx].bound.deinitOwned(allocator);
+                group.entries.items[idx].bound = owned;
+            } else {
+                const module = try allocator.dupe(u8, module_cost.module);
+                errdefer allocator.free(module);
+                var bound = try module_cost.bound.dupeOwned(allocator);
+                errdefer bound.deinitOwned(allocator);
+                try group.entries.append(allocator, .{ .module = module, .bound = bound });
+            }
+        }
+
+        const total_candidate = contract_types.Bound.maxBorrowed(group.total, path_total);
+        const owned_total = try total_candidate.dupeOwned(allocator);
+        group.total.deinitOwned(allocator);
+        group.total = owned_total;
+    }
+
+    fn composeSequentialCosts(
+        allocator: std.mem.Allocator,
+        handler_cost: *const contract_types.CostEnvelope,
+        route_cost: *const contract_types.CostEnvelope,
+    ) !contract_types.CostEnvelope {
+        var result = contract_types.CostEnvelope{
+            .total = try contract_types.Bound.addBorrowed(handler_cost.total, route_cost.total).dupeOwned(allocator),
+        };
+        errdefer result.deinit(allocator);
+
+        for (handler_cost.entries.items) |handler_entry| {
+            const route_bound = if (route_cost.find(handler_entry.module)) |bound|
+                bound.*
+            else
+                contract_types.Bound{ .constant = 0 };
+            const module = try allocator.dupe(u8, handler_entry.module);
+            errdefer allocator.free(module);
+            var bound = try contract_types.Bound.addBorrowed(handler_entry.bound, route_bound).dupeOwned(allocator);
+            errdefer bound.deinitOwned(allocator);
+            try result.entries.append(allocator, .{ .module = module, .bound = bound });
+        }
+        for (route_cost.entries.items) |route_entry| {
+            if (handler_cost.find(route_entry.module) != null) continue;
+            const module = try allocator.dupe(u8, route_entry.module);
+            errdefer allocator.free(module);
+            var bound = try route_entry.bound.dupeOwned(allocator);
+            errdefer bound.deinitOwned(allocator);
+            try result.entries.append(allocator, .{ .module = module, .bound = bound });
+        }
+        return result;
     }
 
     fn findModuleCost(items: []const ModuleCost, module: []const u8) ?usize {
@@ -508,7 +673,7 @@ pub const PathGenerator = struct {
 
     /// Write all generated tests as JSONL to writer.
     pub fn writeJsonl(self: *const PathGenerator, writer: anytype) !void {
-        for (self.tests.items) |test_case| {
+        for (self.getHandlerTests()) |test_case| {
             // Test header
             try writer.writeAll("{\"type\":\"test\",\"name\":");
             try handler_contract.writeJsonString(writer, test_case.name);
@@ -548,7 +713,7 @@ pub const PathGenerator = struct {
             paths.deinit(allocator);
         }
 
-        for (self.tests.items) |test_case| {
+        for (self.getHandlerTests()) |test_case| {
             var conditions: std.ArrayList(handler_contract.PathCondition) = .empty;
             errdefer {
                 for (conditions.items) |*c| @constCast(c).deinit(allocator);
@@ -964,7 +1129,7 @@ pub const PathGenerator = struct {
             const call = self.ir_view.getCall(init_node) orelse return null;
             if (self.getCalleeMeta(call.callee)) |meta| {
                 if (meta.returns != .boolean) return null;
-                return .{ .stub_truthy = .{ .module = meta.module, .func = meta.func, .returns = meta.returns } };
+                return .{ .stub_truthy = .{ .module = meta.module, .func = meta.func, .returns = meta.returns, .call_site = init_node } };
             }
         }
 
@@ -975,7 +1140,7 @@ pub const PathGenerator = struct {
         const call = self.ir_view.getCall(call_node) orelse return null;
         if (self.getCalleeMeta(call.callee)) |meta| {
             if (meta.returns != .boolean) return null;
-            return .{ .stub_truthy = .{ .module = meta.module, .func = meta.func, .returns = meta.returns } };
+            return .{ .stub_truthy = .{ .module = meta.module, .func = meta.func, .returns = meta.returns, .call_site = call_node } };
         }
         return null;
     }
@@ -1009,7 +1174,7 @@ pub const PathGenerator = struct {
             .bytes,
             => return null,
         }
-        return .{ .stub_falsy = .{ .module = meta.module, .func = meta.func, .returns = meta.returns } };
+        return .{ .stub_falsy = .{ .module = meta.module, .func = meta.func, .returns = meta.returns, .call_site = init_node } };
     }
 
     fn extractResultOkConstraint(self: *PathGenerator, member_node: NodeIndex) ?Constraint {
@@ -1030,7 +1195,7 @@ pub const PathGenerator = struct {
             const call = self.ir_view.getCall(init_node) orelse return null;
             if (self.getCalleeMeta(call.callee)) |meta| {
                 if (meta.returns == .result) {
-                    return .{ .result_ok = .{ .module = meta.module, .func = meta.func, .returns = meta.returns } };
+                    return .{ .result_ok = .{ .module = meta.module, .func = meta.func, .returns = meta.returns, .call_site = init_node } };
                 }
             }
         }
@@ -1316,6 +1481,7 @@ pub const PathGenerator = struct {
                     .module = io_call.module,
                     .func = io_call.func,
                     .result_json = result_json,
+                    .call_site = io_call.call_node orelse null_node,
                     .arg_signature = arg_sig,
                 });
             }
@@ -1335,6 +1501,8 @@ pub const PathGenerator = struct {
             .expected_status = status,
             .io_stubs = io_stubs,
             .constraints = constraints_snapshot,
+            .route_root = self.walking_route_root,
+            .root_function = self.walking_root_function,
         });
     }
 
@@ -2197,6 +2365,49 @@ test "behavior path conversion cleans every allocation failure" {
     );
 }
 
+test "route roots stay internal to analysis outputs" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { routerMatch } from "zttp:router";
+        \\function route(req) {
+        \\  return Response.text("created", { status: 201 });
+        \\}
+        \\const routes = { "POST /probe": route };
+        \\export function handler(req) {
+        \\  const found = routerMatch(routes, req);
+        \\  if (found === undefined) return Response.text("not found", { status: 404 });
+        \\  return found.handler(req);
+        \\}
+    ;
+    var fixture = try generateFixture(allocator, source);
+    defer fixture.deinit();
+
+    var found_route_root = false;
+    for (fixture.generator.getTests()) |generated| {
+        if (generated.route_root and generated.expected_status == 201) {
+            found_route_root = true;
+            break;
+        }
+    }
+    try std.testing.expect(found_route_root);
+
+    var jsonl: std.ArrayList(u8) = .empty;
+    defer jsonl.deinit(allocator);
+    var allocating_writer: std.Io.Writer.Allocating = .fromArrayList(allocator, &jsonl);
+    try fixture.generator.writeJsonl(&allocating_writer.writer);
+    jsonl = allocating_writer.toArrayList();
+    try std.testing.expect(std.mem.indexOf(u8, jsonl.items, "\"status\":201") == null);
+
+    var paths = try fixture.generator.toBehaviorPaths(allocator);
+    defer {
+        for (paths.items) |*path| path.deinit(allocator);
+        paths.deinit(allocator);
+    }
+    for (paths.items) |path| {
+        try std.testing.expect(path.response_status != 201);
+    }
+}
+
 fn generateFixture(allocator: std.mem.Allocator, source: []const u8) !PathGeneratorFixture {
     var parser = try parser_mod.JsParser.init(allocator, source);
     errdefer parser.deinit();
@@ -2434,6 +2645,66 @@ test "io call outside loops stays constant" {
 
     try std.testing.expectEqual(contract_types.BoundClass.constant, envelope.total.class());
     try std.testing.expectEqual(@as(u32, 1), envelope.total.constant);
+}
+
+test "routerMatch cost composes handler and route calls" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { cacheGet } from "zttp:cache";
+        \\import { routerMatch } from "zttp:router";
+        \\function route(req) {
+        \\  const route_value = cacheGet("probe", "route");
+        \\  return Response.json({ value: route_value });
+        \\}
+        \\const routes = { "GET /probe": route };
+        \\function handler(req) {
+        \\  const handler_value = cacheGet("probe", "handler");
+        \\  const found = routerMatch(routes, req);
+        \\  if (found === undefined) return Response.json({ value: handler_value }, { status: 404 });
+        \\  return found.handler(req);
+        \\}
+    ;
+
+    var fixture = try generateFixture(allocator, source);
+    defer fixture.deinit();
+
+    var envelope = try fixture.generator.buildCostEnvelope(allocator);
+    defer envelope.deinit(allocator);
+
+    const cache_bound = envelope.find("cache") orelse return error.ExpectedCacheBound;
+    try std.testing.expectEqual(contract_types.BoundClass.constant, cache_bound.class());
+    try std.testing.expectEqual(@as(u32, 2), cache_bound.constant);
+    try std.testing.expect(envelope.total.constant >= 2);
+}
+
+test "repeated routerMatch dispatch makes cost unbounded" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { cacheGet } from "zttp:cache";
+        \\import { routerMatch } from "zttp:router";
+        \\function route(req) {
+        \\  const value = cacheGet("probe", "route");
+        \\  return Response.json({ value: value });
+        \\}
+        \\const routes = { "GET /probe": route };
+        \\function handler(req) {
+        \\  const first = routerMatch(routes, req);
+        \\  const second = routerMatch(routes, req);
+        \\  if (first === undefined) return Response.text("not found", { status: 404 });
+        \\  if (second === undefined) return Response.text("not found", { status: 404 });
+        \\  const ignored = first.handler(req);
+        \\  return second.handler(req);
+        \\}
+    ;
+
+    var fixture = try generateFixture(allocator, source);
+    defer fixture.deinit();
+
+    var envelope = try fixture.generator.buildCostEnvelope(allocator);
+    defer envelope.deinit(allocator);
+
+    try std.testing.expectEqual(contract_types.BoundClass.unbounded, envelope.total.class());
+    try std.testing.expect(!fixture.generator.pathsExhaustive());
 }
 
 test "nested dynamic for...of degrades to unbounded" {

@@ -1271,6 +1271,7 @@ pub fn runCheckOnlyWithOptions(
 const PathAnalysis = struct {
     paths_enumerated: u32,
     paths_exhaustive: bool,
+    behaviors_exhaustive: bool,
     /// Why coverage is or is not complete. A static string from
     /// `PathGenerator.Coverage.note`, so nothing owns it.
     paths_coverage_note: []const u8,
@@ -1307,6 +1308,7 @@ fn analyzeHandlerPaths(
         // it also knows whether anything was summarized instead of enumerated,
         // which this copy of the predicate used to miss (spec gap 11).
         .paths_exhaustive = generator.pathsExhaustive(),
+        .behaviors_exhaustive = generator.pathsExhaustive() and generator.getHandlerTests().len == tests.len,
         .paths_coverage_note = generator.coverage().note(),
         .max_io_depth = null,
         .cost_bounded = false,
@@ -1341,7 +1343,7 @@ fn analyzeHandlerPaths(
         .covered = report.covered,
         .warnings = report.warning_count,
     };
-    analysis.fault_clean = report.isClean();
+    analysis.fault_clean = report.isClean() and generator.routeDispatchesResolved();
     return analysis;
 }
 
@@ -1760,11 +1762,11 @@ fn runCheckOnPreparedSource(
             }
         }
 
+        result.state_isolated = !checked.verifier.has_module_mutation and !checked.verifier.unresolved_route_dispatch;
         if (result.verify_errors == 0) {
             result.exhaustive_returns = true;
             result.results_safe = true;
             result.optionals_safe = true;
-            result.state_isolated = !checked.verifier.has_module_mutation;
             verify_info = .{
                 .exhaustive_returns = true,
                 .results_safe = true,
@@ -1901,7 +1903,7 @@ fn runCheckOnPreparedSource(
                 }
                 c.behaviors = path_analysis.behaviors;
                 path_analysis.behaviors = .empty;
-                c.behaviors_exhaustive = result.paths_exhaustive;
+                c.behaviors_exhaustive = path_analysis.behaviors_exhaustive;
                 c.fault_coverage = path_analysis.fault_coverage;
             }
         }
@@ -1994,7 +1996,7 @@ pub fn runGenTests(
     defer gen.deinit();
     try gen.generate(handler_fn);
     try gen.writeJsonl(writer);
-    return @intCast(gen.getTests().len);
+    return @intCast(gen.getHandlerTests().len);
 }
 
 /// Resolves a call site to a row of the acceptance kernel's guard catalog.
@@ -2347,14 +2349,15 @@ pub fn compileHandler(
                 var gen = zts.PathGenerator.init(allocator, ir_view, &atoms);
                 defer gen.deinit();
                 gen.generate(hf) catch {};
-                zts.property_diagnostics.fillVerifierCounterexamples(all_violations.items, gen.getTests());
+                const handler_tests = gen.getHandlerTests();
+                zts.property_diagnostics.fillVerifierCounterexamples(all_violations.items, handler_tests);
 
                 var viol_jsonl_result: ?[]const u8 = null;
                 var viol_summary_result: ?[]const u8 = null;
                 if (all_violations.items.len > 0) {
                     var vj_buf: std.ArrayList(u8) = .empty;
                     var vj_aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &vj_buf);
-                    zts.property_diagnostics.writeViolationsJsonl(&vj_aw.writer, allocator, all_violations.items, gen.getTests()) catch {};
+                    zts.property_diagnostics.writeViolationsJsonl(&vj_aw.writer, allocator, all_violations.items, handler_tests) catch {};
                     vj_buf = vj_aw.toArrayList();
                     if (vj_buf.items.len > 0) {
                         viol_jsonl_result = try vj_buf.toOwnedSlice(allocator);
@@ -2394,7 +2397,7 @@ pub fn compileHandler(
                 .unreachable_code = has_unreachable,
                 .bytecode_verified = true, // will be set after bytecode gen
             };
-            state_isolated = !verifier.has_module_mutation;
+            state_isolated = !verifier.has_module_mutation and !verifier.unresolved_route_dispatch;
 
             // unchecked_result_value and unchecked_optional_* are .err severity,
             // so reaching here (error_count == 0) guarantees both properties hold.
@@ -2626,7 +2629,8 @@ pub fn compileHandler(
 
             try gen.generate(hf);
 
-            const test_count = gen.getTests().len;
+            const handler_tests = gen.getHandlerTests();
+            const test_count = handler_tests.len;
             if (test_count > 0) {
                 var jsonl_buf: std.ArrayList(u8) = .empty;
                 var jsonl_aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &jsonl_buf);
@@ -2660,7 +2664,8 @@ pub fn compileHandler(
 
                 // Populate behavioral contract from exhaustive paths
                 contract.?.behaviors = try gen.toBehaviorPaths(allocator);
-                contract.?.behaviors_exhaustive = gen.getTests().len < zts.PathGenerator.MAX_PATHS;
+                contract.?.behaviors_exhaustive = gen.getTests().len < zts.PathGenerator.MAX_PATHS and
+                    gen.routeDispatchesResolved() and handler_tests.len == gen.getTests().len;
                 if (cost_envelope) |*envelope| envelope.deinit(allocator);
             }
 
@@ -2670,6 +2675,14 @@ pub fn compileHandler(
             try fc.analyze();
             const fc_report = fc.getReport();
 
+            if (fc_report.total_failable > 0 or !gen.routeDispatchesResolved()) {
+                if (contract) |*c| {
+                    if (c.properties) |*props| {
+                        props.fault_covered = fc_report.isClean() and gen.routeDispatchesResolved();
+                    }
+                }
+            }
+
             if (fc_report.total_failable > 0) {
                 if (contract != null) {
                     contract.?.fault_coverage = .{
@@ -2677,9 +2690,6 @@ pub fn compileHandler(
                         .covered = fc_report.covered,
                         .warnings = fc_report.warning_count,
                     };
-                    if (contract.?.properties) |*props| {
-                        props.fault_covered = fc_report.isClean();
-                    }
                 }
 
                 if (!builtin.is_test) {
@@ -2712,14 +2722,14 @@ pub fn compileHandler(
                     allocator,
                     &all_violations,
                     fc_report.diagnostics,
-                    gen.getTests(),
+                    handler_tests,
                 );
             }
 
             // Fill counterexample refs for result_unsafe violations now that tests exist.
             zts.property_diagnostics.fillVerifierCounterexamples(
                 all_violations.items,
-                gen.getTests(),
+                handler_tests,
             );
 
             // Generate JSONL counterexamples and summary from all violations
@@ -2731,7 +2741,7 @@ pub fn compileHandler(
                     &viol_aw.writer,
                     allocator,
                     all_violations.items,
-                    gen.getTests(),
+                    handler_tests,
                 ) catch {};
                 viol_buf = viol_aw.toArrayList();
                 if (viol_buf.items.len > 0) {
@@ -7323,4 +7333,172 @@ test "a declaration cannot ride the multi-module build path, which runs no flow 
         error.DeclarationNotEnforced,
         compileHandler(allocator, entry_source, entry_path, .{ .declaration = &fixture.declaration }),
     );
+}
+
+/// Exercise the public check pipeline. The census below counts properties only
+/// after the direct and routed sources both falsify that exact property.
+const RoutedPropertyProbe = struct {
+    property: []const u8,
+    proof_property: ?pcc.proof_system.Property = null,
+    flow_property: ?zts.counterexample.PropertyTag = null,
+    imports: []const u8 = "",
+    globals: []const u8 = "",
+    body: []const u8,
+};
+
+fn routedPropertySource(allocator: std.mem.Allocator, probe: RoutedPropertyProbe, routed: bool) ![]u8 {
+    const annotation = if (std.mem.eql(u8, probe.property, "response_total")) "state_isolated" else probe.property;
+    if (!routed) return std.fmt.allocPrint(
+        allocator,
+        "{s}\n{s}\nfunction handler(req: Request): Proof<Response, \"{s}\"> {{ {s} }}\n",
+        .{ probe.imports, probe.globals, annotation, probe.body },
+    );
+    return std.fmt.allocPrint(
+        allocator,
+        "import {{ routerMatch }} from \"zttp:router\";\n{s}\n{s}\n" ++
+            "function route(req: Request): Response {{ {s} }}\n" ++
+            "const routes = {{ \"GET /probe\": route }};\n" ++
+            "function handler(req: Request): Proof<Response, \"{s}\"> {{\n" ++
+            "const found = routerMatch(routes, req);\n" ++
+            "if (found === undefined) return Response.text(\"not found\", {{ status: 404 }});\n" ++
+            "return found.handler(req);\n}}\n",
+        .{ probe.imports, probe.globals, probe.body, annotation },
+    );
+}
+
+fn routedProbeHolds(comptime property: []const u8, result: CheckResult) !bool {
+    if (comptime std.mem.eql(u8, property, "response_total")) return result.exhaustive_returns;
+    const contract = result.contract orelse {
+        std.debug.print("router census has no contract for {s}\n", .{property});
+        for (result.json_diagnostics.items) |diagnostic| {
+            std.debug.print("{s}: {s}\n", .{ diagnostic.code, diagnostic.message });
+        }
+        return error.MissingProbeContract;
+    };
+    const properties = contract.properties orelse return error.MissingProbeProperties;
+    return @field(properties, property);
+}
+
+test "router property census observes direct and routed violations for every obligation" {
+    const allocator = std.testing.allocator;
+    const probes = [_]RoutedPropertyProbe{
+        .{ .property = "response_total", .proof_property = .response_total, .body = "if (req.method === \"GET\") return Response.text(\"ok\");" },
+        .{ .property = "result_safe", .proof_property = .results_checked, .imports = "import { jwtVerify } from \"zttp:auth\";", .body = "const result = jwtVerify(req.url, \"secret\"); return Response.json({ claims: result.value });" },
+        .{ .property = "state_isolated", .proof_property = .state_isolated, .globals = "let counter: number = 0;", .body = "counter = counter + 1; return Response.json({ counter: counter });" },
+        .{ .property = "deterministic", .proof_property = .deterministic, .body = "return Response.json({ now: Date.now() });" },
+        .{ .property = "read_only", .proof_property = .read_only, .imports = "import { cacheSet } from \"zttp:cache\";", .body = "cacheSet(\"probe\", \"key\", req.url, 60); return Response.text(\"ok\");" },
+        .{ .property = "retry_safe", .proof_property = .retry_safe, .imports = "import { cacheSet } from \"zttp:cache\";", .body = "cacheSet(\"probe\", \"key\", req.url, 60); return Response.text(\"ok\");" },
+        .{ .property = "no_secret_leakage", .proof_property = .no_secret_leakage, .flow_property = .no_secret_leakage, .imports = "import { env } from \"zttp:env\";", .body = "return Response.json({ key: env(\"SECRET_KEY\") });" },
+        .{ .property = "no_credential_leakage", .flow_property = .no_credential_leakage, .body = "return Response.json({ credential: req.headers.get(\"authorization\") });" },
+        .{ .property = "input_validated", .flow_property = .input_validated, .imports = "import { fetch } from \"zttp:fetch\";", .body = "fetch(\"https://api.example.com/collect\", { body: req.body ?? \"\" }); return Response.text(\"ok\");" },
+        .{ .property = "pii_contained", .flow_property = .pii_contained, .imports = "import { fetch } from \"zttp:fetch\";", .body = "fetch(\"https://example.com\", { method: \"POST\", body: req.url }); return Response.text(\"ok\");" },
+        .{ .property = "injection_safe", .flow_property = .injection_safe, .body = "return Response.html(req.url);" },
+        .{ .property = "fault_covered", .imports = "import { jwtVerify } from \"zttp:auth\";", .body = "const result = jwtVerify(req.url, \"secret\"); if (!result.ok) return Response.text(\"accepted failure\", { status: 200 }); return Response.text(\"ok\");" },
+        .{ .property = "optional_safe", .imports = "import { env } from \"zttp:env\";", .body = "const value = env(\"HOME\"); return Response.json({ length: value.length });" },
+    };
+    var proof_observed = std.enums.EnumSet(pcc.proof_system.Property).initEmpty();
+    var flow_observed = std.enums.EnumSet(zts.counterexample.PropertyTag).initEmpty();
+    inline for (probes) |probe| {
+        for ([_]bool{ false, true }) |routed| {
+            const source = try routedPropertySource(allocator, probe, routed);
+            defer allocator.free(source);
+            var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "router-census.ts", .{ .json_mode = true });
+            defer result.deinit(allocator);
+            try std.testing.expectEqual(@as(u32, 0), result.parse_errors);
+            try std.testing.expectEqual(@as(u32, 0), result.type_errors);
+            if (try routedProbeHolds(probe.property, result)) {
+                std.debug.print("router census still proves {s} (routed={})\n", .{ probe.property, routed });
+                return error.RoutedPropertyNotRejected;
+            }
+        }
+        if (probe.proof_property) |property| proof_observed.insert(property);
+        if (probe.flow_property) |property| flow_observed.insert(property);
+    }
+
+    // A capability ceiling is checked through the public policy result. Its
+    // module scan covers the whole IR, including route functions.
+    const capability_probe = RoutedPropertyProbe{
+        .property = "state_isolated",
+        .imports = "import { env } from \"zttp:env\";",
+        .body = "env(\"FORBIDDEN\"); return Response.text(\"ok\");",
+    };
+    for ([_]bool{ false, true }) |routed| {
+        const source = try routedPropertySource(allocator, capability_probe, routed);
+        defer allocator.free(source);
+        var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "router-capability-census.ts", .{
+            .json_mode = true,
+            .policy_source = "{\"env\":{\"allow\":[\"PUBLIC_KEY\"]}}",
+        });
+        defer result.deinit(allocator);
+        try std.testing.expectEqual(@as(u32, 0), result.parse_errors);
+        try std.testing.expectEqual(@as(u32, 0), result.type_errors);
+        try std.testing.expectEqual(@as(u32, 1), result.policy_errors);
+        var forbidden_env = false;
+        for (result.json_diagnostics.items) |diagnostic| {
+            if (std.mem.eql(u8, diagnostic.code, "POL001")) forbidden_env = true;
+        }
+        try std.testing.expect(forbidden_env);
+    }
+    proof_observed.insert(.capability_bounded);
+    inline for (std.meta.fields(pcc.proof_system.Property)) |field| {
+        try std.testing.expect(proof_observed.contains(@enumFromInt(field.value)));
+    }
+    inline for (std.meta.fields(zts.counterexample.PropertyTag)) |field| {
+        try std.testing.expect(flow_observed.contains(@enumFromInt(field.value)));
+    }
+}
+
+test "router public checks prove clean routes and fail closed on unresolved dispatch" {
+    const allocator = std.testing.allocator;
+    const clean_probe = RoutedPropertyProbe{
+        .property = "deterministic",
+        .body = "return Response.text(\"ok\");",
+    };
+    const source = try routedPropertySource(allocator, clean_probe, true);
+    defer allocator.free(source);
+    var clean = try runCheckOnlyFromSourceWithOptions(allocator, source, "router-clean.ts", .{ .json_mode = true });
+    defer clean.deinit(allocator);
+    try std.testing.expectEqual(@as(u32, 0), clean.totalErrors());
+    try std.testing.expect(clean.exhaustive_returns);
+    // Route-only analysis paths are not runnable handler behavior samples.
+    try std.testing.expect(!clean.contract.?.behaviors_exhaustive);
+    const direct_source = try routedPropertySource(allocator, clean_probe, false);
+    defer allocator.free(direct_source);
+    var direct = try runCheckOnlyFromSourceWithOptions(allocator, direct_source, "direct-clean.ts", .{ .json_mode = true });
+    defer direct.deinit(allocator);
+    try std.testing.expect(direct.contract.?.behaviors_exhaustive);
+    const clean_properties = clean.contract.?.properties.?;
+    const checked_fields = .{
+        "result_safe",       "optional_safe",         "state_isolated",  "deterministic", "read_only",
+        "retry_safe",        "stateless",             "idempotent",      "fault_covered", "cost_bounded",
+        "no_secret_leakage", "no_credential_leakage", "input_validated", "pii_contained", "injection_safe",
+    };
+    inline for (checked_fields) |field| try std.testing.expect(@field(clean_properties, field));
+
+    // An assignment makes the dispatch unstable even though both visible
+    // function bodies are clean. No property may treat missing call facts as
+    // evidence that the call is safe.
+    const unresolved_source =
+        \\import { routerMatch } from "zttp:router";
+        \\function route(req: Request): Response { return Response.text("ok"); }
+        \\const routes = { "GET /probe": route };
+        \\routes["GET /probe"] = route;
+        \\function handler(req: Request): Proof<Response, "state_isolated"> {
+        \\  const found = routerMatch(routes, req);
+        \\  if (found === undefined) return Response.text("not found", { status: 404 });
+        \\  return found.handler(req);
+        \\}
+    ;
+    var unresolved = try runCheckOnlyFromSourceWithOptions(allocator, unresolved_source, "router-unresolved.ts", .{ .json_mode = true });
+    defer unresolved.deinit(allocator);
+    try std.testing.expectEqual(@as(u32, 0), unresolved.parse_errors);
+    try std.testing.expectEqual(@as(u32, 0), unresolved.type_errors);
+    try std.testing.expect(!unresolved.exhaustive_returns);
+    const unresolved_properties = unresolved.contract.?.properties.?;
+    inline for (checked_fields) |field| {
+        if (@field(unresolved_properties, field)) {
+            std.debug.print("unresolved route still proves {s}\n", .{field});
+            return error.UnresolvedRoutePropertyProven;
+        }
+    }
 }

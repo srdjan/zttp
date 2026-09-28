@@ -205,6 +205,7 @@ zts-compiler repair_intent.zig
 zts-compiler repair_plan.zig
 zts-compiler repair_validator.zig
 zts-compiler restriction_registry.zig
+zts-compiler route_resolution.zig
 zts-compiler rule_registry.zig
 zts-compiler saga_extractor.zig
 zts-compiler semantics.zig

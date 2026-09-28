@@ -15,6 +15,8 @@
 
 const std = @import("std");
 const ir = @import("zts-engine").parser.ir;
+const atom_table = @import("zts-engine").atom_table;
+const parser_mod = @import("zts-engine").parser;
 const path_gen = @import("path_generator.zig");
 const fault_cov = @import("fault_coverage.zig");
 const flow_checker_mod = @import("flow_checker.zig");
@@ -220,8 +222,11 @@ pub fn collectVerifierViolations(
             .loc_col = loc_col,
             .counterexample_name = null,
             .counterexample_index = null,
-            .source_module = if (kind == .result_unsafe) diag.source_module else null,
-            .source_func = if (kind == .result_unsafe) diag.source_func else null,
+            // A route-root path is not a runnable request to the exported
+            // handler. Do not let its module/function pair borrow an unrelated
+            // handler path as a counterexample.
+            .source_module = if (kind == .result_unsafe and !diag.route_root) diag.source_module else null,
+            .source_func = if (kind == .result_unsafe and !diag.route_root) diag.source_func else null,
         }) catch {};
     }
 }
@@ -594,6 +599,74 @@ test "fillVerifierCounterexamples synthetic fallback when no failure path exists
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "\"ok\":false") != null);
     // Original success result must not appear
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "\"ok\":true") == null);
+}
+
+test "routed Result violation cannot borrow a handler counterexample" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { jwtVerify } from "zttp:auth";
+        \\import { routerMatch } from "zttp:router";
+        \\function route(req) {
+        \\  const routed = jwtVerify("route-token", "secret");
+        \\  return Response.json(routed.value);
+        \\}
+        \\const routes = { "GET /probe": route };
+        \\function handler(req) {
+        \\  const own = jwtVerify("handler-token", "secret");
+        \\  if (!own.ok) return Response.text("unauthorized", { status: 401 });
+        \\  const found = routerMatch(routes, req);
+        \\  if (found === undefined) return Response.text("not found", { status: 404 });
+        \\  return found.handler(req);
+        \\}
+    ;
+
+    var parser = try parser_mod.JsParser.init(allocator, source);
+    defer parser.deinit();
+    var atoms = atom_table.AtomTable.init(allocator);
+    defer atoms.deinit();
+    parser.setAtomTable(&atoms);
+    const root = try parser.parse();
+    const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    const handler_fn = handler_verifier_mod.findHandlerFunction(ir_view, root) orelse
+        return error.HandlerNotFound;
+
+    var verifier = handler_verifier_mod.HandlerVerifier.init(
+        allocator,
+        ir_view,
+        &atoms,
+        null,
+        null,
+    );
+    defer verifier.deinit();
+    _ = try verifier.verify(handler_fn);
+
+    var saw_routed_result = false;
+    for (verifier.getDiagnostics()) |diag| {
+        if (diag.kind == .unchecked_result_value) {
+            try std.testing.expect(diag.route_root);
+            saw_routed_result = true;
+        }
+    }
+    try std.testing.expect(saw_routed_result);
+
+    var violations: std.ArrayList(PropertyViolation) = .empty;
+    defer violations.deinit(allocator);
+    collectVerifierViolations(allocator, &violations, verifier.getDiagnostics(), ir_view);
+
+    var generator = path_gen.PathGenerator.init(allocator, ir_view, &atoms);
+    defer generator.deinit();
+    try generator.generate(handler_fn);
+    fillVerifierCounterexamples(violations.items, generator.getHandlerTests());
+
+    var saw_result_violation = false;
+    for (violations.items) |violation| {
+        if (violation.kind != .result_unsafe) continue;
+        try std.testing.expect(violation.source_module == null);
+        try std.testing.expect(violation.source_func == null);
+        try std.testing.expect(violation.counterexample_index == null);
+        saw_result_violation = true;
+    }
+    try std.testing.expect(saw_result_violation);
 }
 
 test "writeJsonStringContent escapes C0 control bytes" {

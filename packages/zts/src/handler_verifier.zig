@@ -24,6 +24,7 @@ const type_pool_mod = @import("type_pool.zig");
 const type_checker_mod = @import("type_checker.zig");
 const bool_checker_mod = @import("bool_checker.zig");
 const match_analysis_mod = @import("match_analysis.zig");
+const route_resolution = @import("route_resolution.zig");
 const repair_intent_mod = @import("repair_intent.zig");
 
 pub const RepairIntent = repair_intent_mod.RepairIntent;
@@ -99,6 +100,9 @@ pub const Diagnostic = struct {
     /// For unchecked_result_value: the function that produced the result.
     /// Borrowed from the module binding registry - always valid.
     source_func: ?[]const u8 = null,
+    /// True when the diagnostic came from a route function checked as a
+    /// request root rather than from the exported handler.
+    route_root: bool = false,
     /// Typed repair primitive the agent uses to pick an apply step directly.
     /// `null` when no single canonical
     /// repair applies (e.g. unused_variable — needs a free-form delete).
@@ -400,6 +404,10 @@ pub const HandlerVerifier = struct {
     // State isolation (Check 7)
     handler_scope_id: ?ir.ScopeId = null,
     has_module_mutation: bool = false,
+    /// A route call exists, but its complete target set is not known. The
+    /// caller uses this separately from `has_module_mutation`: unknown code
+    /// makes state isolation unproven without claiming an observed mutation.
+    unresolved_route_dispatch: bool = false,
     /// Sticky failure for every tracked binding and diagnostic. These are
     /// proof inputs, so a partial verifier result must never escape.
     allocation_failed: bool = false,
@@ -450,26 +458,31 @@ pub const HandlerVerifier = struct {
         // Phase 1: Scan imports for result-producing function bindings
         self.scanImports();
 
+        const facts = self.resolveFacts() orelse return error.OutOfMemory;
+        const route_resolver = route_resolution.Resolver.init(self.ir_view, self.atoms, facts);
+        var route_roots = try route_resolver.routeRoots(self.allocator);
+        defer route_roots.deinit(self.allocator);
+
         // Phase 2: Exhaustive return analysis on the handler body
-        const func = self.ir_view.getFunction(handler_func) orelse {
+        const handler = self.ir_view.getFunction(handler_func) orelse {
             if (self.allocation_failed) return error.OutOfMemory;
             return 0;
         };
-        self.handler_scope_id = func.scope_id;
-        const body_status = self.stmtReturns(func.body);
-        if (body_status != .always) {
-            self.addDiagnostic(.{
-                .severity = .err,
-                .kind = .missing_return_path,
-                .node = handler_func,
-                .message = "not all code paths return a Response",
-                .help = "ensure every branch (if/else, switch/default) ends with a return statement",
-                .repair_intent = .add_trailing_return,
-            });
+        if (route_roots.unresolved) self.addUnresolvedRouteDiagnostics(handler_func);
+        self.verifyRequestRoot(handler_func, handler);
+        for (route_roots.functions.items) |route_function| {
+            if (route_function == handler_func) continue;
+            const function = self.ir_view.getFunction(route_function) orelse {
+                self.addUnresolvedRouteDiagnostics(route_function);
+                continue;
+            };
+            const diagnostic_start = self.diagnostics.items.len;
+            self.verifyRequestRoot(route_function, function);
+            for (self.diagnostics.items[diagnostic_start..]) |*diag| {
+                diag.route_root = true;
+            }
         }
-
-        // Phase 3: Walk body for result checking and ref counting
-        self.walkForResultsAndRefs(func.body);
+        try self.checkUnresolvedRouteDispatches(&route_resolver);
 
         // Phase 4: Report unchecked result accesses (already emitted during walk)
 
@@ -489,6 +502,60 @@ pub const HandlerVerifier = struct {
             if (diag.severity == .err) error_count += 1;
         }
         return error_count;
+    }
+
+    /// Apply the handler-scoped checks to one request entry point. A route
+    /// function receives the same untrusted request and owns the same proof
+    /// obligations as the exported handler that dispatches to it.
+    fn verifyRequestRoot(self: *HandlerVerifier, function_node: NodeIndex, function: Node.FunctionExpr) void {
+        self.handler_scope_id = function.scope_id;
+        if (self.stmtReturns(function.body) != .always) {
+            self.addDiagnostic(.{
+                .severity = .err,
+                .kind = .missing_return_path,
+                .node = function_node,
+                .message = "not all code paths return a Response",
+                .help = "ensure every branch (if/else, switch/default) ends with a return statement",
+                .repair_intent = .add_trailing_return,
+            });
+        }
+        self.walkForResultsAndRefs(function.body);
+    }
+
+    fn checkUnresolvedRouteDispatches(
+        self: *HandlerVerifier,
+        resolver: *const route_resolution.Resolver,
+    ) !void {
+        for (0..self.ir_view.nodeCount()) |idx_usize| {
+            const idx: NodeIndex = @intCast(idx_usize);
+            const tag = self.ir_view.getTag(idx) orelse continue;
+            if (tag != .call and tag != .method_call) continue;
+            const call = self.ir_view.getCall(idx) orelse continue;
+            var targets = (try resolver.resolveDispatch(self.allocator, call.callee)) orelse continue;
+            defer targets.deinit(self.allocator);
+            if (targets.unresolved) self.addUnresolvedRouteDiagnostics(idx);
+        }
+    }
+
+    /// One unresolved dispatch costs both verifier properties. These existing
+    /// diagnostic kinds are the inputs that decide response_total and
+    /// results_safe, so the unknown target cannot silently prove either one.
+    fn addUnresolvedRouteDiagnostics(self: *HandlerVerifier, node: NodeIndex) void {
+        self.unresolved_route_dispatch = true;
+        self.addDiagnostic(.{
+            .severity = .err,
+            .kind = .missing_return_path,
+            .node = node,
+            .message = "route dispatch target cannot be resolved, so response totality is unproven",
+            .help = "use a stable literal routerMatch table whose entries are function declarations",
+        });
+        self.addDiagnostic(.{
+            .severity = .err,
+            .kind = .unchecked_result_value,
+            .node = node,
+            .message = "route dispatch target cannot be resolved, so result safety is unproven",
+            .help = "use a stable literal routerMatch table whose entries are function declarations",
+        });
     }
 
     /// Get all diagnostics.
@@ -1788,6 +1855,278 @@ fn countUnusedVariableWarnings(source: []const u8) !u32 {
         if (diag.kind == .unused_variable) count += 1;
     }
     return count;
+}
+
+const RouteVerifierCounts = struct {
+    missing_return: u32 = 0,
+    unchecked_result: u32 = 0,
+    unchecked_optional: u32 = 0,
+    module_mutation: u32 = 0,
+    unresolved_dispatch: bool = false,
+    has_module_mutation: bool = false,
+};
+
+fn routeVerifierCounts(source: []const u8) !RouteVerifierCounts {
+    const allocator = std.testing.allocator;
+    var stripped = try @import("zts-engine").stripper.strip(allocator, source, .{});
+    defer stripped.deinit();
+    var parser = try @import("zts-engine").parser.JsParser.init(allocator, stripped.code);
+    defer parser.deinit();
+    var atoms = context.AtomTable.init(allocator);
+    defer atoms.deinit();
+    parser.setAtomTable(&atoms);
+    const root = try parser.parse();
+    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    const handler = findHandlerFunction(view, root) orelse return error.HandlerNotFound;
+
+    var verifier = HandlerVerifier.init(allocator, view, &atoms, null, null);
+    defer verifier.deinit();
+    _ = try verifier.verify(handler);
+
+    var counts: RouteVerifierCounts = .{};
+    for (verifier.getDiagnostics()) |diagnostic| {
+        switch (diagnostic.kind) {
+            .missing_return_path => counts.missing_return += 1,
+            .unchecked_result_value => counts.unchecked_result += 1,
+            .unchecked_optional_use, .unchecked_optional_access => counts.unchecked_optional += 1,
+            .module_scope_mutation => counts.module_mutation += 1,
+            // exhaustive: this test helper counts only the four properties its
+            // callers assert; all other diagnostics are outside that result.
+            else => {},
+        }
+    }
+    counts.unresolved_dispatch = verifier.unresolved_route_dispatch;
+    counts.has_module_mutation = verifier.has_module_mutation;
+    return counts;
+}
+
+test "response total checks routerMatch route functions" {
+    const direct = try routeVerifierCounts(
+        \\function handler(req) {
+        \\  if (req.method === "GET") return Response.text("ok");
+        \\}
+    );
+    const routed = try routeVerifierCounts(
+        \\import { routerMatch } from "zttp:router";
+        \\function route(req) {
+        \\  if (req.method === "GET") return Response.text("ok");
+        \\}
+        \\const routes = { "GET /": route };
+        \\function handler(req) {
+        \\  const found = routerMatch(routes, req);
+        \\  if (found !== undefined) return found.handler(req);
+        \\  return Response.text("not found", { status: 404 });
+        \\}
+    );
+    const clean = try routeVerifierCounts(
+        \\import { routerMatch } from "zttp:router";
+        \\function route(req) { return Response.text("ok"); }
+        \\const routes = { "GET /": route };
+        \\function handler(req) {
+        \\  const found = routerMatch(routes, req);
+        \\  if (found !== undefined) return found.handler(req);
+        \\  return Response.text("not found", { status: 404 });
+        \\}
+    );
+
+    try std.testing.expectEqual(@as(u32, 1), direct.missing_return);
+    try std.testing.expectEqual(direct.missing_return, routed.missing_return);
+    try std.testing.expectEqual(@as(u32, 0), clean.missing_return);
+    try std.testing.expect(!clean.unresolved_dispatch);
+}
+
+test "result safety checks routerMatch route functions" {
+    const direct = try routeVerifierCounts(
+        \\import { jwtVerify } from "zttp:auth";
+        \\function handler(req) {
+        \\  const result = jwtVerify("token", "key");
+        \\  return Response.json({ value: result.value });
+        \\}
+    );
+    const routed = try routeVerifierCounts(
+        \\import { jwtVerify } from "zttp:auth";
+        \\import { routerMatch } from "zttp:router";
+        \\function route(req) {
+        \\  const result = jwtVerify("token", "key");
+        \\  return Response.json({ value: result.value });
+        \\}
+        \\const routes = { "GET /": route };
+        \\function handler(req) {
+        \\  const found = routerMatch(routes, req);
+        \\  if (found !== undefined) return found.handler(req);
+        \\  return Response.text("not found", { status: 404 });
+        \\}
+    );
+    const clean = try routeVerifierCounts(
+        \\import { jwtVerify } from "zttp:auth";
+        \\import { routerMatch } from "zttp:router";
+        \\function route(req) {
+        \\  const result = jwtVerify("token", "key");
+        \\  if (!result.ok) return Response.text("unauthorized", { status: 401 });
+        \\  return Response.json({ value: result.value });
+        \\}
+        \\const routes = { "GET /": route };
+        \\function handler(req) {
+        \\  const found = routerMatch(routes, req);
+        \\  if (found !== undefined) return found.handler(req);
+        \\  return Response.text("not found", { status: 404 });
+        \\}
+    );
+
+    try std.testing.expectEqual(@as(u32, 1), direct.unchecked_result);
+    try std.testing.expectEqual(direct.unchecked_result, routed.unchecked_result);
+    try std.testing.expectEqual(@as(u32, 0), clean.unchecked_result);
+    try std.testing.expect(!clean.unresolved_dispatch);
+}
+
+test "optional safety checks routerMatch route functions" {
+    const direct = try routeVerifierCounts(
+        \\import { env } from "zttp:env";
+        \\function handler(req) {
+        \\  const value = env("HOME");
+        \\  return Response.json({ length: value.length });
+        \\}
+    );
+    const routed = try routeVerifierCounts(
+        \\import { env } from "zttp:env";
+        \\import { routerMatch } from "zttp:router";
+        \\function route(req) {
+        \\  const value = env("HOME");
+        \\  return Response.json({ length: value.length });
+        \\}
+        \\const routes = { "GET /": route };
+        \\function handler(req) {
+        \\  const found = routerMatch(routes, req);
+        \\  if (found !== undefined) return found.handler(req);
+        \\  return Response.text("not found", { status: 404 });
+        \\}
+    );
+    const clean = try routeVerifierCounts(
+        \\import { env } from "zttp:env";
+        \\import { routerMatch } from "zttp:router";
+        \\function route(req) {
+        \\  const value = env("HOME");
+        \\  if (value === undefined) return Response.text("missing");
+        \\  return Response.json({ length: value.length });
+        \\}
+        \\const routes = { "GET /": route };
+        \\function handler(req) {
+        \\  const found = routerMatch(routes, req);
+        \\  if (found !== undefined) return found.handler(req);
+        \\  return Response.text("not found", { status: 404 });
+        \\}
+    );
+
+    try std.testing.expectEqual(@as(u32, 1), direct.unchecked_optional);
+    try std.testing.expectEqual(direct.unchecked_optional, routed.unchecked_optional);
+    try std.testing.expectEqual(@as(u32, 0), clean.unchecked_optional);
+    try std.testing.expect(!clean.unresolved_dispatch);
+}
+
+test "state isolation checks routerMatch route functions" {
+    const direct = try routeVerifierCounts(
+        \\let counter = 0;
+        \\function handler(req) {
+        \\  counter = counter + 1;
+        \\  return Response.json({ counter: counter });
+        \\}
+    );
+    const routed = try routeVerifierCounts(
+        \\import { routerMatch } from "zttp:router";
+        \\let counter = 0;
+        \\function route(req) {
+        \\  counter = counter + 1;
+        \\  return Response.json({ counter: counter });
+        \\}
+        \\const routes = { "GET /": route };
+        \\function handler(req) {
+        \\  const found = routerMatch(routes, req);
+        \\  if (found !== undefined) return found.handler(req);
+        \\  return Response.text("not found", { status: 404 });
+        \\}
+    );
+    const clean = try routeVerifierCounts(
+        \\import { routerMatch } from "zttp:router";
+        \\function route(req) { return Response.text("ok"); }
+        \\const routes = { "GET /": route };
+        \\function handler(req) {
+        \\  const found = routerMatch(routes, req);
+        \\  if (found !== undefined) return found.handler(req);
+        \\  return Response.text("not found", { status: 404 });
+        \\}
+    );
+
+    try std.testing.expectEqual(@as(u32, 1), direct.module_mutation);
+    try std.testing.expectEqual(direct.module_mutation, routed.module_mutation);
+    try std.testing.expect(direct.has_module_mutation);
+    try std.testing.expect(routed.has_module_mutation);
+    try std.testing.expectEqual(@as(u32, 0), clean.module_mutation);
+    try std.testing.expect(!clean.has_module_mutation);
+    try std.testing.expect(!clean.unresolved_dispatch);
+}
+
+test "unresolved routerMatch dispatch costs both verifier properties" {
+    const shapes = [_][]const u8{
+        \\import { routerMatch } from "zttp:router";
+        \\function route(req) { return Response.text("ok"); }
+        \\function handler(req) {
+        \\  const found = routerMatch(req.routes, req);
+        \\  return found.handler(req);
+        \\}
+        ,
+        \\import { routerMatch } from "zttp:router";
+        \\function route(req) { return Response.text("ok"); }
+        \\const routes = { "GET /": route };
+        \\function handler(req) {
+        \\  const found = routerMatch(routes, req);
+        \\  const alias = found;
+        \\  return alias.handler(req);
+        \\}
+        ,
+        \\import { routerMatch } from "zttp:router";
+        \\function route(req) { return Response.text("ok"); }
+        \\const routes = { "GET /": route };
+        \\function handler(req) {
+        \\  const found = routerMatch(routes, req);
+        \\  return found["handler"](req);
+        \\}
+        ,
+        \\import { routerMatch } from "zttp:router";
+        \\function route(req) { return Response.text("ok"); }
+        \\const routes = { "GET /": route };
+        \\function handler(req) {
+        \\  const found = routerMatch(routes, req);
+        \\  const dispatch = found.handler;
+        \\  return dispatch(req);
+        \\}
+        ,
+    };
+    for (shapes) |source| {
+        const counts = try routeVerifierCounts(source);
+        try std.testing.expect(counts.missing_return > 0);
+        try std.testing.expect(counts.unchecked_result > 0);
+        try std.testing.expect(counts.unresolved_dispatch);
+    }
+}
+
+test "reading routerMatch params does not make a stable dispatch unresolved" {
+    const counts = try routeVerifierCounts(
+        \\import { routerMatch } from "zttp:router";
+        \\function route(req) { return Response.text("ok"); }
+        \\const routes = { "GET /:id": route };
+        \\function handler(req) {
+        \\  const found = routerMatch(routes, req);
+        \\  if (found !== undefined) {
+        \\    const params = found.params;
+        \\    if (params.id === "") return Response.text("bad", { status: 400 });
+        \\    return found.handler(req);
+        \\  }
+        \\  return Response.text("not found", { status: 404 });
+        \\}
+    );
+    try std.testing.expect(!counts.unresolved_dispatch);
+    try std.testing.expectEqual(@as(u32, 0), counts.missing_return);
+    try std.testing.expectEqual(@as(u32, 0), counts.unchecked_result);
 }
 
 test "a binding read only through an object spread is not reported unused" {

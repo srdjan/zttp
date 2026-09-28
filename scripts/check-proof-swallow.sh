@@ -53,6 +53,7 @@ proof_files=(
   packages/zts/src/handler_contract.zig
   packages/zts/src/handler_verifier.zig
   packages/zts/src/intent_extractor.zig
+  packages/zts/src/route_resolution.zig
   packages/zts/src/spec_discharge.zig
   packages/zts/src/type_checker.zig
   packages/zts/src/type_env.zig

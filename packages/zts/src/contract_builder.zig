@@ -38,6 +38,7 @@ const module_binding = @import("zts-engine").module_binding;
 const builtin_modules = @import("zts-engine").builtin_modules;
 const manifest_registry_mod = @import("manifest_registry.zig");
 const module_facts_mod = @import("module_facts.zig");
+const route_resolution = @import("route_resolution.zig");
 const module_manifest = @import("zts-engine").module_manifest;
 const bytecode = @import("zts-engine").bytecode;
 const handler_analyzer = @import("zts-engine").handler_analyzer;
@@ -214,6 +215,9 @@ pub const ContractBuilder = struct {
         has_bare_write: bool = false,
         has_cache_read: bool = false,
         has_egress: bool = false,
+        /// A reachable function-valued call could not be resolved. The
+        /// summary is then a lower bound and cannot prove absence properties.
+        unknown: bool = false,
 
         fn includeCall(self: *EffectSummary, effect: module_binding.EffectClass, is_durable: bool) void {
             switch (effect) {
@@ -5639,6 +5643,18 @@ pub const ContractBuilder = struct {
             var seen_functions: std.AutoHashMapUnmanaged(NodeIndex, void) = .empty;
             defer seen_functions.deinit(self.allocator);
             try self.includeReachableFunctionEffects(hf, &summary, &seen_functions);
+
+            const route_resolver = route_resolution.Resolver.init(
+                self.ir_view,
+                self.atoms,
+                self.factsRef(),
+            );
+            var roots = try route_resolver.routeRoots(self.allocator);
+            defer roots.deinit(self.allocator);
+            if (roots.unresolved) summary.unknown = true;
+            for (roots.functions.items) |fn_node| {
+                try self.includeReachableFunctionEffects(fn_node, &summary, &seen_functions);
+            }
             return summary;
         }
 
@@ -5828,6 +5844,22 @@ pub const ContractBuilder = struct {
         seen_functions: *std.AutoHashMapUnmanaged(NodeIndex, void),
     ) std.mem.Allocator.Error!void {
         const call = self.ir_view.getCall(node) orelse return;
+
+        const route_resolver = route_resolution.Resolver.init(
+            self.ir_view,
+            self.atoms,
+            self.factsRef(),
+        );
+        if (try route_resolver.resolveDispatch(self.allocator, call.callee)) |resolved| {
+            var targets = resolved;
+            defer targets.deinit(self.allocator);
+            if (targets.unresolved) summary.unknown = true;
+            for (targets.functions.items) |fn_node| {
+                try self.includeReachableFunctionEffects(fn_node, summary, seen_functions);
+            }
+            return;
+        }
+
         if (self.ir_view.getTag(call.callee) != .identifier) return;
         const binding = self.ir_view.getBinding(call.callee) orelse return;
 
@@ -5892,7 +5924,7 @@ pub const ContractBuilder = struct {
     ) !HandlerProperties {
         const s = try self.computeEffectSummary(handler_fn);
 
-        var read_only = s.io != .write;
+        var read_only = !s.unknown and s.io != .write;
         // Determinism is decided by the flow walk, which the caller ANDs in:
         // it answers whether a varying value reaches the response rather than
         // whether one was read at all, so a handler that logs a timestamp and
@@ -5907,14 +5939,14 @@ pub const ContractBuilder = struct {
         // nothing to prove, so the property stays unproven rather than
         // defaulting to held.
         const deterministic = handler_fn != null;
-        var pure = !s.has_any_call and !s.has_egress;
+        var pure = !s.unknown and !s.has_any_call and !s.has_egress;
 
         if (handler_row) |row| {
             read_only = read_only and row.readOnly();
             pure = pure and row.pure;
         }
 
-        const durable_only_writes = s.io == .write and self.durable_used and !s.has_bare_write;
+        const durable_only_writes = !s.unknown and s.io == .write and self.durable_used and !s.has_bare_write;
         // Scope cleanup callbacks run exactly once on unwind; retrying the request
         // would re-run them, violating at-most-once guarantees for resource cleanup.
         const retry_safe = !self.scope_used and (read_only or durable_only_writes);
@@ -6223,6 +6255,192 @@ test "handler-body registration remains a request-path write" {
         \\function handler(req) {
         \\  schemaCompile("todo", "{\"type\":\"object\"}");
         \\  return Response.json({ ok: true });
+        \\}
+    ;
+    var contract = try buildTestContract(source);
+    defer contract.deinit(std.testing.allocator);
+
+    const props = contract.properties orelse return error.MissingProperties;
+    try std.testing.expect(!props.read_only);
+    try std.testing.expect(!props.retry_safe);
+    try std.testing.expect(!props.idempotent);
+}
+
+test "routed writes match direct handler properties" {
+    const direct_source =
+        \\import { cacheSet } from "zttp:cache";
+        \\function handler(req) {
+        \\  cacheSet("routes", "key", "value");
+        \\  return Response.text("ok");
+        \\}
+    ;
+    const routed_source =
+        \\import { routerMatch } from "zttp:router";
+        \\import { cacheSet } from "zttp:cache";
+        \\function write(req) {
+        \\  cacheSet("routes", "key", "value");
+        \\  return Response.text("ok");
+        \\}
+        \\const routes = { "POST /write": write };
+        \\function handler(req) {
+        \\  const found = routerMatch(routes, req);
+        \\  if (found === undefined) return Response.text("not found", { status: 404 });
+        \\  return found.handler(req);
+        \\}
+    ;
+    var direct = try buildTestContract(direct_source);
+    defer direct.deinit(std.testing.allocator);
+    var routed = try buildTestContract(routed_source);
+    defer routed.deinit(std.testing.allocator);
+
+    const direct_props = direct.properties orelse return error.MissingProperties;
+    const routed_props = routed.properties orelse return error.MissingProperties;
+    try std.testing.expect(!direct_props.read_only);
+    try std.testing.expect(!routed_props.read_only);
+    try std.testing.expect(!direct_props.retry_safe);
+    try std.testing.expect(!routed_props.retry_safe);
+}
+
+test "clean routed handler keeps effect-derived properties" {
+    const source =
+        \\import { routerMatch } from "zttp:router";
+        \\function clean(req) { return Response.text("ok"); }
+        \\const routes = { "GET /clean": clean };
+        \\function handler(req) {
+        \\  const found = routerMatch(routes, req);
+        \\  if (found === undefined) return Response.text("not found", { status: 404 });
+        \\  return found.handler(req);
+        \\}
+    ;
+    var contract = try buildTestContract(source);
+    defer contract.deinit(std.testing.allocator);
+
+    const props = contract.properties orelse return error.MissingProperties;
+    try std.testing.expect(props.read_only);
+    try std.testing.expect(props.stateless);
+    try std.testing.expect(props.retry_safe);
+    try std.testing.expect(!props.has_egress);
+}
+
+test "unresolved routed effect summary fails closed" {
+    const source =
+        \\import { routerMatch } from "zttp:router";
+        \\function clean(req) { return Response.text("ok"); }
+        \\function handler(req) {
+        \\  const routes = { "GET /clean": clean };
+        \\  const found = routerMatch(routes, req);
+        \\  if (found === undefined) return Response.text("not found", { status: 404 });
+        \\  return found.handler(req);
+        \\}
+    ;
+    var contract = try buildTestContract(source);
+    defer contract.deinit(std.testing.allocator);
+
+    const props = contract.properties orelse return error.MissingProperties;
+    try std.testing.expect(!props.pure);
+    try std.testing.expect(!props.read_only);
+    try std.testing.expect(!props.stateless);
+    try std.testing.expect(!props.retry_safe);
+}
+
+test "unstable routed dispatch fails closed with resolvable roots" {
+    const source =
+        \\import { routerMatch } from "zttp:router";
+        \\function clean(req) { return Response.text("ok"); }
+        \\const routes = { "GET /clean": clean };
+        \\function handler(req) {
+        \\  const found = routerMatch(routes, req);
+        \\  if (found === undefined) return Response.text("not found", { status: 404 });
+        \\  found.handler = clean;
+        \\  return found.handler(req);
+        \\}
+    ;
+    var contract = try buildTestContract(source);
+    defer contract.deinit(std.testing.allocator);
+
+    const props = contract.properties orelse return error.MissingProperties;
+    try std.testing.expect(!props.read_only);
+    try std.testing.expect(!props.stateless);
+    try std.testing.expect(!props.retry_safe);
+}
+
+test "route roots contribute summary facts without dispatch" {
+    const source =
+        \\import { routerMatch } from "zttp:router";
+        \\import { cacheGet } from "zttp:cache";
+        \\function read(req) { return Response.json(cacheGet("routes", "key")); }
+        \\const routes = { "GET /read": read };
+        \\function handler(req) {
+        \\  routerMatch(routes, req);
+        \\  return Response.text("ok");
+        \\}
+    ;
+    var contract = try buildTestContract(source);
+    defer contract.deinit(std.testing.allocator);
+
+    const props = contract.properties orelse return error.MissingProperties;
+    try std.testing.expect(props.read_only);
+    try std.testing.expect(!props.stateless);
+}
+
+test "routed cache reads and egress contribute their summary facts" {
+    const cache_source =
+        \\import { routerMatch } from "zttp:router";
+        \\import { cacheGet } from "zttp:cache";
+        \\function read(req) { return Response.json(cacheGet("routes", "key")); }
+        \\const routes = { "GET /read": read };
+        \\function handler(req) {
+        \\  const found = routerMatch(routes, req);
+        \\  if (found === undefined) return Response.text("not found", { status: 404 });
+        \\  return found.handler(req);
+        \\}
+    ;
+    const egress_source =
+        \\import { routerMatch } from "zttp:router";
+        \\import { fetchSync } from "zttp:fetch";
+        \\function fetchRoute(req) { return fetchSync("https://example.com"); }
+        \\const routes = { "GET /fetch": fetchRoute };
+        \\function handler(req) {
+        \\  const found = routerMatch(routes, req);
+        \\  if (found === undefined) return Response.text("not found", { status: 404 });
+        \\  return found.handler(req);
+        \\}
+    ;
+    const direct_egress_source =
+        \\import { fetchSync } from "zttp:fetch";
+        \\function handler(req) { return fetchSync("https://example.com"); }
+    ;
+    var cache_contract = try buildTestContract(cache_source);
+    defer cache_contract.deinit(std.testing.allocator);
+    var egress_contract = try buildTestContract(egress_source);
+    defer egress_contract.deinit(std.testing.allocator);
+    var direct_egress_contract = try buildTestContract(direct_egress_source);
+    defer direct_egress_contract.deinit(std.testing.allocator);
+
+    const cache_props = cache_contract.properties orelse return error.MissingProperties;
+    try std.testing.expect(cache_props.read_only);
+    try std.testing.expect(!cache_props.stateless);
+    const direct_egress_props = direct_egress_contract.properties orelse return error.MissingProperties;
+    const egress_props = egress_contract.properties orelse return error.MissingProperties;
+    try std.testing.expectEqual(direct_egress_props.has_egress, egress_props.has_egress);
+    try std.testing.expectEqual(direct_egress_props.read_only, egress_props.read_only);
+}
+
+test "routed bare write prevents durable-only retry proof" {
+    const source =
+        \\import { routerMatch } from "zttp:router";
+        \\import { step } from "zttp:durable";
+        \\import { cacheSet } from "zttp:cache";
+        \\function write(req) {
+        \\  cacheSet("routes", "key", "value");
+        \\  return Response.text("ok");
+        \\}
+        \\const routes = { "POST /write": write };
+        \\function handler(req) {
+        \\  step("audit", () => 1);
+        \\  const found = routerMatch(routes, req);
+        \\  if (found === undefined) return Response.text("not found", { status: 404 });
+        \\  return found.handler(req);
         \\}
     ;
     var contract = try buildTestContract(source);

@@ -18,6 +18,7 @@ const module_binding = @import("zts-engine").module_binding;
 const builtin_modules = @import("zts-engine").builtin_modules;
 const manifest_registry_mod = @import("manifest_registry.zig");
 const module_facts_mod = @import("module_facts.zig");
+const route_resolution = @import("route_resolution.zig");
 const type_env_mod = @import("type_env.zig");
 const type_pool_mod = @import("type_pool.zig");
 const bool_checker = @import("bool_checker.zig");
@@ -164,6 +165,9 @@ pub const Analyzer = struct {
     /// the same walk that computes effect rows, regardless of any declared
     /// `Proof<T, P>`/`Effects<...>` capsule.
     nested_workflow_calls: std.ArrayListUnmanaged(NestedWorkflowCall),
+    /// Inline route functions currently being folded into an owner's row.
+    /// Named routes use the ordinary call graph recursion machinery.
+    inline_route_stack: std.AutoHashMapUnmanaged(NodeIndex, void),
 
     pub fn init(allocator: std.mem.Allocator, ir_view: IrView, atoms: ?*atom_table.AtomTable) Analyzer {
         return initWithManifestRegistry(allocator, ir_view, atoms, null);
@@ -187,6 +191,7 @@ pub const Analyzer = struct {
             .callee_storage = .empty,
             .durable_callback_depth = 0,
             .nested_workflow_calls = .empty,
+            .inline_route_stack = .empty,
         };
     }
 
@@ -198,6 +203,7 @@ pub const Analyzer = struct {
         self.callee_starts.deinit(self.allocator);
         self.callee_storage.deinit(self.allocator);
         self.nested_workflow_calls.deinit(self.allocator);
+        self.inline_route_stack.deinit(self.allocator);
     }
 
     pub fn analyze(self: *Analyzer, root: NodeIndex) !void {
@@ -376,6 +382,9 @@ pub const Analyzer = struct {
             defer seen_users.deinit(self.allocator);
             var row: EffectRow = .{};
             try self.walkBaseExpr(self.functions.items[i].body_node, i, &row, &seen_users);
+            if (std.mem.eql(u8, self.functions.items[i].name, "handler")) {
+                try self.contributeRouteRoots(i, &row, &seen_users);
+            }
             self.functions.items[i].row = row;
             // Snapshot the direct capability set before propagation unions in
             // the rows of transitively-called user functions.
@@ -577,6 +586,13 @@ pub const Analyzer = struct {
             }
         }
 
+        // `found.handler(...)` is an indirect call, but a stable literal
+        // `routerMatch` table makes its target set finite. Add every resolved
+        // route to the owner's call graph. An unstable table, route value, or
+        // selected result leaves the row as a lower bound, so no property can
+        // treat missing route effects as proof that they are absent.
+        if (try self.contributeRouteDispatch(call.callee, owner, row, seen_users)) return;
+
         if (self.ir_view.getTag(call.callee) != .identifier) return;
         const binding = self.ir_view.getBinding(call.callee) orelse return;
 
@@ -663,6 +679,78 @@ pub const Analyzer = struct {
         if (!self.calleeIsUnresolvable(binding)) return;
         if (try self.contributeDeclaredCallbackRow(binding, owner, row)) return;
         row.lower_bound = true;
+    }
+
+    fn contributeRouteDispatch(
+        self: *Analyzer,
+        callee: NodeIndex,
+        owner: usize,
+        row: *EffectRow,
+        seen_users: *std.AutoHashMapUnmanaged(usize, void),
+    ) WalkError!bool {
+        const facts = try self.resolveFacts();
+        const resolver = route_resolution.Resolver.init(self.ir_view, self.atoms, facts);
+        var targets = try resolver.resolveDispatch(self.allocator, callee) orelse return false;
+        defer targets.deinit(self.allocator);
+
+        try self.contributeRouteTargets(targets.functions.items, targets.unresolved, owner, row, seen_users);
+        return true;
+    }
+
+    fn contributeRouteRoots(
+        self: *Analyzer,
+        owner: usize,
+        row: *EffectRow,
+        seen_users: *std.AutoHashMapUnmanaged(usize, void),
+    ) WalkError!void {
+        const facts = try self.resolveFacts();
+        const resolver = route_resolution.Resolver.init(self.ir_view, self.atoms, facts);
+        var roots = try resolver.routeRoots(self.allocator);
+        defer roots.deinit(self.allocator);
+        try self.contributeRouteTargets(roots.functions.items, roots.unresolved, owner, row, seen_users);
+    }
+
+    fn contributeRouteTargets(
+        self: *Analyzer,
+        targets: []const NodeIndex,
+        unresolved: bool,
+        owner: usize,
+        row: *EffectRow,
+        seen_users: *std.AutoHashMapUnmanaged(usize, void),
+    ) WalkError!void {
+        if (unresolved) row.lower_bound = true;
+        for (targets) |fn_node| {
+            if (self.functionIndex(fn_node)) |callee_idx| {
+                if (callee_idx == owner) row.recursive = true;
+                const gop = try seen_users.getOrPut(self.allocator, callee_idx);
+                if (!gop.found_existing) try self.callee_storage.append(self.allocator, callee_idx);
+                continue;
+            }
+
+            // An inline route function has no named FunctionEffect row. Walk
+            // its body into the dispatching owner so its direct effects and
+            // calls to named helpers still contribute to the owner's row.
+            const func = self.ir_view.getFunction(fn_node) orelse {
+                row.lower_bound = true;
+                continue;
+            };
+            const active = try self.inline_route_stack.getOrPut(self.allocator, fn_node);
+            if (active.found_existing) {
+                row.recursive = true;
+                row.lower_bound = true;
+                continue;
+            }
+            defer _ = self.inline_route_stack.remove(fn_node);
+            try self.walkBaseStmt(func.body, owner, row, seen_users);
+        }
+    }
+
+    fn functionIndex(self: *const Analyzer, fn_node: NodeIndex) ?usize {
+        const func = self.ir_view.getFunction(fn_node) orelse return null;
+        for (self.functions.items, 0..) |function, index| {
+            if (function.body_node == func.body) return index;
+        }
+        return null;
     }
 
     /// D2 section 4's I3: a function type carries an effect ceiling, so a call
@@ -1013,6 +1101,25 @@ const testing = std.testing;
 const JsParser = @import("zts-engine").parser.JsParser;
 const module_manifest = @import("zts-engine").module_manifest;
 
+fn analyzeNamedRow(source: []const u8, name: []const u8) !EffectRow {
+    const allocator = testing.allocator;
+    var atoms = atom_table.AtomTable.init(allocator);
+    defer atoms.deinit();
+    var parser = try JsParser.init(allocator, source);
+    parser.setAtomTable(&atoms);
+    defer parser.deinit();
+    const root = try parser.parse();
+    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    var analyzer = Analyzer.init(allocator, view, &atoms);
+    defer analyzer.deinit();
+    try analyzer.analyze(root);
+    return analyzer.lookup(name) orelse error.FunctionNotFound;
+}
+
+fn analyzeHandlerRow(source: []const u8) !EffectRow {
+    return analyzeNamedRow(source, "handler");
+}
+
 test "leaf pure function has empty effect row" {
     const allocator = testing.allocator;
     var atoms = atom_table.AtomTable.init(allocator);
@@ -1297,6 +1404,145 @@ test "write effect propagates transitively to callers" {
 
     const outer = analyzer.lookup("outer") orelse return error.FunctionNotFound;
     try testing.expect(outer.writes);
+}
+
+test "router dispatch joins deterministic effect rows" {
+    const direct = try analyzeHandlerRow(
+        \\function handler(req) {
+        \\  return Response.json({ now: Date.now() });
+        \\}
+    );
+    const routed = try analyzeHandlerRow(
+        \\import { routerMatch } from "zttp:router";
+        \\function clock(req) { return Response.json({ now: Date.now() }); }
+        \\const routes = { "GET /clock": clock };
+        \\function handler(req) {
+        \\  const found = routerMatch(routes, req);
+        \\  if (found === undefined) return Response.text("not found", { status: 404 });
+        \\  return found.handler(req);
+        \\}
+    );
+
+    try testing.expect(!direct.deterministic);
+    try testing.expect(!routed.deterministic);
+}
+
+test "router dispatch joins read only effect rows" {
+    const direct = try analyzeHandlerRow(
+        \\import { cacheSet } from "zttp:cache";
+        \\function handler(req) {
+        \\  cacheSet("routes", "key", "value");
+        \\  return Response.text("ok");
+        \\}
+    );
+    const routed = try analyzeHandlerRow(
+        \\import { routerMatch } from "zttp:router";
+        \\import { cacheSet } from "zttp:cache";
+        \\function write(req) {
+        \\  cacheSet("routes", "key", "value");
+        \\  return Response.text("ok");
+        \\}
+        \\const routes = { "POST /write": write };
+        \\function handler(req) {
+        \\  const found = routerMatch(routes, req);
+        \\  if (found === undefined) return Response.text("not found", { status: 404 });
+        \\  return found.handler(req);
+        \\}
+    );
+
+    try testing.expect(!direct.readOnly());
+    try testing.expect(!routed.readOnly());
+}
+
+test "router dispatch adds route effects to the dispatching function" {
+    const row = try analyzeNamedRow(
+        \\import { routerMatch } from "zttp:router";
+        \\import { cacheSet } from "zttp:cache";
+        \\function write(req) {
+        \\  cacheSet("routes", "key", "value");
+        \\  return Response.text("ok");
+        \\}
+        \\const routes = { "POST /write": write };
+        \\function dispatch(req) {
+        \\  const found = routerMatch(routes, req);
+        \\  if (found === undefined) return Response.text("not found", { status: 404 });
+        \\  return found.handler(req);
+        \\}
+        \\function handler(req) { return Response.text("ok"); }
+    , "dispatch");
+
+    try testing.expect(!row.readOnly());
+}
+
+test "router roots contribute even when the handler does not dispatch" {
+    const row = try analyzeHandlerRow(
+        \\import { routerMatch } from "zttp:router";
+        \\import { cacheSet } from "zttp:cache";
+        \\function write(req) {
+        \\  cacheSet("routes", "key", "value");
+        \\  return Response.text("ok");
+        \\}
+        \\const routes = { "POST /write": write };
+        \\function handler(req) {
+        \\  routerMatch(routes, req);
+        \\  return Response.text("ok");
+        \\}
+    );
+
+    try testing.expect(!row.readOnly());
+}
+
+test "clean router dispatch keeps effect properties" {
+    const row = try analyzeHandlerRow(
+        \\import { routerMatch } from "zttp:router";
+        \\function clean(req) { return Response.text("ok"); }
+        \\const routes = { "GET /clean": clean };
+        \\function handler(req) {
+        \\  const found = routerMatch(routes, req);
+        \\  if (found === undefined) return Response.text("not found", { status: 404 });
+        \\  return found.handler(req);
+        \\}
+    );
+
+    try testing.expect(row.deterministic);
+    try testing.expect(row.readOnly());
+    try testing.expect(!row.lower_bound);
+}
+
+test "unresolved router dispatch leaves the effect row a lower bound" {
+    const row = try analyzeHandlerRow(
+        \\import { routerMatch } from "zttp:router";
+        \\function clean(req) { return Response.text("ok"); }
+        \\function handler(req) {
+        \\  const routes = { "GET /clean": clean };
+        \\  const found = routerMatch(routes, req);
+        \\  if (found === undefined) return Response.text("not found", { status: 404 });
+        \\  return found.handler(req);
+        \\}
+    );
+
+    try testing.expect(row.lower_bound);
+}
+
+test "recursive inline route dispatch fails closed without recursing the analyzer" {
+    const row = try analyzeHandlerRow(
+        \\import { routerMatch } from "zttp:router";
+        \\const routes = {
+        \\  "GET /loop": (req) => {
+        \\    const found = routerMatch(routes, req);
+        \\    if (found === undefined) return Response.text("not found", { status: 404 });
+        \\    return found.handler(req);
+        \\  }
+        \\};
+        \\function handler(req) {
+        \\  const found = routerMatch(routes, req);
+        \\  if (found === undefined) return Response.text("not found", { status: 404 });
+        \\  return found.handler(req);
+        \\}
+    );
+
+    try testing.expect(row.recursive);
+    try testing.expect(row.lower_bound);
 }
 
 test "partner write-classified import marks function and callers as writing" {
