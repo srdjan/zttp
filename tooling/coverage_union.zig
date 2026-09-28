@@ -2,17 +2,17 @@
 //! corpus identity.
 //!
 //! A single coverage row is a sample, not a property of the corpus. Three
-//! recordings of corpus `0012ad8ca6d5` measured 4, 5 and 2 rules with the same
-//! prompts, the same seeds, the same provider and model and the same compiler,
-//! because a rule is counted only when the model happens to make the mistake
-//! that trips it. Any one of those rows understates what these prompts can
-//! reach. The union does not.
+//! recordings of corpus `0012ad8ca6d5` measured 4, 5 and 2 rules. A rule is
+//! counted only when the recorded model output makes the mistake that trips it.
+//! Any one of those rows understates what these prompts can reach. The union
+//! does not.
 //!
 //! The record is `git log docs/coverage.json`, which the coverage page already
 //! names as its history. This reads exactly that, keeps the entries whose
 //! `corpusVersion` matches the identity asked for, and unions their `tripped`
-//! arrays. Codes given on the command line are unioned in too, so a run can
-//! include the result it is about to publish and is not yet in git.
+//! arrays. Codes given on the command line form the pending set. Its source tree
+//! hash identifies the committed packages tree that contains the cassettes,
+//! corpus, and compiler. A source tree not yet in history joins every aggregate.
 //!
 //! Ported from `scripts/coverage-union.sh`, which computed this in a python3
 //! heredoc. The port is not cosmetic: the shell version refused outright when
@@ -29,7 +29,7 @@
 //! have exposed it did not exist yet to be tried.
 //!
 //! Usage:
-//!   coverage-union <corpus-version> [code ...]
+//!   coverage-union <corpus-version> <source-tree-hash> [code ...]
 //!
 //! Prints one `[coverage-union] {json}` line on stdout.
 
@@ -59,11 +59,16 @@ const CodeSet = struct {
     }
 };
 
+const RecordedSet = struct {
+    set: CodeSet,
+    source_tree_hash: ?[]const u8,
+};
+
 pub const Union = struct {
     corpus_version: []const u8,
-    /// How many published runs of this identity the union was computed from.
-    /// The first publication of an identity counts the pending run itself,
-    /// which is the honest answer - one observation - rather than a refusal.
+    source_tree_hash: []const u8,
+    /// How many published runs and new pending source trees of this identity the
+    /// union was computed from. The first publication counts the pending run.
     observations: usize,
     distinct_sets: usize,
     smallest_set: usize,
@@ -74,6 +79,7 @@ pub const Union = struct {
         for (self.codes) |code| allocator.free(code);
         allocator.free(self.codes);
         allocator.free(self.corpus_version);
+        allocator.free(self.source_tree_hash);
         self.* = undefined;
     }
 };
@@ -81,12 +87,14 @@ pub const Union = struct {
 pub const Failure = error{
     UsageMissingVersion,
     VersionNotHex,
+    SourceTreeHashNotHex,
     ShallowClone,
     NoCoverageHistory,
     NoParsedBlob,
     NoTrippedList,
     FirstRunWithoutCodes,
     FirstRunWithUnreadableHistory,
+    SourceTreeSetConflict,
 };
 
 /// The message each refusal prints. Kept beside the error set so a new member
@@ -94,14 +102,16 @@ pub const Failure = error{
 /// can require every one of them to be exercised.
 pub fn failureMessage(failure: Failure) []const u8 {
     return switch (failure) {
-        error.UsageMissingVersion => "usage: coverage-union <corpus-version> [code ...]",
+        error.UsageMissingVersion => "usage: coverage-union <corpus-version> <source-tree-hash> [code ...]",
         error.VersionNotHex => "corpus version must be 64 lowercase hex characters",
+        error.SourceTreeHashNotHex => "source tree hash must be 40 or 64 lowercase hex characters",
         error.ShallowClone => "shallow clone: the history this union is computed from is truncated",
         error.NoCoverageHistory => "no commit in this history touches docs/coverage.json; there is nothing to union",
         error.NoParsedBlob => "no coverage.json blob in history parsed",
         error.NoTrippedList => "no entry for this corpus carries a tripped list",
         error.FirstRunWithoutCodes => "this identity has no published run and no pending codes were given; that would publish an empty set as an observation",
         error.FirstRunWithUnreadableHistory => "no readable published run carries this identity, but some coverage.json blob in history could not be read; it may have been one, so this cannot be reported as a first publication",
+        error.SourceTreeSetConflict => "the pending tripped set differs from the published set for the same source tree hash",
     };
 }
 
@@ -141,6 +151,14 @@ fn runGit(
 
 pub fn isCorpusVersion(value: []const u8) bool {
     if (value.len != 64) return false;
+    for (value) |byte| {
+        if (!std.ascii.isDigit(byte) and !(byte >= 'a' and byte <= 'f')) return false;
+    }
+    return true;
+}
+
+fn isSourceTreeHash(value: []const u8) bool {
+    if (value.len != 40 and value.len != 64) return false;
     for (value) |byte| {
         if (!std.ascii.isDigit(byte) and !(byte >= 'a' and byte <= 'f')) return false;
     }
@@ -188,11 +206,11 @@ fn publishedSets(
     version: []const u8,
     parsed_any: *bool,
     unreadable: *usize,
-) !std.ArrayList(CodeSet) {
+) !std.ArrayList(RecordedSet) {
     const log = try runGit(arena, io, root, &.{ "git", "log", "--format=%H", "--", "docs/coverage.json" });
     if (!log.ok or std.mem.trim(u8, log.stdout, " \t\r\n").len == 0) return error.NoCoverageHistory;
 
-    var sets: std.ArrayList(CodeSet) = .empty;
+    var sets: std.ArrayList(RecordedSet) = .empty;
     var commits = std.mem.tokenizeAny(u8, log.stdout, " \t\r\n");
     while (commits.next()) |commit| {
         const spec = try std.fmt.allocPrint(arena, "{s}:docs/coverage.json", .{commit});
@@ -228,29 +246,39 @@ fn publishedSets(
             if (item != .string) continue;
             try codes.append(arena, item.string);
         }
-        try sets.append(arena, .{ .codes = try sortedUnique(arena, codes.items) });
+        var source_tree_hash: ?[]const u8 = null;
+        if (parsed.object.get("corpusUnion")) |union_value| {
+            if (union_value == .object) {
+                if (union_value.object.get("sourceTreeHash")) |hash_value| {
+                    if (hash_value == .string) source_tree_hash = hash_value.string;
+                }
+            }
+        }
+        try sets.append(arena, .{
+            .set = .{ .codes = try sortedUnique(arena, codes.items) },
+            .source_tree_hash = source_tree_hash,
+        });
     }
     return sets;
 }
 
 /// Compute the union for one identity.
 ///
-/// `pending` is the run about to be published, which is not in git yet. When
-/// history carries runs of this identity the pending codes join the union
-/// exactly as the shell version had them, and `observations` counts the
-/// published rows. When history carries none, the pending run is itself the one
-/// observation: a union of one measured set, reported as one, which the page
-/// prints the count of. Refusing instead - as the shell version did - makes the
-/// first publication of a new identity impossible, and the corpus identity
-/// moves by construction whenever a prompt is edited.
+/// `pending` is the run about to be published. Its `source_tree_hash` names the
+/// committed packages tree that produced it. A pending tree absent from history
+/// joins the observations and all set statistics. A matching tree contributes
+/// nothing new. Historical rows without this identity remain observations and
+/// cannot suppress the pending run.
 pub fn compute(
     allocator: std.mem.Allocator,
     io: std.Io,
     root: []const u8,
     version: []const u8,
+    source_tree_hash: []const u8,
     pending: []const []const u8,
 ) !Union {
     if (!isCorpusVersion(version)) return error.VersionNotHex;
+    if (!isSourceTreeHash(source_tree_hash)) return error.SourceTreeHashNotHex;
 
     var shallow = try runGit(allocator, io, root, &.{ "git", "rev-parse", "--is-shallow-repository" });
     defer shallow.deinit(allocator);
@@ -273,7 +301,8 @@ pub fn compute(
 
     const pending_set = try sortedUnique(arena, pending);
 
-    var sets: []const CodeSet = published.items;
+    var sets: std.ArrayList(CodeSet) = .empty;
+    for (published.items) |recorded| try sets.append(arena, recorded.set);
     if (published.items.len == 0) {
         if (pending_set.len == 0) return error.FirstRunWithoutCodes;
         // The first-publication path claims that nothing of this identity was
@@ -283,19 +312,27 @@ pub fn compute(
         // into a silent wrong count: where history is unreadable the honest
         // answer is a refusal that says which commit to look at.
         if (unreadable != 0) return error.FirstRunWithUnreadableHistory;
-        const only = try arena.alloc(CodeSet, 1);
-        only[0] = .{ .codes = pending_set };
-        sets = only;
+        try sets.append(arena, .{ .codes = pending_set });
+    } else if (pending_set.len != 0) {
+        const pending_code_set = CodeSet{ .codes = pending_set };
+        var already_published = false;
+        for (published.items) |recorded| {
+            if (recorded.source_tree_hash) |published_hash| {
+                if (!std.mem.eql(u8, published_hash, source_tree_hash)) continue;
+                if (!recorded.set.eql(pending_code_set)) return error.SourceTreeSetConflict;
+                already_published = true;
+            }
+        }
+        if (!already_published) try sets.append(arena, pending_code_set);
     }
-    if (sets.len == 0) return error.NoTrippedList;
+    if (sets.items.len == 0) return error.NoTrippedList;
 
     var seen: std.StringArrayHashMapUnmanaged(void) = .empty;
-    for (pending_set) |code| try seen.put(arena, code, {});
 
     var distinct: std.ArrayList(CodeSet) = .empty;
     var smallest: usize = std.math.maxInt(usize);
     var largest: usize = 0;
-    for (sets) |set| {
+    for (sets.items) |set| {
         for (set.codes) |code| try seen.put(arena, code, {});
         smallest = @min(smallest, set.codes.len);
         largest = @max(largest, set.codes.len);
@@ -322,7 +359,8 @@ pub fn compute(
 
     return .{
         .corpus_version = try allocator.dupe(u8, version),
-        .observations = sets.len,
+        .source_tree_hash = try allocator.dupe(u8, source_tree_hash),
+        .observations = sets.items.len,
         .distinct_sets = distinct.items.len,
         .smallest_set = smallest,
         .largest_set = largest,
@@ -332,10 +370,11 @@ pub fn compute(
 
 pub fn writeJson(result: Union, writer: *std.Io.Writer) !void {
     try writer.print(
-        "{{\"corpusVersion\": \"{s}\", \"observations\": {d}, \"distinctSets\": {d}, " ++
+        "{{\"corpusVersion\": \"{s}\", \"sourceTreeHash\": \"{s}\", \"observations\": {d}, \"distinctSets\": {d}, " ++
             "\"smallestSet\": {d}, \"largestSet\": {d}, \"unionCount\": {d}, \"union\": [",
         .{
             result.corpus_version,
+            result.source_tree_hash,
             result.observations,
             result.distinct_sets,
             result.smallest_set,
@@ -390,15 +429,17 @@ pub fn main(init: std.process.Init.Minimal) !void {
         }
     }.print;
 
-    if (args.len < 2) fail(&stderr_writer.interface, error.UsageMissingVersion);
+    if (args.len < 3) fail(&stderr_writer.interface, error.UsageMissingVersion);
 
-    var result = compute(allocator, io, ".", args[1], args[2..]) catch |err| switch (err) {
+    var result = compute(allocator, io, ".", args[1], args[2], args[3..]) catch |err| switch (err) {
         error.VersionNotHex,
+        error.SourceTreeHashNotHex,
         error.ShallowClone,
         error.NoCoverageHistory,
         error.NoParsedBlob,
         error.NoTrippedList,
         error.FirstRunWithoutCodes,
+        error.SourceTreeSetConflict,
         => |failure| fail(&stderr_writer.interface, failure),
         else => return err,
     };
@@ -424,6 +465,8 @@ const testing = std.testing;
 
 const version_a = "e6801afae0990b304b924bcb27e5d435cf75ed922f6064241cb401a1d6845576";
 const version_b = "0012ad8ca6d5d08ac5023862378fe0c971b3672dadbc079256fb47d810033516";
+const source_tree_a = "1111111111111111111111111111111111111111";
+const source_tree_b = "2222222222222222222222222222222222222222";
 
 /// A throwaway repository with a real `docs/coverage.json` history, so the
 /// thing under test is the same `git log`/`git show` path the gate runs rather
@@ -456,6 +499,7 @@ const Fixture = struct {
         io: std.Io,
         version: ?[]const u8,
         codes: []const []const u8,
+        source_tree_hash: ?[]const u8,
     ) !void {
         var body: std.ArrayList(u8) = .empty;
         defer body.deinit(testing.allocator);
@@ -469,7 +513,13 @@ const Fixture = struct {
                 try body.appendSlice(testing.allocator, code);
                 try body.append(testing.allocator, '"');
             }
-            try body.appendSlice(testing.allocator, "]}\n");
+            try body.append(testing.allocator, ']');
+            if (source_tree_hash) |hash| {
+                try body.appendSlice(testing.allocator, ", \"corpusUnion\": {\"sourceTreeHash\": \"");
+                try body.appendSlice(testing.allocator, hash);
+                try body.appendSlice(testing.allocator, "\"}");
+            }
+            try body.appendSlice(testing.allocator, "}\n");
         } else {
             try body.appendSlice(testing.allocator, "this is not json\n");
         }
@@ -493,7 +543,7 @@ fn testIo() std.Io.Threaded {
     return std.Io.Threaded.init(testing.allocator, .{ .environ = .empty });
 }
 
-test "the first publication of an identity is one observation, not a refusal" {
+test "a first pending run contributes every aggregate statistic" {
     var backend = testIo();
     defer backend.deinit();
     const io = backend.io();
@@ -502,13 +552,14 @@ test "the first publication of an identity is one observation, not a refusal" {
     defer fixture.deinit();
     // History exists but carries a different identity - exactly the state a
     // prompt edit leaves behind, and the one the shell version refused.
-    try fixture.publish(io, version_b, &.{ "ZTS400", "ZTS500" });
+    try fixture.publish(io, version_b, &.{ "ZTS400", "ZTS500" }, null);
 
     var result = try compute(
         testing.allocator,
         io,
         fixture.root,
         version_a,
+        source_tree_a,
         &.{ "ZTS500", "ZTS400", "ZTS501" },
     );
     defer result.deinit(testing.allocator);
@@ -522,44 +573,123 @@ test "the first publication of an identity is one observation, not a refusal" {
     try testing.expectEqualStrings("ZTS501", result.codes[2]);
 }
 
-test "an identity with history counts its published rows and folds the pending run in" {
+test "a new pending set contributes every aggregate statistic" {
     var backend = testIo();
     defer backend.deinit();
     const io = backend.io();
 
     var fixture = try Fixture.init(io);
     defer fixture.deinit();
-    try fixture.publish(io, version_a, &.{ "ZTS400", "ZTS500", "ZTS509" });
-    try fixture.publish(io, version_a, &.{ "ZTS400", "ZTS500" });
+    try fixture.publish(io, version_a, &.{ "ZTS400", "ZTS500", "ZTS509" }, null);
+    try fixture.publish(io, version_a, &.{ "ZTS400", "ZTS500" }, null);
 
-    var result = try compute(testing.allocator, io, fixture.root, version_a, &.{"ZTS502"});
+    var result = try compute(testing.allocator, io, fixture.root, version_a, source_tree_a, &.{"ZTS502"});
     defer result.deinit(testing.allocator);
 
-    try testing.expectEqual(@as(usize, 2), result.observations);
-    try testing.expectEqual(@as(usize, 2), result.distinct_sets);
-    try testing.expectEqual(@as(usize, 2), result.smallest_set);
+    try testing.expectEqual(@as(usize, 3), result.observations);
+    try testing.expectEqual(@as(usize, 3), result.distinct_sets);
+    try testing.expectEqual(@as(usize, 1), result.smallest_set);
     try testing.expectEqual(@as(usize, 3), result.largest_set);
-    // The pending code is unioned in without being counted as a published row,
-    // which is what the shell version did for an identity that has history.
     try testing.expectEqual(@as(usize, 4), result.codes.len);
     try testing.expectEqualStrings("ZTS502", result.codes[2]);
 }
 
-test "two rows naming the same rules in a different order are one shape" {
+test "a pending set larger than history becomes the largest observation" {
     var backend = testIo();
     defer backend.deinit();
     const io = backend.io();
 
     var fixture = try Fixture.init(io);
     defer fixture.deinit();
-    try fixture.publish(io, version_a, &.{ "ZTS500", "ZTS400" });
-    try fixture.publish(io, version_a, &.{ "ZTS400", "ZTS500" });
+    try fixture.publish(io, version_a, &.{ "ZTS400", "ZTS500", "ZTS501", "ZTS509" }, null);
 
-    var result = try compute(testing.allocator, io, fixture.root, version_a, &.{});
+    var result = try compute(
+        testing.allocator,
+        io,
+        fixture.root,
+        version_a,
+        source_tree_a,
+        &.{ "ZTS308", "ZTS400", "ZTS500", "ZTS501", "ZTS509", "ZTS604" },
+    );
+    defer result.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(usize, 2), result.observations);
+    try testing.expectEqual(@as(usize, 2), result.distinct_sets);
+    try testing.expectEqual(@as(usize, 4), result.smallest_set);
+    try testing.expectEqual(@as(usize, 6), result.largest_set);
+    try testing.expectEqual(@as(usize, 6), result.codes.len);
+}
+
+test "a pending source tree already in history is not counted twice" {
+    var backend = testIo();
+    defer backend.deinit();
+    const io = backend.io();
+
+    var fixture = try Fixture.init(io);
+    defer fixture.deinit();
+    try fixture.publish(io, version_a, &.{ "ZTS500", "ZTS400" }, source_tree_a);
+
+    var result = try compute(
+        testing.allocator,
+        io,
+        fixture.root,
+        version_a,
+        source_tree_a,
+        &.{ "ZTS500", "ZTS400" },
+    );
+    defer result.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(usize, 1), result.observations);
+    try testing.expectEqual(@as(usize, 1), result.distinct_sets);
+    try testing.expectEqual(@as(usize, 2), result.smallest_set);
+    try testing.expectEqual(@as(usize, 2), result.largest_set);
+}
+
+test "a pending source tree refuses a conflicting tripped set" {
+    var backend = testIo();
+    defer backend.deinit();
+    const io = backend.io();
+
+    var fixture = try Fixture.init(io);
+    defer fixture.deinit();
+    try fixture.publish(io, version_a, &.{ "ZTS400", "ZTS500" }, source_tree_a);
+
+    try testing.expectError(
+        error.SourceTreeSetConflict,
+        compute(
+            testing.allocator,
+            io,
+            fixture.root,
+            version_a,
+            source_tree_a,
+            &.{ "ZTS400", "ZTS500", "ZTS509" },
+        ),
+    );
+}
+
+test "a distinct source tree counts even when its set matches history" {
+    var backend = testIo();
+    defer backend.deinit();
+    const io = backend.io();
+
+    var fixture = try Fixture.init(io);
+    defer fixture.deinit();
+    try fixture.publish(io, version_a, &.{ "ZTS500", "ZTS400" }, source_tree_a);
+
+    var result = try compute(
+        testing.allocator,
+        io,
+        fixture.root,
+        version_a,
+        source_tree_b,
+        &.{ "ZTS400", "ZTS500" },
+    );
     defer result.deinit(testing.allocator);
 
     try testing.expectEqual(@as(usize, 2), result.observations);
     try testing.expectEqual(@as(usize, 1), result.distinct_sets);
+    try testing.expectEqual(@as(usize, 2), result.smallest_set);
+    try testing.expectEqual(@as(usize, 2), result.largest_set);
 }
 
 test "an unparseable blob is skipped rather than fatal" {
@@ -569,10 +699,10 @@ test "an unparseable blob is skipped rather than fatal" {
 
     var fixture = try Fixture.init(io);
     defer fixture.deinit();
-    try fixture.publish(io, null, &.{});
-    try fixture.publish(io, version_a, &.{"ZTS400"});
+    try fixture.publish(io, null, &.{}, null);
+    try fixture.publish(io, version_a, &.{"ZTS400"}, null);
 
-    var result = try compute(testing.allocator, io, fixture.root, version_a, &.{});
+    var result = try compute(testing.allocator, io, fixture.root, version_a, source_tree_a, &.{});
     defer result.deinit(testing.allocator);
 
     try testing.expectEqual(@as(usize, 1), result.observations);
@@ -585,7 +715,7 @@ test "every refusal carries a message and each reachable one is probed" {
     const io = backend.io();
 
     // A census rather than a sample: iterating the error set means a refusal
-    // added later cannot ship without a message, and the probes below name
+    // added later cannot ship without a message. The tests in this file probe
     // every member the library path can reach.
     inline for (@typeInfo(Failure).error_set.?) |member| {
         try testing.expect(failureMessage(@field(Failure, member.name)).len != 0);
@@ -597,28 +727,33 @@ test "every refusal carries a message and each reachable one is probed" {
     // VersionNotHex, refused before any git call runs.
     try testing.expectError(
         error.VersionNotHex,
-        compute(testing.allocator, io, fixture.root, "not-a-version", &.{}),
+        compute(testing.allocator, io, fixture.root, "not-a-version", source_tree_a, &.{}),
+    );
+
+    try testing.expectError(
+        error.SourceTreeHashNotHex,
+        compute(testing.allocator, io, fixture.root, version_a, "not-a-tree", &.{}),
     );
 
     // NoCoverageHistory: a repository whose history never touches the page.
     try testing.expectError(
         error.NoCoverageHistory,
-        compute(testing.allocator, io, fixture.root, version_a, &.{"ZTS400"}),
+        compute(testing.allocator, io, fixture.root, version_a, source_tree_a, &.{"ZTS400"}),
     );
 
     // NoParsedBlob: the only history is bytes that are not JSON at all.
-    try fixture.publish(io, null, &.{});
+    try fixture.publish(io, null, &.{}, null);
     try testing.expectError(
         error.NoParsedBlob,
-        compute(testing.allocator, io, fixture.root, version_a, &.{"ZTS400"}),
+        compute(testing.allocator, io, fixture.root, version_a, source_tree_a, &.{"ZTS400"}),
     );
 
     // FirstRunWithoutCodes: history exists under another identity and the
     // pending run named nothing, so counting it would publish an empty set.
-    try fixture.publish(io, version_b, &.{"ZTS400"});
+    try fixture.publish(io, version_b, &.{"ZTS400"}, null);
     try testing.expectError(
         error.FirstRunWithoutCodes,
-        compute(testing.allocator, io, fixture.root, version_a, &.{}),
+        compute(testing.allocator, io, fixture.root, version_a, source_tree_a, &.{}),
     );
 
     // FirstRunWithUnreadableHistory: the unparseable blob published earlier in
@@ -627,7 +762,7 @@ test "every refusal carries a message and each reachable one is probed" {
     // be a claim the history cannot support.
     try testing.expectError(
         error.FirstRunWithUnreadableHistory,
-        compute(testing.allocator, io, fixture.root, version_a, &.{"ZTS400"}),
+        compute(testing.allocator, io, fixture.root, version_a, source_tree_a, &.{"ZTS400"}),
     );
 
     // UsageMissingVersion and ShallowClone are reached from `main` and from a
@@ -642,9 +777,9 @@ test "the rendered json carries every field the coverage publisher reads" {
 
     var fixture = try Fixture.init(io);
     defer fixture.deinit();
-    try fixture.publish(io, version_a, &.{ "ZTS400", "ZTS500" });
+    try fixture.publish(io, version_a, &.{ "ZTS400", "ZTS500" }, null);
 
-    var result = try compute(testing.allocator, io, fixture.root, version_a, &.{});
+    var result = try compute(testing.allocator, io, fixture.root, version_a, source_tree_a, &.{});
     defer result.deinit(testing.allocator);
 
     var buffer: [4096]u8 = undefined;
@@ -658,6 +793,7 @@ test "the rendered json carries every field the coverage publisher reads" {
     // The publisher reads exactly these; a rename here is a silent break there.
     inline for (.{
         "corpusVersion",
+        "sourceTreeHash",
         "observations",
         "distinctSets",
         "smallestSet",
@@ -668,5 +804,6 @@ test "the rendered json carries every field the coverage publisher reads" {
         try testing.expect(object.get(field) != null);
     }
     try testing.expectEqualStrings(version_a, object.get("corpusVersion").?.string);
+    try testing.expectEqualStrings(source_tree_a, object.get("sourceTreeHash").?.string);
     try testing.expectEqual(@as(i64, 2), object.get("unionCount").?.integer);
 }

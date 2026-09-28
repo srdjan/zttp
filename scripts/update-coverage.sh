@@ -112,14 +112,16 @@ fi
 seed_payload="$(sed -n 's/^\[seed-coverage\] //p' "$seed_log")"
 
 # The union across every published run of this corpus identity. A single row is
-# a sample: the same prompts, seeds, provider, model and compiler have measured
-# 4, 5 and 2 rules on different draws. `zig build coverage-union` reads
+# a sample: earlier recordings of one corpus identity measured 4, 5 and 2 rules.
+# `zig build coverage-union` reads
 # `git log docs/coverage.json`, which this page already names as its history,
 # and refuses a shallow clone rather than publishing a truncated union as a
 # complete one. The pending run's own codes are passed in because they are not
 # in git yet, and when no published run carries this identity the pending run is
 # itself the one observation - the page prints that count, so a union of one
-# describes itself rather than reading as a complete answer.
+# describes itself rather than reading as a complete answer. The committed
+# packages tree identifies the cassettes, corpus, and compiler. A documentation
+# commit does not change it, so publishing the same recording stays idempotent.
 #
 # Read through a marker line, not through the step's whole stdout: `zig build`
 # owns that stream too, and a build that prints anything would otherwise be
@@ -127,8 +129,12 @@ seed_payload="$(sed -n 's/^\[seed-coverage\] //p' "$seed_log")"
 echo ">> unioning this corpus identity across its published runs"
 union_version="$(printf '%s' "$payload" | python3 -c 'import json,sys; print(json.load(sys.stdin)["corpusVersion"])')"
 union_codes="$(printf '%s' "$payload" | python3 -c 'import json,sys; print(" ".join(json.load(sys.stdin)["tripped"]))')"
+if ! union_source_tree_hash="$(git rev-parse HEAD:packages 2>/dev/null)"; then
+  echo "error: could not identify the committed packages tree" >&2
+  exit 1
+fi
 union_log="$evidence_tmp/union.log"
-if ! zig build coverage-union -- "$union_version" $union_codes >"$union_log" 2>&1; then
+if ! zig build coverage-union -- "$union_version" "$union_source_tree_hash" $union_codes >"$union_log" 2>&1; then
   cat "$union_log" >&2
   echo "error: the corpus union could not be computed; generated evidence is unchanged" >&2
   exit 1
@@ -368,12 +374,11 @@ Untripped: {codes(untripped)}
 
 ## What this corpus has ever reached
 
-The row above is one draw. The same prompts, seeds, provider, model and
-compiler have measured a different set each time they were recorded, because a
-rule is counted only when the model happens to make the mistake that trips it.
-Across {union_runs_phrase} of corpus `{version_short}`, the
-tripped set took {union_shapes_phrase}, the smallest naming
-{union_min} rules and the largest {union_max}.
+The row above is one draw. Recordings of the same headline corpus have measured
+different sets. A rule is counted only when the recorded model output makes the
+mistake that trips it. Across {union_runs_phrase} of corpus `{version_short}`,
+the tripped set took {union_shapes_phrase}, the smallest naming {union_min}
+rules and the largest {union_max}.
 
 | Union across runs | Smallest single run | Largest single run |
 |---|---|---|
