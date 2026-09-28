@@ -2,10 +2,13 @@
 import { cacheGet } from "zttp:cache";
 import { routerMatch } from "zttp:router";
 
+// The capsule claims only what this handler can hold. It does not claim
+// no_secret_leakage: getOrderById returns a value read back from the cache,
+// and a cache read carries unknown provenance, because the read cannot see what
+// an earlier write stored there.
 structural Guardrails<T> = Proof<T,
     | "injection_safe"
     | "state_isolated"
-    | "no_secret_leakage"
 >;
 
 function getOrderById(req: Request): Response {
