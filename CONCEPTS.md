@@ -161,6 +161,8 @@ A mark on a value recording where it came from: an environment secret, a caller'
 
 The empty set of labels is a positive claim that a value carries nothing, not an absence of information. Code that cannot determine a value's provenance must say so with the label that means "could not follow", because returning the empty set instead asserts cleanliness the analysis never established. This bites hardest at a module call, where propagation is not automatic: an export is a propagator only when it declares that its result can hold what it was handed, and one that declares nothing is read as claiming its result holds nothing.
 
+The "could not follow" label belongs only to a value the analysis genuinely cannot trace, such as the result of calling a function value with no resolved body. A call whose behavior the analysis knows, such as a built-in method on a string, keeps its ordinary labels. Applying the label more widely does not make a false pass; it makes a false refusal of a correct program.
+
 ### Declassifier
 An operation entitled to clear one named Data label, because performing it is what that label's discharge means. Validation clears the "came from the request" mark, and a Replay boundary clears the "differs per run" mark.
 
@@ -168,6 +170,13 @@ The entitlement is per-label and never general. A Declassifier still carries eve
 
 ### Sink
 A position where a value leaves the program, such as a response body, a log, or an outbound request. Sinks are where Data labels are judged: a label arriving at a Sink is what costs a Property, and each Sink decides a different set of Properties, since a value reaching a log is not the same disclosure as one reaching a client.
+
+A Sink is judged only inside a function the analysis walks. A Sink in a function that no Analysis root reaches costs nothing, so the Property it should have cost is reported as held.
+
+### Analysis root
+A function that a property analysis walks from its first statement as a place where request data enters user code: the Handler, and every function the Handler can dispatch to indirectly, such as each route of a literal routing table.
+
+A Property holds for a program only when every Analysis root is walked. An indirect call whose target set the analysis can resolve contributes each target as a root, and its value carries the union of what those targets return. An indirect call whose target the analysis cannot resolve carries the label that means "could not follow", so it cannot help prove anything.
 
 ### Capability
 A kind of authority a function reaches for: reading the clock, drawing randomness, reading configuration, writing to storage, talking to the network. Capabilities are declared per module export and enforced where the call happens, so authority is visible in the contract rather than discovered at runtime.
