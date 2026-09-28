@@ -2,7 +2,8 @@
 
 Status: accepted by the owner on 2026-09-27, with decisions 1 to 5 of section 2.
 This authorizes A1 to A6 in order. Each unit gets a design note that the owner
-accepts before its code starts, as in M4. Two review rounds (a design critique and
+accepts before its code starts, as in M4. A1 is complete
+([design note](2026-09-27-m5-a1-agent-entry-design.md), section 11). Two review rounds (a design critique and
 a citation check) are folded in.
 Baseline: local `main` at `e6f33dfc`. This contract resumes the work that the
 [M4 release contract](2026-09-22-m4-release-contract.md) parked, under the

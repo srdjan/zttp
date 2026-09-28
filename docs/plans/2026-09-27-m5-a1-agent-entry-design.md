@@ -1,6 +1,7 @@
 # M5 A1 design note: the agent entry, its admission, and grants
 
-Status: accepted by the owner on 2026-09-27, with the recommended answer to each
+Status: implemented 2026-09-27; U1 to U4 complete, evidence in section 11.
+Accepted by the owner on 2026-09-27, with the recommended answer to each
 question in section 8 (section 9 records them). Revised once after a design
 critique and a citation check before acceptance. Unit A1 of the
 [M5 release contract](2026-09-27-m5-agent-handler-release-contract.md) is
@@ -420,3 +421,29 @@ A1 lands in four commits, each with its own tests passing unfiltered.
 - **U4. Close.** `test-expert-app`; the approved re-record if it is stale, then
   convergence and coverage in that order; the full gate; C-A1 evidence in this
   note.
+
+## 11. C-A1 evidence
+
+A1 closed on 2026-09-27 at `22d0b2e2`. `bash scripts/verify.sh` exited 0
+("all CI test-job steps passed"), with `zig build test`, `test-zruntime`,
+`test-server`, `test-cli`, `test-reference-tools`, `test-expert-app`,
+`test-proof-checker-mutants`, `test-module-boundary`, `test-capability-audit`,
+`test-runtime-purity`, and fmt each exiting 0 on the committed trees.
+
+- Carriage (U1, `6611cd56`, its export-list follow-up included): 25 build refusal
+  reasons and 16 kernel decode errors, each with a census case; the kernel
+  errors have mutant rows. Four removed-check probes each failed a test.
+- Build rules (U2, `a4c4a0a5`): 11 reach refusals, each with a census case;
+  the egress and indirect-dispatch census; removing the provider-URL check or
+  the tool-route dispatch refusal failed a test.
+- Runtime (U3, `22d0b2e2`): admission 401, 413, 400 and delivery; `toolInput`
+  and `agentPrompt` separation; provider endpoint, credential, and durable
+  refusals with zero accepted connections on a loopback listener; ambient
+  refusals under both grants; the null-grant refusal; 503 before install; the
+  three deadline refusals; the frame stack. Removing the endpoint refusal, the
+  null-grant refusal, or the second-push refusal each failed a test.
+- The re-record Q6 approved ran once, after U2 (`d037e696`, `3b0b33ca`,
+  `511a2e81`). First-attempt green fell from 14/19 to 11/19 on that draw; the
+  cause is not attributed.
+- One build defect found on the way and fixed on its own (`c0efdf92`): every
+  `-Dtest-filter` build segfaulted since the build split.
