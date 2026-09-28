@@ -25,9 +25,13 @@ For releases prior to v0.16 see git tags and [RELEASE_CHECKLIST.md](RELEASE_CHEC
   handler may carry these six properties falsely; rebuild them.** Two examples
   claimed properties they did not hold: `examples/system/orders.ts` and
   `examples/system/users.ts` return cache reads, whose provenance is unknown,
-  and now claim only what they hold. The same route-body gap remains in the
-  `response_total`, `results_safe`, `read_only`, `state_isolated`, and
-  `fault_covered` analyses; it is the next fix.
+  and now claim only what they hold. The same route-body gap in the
+  `response_total`, `results_safe`, `optional_safe`, `read_only`,
+  `state_isolated`, and `fault_covered` analyses is also closed: every property
+  analysis now shares one route resolution and fails closed on a dispatch it
+  cannot resolve. **Artifacts built by 0.21.1 and earlier from a routed handler
+  may carry any of these properties falsely as well.** A module-scope mutation
+  now also fails a declared `state_isolated` capsule with ZTS500.
 
 ## [0.21.1] - 2026-09-26
 

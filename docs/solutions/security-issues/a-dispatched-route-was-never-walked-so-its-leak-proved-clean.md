@@ -1,6 +1,7 @@
 ---
 title: A dispatched route was never walked, so its leak proved clean
 date: 2026-09-28
+last_updated: 2026-09-28
 category: security-issues
 module: packages/zts/src/flow_checker.zig (analysis roots and calls through zttp:router routerMatch)
 problem_type: security_issue
@@ -122,7 +123,7 @@ The probe claims only the property under test, so that a failure for another pro
 
 **When a claim in an example stops holding, remove the claim.** Do not add a guard only to keep the claim. A guard can bring its own contract, as `validateObject` did with its request-schema extraction.
 
-**The same gap is still open in five analyses.** The `CHANGELOG.md` `[Unreleased]` entry states that `response_total`, `results_safe`, `read_only`, `state_isolated`, and `fault_covered` do not yet walk route bodies. That fix is next. Until it lands, a routed handler's PROVEN for any of those five is not evidence.
+**The same gap was open in six more analyses, and a second commit closed it.** `response_total`, `results_safe`, `optional_safe`, `read_only`, `state_isolated`, and `fault_covered` each walked only the handler. The flow checker's route resolution now lives in `packages/zts/src/route_resolution.zig` and feeds every property analysis, so a new analysis gets routed roots by using it rather than by repeating the flow fix. A census over every proof property and flow tag requires a routed and a direct probe for each, which is what stops the next analysis from opening the gap again.
 
 **Rebuild routed artifacts.** Per the `CHANGELOG.md` entry, artifacts built by 0.21.1 and earlier from a routed handler can carry the six flow properties falsely.
 
