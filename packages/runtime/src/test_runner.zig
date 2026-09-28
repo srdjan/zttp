@@ -400,14 +400,22 @@ fn runOneTest(
     const ub = trace.unescapeBody(allocator, request.body);
     defer if (ub.owned) |owned| allocator.free(owned);
 
-    var response = rt.executeHandler(.{
+    var request_view: @import("http_types.zig").HttpRequestView = .{
         .method = request.method,
         .url = request.url,
         .path = target.path,
         .query_params = target.params,
         .headers = headers_list,
         .body = ub.slice,
-    }) catch |err| {
+    };
+    const turn = @import("replay_turn.zig").ReplayTurn.prepare(allocator, rt, handler_code, handler_filename, &request_view) catch |err| {
+        return .{ .pass = false, .name = test_case.name, .failures = failures, .err = err };
+    };
+    defer if (turn) |active| active.deinit();
+    var response = rt.executeHandler(request_view) catch |err| {
+        if (turn) |active| active.finish(if (err == error.RequestTimeout) 504 else if (err == error.HandlerNotImplemented) 501 else 500, err == error.RequestTimeout) catch |record_err| {
+            return .{ .pass = false, .name = test_case.name, .failures = failures, .err = record_err };
+        };
         // A hole is an unfinished path, not a failing one, and the servers
         // answer it with 501. A test asserting that status must see the same
         // thing here, or `zttp test` would contradict `zttp dev` about what a
@@ -436,6 +444,10 @@ fn runOneTest(
         return .{ .pass = false, .name = test_case.name, .failures = failures, .err = err };
     };
     defer response.deinit();
+
+    if (turn) |active| active.finish(response.status, false) catch |err| {
+        return .{ .pass = false, .name = test_case.name, .failures = failures, .err = err };
+    };
 
     recordChecks(allocator, &response, &test_case.assertions, &replay_state, options, &failures) catch |err| {
         return .{ .pass = false, .name = test_case.name, .failures = failures, .err = err };
@@ -1992,6 +2004,76 @@ test "runOneTest: req.query is populated from the url query string" {
     const result = runOneTest(allocator, config, handler_code, "<query>", &test_case, .{});
     defer result.deinitFailures(allocator);
 
+    try std.testing.expect(result.err == null);
+    try std.testing.expect(result.pass);
+}
+
+test "runOneTest applies the in-memory agent round budget during replay" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const handler_code =
+        \\import { fetch } from "zttp:fetch";
+        \\import { routerMatch } from "zttp:router";
+        \\import { toolCatalog } from "zttp:tool";
+        \\import { schemaCompile } from "zttp:validate";
+        \\schemaCompile("In", "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{}}");
+        \\schemaCompile("Out", "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{}}");
+        \\function lookup(req) { return Response.json({}); }
+        \\function assistant(req) {
+        \\  const first = fetch("https://api.example.com/v1", { credential: "provider" });
+        \\  const second = fetch("https://api.example.com/v1", { credential: "provider" });
+        \\  return Response.json({ first: first.status, second: second.status, error: second["error"], details: second["details"] });
+        \\}
+        \\const routes = { "POST /tools/lookup": lookup, "POST /agent": assistant };
+        \\toolCatalog({
+        \\  lookup: { route: "POST /tools/lookup", description: "Look up one value.", input: "In", output: "Out", maxInputBytes: 4096 },
+        \\  assistant: {
+        \\    route: "POST /agent",
+        \\    description: "Answer one question.",
+        \\    maxInputBytes: 8192,
+        \\    agent: {
+        \\      tools: ["lookup"],
+        \\      provider: { endpoint: "https://api.example.com", credential: "provider" },
+        \\      limits: { rounds: 1, toolCalls: 1, toolCallsPerRound: 1, argumentBytes: 4096, resultBytes: 16384, turnDeadlineMs: 20000, providerRequestBytes: 32768 }
+        \\    }
+        \\  }
+        \\});
+        \\function handler(req) {
+        \\  const found = routerMatch(routes, req);
+        \\  if (found !== undefined) return found.handler(req);
+        \\  return Response.json({}, { status: 404 });
+        \\}
+    ;
+    const io_calls = [_]trace.IoEntry{.{
+        .seq = 0,
+        .module = "fetch",
+        .func = "fetch",
+        .args_json = "[]",
+        .result_json = "{\"status\":200,\"statusText\":\"OK\",\"ok\":true,\"headers\":{},\"body\":\"done\"}",
+        .provider_phase = .completed,
+        .provider_status = 200,
+    }};
+    const test_case = TestCase{
+        .name = "agent replay round budget",
+        .request = .{
+            .method = "POST",
+            .url = "/agent",
+            .headers_json = "{}",
+            .body = "{\"version\":1,\"prompt\":\"hello\"}",
+        },
+        .io_calls = &io_calls,
+        .assertions = .{ .status = 200, .body_contains = "budget_exhausted" },
+    };
+    const result = runOneTest(
+        allocator,
+        .{ .replay_file_path = "memory", .enforce_arena_escape = false },
+        handler_code,
+        "agent-test-runner.ts",
+        &test_case,
+        .{},
+    );
+    defer result.deinitFailures(allocator);
     try std.testing.expect(result.err == null);
     try std.testing.expect(result.pass);
 }

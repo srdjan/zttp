@@ -1,11 +1,12 @@
 //! HTTP protocol types shared between server and runtime layers.
 //!
-//! These types define the HTTP request/response contract without
-//! depending on the JavaScript engine (zts). The runtime layer
-//! converts between these types and JS objects.
+//! These types define the HTTP request/response contract. Agent requests also
+//! borrow runtime-owned turn state. The runtime layer converts the HTTP values
+//! into JS objects.
 
 const std = @import("std");
 const ascii = std.ascii;
+const TurnState = @import("turn_state.zig").TurnState;
 
 /// A single query parameter key-value pair (references into string_storage)
 pub const QueryParam = struct {
@@ -32,6 +33,9 @@ pub const HttpRequestView = struct {
     tool_grant: ?ToolGrant = null,
     /// The validated prompt, borrowed for this agent request only.
     agent_prompt: ?[]const u8 = null,
+    /// State for the admitted frame-0 agent turn. Nested tool frames must set
+    /// this to null so their effects do not count as provider rounds.
+    turn: ?*TurnState = null,
     /// The accepted capability ceiling of the served generation (M4 T5b),
     /// held for the duration of the call. Null when the generation has none.
     capability_ceiling: ?CapabilityCeiling = null,

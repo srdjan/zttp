@@ -151,6 +151,9 @@ pub fn findPositionalPath(argv: []const []const u8) ?[]const u8 {
             std.mem.eql(u8, arg, "--static") or
             std.mem.eql(u8, arg, "--outbound-host") or
             std.mem.eql(u8, arg, "--outbound-timeout-ms") or
+            std.mem.eql(u8, arg, "--agent-turn-recorder-dir") or
+            std.mem.eql(u8, arg, "--agent-turn-recorder-max-bytes") or
+            std.mem.eql(u8, arg, "--max-agent-turns") or
             std.mem.eql(u8, arg, "--outbound-max-response") or
             std.mem.eql(u8, arg, "--max-body-size") or
             std.mem.eql(u8, arg, "--security-log") or
@@ -171,6 +174,12 @@ pub fn findPositionalPath(argv: []const []const u8) ?[]const u8 {
         return arg;
     }
     return null;
+}
+
+test "agent turn setting values are not handler paths" {
+    const args = [_][]const u8{ "--agent-turn-recorder-dir", "turns", "--agent-turn-recorder-max-bytes", "16M", "--max-agent-turns", "1" };
+    try std.testing.expect(findPositionalPath(&args) == null);
+    try std.testing.expectEqualStrings("handler.ts", findPositionalPath(&(args ++ .{"handler.ts"})).?);
 }
 
 pub fn hasFlag(argv: []const []const u8, name: []const u8) bool {

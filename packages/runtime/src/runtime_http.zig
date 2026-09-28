@@ -30,6 +30,8 @@ const QueryParam = http_types.QueryParam;
 const HttpHeader = http_types.HttpHeader;
 const ResponseHeader = http_types.ResponseHeader;
 const RuntimeConfig = @import("runtime_config.zig").RuntimeConfig;
+const turn_state = @import("turn_state.zig");
+const TurnState = turn_state.TurnState;
 
 const FetchResponseObjects = struct {
     value: zq.JSValue,
@@ -43,6 +45,13 @@ const unixMillis = zq.trace.unixMillis;
 
 fn effectiveOutboundTimeoutMs(rt: *HandlerInstance) u32 {
     var timeout_ms = rt.config.outbound_timeout_ms;
+    if (rt.active_request) |request| {
+        if (request.turn) |turn| {
+            if (turn.provider_timeout_ms) |turn_timeout_ms| {
+                if (turn_timeout_ms < timeout_ms) timeout_ms = turn_timeout_ms;
+            }
+        }
+    }
     if (rt.active_durable_run) |active| {
         if (active.step_timeout_deadline_ms) |deadline_ms| {
             const remaining_ms = deadline_ms - unixMillis();
@@ -610,14 +619,28 @@ pub fn fetchSyncNative(ctx_ptr: *anyopaque, _: zq.JSValue, args: []const zq.JSVa
 }
 
 fn fetchAndRecord(rt: *HandlerInstance, args: []const zq.JSValue) !zq.JSValue {
-    const result = fetchSyncResult(rt, args) catch |err| {
-        return createFetchErrorResponse(rt, "InternalError", @errorName(err));
+    const result = fetch_result: {
+        const fetched = fetchSyncResult(rt, args) catch |err| {
+            const internal = try createFetchErrorResponse(rt, "InternalError", @errorName(err));
+            const is_agent_provider = if (rt.active_request) |request| request.turn != null else false;
+            if (is_agent_provider) break :fetch_result internal;
+            return internal;
+        };
+        break :fetch_result fetched;
     };
 
     // Record fetchSync to trace (it's outside virtual module dispatch)
     const ctx = rt.ctx;
     if (ctx.getModuleState(zq.TraceRecorder, zq.TRACE_STATE_SLOT)) |recorder| {
-        recorder.recordIO("http", "fetchSync", ctx, args, result);
+        const provider_phase: ?zq.trace.ProviderPhase = if (rt.active_request) |request|
+            if (request.turn) |turn| turn.provider_phase else null
+        else
+            null;
+        const provider_status = if (rt.active_request) |request|
+            if (request.turn) |turn| turn.provider_status else null
+        else
+            null;
+        recorder.recordIOWithProviderPhase("http", "fetchSync", ctx, args, result, provider_phase, provider_status);
     }
 
     return result;
@@ -838,7 +861,11 @@ fn parseFetchInitOptions(
             // to be valid UTF-8.
             options.body = zq.bytes.data(raw);
         } else {
-            options.body = getStringData(body_val) orelse {
+            const body_string = if (activeAgentGrant(rt) != null)
+                getStringDataCtx(body_val, rt.ctx)
+            else
+                getStringData(body_val);
+            options.body = body_string orelse {
                 return fetchInitError(rt, allocator, &options, "InvalidBody", "body must be string|Bytes|null");
             };
         }
@@ -972,6 +999,134 @@ fn checkAgentFetch(rt: *HandlerInstance, args: []const zq.JSValue) !?zq.JSValue 
         return try createFetchErrorResponse(rt, "AgentGrantRefused", @tagName(reason));
     }
     return null;
+}
+
+const AgentProviderHook = union(enum) {
+    none,
+    active: *TurnState,
+    refused: zq.JSValue,
+};
+
+fn activeAgentGrant(rt: *HandlerInstance) ?http_types.AgentGrant {
+    const request = rt.active_request orelse return null;
+    const grant = request.tool_grant orelse return null;
+    return grant.agent;
+}
+
+fn fetchInitObject(args: []const zq.JSValue) ?*zq.JSObject {
+    if (args.len >= 1 and args[0].isObject()) return args[0].toPtr(zq.JSObject);
+    if (args.len >= 2 and args[1].isObject()) return args[1].toPtr(zq.JSObject);
+    return null;
+}
+
+/// Return the byte length only when the body has a valid fetch body type.
+/// Invalid bodies reach the normal parser after the pre-record and classify as
+/// not_started; they cannot open a connection.
+fn providerRequestBodyLength(rt: *HandlerInstance, pool: *const zq.HiddenClassPool, args: []const zq.JSValue) ?usize {
+    const init = fetchInitObject(args) orelse return 0;
+    const value = getObjectProperty(rt.ctx, init, pool, zq.Atom.body, "body") orelse return 0;
+    if (value.isNull() or value.isUndefined()) return 0;
+    if (zq.bytes.asBytes(value)) |raw| return zq.bytes.data(raw).len;
+    const body = getStringDataCtx(value, rt.ctx) orelse return null;
+    return body.len;
+}
+
+fn agentTurnRefusal(rt: *HandlerInstance, tag: turn_state.TerminalTag) !zq.JSValue {
+    return createFetchErrorResponse(rt, "AgentTurnRefused", @tagName(tag));
+}
+
+/// Apply the accepted A2 provider hook in its security-relevant order. A
+/// durable pre-record is the admission point for one provider round.
+fn beginAgentProviderFetch(
+    rt: *HandlerInstance,
+    pool: *const zq.HiddenClassPool,
+    args: []const zq.JSValue,
+) !AgentProviderHook {
+    _ = activeAgentGrant(rt) orelse return .none;
+    const request = rt.active_request.?;
+    const turn = request.turn orelse {
+        return .{ .refused = try agentTurnRefusal(rt, .recorder_unavailable) };
+    };
+
+    if (turn.latch) |tag| return .{ .refused = try agentTurnRefusal(rt, tag) };
+
+    const now_ns = zq.monotonicNowNs() catch {
+        turn.closeLatch(.deadline_exceeded);
+        return .{ .refused = try agentTurnRefusal(rt, .deadline_exceeded) };
+    };
+    if (turn.deadlineExpired(now_ns)) {
+        turn.closeLatch(.deadline_exceeded);
+        return .{ .refused = try agentTurnRefusal(rt, .deadline_exceeded) };
+    }
+    if (turn.roundBudgetExhausted()) {
+        turn.closeLatch(.budget_exhausted);
+        return .{ .refused = try agentTurnRefusal(rt, .budget_exhausted) };
+    }
+    if (providerRequestBodyLength(rt, pool, args)) |body_len| {
+        if (body_len > turn.limits.provider_request_bytes) {
+            turn.closeLatch(.budget_exhausted);
+            return .{ .refused = try agentTurnRefusal(rt, .budget_exhausted) };
+        }
+    }
+
+    const ordinal = turn.round;
+    turn.recorder.appendPre(turn.id, turn.nextSequence(), ordinal, @intCast(now_ns)) catch {
+        turn.closeLatch(.recorder_unavailable);
+        return .{ .refused = try agentTurnRefusal(rt, .recorder_unavailable) };
+    };
+    turn.recordSucceeded();
+    turn.spendRound();
+    const budget_now_ns = zq.monotonicNowNs() catch {
+        turn.closeLatch(.deadline_exceeded);
+        turn.provider_started_ns = now_ns;
+        finishAgentProviderFetch(turn);
+        return .{ .refused = try agentTurnRefusal(rt, .deadline_exceeded) };
+    };
+    turn.provider_started_ns = budget_now_ns;
+    if (turn.deadlineExpired(budget_now_ns)) {
+        turn.closeLatch(.deadline_exceeded);
+        finishAgentProviderFetch(turn);
+        return .{ .refused = try agentTurnRefusal(rt, .deadline_exceeded) };
+    }
+    turn.setProviderTimeout(rt.config.outbound_timeout_ms, budget_now_ns);
+    return .{ .active = turn };
+}
+
+fn finishAgentProviderFetch(turn: *TurnState) void {
+    const class = turn.providerOutcome();
+    if (class == .outcome_unknown) turn.closeLatch(.outcome_unknown);
+    const now_ns = zq.monotonicNowNs() catch turn.provider_started_ns;
+    turn.recorder.appendPost(
+        turn.id,
+        turn.nextSequence(),
+        turn.provider_ordinal.?,
+        class,
+        turn.provider_status != null,
+        turn.provider_status,
+        @intCast(now_ns),
+    ) catch {
+        turn.closeLatch(.recorder_unavailable);
+        return;
+    };
+    turn.recordSucceeded();
+}
+
+fn markProviderRequestStarted(rt: *HandlerInstance) void {
+    const request = rt.active_request orelse return;
+    const turn = request.turn orelse return;
+    turn.requestStarted();
+}
+
+fn markProviderHeadReceived(rt: *HandlerInstance, status: u16) void {
+    const request = rt.active_request orelse return;
+    const turn = request.turn orelse return;
+    turn.headReceived(status);
+}
+
+fn markProviderResponseCompleted(rt: *HandlerInstance) void {
+    const request = rt.active_request orelse return;
+    const turn = request.turn orelse return;
+    turn.responseCompleted();
 }
 
 /// Where an upstream response echoed the credential value, or null. Only the
@@ -1118,6 +1273,23 @@ fn fetchSyncResult(rt: *HandlerInstance, args: []const zq.JSValue) !zq.JSValue {
         },
     } else null;
 
+    // Name resolution and validation happen after the turn pre-record. Refresh
+    // the cap immediately before connect so that work cannot restore the old
+    // full timeout or start an effect after the absolute turn deadline.
+    if (rt.active_request) |request| {
+        if (request.turn) |turn| {
+            const budget_now_ns = zq.monotonicNowNs() catch {
+                turn.closeLatch(.deadline_exceeded);
+                return agentTurnRefusal(rt, .deadline_exceeded);
+            };
+            if (turn.deadlineExpired(budget_now_ns)) {
+                turn.closeLatch(.deadline_exceeded);
+                return agentTurnRefusal(rt, .deadline_exceeded);
+            }
+            turn.setProviderTimeout(rt.config.outbound_timeout_ms, budget_now_ns);
+        }
+    }
+
     // One budget for connect, handshake, and exchange, starting after name
     // resolution. The backend arms the watchdog when the connect succeeds.
     var deadline: FetchDeadline = .{ .timeout_ms = effectiveOutboundTimeoutMs(rt), .io = client.io };
@@ -1156,6 +1328,7 @@ fn fetchSyncResult(rt: *HandlerInstance, args: []const zq.JSValue) !zq.JSValue {
 
     if (outboundBody(options.method, options.body)) |payload| {
         req.transfer_encoding = .{ .content_length = payload.len };
+        markProviderRequestStarted(rt);
         var request_body = req.sendBodyUnflushed(&.{}) catch |err| {
             return createFetchErrorResponse(rt, deadline.failCode("RequestSendFailed"), @errorName(err));
         };
@@ -1169,6 +1342,7 @@ fn fetchSyncResult(rt: *HandlerInstance, args: []const zq.JSValue) !zq.JSValue {
             return createFetchErrorResponse(rt, deadline.failCode("RequestSendFailed"), @errorName(err));
         };
     } else {
+        markProviderRequestStarted(rt);
         req.sendBodiless() catch |err| {
             return createFetchErrorResponse(rt, deadline.failCode("RequestSendFailed"), @errorName(err));
         };
@@ -1182,6 +1356,7 @@ fn fetchSyncResult(rt: *HandlerInstance, args: []const zq.JSValue) !zq.JSValue {
         return createFetchErrorResponse(rt, code, @errorName(err));
     };
     const status = @intFromEnum(response.head.status);
+    markProviderHeadReceived(rt, status);
     var owned_head = try snapshotResponseHead(rt.allocator, response.head);
     defer owned_head.deinit(rt.allocator);
 
@@ -1218,6 +1393,8 @@ fn fetchSyncResult(rt: *HandlerInstance, args: []const zq.JSValue) !zq.JSValue {
         const value_str = try rt.ctx.createString(header.value);
         try rt.ctx.setPropertyChecked(created.headers, key_atom, value_str);
     }
+
+    markProviderResponseCompleted(rt);
 
     return created.value;
 }
@@ -1330,15 +1507,46 @@ pub fn fetchModuleCallback(
 
     if (try checkAgentFetch(rt, args)) |refusal| return refusal;
 
+    const hook = try beginAgentProviderFetch(rt, pool, args);
+    switch (hook) {
+        .refused => |refusal| return refusal,
+        .none, .active => {},
+    }
+
+    const result = dispatchFetchModule(rt, pool, args) catch |err| {
+        switch (hook) {
+            .active => |turn| {
+                const internal = createFetchErrorResponse(rt, "InternalError", @errorName(err)) catch |response_err| {
+                    finishAgentProviderFetch(turn);
+                    return response_err;
+                };
+                finishAgentProviderFetch(turn);
+                return internal;
+            },
+            .none => return err,
+            .refused => unreachable,
+        }
+    };
+    return switch (hook) {
+        .active => |turn| blk: {
+            finishAgentProviderFetch(turn);
+            break :blk result;
+        },
+        .none => result,
+        .refused => unreachable,
+    };
+}
+
+fn dispatchFetchModule(
+    rt: *HandlerInstance,
+    pool: *const zq.HiddenClassPool,
+    args: []const zq.JSValue,
+) !zq.JSValue {
     if (rt.config.replay_file_path != null) {
         return fetchModuleReplay(rt);
     }
 
-    const init_obj: ?*zq.JSObject = blk: {
-        if (args.len >= 1 and args[0].isObject()) break :blk args[0].toPtr(zq.JSObject);
-        if (args.len >= 2 and args[1].isObject()) break :blk args[1].toPtr(zq.JSObject);
-        break :blk null;
-    };
+    const init_obj = fetchInitObject(args);
 
     if (init_obj) |obj| {
         switch (try parseDurableFetchOpts(rt, obj, pool)) {
@@ -1388,6 +1596,21 @@ fn fetchModuleReplay(rt: *HandlerInstance) !zq.JSValue {
 
     const status_raw = zq.trace.findJsonIntValue(entry.result_json, "\"status\"") orelse 200;
     const status: u16 = @intCast(@max(100, @min(599, status_raw)));
+    // Old traces have no provider phase. Under an admitted agent turn, treat
+    // that absence as outcome_unknown. Do not infer transport state from an
+    // error name or status.
+    var provider_phase = entry.provider_phase orelse .request_started;
+    if ((provider_phase == .head_received or provider_phase == .completed) and entry.provider_status == null) {
+        provider_phase = .request_started;
+    }
+    switch (provider_phase) {
+        .not_started => {},
+        .request_started => markProviderRequestStarted(rt),
+        .head_received, .completed => {
+            markProviderRequestStarted(rt);
+            markProviderHeadReceived(rt, entry.provider_status.?);
+        },
+    }
 
     const status_text_raw = zq.trace.findJsonStringValue(entry.result_json, "\"statusText\"") orelse "OK";
     const status_text = try zq.trace.unescapeJson(rt.allocator, status_text_raw);
@@ -1416,7 +1639,26 @@ fn fetchModuleReplay(rt: *HandlerInstance) !zq.JSValue {
     if (headers_json) |headers| {
         try copyRecordedFetchHeaders(rt, created.headers, headers);
     }
+    if (rt.active_request) |request| {
+        if (request.turn != null) {
+            try copyRecordedFetchError(rt, created.response, entry.result_json);
+        }
+    }
+    if (provider_phase == .completed) markProviderResponseCompleted(rt);
     return created.value;
+}
+
+fn copyRecordedFetchError(rt: *HandlerInstance, response: *zq.JSObject, result_json: []const u8) !void {
+    const error_raw = zq.trace.findJsonStringValue(result_json, "\"error\"") orelse return;
+    const details_raw = zq.trace.findJsonStringValue(result_json, "\"details\"") orelse "";
+    const error_text = try zq.trace.unescapeJson(rt.allocator, error_raw);
+    defer rt.allocator.free(error_text);
+    const details_text = try zq.trace.unescapeJson(rt.allocator, details_raw);
+    defer rt.allocator.free(details_text);
+    const error_atom = try rt.ctx.atoms.intern("error");
+    const details_atom = try rt.ctx.atoms.intern("details");
+    try rt.ctx.setPropertyChecked(response, error_atom, try rt.ctx.createString(error_text));
+    try rt.ctx.setPropertyChecked(response, details_atom, try rt.ctx.createString(details_text));
 }
 
 fn replayNextIs(state: *const zq.trace.ReplayState, module_name: []const u8, fn_name: []const u8) bool {

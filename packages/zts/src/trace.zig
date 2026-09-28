@@ -120,6 +120,21 @@ pub const TraceRecorder = struct {
         args: []const value.JSValue,
         result: value.JSValue,
     ) void {
+        self.recordIOWithProviderPhase(module_name, fn_name, ctx_ptr, args, result, null, null);
+    }
+
+    /// Agent provider replay needs the actual transport phase. Ordinary I/O
+    /// leaves this absent and retains its existing trace representation.
+    pub fn recordIOWithProviderPhase(
+        self: *TraceRecorder,
+        module_name: []const u8,
+        fn_name: []const u8,
+        ctx_ptr: *context.Context,
+        args: []const value.JSValue,
+        result: value.JSValue,
+        provider_phase: ?ProviderPhase,
+        provider_status: ?u16,
+    ) void {
         if (!self.active) return;
 
         self.append("{\"type\":\"io\",\"seq\":") orelse return;
@@ -137,6 +152,15 @@ pub const TraceRecorder = struct {
 
         self.append("],\"result\":") orelse return;
         self.appendJSValue(ctx_ptr, result) orelse return;
+        if (provider_phase) |phase| {
+            self.append(",\"provider_phase\":\"") orelse return;
+            self.append(@tagName(phase)) orelse return;
+            self.appendByte('"') orelse return;
+        }
+        if (provider_status) |status| {
+            self.append(",\"provider_status\":") orelse return;
+            self.appendInt(status) orelse return;
+        }
         self.append("}\n") orelse return;
 
         self.io_seq += 1;
@@ -351,12 +375,16 @@ pub const RequestTrace = struct {
     body: ?[]const u8,
 };
 
+pub const ProviderPhase = enum { not_started, request_started, head_received, completed };
+
 pub const IoEntry = struct {
     seq: u32,
     module: []const u8,
     func: []const u8,
     args_json: []const u8,
     result_json: []const u8,
+    provider_phase: ?ProviderPhase = null,
+    provider_status: ?u16 = null,
 };
 
 pub const StepStartTrace = struct {
@@ -516,6 +544,14 @@ pub fn parseTraceLine(line: []const u8) !TraceEntry {
             .func = findJsonStringValue(line, "\"fn\"") orelse "",
             .args_json = findJsonArrayValue(line, "\"args\"") orelse "[]",
             .result_json = findJsonAnyValue(line, "\"result\"") orelse "null",
+            .provider_phase = if (findJsonStringValue(line, "\"provider_phase\"")) |phase|
+                std.meta.stringToEnum(ProviderPhase, phase)
+            else
+                null,
+            .provider_status = if (findJsonIntValue(line, "\"provider_status\"")) |status|
+                std.math.cast(u16, status)
+            else
+                null,
         } };
     } else if (std.mem.eql(u8, type_str, "step_start")) {
         return .{ .step_start = .{
@@ -1897,6 +1933,35 @@ test "findJsonStringValue" {
     try std.testing.expectEqualStrings("GET", findJsonStringValue(line, "\"method\"").?);
     try std.testing.expectEqualStrings("/api/test", findJsonStringValue(line, "\"url\"").?);
     try std.testing.expect(findJsonStringValue(line, "\"missing\"") == null);
+}
+
+test "provider trace phase is a closed optional transport marker" {
+    inline for (std.meta.fields(ProviderPhase)) |field| {
+        const line = "{\"type\":\"io\",\"module\":\"fetch\",\"fn\":\"fetch\",\"result\":{\"error\":\"InternalError\"},\"provider_phase\":\"" ++ field.name ++ "\"}";
+        const parsed = (try parseTraceLine(line)).io;
+        try std.testing.expectEqual(@as(ProviderPhase, @enumFromInt(field.value)), parsed.provider_phase.?);
+    }
+    const absent = (try parseTraceLine("{\"type\":\"io\",\"result\":{\"provider_phase\":\"completed\"}}")).io;
+    try std.testing.expect(absent.provider_phase == null);
+    const invalid = (try parseTraceLine("{\"type\":\"io\",\"provider_phase\":\"guessed\"}")).io;
+    try std.testing.expect(invalid.provider_phase == null);
+}
+
+test "provider trace writes its phase and head status without changing ordinary IO" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const ctx = try testCreateContext(arena.allocator());
+    defer testDestroyContext(ctx);
+    var mutex: TraceMutex = .{};
+    var recorder = TraceRecorder.init(std.testing.allocator, -1, &mutex);
+    defer recorder.deinit();
+    recorder.recordIOWithProviderPhase("http", "fetchSync", ctx, &.{}, value.JSValue.undefined_val, .head_received, 202);
+    const io = (try parseTraceLine(std.mem.trim(u8, recorder.buf.items, "\n"))).io;
+    try std.testing.expectEqual(ProviderPhase.head_received, io.provider_phase.?);
+    try std.testing.expectEqual(@as(?u16, 202), io.provider_status);
+    recorder.buf.clearRetainingCapacity();
+    recorder.recordIO("http", "fetchSync", ctx, &.{}, value.JSValue.undefined_val);
+    try std.testing.expect(std.mem.find(u8, recorder.buf.items, "provider_") == null);
 }
 
 test "findJsonIntValue" {

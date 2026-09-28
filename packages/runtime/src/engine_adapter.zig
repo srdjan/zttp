@@ -9,8 +9,10 @@ const handler_instance = @import("handler_instance.zig");
 const http_types = @import("http_types.zig");
 
 pub const HandlerInstance = handler_instance.HandlerInstance;
+pub const AotOverrideFn = handler_instance.AotOverrideFn;
 pub const HandlerPool = @import("runtime_pool.zig").HandlerPool;
 pub const RuntimeConfig = @import("runtime_config.zig").RuntimeConfig;
+pub const AgentLimits = zq.handler_contract.AgentLimits;
 pub const ResponseHandle = HandlerPool.ResponseHandle;
 pub const HandlerContract = zq.HandlerContract;
 pub const HandlerProperties = zq.HandlerProperties;
@@ -42,12 +44,31 @@ pub fn sourceIdentityForPath(path: []const u8) SourceIdentity {
     return zq.sourceIdentityForPath(path);
 }
 
+/// Source-mode startup must validate agent settings before the watcher can
+/// install its first catalog. This is a producer catalog, as in dev admission.
+pub fn sourceHasAgent(allocator: std.mem.Allocator, source: []const u8, filename: []const u8) !bool {
+    var contract = try zq.pipeline.extractContract(allocator, source, filename, .{
+        .strict = false,
+        .version = zq.version.string,
+        .read_file = zq.file_io.readFileForModuleGraph,
+    });
+    defer contract.deinit(allocator);
+    for (contract.tools.items) |entry| {
+        if (entry.agent != null) return true;
+    }
+    return false;
+}
+
 pub fn initSecurityEvents(allocator: std.mem.Allocator, capacity: usize) !void {
     try zq.security_events.initGlobal(allocator, capacity);
 }
 
 pub fn deinitSecurityEvents() void {
     zq.security_events.deinitGlobal();
+}
+
+pub fn setAotOverrideForTest(callback: ?AotOverrideFn) void {
+    handler_instance.setAotOverrideForTest(callback);
 }
 
 pub fn unixMillis() i64 {

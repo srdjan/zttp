@@ -56,6 +56,8 @@ const cost_meter = zq.CostMeter;
 
 const RuntimeConfig = runtime_config_mod.RuntimeConfig;
 const RuntimePolicyGeneration = @import("runtime_policy_generation.zig").RuntimePolicyGeneration;
+const turn_recorder = @import("turn_recorder.zig");
+const TurnState = @import("turn_state.zig").TurnState;
 
 /// In-process registry of co-located sub-handlers, used by zttp:workflow to
 /// dispatch from an orchestrator handler without HTTP.
@@ -5775,7 +5777,7 @@ const CredentialUpstream = struct {
     accepted_connections: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
     thread_error: std.atomic.Value(TestErrorInt) = std.atomic.Value(TestErrorInt).init(0),
 
-    const Reply = enum { ok, echo_body, echo_head, redirect, close_without_answer, large_body };
+    const Reply = enum { ok, server_error, echo_body, echo_head, redirect, close_without_answer, stall_before_head, truncated_body, large_body };
 
     fn init(reply: Reply) !CredentialUpstream {
         var io_backend = std.Io.Threaded.init(std.testing.allocator, .{ .environ = .empty });
@@ -5810,7 +5812,7 @@ const CredentialUpstream = struct {
         defer stream.close(io);
         var out_buf: [64]u8 = undefined;
         var writer = stream.writer(io, &out_buf);
-        try writer.interface.writeAll("GET /__stop HTTP/1.1\r\n\r\n");
+        try writer.interface.writeAll("GET /__stop HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n");
         try writer.interface.flush();
     }
 
@@ -5848,7 +5850,8 @@ const CredentialUpstream = struct {
             var captured = try captureRequest(allocator, &stream, io);
             if (std.mem.eql(u8, captured.path, "/__stop")) {
                 captured.deinit(allocator);
-                try writeTestResponse(&stream, io, 200, "OK", &.{}, "stopped");
+                // The test-side stop closes without reading; its reply is best effort.
+                writeTestResponse(&stream, io, 200, "OK", &.{}, "stopped") catch {};
                 return;
             }
             self.captured.append(allocator, captured) catch |err| {
@@ -5858,6 +5861,7 @@ const CredentialUpstream = struct {
             const authorization = captured.getHeader("authorization") orelse "";
             switch (self.reply) {
                 .ok => try writeTestResponse(&stream, io, 200, "OK", &.{"Content-Type: text/plain"}, "forecast"),
+                .server_error => try writeTestResponse(&stream, io, 503, "Service Unavailable", &.{"Content-Type: text/plain"}, "retry"),
                 .echo_body => try writeTestResponse(&stream, io, 200, "OK", &.{"Content-Type: text/plain"}, authorization),
                 .echo_head => {
                     var line_buf: [256]u8 = undefined;
@@ -5870,11 +5874,80 @@ const CredentialUpstream = struct {
                     try writeTestResponse(&stream, io, 302, "Found", &.{line}, "");
                 },
                 .close_without_answer => {},
+                .stall_before_head => std.Io.sleep(io, .fromMilliseconds(500), .awake) catch {},
+                .truncated_body => {
+                    var out_buf: [256]u8 = undefined;
+                    var writer = stream.writer(io, &out_buf);
+                    try writer.interface.writeAll("HTTP/1.1 200 OK\r\nContent-Length: 32\r\nConnection: close\r\n\r\nshort");
+                    try writer.interface.flush();
+                },
                 .large_body => try writeTestResponse(&stream, io, 200, "OK", &.{"Content-Type: text/plain"}, "0123456789abcdef0123456789abcdef"),
             }
         }
     }
 };
+
+fn agentTurnLimits(rounds: u32, provider_request_bytes: u32, turn_deadline_ms: u32) zq.handler_contract.AgentLimits {
+    return .{
+        .rounds = rounds,
+        .tool_calls = 4,
+        .tool_calls_per_round = 2,
+        .argument_bytes = 4096,
+        .result_bytes = 4096,
+        .turn_deadline_ms = turn_deadline_ms,
+        .provider_request_bytes = provider_request_bytes,
+    };
+}
+
+fn initAgentTurnForTest(
+    allocator: std.mem.Allocator,
+    recorder: *turn_recorder.Recorder,
+    limits: zq.handler_contract.AgentLimits,
+    deadline_ns: u64,
+) !TurnState {
+    const id = [_]u8{0x6b} ** 16;
+    const now_ns = try zq.monotonicNowNs();
+    try recorder.admit(.{
+        .turn_id = id,
+        .sequence = 0,
+        .kind = .admit,
+        .monotonic_ns = @intCast(now_ns),
+        .agent_name = "test-agent",
+        .catalog_digest = "test-catalog",
+        .runtime_policy_hash = "test-policy",
+        .wall_time_unix_ns = 0,
+    });
+    return TurnState.init(allocator, id, limits, deadline_ns, recorder);
+}
+
+fn finishAgentTurnForTest(turn: *TurnState, status: u16, handler_timed_out: bool) !void {
+    const now_ns = zq.monotonicNowNs() catch turn.provider_started_ns;
+    try turn.recorder.terminal(.{
+        .turn_id = turn.id,
+        .sequence = turn.nextSequence(),
+        .kind = .terminal,
+        .monotonic_ns = @intCast(now_ns),
+        .terminal_tag = turn.terminalTag(status, handler_timed_out),
+    });
+    turn.recordSucceeded();
+}
+
+fn configureAgentRuntime(
+    rt: *HandlerInstance,
+    endpoints: []const []const u8,
+) void {
+    rt.ctx.capability_policy = .{
+        .egress = .{ .enabled = true, .values = endpoints },
+        .egress_scopes = (zq.endpoint.ScopeSet{}).with(.loopback),
+    };
+}
+
+fn expectUpstreamCounts(upstream: *CredentialUpstream, expected_requests: usize) !void {
+    try std.testing.expectEqual(expected_requests, (try upstream.requests()).len);
+    // `requests` joins through one `/__stop` wake connection. The accepted
+    // count therefore includes exactly the provider requests plus that wake.
+    try std.testing.expectEqual(expected_requests + 1, upstream.accepted_connections.load(.acquire));
+}
 
 /// Run `handler_code` once under `grant`, with egress allowed to `endpoints`
 /// and to loopback, and return the response body. Every body is searched for
@@ -6659,6 +6732,682 @@ test "agent fetch refusals connect to no endpoint" {
         if (accepted != 0) std.debug.print("case '{s}' opened {d} connection(s)\n", .{ case.label, accepted });
         try std.testing.expectEqual(@as(usize, 0), accepted);
     }
+}
+
+test "agent provider rounds record pre post terminal and refuse the excess before connect" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var upstream = try CredentialUpstream.init(.ok);
+    defer upstream.deinit();
+    try upstream.start();
+    const base = try upstream.url(allocator, "");
+    var endpoint_buf: [512]u8 = undefined;
+    const endpoint = egressEndpoint(base, &endpoint_buf);
+    const endpoints = [_][]const u8{endpoint};
+    var store = try credentialTestStore(std.testing.allocator, endpoint);
+    defer store.deinit();
+    const grant_state = TestCredentialGrant{ .names = &.{"weather"} };
+
+    const handler_code = try std.fmt.allocPrint(allocator,
+        \\import {{ fetch }} from "zttp:fetch";
+        \\function handler(req) {{
+        \\  const first = fetch("{s}/v1", {{ credential: "weather" }});
+        \\  const second = fetch("{s}/v1", {{ credential: "weather" }});
+        \\  return Response.json({{ first: first.status, second: second.status, error: second.error, details: second.details }});
+        \\}}
+    , .{ base, base });
+    const rt = try HandlerInstance.init(allocator, .{ .credential_store = &store, .outbound_http_enabled = true });
+    defer rt.deinit();
+    configureAgentRuntime(rt, &endpoints);
+    try rt.loadHandler(handler_code, "<agent-round-budget>");
+
+    var recorder = turn_recorder.Recorder.initMemory(std.testing.allocator, 64 * 1024);
+    defer recorder.deinit();
+    const now_ns = try zq.monotonicNowNs();
+    var turn = try initAgentTurnForTest(allocator, &recorder, agentTurnLimits(1, 4096, 5000), now_ns + 5 * std.time.ns_per_s);
+    defer turn.deinit();
+
+    var request = try makeTestRequest(allocator, "POST", "/agent", "{}");
+    defer request.deinit(allocator);
+    var view = request.asView();
+    view.tool_grant = grant_state.agentGrant(endpoint, "weather");
+    view.agent_prompt = "hello";
+    view.turn = &turn;
+    var response = try rt.executeHandler(view);
+    defer response.deinit();
+    try finishAgentTurnForTest(&turn, response.status, false);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, response.body, .{});
+    defer parsed.deinit();
+    try std.testing.expectEqual(@as(i64, 200), parsed.value.object.get("first").?.integer);
+    try std.testing.expectEqual(@as(i64, 599), parsed.value.object.get("second").?.integer);
+    try std.testing.expectEqualStrings("AgentTurnRefused", parsed.value.object.get("error").?.string);
+    try std.testing.expectEqualStrings("budget_exhausted", parsed.value.object.get("details").?.string);
+    try expectUpstreamCounts(&upstream, 1);
+
+    const records = try recorder.memoryBytes();
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, records, "\"kind\":\"pre\""));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, records, "\"kind\":\"post\""));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, records, "\"kind\":\"terminal\""));
+    try std.testing.expect(std.mem.indexOf(u8, records, "\"class\":\"completed\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, records, "\"terminalTag\":\"budget_exhausted\"") != null);
+}
+
+test "agent provider turn inside limits records admit pre post terminal in order" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var upstream = try CredentialUpstream.init(.ok);
+    defer upstream.deinit();
+    try upstream.start();
+    const base = try upstream.url(allocator, "");
+    var endpoint_buf: [512]u8 = undefined;
+    const endpoint = egressEndpoint(base, &endpoint_buf);
+    const endpoints = [_][]const u8{endpoint};
+    var store = try credentialTestStore(std.testing.allocator, endpoint);
+    defer store.deinit();
+    const grant_state = TestCredentialGrant{ .names = &.{"weather"} };
+    const handler_code = try std.fmt.allocPrint(allocator,
+        \\import {{ fetch }} from "zttp:fetch";
+        \\function handler(req) {{
+        \\  const result = fetch("{s}/v1", {{ credential: "weather" }});
+        \\  return Response.json({{ status: result.status, body: result.body }});
+        \\}}
+    , .{base});
+    const rt = try HandlerInstance.init(allocator, .{ .credential_store = &store, .outbound_http_enabled = true });
+    defer rt.deinit();
+    configureAgentRuntime(rt, &endpoints);
+    try rt.loadHandler(handler_code, "<agent-inside-limits>");
+    var recorder = turn_recorder.Recorder.initMemory(std.testing.allocator, 64 * 1024);
+    defer recorder.deinit();
+    const now_ns = try zq.monotonicNowNs();
+    var turn = try initAgentTurnForTest(allocator, &recorder, agentTurnLimits(2, 4096, 5000), now_ns + 5 * std.time.ns_per_s);
+    defer turn.deinit();
+    var request = try makeTestRequest(allocator, "POST", "/agent", "{}");
+    defer request.deinit(allocator);
+    var view = request.asView();
+    view.tool_grant = grant_state.agentGrant(endpoint, "weather");
+    view.agent_prompt = "hello";
+    view.turn = &turn;
+    var response = try rt.executeHandler(view);
+    defer response.deinit();
+    try finishAgentTurnForTest(&turn, response.status, false);
+
+    try expectUpstreamCounts(&upstream, 1);
+    const records = try recorder.memoryBytes();
+    const admit_at = std.mem.indexOf(u8, records, "\"kind\":\"admit\"").?;
+    const pre_at = std.mem.indexOf(u8, records, "\"kind\":\"pre\"").?;
+    const post_at = std.mem.indexOf(u8, records, "\"kind\":\"post\"").?;
+    const terminal_at = std.mem.indexOf(u8, records, "\"kind\":\"terminal\"").?;
+    try std.testing.expect(admit_at < pre_at and pre_at < post_at and post_at < terminal_at);
+    try std.testing.expect(std.mem.indexOf(u8, records, "\"terminalTag\":\"completed\"") != null);
+}
+
+test "agent provider pre-record failure opens no connection" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var upstream = try CredentialUpstream.init(.ok);
+    defer upstream.deinit();
+    try upstream.start();
+    const base = try upstream.url(allocator, "");
+    var endpoint_buf: [512]u8 = undefined;
+    const endpoint = egressEndpoint(base, &endpoint_buf);
+    const endpoints = [_][]const u8{endpoint};
+    var store = try credentialTestStore(std.testing.allocator, endpoint);
+    defer store.deinit();
+    const grant_state = TestCredentialGrant{ .names = &.{"weather"} };
+    const handler_code = try std.fmt.allocPrint(allocator,
+        \\import {{ fetch }} from "zttp:fetch";
+        \\function handler(req) {{
+        \\  const result = fetch("{s}/v1", {{ credential: "weather" }});
+        \\  return Response.json({{ status: result.status, error: result.error, details: result.details }});
+        \\}}
+    , .{base});
+    const rt = try HandlerInstance.init(allocator, .{ .credential_store = &store, .outbound_http_enabled = true });
+    defer rt.deinit();
+    configureAgentRuntime(rt, &endpoints);
+    try rt.loadHandler(handler_code, "<agent-pre-failure>");
+
+    var recorder = turn_recorder.Recorder.initMemory(std.testing.allocator, 64 * 1024);
+    defer recorder.deinit();
+    const now_ns = try zq.monotonicNowNs();
+    var turn = try initAgentTurnForTest(allocator, &recorder, agentTurnLimits(2, 4096, 5000), now_ns + 5 * std.time.ns_per_s);
+    defer turn.deinit();
+    try recorder.failNextMemoryWrite();
+
+    var request = try makeTestRequest(allocator, "POST", "/agent", "{}");
+    defer request.deinit(allocator);
+    var view = request.asView();
+    view.tool_grant = grant_state.agentGrant(endpoint, "weather");
+    view.agent_prompt = "hello";
+    view.turn = &turn;
+    var response = try rt.executeHandler(view);
+    defer response.deinit();
+
+    try expectFetchError(response.body, "AgentTurnRefused", "recorder_unavailable");
+    try expectUpstreamCounts(&upstream, 0);
+    try std.testing.expect(!recorder.isHealthy());
+    try std.testing.expectEqual(@as(u32, 0), turn.round);
+}
+
+test "agent provider post-record failure returns the result and closes the latch" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var upstream = try CredentialUpstream.init(.ok);
+    defer upstream.deinit();
+    try upstream.start();
+    const base = try upstream.url(allocator, "");
+    var endpoint_buf: [512]u8 = undefined;
+    const endpoint = egressEndpoint(base, &endpoint_buf);
+    const endpoints = [_][]const u8{endpoint};
+    var store = try credentialTestStore(std.testing.allocator, endpoint);
+    defer store.deinit();
+    const grant_state = TestCredentialGrant{ .names = &.{"weather"} };
+    const handler_code = try std.fmt.allocPrint(allocator,
+        \\import {{ fetch }} from "zttp:fetch";
+        \\function handler(req) {{
+        \\  const result = fetch("{s}/v1", {{ credential: "weather" }});
+        \\  return Response.json({{ status: result.status, body: result.body }});
+        \\}}
+    , .{base});
+    const rt = try HandlerInstance.init(allocator, .{ .credential_store = &store, .outbound_http_enabled = true });
+    defer rt.deinit();
+    configureAgentRuntime(rt, &endpoints);
+    try rt.loadHandler(handler_code, "<agent-post-failure>");
+
+    var recorder = turn_recorder.Recorder.initMemory(std.testing.allocator, 64 * 1024);
+    defer recorder.deinit();
+    const now_ns = try zq.monotonicNowNs();
+    var turn = try initAgentTurnForTest(allocator, &recorder, agentTurnLimits(2, 4096, 5000), now_ns + 5 * std.time.ns_per_s);
+    defer turn.deinit();
+    try recorder.failMemoryWriteAfter(1);
+
+    var request = try makeTestRequest(allocator, "POST", "/agent", "{}");
+    defer request.deinit(allocator);
+    var view = request.asView();
+    view.tool_grant = grant_state.agentGrant(endpoint, "weather");
+    view.agent_prompt = "hello";
+    view.turn = &turn;
+    var response = try rt.executeHandler(view);
+    defer response.deinit();
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, response.body, .{});
+    defer parsed.deinit();
+    try std.testing.expectEqual(@as(i64, 200), parsed.value.object.get("status").?.integer);
+    try std.testing.expectEqualStrings("forecast", parsed.value.object.get("body").?.string);
+    try std.testing.expectEqual(turn_recorder.TerminalTag.recorder_unavailable, turn.latch.?);
+    try expectUpstreamCounts(&upstream, 1);
+    const records = try recorder.memoryBytes();
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, records, "\"kind\":\"pre\""));
+    try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, records, "\"kind\":\"post\""));
+}
+
+test "agent unknown provider outcome closes the latch and survives a caught 200" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var upstream = try CredentialUpstream.init(.close_without_answer);
+    defer upstream.deinit();
+    try upstream.start();
+    const base = try upstream.url(allocator, "");
+    var endpoint_buf: [512]u8 = undefined;
+    const endpoint = egressEndpoint(base, &endpoint_buf);
+    const endpoints = [_][]const u8{endpoint};
+    var store = try credentialTestStore(std.testing.allocator, endpoint);
+    defer store.deinit();
+    const grant_state = TestCredentialGrant{ .names = &.{"weather"} };
+    const handler_code = try std.fmt.allocPrint(allocator,
+        \\import {{ fetch }} from "zttp:fetch";
+        \\function handler(req) {{
+        \\  const first = fetch("{s}/v1", {{ credential: "weather", method: "POST", body: "charge" }});
+        \\  const second = fetch("{s}/v1", {{ credential: "weather" }});
+        \\  return Response.json({{ first: first.error, second: second.error, details: second.details }});
+        \\}}
+    , .{ base, base });
+    const rt = try HandlerInstance.init(allocator, .{ .credential_store = &store, .outbound_http_enabled = true });
+    defer rt.deinit();
+    configureAgentRuntime(rt, &endpoints);
+    try rt.loadHandler(handler_code, "<agent-unknown-caught>");
+
+    var recorder = turn_recorder.Recorder.initMemory(std.testing.allocator, 64 * 1024);
+    defer recorder.deinit();
+    const now_ns = try zq.monotonicNowNs();
+    var turn = try initAgentTurnForTest(allocator, &recorder, agentTurnLimits(3, 4096, 5000), now_ns + 5 * std.time.ns_per_s);
+    defer turn.deinit();
+
+    var request = try makeTestRequest(allocator, "POST", "/agent", "{}");
+    defer request.deinit(allocator);
+    var view = request.asView();
+    view.tool_grant = grant_state.agentGrant(endpoint, "weather");
+    view.agent_prompt = "hello";
+    view.turn = &turn;
+    var response = try rt.executeHandler(view);
+    defer response.deinit();
+    try finishAgentTurnForTest(&turn, response.status, false);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, response.body, .{});
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings("OutcomeUnknown", parsed.value.object.get("first").?.string);
+    try std.testing.expectEqualStrings("AgentTurnRefused", parsed.value.object.get("second").?.string);
+    try std.testing.expectEqualStrings("outcome_unknown", parsed.value.object.get("details").?.string);
+    try expectUpstreamCounts(&upstream, 1);
+
+    const records = try recorder.memoryBytes();
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, records, "\"kind\":\"pre\""));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, records, "\"kind\":\"post\""));
+    try std.testing.expect(std.mem.indexOf(u8, records, "\"class\":\"outcome_unknown\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, records, "\"terminalTag\":\"outcome_unknown\"") != null);
+}
+
+test "agent deadline between provider fetches records no second pre or connection" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var upstream = try CredentialUpstream.init(.ok);
+    defer upstream.deinit();
+    try upstream.start();
+    const base = try upstream.url(allocator, "");
+    var endpoint_buf: [512]u8 = undefined;
+    const endpoint = egressEndpoint(base, &endpoint_buf);
+    const endpoints = [_][]const u8{endpoint};
+    var store = try credentialTestStore(std.testing.allocator, endpoint);
+    defer store.deinit();
+    const grant_state = TestCredentialGrant{ .names = &.{"weather"} };
+    const handler_code = try std.fmt.allocPrint(allocator,
+        \\import {{ fetch }} from "zttp:fetch";
+        \\function handler(req) {{
+        \\  const result = fetch("{s}/v1", {{ credential: "weather" }});
+        \\  return Response.json({{ status: result.status, error: result.error, details: result.details }});
+        \\}}
+    , .{base});
+    const rt = try HandlerInstance.init(allocator, .{ .credential_store = &store, .outbound_http_enabled = true });
+    defer rt.deinit();
+    configureAgentRuntime(rt, &endpoints);
+    try rt.loadHandler(handler_code, "<agent-deadline-between>");
+
+    var recorder = turn_recorder.Recorder.initMemory(std.testing.allocator, 64 * 1024);
+    defer recorder.deinit();
+    const now_ns = try zq.monotonicNowNs();
+    var turn = try initAgentTurnForTest(allocator, &recorder, agentTurnLimits(3, 4096, 5000), now_ns + 5 * std.time.ns_per_s);
+    defer turn.deinit();
+    var request = try makeTestRequest(allocator, "POST", "/agent", "{}");
+    defer request.deinit(allocator);
+    var view = request.asView();
+    view.tool_grant = grant_state.agentGrant(endpoint, "weather");
+    view.agent_prompt = "hello";
+    view.turn = &turn;
+
+    var first = try rt.executeHandler(view);
+    defer first.deinit();
+    try std.testing.expect(std.mem.indexOf(u8, first.body, "\"status\":200") != null);
+    turn.deadline_ns = 0;
+    var second = try rt.executeHandler(view);
+    defer second.deinit();
+    try expectFetchError(second.body, "AgentTurnRefused", "deadline_exceeded");
+    try expectUpstreamCounts(&upstream, 1);
+    const records = try recorder.memoryBytes();
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, records, "\"kind\":\"pre\""));
+}
+
+test "agent oversized request closes its budget latch before connect" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var upstream = try CredentialUpstream.init(.ok);
+    defer upstream.deinit();
+    try upstream.start();
+    const base = try upstream.url(allocator, "");
+    var endpoint_buf: [512]u8 = undefined;
+    const endpoint = egressEndpoint(base, &endpoint_buf);
+    const endpoints = [_][]const u8{endpoint};
+    var store = try credentialTestStore(std.testing.allocator, endpoint);
+    defer store.deinit();
+    const grant_state = TestCredentialGrant{ .names = &.{"weather"} };
+    const handler_code = try std.fmt.allocPrint(allocator,
+        \\import {{ fetch }} from "zttp:fetch";
+        \\function handler(req) {{
+        \\  const body = [req.url, "0123456789012345678901234567890123456789012345678901234567890123456789"].join("");
+        \\  const result = fetch("{s}/v1", {{ credential: "weather", method: "POST", body: body }});
+        \\  return Response.json({{ status: result.status, error: result.error, details: result.details }});
+        \\}}
+    , .{base});
+    const rt = try HandlerInstance.init(allocator, .{ .credential_store = &store, .outbound_http_enabled = true });
+    defer rt.deinit();
+    configureAgentRuntime(rt, &endpoints);
+    try rt.loadHandler(handler_code, "<agent-request-budget>");
+
+    var recorder = turn_recorder.Recorder.initMemory(std.testing.allocator, 64 * 1024);
+    defer recorder.deinit();
+    const now_ns = try zq.monotonicNowNs();
+    var turn = try initAgentTurnForTest(allocator, &recorder, agentTurnLimits(2, 4, 5000), now_ns + 5 * std.time.ns_per_s);
+    defer turn.deinit();
+    var request = try makeTestRequest(allocator, "POST", "/agent", "{}");
+    defer request.deinit(allocator);
+    var view = request.asView();
+    view.tool_grant = grant_state.agentGrant(endpoint, "weather");
+    view.agent_prompt = "hello";
+    view.turn = &turn;
+    var response = try rt.executeHandler(view);
+    defer response.deinit();
+
+    try expectFetchError(response.body, "AgentTurnRefused", "budget_exhausted");
+    try expectUpstreamCounts(&upstream, 0);
+    try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, try recorder.memoryBytes(), "\"kind\":\"pre\""));
+}
+
+test "agent stalled truncated and oversized provider responses are outcome unknown" {
+    const Case = struct {
+        reply: CredentialUpstream.Reply,
+        outbound_timeout_ms: u32,
+        turn_deadline_ms: u32,
+        max_response_bytes: usize,
+    };
+    const cases = [_]Case{
+        .{ .reply = .stall_before_head, .outbound_timeout_ms = 1000, .turn_deadline_ms = 20, .max_response_bytes = 1024 },
+        .{ .reply = .truncated_body, .outbound_timeout_ms = 1000, .turn_deadline_ms = 1000, .max_response_bytes = 1024 },
+        .{ .reply = .large_body, .outbound_timeout_ms = 1000, .turn_deadline_ms = 1000, .max_response_bytes = 16 },
+    };
+
+    for (cases) |case| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const allocator = arena.allocator();
+        var upstream = try CredentialUpstream.init(case.reply);
+        defer upstream.deinit();
+        try upstream.start();
+        const base = try upstream.url(allocator, "");
+        var endpoint_buf: [512]u8 = undefined;
+        const endpoint = egressEndpoint(base, &endpoint_buf);
+        const endpoints = [_][]const u8{endpoint};
+        var store = try credentialTestStore(std.testing.allocator, endpoint);
+        defer store.deinit();
+        const grant_state = TestCredentialGrant{ .names = &.{"weather"} };
+        const handler_code = try std.fmt.allocPrint(allocator,
+            \\import {{ fetch }} from "zttp:fetch";
+            \\function handler(req) {{
+            \\  const result = fetch("{s}/v1", {{ credential: "weather" }});
+            \\  return Response.json({{ status: result.status, error: result.error }});
+            \\}}
+        , .{base});
+        const rt = try HandlerInstance.init(allocator, .{
+            .credential_store = &store,
+            .outbound_http_enabled = true,
+            .outbound_timeout_ms = case.outbound_timeout_ms,
+            .outbound_max_response_bytes = case.max_response_bytes,
+        });
+        defer rt.deinit();
+        configureAgentRuntime(rt, &endpoints);
+        try rt.loadHandler(handler_code, "<agent-provider-incomplete>");
+
+        var recorder = turn_recorder.Recorder.initMemory(std.testing.allocator, 64 * 1024);
+        defer recorder.deinit();
+        const now_ns = try zq.monotonicNowNs();
+        const deadline_ns = now_ns + @as(u64, case.turn_deadline_ms) * std.time.ns_per_ms;
+        var turn = try initAgentTurnForTest(allocator, &recorder, agentTurnLimits(2, 4096, case.turn_deadline_ms), deadline_ns);
+        defer turn.deinit();
+        var request = try makeTestRequest(allocator, "POST", "/agent", "{}");
+        defer request.deinit(allocator);
+        var view = request.asView();
+        view.tool_grant = grant_state.agentGrant(endpoint, "weather");
+        view.agent_prompt = "hello";
+        view.turn = &turn;
+        const started_ns = try zq.monotonicNowNs();
+        var response = try rt.executeHandler(view);
+        const elapsed_ns = (try zq.monotonicNowNs()) - started_ns;
+        defer response.deinit();
+        try finishAgentTurnForTest(&turn, response.status, false);
+
+        try std.testing.expectEqual(turn_recorder.TerminalTag.outcome_unknown, turn.latch.?);
+        try expectUpstreamCounts(&upstream, 1);
+        const records = try recorder.memoryBytes();
+        try std.testing.expect(std.mem.indexOf(u8, records, "\"class\":\"outcome_unknown\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, records, "\"terminalTag\":\"outcome_unknown\"") != null);
+        if (case.reply == .stall_before_head) {
+            try std.testing.expect(elapsed_ns < 250 * std.time.ns_per_ms);
+        }
+    }
+}
+
+test "agent provider hook refuses every latch tag before connect" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var upstream = try CredentialUpstream.init(.ok);
+    defer upstream.deinit();
+    try upstream.start();
+    const base = try upstream.url(allocator, "");
+    var endpoint_buf: [512]u8 = undefined;
+    const endpoint = egressEndpoint(base, &endpoint_buf);
+    const endpoints = [_][]const u8{endpoint};
+    var store = try credentialTestStore(std.testing.allocator, endpoint);
+    defer store.deinit();
+    const grant_state = TestCredentialGrant{ .names = &.{"weather"} };
+    const handler_code = try std.fmt.allocPrint(allocator,
+        \\import {{ fetch }} from "zttp:fetch";
+        \\function handler(req) {{
+        \\  const result = fetch("{s}/v1", {{ credential: "weather" }});
+        \\  return Response.json({{ status: result.status, error: result.error, details: result.details }});
+        \\}}
+    , .{base});
+    const rt = try HandlerInstance.init(allocator, .{ .credential_store = &store, .outbound_http_enabled = true });
+    defer rt.deinit();
+    configureAgentRuntime(rt, &endpoints);
+    try rt.loadHandler(handler_code, "<agent-latch-census>");
+    var request = try makeTestRequest(allocator, "POST", "/agent", "{}");
+    defer request.deinit(allocator);
+
+    const tag_fields = @typeInfo(turn_recorder.TerminalTag).@"enum".fields;
+    var observed = [_]bool{false} ** tag_fields.len;
+    inline for (tag_fields, 0..) |field, index| {
+        const tag: turn_recorder.TerminalTag = @enumFromInt(field.value);
+        if (tag.isLatchTag()) {
+            var recorder = turn_recorder.Recorder.initMemory(std.testing.allocator, 64 * 1024);
+            defer recorder.deinit();
+            const now_ns = try zq.monotonicNowNs();
+            var turn = try initAgentTurnForTest(allocator, &recorder, agentTurnLimits(2, 4096, 5000), now_ns + 5 * std.time.ns_per_s);
+            defer turn.deinit();
+            turn.closeLatch(tag);
+            var view = request.asView();
+            view.tool_grant = grant_state.agentGrant(endpoint, "weather");
+            view.agent_prompt = "hello";
+            view.turn = &turn;
+            var response = try rt.executeHandler(view);
+            defer response.deinit();
+            try expectFetchError(response.body, "AgentTurnRefused", @tagName(tag));
+            observed[index] = true;
+        }
+    }
+    inline for (tag_fields, 0..) |field, index| {
+        const tag: turn_recorder.TerminalTag = @enumFromInt(field.value);
+        if (tag.isLatchTag()) try std.testing.expect(observed[index]);
+    }
+    try expectUpstreamCounts(&upstream, 0);
+}
+
+test "agent preconnect failures are not started and leave the latch open" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var closed = try CredentialUpstream.init(.ok);
+    const base = try closed.url(allocator, "");
+    closed.deinit();
+    var endpoint_buf: [512]u8 = undefined;
+    const endpoint = egressEndpoint(base, &endpoint_buf);
+    const endpoints = [_][]const u8{endpoint};
+    var store = try credentialTestStore(std.testing.allocator, endpoint);
+    defer store.deinit();
+    const grant_state = TestCredentialGrant{ .names = &.{"weather"} };
+    const handler_code = try std.fmt.allocPrint(allocator,
+        \\import {{ fetch }} from "zttp:fetch";
+        \\function handler(req) {{
+        \\  const first = fetch("{s}/v1", {{ credential: "weather" }});
+        \\  const second = fetch("{s}/v1", {{ credential: "weather" }});
+        \\  return Response.json({{ first: first.error, second: second.error }});
+        \\}}
+    , .{ base, base });
+    const rt = try HandlerInstance.init(allocator, .{
+        .credential_store = &store,
+        .outbound_http_enabled = true,
+        .outbound_timeout_ms = 100,
+    });
+    defer rt.deinit();
+    configureAgentRuntime(rt, &endpoints);
+    try rt.loadHandler(handler_code, "<agent-not-started>");
+
+    var recorder = turn_recorder.Recorder.initMemory(std.testing.allocator, 64 * 1024);
+    defer recorder.deinit();
+    const now_ns = try zq.monotonicNowNs();
+    var turn = try initAgentTurnForTest(allocator, &recorder, agentTurnLimits(2, 4096, 5000), now_ns + 5 * std.time.ns_per_s);
+    defer turn.deinit();
+    var request = try makeTestRequest(allocator, "POST", "/agent", "{}");
+    defer request.deinit(allocator);
+    var view = request.asView();
+    view.tool_grant = grant_state.agentGrant(endpoint, "weather");
+    view.agent_prompt = "hello";
+    view.turn = &turn;
+    var response = try rt.executeHandler(view);
+    defer response.deinit();
+
+    try std.testing.expect(turn.latch == null);
+    try std.testing.expectEqual(@as(u32, 2), turn.round);
+    const records = try recorder.memoryBytes();
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, records, "\"class\":\"not_started\""));
+}
+
+test "agent invalid method records not started and opens no connection" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var upstream = try CredentialUpstream.init(.ok);
+    defer upstream.deinit();
+    try upstream.start();
+    const base = try upstream.url(allocator, "");
+    var endpoint_buf: [512]u8 = undefined;
+    const endpoint = egressEndpoint(base, &endpoint_buf);
+    const endpoints = [_][]const u8{endpoint};
+    var store = try credentialTestStore(std.testing.allocator, endpoint);
+    defer store.deinit();
+    const grant_state = TestCredentialGrant{ .names = &.{"weather"} };
+    const handler_code = try std.fmt.allocPrint(allocator,
+        \\import {{ fetch }} from "zttp:fetch";
+        \\function handler(req) {{
+        \\  const result = fetch("{s}/v1", {{ credential: "weather", method: "NOPE" }});
+        \\  return Response.json({{ status: result.status, error: result.error, details: result.details }});
+        \\}}
+    , .{base});
+    const rt = try HandlerInstance.init(allocator, .{ .credential_store = &store, .outbound_http_enabled = true });
+    defer rt.deinit();
+    configureAgentRuntime(rt, &endpoints);
+    try rt.loadHandler(handler_code, "<agent-invalid-method>");
+
+    var recorder = turn_recorder.Recorder.initMemory(std.testing.allocator, 64 * 1024);
+    defer recorder.deinit();
+    const now_ns = try zq.monotonicNowNs();
+    var turn = try initAgentTurnForTest(allocator, &recorder, agentTurnLimits(2, 4096, 5000), now_ns + 5 * std.time.ns_per_s);
+    defer turn.deinit();
+    var request = try makeTestRequest(allocator, "POST", "/agent", "{}");
+    defer request.deinit(allocator);
+    var view = request.asView();
+    view.tool_grant = grant_state.agentGrant(endpoint, "weather");
+    view.agent_prompt = "hello";
+    view.turn = &turn;
+    var response = try rt.executeHandler(view);
+    defer response.deinit();
+
+    try expectFetchError(response.body, "InvalidMethod", "NOPE");
+    try std.testing.expect(turn.latch == null);
+    try std.testing.expectEqual(@as(u32, 1), turn.round);
+    try expectUpstreamCounts(&upstream, 0);
+    const records = try recorder.memoryBytes();
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, records, "\"kind\":\"pre\""));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, records, "\"kind\":\"post\""));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, records, "\"class\":\"not_started\""));
+}
+
+test "agent completed non-2xx responses may be reissued" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var upstream = try CredentialUpstream.init(.server_error);
+    defer upstream.deinit();
+    try upstream.start();
+    const base = try upstream.url(allocator, "");
+    var endpoint_buf: [512]u8 = undefined;
+    const endpoint = egressEndpoint(base, &endpoint_buf);
+    const endpoints = [_][]const u8{endpoint};
+    var store = try credentialTestStore(std.testing.allocator, endpoint);
+    defer store.deinit();
+    const grant_state = TestCredentialGrant{ .names = &.{"weather"} };
+    const handler_code = try std.fmt.allocPrint(allocator,
+        \\import {{ fetch }} from "zttp:fetch";
+        \\function handler(req) {{
+        \\  const first = fetch("{s}/v1", {{ credential: "weather" }});
+        \\  const second = fetch("{s}/v1", {{ credential: "weather" }});
+        \\  return Response.json({{ first: first.status, second: second.status }});
+        \\}}
+    , .{ base, base });
+    const rt = try HandlerInstance.init(allocator, .{ .credential_store = &store, .outbound_http_enabled = true });
+    defer rt.deinit();
+    configureAgentRuntime(rt, &endpoints);
+    try rt.loadHandler(handler_code, "<agent-completed-non-2xx>");
+
+    var recorder = turn_recorder.Recorder.initMemory(std.testing.allocator, 64 * 1024);
+    defer recorder.deinit();
+    const now_ns = try zq.monotonicNowNs();
+    var turn = try initAgentTurnForTest(allocator, &recorder, agentTurnLimits(2, 4096, 5000), now_ns + 5 * std.time.ns_per_s);
+    defer turn.deinit();
+    var request = try makeTestRequest(allocator, "POST", "/agent", "{}");
+    defer request.deinit(allocator);
+    var view = request.asView();
+    view.tool_grant = grant_state.agentGrant(endpoint, "weather");
+    view.agent_prompt = "hello";
+    view.turn = &turn;
+    var response = try rt.executeHandler(view);
+    defer response.deinit();
+
+    try std.testing.expect(turn.latch == null);
+    try expectUpstreamCounts(&upstream, 2);
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, try recorder.memoryBytes(), "\"class\":\"completed\""));
+}
+
+test "nested handler frames cannot inherit the frame-zero agent turn" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const rt = try HandlerInstance.init(allocator, .{});
+    defer rt.deinit();
+    var recorder = turn_recorder.Recorder.initMemory(std.testing.allocator, 64 * 1024);
+    defer recorder.deinit();
+    const now_ns = try zq.monotonicNowNs();
+    var turn = try initAgentTurnForTest(allocator, &recorder, agentTurnLimits(2, 4096, 5000), now_ns + 5 * std.time.ns_per_s);
+    defer turn.deinit();
+
+    const frame_zero: HttpRequestView = .{
+        .method = "POST",
+        .url = "/agent",
+        .headers = .empty,
+        .body = null,
+        .turn = &turn,
+    };
+    rt.frames[0] = .{ .request = frame_zero };
+    rt.frame_depth = 1;
+    try rt.enterNested(.{ .request = frame_zero });
+    try std.testing.expect(rt.active_request.?.turn == null);
+    try rt.leaveNested();
+    try std.testing.expect(rt.active_request.?.turn == &turn);
 }
 
 test "an agent contract refuses a null grant but permits routerMatch" {

@@ -147,7 +147,7 @@ pub fn replayOne(
     const target = runtime_natives.parseRequestTarget(allocator, group.request.url);
     defer target.deinit(allocator);
 
-    const request = HttpRequestView{
+    var request = HttpRequestView{
         .method = group.request.method,
         .url = group.request.url,
         .path = target.path,
@@ -156,8 +156,12 @@ pub fn replayOne(
         .body = ub.slice,
     };
 
+    const turn = try @import("replay_turn.zig").ReplayTurn.prepare(allocator, rt, handler_code, handler_filename, &request);
+    defer if (turn) |active| active.deinit();
+
     // Execute handler
     var response = rt.executeHandler(request) catch |err| {
+        if (turn) |active| try active.finish(if (err == error.RequestTimeout) 504 else 500, err == error.RequestTimeout);
         return ReplayResult{
             .match = false,
             .expected_status = if (group.response) |r| r.status else 200,
@@ -171,6 +175,7 @@ pub fn replayOne(
         };
     };
     defer response.deinit();
+    if (turn) |active| try active.finish(response.status, false);
 
     const expected = group.response orelse {
         // Witness case: no expected response was recorded. Hand back the

@@ -14,6 +14,7 @@ const Dir = std.Io.Dir;
 const Runtime = engine.Runtime;
 const HandlerPool = engine.HandlerPool;
 const RuntimeConfig = engine.RuntimeConfig;
+const AgentLimits = engine.AgentLimits;
 const execution_spec = @import("execution_spec.zig");
 const http_parser = @import("http_parser.zig");
 const http_types = @import("http_types.zig");
@@ -21,6 +22,10 @@ const HttpRequestView = http_types.HttpRequestView;
 const HttpResponse = http_types.HttpResponse;
 const HttpHeader = http_types.HttpHeader;
 const QueryParam = http_types.QueryParam;
+const turn_recorder = @import("turn_recorder.zig");
+const turn_state = @import("turn_state.zig");
+const TurnRecorder = turn_recorder.Recorder;
+const TurnState = turn_state.TurnState;
 
 const contract_runtime = @import("contract_runtime.zig");
 const tool_auth_mod = @import("tool_auth.zig");
@@ -582,6 +587,15 @@ const ConnectionPool = struct {
         defer request.deinit(req_allocator);
 
         var access_status: u16 = 500;
+        var admitted_turn: ?*TurnState = null;
+        var agent_turn_slot_held = false;
+        var handler_timed_out = false;
+        defer {
+            if (admitted_turn) |turn| {
+                self.server.finishAgentTurn(turn, access_status, handler_timed_out);
+            }
+            if (agent_turn_slot_held) self.server.releaseAgentTurn();
+        }
         const access_started_ms = unixMillisNow();
         defer self.logAccess(request.method, request.path, request.headers.items, access_status, access_started_ms);
 
@@ -629,6 +643,13 @@ const ConnectionPool = struct {
             return outcome_if_alive;
         }
         if (std.mem.eql(u8, request.path, "/_readiness")) {
+            if (self.server.turn_recorder) |*recorder| {
+                if (!recorder.isHealthy()) {
+                    access_status = 503;
+                    self.sendStatusSync(fd, 503, "turn recorder unavailable", keep_alive) catch {};
+                    return outcome_if_alive;
+                }
+            }
             const pool_full = if (self.server.pool) |*pool|
                 pool.getInUse() >= pool.max_size
             else
@@ -815,6 +836,17 @@ const ConnectionPool = struct {
                     self.sendErrorSync(fd, 500, "Internal Server Error") catch {};
                     return .close;
                 };
+                const turn = self.server.admitAgentTurn(req_allocator, agent) catch |err| {
+                    access_status = 503;
+                    const message = if (err == error.AgentTurnCapacityExhausted)
+                        "agent turn capacity exhausted"
+                    else
+                        "agent turn recorder unavailable";
+                    self.sendStatusSync(fd, 503, message, keep_alive) catch {};
+                    return outcome_if_alive;
+                };
+                admitted_turn = turn;
+                agent_turn_slot_held = true;
             }
         }
 
@@ -858,11 +890,13 @@ const ConnectionPool = struct {
                 else
                     null,
                 .agent_prompt = agent_prompt,
+                .turn = admitted_turn,
                 // Every request, tool or not, runs under the generation's
                 // accepted capability ceiling (M4 T5b), when it has one.
                 .capability_ceiling = self.server.activeCapabilityCeiling(),
             }, &fault_location) catch |err| {
                 const status: u16 = if (err == error.PoolExhausted) 503 else if (err == error.RequestTimeout) 504 else if (err == error.HandlerNotImplemented) 501 else 500;
+                handler_timed_out = err == error.RequestTimeout;
                 var fault_buf: [256]u8 = undefined;
                 var fault_loc_buf: [320]u8 = undefined;
                 const message: []const u8 = blk: {
@@ -1405,6 +1439,18 @@ pub const ServerConfig = struct {
     /// Number of runtime instances in pool (0 = auto)
     pool_size: usize = 0,
 
+    /// Directory for the process-owned agent turn JSONL recorder. Required
+    /// when the accepted catalog serves an agent route.
+    agent_turn_recorder_dir: ?[]const u8 = null,
+
+    /// Maximum bytes the agent turn recorder may commit in this process.
+    /// Required and non-zero when the accepted catalog serves an agent route.
+    agent_turn_recorder_max_bytes: ?usize = null,
+
+    /// Maximum agent turns admitted concurrently. Required and non-zero when
+    /// the accepted catalog serves an agent route.
+    max_agent_turns: ?u32 = null,
+
     /// Log requests to stdout
     log_requests: bool = true,
 
@@ -1492,6 +1538,24 @@ fn validateInvariantRuntimeTopology(config: RuntimeConfig) !void {
     if (config.invariant_section != null and config.system_config_path != null) {
         return error.UnsupportedInvariantSystem;
     }
+}
+
+/// Validate the process settings required before an agent generation can
+/// serve. Source-mode callers use this before `Server.init`; accepted embedded
+/// catalogs use it in `Server.start`.
+pub fn validateAgentTurnSettings(config: ServerConfig) !void {
+    const directory = config.agent_turn_recorder_dir orelse
+        return error.AgentTurnRecorderDirectoryRequired;
+    if (directory.len == 0) return error.AgentTurnRecorderDirectoryRequired;
+
+    const ceiling = config.agent_turn_recorder_max_bytes orelse
+        return error.AgentTurnRecorderCeilingRequired;
+    if (ceiling == 0) return error.AgentTurnRecorderCeilingInvalid;
+
+    const cap = config.max_agent_turns orelse return error.MaxAgentTurnsRequired;
+    if (cap == 0) return error.MaxAgentTurnsInvalid;
+    const pool_size = if (config.pool_size == 0) defaultPoolSize() else config.pool_size;
+    if (pool_size <= 1 or @as(usize, cap) >= pool_size - 1) return error.MaxAgentTurnsInvalid;
 }
 
 // ============================================================================
@@ -1624,6 +1688,11 @@ pub const Server = struct {
     /// Process-owned in-memory actor queue for opt-in `zttp:queue` delivery.
     /// Deinitialised after handler pools so no runtime can hold a queue pointer.
     actor_queue: ?actor_queue.ActorQueue = null,
+    /// Process-owned turn recorder. It is initialized once in `start` and is
+    /// not replaced when a live reload installs a new handler generation.
+    turn_recorder: ?TurnRecorder = null,
+    active_agent_turns: std.atomic.Value(u32) = .init(0),
+    refused_agent_turns: std.atomic.Value(u64) = .init(0),
     const Self = @This();
     const IoBackend = Io.Threaded;
 
@@ -1698,6 +1767,7 @@ pub const Server = struct {
         if (self.conn_pool) |cp| cp.deinit();
 
         if (self.pool) |*p| p.deinit();
+        if (self.turn_recorder) |*recorder| recorder.deinit();
         // Pool drained: no runtime can still be writing to the incident log fd.
         if (self.incident_log_fd) |fd| std.Io.Threaded.closeFd(fd);
         // After the main pool: in-flight orchestrators (which dispatch into the
@@ -1743,6 +1813,122 @@ pub const Server = struct {
         }
         if (self.dev_tool_catalog) |*catalog| return catalog;
         return null;
+    }
+
+    fn activeCatalogHasAgent(self: *const Self) bool {
+        const catalog = self.activeToolCatalog() orelse return false;
+        for (catalog.entries) |*entry| {
+            switch (entry.kind) {
+                .agent => return true,
+                .tool => {},
+            }
+        }
+        return false;
+    }
+
+    fn validateAgentTurnConfig(self: *const Self) !void {
+        if (!self.activeCatalogHasAgent()) return;
+        try validateAgentTurnSettings(self.config);
+    }
+
+    fn initAgentTurnRecorder(self: *Self) !void {
+        try self.validateAgentTurnConfig();
+        if (self.turn_recorder != null) return;
+        const directory = self.config.agent_turn_recorder_dir orelse return;
+        const ceiling = self.config.agent_turn_recorder_max_bytes orelse return;
+        if (directory.len == 0 or ceiling == 0) return;
+        self.turn_recorder = try TurnRecorder.initFile(self.allocator, directory, @intCast(ceiling));
+    }
+
+    fn tryAcquireAgentTurn(self: *Self) bool {
+        const cap = self.config.max_agent_turns orelse {
+            _ = self.refused_agent_turns.fetchAdd(1, .monotonic);
+            return false;
+        };
+        const pool_size = if (self.config.pool_size == 0) defaultPoolSize() else self.config.pool_size;
+        if (cap == 0 or pool_size <= 1 or @as(usize, cap) >= pool_size - 1) {
+            _ = self.refused_agent_turns.fetchAdd(1, .monotonic);
+            return false;
+        }
+        var current = self.active_agent_turns.load(.acquire);
+        while (current < cap) {
+            if (self.active_agent_turns.cmpxchgWeak(current, current + 1, .acq_rel, .acquire)) |actual| {
+                current = actual;
+            } else {
+                return true;
+            }
+        }
+        _ = self.refused_agent_turns.fetchAdd(1, .monotonic);
+        return false;
+    }
+
+    fn releaseAgentTurn(self: *Self) void {
+        const previous = self.active_agent_turns.fetchSub(1, .acq_rel);
+        std.debug.assert(previous > 0);
+    }
+
+    fn activeRuntimePolicyDigest(self: *Self, allocator: std.mem.Allocator) ![32]u8 {
+        const pool = if (self.pool) |*value| value else return error.ServerNotStarted;
+        pool.runtime_init_mutex.lock();
+        defer pool.runtime_init_mutex.unlock();
+        const serialized = try self_extract.serializePolicy(allocator, &pool.policy_generation.policy);
+        defer allocator.free(serialized);
+        var digest: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(serialized, &digest, .{});
+        return digest;
+    }
+
+    fn admitAgentTurn(
+        self: *Self,
+        allocator: std.mem.Allocator,
+        agent: *const contract_runtime.AcceptedAgent,
+    ) !*TurnState {
+        if (!self.tryAcquireAgentTurn()) return error.AgentTurnCapacityExhausted;
+        errdefer self.releaseAgentTurn();
+
+        const recorder = if (self.turn_recorder) |*value| value else return error.AgentTurnRecorderUnavailable;
+        if (!recorder.isHealthy()) return error.AgentTurnRecorderUnavailable;
+
+        var id: turn_recorder.TurnId = undefined;
+        try self.io_backend.io().randomSecure(&id);
+        const now_ns = try engine.monotonicNowNs();
+        const deadline_delta = @as(u64, agent.limits.turn_deadline_ms) * std.time.ns_per_ms;
+        const deadline_ns = std.math.add(u64, now_ns, deadline_delta) catch std.math.maxInt(u64);
+        const turn = try allocator.create(TurnState);
+        turn.* = try TurnState.init(allocator, id, agent.limits, deadline_ns, recorder);
+
+        const catalog = self.activeToolCatalog() orelse return error.AgentTurnRecorderUnavailable;
+        const catalog_digest = pcc.tool_catalog.digest(catalog.bytes);
+        const catalog_hex = std.fmt.bytesToHex(catalog_digest, .lower);
+        const policy_digest = try self.activeRuntimePolicyDigest(allocator);
+        const policy_hex = std.fmt.bytesToHex(policy_digest, .lower);
+        const wall_ms = unixMillisNow();
+        const wall_ns = @as(i128, wall_ms) * std.time.ns_per_ms;
+        try recorder.admit(.{
+            .turn_id = id,
+            .sequence = 0,
+            .kind = .admit,
+            .monotonic_ns = @intCast(now_ns),
+            .agent_name = agent.name,
+            .catalog_digest = &catalog_hex,
+            .runtime_policy_hash = &policy_hex,
+            .wall_time_unix_ns = wall_ns,
+        });
+        return turn;
+    }
+
+    fn finishAgentTurn(self: *Self, turn: *TurnState, status: u16, handler_timed_out: bool) void {
+        const recorder = if (self.turn_recorder) |*value| value else return;
+        const now_ns = engine.monotonicNowNs() catch 0;
+        recorder.terminal(.{
+            .turn_id = turn.id,
+            .sequence = turn.nextSequence(),
+            .kind = .terminal,
+            .terminal_tag = turn.terminalTag(status, handler_timed_out),
+            .monotonic_ns = @intCast(now_ns),
+        }) catch |err| {
+            std.log.err("agent turn terminal record failed: {}", .{err});
+        };
     }
 
     /// Whether the current handler contract declares a tool or agent entry.
@@ -2566,6 +2752,12 @@ pub const Server = struct {
         // the pool exists, so a refusal is a refusal to serve rather than a
         // handler that is already warm when somebody reads the log line.
         try self.acceptEmbeddedCertificate();
+
+        // The recorder is process-owned and opened once. A live reload may
+        // replace the handler generation, but it must not replace the sink.
+        // Development supplies settings before the first source analysis, so
+        // the same initialization also prepares a later agent generation.
+        try self.initAgentTurnRecorder();
 
         // Tool identity (M4 T5): a handler serving tools needs the key before
         // it serves anything. Checked after acceptance, which is what installs
@@ -3948,6 +4140,7 @@ test "threaded health and readiness probes return over socket accept path" {
             server.contract = null;
             server.well_known_doc = null;
             server.pool = null;
+            server.turn_recorder = null;
 
             var pool = ConnectionPool{
                 .workers = &[_]std.Thread{},
@@ -5176,6 +5369,7 @@ const CredentialTestUpstream = struct {
     thread: ?std.Thread = null,
     authorization_buf: [256]u8 = undefined,
     authorization_len: usize = 0,
+    connections: usize = 0,
     requests: usize = 0,
 
     fn init(body: []const u8) !CredentialTestUpstream {
@@ -5233,6 +5427,7 @@ const CredentialTestUpstream = struct {
         const io = self.io_backend.io();
         var stream = try self.listener.accept(io);
         defer stream.close(io);
+        self.connections += 1;
         var head: [4096]u8 = undefined;
         var len: usize = 0;
         while (std.mem.indexOf(u8, head[0..len], "\r\n\r\n") == null and len < head.len) {
@@ -5241,7 +5436,10 @@ const CredentialTestUpstream = struct {
             if (n == 0) break;
             len += n;
         }
-        if (std.mem.startsWith(u8, head[0..len], "GET /__stop ")) return;
+        if (std.mem.startsWith(u8, head[0..len], "GET /__stop ")) {
+            self.connections -= 1;
+            return;
+        }
         self.requests += 1;
         var lines = std.mem.splitSequence(u8, head[0..len], "\r\n");
         while (lines.next()) |line| {
@@ -5615,14 +5813,26 @@ test "a tool handler refuses to start without auth or without its key" {
     );
 }
 
+const AgentTestSpec = struct {
+    provider_endpoint: []const u8 = "https://provider.example:443",
+    allow_provider_fetch: bool = false,
+    pool_config: RuntimeConfig = .{},
+};
+
 // Agent admission uses the same request driver and token builder as tools.
-fn agentTestServer(handler_code: []const u8, install_catalog: bool) !Server {
+fn agentTestServerFor(handler_code: []const u8, install_catalog: bool, spec: AgentTestSpec) !Server {
     const allocator = std.testing.allocator;
     var names = [_][]const u8{"lookup"};
+    // The catalog decoder requires exports in strictly increasing (module,
+    // name) order, so the optional provider fetch comes first and is skipped
+    // by offset when the spec does not allow it.
     var exports = [_]engine.ToolExport{
+        .{ .module = "zttp:fetch", .name = "fetch" },
         .{ .module = "zttp:tool", .name = "agentPrompt" },
         .{ .module = "zttp:tool", .name = "toolInput" },
     };
+    const export_start: usize = if (spec.allow_provider_fetch) 0 else 1;
+    const export_count: usize = exports.len - export_start;
     var entries = [_]contract_runtime.ToolEntry{
         .{
             .name = "assistant",
@@ -5633,10 +5843,10 @@ fn agentTestServer(handler_code: []const u8, install_catalog: bool) !Server {
             .output_schema_name = "",
             .output_schema_json = "",
             .max_input_bytes = 64,
-            .reachable_exports = .{ .items = &exports, .capacity = exports.len },
+            .reachable_exports = .{ .items = exports[export_start..], .capacity = export_count },
             .agent = .{
                 .tools = .{ .items = &names, .capacity = names.len },
-                .provider_endpoint = "https://provider.example:443",
+                .provider_endpoint = spec.provider_endpoint,
                 .provider_credential = "provider",
                 .limits = .{ .rounds = 4, .tool_calls = 8, .tool_calls_per_round = 4, .argument_bytes = 4096, .result_bytes = 16384, .turn_deadline_ms = 20000, .provider_request_bytes = 32768 },
             },
@@ -5660,15 +5870,26 @@ fn agentTestServer(handler_code: []const u8, install_catalog: bool) !Server {
     var srv = try Server.init(allocator, .{
         .handler = .{ .inline_code = handler_code },
         .log_requests = false,
-        .pool_size = 1,
+        .pool_size = 3,
+        .max_agent_turns = 1,
         .max_body_size = 4096,
         .runtime_config = .{ .tool_auth = .{ .key_env = tool_test_key_env, .tenant_claim = tool_test_tenant_claim } },
     });
     errdefer srv.deinit();
     srv.contract = try contract_runtime.validate(try contract_runtime.fromHandlerContract(allocator, &hc), .{});
-    srv.pool = try HandlerPool.init(allocator, .{ .contract_has_catalog = true, .contract_has_agent = true }, handler_code, "<agent-test>", 1, 0);
+    var pool_config = spec.pool_config;
+    pool_config.contract_has_catalog = true;
+    pool_config.contract_has_agent = true;
+    srv.pool = try HandlerPool.init(allocator, pool_config, handler_code, "<agent-test>", 3, 0);
+    srv.turn_recorder = TurnRecorder.initMemory(allocator, 64 * 1024);
+    try initIoBackend(&srv.io_backend, allocator);
+    srv.evented_ready = true;
     if (install_catalog) srv.dev_tool_catalog = try contract_runtime.lowerProducerToolCatalog(allocator, &entries);
     return srv;
+}
+
+fn agentTestServer(handler_code: []const u8, install_catalog: bool) !Server {
+    return agentTestServerFor(handler_code, install_catalog, .{});
 }
 
 fn serveAgentTestRequest(srv: *Server, raw_request: []const u8, out: []u8) ![]const u8 {
@@ -5704,6 +5925,14 @@ fn countAgentTestInvocation(_: *engine.Context, _: []const engine.JSValue) anyer
     return error.AotBail;
 }
 
+fn latchUnknownAgentTestInvocation(ctx: *engine.Context, _: []const engine.JSValue) anyerror!engine.JSValue {
+    const rt: *engine.HandlerInstance = @ptrCast(@alignCast(ctx.host orelse return error.AotBail));
+    const request = rt.active_request orelse return error.AotBail;
+    const turn = request.turn orelse return error.AotBail;
+    turn.closeLatch(.outcome_unknown);
+    return error.AotBail;
+}
+
 const agent_prompt_handler =
     \\import { agentPrompt, toolInput } from "zttp:tool";
     \\function handler(req) {
@@ -5734,8 +5963,8 @@ test "agent admission verifies identity and prompt before running the handler" {
         .{ .auth = authorized, .body = "{\"version\":1,\"prompt\":\"\"}", .status = "HTTP/1.1 400", .reason = "string_too_short" },
     };
     agent_test_invocations = 0;
-    @import("handler_instance.zig").setAotOverrideForTest(countAgentTestInvocation);
-    defer @import("handler_instance.zig").setAotOverrideForTest(null);
+    engine.setAotOverrideForTest(countAgentTestInvocation);
+    defer engine.setAotOverrideForTest(null);
     for (cases) |case| {
         var buf: [2048]u8 = undefined;
         const response = try serveAgentTestRequest(&srv, try agentTestPost(&reqs, case.auth, case.body), &buf);
@@ -5751,6 +5980,11 @@ test "agent admission verifies identity and prompt before running the handler" {
     try expectResponse(response, "HTTP/1.1 200", "\"tenant\":\"acme\"");
     try expectResponse(response, "HTTP/1.1 200", "\"auth\":\"absent\"");
     try std.testing.expectEqual(@as(usize, 1), agent_test_invocations);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        try srv.turn_recorder.?.memoryBytes(),
+        "\"terminalTag\":\"completed\"",
+    ) != null);
 }
 
 test "agent catalog requires auth and catalog handlers refuse every route before installation" {
@@ -5767,8 +6001,8 @@ test "agent catalog requires auth and catalog handlers refuse every route before
     var before_install = try agentTestServer(agent_prompt_handler, false);
     defer before_install.deinit();
     agent_test_invocations = 0;
-    @import("handler_instance.zig").setAotOverrideForTest(countAgentTestInvocation);
-    defer @import("handler_instance.zig").setAotOverrideForTest(null);
+    engine.setAotOverrideForTest(countAgentTestInvocation);
+    defer engine.setAotOverrideForTest(null);
     for ([_][]const u8{ "/agent", "/tools/lookup", "/unmatched", "/_health", "/_readiness", "/static/file.txt" }) |path| {
         const raw = try std.fmt.allocPrint(reqs.arena.allocator(), "GET {s} HTTP/1.1\r\nHost: t\r\n\r\n", .{path});
         try expectResponse(try serveAgentTestRequest(&before_install, raw, &buf), "HTTP/1.1 503", "tool catalog is not installed");
@@ -5791,4 +6025,316 @@ test "agent requests enforce the catalog export grant" {
     var buf: [2048]u8 = undefined;
     const response = try serveAgentTestRequest(&srv, try agentTestPost(&reqs, try reqs.bearer(valid_claims), "{\"version\":1,\"prompt\":\"hello\"}"), &buf);
     try expectResponse(response, "HTTP/1.1 500", "Internal Server Error");
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        try srv.turn_recorder.?.memoryBytes(),
+        "\"terminalTag\":\"failed\"",
+    ) != null);
+}
+
+test "agent unknown outcome stays terminal when the handler returns 200" {
+    const handler = "function handler(req) { return Response.text('caught'); }";
+    var reqs = ToolRequests.init();
+    defer reqs.deinit();
+    var srv = try agentTestServer(handler, true);
+    defer srv.deinit();
+    _ = setenv(tool_test_key_env, tool_test_key, 1);
+    defer _ = unsetenv(tool_test_key_env);
+    try srv.loadToolAuth();
+    engine.setAotOverrideForTest(latchUnknownAgentTestInvocation);
+    defer engine.setAotOverrideForTest(null);
+
+    var buf: [2048]u8 = undefined;
+    const response = try serveAgentTestRequest(
+        &srv,
+        try agentTestPost(&reqs, try reqs.bearer(valid_claims), "{\"version\":1,\"prompt\":\"hello\"}"),
+        &buf,
+    );
+    try expectResponse(response, "HTTP/1.1 200", "caught");
+    try std.testing.expectEqual(@as(u32, 0), srv.active_agent_turns.load(.acquire));
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        try srv.turn_recorder.?.memoryBytes(),
+        "\"terminalTag\":\"outcome_unknown\"",
+    ) != null);
+}
+
+test "agent turn startup settings require a recorder ceiling and reserved pool capacity" {
+    var startup = try agentTestServer(agent_prompt_handler, true);
+    defer startup.deinit();
+    startup.io_backend.deinit();
+    startup.evented_ready = false;
+    try std.testing.expectError(error.AgentTurnRecorderDirectoryRequired, startup.start());
+
+    var srv = try agentTestServer(agent_prompt_handler, true);
+    defer srv.deinit();
+
+    try std.testing.expectError(error.AgentTurnRecorderDirectoryRequired, srv.validateAgentTurnConfig());
+    srv.config.agent_turn_recorder_dir = "/tmp";
+    try std.testing.expectError(error.AgentTurnRecorderCeilingRequired, srv.validateAgentTurnConfig());
+    srv.config.agent_turn_recorder_max_bytes = 0;
+    try std.testing.expectError(error.AgentTurnRecorderCeilingInvalid, srv.validateAgentTurnConfig());
+    srv.config.agent_turn_recorder_max_bytes = 4096;
+    srv.config.max_agent_turns = null;
+    try std.testing.expectError(error.MaxAgentTurnsRequired, srv.validateAgentTurnConfig());
+    srv.config.max_agent_turns = 0;
+    try std.testing.expectError(error.MaxAgentTurnsInvalid, srv.validateAgentTurnConfig());
+    srv.config.max_agent_turns = 2;
+    try std.testing.expectError(error.MaxAgentTurnsInvalid, srv.validateAgentTurnConfig());
+    srv.config.max_agent_turns = 1;
+    try srv.validateAgentTurnConfig();
+    try validateAgentTurnSettings(.{
+        .handler = .{ .inline_code = "function handler(req) { return Response.text(\"ok\"); }" },
+        .agent_turn_recorder_dir = "/tmp",
+        .agent_turn_recorder_max_bytes = 4096,
+        .max_agent_turns = 1,
+    });
+
+    var ordinary = try Server.init(std.testing.allocator, .{
+        .handler = .{ .inline_code = "function handler(req) { return Response.text(\"ok\"); }" },
+        .pool_size = 1,
+        .agent_turn_recorder_dir = "/tmp",
+        .agent_turn_recorder_max_bytes = 4096,
+        .max_agent_turns = 1,
+    });
+    defer ordinary.deinit();
+    try ordinary.validateAgentTurnConfig();
+}
+
+test "agent turn cap refuses before handler pool acquisition and counts the refusal" {
+    var reqs = ToolRequests.init();
+    defer reqs.deinit();
+    var srv = try agentTestServer(agent_prompt_handler, true);
+    defer srv.deinit();
+    _ = setenv(tool_test_key_env, tool_test_key, 1);
+    defer _ = unsetenv(tool_test_key_env);
+    try srv.loadToolAuth();
+
+    try std.testing.expect(srv.tryAcquireAgentTurn());
+    defer srv.releaseAgentTurn();
+    var buf: [2048]u8 = undefined;
+    const response = try serveAgentTestRequest(
+        &srv,
+        try agentTestPost(&reqs, try reqs.bearer(valid_claims), "{\"version\":1,\"prompt\":\"hello\"}"),
+        &buf,
+    );
+    try expectResponse(response, "HTTP/1.1 503", "agent turn capacity exhausted");
+    try std.testing.expectEqual(@as(u64, 1), srv.refused_agent_turns.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 0), (try srv.turn_recorder.?.memoryBytes()).len);
+    try std.testing.expectEqual(@as(usize, 0), srv.pool.?.getInUse());
+}
+
+test "agent recorder ceiling refusal releases the cap and keeps readiness healthy" {
+    var reqs = ToolRequests.init();
+    defer reqs.deinit();
+    var srv = try agentTestServer(agent_prompt_handler, true);
+    defer srv.deinit();
+    _ = setenv(tool_test_key_env, tool_test_key, 1);
+    defer _ = unsetenv(tool_test_key_env);
+    try srv.loadToolAuth();
+    srv.turn_recorder.?.deinit();
+    srv.turn_recorder = TurnRecorder.initMemory(std.testing.allocator, 1);
+
+    var buf: [2048]u8 = undefined;
+    const refused = try serveAgentTestRequest(
+        &srv,
+        try agentTestPost(&reqs, try reqs.bearer(valid_claims), "{\"version\":1,\"prompt\":\"hello\"}"),
+        &buf,
+    );
+    try expectResponse(refused, "HTTP/1.1 503", "agent turn recorder unavailable");
+    try std.testing.expectEqual(@as(u32, 0), srv.active_agent_turns.load(.acquire));
+    try std.testing.expect(srv.turn_recorder.?.isHealthy());
+
+    const ready = try serveAgentTestRequest(&srv, "GET /_readiness HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n", &buf);
+    try expectResponse(ready, "HTTP/1.1 200", "OK");
+}
+
+const AgentProviderAdmissionRefusal = enum { cap, recorder_ceiling };
+
+fn expectAgentAdmissionRefusesBeforeProvider(upstream: *CredentialTestUpstream, refusal: AgentProviderAdmissionRefusal) !void {
+    var endpoint_buf: [64]u8 = undefined;
+    const endpoint = try std.fmt.bufPrint(&endpoint_buf, "http://127.0.0.1:{d}", .{upstream.port()});
+    var paths = [_][]const u8{"/v1"};
+    const refs = [_]credential_store_mod.CredentialRef{.{
+        .name = "provider",
+        .env = credential_test_env,
+        .endpoint = endpoint,
+        .header = "authorization",
+        .scheme = "Bearer",
+        .methods = std.EnumSet(credential_store_mod.credential_ref.Method).initOne(.POST),
+        .paths = &paths,
+    }};
+    _ = setenv(credential_test_env, credential_test_value, 1);
+    defer _ = unsetenv(credential_test_env);
+    var store = (try credential_store_mod.load(std.testing.allocator, &refs, credential_store_mod.processEnv())).ok;
+    defer store.deinit();
+
+    var handler_buf: [512]u8 = undefined;
+    const handler = try std.fmt.bufPrint(&handler_buf,
+        \\import {{ fetch }} from "zttp:fetch";
+        \\function handler(req) {{
+        \\  const response = fetch("{s}/v1/chat", {{ method: "POST", credential: "provider", body: "request" }});
+        \\  return Response.text(response.body);
+        \\}}
+    , .{endpoint});
+    var srv = try agentTestServerFor(handler, true, .{
+        .provider_endpoint = endpoint,
+        .allow_provider_fetch = true,
+        .pool_config = .{
+            .outbound_http_enabled = true,
+            .credential_store = &store,
+            .dev_capability_policy = .{ .egress_scopes = (engine.endpoint.ScopeSet{}).with(.loopback) },
+        },
+    });
+    defer srv.deinit();
+    _ = setenv(tool_test_key_env, tool_test_key, 1);
+    defer _ = unsetenv(tool_test_key_env);
+    try srv.loadToolAuth();
+
+    var cap_slot_held = false;
+    defer if (cap_slot_held) srv.releaseAgentTurn();
+    switch (refusal) {
+        .cap => {
+            try std.testing.expect(srv.tryAcquireAgentTurn());
+            cap_slot_held = true;
+        },
+        .recorder_ceiling => {
+            srv.turn_recorder.?.deinit();
+            srv.turn_recorder = TurnRecorder.initMemory(std.testing.allocator, 1);
+        },
+    }
+
+    try upstream.start();
+    defer upstream.join();
+    var reqs = ToolRequests.init();
+    defer reqs.deinit();
+    var response_buf: [2048]u8 = undefined;
+    const response = try serveAgentTestRequest(
+        &srv,
+        try agentTestPost(&reqs, try reqs.bearer(valid_claims), "{\"version\":1,\"prompt\":\"hello\"}"),
+        &response_buf,
+    );
+    switch (refusal) {
+        .cap => try expectResponse(response, "HTTP/1.1 503", "agent turn capacity exhausted"),
+        .recorder_ceiling => try expectResponse(response, "HTTP/1.1 503", "agent turn recorder unavailable"),
+    }
+    upstream.join();
+    try std.testing.expectEqual(@as(usize, 0), upstream.connections);
+    try std.testing.expectEqual(@as(usize, 0), upstream.requests);
+}
+
+test "agent admission cap and recorder ceiling contact no provider" {
+    var capped_upstream = try CredentialTestUpstream.init("provider response");
+    defer capped_upstream.deinit();
+    try expectAgentAdmissionRefusesBeforeProvider(&capped_upstream, .cap);
+
+    var ceiling_upstream = try CredentialTestUpstream.init("provider response");
+    defer ceiling_upstream.deinit();
+    try expectAgentAdmissionRefusesBeforeProvider(&ceiling_upstream, .recorder_ceiling);
+}
+
+test "unhealthy agent recorder makes readiness name the recorder" {
+    var srv = try agentTestServer(agent_prompt_handler, true);
+    defer srv.deinit();
+    try srv.turn_recorder.?.failNextMemoryWrite();
+    try std.testing.expectError(error.RecorderWriteFailed, srv.turn_recorder.?.admit(.{
+        .turn_id = [_]u8{0x7a} ** 16,
+        .sequence = 0,
+        .kind = .admit,
+        .monotonic_ns = 1,
+        .agent_name = "assistant",
+        .catalog_digest = "00",
+        .runtime_policy_hash = "11",
+        .wall_time_unix_ns = 2,
+    }));
+
+    var buf: [1024]u8 = undefined;
+    const response = try serveAgentTestRequest(&srv, "GET /_readiness HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n", &buf);
+    try expectResponse(response, "HTTP/1.1 503", "turn recorder unavailable");
+}
+
+test "agent terminal precedence maps timeout and latch outcomes" {
+    var recorder = TurnRecorder.initMemory(std.testing.allocator, 4096);
+    defer recorder.deinit();
+    const limits = AgentLimits{
+        .rounds = 1,
+        .tool_calls = 1,
+        .tool_calls_per_round = 1,
+        .argument_bytes = 1,
+        .result_bytes = 1,
+        .turn_deadline_ms = 1,
+        .provider_request_bytes = 1,
+    };
+    var turn = try TurnState.init(std.testing.allocator, [_]u8{0} ** 16, limits, 1, &recorder);
+    defer turn.deinit();
+
+    try std.testing.expectEqual(turn_recorder.TerminalTag.completed, turn.terminalTag(200, false));
+    try std.testing.expectEqual(turn_recorder.TerminalTag.failed, turn.terminalTag(500, false));
+    try std.testing.expectEqual(turn_recorder.TerminalTag.failed, turn.terminalTag(501, false));
+    try std.testing.expectEqual(turn_recorder.TerminalTag.deadline_exceeded, turn.terminalTag(500, true));
+    turn.closeLatch(.budget_exhausted);
+    try std.testing.expectEqual(turn_recorder.TerminalTag.deadline_exceeded, turn.terminalTag(504, true));
+
+    var unknown = try TurnState.init(std.testing.allocator, [_]u8{1} ** 16, limits, 1, &recorder);
+    defer unknown.deinit();
+    unknown.closeLatch(.outcome_unknown);
+    try std.testing.expectEqual(turn_recorder.TerminalTag.outcome_unknown, unknown.terminalTag(504, true));
+}
+
+test "agent handler timeout writes a deadline terminal before releasing the cap" {
+    const slow_handler =
+        "function handler(req) { let x = 0; for (let i of range(1000000000)) { x = x + 1; } return Response.text('unreachable'); }";
+    var reqs = ToolRequests.init();
+    defer reqs.deinit();
+    var srv = try agentTestServer(slow_handler, true);
+    defer srv.deinit();
+    srv.pool.?.deinit();
+    srv.pool = try HandlerPool.init(
+        std.testing.allocator,
+        .{ .contract_has_catalog = true, .contract_has_agent = true, .request_timeout_ms = 10 },
+        slow_handler,
+        "<agent-timeout-test>",
+        3,
+        0,
+    );
+    _ = setenv(tool_test_key_env, tool_test_key, 1);
+    defer _ = unsetenv(tool_test_key_env);
+    try srv.loadToolAuth();
+
+    var buf: [2048]u8 = undefined;
+    const response = try serveAgentTestRequest(
+        &srv,
+        try agentTestPost(&reqs, try reqs.bearer(valid_claims), "{\"version\":1,\"prompt\":\"hello\"}"),
+        &buf,
+    );
+    try expectResponse(response, "HTTP/1.1 504", "Gateway Timeout");
+    try std.testing.expectEqual(@as(u32, 0), srv.active_agent_turns.load(.acquire));
+    const records = try srv.turn_recorder.?.memoryBytes();
+    try std.testing.expect(std.mem.indexOf(u8, records, "\"kind\":\"admit\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, records, "\"terminalTag\":\"deadline_exceeded\"") != null);
+}
+
+test "agent pool refusal still writes a failed terminal and releases the cap" {
+    var reqs = ToolRequests.init();
+    defer reqs.deinit();
+    var srv = try agentTestServer(agent_prompt_handler, true);
+    defer srv.deinit();
+    _ = setenv(tool_test_key_env, tool_test_key, 1);
+    defer _ = unsetenv(tool_test_key_env);
+    try srv.loadToolAuth();
+    var leases: [3]HandlerPool.WorkerRuntimeLease = undefined;
+    for (&leases) |*lease| lease.* = try srv.pool.?.acquireWorkerRuntime();
+    defer for (&leases) |*lease| lease.deinit();
+
+    var buf: [2048]u8 = undefined;
+    const response = try serveAgentTestRequest(
+        &srv,
+        try agentTestPost(&reqs, try reqs.bearer(valid_claims), "{\"version\":1,\"prompt\":\"hello\"}"),
+        &buf,
+    );
+    try expectResponse(response, "HTTP/1.1 503", "Service Unavailable");
+    try std.testing.expectEqual(@as(u32, 0), srv.active_agent_turns.load(.acquire));
+    const records = try srv.turn_recorder.?.memoryBytes();
+    try std.testing.expect(std.mem.indexOf(u8, records, "\"kind\":\"admit\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, records, "\"terminalTag\":\"failed\"") != null);
 }

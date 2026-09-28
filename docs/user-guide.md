@@ -240,6 +240,36 @@ an address scope, and the operator allows outbound requests with
 `zig build test-reference-tools` builds `examples/tools`, runs the binary, and
 checks the positive path and each boundary case with real requests.
 
+### Agent turns
+
+An admitted agent request has a turn deadline and a round budget. Each provider
+fetch attempt consumes one round after the recorder accepts its pre-record.
+The runtime also checks `providerRequestBytes` before that record. It never
+retries a provider fetch automatically.
+
+A refused fetch returns status 599, `error: "AgentTurnRefused"`, and one stable
+`details` tag: `deadline_exceeded`, `budget_exhausted`,
+`recorder_unavailable`, `outcome_unknown`, `tool_denied`, or `tool_failed`.
+The last two tags are reserved for tool dispatch. The first refusal closes the
+turn. Later provider fetches return that same tag without a new connection.
+A failure after the request write starts is `outcome_unknown` unless the full
+response is usable. A complete non-2xx response leaves the turn open.
+
+For agent handlers, `zttp serve` and self-contained binaries require
+`--agent-turn-recorder-dir <DIR>`, `--agent-turn-recorder-max-bytes <SIZE>`, and
+`--max-agent-turns <COUNT>`. The cap must be positive and less than the pool size
+minus one. A full cap returns 503. The recorder writes metadata only, reserves
+space for each terminal record, and flushes each record before it returns.
+After a write or flush failure, `/_readiness` returns 503 and names the recorder.
+Restart the process after recorder failure or when its byte ceiling is reached.
+
+`zttp dev` uses unmeasured development values: `<project>/.zttp/turns`, 16 MiB,
+and one concurrent turn. Its default pool has at least three slots; an explicit
+smaller pool is refused for an agent handler. These values do not apply to
+serve or deployed binaries. Replay uses an in-memory recorder and needs no
+recorder settings. Agent traces without transport phase metadata replay as
+`outcome_unknown`. Tool dispatch remains inactive in this release step.
+
 ## Application Invariants
 
 An application invariant states what must remain true after a committed state

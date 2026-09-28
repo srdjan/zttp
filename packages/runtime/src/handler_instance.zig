@@ -203,7 +203,9 @@ pub const HandlerInstance = struct {
 
     pub fn enterNested(self: *Self, frame: Frame) !void {
         if (self.frame_depth != 1) return error.InvalidGrantFrameDepth;
-        self.frames[1] = frame;
+        var nested = frame;
+        nested.request.turn = null;
+        self.frames[1] = nested;
         self.frame_depth = 2;
         self.syncFrame();
     }

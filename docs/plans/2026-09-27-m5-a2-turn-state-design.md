@@ -348,7 +348,18 @@ the kernel decoder.
   literal, the builder refusals and census cases, contract version 24, `ZTCAT1`
   schema 5 in the encoder and the kernel decoder with mutant rows, the runtime
   lowering and cross-check, and the consumer-contract section 4.6 text.
-- **U2. Turn state, recorder, and cap.** Sections 3 to 7: the turn state and
+- **U2. Turn state, recorder, and cap.** Done 2026-09-27: full `zig build test`,
+  `test-zruntime`, `test-server`, `test-cli`, `test-expert-app`,
+  `test-reference-tools`, `test-runtime-purity`, `test-proof-swallow`, and fmt
+  pass; the pre-record, latch, terminal-precedence, and fetch-budget probes
+  each failed a test. Two changes from the plan. The `zttp:fetch` summary and
+  the `error?`/`details?` return fields moved to A4, because they move the
+  module hashes the codegen cassettes embed and A4 already carries the approved
+  re-record; until then a sound-mode handler reads those fields with a
+  literal-key bracket read. And a body shorter than its Content-Length is now
+  refused on every fetch (`9e8f54ef`). Open finding for the owner: sound mode
+  refuses `p.missing` with ZTS201 but accepts `p["missing"]` on the same closed
+  record. Sections 3 to 7: the turn state and
   hook, the phase marker and classification, the terminal precedence, the
   recorder with its settings, readiness, and replay sink, the cap, the dev
   values, and the tag set in the `zttp:fetch` spec and the user guide.

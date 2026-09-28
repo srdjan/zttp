@@ -415,6 +415,11 @@ fn serveCommandWithDebugPanicPath(
         return;
     }
 
+    // The watcher's initial catalog arrives after Server.start. Check source
+    // agent settings here so missing settings refuse startup, not the first
+    // request. Replay and fixture execution use their in-memory sink above.
+    try validateSourceAgentSettings(allocator, config);
+
     var scheduler: ?durable_scheduler.DurableScheduler = null;
     defer if (scheduler) |*worker| worker.deinit();
 
@@ -480,6 +485,19 @@ fn serveCommandWithDebugPanicPath(
             reportServerError(err, config.port);
             std.process.exit(1);
         };
+    }
+}
+
+fn validateSourceAgentSettings(allocator: std.mem.Allocator, config: ServerConfig) !void {
+    switch (config.handler) {
+        .file_path, .inline_code => {
+            const source = try @import("handler_loader.zig").load(allocator, config.handler);
+            defer allocator.free(source.code);
+            if (try engine.sourceHasAgent(allocator, source.code, source.filename)) {
+                try @import("server.zig").validateAgentTurnSettings(config);
+            }
+        },
+        else => {},
     }
 }
 
@@ -622,6 +640,26 @@ fn parseCommonServeFlag(
     if (std.mem.eql(u8, arg, "--outbound-host")) {
         config.runtime_config.outbound_http_enabled = true;
         config.runtime_config.outbound_allow_host = try shared.takeArg(i, argv, error.MissingOutboundHost);
+        return true;
+    }
+    if (std.mem.eql(u8, arg, "--agent-turn-recorder-dir")) {
+        const value = try shared.takeArg(i, argv, error.MissingAgentTurnRecorderDir);
+        if (value.len == 0) return error.InvalidAgentTurnRecorderDir;
+        config.agent_turn_recorder_dir = value;
+        return true;
+    }
+    if (std.mem.eql(u8, arg, "--agent-turn-recorder-max-bytes")) {
+        const value = try shared.takeArg(i, argv, error.MissingAgentTurnRecorderMaxBytes);
+        const bytes = shared.parseSize(value) catch return error.InvalidAgentTurnRecorderMaxBytes;
+        if (bytes == 0) return error.InvalidAgentTurnRecorderMaxBytes;
+        config.agent_turn_recorder_max_bytes = bytes;
+        return true;
+    }
+    if (std.mem.eql(u8, arg, "--max-agent-turns")) {
+        const value = try shared.takeArg(i, argv, error.MissingMaxAgentTurns);
+        const cap = std.fmt.parseInt(u32, value, 10) catch return error.InvalidMaxAgentTurns;
+        if (cap == 0) return error.InvalidMaxAgentTurns;
+        config.max_agent_turns = cap;
         return true;
     }
     if (std.mem.eql(u8, arg, "--no-env-check")) {
@@ -874,6 +912,9 @@ fn printAppendedHelp() void {
         \\  --workflow-queue      Queue durable workflow dispatch; requires --system and --durable
         \\  --actor-queue         Enable in-memory zttp:queue actor mailboxes
         \\  --ledger <FILE>       Protected ledger store for the embedded invariant
+        \\  --agent-turn-recorder-dir <DIR>  Required for agent handlers
+        \\  --agent-turn-recorder-max-bytes <SIZE>  Recorder byte ceiling
+        \\  --max-agent-turns <COUNT>  Agent cap, less than pool size minus 1
         \\
     ;
     _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
@@ -944,6 +985,9 @@ fn printServeHelp() void {
         \\  --outbound-http       Enable native outbound HTTP bridge
         \\  --outbound-host <H>   Restrict outbound bridge to exact host H (host only, not port)
         \\  --outbound-timeout-ms Outbound fetch deadline in ms, greater than 0
+        \\  --agent-turn-recorder-dir <DIR>  Required for agent handlers
+        \\  --agent-turn-recorder-max-bytes <SIZE>  Recorder byte ceiling
+        \\  --max-agent-turns <COUNT>  Agent cap, less than pool size minus 1
         \\  --outbound-max-response <SIZE>
         \\  --sqlite <FILE>       SQLite database path for zttp:sql
         \\  --trace <FILE>        Record handler I/O traces to JSONL file
@@ -1056,6 +1100,77 @@ test "parseServeArgs refuses a zero outbound timeout" {
     );
     const config = try parseServeArgs(arena.allocator(), &.{ "handler.ts", "--outbound-timeout-ms", "1" });
     try std.testing.expectEqual(@as(u32, 1), config.runtime_config.outbound_timeout_ms);
+}
+
+test "serve and self-contained binaries parse explicit agent turn settings" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const args = [_][]const u8{ "--agent-turn-recorder-dir", "/tmp/turns", "--agent-turn-recorder-max-bytes", "16M", "--max-agent-turns", "1" };
+    const config = try parseServeArgs(arena.allocator(), &(args ++ .{"handler.ts"}));
+    var appended: ServerConfig = .{ .handler = .{ .inline_code = "" } };
+    try parseAppendedServeArgs(&args, &appended, false);
+    for ([_]ServerConfig{ config, appended }) |parsed| {
+        try std.testing.expectEqualStrings("/tmp/turns", parsed.agent_turn_recorder_dir.?);
+        try std.testing.expectEqual(@as(?usize, 16 * 1024 * 1024), parsed.agent_turn_recorder_max_bytes);
+        try std.testing.expectEqual(@as(?u32, 1), parsed.max_agent_turns);
+    }
+    const ordinary = try parseServeArgs(arena.allocator(), &.{"handler.ts"});
+    try std.testing.expect(ordinary.agent_turn_recorder_dir == null);
+    try std.testing.expect(ordinary.agent_turn_recorder_max_bytes == null);
+    try std.testing.expect(ordinary.max_agent_turns == null);
+}
+
+test "agent turn flags refuse missing empty zero and invalid values" {
+    const cases = .{
+        .{ "--agent-turn-recorder-dir", "", error.MissingAgentTurnRecorderDir, error.InvalidAgentTurnRecorderDir },
+        .{ "--agent-turn-recorder-max-bytes", "0", error.MissingAgentTurnRecorderMaxBytes, error.InvalidAgentTurnRecorderMaxBytes },
+        .{ "--max-agent-turns", "0", error.MissingMaxAgentTurns, error.InvalidMaxAgentTurns },
+    };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    inline for (cases) |case| {
+        var config: ServerConfig = .{ .handler = .{ .inline_code = "" } };
+        try std.testing.expectError(case[2], parseAppendedServeArgs(&.{case[0]}, &config, false));
+        try std.testing.expectError(case[3], parseAppendedServeArgs(&.{ case[0], case[1] }, &config, false));
+        try std.testing.expectError(case[2], parseServeArgs(arena.allocator(), &.{ "handler.ts", case[0] }));
+        try std.testing.expectError(case[3], parseServeArgs(arena.allocator(), &.{ "handler.ts", case[0], case[1] }));
+    }
+}
+
+test "source agent settings are refused before starting the watcher" {
+    const source =
+        \\import { toolCatalog } from "zttp:tool";
+        \\import { routerMatch } from "zttp:router";
+        \\import { schemaCompile } from "zttp:validate";
+        \\schemaCompile("In", "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{}}");
+        \\schemaCompile("Out", "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{}}");
+        \\function lookup(req) { return Response.json({}); }
+        \\function assistant(req) { return Response.json({}); }
+        \\const routes = { "POST /tools/lookup": lookup, "POST /agent": assistant };
+        \\toolCatalog({
+        \\  lookup: { route: "POST /tools/lookup", description: "Look up one value.", input: "In", output: "Out", maxInputBytes: 4096 },
+        \\  assistant: { route: "POST /agent", description: "Answer.", maxInputBytes: 8192,
+        \\    agent: { tools: ["lookup"], provider: { endpoint: "https://api.example.com", credential: "provider" },
+        \\      limits: { rounds: 1, toolCalls: 1, toolCallsPerRound: 1, argumentBytes: 4096, resultBytes: 16384, turnDeadlineMs: 20000, providerRequestBytes: 32768 } }
+        \\  }
+        \\});
+        \\function handler(req) {
+        \\  const found = routerMatch(routes, req);
+        \\  if (found !== undefined) return found.handler(req);
+        \\  return Response.json({}, { status: 404 });
+        \\}
+    ;
+    var config: ServerConfig = .{ .handler = .{ .inline_code = source }, .pool_size = 3 };
+    try std.testing.expectError(error.AgentTurnRecorderDirectoryRequired, validateSourceAgentSettings(std.testing.allocator, config));
+    config.agent_turn_recorder_dir = "/tmp/turns";
+    try std.testing.expectError(error.AgentTurnRecorderCeilingRequired, validateSourceAgentSettings(std.testing.allocator, config));
+    config.agent_turn_recorder_max_bytes = 16 * 1024 * 1024;
+    try std.testing.expectError(error.MaxAgentTurnsRequired, validateSourceAgentSettings(std.testing.allocator, config));
+    config.max_agent_turns = 1;
+    try validateSourceAgentSettings(std.testing.allocator, config);
+    config.pool_size = 2;
+    try std.testing.expectError(error.MaxAgentTurnsInvalid, validateSourceAgentSettings(std.testing.allocator, config));
+    try validateSourceAgentSettings(std.testing.allocator, .{ .handler = .{ .inline_code = "function handler(req) { return Response.text(\"ok\"); }" } });
 }
 
 test "serve policy validation never bypasses a configured policy" {
