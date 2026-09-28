@@ -5742,6 +5742,22 @@ const TestCredentialGrant = struct {
     fn grant(self: *const TestCredentialGrant) http_types.ToolGrant {
         return .{ .context = @ptrCast(self), .allows = allowsExport, .allows_credential = allowsCredential };
     }
+
+    fn agentGrant(
+        self: *const TestCredentialGrant,
+        provider_endpoint: []const u8,
+        provider_credential: []const u8,
+    ) http_types.ToolGrant {
+        return .{
+            .context = @ptrCast(self),
+            .allows = allowsExport,
+            .allows_credential = allowsCredential,
+            .agent = .{
+                .provider_endpoint = provider_endpoint,
+                .provider_credential = provider_credential,
+            },
+        };
+    }
 };
 
 /// An upstream that records every request until one asks for `/__stop`.
@@ -5756,6 +5772,7 @@ const CredentialUpstream = struct {
     /// Owned by `std.testing.allocator`, which is thread-safe; the test's
     /// arena is not, and the handler allocates from it while this runs.
     captured: std.ArrayListUnmanaged(TestCapturedRequest) = .empty,
+    accepted_connections: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
     thread_error: std.atomic.Value(TestErrorInt) = std.atomic.Value(TestErrorInt).init(0),
 
     const Reply = enum { ok, echo_body, echo_head, redirect, close_without_answer, large_body };
@@ -5827,6 +5844,7 @@ const CredentialUpstream = struct {
                 else => return err,
             };
             defer stream.close(io);
+            _ = self.accepted_connections.fetchAdd(1, .acq_rel);
             var captured = try captureRequest(allocator, &stream, io);
             if (std.mem.eql(u8, captured.path, "/__stop")) {
                 captured.deinit(allocator);
@@ -5988,7 +6006,9 @@ test "every credential refusal sends nothing, names its reason, and every reason
         .{ .label = "fetchWithRetry", .call = "fetchWithRetry(\"@BASE@/v1\", { credential: \"weather\" }, { maxRetries: 3 })", .reason = .path_unsupported },
         .{ .label = "durable fetch", .call = "fetch(\"@BASE@/v1\", { credential: \"weather\", durable: { key: \"k\", retries: 3 } })", .durable = true, .reason = .path_unsupported },
         .{ .label = "parallel", .call = "parallelFetch(\"@BASE@/v1\")", .reason = .path_unsupported },
-        .{ .label = "httpRequest", .call = "JSON.parse(httpRequest(JSON.stringify({ url: \"@BASE@/v1\", credential: \"weather\" })))", .no_status = true, .reason = .path_unsupported },
+        // Without a grant: under any tool or agent grant the ambient httpRequest is
+        // refused before it reads a credential (M5 A1 Q3), which its own test covers.
+        .{ .label = "httpRequest", .call = "JSON.parse(httpRequest(JSON.stringify({ url: \"@BASE@/v1\", credential: \"weather\" })))", .no_grant = true, .no_status = true, .reason = .path_unsupported },
     };
 
     var observed = std.EnumSet(credential_store.Refusal).initEmpty();
@@ -6022,7 +6042,7 @@ test "every credential refusal sends nothing, names its reason, and every reason
             \\import { parallel } from "zttp:io";
             \\function parallelFetch(url) {
             \\  const box = [];
-            \\  function one() { box.push(fetchSync(url, { credential: "weather" })); }
+            \\  function one() { box.push(fetch(url, { credential: "weather" })); }
             \\  parallel([one]);
             \\  return box[0];
             \\}
@@ -6086,10 +6106,11 @@ test "a credentialed redirect returns to the tool and the second listener receiv
     const grant = TestCredentialGrant{ .names = &.{"weather"} };
 
     const handler_code = try std.fmt.allocPrint(allocator,
+        \\import {{ fetch }} from "zttp:fetch";
         \\function handler(req) {{
-        \\  const res = fetchSync("{s}/v1", {{ credential: "weather" }});
-        \\  fetchSync("{s}/__stop");
-        \\  fetchSync("{s}/__stop");
+        \\  const res = fetch("{s}/v1", {{ credential: "weather" }});
+        \\  fetch("{s}/__stop");
+        \\  fetch("{s}/__stop");
         \\  return Response.json({{ status: res.status, location: res.headers.get("location") }});
         \\}}
     , .{ base, base, target_base });
@@ -6159,9 +6180,10 @@ test "an upstream that echoes the credential is refused before the tool reads it
         const grant = TestCredentialGrant{ .names = &.{"weather"} };
 
         const handler_code = try std.fmt.allocPrint(allocator,
+            \\import {{ fetch }} from "zttp:fetch";
             \\function handler(req) {{
-            \\  const res = fetchSync("{s}/v1", {{ credential: "weather" }});
-            \\  fetchSync("{s}/__stop");
+            \\  const res = fetch("{s}/v1", {{ credential: "weather" }});
+            \\  fetch("{s}/__stop");
             \\  return Response.json({{ status: res.status, error: res.error, details: res.details, body: res.body }});
             \\}}
         , .{ base, base });
@@ -6188,9 +6210,10 @@ test "a credentialed response over the size bound is refused (B8.3)" {
     const grant = TestCredentialGrant{ .names = &.{"weather"} };
 
     const handler_code = try std.fmt.allocPrint(allocator,
+        \\import {{ fetch }} from "zttp:fetch";
         \\function handler(req) {{
-        \\  const res = fetchSync("{s}/v1", {{ credential: "weather" }});
-        \\  fetchSync("{s}/__stop");
+        \\  const res = fetch("{s}/v1", {{ credential: "weather" }});
+        \\  fetch("{s}/__stop");
         \\  return Response.json({{ status: res.status, error: res.error, details: res.details }});
         \\}}
     , .{ base, base });
@@ -6423,4 +6446,270 @@ test "toolInput answers ok only for the schema the gate validated" {
         const detail = if (case.ok) parsed.value.object.get("order").? else parsed.value.object.get("error").?;
         try std.testing.expectEqualStrings(case.detail, detail.string);
     }
+}
+
+test "agentPrompt returns the admitted prompt and toolInput refuses the agent grant" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const rt = try HandlerInstance.init(allocator, .{});
+    defer rt.deinit();
+    try rt.loadHandler(
+        \\import { agentPrompt, toolInput } from "zttp:tool";
+        \\function handler(req) {
+        \\  const prompt = agentPrompt();
+        \\  const input = toolInput("OrderInput", req);
+        \\  return Response.json({
+        \\    promptOk: prompt.ok,
+        \\    prompt: prompt.ok ? prompt.value : prompt.error,
+        \\    inputOk: input.ok,
+        \\    input: input.ok ? "unexpected" : input.error
+        \\  });
+        \\}
+    , "<agent-prompt>");
+
+    var request = try makeTestRequest(allocator, "POST", "/agent", "{\"version\":1,\"prompt\":\"body text is not the admitted value\"}");
+    defer request.deinit(allocator);
+    const grant_state = TestCredentialGrant{ .names = &.{"provider"} };
+    var endpoint_buf: [zq.endpoint.max_endpoint_bytes]u8 = undefined;
+    const provider_endpoint = egressEndpoint("https://api.example.com", &endpoint_buf);
+    var view = request.asView();
+    view.tool_grant = grant_state.agentGrant(provider_endpoint, "provider");
+    view.agent_prompt = "where is order o-1?";
+    var response = try rt.executeHandler(view);
+    defer response.deinit();
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, response.body, .{});
+    defer parsed.deinit();
+    try std.testing.expect(parsed.value.object.get("promptOk").?.bool);
+    try std.testing.expectEqualStrings("where is order o-1?", parsed.value.object.get("prompt").?.string);
+    try std.testing.expect(!parsed.value.object.get("inputOk").?.bool);
+    try std.testing.expectEqualStrings("not_a_tool_request", parsed.value.object.get("input").?.string);
+}
+
+test "agentPrompt refuses a tool request" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const rt = try HandlerInstance.init(allocator, .{});
+    defer rt.deinit();
+    try rt.loadHandler(
+        \\import { agentPrompt } from "zttp:tool";
+        \\function handler(req) {
+        \\  const prompt = agentPrompt();
+        \\  return Response.json({ ok: prompt.ok, error: prompt.error });
+        \\}
+    , "<agent-prompt-tool-request>");
+
+    var request = try makeTestRequest(allocator, "POST", "/tools/lookup", "{}");
+    defer request.deinit(allocator);
+    const grant_state = TestCredentialGrant{ .names = &.{} };
+    var grant = grant_state.grant();
+    grant.input_schema = "Input";
+    var view = request.asView();
+    view.tool_grant = grant;
+    var response = try rt.executeHandler(view);
+    defer response.deinit();
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, response.body, .{});
+    defer parsed.deinit();
+    try std.testing.expect(!parsed.value.object.get("ok").?.bool);
+    try std.testing.expectEqualStrings("not_an_agent_request", parsed.value.object.get("error").?.string);
+}
+
+test "ambient HTTP refuses tool and agent grants" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const handler_code =
+        \\function handler(req) {
+        \\  const sync = fetchSync("http://127.0.0.1:9/v1");
+        \\  const bridged = JSON.parse(httpRequest(JSON.stringify({ url: "http://127.0.0.1:9/v1" })));
+        \\  return Response.json({ sync: sync, bridged: bridged });
+        \\}
+    ;
+    const GrantKind = enum { tool, agent };
+    for ([_]GrantKind{ .tool, .agent }) |kind| {
+        const rt = try HandlerInstance.init(allocator, .{ .outbound_http_enabled = true });
+        defer rt.deinit();
+        rt.ctx.capability_policy = .{
+            .egress_scopes = (zq.endpoint.ScopeSet{}).with(.loopback),
+        };
+        try rt.loadHandler(handler_code, "<ambient-grant>");
+
+        var request = try makeTestRequest(allocator, "GET", "/", null);
+        defer request.deinit(allocator);
+        const grant_state = TestCredentialGrant{ .names = &.{"provider"} };
+        var view = request.asView();
+        view.tool_grant = switch (kind) {
+            .tool => grant_state.grant(),
+            .agent => grant_state.agentGrant("http://127.0.0.1:9", "provider"),
+        };
+        var response = try rt.executeHandler(view);
+        defer response.deinit();
+
+        var parsed = try std.json.parseFromSlice(std.json.Value, allocator, response.body, .{});
+        defer parsed.deinit();
+        const sync = parsed.value.object.get("sync").?.object;
+        try std.testing.expectEqual(@as(i64, 599), sync.get("status").?.integer);
+        try std.testing.expectEqualStrings("ToolGrantRefused", sync.get("error").?.string);
+        try std.testing.expectEqualStrings("ambient_http_forbidden", sync.get("details").?.string);
+        const bridged = parsed.value.object.get("bridged").?.object;
+        try std.testing.expect(bridged.get("status") == null);
+        try std.testing.expectEqualStrings("ToolGrantRefused", bridged.get("error").?.string);
+        try std.testing.expectEqualStrings("ambient_http_forbidden", bridged.get("details").?.string);
+    }
+}
+
+test "agent fetch refusals connect to no endpoint" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const durable_dir = try durableTestDirPath(allocator, &tmp_dir);
+
+    const Case = struct {
+        label: []const u8,
+        call: []const u8,
+        detail: []const u8,
+        durable: bool = false,
+    };
+    const cases = [_]Case{
+        .{
+            .label = "provider endpoint",
+            .call = "fetch(\"@OTHER@/v1\", { credential: \"weather\" })",
+            .detail = "provider_endpoint_mismatch",
+        },
+        .{
+            .label = "provider credential",
+            .call = "fetch(\"@PROVIDER@/v1\")",
+            .detail = "provider_credential_required",
+        },
+        .{
+            .label = "durable",
+            .call = "fetch(\"@PROVIDER@/v1\", { credential: \"weather\", durable: { key: \"agent\", retries: 1 } })",
+            .detail = "durable_forbidden",
+            .durable = true,
+        },
+    };
+
+    for (cases) |case| {
+        var provider = try CredentialUpstream.init(.ok);
+        defer provider.deinit();
+        try provider.start();
+        var other = try CredentialUpstream.init(.ok);
+        defer other.deinit();
+        try other.start();
+
+        const provider_base = try provider.url(allocator, "");
+        const other_base = try other.url(allocator, "");
+        var provider_endpoint_buf: [512]u8 = undefined;
+        var other_endpoint_buf: [512]u8 = undefined;
+        const provider_endpoint = egressEndpoint(provider_base, &provider_endpoint_buf);
+        const endpoints = [_][]const u8{
+            provider_endpoint,
+            egressEndpoint(other_base, &other_endpoint_buf),
+        };
+        var store = try credentialTestStore(std.testing.allocator, provider_endpoint);
+        defer store.deinit();
+        const grant_state = TestCredentialGrant{ .names = &.{"weather"} };
+
+        const template =
+            \\import { fetch } from "zttp:fetch";
+            \\function handler(req) {
+            \\  const res = @CALL@;
+            \\  return Response.json({ status: res.status, error: res.error, details: res.details });
+            \\}
+        ;
+        const with_call = try std.mem.replaceOwned(u8, allocator, template, "@CALL@", case.call);
+        const with_provider = try std.mem.replaceOwned(u8, allocator, with_call, "@PROVIDER@", provider_base);
+        const handler_code = try std.mem.replaceOwned(u8, allocator, with_provider, "@OTHER@", other_base);
+
+        var config: RuntimeConfig = .{
+            .credential_store = &store,
+            .outbound_http_enabled = true,
+        };
+        if (case.durable) config.durable_oplog_dir = durable_dir;
+        const rt = try HandlerInstance.init(allocator, config);
+        defer rt.deinit();
+        rt.ctx.capability_policy = .{
+            .egress = .{ .enabled = true, .values = &endpoints },
+            .egress_scopes = (zq.endpoint.ScopeSet{}).with(.loopback),
+        };
+        try rt.loadHandler(handler_code, "<agent-fetch-refusal>");
+
+        var request = try makeTestRequest(allocator, "POST", "/agent", "{\"version\":1,\"prompt\":\"hello\"}");
+        defer request.deinit(allocator);
+        var view = request.asView();
+        view.tool_grant = grant_state.agentGrant(provider_endpoint, "weather");
+        view.agent_prompt = "hello";
+        var response = try rt.executeHandler(view);
+        defer response.deinit();
+
+        expectFetchError(response.body, "AgentGrantRefused", case.detail) catch |err| {
+            std.debug.print("case '{s}' returned {s}\n", .{ case.label, response.body });
+            return err;
+        };
+        const accepted = provider.accepted_connections.load(.acquire) + other.accepted_connections.load(.acquire);
+        if (accepted != 0) std.debug.print("case '{s}' opened {d} connection(s)\n", .{ case.label, accepted });
+        try std.testing.expectEqual(@as(usize, 0), accepted);
+    }
+}
+
+test "an agent contract refuses a null grant but permits routerMatch" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    try zq.security_events.initGlobal(std.testing.allocator, 16);
+    defer zq.security_events.deinitGlobal();
+
+    const refused = try HandlerInstance.init(allocator, .{ .contract_has_agent = true });
+    defer refused.deinit();
+    try refused.loadHandler(
+        \\import { sha256 } from "zttp:crypto";
+        \\function handler(req) { return Response.text(sha256("x")); }
+    , "<agent-null-grant>");
+    var refused_request = try makeTestRequest(allocator, "GET", "/", null);
+    defer refused_request.deinit(allocator);
+    try std.testing.expectError(error.HandlerError, refused.executeHandler(refused_request.asView()));
+
+    const stream = zq.security_events.getGlobal() orelse return error.TestUnexpectedResult;
+    var events: [16]zq.security_events.SecurityEvent = undefined;
+    const event_count = stream.drain(&events);
+    try std.testing.expectEqual(@as(usize, 1), event_count);
+    try std.testing.expectEqualStrings("zttp:crypto", events[0].moduleSlice());
+    try std.testing.expectEqualStrings("sha256", events[0].resourceIdSlice());
+    try std.testing.expectEqualStrings("tool_grant_missing", events[0].detailSlice());
+
+    const routed = try HandlerInstance.init(allocator, .{ .contract_has_agent = true });
+    defer routed.deinit();
+    try routed.loadHandler(
+        \\import { routerMatch } from "zttp:router";
+        \\function found(req) { return Response.text("matched"); }
+        \\function handler(req) {
+        \\  const routes = { "GET /found": found };
+        \\  const routedMatch = routerMatch(routes, req);
+        \\  if (routedMatch !== undefined) return routedMatch.handler(req);
+        \\  return Response.text("missing", { status: 404 });
+        \\}
+    , "<agent-router-null-grant>");
+    var found_request = try makeTestRequest(allocator, "GET", "/found", null);
+    defer found_request.deinit(allocator);
+    var found_response = try routed.executeHandler(found_request.asView());
+    defer found_response.deinit();
+    try std.testing.expectEqual(@as(u16, 200), found_response.status);
+    try std.testing.expectEqualStrings("matched", found_response.body);
+
+    var routed_request = try makeTestRequest(allocator, "GET", "/missing", null);
+    defer routed_request.deinit(allocator);
+    var response = try routed.executeHandler(routed_request.asView());
+    defer response.deinit();
+    try std.testing.expectEqual(@as(u16, 404), response.status);
+    try std.testing.expectEqualStrings("missing", response.body);
 }

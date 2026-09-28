@@ -325,6 +325,17 @@ pub const sdk_bridge = struct {
         return true;
     }
 
+    /// The exact prompt admitted for the current agent request. False outside
+    /// an agent request. The returned bytes borrow from the runtime frame.
+    pub export fn zttpSdkActiveAgentPrompt(handle: *ModuleHandle, out_ptr: *[*]const u8, out_len: *usize) bool {
+        const ctx = handleToContext(handle);
+        const grant = ctx.active_tool_grant orelse return false;
+        const prompt = grant.agent_prompt orelse return false;
+        out_ptr.* = prompt.ptr;
+        out_len.* = prompt.len;
+        return true;
+    }
+
     pub export fn zttpSdkSetModuleState(
         handle: *ModuleHandle,
         slot: usize,

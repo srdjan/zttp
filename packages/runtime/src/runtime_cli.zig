@@ -468,6 +468,9 @@ fn serveCommandWithDebugPanicPath(
         );
         defer live_reload.deinit();
 
+        // Source contracts arrive from the watcher after Server.start. Refuse
+        // requests until that first analysis establishes the catalog facts.
+        server.catalog_analysis_pending = true;
         server.runWithBackgroundWork(&live_reload, watcherThread) catch |err| {
             reportServerError(err, config.port);
             std.process.exit(1);

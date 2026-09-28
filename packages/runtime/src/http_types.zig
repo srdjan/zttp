@@ -22,14 +22,16 @@ pub const HttpRequestView = struct {
     query_params: []const QueryParam = &.{},
     headers: std.ArrayListUnmanaged(HttpHeader),
     body: ?[]const u8,
-    /// The verified subject and tenant of a tool request (M4 T5), borrowed
+    /// The verified subject and tenant of a tool or agent request, borrowed
     /// from the claims the server verified. Null on every other request.
     subject: ?[]const u8 = null,
     tenant: ?[]const u8 = null,
-    /// True on a tool request: the handler's Request omits `authorization`.
+    /// True on a tool or agent request: Request omits `authorization`.
     strip_authorization: bool = false,
-    /// The served tool's export grant, held for the duration of the call.
+    /// The served tool or agent grant, held for the duration of the call.
     tool_grant: ?ToolGrant = null,
+    /// The validated prompt, borrowed for this agent request only.
+    agent_prompt: ?[]const u8 = null,
     /// The accepted capability ceiling of the served generation (M4 T5b),
     /// held for the duration of the call. Null when the generation has none.
     capability_ceiling: ?CapabilityCeiling = null,
@@ -58,6 +60,13 @@ pub const ToolGrant = struct {
     /// The input schema the gate validated this request against (M4 T7).
     /// `toolInput` answers only for this name.
     input_schema: []const u8 = "",
+    agent: ?AgentGrant = null,
+};
+
+pub const AgentGrant = struct {
+    provider_endpoint: []const u8,
+    provider_credential: []const u8,
+    no_durable: bool = true,
 };
 
 pub const HttpRequestOwned = struct {

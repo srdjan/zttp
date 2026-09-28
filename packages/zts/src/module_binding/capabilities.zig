@@ -81,12 +81,28 @@ pub fn wrapNativeFnWithCapabilities(
 /// does not hold the export in its grant.
 pub const ToolGrantError = error{ToolGrantDenied};
 
-/// Refuse `specifier`.`export_name` when the active tool's grant lacks it.
-/// No active grant - any handler not serving a tool request - allows the call.
+/// Refuse `specifier`.`export_name` when the active tool or agent grant lacks
+/// it. A handler whose contract declares an agent also refuses a missing grant,
+/// except for `routerMatch`, which dispatch needs before it selects a route.
 /// A denial is recorded in the security event stream, naming the module and
 /// the export (both compile-time identities, never request data).
 pub fn checkToolGrant(ctx: *const context.Context, specifier: []const u8, export_name: []const u8) ToolGrantError!void {
-    const grant = ctx.active_tool_grant orelse return;
+    const grant = ctx.active_tool_grant orelse {
+        if (!ctx.contract_has_agent or isRouterMatch(specifier, export_name)) return;
+        if (!builtin.is_test) std.log.err(
+            "tool grant: {s}.{s} has no grant in a handler that declares an agent; call refused",
+            .{ specifier, export_name },
+        );
+        security_events.emitGlobal(security_events.SecurityEvent.initPolicyDenied(
+            specifier,
+            "call",
+            "export",
+            export_name,
+            "tool_grant_missing",
+            ctx.policy_generation,
+        ));
+        return error.ToolGrantDenied;
+    };
     if (grant.allows(grant.context, specifier, export_name)) return;
     if (!builtin.is_test) std.log.err(
         "tool grant: {s}.{s} is outside the served tool's reachable exports; call refused",
@@ -101,6 +117,42 @@ pub fn checkToolGrant(ctx: *const context.Context, specifier: []const u8, export
         ctx.policy_generation,
     ));
     return error.ToolGrantDenied;
+}
+
+fn isRouterMatch(specifier: []const u8, export_name: []const u8) bool {
+    return std.mem.eql(u8, specifier, "zttp:router") and
+        std.mem.eql(u8, export_name, "routerMatch");
+}
+
+test "an agent contract refuses a null grant except for routerMatch" {
+    const allocator = std.testing.allocator;
+    var gc_state = try gc.GC.init(allocator, .{});
+    defer gc_state.deinit();
+    const ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    // A handler without an agent preserves the ambient module-call behavior.
+    try checkToolGrant(ctx, "zttp:crypto", "sha256");
+
+    ctx.contract_has_agent = true;
+    try checkToolGrant(ctx, "zttp:router", "routerMatch");
+
+    try security_events.initGlobal(allocator, 4);
+    defer security_events.deinitGlobal();
+    try std.testing.expectError(
+        error.ToolGrantDenied,
+        checkToolGrant(ctx, "zttp:crypto", "sha256"),
+    );
+
+    const stream = security_events.getGlobal() orelse return error.TestUnexpectedResult;
+    var events: [1]security_events.SecurityEvent = undefined;
+    try std.testing.expectEqual(@as(usize, 1), stream.drain(&events));
+    try std.testing.expectEqual(security_events.SecurityEventKind.policy_denied, events[0].kind);
+    try std.testing.expectEqualStrings("zttp:crypto", events[0].moduleSlice());
+    try std.testing.expectEqualStrings("call", events[0].actionSlice());
+    try std.testing.expectEqualStrings("export", events[0].resourceKindSlice());
+    try std.testing.expectEqualStrings("sha256", events[0].resourceIdSlice());
+    try std.testing.expectEqualStrings("tool_grant_missing", events[0].detailSlice());
 }
 
 /// The named denial a module call gets when the accepted capability ceiling

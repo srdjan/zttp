@@ -287,6 +287,17 @@ pub const HandlerPool = struct {
         new_filename: []const u8,
         dev_policy: ?zq.RuntimePolicy,
     ) !usize {
+        return self.reloadHandlerWithCatalogPolicy(new_code, new_filename, dev_policy, self.config.contract_has_catalog, self.config.contract_has_agent);
+    }
+
+    pub fn reloadHandlerWithCatalogPolicy(
+        self: *Self,
+        new_code: []const u8,
+        new_filename: []const u8,
+        dev_policy: ?zq.RuntimePolicy,
+        has_catalog: bool,
+        has_agent: bool,
+    ) !usize {
         self.runtime_init_mutex.lock();
         if (self.config.invariant_section != null) {
             self.runtime_init_mutex.unlock();
@@ -314,6 +325,8 @@ pub const HandlerPool = struct {
 
         self.handler_code = new_code;
         self.handler_filename = new_filename;
+        self.config.contract_has_catalog = has_catalog;
+        self.config.contract_has_agent = has_agent;
         self.cache.clear();
         self.embedded_bytecode = null;
         const previous_policy = if (candidate) |generation| blk: {
@@ -341,6 +354,17 @@ pub const HandlerPool = struct {
         }
 
         return invalidated;
+    }
+
+    /// Install contract facts before a dev catalog can be lowered. Instances
+    /// already in use keep their own config until the next pool generation.
+    pub fn setCatalogContract(self: *Self, has_catalog: bool, has_agent: bool) void {
+        self.runtime_init_mutex.lock();
+        defer self.runtime_init_mutex.unlock();
+        if (self.config.contract_has_catalog == has_catalog and self.config.contract_has_agent == has_agent) return;
+        self.config.contract_has_catalog = has_catalog;
+        self.config.contract_has_agent = has_agent;
+        _ = self.reload_generation.fetchAdd(1, .acq_rel);
     }
 
     /// Dev/serve live path only: pin a contract-derived capability policy onto
@@ -2084,4 +2108,34 @@ test "HandlerPool high contention stress" {
     try std.testing.expectEqual(thread_count * iterations, total);
     // At least some requests should succeed (proves pool works under contention)
     try std.testing.expect(completed_count > 0);
+}
+
+test "dev catalog facts follow the handler generation and survive an install window" {
+    const code =
+        \\import { sha256 } from "zttp:crypto";
+        \\function handler(req) { return Response.text(sha256(req.method)); }
+    ;
+    var pool = try HandlerPool.init(std.testing.allocator, .{}, code, "<catalog-generation>", 2, 0);
+    defer pool.deinit();
+    const request: HttpRequestView = .{ .method = "GET", .url = "/", .headers = .empty, .body = null };
+    var old = try pool.acquireWorkerRuntime();
+    defer old.deinit();
+    pool.setCatalogContract(true, true);
+    // A checked-out instance keeps the old contract. A new instance enforces
+    // the new contract even before a catalog is available to grant a request.
+    var old_response = try old.runtime.executeHandler(request);
+    defer old_response.deinit();
+    try std.testing.expectEqual(@as(u16, 200), old_response.status);
+    {
+        var next = try pool.acquireWorkerRuntime();
+        defer next.deinit();
+        try std.testing.expect(next.runtime.config.contract_has_catalog);
+        try std.testing.expectError(error.HandlerError, next.runtime.executeHandler(request));
+    }
+    _ = try pool.reloadHandlerWithCatalogPolicy(code, "<catalog-generation-plain>", null, false, false);
+    var plain = try pool.acquireWorkerRuntime();
+    defer plain.deinit();
+    var plain_response = try plain.runtime.executeHandler(request);
+    defer plain_response.deinit();
+    try std.testing.expectEqual(@as(u16, 200), plain_response.status);
 }

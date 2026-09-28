@@ -41,6 +41,9 @@ pub const ToolAuthNames = struct {
 };
 
 pub const RuntimeConfig = struct {
+    /// Derived from the handler contract, even before catalog installation.
+    contract_has_catalog: bool = false,
+    contract_has_agent: bool = false,
     memory_limit: usize = 0,
     nursery_size: usize = 64 * 1024,
     use_hybrid_allocation: bool = true,

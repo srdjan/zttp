@@ -152,6 +152,10 @@ pub const HandlerInstance = struct {
     trace_mutex: ?*zq.trace.TraceMutex,
     trace_recorder: ?*zq.TraceRecorder,
     active_request: ?HttpRequestView,
+    /// One request and grant stack. The engine slot and active_request are
+    /// borrowed views of its top, updated together by syncFrame.
+    frames: [2]Frame = undefined,
+    frame_depth: usize = 0,
     active_durable_run: ?ActiveDurableRun,
     pending_durable_recovery: ?PendingDurableRecovery,
     // Hybrid allocation support
@@ -176,6 +180,50 @@ pub const HandlerInstance = struct {
     queue_system_ref: ?*actor_queue.ActorQueue = null,
 
     const Self = @This();
+
+    pub const Frame = struct {
+        request: HttpRequestView,
+        /// Reserved for A4. U3 does not dispatch a nested tool.
+        pending_args: ?[]const u8 = null,
+    };
+
+    fn syncFrame(self: *Self) void {
+        const request = if (self.frame_depth == 0) null else self.frames[self.frame_depth - 1].request;
+        self.active_request = request;
+        self.ctx.active_tool_grant = if (request) |view| blk: {
+            const grant = view.tool_grant orelse break :blk null;
+            break :blk .{
+                .context = grant.context,
+                .allows = grant.allows,
+                .input_schema = grant.input_schema,
+                .agent_prompt = if (grant.agent != null) view.agent_prompt else null,
+            };
+        } else null;
+    }
+
+    pub fn enterNested(self: *Self, frame: Frame) !void {
+        if (self.frame_depth != 1) return error.InvalidGrantFrameDepth;
+        self.frames[1] = frame;
+        self.frame_depth = 2;
+        self.syncFrame();
+    }
+
+    pub fn leaveNested(self: *Self) !void {
+        if (self.frame_depth != 2) return error.InvalidGrantFrameDepth;
+        self.frame_depth = 1;
+        self.syncFrame();
+    }
+
+    fn resetFrames(self: *Self) void {
+        self.frame_depth = 0;
+        self.syncFrame();
+    }
+
+    fn checkResponseDepth(self: *Self) !void {
+        if (self.frame_depth == 1) return;
+        if (!builtin.is_test) std.log.err("handler completed with grant frame depth {d}", .{self.frame_depth});
+        return error.InvalidGrantFrameDepth;
+    }
 
     pub const PendingDurableWait = union(enum) {
         timer: i64,
@@ -1440,9 +1488,20 @@ pub const HandlerInstance = struct {
     }
 
     fn executeHandlerInternal(self: *Self, request: HttpRequestView, request_id: u64, borrow_body: bool) !HttpResponse {
+        self.frames[0] = .{ .request = request };
+        self.frame_depth = 1;
+        self.syncFrame();
+        defer self.resetFrames();
+        self.ctx.contract_has_agent = self.config.contract_has_agent;
+        defer self.ctx.contract_has_agent = false;
+        var response = try self.executeHandlerFrame(request, request_id, borrow_body);
+        errdefer response.deinit();
+        try self.checkResponseDepth();
+        return response;
+    }
+
+    fn executeHandlerFrame(self: *Self, request: HttpRequestView, request_id: u64, borrow_body: bool) !HttpResponse {
         self.last_request_body_len = if (request.body) |b| b.len else 0;
-        self.active_request = request;
-        defer self.active_request = null;
         defer {
             if (self.pending_durable_recovery != null) {
                 self.pending_durable_recovery = null;
@@ -1453,15 +1512,6 @@ pub const HandlerInstance = struct {
             try self.refreshHandlerCache();
         }
         const handler_obj = self.cached_handler_obj orelse return error.NoHandler;
-
-        // The served tool's export grant (M4 T5) holds for exactly this call.
-        // The defer clears it on every exit, error paths included, so a pooled
-        // runtime never carries one request's grant into the next.
-        self.ctx.active_tool_grant = if (request.tool_grant) |grant|
-            .{ .context = grant.context, .allows = grant.allows, .input_schema = grant.input_schema }
-        else
-            null;
-        defer self.ctx.active_tool_grant = null;
 
         // The generation's accepted capability ceiling (M4 T5b) holds for
         // exactly this call too, and is cleared the same way on every exit.

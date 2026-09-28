@@ -70,7 +70,8 @@ fn devCeilingFor(allocator: std.mem.Allocator, hc: *const HandlerContract) !?con
 }
 
 fn shouldSkipContract(config: *const LiveReloadConfig) bool {
-    return !config.prove and config.policy_path == null;
+    _ = config;
+    return false;
 }
 
 /// Why a swap may not proceed.
@@ -115,6 +116,11 @@ fn swapRefusal(
         return .candidate_computes_a_capability_resource;
     }
     return .none;
+}
+
+fn contractHasAgent(contract: *const HandlerContract) bool {
+    for (contract.tools.items) |entry| if (entry.agent != null) return true;
+    return false;
 }
 
 pub const LiveReloadState = struct {
@@ -216,10 +222,11 @@ pub const LiveReloadState = struct {
         // Install the keystroke listener before the first render so the very
         // first proof card already advertises Tab. No-op on non-TTY.
         self.keystroke_handle = keystroke_input.install(self.allocator, self, onKeystroke);
-        if (self.config.prove) {
-            self.seedInitialProof();
-            self.quest.maybeStart();
-        }
+        // The server begins fail-closed while catalog analysis is pending.
+        // Always extract and install the initial contract before requests can
+        // leave that state, even when the proof HUD is disabled.
+        self.seedInitialProof();
+        if (self.config.prove) self.quest.maybeStart();
 
         while (self.server.running.load(.acquire)) {
             try std.Io.sleep(io, .fromMilliseconds(self.config.poll_interval_ms), .awake);
@@ -395,8 +402,7 @@ pub const LiveReloadState = struct {
 
         if (self.config.prove) {
             var new_contract = analysis.contract orelse {
-                printReload("No contract extracted. Reloading without proof.\n", .{});
-                _ = self.doSwap(&new_code, null, null);
+                printReload("No contract extracted. Keeping previous handler.\n", .{});
                 return;
             };
             analysis.contract = null;
@@ -430,8 +436,8 @@ pub const LiveReloadState = struct {
                     old_contract,
                     &new_contract,
                 ) catch |err| {
-                    printProve("Contract diff failed: {}. Reloading without proof.\n", .{err});
-                    if (self.doSwap(&new_code, null, null)) {
+                    printProve("Contract diff failed: {}. Reloading without proof comparison.\n", .{err});
+                    if (self.doSwap(&new_code, &new_contract, analysis.configuredPolicy())) {
                         self.updateCurrentContract(new_contract);
                     } else {
                         new_contract.deinit(self.allocator);
@@ -449,8 +455,8 @@ pub const LiveReloadState = struct {
                     null,
                     &new_contract,
                 ) catch |err| {
-                    printProve("Upgrade analysis failed: {}. Reloading without proof.\n", .{err});
-                    if (self.doSwap(&new_code, null, null)) {
+                    printProve("Upgrade analysis failed: {}. Reloading without proof comparison.\n", .{err});
+                    if (self.doSwap(&new_code, &new_contract, analysis.configuredPolicy())) {
                         self.updateCurrentContract(new_contract);
                     } else {
                         new_contract.deinit(self.allocator);
@@ -496,16 +502,15 @@ pub const LiveReloadState = struct {
                 }
             }
         } else {
-            if (analysis.configured_policy) |*policy| {
-                var new_contract = analysis.contract orelse {
-                    printReload("Configured policy was checked without a contract. Keeping previous handler.\n", .{});
-                    return;
-                };
-                analysis.contract = null;
-                defer new_contract.deinit(self.allocator);
-                _ = self.doSwap(&new_code, &new_contract, policy);
+            var new_contract = analysis.contract orelse {
+                printReload("No contract was extracted. Keeping previous handler.\n", .{});
+                return;
+            };
+            analysis.contract = null;
+            if (self.doSwap(&new_code, &new_contract, analysis.configuredPolicy())) {
+                self.updateCurrentContract(new_contract);
             } else {
-                _ = self.doSwap(&new_code, null, null);
+                new_contract.deinit(self.allocator);
             }
         }
     }
@@ -585,6 +590,13 @@ pub const LiveReloadState = struct {
 
     fn installRuntimeContract(self: *LiveReloadState, configured_policy: ?*const HandlerPolicy) void {
         if (self.current_contract) |*hc| {
+            const has_catalog = hc.tools.items.len != 0;
+            const has_agent = contractHasAgent(hc);
+            // These facts come from the handler contract, not from a catalog
+            // that may fail to lower. Install them first so the request path
+            // and null-grant gate fail closed throughout the dev window.
+            self.server.setCatalogRequirement(has_catalog, has_agent);
+            if (self.server.pool) |*pool| pool.setCatalogContract(has_catalog, has_agent);
             const raw = contract_runtime.fromHandlerContract(self.allocator, hc) catch |err| {
                 printReload("Failed to build runtime contract: {}.\n", .{err});
                 return;
@@ -598,10 +610,21 @@ pub const LiveReloadState = struct {
             // catalog that does not lower installs nothing rather than serving
             // tool routes unchecked.
             var dev_tool_catalog = contract_runtime.lowerProducerToolCatalog(self.allocator, hc.tools.items) catch |err| {
-                validated.deinit();
                 printReload("Failed to lower the tool catalog: {}.\n", .{err});
+                self.server.updateContractWithTools(validated, null, null);
                 return;
             };
+            if (dev_tool_catalog) |*catalog| {
+                contract_runtime.validateAgentDeadlines(catalog, .{
+                    .handler_deadline_ms = self.server.config.timeout_ms,
+                    .outbound_timeout_ms = self.server.config.runtime_config.outbound_timeout_ms,
+                }) catch |err| {
+                    catalog.deinit();
+                    printReload("Failed to install the agent catalog deadline policy: {}.\n", .{err});
+                    self.server.updateContractWithTools(validated, null, null);
+                    return;
+                };
+            }
             // The producer's ceiling report, lowered with the deployment's code
             // (M4 T5b). The live-reload compile passes no declaration today, so
             // the report is null and dev installs no ceiling.
@@ -970,6 +993,18 @@ pub const LiveReloadState = struct {
                 printReload("Failed to lower the tool catalog: {}. Keeping previous handler active.\n", .{err});
                 return false;
             };
+            if (dev_tool_catalog) |*catalog| {
+                contract_runtime.validateAgentDeadlines(catalog, .{
+                    .handler_deadline_ms = self.server.config.timeout_ms,
+                    .outbound_timeout_ms = self.server.config.runtime_config.outbound_timeout_ms,
+                }) catch |err| {
+                    catalog.deinit();
+                    dev_tool_catalog = null;
+                    if (validated_contract) |*validated| validated.deinit();
+                    printReload("Failed to install the agent catalog deadline policy: {}. Keeping previous handler active.\n", .{err});
+                    return false;
+                };
+            }
             dev_ceiling = devCeilingFor(self.allocator, hc) catch |err| {
                 if (dev_tool_catalog) |*catalog| catalog.deinit();
                 if (validated_contract) |*validated| validated.deinit();
@@ -984,7 +1019,9 @@ pub const LiveReloadState = struct {
         // prior generation is it safe to retire older code. Freeing before
         // the swap (the previous bug) raced a concurrent worker reading the
         // freed handler_code in ensureRuntime on a rapid second save.
-        const invalidated = pool.reloadHandlerWithPolicy(new_code, self.handler_path, dev_policy) catch |err| {
+        const has_catalog = if (runtime_contract) |hc| hc.tools.items.len != 0 else false;
+        const has_agent = if (runtime_contract) |hc| contractHasAgent(hc) else false;
+        const invalidated = pool.reloadHandlerWithCatalogPolicy(new_code, self.handler_path, dev_policy, has_catalog, has_agent) catch |err| {
             if (validated_contract) |*validated| validated.deinit();
             if (dev_tool_catalog) |*catalog| catalog.deinit();
             if (dev_ceiling) |*ceiling| ceiling.deinit();
@@ -1307,7 +1344,7 @@ test "LiveReloadConfig defaults" {
     try std.testing.expect(!config.force_swap);
     try std.testing.expectEqual(@as(i64, 250), config.poll_interval_ms);
     try std.testing.expect(config.policy_path == null);
-    try std.testing.expect(shouldSkipContract(&config));
+    try std.testing.expect(!shouldSkipContract(&config));
 }
 
 test "a swap that would strand a guard is refused from either side" {
@@ -1378,7 +1415,7 @@ test "a swap that would strand a guard is refused from either side" {
     );
 }
 
-test "live reload builds a contract when a capability policy is configured" {
+test "live reload builds a contract in every mode" {
     var config = LiveReloadConfig{ .policy_path = "policy.json" };
     try std.testing.expect(!shouldSkipContract(&config));
 

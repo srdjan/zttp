@@ -101,6 +101,9 @@ pub const ToolGrant = struct {
     /// The input schema the tool gate validated the request body against (M4
     /// T7). `toolInput` answers only for this name. Borrowed.
     input_schema: []const u8 = "",
+    /// The prompt admitted for the active agent request. Null for tool grants
+    /// and outside an agent request. Borrowed from the runtime frame.
+    agent_prompt: ?[]const u8 = null,
 };
 
 /// The accepted capability ceiling of the handler (M4 T5b design note,
@@ -270,6 +273,9 @@ pub const Context = struct {
     /// call as it was. The runtime sets it for the duration of one handler call
     /// and clears it on every exit path.
     active_tool_grant: ?ToolGrant = null,
+    /// True only while invoking a handler whose contract declares an agent.
+    /// A null grant then permits only `zttp:router.routerMatch`.
+    contract_has_agent: bool = false,
     /// The accepted capability ceiling of the handler. Null when the served
     /// artifact carries no declaration ceiling, which leaves every module call
     /// as it was. The runtime sets it for the duration of one handler call and
@@ -665,6 +671,7 @@ pub const Context = struct {
         // cannot inherit authority from the failed call.
         self.active_module_scope = null;
         self.active_tool_grant = null;
+        self.contract_has_agent = false;
         self.active_capability_ceiling = null;
         self.parallel_collection.clear();
 

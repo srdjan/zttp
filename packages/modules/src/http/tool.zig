@@ -17,10 +17,9 @@
 //! the gate checked. The build refuses a `name` that is not the calling
 //! route's catalog input.
 //!
-//! `agentPrompt()` reads the prompt that the agent gate admitted. The runtime
-//! wires the admitted bytes in M5 A1 U3. Until then, the export refuses every
-//! call. `callTool(callId, name, argsJson)` has its final public signature but
-//! stays inert until M5 A4 implements tool dispatch.
+//! `agentPrompt()` reads the prompt that the agent gate admitted from the
+//! active runtime frame. `callTool(callId, name, argsJson)` has its final public
+//! signature but stays inert until M5 A4 implements tool dispatch.
 
 const std = @import("std");
 const sdk = @import("zttp-sdk");
@@ -112,7 +111,8 @@ fn toolInputImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const sdk.JS
 }
 
 fn agentPromptImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, _: []const sdk.JSValue) anyerror!sdk.JSValue {
-    return refuse(handle, .not_an_agent_request);
+    const prompt = sdk.activeAgentPrompt(handle) orelse return refuse(handle, .not_an_agent_request);
+    return sdk.resultOk(handle, try sdk.createString(handle, prompt));
 }
 
 fn callToolImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, _: []const sdk.JSValue) anyerror!sdk.JSValue {
@@ -146,6 +146,21 @@ test "agentPrompt keeps admitted prompt input labelled" {
         @as(sdk.LabelSet, .{ .user_input = true }),
         prompt.return_labels,
     );
+}
+
+test "agentPrompt returns the runtime-held prompt and refuses outside an agent request" {
+    const test_shim = @import("zttp-sdk-test-shim");
+    const fake_handle: *sdk.ModuleHandle = @ptrFromInt(8);
+    test_shim.setActiveAgentPrompt(null);
+    defer test_shim.setActiveAgentPrompt(null);
+    defer test_shim.resetStrings();
+
+    const refused = try agentPromptImpl(fake_handle, sdk.JSValue.undefined_val, &.{});
+    try std.testing.expect(refused.isUndefined());
+
+    test_shim.setActiveAgentPrompt("admitted prompt");
+    const admitted = try agentPromptImpl(fake_handle, sdk.JSValue.undefined_val, &.{});
+    try std.testing.expectEqualStrings("admitted prompt", sdk.extractString(admitted).?);
 }
 
 test "callTool has its final pass-through signature" {

@@ -75,6 +75,17 @@ test "decodeArgs on an empty declared list accepts any arguments" {
     try std.testing.expect(sdk.decodeArgs(&.{}, &args) != null);
 }
 
+test "activeAgentPrompt returns only the prompt held by the runtime" {
+    const fake_handle: *sdk.ModuleHandle = @ptrFromInt(8);
+    test_shim.setActiveAgentPrompt(null);
+    defer test_shim.setActiveAgentPrompt(null);
+    try std.testing.expect(sdk.activeAgentPrompt(fake_handle) == null);
+
+    test_shim.setActiveAgentPrompt("admitted prompt");
+    try std.testing.expectEqualStrings("admitted prompt", sdk.activeAgentPrompt(fake_handle).?);
+    try std.testing.expect(sdk.activeToolInputSchema(fake_handle) == null);
+}
+
 // Lives here, not in test_shim.zig: test_shim is imported as a separate module,
 // so refAllDecls references its decls but does NOT register its `test` blocks -
 // a test placed there never runs. test_root.zig is the actual test root.

@@ -55,6 +55,7 @@ pub const StateDeinitFn = context.StateDeinitFn;
 pub const getAllocator = context.getAllocator;
 pub const getModuleState = context.getModuleState;
 pub const activeToolInputSchema = context.activeToolInputSchema;
+pub const activeAgentPrompt = context.activeAgentPrompt;
 pub const setModuleState = context.setModuleState;
 
 pub const Sha256Digest = crypto.Sha256Digest;

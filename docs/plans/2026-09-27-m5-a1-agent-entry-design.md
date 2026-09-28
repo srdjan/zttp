@@ -407,7 +407,13 @@ A1 lands in four commits, each with its own tests passing unfiltered.
   their census, the agent-route reach rules, the workflow refusal in tool
   routes (Q8), the `callTool` placement refusal, the `agentPrompt` and inert
   `callTool` exports, the `toolInput` label probe as a test, and the hash pins.
-- **U3. Runtime.** Agent admission, `agentPrompt`, the frame stack, the agent
+- **U3. Runtime.** Done 2026-09-27: full `zig build test`, `test-zruntime`,
+  `test-cli`, `test-reference-tools`, `test-module-boundary`, `test-expert-app`,
+  and fmt pass. Four M4 credential tests that drove the credential path through
+  the ambient `fetchSync` under a tool grant now use module `fetch`, because Q3
+  refuses the ambient natives under any grant; production `zttp:io` reaches
+  fetch through `fetchSyncResult` and is unaffected. In dev every route answers
+  503 until the first contract analysis finishes. Agent admission, `agentPrompt`, the frame stack, the agent
   grant fields and their fetch refusals, the ambient refusal (Q3), the
   null-grant refusal and the 503 before install (Q4), and the deadline check at
   promotion and dev install (Q7).

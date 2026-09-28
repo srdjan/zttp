@@ -602,6 +602,17 @@ const ConnectionPool = struct {
         // so the static-file and well-known paths below can honor it too.
         const is_head = std.mem.eql(u8, request.method, "HEAD");
 
+        // A handler that declares any catalog entry cannot serve any route
+        // without the catalog for this generation. This also covers the dev
+        // install window and a dev lowering failure.
+        if (self.server.catalog_analysis_pending or
+            (self.server.contractHasCatalog() and self.server.activeToolCatalog() == null))
+        {
+            access_status = 503;
+            self.sendStatusSync(fd, 503, "tool catalog is not installed", keep_alive) catch {};
+            return outcome_if_alive;
+        }
+
         if (self.server.config.studio and studio_mod.isStudioPath(request.path)) {
             return self.handleStudioRequestSync(fd, request.method, request.path, request.body, keep_alive, req_allocator, &access_status) catch |err| {
                 std.log.warn("studio request failed for {s}: {}", .{ request.path, err });
@@ -688,10 +699,12 @@ const ConnectionPool = struct {
         // value exists. A deployment checks only the catalog its certificate
         // promoted; `zttp dev` checks the producer's with the same code.
         var tool_route: ?*const contract_runtime.AcceptedTool = null;
-        // The verified identity of a tool request (M4 T5). Its arena lives in
+        var agent_route: ?*const contract_runtime.AcceptedAgent = null;
+        var agent_prompt: ?[]const u8 = null;
+        // The verified identity of a tool or agent request. Its arena lives in
         // the request allocator, so it is released with the request.
-        var tool_claims: ?tool_auth_mod.Claims = null;
-        defer if (tool_claims) |*claims| claims.deinit();
+        var request_claims: ?tool_auth_mod.Claims = null;
+        defer if (request_claims) |*claims| claims.deinit();
         if (self.server.activeToolCatalog()) |catalog| {
             if (catalog.match(request.method, request.path)) |tool| {
                 tool_route = tool;
@@ -710,7 +723,7 @@ const ConnectionPool = struct {
                     return .close;
                 };
                 switch (identity) {
-                    .ok => |claims| tool_claims = claims,
+                    .ok => |claims| request_claims = claims,
                     .refused => |refusal| {
                         var message_buf: [64]u8 = undefined;
                         const message = std.fmt.bufPrint(&message_buf, "tool auth refused: {s}", .{refusal.name()}) catch "tool auth refused";
@@ -741,7 +754,7 @@ const ConnectionPool = struct {
 
                 // Scope (M4 T5, AE3): a field the entry binds must name the
                 // verified caller, compared by the platform before the handler.
-                const claims = tool_claims.?;
+                const claims = request_claims.?;
                 switch (tool_auth_mod.checkScope(req_allocator, tool, request.body orelse "", claims.subject, claims.tenant)) {
                     .ok => {},
                     .tenant, .subject => |field| {
@@ -752,6 +765,56 @@ const ConnectionPool = struct {
                         return outcome_if_alive;
                     },
                 }
+            } else if (catalog.matchAgent(request.method, request.path)) |agent| {
+                agent_route = agent;
+
+                // Agent identity precedes the body bound and schema check, as
+                // it does for tools. A server with no key serves no agent.
+                const auth = if (self.server.tool_auth) |*loaded| loaded else {
+                    access_status = 503;
+                    self.sendStatusSync(fd, 503, "tool handler requires auth: no key is loaded", keep_alive) catch {};
+                    return outcome_if_alive;
+                };
+                const now_s = @divFloor(unixMillisNow(), std.time.ms_per_s);
+                const identity = tool_auth_mod.verifyRequest(req_allocator, auth, request.headers.items, now_s) catch {
+                    access_status = 500;
+                    self.sendErrorSync(fd, 500, "Internal Server Error") catch {};
+                    return .close;
+                };
+                switch (identity) {
+                    .ok => |claims| request_claims = claims,
+                    .refused => |refusal| {
+                        var message_buf: [64]u8 = undefined;
+                        const message = std.fmt.bufPrint(&message_buf, "tool auth refused: {s}", .{refusal.name()}) catch "tool auth refused";
+                        access_status = 401;
+                        self.sendStatusSync(fd, 401, message, keep_alive) catch {};
+                        return outcome_if_alive;
+                    },
+                }
+
+                const verdict = contract_runtime.validateAgentInput(req_allocator, agent, request.body orelse "") catch {
+                    access_status = 500;
+                    self.sendErrorSync(fd, 500, "Internal Server Error") catch {};
+                    return .close;
+                };
+                switch (verdict) {
+                    .ok => {},
+                    .refused => |refused| {
+                        const status: u16 = if (refused.reason == .too_large) 413 else 400;
+                        var message_buf: [128]u8 = undefined;
+                        const message = std.fmt.bufPrint(&message_buf, "agent prompt refused: {s} at byte {d}", .{
+                            @tagName(refused.reason), refused.offset,
+                        }) catch "agent prompt refused";
+                        access_status = status;
+                        self.sendStatusSync(fd, status, message, keep_alive) catch {};
+                        return outcome_if_alive;
+                    },
+                }
+                agent_prompt = contract_runtime.admittedAgentPrompt(req_allocator, request.body orelse "") catch {
+                    access_status = 500;
+                    self.sendErrorSync(fd, 500, "Internal Server Error") catch {};
+                    return .close;
+                };
             }
         }
 
@@ -785,10 +848,16 @@ const ConnectionPool = struct {
                 .query_params = request.query_params,
                 .headers = request.headers,
                 .body = request.body,
-                .subject = if (tool_claims) |claims| claims.subject else null,
-                .tenant = if (tool_claims) |claims| claims.tenant else null,
-                .strip_authorization = tool_route != null,
-                .tool_grant = if (tool_route) |tool| tool_auth_mod.grantFor(tool) else null,
+                .subject = if (request_claims) |claims| claims.subject else null,
+                .tenant = if (request_claims) |claims| claims.tenant else null,
+                .strip_authorization = tool_route != null or agent_route != null,
+                .tool_grant = if (tool_route) |tool|
+                    tool_auth_mod.grantFor(tool)
+                else if (agent_route) |agent|
+                    tool_auth_mod.agentGrantFor(agent)
+                else
+                    null,
+                .agent_prompt = agent_prompt,
                 // Every request, tool or not, runs under the generation's
                 // accepted capability ceiling (M4 T5b), when it has one.
                 .capability_ceiling = self.server.activeCapabilityCeiling(),
@@ -1495,6 +1564,14 @@ pub const Server = struct {
     /// decision Q4). Null for a deployment, which validates only the catalog its
     /// certificate promoted. Replaced with the contract, under `contract_lock`.
     dev_tool_catalog: ?contract_runtime.AcceptedCatalog = null,
+    /// Contract facts kept independently of catalog installation. Dev sets
+    /// them before lowering so every route refuses during the install window
+    /// and after a lowering failure.
+    contract_catalog_required: bool = false,
+    contract_agent_required: bool = false,
+    /// Dev starts fail-closed until the first source analysis establishes
+    /// whether this handler declares a catalog.
+    catalog_analysis_pending: bool = false,
     /// The capability ceiling `zttp dev` checks module calls against: the one
     /// the producer's contract reports, lowered with the same code as an
     /// accepted one and claiming nothing (M4 T5b). Null for a deployment,
@@ -1605,6 +1682,9 @@ pub const Server = struct {
             .conn_pool = null,
             .contract = null,
             .proof_cache = null,
+            .contract_catalog_required = false,
+            .contract_agent_required = false,
+            .catalog_analysis_pending = false,
             .security_logger = null,
             .studio = null,
             .attestation_headers = null,
@@ -1663,6 +1743,31 @@ pub const Server = struct {
         }
         if (self.dev_tool_catalog) |*catalog| return catalog;
         return null;
+    }
+
+    /// Whether the current handler contract declares a tool or agent entry.
+    /// The request path uses this independently of catalog installation.
+    pub fn contractHasCatalog(self: *const Self) bool {
+        if (self.contract_catalog_required) return true;
+        return if (self.contract) |*contract| contract.view().tools.len != 0 else false;
+    }
+
+    pub fn contractHasAgent(self: *const Self) bool {
+        if (self.contract_agent_required) return true;
+        const contract = if (self.contract) |*contract| contract else return false;
+        for (contract.view().tools) |entry| if (entry.agent != null) return true;
+        return false;
+    }
+
+    /// Install contract catalog facts before dev lowering. The live-reload
+    /// caller already marked this server reload-active, so request readers use
+    /// the shared side of this lock.
+    pub fn setCatalogRequirement(self: *Self, has_catalog: bool, has_agent: bool) void {
+        self.contract_lock.lock();
+        defer self.contract_lock.unlock();
+        self.contract_catalog_required = has_catalog;
+        self.contract_agent_required = has_agent;
+        self.catalog_analysis_pending = false;
     }
 
     /// The capability ceiling every handler call of this generation runs
@@ -1793,6 +1898,14 @@ pub const Server = struct {
 
         if (self.contract) |*c| c.deinit();
         self.contract = new_contract;
+        self.contract_catalog_required = self.contract.?.view().tools.len != 0;
+        self.contract_agent_required = false;
+        for (self.contract.?.view().tools) |entry| {
+            if (entry.agent != null) {
+                self.contract_agent_required = true;
+                break;
+            }
+        }
         // The certificate described the artifact that was replaced. A live swap
         // therefore drops the promotion rather than carrying it across: the new
         // handler has not been checked by anything, and the proof cache,
@@ -1836,6 +1949,8 @@ pub const Server = struct {
             c.deinit();
             self.contract = null;
         }
+        self.contract_catalog_required = false;
+        self.contract_agent_required = false;
         self.clearProofChecked();
         if (self.pool) |*pool| {
             pool.setDurableWorkflowProperties(.{});
@@ -2082,6 +2197,10 @@ pub const Server = struct {
             policy_digest,
             self.config.runtime_config.tool_catalog_section,
             self.config.runtime_config.declaration_section,
+            .{
+                .handler_deadline_ms = self.config.timeout_ms,
+                .outbound_timeout_ms = self.config.runtime_config.outbound_timeout_ms,
+            },
         ) catch |err| {
             if (!builtin.is_test) {
                 switch (err) {
@@ -2100,6 +2219,18 @@ pub const Server = struct {
                     ),
                     error.ToolCatalogMissing => std.log.err(
                         "activation: the contract lists tools but the artifact carries no accepted tool catalog; refusing to serve",
+                        .{},
+                    ),
+                    error.AgentHandlerDeadlineDisabled => std.log.err(
+                        "activation: an agent handler requires a non-zero handler deadline; refusing to serve",
+                        .{},
+                    ),
+                    error.AgentOutboundTimeoutNotBelowTurnDeadline => std.log.err(
+                        "activation: the outbound timeout is not below the agent turn deadline; refusing to serve",
+                        .{},
+                    ),
+                    error.AgentTurnDeadlineNotBelowHandlerDeadline => std.log.err(
+                        "activation: the agent turn deadline and terminal margin are not below the handler deadline; refusing to serve",
                         .{},
                     ),
                     error.AcceptedDeclarationUndecodable => std.log.err(
@@ -2414,6 +2545,14 @@ pub const Server = struct {
                 }
                 return err;
             };
+            self.contract_catalog_required = self.contract.?.view().tools.len != 0;
+            self.contract_agent_required = false;
+            for (self.contract.?.view().tools) |entry| {
+                if (entry.agent != null) {
+                    self.contract_agent_required = true;
+                    break;
+                }
+            }
         }
 
         // Self-extract artifacts carry the enforcement policy as section 4.
@@ -2441,6 +2580,8 @@ pub const Server = struct {
         // interpreter's cooperative deadline check is enforced per handler call.
         var pool_rt_config = self.config.runtime_config;
         pool_rt_config.request_timeout_ms = self.config.timeout_ms;
+        pool_rt_config.contract_has_catalog = self.contractHasCatalog();
+        pool_rt_config.contract_has_agent = self.contractHasAgent();
         // The store lives as long as the server, which outlives the pool.
         pool_rt_config.credential_store = if (self.credential_store) |*store| store else null;
         pool_rt_config.invariant_coverage_accepted = self.config.runtime_config.invariant_section != null and
@@ -4633,7 +4774,7 @@ test "a live swap drops the promotion the replaced artifact earned" {
         .outcome = .{ .accepted = .{ .grade = .translation_validated, .development_only = false } },
         .provenance = .absent,
         .work_spent = 1,
-    }, [_]u8{0} ** 32, null, null);
+    }, [_]u8{0} ** 32, null, null, .{});
     try std.testing.expect(server.proof_checked != null);
 
     // The certificate described the artifact that is being replaced, so the
@@ -4670,7 +4811,7 @@ test "promotion refuses a policy rejection" {
         } },
         .provenance = .absent,
         .work_spent = 1,
-    }, [_]u8{0} ** 32, null, null)) == null);
+    }, [_]u8{0} ** 32, null, null, .{})) == null);
 }
 
 test "self-extract runtime policy binding rejects a widened policy" {
@@ -5472,4 +5613,182 @@ test "a tool handler refuses to start without auth or without its key" {
         error.ToolAuthKeyMissing,
         startToolServer(.{ .tool_auth = .{ .key_env = unset_env, .tenant_claim = tool_test_tenant_claim } }),
     );
+}
+
+// Agent admission uses the same request driver and token builder as tools.
+fn agentTestServer(handler_code: []const u8, install_catalog: bool) !Server {
+    const allocator = std.testing.allocator;
+    var names = [_][]const u8{"lookup"};
+    var exports = [_]engine.ToolExport{
+        .{ .module = "zttp:tool", .name = "agentPrompt" },
+        .{ .module = "zttp:tool", .name = "toolInput" },
+    };
+    var entries = [_]contract_runtime.ToolEntry{
+        .{
+            .name = "assistant",
+            .route = "POST /agent",
+            .description = "Answer.",
+            .input_schema_name = "",
+            .input_schema_json = "",
+            .output_schema_name = "",
+            .output_schema_json = "",
+            .max_input_bytes = 64,
+            .reachable_exports = .{ .items = &exports, .capacity = exports.len },
+            .agent = .{
+                .tools = .{ .items = &names, .capacity = names.len },
+                .provider_endpoint = "https://provider.example:443",
+                .provider_credential = "provider",
+                .limits = .{ .rounds = 4, .tool_calls = 8, .tool_calls_per_round = 4, .argument_bytes = 4096, .result_bytes = 16384, .turn_deadline_ms = 20000 },
+            },
+        },
+        .{
+            .name = "lookup",
+            .route = "POST /tools/lookup",
+            .description = "Look up.",
+            .input_schema_name = "In",
+            .input_schema_json = tool_test_input_schema,
+            .output_schema_name = "Out",
+            .output_schema_json = tool_test_output_schema,
+            .max_input_bytes = 64,
+        },
+    };
+    // These fixture entries borrow literals. Both runtime projections copy
+    // their fields, so no borrowed entry is deinitialized as owned data.
+    var hc = engine.emptyContract("<agent-test>");
+    hc.source_identity = engine.sourceIdentityForPath("handler.ts");
+    hc.tools = .{ .items = &entries, .capacity = entries.len };
+    var srv = try Server.init(allocator, .{
+        .handler = .{ .inline_code = handler_code },
+        .log_requests = false,
+        .pool_size = 1,
+        .max_body_size = 4096,
+        .runtime_config = .{ .tool_auth = .{ .key_env = tool_test_key_env, .tenant_claim = tool_test_tenant_claim } },
+    });
+    errdefer srv.deinit();
+    srv.contract = try contract_runtime.validate(try contract_runtime.fromHandlerContract(allocator, &hc), .{});
+    srv.pool = try HandlerPool.init(allocator, .{ .contract_has_catalog = true, .contract_has_agent = true }, handler_code, "<agent-test>", 1, 0);
+    if (install_catalog) srv.dev_tool_catalog = try contract_runtime.lowerProducerToolCatalog(allocator, &entries);
+    return srv;
+}
+
+fn serveAgentTestRequest(srv: *Server, raw_request: []const u8, out: []u8) ![]const u8 {
+    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    var pool = ConnectionPool{
+        .workers = &[_]std.Thread{},
+        .queue = ConnectionPool.BoundedQueue.init(),
+        .running = std.atomic.Value(bool).init(true),
+        .server = srv,
+        .allocator = allocator,
+    };
+    const fds = try createUnixSocketPair();
+    defer std.Io.Threaded.closeFd(fds[0]);
+    defer std.Io.Threaded.closeFd(fds[1]);
+    try writeAllFd(fds[1], raw_request);
+    var pending: ConnectionPool.PendingRequestBytes = .{};
+    defer pending.deinit(allocator);
+    _ = try pool.handleSingleRequestSync(fds[0], 0, arena.allocator(), &pending);
+    const n = try std.posix.read(fds[1], out);
+    return out[0..n];
+}
+
+fn agentTestPost(reqs: *ToolRequests, authorization: ?[]const u8, body: []const u8) ![]const u8 {
+    const request = try reqs.postWith(authorization, body);
+    return std.mem.replaceOwned(u8, reqs.arena.allocator(), request, "/tools/lookup", "/agent");
+}
+
+threadlocal var agent_test_invocations: usize = 0;
+fn countAgentTestInvocation(_: *engine.Context, _: []const engine.JSValue) anyerror!engine.JSValue {
+    agent_test_invocations += 1;
+    return error.AotBail;
+}
+
+const agent_prompt_handler =
+    \\import { agentPrompt, toolInput } from "zttp:tool";
+    \\function handler(req) {
+    \\  const prompt = agentPrompt();
+    \\  const input = toolInput("In", req);
+    \\  return Response.json({ prompt: prompt.ok ? prompt.value : prompt.error,
+    \\    input: input.ok ? "unexpected" : input.error,
+    \\    subject: req.subject, tenant: req.tenant, auth: req.headers.authorization ?? "absent" });
+    \\}
+;
+
+test "agent admission verifies identity and prompt before running the handler" {
+    var reqs = ToolRequests.init();
+    defer reqs.deinit();
+    var srv = try agentTestServer(agent_prompt_handler, true);
+    defer srv.deinit();
+    _ = setenv(tool_test_key_env, tool_test_key, 1);
+    defer _ = unsetenv(tool_test_key_env);
+    try srv.loadToolAuth();
+    const authorized = try reqs.bearer(valid_claims);
+    const cases = [_]struct { auth: ?[]const u8, body: []const u8, status: []const u8, reason: []const u8 }{
+        .{ .auth = null, .body = "invalid", .status = "HTTP/1.1 401", .reason = "missing_token" },
+        .{ .auth = "Bearer broken", .body = "invalid", .status = "HTTP/1.1 401", .reason = "malformed" },
+        .{ .auth = authorized, .body = " " ** 65, .status = "HTTP/1.1 413", .reason = "too_large" },
+        .{ .auth = authorized, .body = "{\"version\":2,\"prompt\":\"hello\"}", .status = "HTTP/1.1 400", .reason = "enum" },
+        .{ .auth = authorized, .body = "{\"version\":1,\"prompt\":\"hello\",\"extra\":1}", .status = "HTTP/1.1 400", .reason = "unknown_field" },
+        .{ .auth = authorized, .body = "{\"version\":1}", .status = "HTTP/1.1 400", .reason = "missing_required" },
+        .{ .auth = authorized, .body = "{\"version\":1,\"prompt\":\"\"}", .status = "HTTP/1.1 400", .reason = "string_too_short" },
+    };
+    agent_test_invocations = 0;
+    @import("handler_instance.zig").setAotOverrideForTest(countAgentTestInvocation);
+    defer @import("handler_instance.zig").setAotOverrideForTest(null);
+    for (cases) |case| {
+        var buf: [2048]u8 = undefined;
+        const response = try serveAgentTestRequest(&srv, try agentTestPost(&reqs, case.auth, case.body), &buf);
+        try expectResponse(response, case.status, case.reason);
+        if (std.mem.eql(u8, case.status, "HTTP/1.1 400")) try std.testing.expect(std.mem.indexOf(u8, response, "at byte ") != null);
+        try std.testing.expectEqual(@as(usize, 0), agent_test_invocations);
+    }
+    var buf: [2048]u8 = undefined;
+    const response = try serveAgentTestRequest(&srv, try agentTestPost(&reqs, authorized, "{\"version\":1,\"prompt\":\"hello\\nworld\"}"), &buf);
+    try expectResponse(response, "HTTP/1.1 200", "\"prompt\":\"hello\\nworld\"");
+    try expectResponse(response, "HTTP/1.1 200", "not_a_tool_request");
+    try expectResponse(response, "HTTP/1.1 200", "\"subject\":\"user-1\"");
+    try expectResponse(response, "HTTP/1.1 200", "\"tenant\":\"acme\"");
+    try expectResponse(response, "HTTP/1.1 200", "\"auth\":\"absent\"");
+    try std.testing.expectEqual(@as(usize, 1), agent_test_invocations);
+}
+
+test "agent catalog requires auth and catalog handlers refuse every route before installation" {
+    var reqs = ToolRequests.init();
+    defer reqs.deinit();
+    var srv = try agentTestServer(agent_prompt_handler, true);
+    defer srv.deinit();
+    srv.config.runtime_config.tool_auth = null;
+    try std.testing.expectError(error.ToolAuthNotConfigured, srv.loadToolAuth());
+    var buf: [2048]u8 = undefined;
+    const no_key = try serveAgentTestRequest(&srv, try agentTestPost(&reqs, null, "invalid"), &buf);
+    try expectResponse(no_key, "HTTP/1.1 503", "tool handler requires auth: no key is loaded");
+
+    var before_install = try agentTestServer(agent_prompt_handler, false);
+    defer before_install.deinit();
+    agent_test_invocations = 0;
+    @import("handler_instance.zig").setAotOverrideForTest(countAgentTestInvocation);
+    defer @import("handler_instance.zig").setAotOverrideForTest(null);
+    for ([_][]const u8{ "/agent", "/tools/lookup", "/unmatched", "/_health", "/_readiness", "/static/file.txt" }) |path| {
+        const raw = try std.fmt.allocPrint(reqs.arena.allocator(), "GET {s} HTTP/1.1\r\nHost: t\r\n\r\n", .{path});
+        try expectResponse(try serveAgentTestRequest(&before_install, raw, &buf), "HTTP/1.1 503", "tool catalog is not installed");
+    }
+    try std.testing.expectEqual(@as(usize, 0), agent_test_invocations);
+
+    // Before the watcher knows even the contract, all requests stay closed.
+    srv.catalog_analysis_pending = true;
+    try expectResponse(try serveAgentTestRequest(&srv, "GET /_health HTTP/1.1\r\nHost: t\r\n\r\n", &buf), "HTTP/1.1 503", "tool catalog is not installed");
+}
+
+test "agent requests enforce the catalog export grant" {
+    var reqs = ToolRequests.init();
+    defer reqs.deinit();
+    var srv = try agentTestServer(grant_probe_handler, true);
+    defer srv.deinit();
+    _ = setenv(tool_test_key_env, tool_test_key, 1);
+    defer _ = unsetenv(tool_test_key_env);
+    try srv.loadToolAuth();
+    var buf: [2048]u8 = undefined;
+    const response = try serveAgentTestRequest(&srv, try agentTestPost(&reqs, try reqs.bearer(valid_claims), "{\"version\":1,\"prompt\":\"hello\"}"), &buf);
+    try expectResponse(response, "HTTP/1.1 500", "Internal Server Error");
 }

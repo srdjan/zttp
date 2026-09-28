@@ -126,8 +126,8 @@ pub const AcceptedTool = struct {
     }
 };
 
-/// One accepted agent entry. It has no compiled schemas because U3 owns agent
-/// request admission and prompt validation.
+/// One accepted agent entry. Its fixed prompt envelope is compiled once while
+/// the catalog is lowered; agent entries carry no producer-declared schemas.
 pub const AcceptedAgent = struct {
     name: []const u8,
     method: []const u8,
@@ -141,6 +141,9 @@ pub const AcceptedAgent = struct {
     provider_endpoint: []const u8,
     provider_credential: []const u8,
     limits: zq.handler_contract.AgentLimits,
+    /// The fixed prompt envelope from the A1 design, compiled once when the
+    /// catalog is lowered. Its `prompt.maxLength` is `max_input_bytes`.
+    prompt_schema: zq.tool_schema.CompiledToolSchema,
 
     pub fn allowsExport(self: *const AcceptedAgent, module: []const u8, name: []const u8) bool {
         for (self.exports) |exp| {
@@ -201,6 +204,19 @@ pub const AcceptedCatalog = struct {
         }
         return null;
     }
+
+    /// The agent served on this request. Tool entries are excluded so each
+    /// request enters exactly one admission path.
+    pub fn matchAgent(self: *const AcceptedCatalog, method: []const u8, path: []const u8) ?*const AcceptedAgent {
+        for (self.entries) |*entry| {
+            if (!std.ascii.eqlIgnoreCase(entry.method, method) or !matchPath(entry.path, path)) continue;
+            return switch (entry.kind) {
+                .tool => null,
+                .agent => |*agent| agent,
+            };
+        }
+        return null;
+    }
 };
 
 fn deinitAcceptedEntry(allocator: std.mem.Allocator, entry: *AcceptedCatalogEntry) void {
@@ -212,6 +228,7 @@ fn deinitAcceptedEntry(allocator: std.mem.Allocator, entry: *AcceptedCatalogEntr
             allocator.free(tool.credentials);
         },
         .agent => |*agent| {
+            agent.prompt_schema.deinit();
             allocator.free(agent.exports);
             allocator.free(agent.tools);
         },
@@ -241,6 +258,42 @@ pub fn validateToolOutput(scratch: std.mem.Allocator, tool: *const AcceptedTool,
     return zq.tool_schema.validate(scratch, &tool.output, body, max_tool_output_bytes);
 }
 
+/// Check one agent request against the fixed prompt envelope and the entry's
+/// byte bound before a JS value exists.
+pub fn validateAgentInput(scratch: std.mem.Allocator, agent: *const AcceptedAgent, body: []const u8) std.mem.Allocator.Error!ToolVerdict {
+    return zq.tool_schema.validate(scratch, &agent.prompt_schema, body, agent.max_input_bytes);
+}
+
+pub const AgentPromptError = std.mem.Allocator.Error || error{InvalidAdmittedPrompt};
+
+/// Decode the prompt string from a body that already passed
+/// `validateAgentInput`. The returned string is owned by `scratch`.
+pub fn admittedAgentPrompt(scratch: std.mem.Allocator, body: []const u8) AgentPromptError![]const u8 {
+    const value = std.json.parseFromSliceLeaky(std.json.Value, scratch, body, .{
+        .duplicate_field_behavior = .@"error",
+    }) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.InvalidAdmittedPrompt,
+    };
+    const object = switch (value) {
+        .object => |object| object,
+        else => return error.InvalidAdmittedPrompt,
+    };
+    return switch (object.get("prompt") orelse return error.InvalidAdmittedPrompt) {
+        .string => |prompt| prompt,
+        else => error.InvalidAdmittedPrompt,
+    };
+}
+
+/// The terminal bookkeeping reserve between an agent turn and its handler
+/// deadline. This value is unmeasured. A6 measures and sets it.
+pub const agent_terminal_margin_ms: u32 = 1_000;
+
+pub const AgentDeadlineConfig = struct {
+    handler_deadline_ms: u32 = 0,
+    outbound_timeout_ms: u32 = 0,
+};
+
 pub const PromoteError = std.mem.Allocator.Error || error{
     /// The accepted section bytes do not decode. Acceptance already decoded
     /// them, so this is an invariant violation, and it refuses rather than
@@ -255,6 +308,12 @@ pub const PromoteError = std.mem.Allocator.Error || error{
     ToolCatalogContractMismatch,
     /// The contract lists tools and no catalog section was accepted.
     ToolCatalogMissing,
+    /// An agent cannot run without a finite handler deadline.
+    AgentHandlerDeadlineDisabled,
+    /// A provider call can consume the whole turn deadline.
+    AgentOutboundTimeoutNotBelowTurnDeadline,
+    /// The turn and terminal margin do not fit below the handler deadline.
+    AgentTurnDeadlineNotBelowHandlerDeadline,
     /// The accepted declaration section does not decode. Acceptance already
     /// decoded it, so this is an invariant violation, and it refuses rather
     /// than serves without the ceiling.
@@ -486,6 +545,7 @@ pub fn promote(
     runtime_policy_digest: [32]u8,
     tool_catalog_section: ?[]const u8,
     declaration_section: ?[]const u8,
+    deadline_config: AgentDeadlineConfig,
 ) PromoteError!?ProofCheckedContract {
     const accepted = switch (assessment.outcome) {
         .accepted => |value| value,
@@ -504,6 +564,7 @@ pub fn promote(
     if (tool_catalog_section) |bytes| {
         tool_catalog = try lowerAcceptedCatalog(validated.view().allocator, bytes);
         try crossCheckToolCatalog(&tool_catalog.?, contract_tools);
+        try validateAgentDeadlines(&tool_catalog.?, deadline_config);
     } else if (contract_tools.len != 0) {
         return error.ToolCatalogMissing;
     }
@@ -594,6 +655,8 @@ fn lowerAcceptedCatalog(allocator: std.mem.Allocator, bytes: []const u8) Promote
                 errdefer allocator.free(exports);
                 const tools = try lowerAcceptedAgentTools(allocator, agent.tools);
                 errdefer allocator.free(tools);
+                var prompt_schema = try compileAgentPromptSchema(allocator, entry.max_input_bytes);
+                errdefer prompt_schema.deinit();
                 break :blk .{
                     .name = entry.name,
                     .method = entry.method,
@@ -617,6 +680,7 @@ fn lowerAcceptedCatalog(allocator: std.mem.Allocator, bytes: []const u8) Promote
                             .result_bytes = agent.limits.result_bytes,
                             .turn_deadline_ms = agent.limits.turn_deadline_ms,
                         },
+                        .prompt_schema = prompt_schema,
                     } },
                 };
             },
@@ -675,6 +739,37 @@ fn compileAcceptedSchema(allocator: std.mem.Allocator, schema: []const u8) Promo
     return zq.tool_schema.compile(allocator, schema) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.SchemaNotInSubset => return error.ToolSchemaNotCompilable,
+    };
+}
+
+fn compileAgentPromptSchema(allocator: std.mem.Allocator, max_input_bytes: u32) PromoteError!zq.tool_schema.CompiledToolSchema {
+    const schema = try std.fmt.allocPrint(
+        allocator,
+        "{s}{d}{s}",
+        .{
+            "{\"type\":\"object\",\"additionalProperties\":false,\"required\":[\"version\",\"prompt\"],\"properties\":{\"version\":{\"type\":\"integer\",\"enum\":[1]},\"prompt\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":",
+            max_input_bytes,
+            "}}}",
+        },
+    );
+    defer allocator.free(schema);
+    return compileAcceptedSchema(allocator, schema);
+}
+
+/// Refuse an agent catalog whose provider and turn deadlines cannot complete
+/// below the server's handler deadline.
+pub fn validateAgentDeadlines(catalog: *const AcceptedCatalog, config: AgentDeadlineConfig) PromoteError!void {
+    for (catalog.entries) |entry| switch (entry.kind) {
+        .tool => {},
+        .agent => |agent| {
+            if (config.handler_deadline_ms == 0) return error.AgentHandlerDeadlineDisabled;
+            if (config.outbound_timeout_ms >= agent.limits.turn_deadline_ms) {
+                return error.AgentOutboundTimeoutNotBelowTurnDeadline;
+            }
+            if (agent.limits.turn_deadline_ms + agent_terminal_margin_ms >= config.handler_deadline_ms) {
+                return error.AgentTurnDeadlineNotBelowHandlerDeadline;
+            }
+        },
     };
 }
 
@@ -2267,7 +2362,7 @@ test "promotion exposes only properties that cleared the policy" {
     };
 
     const digest = [_]u8{0xab} ** 32;
-    const promoted = (try promote(&validated, assessment, digest, null, null)) orelse return error.TestUnexpectedResult;
+    const promoted = (try promote(&validated, assessment, digest, null, null, .{})) orelse return error.TestUnexpectedResult;
     try std.testing.expect(promoted.properties.no_secret_leakage);
     try std.testing.expect(promoted.properties.result_safe);
     try std.testing.expect(!promoted.properties.read_only);
@@ -2288,11 +2383,11 @@ test "promotion exposes only properties that cleared the policy" {
     // it becomes no promotion.
     var uncovered = assessment;
     uncovered.guards = .{ .required = 2, .covered = 1 };
-    try std.testing.expect((try promote(&validated, uncovered, digest, null, null)) == null);
+    try std.testing.expect((try promote(&validated, uncovered, digest, null, null, .{})) == null);
 
     var covered = assessment;
     covered.guards = .{ .required = 2, .covered = 2, .kinds = 0x01 };
-    const guarded = (try promote(&validated, covered, digest, null, null)) orelse return error.TestUnexpectedResult;
+    const guarded = (try promote(&validated, covered, digest, null, null, .{})) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(u32, 2), guarded.guards.required);
     // Guard coverage is beside the properties, never inside them: the same
     // property set comes back.
@@ -2306,7 +2401,7 @@ test "promotion exposes only properties that cleared the policy" {
         .writes = 1,
         .kind_bits = 1,
     };
-    const invariant_contract = (try promote(&validated, invariant_covered, digest, null, null)) orelse
+    const invariant_contract = (try promote(&validated, invariant_covered, digest, null, null, .{})) orelse
         return error.TestUnexpectedResult;
     try std.testing.expect(invariant_contract.invariants.coverageReady());
     try std.testing.expectEqual(@as(u32, 1), invariant_contract.invariants.reads);
@@ -2340,7 +2435,7 @@ test "a read-only generation is coverage ready and reports vacuous write applica
         .writes = 0,
         .kind_bits = 0b11,
     };
-    const promoted = (try promote(&validated, assessment, [_]u8{0xcd} ** 32, null, null)) orelse
+    const promoted = (try promote(&validated, assessment, [_]u8{0xcd} ** 32, null, null, .{})) orelse
         return error.TestUnexpectedResult;
 
     // Vacuity is a report, never a relabelling. Coverage readiness reads
@@ -2680,7 +2775,10 @@ test "promotion lowers the accepted tool catalog and compiles every schema" {
     const bytes = testCatalog(&buf, &catalog_test_entries);
     const validated = toolTestContract(&matching_tool_summaries);
 
-    var promoted = (try promote(&validated, acceptedTestAssessment(), [_]u8{0} ** 32, bytes, null)) orelse
+    var promoted = (try promote(&validated, acceptedTestAssessment(), [_]u8{0} ** 32, bytes, null, .{
+        .handler_deadline_ms = 30_000,
+        .outbound_timeout_ms = 10_000,
+    })) orelse
         return error.TestUnexpectedResult;
     defer promoted.deinit();
 
@@ -2696,7 +2794,7 @@ test "promotion lowers the accepted tool catalog and compiles every schema" {
     try std.testing.expectEqualStrings("alpha", catalog.find("alpha").?.name);
 }
 
-test "agent catalog lowering has no schemas and matching excludes the agent route" {
+test "agent catalog compiles its fixed prompt schema and matches separately" {
     const names = [_][]const u8{"lookup"};
     const entries = [_]catalog_test_support.SampleEntry{
         .{
@@ -2725,6 +2823,110 @@ test "agent catalog lowering has no schemas and matching excludes the agent rout
     try std.testing.expect(catalog.find("assistant") == null);
     try std.testing.expect(catalog.match("POST", "/agent") == null);
     try std.testing.expect(catalog.match("POST", "/tools/lookup") != null);
+    const agent_ptr = catalog.matchAgent("post", "/agent") orelse return error.TestExpectedAgent;
+    try std.testing.expectEqualStrings("assistant", agent_ptr.name);
+    try std.testing.expect(catalog.matchAgent("GET", "/agent") == null);
+    try std.testing.expect(catalog.matchAgent("POST", "/tools/lookup") == null);
+
+    const valid = "{\"version\":1,\"prompt\":\"hello \\\"agent\\\"\"}";
+    try std.testing.expectEqual(ToolVerdict.ok, try validateAgentInput(std.testing.allocator, agent_ptr, valid));
+    var prompt_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer prompt_arena.deinit();
+    try std.testing.expectEqualStrings("hello \"agent\"", try admittedAgentPrompt(prompt_arena.allocator(), valid));
+
+    const Case = struct {
+        body: []const u8,
+        reason: zq.tool_schema.ValidateRefusal,
+    };
+    const cases = [_]Case{
+        .{ .body = "{\"version\":2,\"prompt\":\"hello\"}", .reason = .enum_mismatch },
+        .{ .body = "{\"version\":1,\"prompt\":\"hello\",\"extra\":true}", .reason = .unknown_field },
+        .{ .body = "{\"version\":1}", .reason = .missing_required },
+        .{ .body = "{\"version\":1,\"prompt\":\"\"}", .reason = .string_too_short },
+    };
+    for (cases) |case| {
+        const verdict = try validateAgentInput(std.testing.allocator, agent_ptr, case.body);
+        try std.testing.expect(verdict == .refused);
+        try std.testing.expectEqual(case.reason, verdict.refused.reason);
+    }
+
+    const oversized = try std.testing.allocator.alloc(u8, agent.max_input_bytes + 1);
+    defer std.testing.allocator.free(oversized);
+    @memset(oversized, 'x');
+    const oversized_verdict = try validateAgentInput(std.testing.allocator, agent_ptr, oversized);
+    try std.testing.expect(oversized_verdict == .refused);
+    try std.testing.expectEqual(zq.tool_schema.ValidateRefusal.too_large, oversized_verdict.refused.reason);
+}
+
+test "promotion enforces every agent deadline relation" {
+    const names = [_][]const u8{"lookup"};
+    const credentials = [_][]const u8{"provider"};
+    const entries = [_]catalog_test_support.SampleEntry{
+        .{
+            .kind = @intFromEnum(pcc.tool_catalog.EntryKind.agent),
+            .name = "assistant",
+            .path = "/agent",
+            .description = "Answer questions.",
+            .max_input_bytes = 8192,
+            .agent = .{ .tools = &names },
+        },
+        .{ .name = "lookup", .path = "/tools/lookup", .input_schema = closed_test_schema, .output_schema = closed_test_schema },
+    };
+    var buf: [2048]u8 = undefined;
+    const bytes = testCatalog(&buf, &entries);
+    const limits = zq.handler_contract.AgentLimits{
+        .rounds = 4,
+        .tool_calls = 8,
+        .tool_calls_per_round = 4,
+        .argument_bytes = 4096,
+        .result_bytes = 16384,
+        .turn_deadline_ms = 20_000,
+    };
+    const summaries = [_]ToolSummary{
+        .{
+            .name = "assistant",
+            .method = "POST",
+            .path = "/agent",
+            .description = "Answer questions.",
+            .max_input_bytes = 8192,
+            .credentials = &credentials,
+            .agent = .{
+                .tools = &names,
+                .provider_endpoint = "https://api.example.com:443",
+                .provider_credential = "provider",
+                .limits = limits,
+            },
+        },
+        .{ .name = "lookup", .method = "POST", .path = "/tools/lookup", .max_input_bytes = 4096 },
+    };
+    const validated = toolTestContract(&summaries);
+    try std.testing.expectError(
+        error.AgentHandlerDeadlineDisabled,
+        promote(&validated, acceptedTestAssessment(), [_]u8{0} ** 32, bytes, null, .{
+            .handler_deadline_ms = 0,
+            .outbound_timeout_ms = 10_000,
+        }),
+    );
+    try std.testing.expectError(
+        error.AgentOutboundTimeoutNotBelowTurnDeadline,
+        promote(&validated, acceptedTestAssessment(), [_]u8{0} ** 32, bytes, null, .{
+            .handler_deadline_ms = 30_000,
+            .outbound_timeout_ms = 20_000,
+        }),
+    );
+    try std.testing.expectError(
+        error.AgentTurnDeadlineNotBelowHandlerDeadline,
+        promote(&validated, acceptedTestAssessment(), [_]u8{0} ** 32, bytes, null, .{
+            .handler_deadline_ms = 21_000,
+            .outbound_timeout_ms = 10_000,
+        }),
+    );
+    var promoted = (try promote(&validated, acceptedTestAssessment(), [_]u8{0} ** 32, bytes, null, .{
+        .handler_deadline_ms = 30_000,
+        .outbound_timeout_ms = 10_000,
+    })) orelse return error.TestUnexpectedResult;
+    defer promoted.deinit();
+    try std.testing.expect(promoted.tool_catalog.?.matchAgent("POST", "/agent") != null);
 }
 
 test "producer agent lowering preserves its reachable exports" {
@@ -2915,7 +3117,7 @@ test "promotion refuses a contract tool list that disagrees with the accepted ca
     };
     for (cases) |case| {
         const validated = toolTestContract(case.tools);
-        const result = promote(&validated, acceptedTestAssessment(), [_]u8{0} ** 32, bytes, null);
+        const result = promote(&validated, acceptedTestAssessment(), [_]u8{0} ** 32, bytes, null, .{});
         std.testing.expectError(error.ToolCatalogContractMismatch, result) catch |err| {
             std.debug.print("case '{s}' was not refused as a mismatch\n", .{case.label});
             return err;
@@ -2932,7 +3134,7 @@ test "promotion refuses a contract whose scope bindings disagree with the accept
     const alpha = ToolSummary{ .name = "alpha", .method = "POST", .path = "/tools/alpha", .max_input_bytes = 64, .scope_tenant = "tenant_id" };
 
     const agreeing = toolTestContract(&.{alpha});
-    var promoted = (try promote(&agreeing, acceptedTestAssessment(), [_]u8{0} ** 32, bytes, null)) orelse
+    var promoted = (try promote(&agreeing, acceptedTestAssessment(), [_]u8{0} ** 32, bytes, null, .{})) orelse
         return error.TestUnexpectedResult;
     defer promoted.deinit();
     const tool = promoted.tool_catalog.?.find("alpha") orelse return error.TestUnexpectedResult;
@@ -2952,7 +3154,7 @@ test "promotion refuses a contract whose scope bindings disagree with the accept
     };
     for (cases) |case| {
         const validated = toolTestContract(&.{case.tool});
-        std.testing.expectError(error.ToolCatalogContractMismatch, promote(&validated, acceptedTestAssessment(), [_]u8{0} ** 32, bytes, null)) catch |err| {
+        std.testing.expectError(error.ToolCatalogContractMismatch, promote(&validated, acceptedTestAssessment(), [_]u8{0} ** 32, bytes, null, .{})) catch |err| {
             std.debug.print("case '{s}' was not refused as a mismatch\n", .{case.label});
             return err;
         };
@@ -2969,7 +3171,10 @@ test "promotion refuses a contract whose credential grant disagrees with the acc
     const alpha = ToolSummary{ .name = "alpha", .method = "POST", .path = "/tools/alpha", .max_input_bytes = 64, .credentials = &granted };
 
     const agreeing = toolTestContract(&.{alpha});
-    var promoted = (try promote(&agreeing, acceptedTestAssessment(), [_]u8{0} ** 32, bytes, null)) orelse
+    var promoted = (try promote(&agreeing, acceptedTestAssessment(), [_]u8{0} ** 32, bytes, null, .{
+        .handler_deadline_ms = 30_000,
+        .outbound_timeout_ms = 10_000,
+    })) orelse
         return error.TestUnexpectedResult;
     defer promoted.deinit();
     const tool = promoted.tool_catalog.?.find("alpha") orelse return error.TestUnexpectedResult;
@@ -2989,7 +3194,10 @@ test "promotion refuses a contract whose credential grant disagrees with the acc
         var summary = alpha;
         summary.credentials = case.names;
         const validated = toolTestContract(&.{summary});
-        std.testing.expectError(error.ToolCatalogContractMismatch, promote(&validated, acceptedTestAssessment(), [_]u8{0} ** 32, bytes, null)) catch |err| {
+        std.testing.expectError(error.ToolCatalogContractMismatch, promote(&validated, acceptedTestAssessment(), [_]u8{0} ** 32, bytes, null, .{
+            .handler_deadline_ms = 30_000,
+            .outbound_timeout_ms = 10_000,
+        })) catch |err| {
             std.debug.print("case '{s}' was not refused as a mismatch\n", .{case.label});
             return err;
         };
@@ -3104,12 +3312,12 @@ test "promotion refuses a contract listing tools when no catalog was accepted" {
     const validated = toolTestContract(&matching_tool_summaries);
     try std.testing.expectError(
         error.ToolCatalogMissing,
-        promote(&validated, acceptedTestAssessment(), [_]u8{0} ** 32, null, null),
+        promote(&validated, acceptedTestAssessment(), [_]u8{0} ** 32, null, null, .{}),
     );
 
     // No tools and no catalog is an ordinary handler, promoted with none.
     const plain = toolTestContract(&.{});
-    var promoted = (try promote(&plain, acceptedTestAssessment(), [_]u8{0} ** 32, null, null)) orelse
+    var promoted = (try promote(&plain, acceptedTestAssessment(), [_]u8{0} ** 32, null, null, .{})) orelse
         return error.TestUnexpectedResult;
     defer promoted.deinit();
     try std.testing.expect(promoted.tool_catalog == null);
@@ -3126,12 +3334,12 @@ test "promotion refuses an accepted catalog it cannot decode or compile" {
     var buf: [2048]u8 = undefined;
     try std.testing.expectError(
         error.ToolSchemaNotCompilable,
-        promote(&validated, acceptedTestAssessment(), [_]u8{0} ** 32, catalog_test_support.sample(&buf), null),
+        promote(&validated, acceptedTestAssessment(), [_]u8{0} ** 32, catalog_test_support.sample(&buf), null, .{}),
     );
 
     try std.testing.expectError(
         error.AcceptedToolCatalogUndecodable,
-        promote(&validated, acceptedTestAssessment(), [_]u8{0} ** 32, "not a catalog", null),
+        promote(&validated, acceptedTestAssessment(), [_]u8{0} ** 32, "not a catalog", null, .{}),
     );
 }
 
@@ -3173,7 +3381,7 @@ test "promotion reads no catalog for a rejected assessment" {
         .code = .obligation_missing,
         .recertifiable = true,
     }, 1);
-    try std.testing.expect((try promote(&validated, refused, [_]u8{0} ** 32, "not a catalog", null)) == null);
+    try std.testing.expect((try promote(&validated, refused, [_]u8{0} ** 32, "not a catalog", null, .{})) == null);
 }
 
 test "fromHandlerContract lowers the tool list with an uppercase method" {

@@ -181,6 +181,22 @@ pub fn grantFor(tool: *const contract_runtime.AcceptedTool) http_types.ToolGrant
     return .{ .context = @ptrCast(tool), .allows = allowsThunk, .allows_credential = allowsCredentialThunk, .input_schema = tool.input_name };
 }
 
+/// The export, credential, and provider grant for one admitted agent request.
+/// The agent carries no tool input schema.
+pub fn agentGrantFor(agent: *const contract_runtime.AcceptedAgent) http_types.ToolGrant {
+    return .{
+        .context = @ptrCast(agent),
+        .allows = allowsAgentThunk,
+        .allows_credential = allowsAgentCredentialThunk,
+        .input_schema = "",
+        .agent = .{
+            .provider_endpoint = agent.provider_endpoint,
+            .provider_credential = agent.provider_credential,
+            .no_durable = true,
+        },
+    };
+}
+
 fn allowsCredentialThunk(context: *const anyopaque, name: []const u8) bool {
     const tool: *const contract_runtime.AcceptedTool = @ptrCast(@alignCast(context));
     return tool.allowsCredential(name);
@@ -189,6 +205,20 @@ fn allowsCredentialThunk(context: *const anyopaque, name: []const u8) bool {
 fn allowsThunk(context: *const anyopaque, module: []const u8, name: []const u8) bool {
     const tool: *const contract_runtime.AcceptedTool = @ptrCast(@alignCast(context));
     if (tool.allowsExport(module, name)) return true;
+    for (dispatch_exports) |exp| {
+        if (std.mem.eql(u8, exp.module, module) and std.mem.eql(u8, exp.name, name)) return true;
+    }
+    return false;
+}
+
+fn allowsAgentCredentialThunk(context: *const anyopaque, name: []const u8) bool {
+    const agent: *const contract_runtime.AcceptedAgent = @ptrCast(@alignCast(context));
+    return std.mem.eql(u8, agent.provider_credential, name);
+}
+
+fn allowsAgentThunk(context: *const anyopaque, module: []const u8, name: []const u8) bool {
+    const agent: *const contract_runtime.AcceptedAgent = @ptrCast(@alignCast(context));
+    if (agent.allowsExport(module, name)) return true;
     for (dispatch_exports) |exp| {
         if (std.mem.eql(u8, exp.module, module) and std.mem.eql(u8, exp.name, name)) return true;
     }

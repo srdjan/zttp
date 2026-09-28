@@ -25,6 +25,10 @@ pub const normalizedSqlQuery = zq.handler_policy.normalizedSqlQuery;
 pub const sqlQueryIsReadOnly = zq.handler_policy.sqlQueryIsReadOnly;
 pub const contractRequiresRuntimePolicyIndex = zq.handler_policy.contractRequiresRuntimePolicyIndex;
 pub const JSValue = zq.JSValue;
+/// Test-only reach for server.zig's agent admission tests (M5 A1 U3).
+pub const Context = zq.Context;
+pub const ToolExport = zq.handler_contract.ToolExport;
+pub const emptyContract = zq.handler_contract.emptyContract;
 pub const Instant = zq.compat.Instant;
 pub const Timer = zq.compat.Timer;
 pub const Mutex = zq.compat.Mutex;

@@ -2742,6 +2742,7 @@ test "a real compile of a tool handler reaches acceptance and promotes the catal
         artifact.payload.policy_section_sha256,
         section,
         null,
+        .{},
     )) orelse return error.TestUnexpectedResult;
     defer promoted.deinit();
     const catalog = promoted.tool_catalog orelse return error.TestUnexpectedResult;
@@ -2829,13 +2830,13 @@ test "a contract tool list that disagrees with the accepted catalog refuses to s
     defer disagreeing.deinit();
     try std.testing.expectError(
         error.ToolCatalogContractMismatch,
-        contract_runtime.promote(&disagreeing, assessment, artifact.payload.policy_section_sha256, section, null),
+        contract_runtime.promote(&disagreeing, assessment, artifact.payload.policy_section_sha256, section, null, .{}),
     );
 
     // And the contract names tools while no catalog section was accepted.
     try std.testing.expectError(
         error.ToolCatalogMissing,
-        contract_runtime.promote(&artifact.contract, assessment, artifact.payload.policy_section_sha256, null, null),
+        contract_runtime.promote(&artifact.contract, assessment, artifact.payload.policy_section_sha256, null, null, .{}),
     );
 }
 
@@ -2861,6 +2862,7 @@ test "a handler with no tool catalog ships no section and no member, and promote
         artifact.payload.policy_section_sha256,
         null,
         null,
+        .{},
     )) orelse return error.TestUnexpectedResult;
     defer promoted.deinit();
     try std.testing.expect(promoted.tool_catalog == null);
@@ -2924,6 +2926,7 @@ test "a real compile of a declared handler reaches acceptance and promotes the c
         artifact.payload.policy_section_sha256,
         null,
         section,
+        .{},
     )) orelse return error.TestUnexpectedResult;
     defer promoted.deinit();
     const ceiling = promoted.capability_ceiling orelse return error.TestUnexpectedResult;
@@ -2961,6 +2964,7 @@ test "a declaration with classifications and no ceiling ships its section and pr
         artifact.payload.policy_section_sha256,
         null,
         section,
+        .{},
     )) orelse return error.TestUnexpectedResult;
     defer promoted.deinit();
     try std.testing.expect(promoted.capability_ceiling == null);
@@ -3016,7 +3020,7 @@ test "a declaration section that does not lower refuses to start" {
     // decode are a refusal, never a generation without its ceiling.
     try std.testing.expectError(
         error.AcceptedDeclarationUndecodable,
-        contract_runtime.promote(&artifact.contract, assessment, artifact.payload.policy_section_sha256, null, "not a declaration"),
+        contract_runtime.promote(&artifact.contract, assessment, artifact.payload.policy_section_sha256, null, "not a declaration", .{}),
     );
 }
 

@@ -603,12 +603,19 @@ fn resolvedScopeDecision(
 pub fn fetchSyncNative(ctx_ptr: *anyopaque, _: zq.JSValue, args: []const zq.JSValue) anyerror!zq.JSValue {
     const ctx_for_host: *zq.Context = @ptrCast(@alignCast(ctx_ptr));
     const rt = HandlerInstance.fromContext(ctx_for_host) orelse return error.RuntimeUnavailable;
+    if (rt.ctx.active_tool_grant != null) {
+        return createFetchErrorResponse(rt, "ToolGrantRefused", "ambient_http_forbidden");
+    }
+    return fetchAndRecord(rt, args);
+}
+
+fn fetchAndRecord(rt: *HandlerInstance, args: []const zq.JSValue) !zq.JSValue {
     const result = fetchSyncResult(rt, args) catch |err| {
         return createFetchErrorResponse(rt, "InternalError", @errorName(err));
     };
 
     // Record fetchSync to trace (it's outside virtual module dispatch)
-    const ctx: *zq.Context = @ptrCast(@alignCast(ctx_ptr));
+    const ctx = rt.ctx;
     if (ctx.getModuleState(zq.TraceRecorder, zq.TRACE_STATE_SLOT)) |recorder| {
         recorder.recordIO("http", "fetchSync", ctx, args, result);
     }
@@ -925,6 +932,46 @@ fn authorizeCredential(rt: *HandlerInstance, name: []const u8, url: []const u8, 
         .method = options.method,
         .headers = options.headers.items,
     });
+}
+
+const AgentFetchRefusal = enum {
+    provider_endpoint_mismatch,
+    provider_credential_required,
+    durable_forbidden,
+};
+
+fn agentFetchRefusal(grant: http_types.AgentGrant, url: []const u8, credential: ?[]const u8, durable: bool) ?AgentFetchRefusal {
+    var normalized: [zq.endpoint.max_endpoint_bytes]u8 = undefined;
+    const endpoint = zq.endpoint.normalize(url, &normalized) catch return .provider_endpoint_mismatch;
+    if (!std.mem.eql(u8, endpoint, grant.provider_endpoint)) return .provider_endpoint_mismatch;
+    const name = credential orelse return .provider_credential_required;
+    if (!std.mem.eql(u8, name, grant.provider_credential)) return .provider_credential_required;
+    if (grant.no_durable and durable) return .durable_forbidden;
+    return null;
+}
+
+/// Run before replay, durable dispatch, DNS, or connect. These paths must not
+/// bypass an agent's endpoint and credential restrictions.
+fn checkAgentFetch(rt: *HandlerInstance, args: []const zq.JSValue) !?zq.JSValue {
+    const request = rt.active_request orelse return null;
+    const grant = request.tool_grant orelse return null;
+    const agent = grant.agent orelse return null;
+    const pool = rt.ctx.hidden_class_pool orelse return error.NoHiddenClassPool;
+    const parsed = switch (try parseFetchArgs(rt, pool, args)) {
+        .ok => |value| value,
+        .err => |value| return value,
+    };
+    defer rt.allocator.free(parsed.url);
+    var credential: ?[]const u8 = null;
+    var durable = false;
+    if (parsed.init_obj) |init| {
+        if (credentialOption(rt, init, pool)) |value| credential = getStringData(value);
+        if (getDynamicProperty(rt.ctx, init, pool, "durable")) |value| durable = !value.isUndefined();
+    }
+    if (agentFetchRefusal(agent, parsed.url, credential, durable)) |reason| {
+        return try createFetchErrorResponse(rt, "AgentGrantRefused", @tagName(reason));
+    }
+    return null;
 }
 
 /// Where an upstream response echoed the credential value, or null. Only the
@@ -1274,6 +1321,8 @@ pub fn fetchModuleCallback(
     const rt: *HandlerInstance = @ptrCast(@alignCast(runtime_ptr));
     const pool = rt.ctx.hidden_class_pool orelse return error.NoHiddenClassPool;
 
+    if (try checkAgentFetch(rt, args)) |refusal| return refusal;
+
     if (rt.config.replay_file_path != null) {
         return fetchModuleReplay(rt);
     }
@@ -1296,7 +1345,7 @@ pub fn fetchModuleCallback(
             },
         }
     }
-    return fetchSyncNative(@ptrCast(rt.ctx), zq.JSValue.undefined_val, args);
+    return fetchAndRecord(rt, args);
 }
 
 /// The `zttp:fetch` module's refusal callback: the same 599 fetch error the
@@ -2360,6 +2409,9 @@ pub fn httpRequestNative(ctx_ptr: *anyopaque, _: zq.JSValue, args: []const zq.JS
 
 fn httpRequestResultJsonAlloc(rt: *HandlerInstance, args: []const zq.JSValue) ![]u8 {
     const a = rt.allocator;
+    if (rt.ctx.active_tool_grant != null) {
+        return httpRequestErrorJsonAlloc(a, "ToolGrantRefused", "ambient_http_forbidden");
+    }
     if (!rt.config.outbound_http_enabled) {
         return try httpRequestErrorJsonAlloc(a, "OutboundHttpDisabled", "set runtime outbound_http_enabled=true");
     }
@@ -2734,4 +2786,114 @@ test "the endpoint decides, not the host" {
     const refused = outboundEndpointViolation(rt, "https://api.example.com@evil.example", "evil.example") orelse
         return error.TestUnexpectedResult;
     try testing.expectEqualStrings("url names no endpoint this policy can decide", refused);
+}
+
+test "agent fetch bounds endpoint credential and durable without sockets" {
+    const grant: http_types.AgentGrant = .{
+        .provider_endpoint = "https://provider.example:443",
+        .provider_credential = "provider",
+    };
+    try std.testing.expectEqual(@as(?AgentFetchRefusal, .provider_endpoint_mismatch), agentFetchRefusal(grant, "https://other.example/chat", "provider", false));
+    try std.testing.expectEqual(@as(?AgentFetchRefusal, .provider_credential_required), agentFetchRefusal(grant, "https://provider.example/chat", null, false));
+    try std.testing.expectEqual(@as(?AgentFetchRefusal, .provider_credential_required), agentFetchRefusal(grant, "https://provider.example/chat", "other", false));
+    try std.testing.expectEqual(@as(?AgentFetchRefusal, .durable_forbidden), agentFetchRefusal(grant, "https://provider.example/chat", "provider", true));
+    try std.testing.expectEqual(@as(?AgentFetchRefusal, null), agentFetchRefusal(grant, "HTTPS://PROVIDER.EXAMPLE./chat", "provider", false));
+}
+
+const FrameTestGrant = struct {
+    name: []const u8,
+    fn allows(ptr: *const anyopaque, _: []const u8, name: []const u8) bool {
+        const self: *const FrameTestGrant = @ptrCast(@alignCast(ptr));
+        return std.mem.eql(u8, self.name, name);
+    }
+    fn credential(ptr: *const anyopaque, name: []const u8) bool {
+        return allows(ptr, "", name);
+    }
+    fn grant(self: *const FrameTestGrant) http_types.ToolGrant {
+        return .{ .context = self, .allows = allows, .allows_credential = credential };
+    }
+};
+const outer_frame_grant: FrameTestGrant = .{ .name = "outer" };
+const inner_frame_grant: FrameTestGrant = .{ .name = "inner" };
+
+fn expectFrameReaders(rt: *HandlerInstance, name: []const u8, other: []const u8) !void {
+    const engine = rt.ctx.active_tool_grant orelse return error.TestUnexpectedResult;
+    try std.testing.expect(engine.allows(engine.context, "test", name));
+    try std.testing.expect(!engine.allows(engine.context, "test", other));
+    if (std.mem.eql(u8, name, "outer")) {
+        try std.testing.expectEqualStrings("outer prompt", engine.agent_prompt orelse return error.TestUnexpectedResult);
+    } else {
+        try std.testing.expect(engine.agent_prompt == null);
+    }
+    const options: FetchInitOptions = .{ .max_response_bytes = 1024 };
+    // No store is loaded. Only the credential the runtime grant allows gets
+    // past the first check and reaches not_configured.
+    try std.testing.expectEqual(credential_store.Refusal.not_configured, authorizeCredential(rt, name, "https://provider.example", &options).refused);
+    try std.testing.expectEqual(credential_store.Refusal.not_granted, authorizeCredential(rt, other, "https://provider.example", &options).refused);
+    try std.testing.expectEqualStrings(name, rt.active_request.?.subject.?);
+    try std.testing.expectEqualStrings(name, rt.active_request.?.tenant.?);
+}
+
+fn frameTestNestedError(rt: *HandlerInstance, nested: HandlerInstance.Frame) !void {
+    try rt.enterNested(nested);
+    defer rt.leaveNested() catch unreachable;
+    try expectFrameReaders(rt, "inner", "outer");
+    return error.FrameTestUnwind;
+}
+
+fn frameTestTransitions(ctx: *zq.Context, _: []const zq.JSValue) !zq.JSValue {
+    const rt = HandlerInstance.fromContext(ctx) orelse return error.RuntimeUnavailable;
+    try expectFrameReaders(rt, "outer", "inner");
+    var nested = rt.active_request.?;
+    nested.tool_grant = inner_frame_grant.grant();
+    nested.subject = "inner";
+    nested.tenant = "inner";
+    const frame: HandlerInstance.Frame = .{ .request = nested, .pending_args = "unused" };
+    try rt.enterNested(frame);
+    try expectFrameReaders(rt, "inner", "outer");
+    try std.testing.expectError(error.InvalidGrantFrameDepth, rt.enterNested(frame));
+    try expectFrameReaders(rt, "inner", "outer");
+    try rt.leaveNested();
+    try expectFrameReaders(rt, "outer", "inner");
+    try std.testing.expectError(error.FrameTestUnwind, frameTestNestedError(rt, frame));
+    try expectFrameReaders(rt, "outer", "inner");
+    return error.AotBail;
+}
+
+fn frameTestUnbalanced(ctx: *zq.Context, _: []const zq.JSValue) !zq.JSValue {
+    const rt = HandlerInstance.fromContext(ctx) orelse return error.RuntimeUnavailable;
+    try rt.enterNested(.{ .request = rt.active_request.? });
+    return error.AotBail;
+}
+
+test "frame push pop and error unwind keep engine and credential readers together" {
+    const rt = try HandlerInstance.init(std.testing.allocator, .{});
+    defer rt.deinit();
+    try rt.loadHandler("function handler(req) { return Response.text(req.method); }", "<frames>");
+    var outer_grant = outer_frame_grant.grant();
+    outer_grant.agent = .{ .provider_endpoint = "https://provider.example:443", .provider_credential = "outer" };
+    const request: HttpRequestView = .{
+        .method = "POST",
+        .url = "/agent",
+        .headers = .empty,
+        .body = null,
+        .subject = "outer",
+        .tenant = "outer",
+        .tool_grant = outer_grant,
+        .agent_prompt = "outer prompt",
+    };
+    handler_instance.setAotOverrideForTest(frameTestTransitions);
+    defer handler_instance.setAotOverrideForTest(null);
+    var response = try rt.executeHandler(request);
+    defer response.deinit();
+    try std.testing.expectEqualStrings("POST", response.body);
+    try std.testing.expectEqual(@as(usize, 0), rt.frame_depth);
+    try std.testing.expect(rt.ctx.active_tool_grant == null);
+    try std.testing.expect(rt.active_request == null);
+
+    handler_instance.setAotOverrideForTest(frameTestUnbalanced);
+    try std.testing.expectError(error.InvalidGrantFrameDepth, rt.executeHandler(request));
+    try std.testing.expectEqual(@as(usize, 0), rt.frame_depth);
+    try std.testing.expect(rt.ctx.active_tool_grant == null);
+    try std.testing.expect(rt.active_request == null);
 }
