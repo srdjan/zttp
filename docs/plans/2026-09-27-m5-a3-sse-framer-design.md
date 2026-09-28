@@ -1,8 +1,9 @@
 # M5 A3 design note: the SSE framer and strict JSON strings
 
-Status: proposed on 2026-09-27, revised once after a design critique (run on
-Opus; Fable credits were exhausted) and a citation check. It needs the owner's
-answers to section 8 before code starts. Unit A3 of the
+Status: accepted by the owner on 2026-09-28, with the recommended answer to each
+question in section 8 (section 9 records them). Revised once before acceptance
+after a design critique (run on Opus; Fable credits were exhausted) and a
+citation check. Unit A3 of the
 [M5 release contract](2026-09-27-m5-agent-handler-release-contract.md) is
 written against the approach this note names; check C-A3 is its completion
 check.
@@ -236,3 +237,19 @@ the name `zttp:sse` and the export `sseEvents`; the `bounds` object; the closed
 tag set and its order; the `{ tag, offset }` error shape; WHATWG id persistence
 and the `message` default; the 65536 event maximum and the 8 MiB byte maxima as
 encoding bounds.
+
+## 9. Decisions
+
+The owner accepted the recommended answer to Q1 to Q5 on 2026-09-28, and the
+defaults listed after them.
+
+## 10. Implementation units
+
+- **U1. Strict JSON strings.** Section 4, with its tests. Moves no hash.
+- **U2. The framer core.** Section 3 as a pure Zig core in
+  `packages/modules/src/net/sse.zig` with its corpus, census, and probes, tested
+  through `test-modules` but not yet registered as a builtin. Moves no hash.
+- **U3. Registration.** After A4 closes: the binding and its JS layer, the
+  builtin entries, the generated spec, the pins, and the label probe through
+  JS; then the one whole-corpus re-record, which also covers A4's deferred
+  `zttp:fetch` signature change; then C-A3 evidence.
