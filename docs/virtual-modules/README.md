@@ -33,9 +33,10 @@ Use `zttp modules --json` for the live export list from the built binary.
 | `zttp:scope` | `scope`, `using`, `ensure` | `runtime_callback` |
 | `zttp:service` | `serviceCall` | `network`, `filesystem`, `runtime_callback` |
 | `zttp:sql` | `sql`, `sqlOne`, `sqlMany`, `sqlExec` | `sqlite`, `policy_check` |
+| `zttp:sse` | `sseEvents` | none |
 | `zttp:text` | `escapeHtml`, `unescapeHtml`, `slugify`, `truncate`, `mask` | none |
 | `zttp:time` | `formatIso`, `formatHttp`, `parseIso`, `addSeconds` | none |
-| `zttp:tool` | `toolCatalog`, `toolInput`, `agentPrompt`, `callTool` | none |
+| `zttp:tool` | `toolCatalog`, `toolInput`, `agentPrompt`, `callTool` | `runtime_callback` |
 | `zttp:url` | `urlParse`, `urlSearchParams`, `urlEncode`, `urlDecode` | none |
 | `zttp:validate` | `schemaCompile`, `validateJson`, `validateObject`, `coerceJson`, `schemaDrop` | none |
 | `zttp:workflow` | `call`, `saga`, `fanout`, `follow` | `runtime_callback` |

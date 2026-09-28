@@ -39,6 +39,7 @@ pub const data = struct {
 pub const net = struct {
     pub const fetch = @import("net/fetch.zig");
     pub const service = @import("net/service.zig");
+    pub const sse = @import("net/sse.zig");
 };
 
 pub const workflow = struct {};
@@ -67,6 +68,7 @@ pub const catalog = struct {
 
     pub const fetch = net.fetch.binding;
     pub const service = net.service.binding;
+    pub const sse = net.sse.binding;
 };
 
 pub const all_bindings = [_]sdk.ModuleBinding{
@@ -89,6 +91,7 @@ pub const all_bindings = [_]sdk.ModuleBinding{
     catalog.ledger,
     catalog.fetch,
     catalog.service,
+    catalog.sse,
 };
 
 comptime {
@@ -117,4 +120,5 @@ test {
     _ = data.ledger;
     _ = net.fetch;
     _ = net.service;
+    _ = net.sse;
 }

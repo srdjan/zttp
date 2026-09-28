@@ -261,8 +261,9 @@
       { "name": "zttp:time", "binding_digest": "c92ca4b021e33abd1f6b735502d4637046029234ce813fcb8fecad64d88fa82d" },
       { "name": "zttp:ratelimit", "binding_digest": "fac23b4a7784653b7e17b0d53f383f6ea7b74eab627a59177db22c2e582bc87b" },
       { "name": "zttp:service", "binding_digest": "0e13487277a309390c123b1d973a3ff884b7469ab86a12146db76fc8a7437d32" },
-      { "name": "zttp:fetch", "binding_digest": "28557ec247130841bcd6f1e69c13ef849618630337e1df781d80da99ed81b15b" },
-      { "name": "zttp:tool", "binding_digest": "09e97536a0cd2c46291d8b4cf48f376f0a2439a16f77bec0119fd57b69af5604" }
+      { "name": "zttp:fetch", "binding_digest": "2eda4246f64fae03388656740761d775fd22dd86a55abee1fb2508caa1b80449" },
+      { "name": "zttp:tool", "binding_digest": "89c9691f736dda3caeea0b2ac0e916ddf2d3d24e93d2c5b0b9f3f7265e153bc9" },
+      { "name": "zttp:sse", "binding_digest": "3f279f119acfed32534ee361d23831077f4e69f618482bddd5c3d23981933220" }
     ] },
     "virtual_modules_effective": { "source": "packages/zts/src/builtin_modules.zig", "members": [
       { "name": "zttp:env", "binding_digest": "2513fed47233e2a7b0181c3b18ba63683b4bcdee893beef07a8a2f5706b29aa3" },
@@ -291,8 +292,9 @@
       { "name": "zttp:time", "binding_digest": "c92ca4b021e33abd1f6b735502d4637046029234ce813fcb8fecad64d88fa82d" },
       { "name": "zttp:ratelimit", "binding_digest": "fac23b4a7784653b7e17b0d53f383f6ea7b74eab627a59177db22c2e582bc87b" },
       { "name": "zttp:service", "binding_digest": "0e13487277a309390c123b1d973a3ff884b7469ab86a12146db76fc8a7437d32" },
-      { "name": "zttp:fetch", "binding_digest": "28557ec247130841bcd6f1e69c13ef849618630337e1df781d80da99ed81b15b" },
-      { "name": "zttp:tool", "binding_digest": "09e97536a0cd2c46291d8b4cf48f376f0a2439a16f77bec0119fd57b69af5604" }
+      { "name": "zttp:fetch", "binding_digest": "2eda4246f64fae03388656740761d775fd22dd86a55abee1fb2508caa1b80449" },
+      { "name": "zttp:tool", "binding_digest": "89c9691f736dda3caeea0b2ac0e916ddf2d3d24e93d2c5b0b9f3f7265e153bc9" },
+      { "name": "zttp:sse", "binding_digest": "3f279f119acfed32534ee361d23831077f4e69f618482bddd5c3d23981933220" }
     ] },
     "residual_guard_families_enabled": { "source": "packages/proof-checker/src/residual.zig", "members": [
       { "name": "env", "ordinal": 0 },
@@ -318,7 +320,7 @@
     "semantics_epoch": 1,
     "handler_contract_version": 24,
     "agent_protocol_schema": 2,
-    "policy_hash": "6ae21f9cbdf8240b130c77e7b258cb149dcae7890cdfc047d1ee01849d146f3a",
-    "module_registry_hash": "1c6ed893dcb89d44dd94d1faea25ff2bf600da0d288f876ee8eede8b3f95066f"
+    "policy_hash": "84e3ba342bad0a0e05e19410829c382248d2d1d8e9e362cde5f934df749c5bb1",
+    "module_registry_hash": "c4098fd57cb0b4b2f3a646899ca41f55dadbfc525df4413b0c258a2b9f9d7394"
   }
 }

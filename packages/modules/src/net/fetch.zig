@@ -40,6 +40,7 @@ pub const FetchState = struct {
 pub const binding = sdk.ModuleBinding{
     .specifier = "zttp:fetch",
     .name = "fetch",
+    .summary = "Fetch an HTTP resource. In an agent turn, a refused fetch returns status 599 with error AgentTurnRefused and a details tag: deadline_exceeded, budget_exhausted, recorder_unavailable, outcome_unknown, tool_denied, or tool_failed.",
     .required_capabilities = &.{ .network, .runtime_callback },
     .stateful = true,
     .exports = &.{
@@ -74,7 +75,7 @@ pub const binding = sdk.ModuleBinding{
             // export declared before.
             .signature = .{
                 .params = &.{ "string", "FetchOptions" },
-                .returns = "{ ok: boolean; status: number; statusText: string; body: string; headers: { get: (name: string) => string | undefined; has: (name: string) => boolean }; json: () => unknown; text: () => string }",
+                .returns = "{ ok: boolean; status: number; statusText: string; body: string; error?: string; details?: string; headers: { get: (name: string) => string | undefined; has: (name: string) => boolean }; json: () => unknown; text: () => string }",
             },
             .return_labels = .{ .external = true },
             .contract_extractions = &.{
@@ -98,7 +99,7 @@ pub const binding = sdk.ModuleBinding{
             // is data from the host, not from the arguments.
             .signature = .{
                 .params = &.{ "string", "FetchOptions", "object" },
-                .returns = "{ ok: boolean; status: number; statusText: string; body: string; headers: { get: (name: string) => string | undefined; has: (name: string) => boolean }; json: () => unknown; text: () => string }",
+                .returns = "{ ok: boolean; status: number; statusText: string; body: string; error?: string; details?: string; headers: { get: (name: string) => string | undefined; has: (name: string) => boolean }; json: () => unknown; text: () => string }",
             },
             .return_labels = .{ .external = true },
             .contract_extractions = &.{

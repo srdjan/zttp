@@ -25,6 +25,7 @@ pub const queue = @import("workflow/queue.zig");
 
 pub const service = @import("net/service.zig");
 pub const fetch = @import("net/fetch.zig");
+pub const tool = @import("http/tool.zig");
 
 pub const ModuleExport = resolver.ModuleExport;
 pub const ResolveResult = resolver.ResolveResult;

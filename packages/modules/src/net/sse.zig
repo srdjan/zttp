@@ -1,8 +1,31 @@
 const std = @import("std");
+const sdk = @import("zttp-sdk");
 
 pub const max_body_bytes_limit: usize = 8 * 1024 * 1024;
 pub const max_block_bytes_limit: usize = 8 * 1024 * 1024;
 pub const max_events_limit: usize = 65_536;
+
+pub const binding = sdk.ModuleBinding{
+    .specifier = "zttp:sse",
+    .name = "sse",
+    .exports = &.{.{
+        .name = "sseEvents",
+        .module_func = sseEventsImpl,
+        .arg_count = 2,
+        .effect = .none,
+        .returns = .result,
+        .param_types = &.{ .string, .object },
+        .param_names = &.{ "body", "bounds" },
+        .signature = .{
+            .params = &.{ "string", "{ maxBodyBytes: number; maxBlockBytes: number; maxEvents: number }" },
+            .returns = "{ ok: boolean; value?: { event: string; data: string; id: string }[]; error?: { tag: string; offset: number } }",
+        },
+        .failure_severity = .critical,
+        .derives_from_args = true,
+        .laws = &.{.pure},
+        .replay_pure = true,
+    }},
+};
 
 pub const Bounds = struct {
     max_body_bytes: usize,
@@ -58,6 +81,71 @@ pub const FrameResult = union(enum) {
     ok: EventList,
     err: Failure,
 };
+
+fn sseEventsImpl(
+    handle: *sdk.ModuleHandle,
+    _: sdk.JSValue,
+    args: []const sdk.JSValue,
+) anyerror!sdk.JSValue {
+    if (args.len < 2) return invalidBoundToJs(handle);
+    const body = sdk.extractString(args[0]) orelse return invalidBoundToJs(handle);
+    if (!sdk.isObject(args[1])) return invalidBoundToJs(handle);
+
+    const bounds = readBounds(handle, args[1]) orelse
+        return invalidBoundToJs(handle);
+    const result = try frame(sdk.getAllocator(handle), body, bounds);
+    return switch (result) {
+        .err => |failure| failureToJs(handle, failure),
+        .ok => |list_value| blk: {
+            var list = list_value;
+            defer list.deinit();
+            break :blk try eventListToJs(handle, &list);
+        },
+    };
+}
+
+fn invalidBoundToJs(handle: *sdk.ModuleHandle) !sdk.JSValue {
+    return failureToJs(handle, .{ .tag = .invalid_bound, .offset = 0 });
+}
+
+fn readBounds(handle: *sdk.ModuleHandle, value: sdk.JSValue) ?Bounds {
+    return .{
+        .max_body_bytes = readPositiveInteger(handle, value, "maxBodyBytes") orelse return null,
+        .max_block_bytes = readPositiveInteger(handle, value, "maxBlockBytes") orelse return null,
+        .max_events = readPositiveInteger(handle, value, "maxEvents") orelse return null,
+    };
+}
+
+fn readPositiveInteger(handle: *sdk.ModuleHandle, object: sdk.JSValue, name: []const u8) ?usize {
+    const value = sdk.objectGet(handle, object, name) orelse return null;
+    const integer = sdk.extractInt(value) orelse return null;
+    if (integer < 1) return null;
+    return @intCast(integer);
+}
+
+fn eventListToJs(handle: *sdk.ModuleHandle, list: *const EventList) !sdk.JSValue {
+    const allocator = sdk.getAllocator(handle);
+    const ids = try allocator.alloc(sdk.JSValue, list.ids.len);
+    defer allocator.free(ids);
+    for (list.ids, ids) |id, *js_id| js_id.* = try sdk.createString(handle, id);
+
+    const events = try sdk.createArray(handle);
+    for (list.events) |event| {
+        const object = try sdk.createObject(handle);
+        try sdk.objectSet(handle, object, "event", try sdk.createString(handle, event.event));
+        try sdk.objectSet(handle, object, "data", try sdk.createString(handle, event.data));
+        try sdk.objectSet(handle, object, "id", ids[event.id_index]);
+        try sdk.arrayPush(handle, events, object);
+    }
+    return sdk.resultOk(handle, events);
+}
+
+fn failureToJs(handle: *sdk.ModuleHandle, failure: Failure) !sdk.JSValue {
+    const object = try sdk.createObject(handle);
+    try sdk.objectSet(handle, object, "tag", try sdk.createString(handle, @tagName(failure.tag)));
+    try sdk.objectSet(handle, object, "offset", sdk.JSValue.fromInt(@intCast(failure.offset)));
+    return sdk.resultErrValue(handle, object);
+}
 
 const Stats = struct {
     events: usize = 0,
@@ -330,6 +418,59 @@ const generous_bounds = Bounds{
     .max_block_bytes = max_block_bytes_limit,
     .max_events = max_events_limit,
 };
+
+test "SSE binding publishes the strict pure Result contract" {
+    try std.testing.expectEqualStrings("zttp:sse", binding.specifier);
+    try std.testing.expectEqual(@as(usize, 0), binding.required_capabilities.len);
+    try std.testing.expectEqual(@as(usize, 1), binding.exports.len);
+
+    const events = binding.exports[0];
+    try std.testing.expectEqualStrings("sseEvents", events.name);
+    try std.testing.expectEqual(sdk.EffectClass.none, events.effect);
+    try std.testing.expectEqual(sdk.ReturnKind.result, events.returns);
+    try std.testing.expectEqual(sdk.FailureSeverity.critical, events.failure_severity);
+    try std.testing.expect(events.derives_from_args);
+    try std.testing.expect(events.replay_pure);
+    try std.testing.expectEqualSlices(
+        sdk.ReturnKind,
+        &.{ .string, .object },
+        events.param_types,
+    );
+    try std.testing.expectEqualStrings(
+        "{ ok: boolean; value?: { event: string; data: string; id: string }[]; error?: { tag: string; offset: number } }",
+        events.signature.?.returns,
+    );
+}
+
+test "SSE SDK wrapper builds both Result arms" {
+    const test_shim = @import("zttp-sdk-test-shim");
+    const fake_handle: *sdk.ModuleHandle = @ptrFromInt(8);
+    defer test_shim.resetStrings();
+
+    // The shim collapses objects and arrays to undefined. These calls still
+    // exercise every SDK allocation and setter in both builders.
+    const missing_args = try sseEventsImpl(fake_handle, sdk.JSValue.undefined_val, &.{});
+    try std.testing.expect(missing_args.isUndefined());
+
+    const result = try frame(
+        std.testing.allocator,
+        "id: shared\ndata: one\n\ndata: two\n\n",
+        generous_bounds,
+    );
+    switch (result) {
+        .err => return error.UnexpectedSseFailure,
+        .ok => |list_value| {
+            var list = list_value;
+            defer list.deinit();
+            try std.testing.expect((try eventListToJs(fake_handle, &list)).isUndefined());
+        },
+    }
+
+    try std.testing.expect((try failureToJs(
+        fake_handle,
+        .{ .tag = .unterminated_event, .offset = 7 },
+    )).isUndefined());
+}
 
 const ExpectedEvent = struct {
     event: []const u8 = "message",

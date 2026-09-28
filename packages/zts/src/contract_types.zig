@@ -1545,6 +1545,9 @@ pub const ToolCatalogRefusal = enum {
     agent_tool_unknown,
     /// `agent.tools` names an agent entry instead of a tool entry.
     agent_tool_is_agent,
+    /// An agent-listed tool route contains a `:param` path segment. M5a
+    /// supplies tool arguments in the request body and has no path binding.
+    agent_tool_route_param,
     /// `agent.provider` is not an object literal.
     agent_provider_not_literal,
     /// `agent.provider` lacks `endpoint` or `credential`.
@@ -1677,6 +1680,7 @@ pub const ToolCatalogRefusal = enum {
             .agent_tool_duplicate => "agent.tools may name each tool once",
             .agent_tool_unknown => "each agent.tools name must name an entry in the same catalog",
             .agent_tool_is_agent => "each agent.tools name must name a tool entry, not an agent entry",
+            .agent_tool_route_param => "an agent-listed tool route may not contain a :param path segment because callTool supplies arguments in the request body",
             .agent_provider_not_literal => "agent.provider must be an object literal",
             .agent_provider_field_missing => "agent.provider needs endpoint and credential",
             .agent_provider_field_unknown => "agent.provider may hold only endpoint and credential",

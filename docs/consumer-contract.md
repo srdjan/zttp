@@ -626,8 +626,8 @@ stated so a drift gate can check them and a reader can fail the document against
 | Invariant kinds | 2 | `packages/proof-checker/src/invariant.zig` |
 | Account matcher tags | 2 | `packages/proof-checker/src/invariant.zig` |
 | Executable-graph member kinds | 20 | `packages/proof-checker/src/executable_graph.zig` |
-| Virtual modules, in-tree base | 28 | `packages/zts/src/builtin_modules.zig` |
-| Virtual modules, effective for this build | 28 | `packages/zts/src/builtin_modules.zig` |
+| Virtual modules, in-tree base | 29 | `packages/zts/src/builtin_modules.zig` |
+| Virtual modules, effective for this build | 29 | `packages/zts/src/builtin_modules.zig` |
 | Residual guard families, enabled | 3 | `packages/proof-checker/src/residual.zig` |
 | Goal-driveable properties | 5 | `packages/pi/src/property_goals.zig` |
 | Capability profiles | 3 | `packages/zts/src/capability_profiles.zig` |
@@ -640,7 +640,7 @@ Diagnostic codes run from ZTS0xx to ZTS7xx, owned by
 range is a claim about numbering rather than a set, so a count here would be a different
 kind of statement from every other row. `zts describe-rule` enumerates them.
 
-Two counts need a qualifier before a gate reads them. Virtual modules = 27 counts
+Two counts need a qualifier before a gate reads them. Virtual modules = 29 counts
 `runtime_builtins`, the in-tree base. `all = builtins ++ extension_bindings.all`, so a
 build that registers an extension holds more. Residual guard families = 4 counts the
 catalog; three are in `enabled_families` today, and `sql` is catalogued but not

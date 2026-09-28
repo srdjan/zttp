@@ -263,12 +263,41 @@ space for each terminal record, and flushes each record before it returns.
 After a write or flush failure, `/_readiness` returns 503 and names the recorder.
 Restart the process after recorder failure or when its byte ceiling is reached.
 
+An agent handler can call `callTool(callId, name, argsJson)` from `zttp:tool`.
+`name` must be in that agent entry's `tools` list. The call runs the tool's
+route in the same runtime under that tool's grant. The tool receives a new
+request with the verified subject and tenant and `argsJson` as its body. The
+request has no client headers, query, or agent prompt. `toolInput` reads the
+validated arguments from that body.
+
+Each admitted call spends one tool call from the turn and round budgets before
+the runtime resolves `name`. Invalid arguments and unknown names also spend a
+call. A repeated `callId` in one round is refused. The runtime records the
+call before it runs the tool and records its outcome after it returns. A tool
+that does not return, including one interrupted by the turn deadline, gives
+`outcome_unknown`. A non-2xx response or a response that fails the tool's
+output schema gives `tool_failed`. The error arm contains only a tag:
+`unknown_tool`, `invalid_arguments`, `tool_denied`, `tool_failed`,
+`budget_exhausted`, `deadline_exceeded`, or `outcome_unknown`.
+
+The verifier labels a successful `callTool` value with the labels of
+`argsJson` and the union of the return labels of every tool that the agent
+entry lists. `callId` and `name` do not label that value. If it cannot resolve
+a listed tool route, it does not prove the affected flow properties.
+
+Use `sseEvents(body, bounds)` from `zttp:sse` to frame a buffered event stream
+from a provider. Set positive `maxBodyBytes`, `maxBlockBytes`, and `maxEvents`
+bounds. The success arm contains an array of `{ event, data, id }` records.
+The error arm contains a `tag` and byte `offset`, including
+`unterminated_event` when the body ends inside an event block. Check `ok`
+before reading the events. The framer does not retry or read from a socket.
+
 `zttp dev` uses unmeasured development values: `<project>/.zttp/turns`, 16 MiB,
 and one concurrent turn. Its default pool has at least three slots; an explicit
 smaller pool is refused for an agent handler. These values do not apply to
 serve or deployed binaries. Replay uses an in-memory recorder and needs no
 recorder settings. Agent traces without transport phase metadata replay as
-`outcome_unknown`. Tool dispatch remains inactive in this release step.
+`outcome_unknown`.
 
 ## Application Invariants
 

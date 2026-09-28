@@ -138,6 +138,9 @@ pub const AcceptedAgent = struct {
     /// The slice is owned by the catalog; its strings borrow from those bytes.
     exports: []Export,
     tools: []const []const u8,
+    /// Tool pointers resolved once after the accepted catalog is lowered.
+    /// Every pointer targets the catalog's fixed `entries` allocation.
+    resolved_tools: ?[]const *const AcceptedTool = null,
     provider_endpoint: []const u8,
     provider_credential: []const u8,
     limits: zq.handler_contract.AgentLimits,
@@ -231,6 +234,7 @@ fn deinitAcceptedEntry(allocator: std.mem.Allocator, entry: *AcceptedCatalogEntr
             agent.prompt_schema.deinit();
             allocator.free(agent.exports);
             allocator.free(agent.tools);
+            if (agent.resolved_tools) |tools| allocator.free(tools);
         },
     }
 }
@@ -690,7 +694,31 @@ fn lowerAcceptedCatalog(allocator: std.mem.Allocator, bytes: []const u8) Promote
     }
     if (filled != entries.len) return error.AcceptedToolCatalogUndecodable;
 
+    for (entries) |*entry| switch (entry.kind) {
+        .tool => {},
+        .agent => |*agent| {
+            const resolved = try allocator.alloc(*const AcceptedTool, agent.tools.len);
+            errdefer allocator.free(resolved);
+            for (agent.tools, 0..) |name, index| {
+                resolved[index] = findToolInEntries(entries, name) orelse
+                    return error.AcceptedToolCatalogUndecodable;
+            }
+            agent.resolved_tools = resolved;
+        },
+    };
+
     return .{ .allocator = allocator, .bytes = owned, .entries = entries };
+}
+
+fn findToolInEntries(entries: []const AcceptedCatalogEntry, name: []const u8) ?*const AcceptedTool {
+    for (entries) |*entry| {
+        if (!std.mem.eql(u8, entry.name, name)) continue;
+        return switch (entry.kind) {
+            .tool => |*tool| tool,
+            .agent => null,
+        };
+    }
+    return null;
 }
 
 fn lowerAcceptedAgentTools(allocator: std.mem.Allocator, iterator: pcc.tool_catalog.AgentToolIterator) PromoteError![]const []const u8 {
@@ -2820,6 +2848,9 @@ test "agent catalog compiles its fixed prompt schema and matches separately" {
     };
     try std.testing.expectEqualStrings("assistant", agent.name);
     try std.testing.expectEqualStrings("lookup", agent.tools[0]);
+    const resolved_tools = agent.resolved_tools orelse return error.TestExpectedTool;
+    try std.testing.expectEqual(@as(usize, 1), resolved_tools.len);
+    try std.testing.expect(resolved_tools[0] == catalog.find("lookup").?);
     try std.testing.expectEqualStrings("https://api.example.com:443", agent.provider_endpoint);
     try std.testing.expectEqual(@as(u32, 4), agent.limits.rounds);
     try std.testing.expect(catalog.find("assistant") == null);

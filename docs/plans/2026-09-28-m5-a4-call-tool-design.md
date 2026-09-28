@@ -1,7 +1,6 @@
 # M5 A4 design note: `callTool`
 
-Status: proposed on 2026-09-28. It needs the owner's answers to section 9 before
-code starts. Unit A4 of the
+Status: accepted and implemented on 2026-09-28. Unit A4 of the
 [M5 release contract](2026-09-27-m5-agent-handler-release-contract.md) is
 written against the approach this note names; check C-A4 is its completion
 check.
@@ -299,7 +298,7 @@ scope check, the budget check, the in-flight terminal check, the nested fetch
 deadline cap, and the listed-tool label union in turn, and a test must fail
 each time. The label mutation keeps route-root checks enabled.
 
-## 9. Questions for the owner
+## 9. Decisions
 
 - **Q1. Invoking the tool.** Re-invoke the handler with a synthetic request
   whose method and path are the tool's, so `routerMatch` dispatches it under the
@@ -316,7 +315,7 @@ each time. The label mutation keeps route-root checks enabled.
   `unknown_tool` and `invalid_arguments` do not, so a model can correct a bad
   call within its budget (recommended), or every failure closes it.
 
-The contract fixes the label rule in section 5. These defaults are recommended
-and are not questions unless the owner objects: the step order of section 3;
-every call that reaches step 3 counts against the budgets; tag-only error
-arms; a thrown tool is `outcome_unknown`.
+The owner accepted the recommended answer to Q1 to Q4 on 2026-09-28. The
+contract fixes the label rule in section 5. The owner also accepted the step
+order of section 3, counting each call that reaches step 3 against the
+budgets, tag-only error arms, and `outcome_unknown` for a thrown tool.

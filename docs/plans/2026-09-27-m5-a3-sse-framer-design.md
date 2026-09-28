@@ -1,6 +1,6 @@
 # M5 A3 design note: the SSE framer and strict JSON strings
 
-Status: accepted by the owner on 2026-09-28, with the recommended answer to each
+Status: accepted and implemented on 2026-09-28, with the recommended answer to each
 question in section 8 (section 9 records them). Revised once before acceptance
 after a design critique (run on Opus; Fable credits were exhausted) and a
 citation check. Unit A3 of the
@@ -251,7 +251,8 @@ defaults listed after them.
   UTF-8, unterminated, event-count, and control-byte probes each failed a test. Section 3 as a pure Zig core in
   `packages/modules/src/net/sse.zig` with its corpus, census, and probes, tested
   through `test-modules` but not yet registered as a builtin. Moves no hash.
-- **U3. Registration.** After A4 closes: the binding and its JS layer, the
-  builtin entries, the generated spec, the pins, and the label probe through
-  JS; then the one whole-corpus re-record, which also covers A4's deferred
-  `zttp:fetch` signature change; then C-A3 evidence.
+- **U3. Registration.** Done 2026-09-28: the binding and its JS layer,
+  builtin entries, generated spec, pins, and JS and label probes are in place.
+  The one whole-corpus DeepSeek re-record covers this module and A4's deferred
+  `zttp:fetch` signature change. The two changes share one registry hash and
+  one corpus, so they form one commit unit.

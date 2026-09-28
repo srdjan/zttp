@@ -52,6 +52,8 @@ const HttpRequestView = http_types.HttpRequestView;
 const HttpRequestOwned = http_types.HttpRequestOwned;
 
 const runtime_config_mod = @import("runtime_config.zig");
+const contract_runtime = @import("contract_runtime.zig");
+const tool_auth = @import("tool_auth.zig");
 const cost_meter = zq.CostMeter;
 
 const RuntimeConfig = runtime_config_mod.RuntimeConfig;
@@ -5949,6 +5951,125 @@ fn expectUpstreamCounts(upstream: *CredentialUpstream, expected_requests: usize)
     try std.testing.expectEqual(expected_requests + 1, upstream.accepted_connections.load(.acquire));
 }
 
+const a4_input_schema =
+    \\{
+    \\  "type": "object",
+    \\  "properties": { "value": { "type": "string", "maxLength": 64 } },
+    \\  "required": ["value"],
+    \\  "additionalProperties": false
+    \\}
+;
+
+const a4_output_schema =
+    \\{
+    \\  "type": "object",
+    \\  "properties": {
+    \\    "route": { "type": "string", "maxLength": 64 },
+    \\    "echoed": { "type": "string", "maxLength": 64 },
+    \\    "subject": { "type": "string", "maxLength": 64 },
+    \\    "tenant": { "type": "string", "maxLength": 64 },
+    \\    "headerMissing": { "type": "boolean" },
+    \\    "queryMissing": { "type": "boolean" },
+    \\    "promptMissing": { "type": "boolean" }
+    \\  },
+    \\  "required": ["route", "echoed"],
+    \\  "additionalProperties": false
+    \\}
+;
+
+const a4_scoped_input_schema =
+    \\{
+    \\  "type": "object",
+    \\  "properties": { "tenant_id": { "type": "string", "maxLength": 64 } },
+    \\  "required": ["tenant_id"],
+    \\  "additionalProperties": false
+    \\}
+;
+
+const a4_prompt_schema =
+    \\{
+    \\  "type": "object",
+    \\  "properties": {
+    \\    "version": { "type": "integer", "minimum": 1, "maximum": 1 },
+    \\    "prompt": { "type": "string", "maxLength": 4096 }
+    \\  },
+    \\  "required": ["version", "prompt"],
+    \\  "additionalProperties": false
+    \\}
+;
+
+fn initA4Tool(
+    allocator: std.mem.Allocator,
+    name: []const u8,
+    path: []const u8,
+    exports: []const contract_runtime.Export,
+) !contract_runtime.AcceptedTool {
+    return initA4ToolWithInput(allocator, name, path, exports, "A4Input", a4_input_schema);
+}
+
+fn initA4ToolWithInput(
+    allocator: std.mem.Allocator,
+    name: []const u8,
+    path: []const u8,
+    exports: []const contract_runtime.Export,
+    input_name: []const u8,
+    input_schema: []const u8,
+) !contract_runtime.AcceptedTool {
+    var input = try zq.tool_schema.compile(allocator, input_schema);
+    errdefer input.deinit();
+    return .{
+        .name = name,
+        .method = "POST",
+        .path = path,
+        .max_input_bytes = 4096,
+        .exports = exports,
+        .input_name = input_name,
+        .input = input,
+        .output = try zq.tool_schema.compile(allocator, a4_output_schema),
+    };
+}
+
+fn deinitA4Tool(tool: *contract_runtime.AcceptedTool) void {
+    tool.input.deinit();
+    tool.output.deinit();
+}
+
+fn initA4Agent(
+    allocator: std.mem.Allocator,
+    exports: []contract_runtime.Export,
+    tools: []const []const u8,
+    resolved_tools: []const *const contract_runtime.AcceptedTool,
+    limits: zq.handler_contract.AgentLimits,
+) !contract_runtime.AcceptedAgent {
+    return .{
+        .name = "test-agent",
+        .method = "POST",
+        .path = "/agent",
+        .description = "A4 runtime test agent",
+        .max_input_bytes = 4096,
+        .exports = exports,
+        .tools = tools,
+        .resolved_tools = resolved_tools,
+        .provider_endpoint = "https://api.example.com:443",
+        .provider_credential = "provider",
+        .limits = limits,
+        .prompt_schema = try zq.tool_schema.compile(allocator, a4_prompt_schema),
+    };
+}
+
+fn configureA4AgentRequest(
+    view: *HttpRequestView,
+    agent: *const contract_runtime.AcceptedAgent,
+    turn: *TurnState,
+) void {
+    view.subject = "test-subject";
+    view.tenant = "test-tenant";
+    view.strip_authorization = true;
+    view.tool_grant = tool_auth.agentGrantFor(agent);
+    view.agent_prompt = "run the test tool";
+    view.turn = turn;
+}
+
 /// Run `handler_code` once under `grant`, with egress allowed to `endpoints`
 /// and to loopback, and return the response body. Every body is searched for
 /// the marker here, so no test can forget to.
@@ -6590,6 +6711,1015 @@ test "agentPrompt refuses a tool request" {
     defer parsed.deinit();
     try std.testing.expect(!parsed.value.object.get("ok").?.bool);
     try std.testing.expectEqualStrings("not_an_agent_request", parsed.value.object.get("error").?.string);
+}
+
+test "callTool dispatches each listed tool to its own route function" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const tool_exports = [_]contract_runtime.Export{
+        .{ .module = "zttp:tool", .name = "toolInput" },
+        .{ .module = "zttp:tool", .name = "agentPrompt" },
+    };
+    var alpha = try initA4Tool(allocator, "alpha", "/tools/alpha", &tool_exports);
+    defer deinitA4Tool(&alpha);
+    var beta = try initA4Tool(allocator, "beta", "/tools/beta", &tool_exports);
+    defer deinitA4Tool(&beta);
+    const tool_names = [_][]const u8{ "alpha", "beta" };
+    const resolved_tools = [_]*const contract_runtime.AcceptedTool{ &alpha, &beta };
+    var agent_exports = [_]contract_runtime.Export{
+        .{ .module = "zttp:tool", .name = "callTool" },
+    };
+    const limits = agentTurnLimits(1, 4096, 5000);
+    var agent = try initA4Agent(allocator, &agent_exports, &tool_names, &resolved_tools, limits);
+    defer agent.prompt_schema.deinit();
+
+    const rt = try HandlerInstance.init(allocator, .{ .contract_has_agent = true });
+    defer rt.deinit();
+    try rt.loadHandler(
+        \\import { routerMatch } from "zttp:router";
+        \\import { agentPrompt, callTool, toolInput } from "zttp:tool";
+        \\let alphaCalls = 0;
+        \\let betaCalls = 0;
+        \\function alphaRoute(req) {
+        \\  alphaCalls = alphaCalls + 1;
+        \\  const input = toolInput("A4Input", req);
+        \\  const prompt = agentPrompt();
+        \\  return Response.json({
+        \\    route: "alphaRoute",
+        \\    echoed: input.value.value,
+        \\    subject: req.subject,
+        \\    tenant: req.tenant,
+        \\    headerMissing: req.headers.get("x-client") === undefined,
+        \\    queryMissing: req.query.client === undefined,
+        \\    promptMissing: !prompt.ok && prompt.error === "not_an_agent_request"
+        \\  });
+        \\}
+        \\function betaRoute(req) {
+        \\  betaCalls = betaCalls + 1;
+        \\  const input = toolInput("A4Input", req);
+        \\  const prompt = agentPrompt();
+        \\  return Response.json({
+        \\    route: "betaRoute",
+        \\    echoed: input.value.value,
+        \\    subject: req.subject,
+        \\    tenant: req.tenant,
+        \\    headerMissing: req.headers.get("x-client") === undefined,
+        \\    queryMissing: req.query.client === undefined,
+        \\    promptMissing: !prompt.ok && prompt.error === "not_an_agent_request"
+        \\  });
+        \\}
+        \\function agentRoute(req) {
+        \\  const first = callTool("call-alpha", "alpha", "{\"value\":\"one\"}");
+        \\  const second = callTool("call-beta", "beta", "{\"value\":\"two\"}");
+        \\  return Response.json({
+        \\    firstRoute: first.ok ? first.value.route : first.error,
+        \\    firstValue: first.ok ? first.value.echoed : first.error,
+        \\    firstSubject: first.ok ? first.value.subject : first.error,
+        \\    firstTenant: first.ok ? first.value.tenant : first.error,
+        \\    firstIsolated: first.ok && first.value.headerMissing && first.value.queryMissing && first.value.promptMissing,
+        \\    secondRoute: second.ok ? second.value.route : second.error,
+        \\    secondValue: second.ok ? second.value.echoed : second.error,
+        \\    secondSubject: second.ok ? second.value.subject : second.error,
+        \\    secondTenant: second.ok ? second.value.tenant : second.error,
+        \\    secondIsolated: second.ok && second.value.headerMissing && second.value.queryMissing && second.value.promptMissing,
+        \\    alphaCalls: alphaCalls,
+        \\    betaCalls: betaCalls
+        \\  });
+        \\}
+        \\function handler(req) {
+        \\  const routes = {
+        \\    "POST /agent": agentRoute,
+        \\    "POST /tools/alpha": alphaRoute,
+        \\    "POST /tools/beta": betaRoute
+        \\  };
+        \\  const found = routerMatch(routes, req);
+        \\  if (found !== undefined) return found.handler(req);
+        \\  return Response.text("missing", { status: 404 });
+        \\}
+    , "<a4-own-route>");
+
+    var recorder = turn_recorder.Recorder.initMemory(std.testing.allocator, 64 * 1024);
+    defer recorder.deinit();
+    const now_ns = try zq.monotonicNowNs();
+    var turn = try initAgentTurnForTest(allocator, &recorder, limits, now_ns + 5 * std.time.ns_per_s);
+    defer turn.deinit();
+    var request = try makeTestRequest(allocator, "POST", "/agent", null);
+    defer request.deinit(allocator);
+    try request.headers.append(allocator, .{
+        .key = try allocator.dupe(u8, "x-client"),
+        .value = try allocator.dupe(u8, "outer-header"),
+    });
+    const client_query = [_]http_types.QueryParam{.{ .key = "client", .value = "outer-query" }};
+    var view = request.asView();
+    view.query_params = &client_query;
+    configureA4AgentRequest(&view, &agent, &turn);
+    var response = try rt.executeHandler(view);
+    defer response.deinit();
+    try finishAgentTurnForTest(&turn, response.status, false);
+
+    try std.testing.expectEqual(@as(u16, 200), response.status);
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, response.body, .{});
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings("alphaRoute", parsed.value.object.get("firstRoute").?.string);
+    try std.testing.expectEqualStrings("one", parsed.value.object.get("firstValue").?.string);
+    try std.testing.expectEqualStrings("test-subject", parsed.value.object.get("firstSubject").?.string);
+    try std.testing.expectEqualStrings("test-tenant", parsed.value.object.get("firstTenant").?.string);
+    try std.testing.expect(parsed.value.object.get("firstIsolated").?.bool);
+    try std.testing.expectEqualStrings("betaRoute", parsed.value.object.get("secondRoute").?.string);
+    try std.testing.expectEqualStrings("two", parsed.value.object.get("secondValue").?.string);
+    try std.testing.expectEqualStrings("test-subject", parsed.value.object.get("secondSubject").?.string);
+    try std.testing.expectEqualStrings("test-tenant", parsed.value.object.get("secondTenant").?.string);
+    try std.testing.expect(parsed.value.object.get("secondIsolated").?.bool);
+    try std.testing.expectEqual(@as(i64, 1), parsed.value.object.get("alphaCalls").?.integer);
+    try std.testing.expectEqual(@as(i64, 1), parsed.value.object.get("betaCalls").?.integer);
+    try std.testing.expectEqual(@as(u32, 2), turn.tool_calls_total);
+    const records = try recorder.memoryBytes();
+    try std.testing.expect(std.mem.indexOf(u8, records, "\"toolName\":\"alpha\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, records, "\"toolName\":\"beta\"") != null);
+}
+
+test "callTool denies a mismatched tenant before the scoped route runs" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var scoped = try initA4ToolWithInput(
+        allocator,
+        "scoped",
+        "/tools/scoped",
+        &.{},
+        "ScopedInput",
+        a4_scoped_input_schema,
+    );
+    defer deinitA4Tool(&scoped);
+    scoped.scope_tenant = "tenant_id";
+    const tool_names = [_][]const u8{"scoped"};
+    const resolved_tools = [_]*const contract_runtime.AcceptedTool{&scoped};
+    var agent_exports = [_]contract_runtime.Export{
+        .{ .module = "zttp:tool", .name = "callTool" },
+    };
+    const limits = agentTurnLimits(1, 4096, 5000);
+    var agent = try initA4Agent(allocator, &agent_exports, &tool_names, &resolved_tools, limits);
+    defer agent.prompt_schema.deinit();
+
+    const rt = try HandlerInstance.init(allocator, .{ .contract_has_agent = true });
+    defer rt.deinit();
+    try rt.loadHandler(
+        \\import { routerMatch } from "zttp:router";
+        \\import { callTool } from "zttp:tool";
+        \\let scopedCalls = 0;
+        \\function scopedRoute(req) {
+        \\  scopedCalls = scopedCalls + 1;
+        \\  return Response.json({ route: "scopedRoute", echoed: "ran" });
+        \\}
+        \\function agentRoute(req) {
+        \\  const result = callTool("scoped-call", "scoped", "{\"tenant_id\":\"other-tenant\"}");
+        \\  return Response.json({ error: result.error, scopedCalls: scopedCalls });
+        \\}
+        \\function handler(req) {
+        \\  const routes = { "POST /agent": agentRoute, "POST /tools/scoped": scopedRoute };
+        \\  const found = routerMatch(routes, req);
+        \\  if (found !== undefined) return found.handler(req);
+        \\  return Response.text("missing", { status: 404 });
+        \\}
+    , "<a4-scope-denied>");
+
+    var recorder = turn_recorder.Recorder.initMemory(std.testing.allocator, 64 * 1024);
+    defer recorder.deinit();
+    const now_ns = try zq.monotonicNowNs();
+    var turn = try initAgentTurnForTest(allocator, &recorder, limits, now_ns + 5 * std.time.ns_per_s);
+    defer turn.deinit();
+    var request = try makeTestRequest(allocator, "POST", "/agent", null);
+    defer request.deinit(allocator);
+    var view = request.asView();
+    configureA4AgentRequest(&view, &agent, &turn);
+    var response = try rt.executeHandler(view);
+    defer response.deinit();
+    try finishAgentTurnForTest(&turn, response.status, false);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, response.body, .{});
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings("tool_denied", parsed.value.object.get("error").?.string);
+    try std.testing.expectEqual(@as(i64, 0), parsed.value.object.get("scopedCalls").?.integer);
+    try std.testing.expectEqual(turn_recorder.TerminalTag.tool_denied, turn.latch.?);
+    const records = try recorder.memoryBytes();
+    try std.testing.expect(std.mem.indexOf(u8, records, "\"toolName\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, records, "\"terminalTag\":\"tool_denied\"") != null);
+}
+
+test "callTool spends budget before unlisted names and invalid arguments" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var listed = try initA4Tool(allocator, "listed", "/tools/listed", &.{});
+    defer deinitA4Tool(&listed);
+    // This accepted tool has a route in the same handler, but the agent does
+    // not list it and its resolved tool set does not contain it.
+    var unlisted = try initA4Tool(allocator, "unlisted", "/tools/unlisted", &.{});
+    defer deinitA4Tool(&unlisted);
+    const tool_names = [_][]const u8{"listed"};
+    const resolved_tools = [_]*const contract_runtime.AcceptedTool{&listed};
+    var agent_exports = [_]contract_runtime.Export{
+        .{ .module = "zttp:tool", .name = "callTool" },
+    };
+    var limits = agentTurnLimits(1, 4096, 5000);
+    limits.tool_calls_per_round = 3;
+    var agent = try initA4Agent(allocator, &agent_exports, &tool_names, &resolved_tools, limits);
+    defer agent.prompt_schema.deinit();
+
+    const rt = try HandlerInstance.init(allocator, .{ .contract_has_agent = true });
+    defer rt.deinit();
+    try rt.loadHandler(
+        \\import { routerMatch } from "zttp:router";
+        \\import { callTool } from "zttp:tool";
+        \\function listedRoute(req) { return Response.json({ route: "listed", echoed: "ran" }); }
+        \\function unlistedRoute(req) { return Response.json({ route: "unlisted", echoed: "ran" }); }
+        \\function agentRoute(req) {
+        \\  const first = callTool("unlisted-call", "unlisted", "{\"value\":\"one\"}");
+        \\  const second = callTool("agent-name-call", "test-agent", "{\"value\":\"two\"}");
+        \\  const third = callTool("invalid-call", "listed", "not-json");
+        \\  const fourth = callTool("after-budget", "listed", "{\"value\":\"four\"}");
+        \\  return Response.json({ first: first.error, second: second.error, third: third.error, fourth: fourth.error });
+        \\}
+        \\function handler(req) {
+        \\  const routes = {
+        \\    "POST /agent": agentRoute,
+        \\    "POST /tools/listed": listedRoute,
+        \\    "POST /tools/unlisted": unlistedRoute
+        \\  };
+        \\  const found = routerMatch(routes, req);
+        \\  if (found !== undefined) return found.handler(req);
+        \\  return Response.text("missing", { status: 404 });
+        \\}
+    , "<a4-budget-before-name>");
+
+    var recorder = turn_recorder.Recorder.initMemory(std.testing.allocator, 64 * 1024);
+    defer recorder.deinit();
+    const now_ns = try zq.monotonicNowNs();
+    var turn = try initAgentTurnForTest(allocator, &recorder, limits, now_ns + 5 * std.time.ns_per_s);
+    defer turn.deinit();
+    var request = try makeTestRequest(allocator, "POST", "/agent", null);
+    defer request.deinit(allocator);
+    var view = request.asView();
+    configureA4AgentRequest(&view, &agent, &turn);
+    var response = try rt.executeHandler(view);
+    defer response.deinit();
+    try finishAgentTurnForTest(&turn, response.status, false);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, response.body, .{});
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings("unknown_tool", parsed.value.object.get("first").?.string);
+    try std.testing.expectEqualStrings("unknown_tool", parsed.value.object.get("second").?.string);
+    try std.testing.expectEqualStrings("invalid_arguments", parsed.value.object.get("third").?.string);
+    try std.testing.expectEqualStrings("budget_exhausted", parsed.value.object.get("fourth").?.string);
+    try std.testing.expectEqual(@as(u32, 3), turn.tool_calls_total);
+    try std.testing.expectEqual(turn_recorder.TerminalTag.budget_exhausted, turn.latch.?);
+    const records = try recorder.memoryBytes();
+    try std.testing.expect(std.mem.indexOf(u8, records, "\"toolName\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, records, "\"terminalTag\":\"budget_exhausted\"") != null);
+}
+
+test "callTool enforces argument and result byte bounds at the exact byte" {
+    const args_json = "{\"value\":\"x\"}";
+    const result_json = "{\"route\":\"boundary\",\"echoed\":\"x\"}";
+    const Case = struct {
+        name: []const u8,
+        argument_bytes: u32,
+        result_bytes: u32,
+        ok: bool,
+        detail: []const u8,
+        terminal: turn_recorder.TerminalTag,
+        starts_tool: bool,
+    };
+    const cases = [_]Case{
+        .{
+            .name = "argument exact",
+            .argument_bytes = @intCast(args_json.len),
+            .result_bytes = 4096,
+            .ok = true,
+            .detail = "x",
+            .terminal = .completed,
+            .starts_tool = true,
+        },
+        .{
+            .name = "argument over",
+            .argument_bytes = @intCast(args_json.len - 1),
+            .result_bytes = 4096,
+            .ok = false,
+            .detail = "budget_exhausted",
+            .terminal = .budget_exhausted,
+            .starts_tool = false,
+        },
+        .{
+            .name = "result exact",
+            .argument_bytes = 4096,
+            .result_bytes = @intCast(result_json.len),
+            .ok = true,
+            .detail = "x",
+            .terminal = .completed,
+            .starts_tool = true,
+        },
+        .{
+            .name = "result over",
+            .argument_bytes = 4096,
+            .result_bytes = @intCast(result_json.len - 1),
+            .ok = false,
+            .detail = "tool_failed",
+            .terminal = .tool_failed,
+            .starts_tool = true,
+        },
+    };
+
+    for (cases) |case| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const allocator = arena.allocator();
+
+        var boundary = try initA4Tool(allocator, "boundary", "/tools/boundary", &.{});
+        defer deinitA4Tool(&boundary);
+        const tool_names = [_][]const u8{"boundary"};
+        const resolved_tools = [_]*const contract_runtime.AcceptedTool{&boundary};
+        var agent_exports = [_]contract_runtime.Export{
+            .{ .module = "zttp:tool", .name = "callTool" },
+        };
+        var limits = agentTurnLimits(1, 4096, 5000);
+        limits.argument_bytes = case.argument_bytes;
+        limits.result_bytes = case.result_bytes;
+        var agent = try initA4Agent(allocator, &agent_exports, &tool_names, &resolved_tools, limits);
+        defer agent.prompt_schema.deinit();
+
+        const rt = try HandlerInstance.init(allocator, .{ .contract_has_agent = true });
+        defer rt.deinit();
+        const source_name = try std.fmt.allocPrint(allocator, "<a4-{s}.ts>", .{case.name});
+        try rt.loadHandler(
+            \\import { routerMatch } from "zttp:router";
+            \\import { callTool } from "zttp:tool";
+            \\function boundaryRoute(req) { return Response.json({ route: "boundary", echoed: "x" }); }
+            \\function agentRoute(req) {
+            \\  const result = callTool("boundary-call", "boundary", "{\"value\":\"x\"}");
+            \\  return Response.json({ ok: result.ok, detail: result.ok ? result.value.echoed : result.error });
+            \\}
+            \\function handler(req) {
+            \\  const routes = { "POST /agent": agentRoute, "POST /tools/boundary": boundaryRoute };
+            \\  const found = routerMatch(routes, req);
+            \\  if (found !== undefined) return found.handler(req);
+            \\  return Response.text("missing", { status: 404 });
+            \\}
+        , source_name);
+
+        var recorder = turn_recorder.Recorder.initMemory(std.testing.allocator, 64 * 1024);
+        defer recorder.deinit();
+        const now_ns = try zq.monotonicNowNs();
+        var turn = try initAgentTurnForTest(allocator, &recorder, limits, now_ns + 5 * std.time.ns_per_s);
+        defer turn.deinit();
+        var request = try makeTestRequest(allocator, "POST", "/agent", null);
+        defer request.deinit(allocator);
+        var view = request.asView();
+        configureA4AgentRequest(&view, &agent, &turn);
+        var response = try rt.executeHandler(view);
+        defer response.deinit();
+        try finishAgentTurnForTest(&turn, response.status, false);
+
+        var parsed = try std.json.parseFromSlice(std.json.Value, allocator, response.body, .{});
+        defer parsed.deinit();
+        try std.testing.expectEqual(case.ok, parsed.value.object.get("ok").?.bool);
+        try std.testing.expectEqualStrings(case.detail, parsed.value.object.get("detail").?.string);
+        try std.testing.expectEqual(case.terminal, turn.terminalTag(response.status, false));
+        const records = try recorder.memoryBytes();
+        try std.testing.expectEqual(case.starts_tool, std.mem.indexOf(u8, records, "\"toolName\":\"boundary\"") != null);
+        var terminal_needle_buf: [96]u8 = undefined;
+        const terminal_needle = try std.fmt.bufPrint(&terminal_needle_buf, "\"terminalTag\":\"{s}\"", .{@tagName(case.terminal)});
+        try std.testing.expect(std.mem.indexOf(u8, records, terminal_needle) != null);
+    }
+}
+
+test "callTool executes a duplicate call identity once" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var listed = try initA4Tool(allocator, "listed", "/tools/listed", &.{});
+    defer deinitA4Tool(&listed);
+    const tool_names = [_][]const u8{"listed"};
+    const resolved_tools = [_]*const contract_runtime.AcceptedTool{&listed};
+    var agent_exports = [_]contract_runtime.Export{
+        .{ .module = "zttp:tool", .name = "callTool" },
+    };
+    const limits = agentTurnLimits(1, 4096, 5000);
+    var agent = try initA4Agent(allocator, &agent_exports, &tool_names, &resolved_tools, limits);
+    defer agent.prompt_schema.deinit();
+
+    const rt = try HandlerInstance.init(allocator, .{ .contract_has_agent = true });
+    defer rt.deinit();
+    try rt.loadHandler(
+        \\import { routerMatch } from "zttp:router";
+        \\import { callTool } from "zttp:tool";
+        \\function listedRoute(req) { return Response.json({ route: "listedRoute", echoed: "once" }); }
+        \\function agentRoute(req) {
+        \\  const first = callTool("same-call", "listed", "{\"value\":\"one\"}");
+        \\  const second = callTool("same-call", "listed", "{\"value\":\"two\"}");
+        \\  return Response.json({ first: first.ok ? first.value.echoed : first.error, second: second.error });
+        \\}
+        \\function handler(req) {
+        \\  const routes = { "POST /agent": agentRoute, "POST /tools/listed": listedRoute };
+        \\  const found = routerMatch(routes, req);
+        \\  if (found !== undefined) return found.handler(req);
+        \\  return Response.text("missing", { status: 404 });
+        \\}
+    , "<a4-duplicate-call-id>");
+
+    var recorder = turn_recorder.Recorder.initMemory(std.testing.allocator, 64 * 1024);
+    defer recorder.deinit();
+    const now_ns = try zq.monotonicNowNs();
+    var turn = try initAgentTurnForTest(allocator, &recorder, limits, now_ns + 5 * std.time.ns_per_s);
+    defer turn.deinit();
+    var request = try makeTestRequest(allocator, "POST", "/agent", null);
+    defer request.deinit(allocator);
+    var view = request.asView();
+    configureA4AgentRequest(&view, &agent, &turn);
+    var response = try rt.executeHandler(view);
+    defer response.deinit();
+    try finishAgentTurnForTest(&turn, response.status, false);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, response.body, .{});
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings("once", parsed.value.object.get("first").?.string);
+    try std.testing.expectEqualStrings("invalid_arguments", parsed.value.object.get("second").?.string);
+    try std.testing.expectEqual(@as(u32, 2), turn.tool_calls_total);
+    try std.testing.expect(turn.latch == null);
+    const records = try recorder.memoryBytes();
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, records, "\"toolName\":\"listed\""));
+}
+
+test "callTool bad output closes the latch before a later tool" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var bad = try initA4Tool(allocator, "bad", "/tools/bad", &.{});
+    defer deinitA4Tool(&bad);
+    var later = try initA4Tool(allocator, "later", "/tools/later", &.{});
+    defer deinitA4Tool(&later);
+    const tool_names = [_][]const u8{ "bad", "later" };
+    const resolved_tools = [_]*const contract_runtime.AcceptedTool{ &bad, &later };
+    var agent_exports = [_]contract_runtime.Export{
+        .{ .module = "zttp:tool", .name = "callTool" },
+    };
+    const limits = agentTurnLimits(1, 4096, 5000);
+    var agent = try initA4Agent(allocator, &agent_exports, &tool_names, &resolved_tools, limits);
+    defer agent.prompt_schema.deinit();
+
+    const rt = try HandlerInstance.init(allocator, .{ .contract_has_agent = true });
+    defer rt.deinit();
+    try rt.loadHandler(
+        \\import { routerMatch } from "zttp:router";
+        \\import { callTool } from "zttp:tool";
+        \\function badRoute(req) { return Response.json({ route: "badRoute", echoed: 7 }); }
+        \\function laterRoute(req) { return Response.json({ route: "laterRoute", echoed: "ran" }); }
+        \\function agentRoute(req) {
+        \\  const first = callTool("bad-call", "bad", "{\"value\":\"one\"}");
+        \\  const second = callTool("later-call", "later", "{\"value\":\"two\"}");
+        \\  return Response.json({ first: first.error, second: second.error });
+        \\}
+        \\function handler(req) {
+        \\  const routes = {
+        \\    "POST /agent": agentRoute,
+        \\    "POST /tools/bad": badRoute,
+        \\    "POST /tools/later": laterRoute
+        \\  };
+        \\  const found = routerMatch(routes, req);
+        \\  if (found !== undefined) return found.handler(req);
+        \\  return Response.text("missing", { status: 404 });
+        \\}
+    , "<a4-bad-output-latch>");
+
+    var recorder = turn_recorder.Recorder.initMemory(std.testing.allocator, 64 * 1024);
+    defer recorder.deinit();
+    const now_ns = try zq.monotonicNowNs();
+    var turn = try initAgentTurnForTest(allocator, &recorder, limits, now_ns + 5 * std.time.ns_per_s);
+    defer turn.deinit();
+    var request = try makeTestRequest(allocator, "POST", "/agent", null);
+    defer request.deinit(allocator);
+    var view = request.asView();
+    configureA4AgentRequest(&view, &agent, &turn);
+    var response = try rt.executeHandler(view);
+    defer response.deinit();
+    try finishAgentTurnForTest(&turn, response.status, false);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, response.body, .{});
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings("tool_failed", parsed.value.object.get("first").?.string);
+    try std.testing.expectEqualStrings("tool_failed", parsed.value.object.get("second").?.string);
+    try std.testing.expectEqual(@as(u32, 1), turn.tool_calls_total);
+    try std.testing.expectEqual(turn_recorder.TerminalTag.tool_failed, turn.latch.?);
+    const records = try recorder.memoryBytes();
+    try std.testing.expect(std.mem.indexOf(u8, records, "\"toolName\":\"bad\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, records, "\"toolName\":\"later\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, records, "\"terminalTag\":\"tool_failed\"") != null);
+}
+
+test "callTool failure blocks a later provider fetch without undoing an earlier tool effect" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var upstream = try CredentialUpstream.init(.ok);
+    defer upstream.deinit();
+    try upstream.start();
+    const base = try upstream.url(allocator, "");
+    var endpoint_buf: [512]u8 = undefined;
+    const endpoint = egressEndpoint(base, &endpoint_buf);
+    const endpoints = [_][]const u8{endpoint};
+    var store = try credentialTestStore(std.testing.allocator, endpoint);
+    defer store.deinit();
+
+    var first = try initA4Tool(allocator, "first", "/tools/first", &.{});
+    defer deinitA4Tool(&first);
+    var failing = try initA4Tool(allocator, "failing", "/tools/failing", &.{});
+    defer deinitA4Tool(&failing);
+    const tool_names = [_][]const u8{ "first", "failing" };
+    const resolved_tools = [_]*const contract_runtime.AcceptedTool{ &first, &failing };
+    var agent_exports = [_]contract_runtime.Export{
+        .{ .module = "zttp:tool", .name = "callTool" },
+        .{ .module = "zttp:fetch", .name = "fetch" },
+    };
+    const limits = agentTurnLimits(1, 4096, 5000);
+    var agent = try initA4Agent(allocator, &agent_exports, &tool_names, &resolved_tools, limits);
+    defer agent.prompt_schema.deinit();
+    agent.provider_endpoint = endpoint;
+    agent.provider_credential = "weather";
+
+    const rt = try HandlerInstance.init(allocator, .{
+        .contract_has_agent = true,
+        .credential_store = &store,
+        .outbound_http_enabled = true,
+    });
+    defer rt.deinit();
+    configureAgentRuntime(rt, &endpoints);
+    const handler_code = try std.fmt.allocPrint(allocator,
+        \\import {{ routerMatch }} from "zttp:router";
+        \\import {{ callTool }} from "zttp:tool";
+        \\import {{ fetch }} from "zttp:fetch";
+        \\let firstCalls = 0;
+        \\let failingCalls = 0;
+        \\function firstRoute(req) {{
+        \\  firstCalls = firstCalls + 1;
+        \\  return Response.json({{ route: "firstRoute", echoed: "kept" }});
+        \\}}
+        \\function failingRoute(req) {{
+        \\  failingCalls = failingCalls + 1;
+        \\  return Response.json({{ route: "failingRoute", echoed: 7 }});
+        \\}}
+        \\function agentRoute(req) {{
+        \\  const first = callTool("first-call", "first", "{{\"value\":\"one\"}}");
+        \\  const second = callTool("failing-call", "failing", "{{\"value\":\"two\"}}");
+        \\  const provider = fetch("{s}/v1", {{ credential: "weather" }});
+        \\  return Response.json({{
+        \\    first: first.ok ? first.value.echoed : first.error,
+        \\    second: second.ok ? "unexpected" : second.error,
+        \\    providerStatus: provider.status,
+        \\    providerError: provider.error,
+        \\    providerDetails: provider.details,
+        \\    firstCalls: firstCalls,
+        \\    failingCalls: failingCalls
+        \\  }});
+        \\}}
+        \\function handler(req) {{
+        \\  const routes = {{
+        \\    "POST /agent": agentRoute,
+        \\    "POST /tools/first": firstRoute,
+        \\    "POST /tools/failing": failingRoute
+        \\  }};
+        \\  const found = routerMatch(routes, req);
+        \\  if (found !== undefined) return found.handler(req);
+        \\  return Response.text("missing", {{ status: 404 }});
+        \\}}
+    , .{base});
+    try rt.loadHandler(handler_code, "<a4-provider-after-tool-failure>");
+
+    var recorder = turn_recorder.Recorder.initMemory(std.testing.allocator, 64 * 1024);
+    defer recorder.deinit();
+    const now_ns = try zq.monotonicNowNs();
+    var turn = try initAgentTurnForTest(allocator, &recorder, limits, now_ns + 5 * std.time.ns_per_s);
+    defer turn.deinit();
+    var request = try makeTestRequest(allocator, "POST", "/agent", null);
+    defer request.deinit(allocator);
+    var view = request.asView();
+    configureA4AgentRequest(&view, &agent, &turn);
+    var response = try rt.executeHandler(view);
+    defer response.deinit();
+    try finishAgentTurnForTest(&turn, response.status, false);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, response.body, .{});
+    defer parsed.deinit();
+    const output = parsed.value.object;
+    try std.testing.expectEqualStrings("kept", output.get("first").?.string);
+    try std.testing.expectEqualStrings("tool_failed", output.get("second").?.string);
+    try std.testing.expectEqual(@as(i64, 599), output.get("providerStatus").?.integer);
+    try std.testing.expectEqualStrings("AgentTurnRefused", output.get("providerError").?.string);
+    try std.testing.expectEqualStrings("tool_failed", output.get("providerDetails").?.string);
+    try std.testing.expectEqual(@as(i64, 1), output.get("firstCalls").?.integer);
+    try std.testing.expectEqual(@as(i64, 1), output.get("failingCalls").?.integer);
+    try std.testing.expectEqual(turn_recorder.TerminalTag.tool_failed, turn.latch.?);
+    try expectUpstreamCounts(&upstream, 0);
+    const records = try recorder.memoryBytes();
+    try std.testing.expect(std.mem.indexOf(u8, records, "\"toolName\":\"first\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, records, "\"toolName\":\"failing\"") != null);
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, records, "\"kind\":\"pre\""));
+}
+
+test "callTool maps an ordinary non-2xx tool response to tool_failed" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var unavailable = try initA4Tool(allocator, "unavailable", "/tools/unavailable", &.{});
+    defer deinitA4Tool(&unavailable);
+    const tool_names = [_][]const u8{"unavailable"};
+    const resolved_tools = [_]*const contract_runtime.AcceptedTool{&unavailable};
+    var agent_exports = [_]contract_runtime.Export{
+        .{ .module = "zttp:tool", .name = "callTool" },
+    };
+    const limits = agentTurnLimits(1, 4096, 5000);
+    var agent = try initA4Agent(allocator, &agent_exports, &tool_names, &resolved_tools, limits);
+    defer agent.prompt_schema.deinit();
+
+    const rt = try HandlerInstance.init(allocator, .{ .contract_has_agent = true });
+    defer rt.deinit();
+    try rt.loadHandler(
+        \\import { routerMatch } from "zttp:router";
+        \\import { callTool } from "zttp:tool";
+        \\function unavailableRoute(req) {
+        \\  return Response.json({ route: "unavailableRoute", echoed: "retry" }, { status: 503 });
+        \\}
+        \\function agentRoute(req) {
+        \\  const result = callTool("unavailable-call", "unavailable", "{\"value\":\"one\"}");
+        \\  return Response.json({ error: result.error });
+        \\}
+        \\function handler(req) {
+        \\  const routes = { "POST /agent": agentRoute, "POST /tools/unavailable": unavailableRoute };
+        \\  const found = routerMatch(routes, req);
+        \\  if (found !== undefined) return found.handler(req);
+        \\  return Response.text("missing", { status: 404 });
+        \\}
+    , "<a4-non-2xx>");
+
+    var recorder = turn_recorder.Recorder.initMemory(std.testing.allocator, 64 * 1024);
+    defer recorder.deinit();
+    const now_ns = try zq.monotonicNowNs();
+    var turn = try initAgentTurnForTest(allocator, &recorder, limits, now_ns + 5 * std.time.ns_per_s);
+    defer turn.deinit();
+    var request = try makeTestRequest(allocator, "POST", "/agent", null);
+    defer request.deinit(allocator);
+    var view = request.asView();
+    configureA4AgentRequest(&view, &agent, &turn);
+    var response = try rt.executeHandler(view);
+    defer response.deinit();
+    try finishAgentTurnForTest(&turn, response.status, false);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, response.body, .{});
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings("tool_failed", parsed.value.object.get("error").?.string);
+    try std.testing.expectEqual(turn_recorder.TerminalTag.tool_failed, turn.latch.?);
+    const records = try recorder.memoryBytes();
+    try std.testing.expect(std.mem.indexOf(u8, records, "\"class\":\"completed\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, records, "\"status\":503") != null);
+    try std.testing.expect(std.mem.indexOf(u8, records, "\"terminalTag\":\"tool_failed\"") != null);
+}
+
+test "callTool returns an established result when the tool post-record fails" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var completed = try initA4Tool(allocator, "completed", "/tools/completed", &.{});
+    defer deinitA4Tool(&completed);
+    const tool_names = [_][]const u8{"completed"};
+    const resolved_tools = [_]*const contract_runtime.AcceptedTool{&completed};
+    var agent_exports = [_]contract_runtime.Export{
+        .{ .module = "zttp:tool", .name = "callTool" },
+    };
+    const limits = agentTurnLimits(1, 4096, 5000);
+    var agent = try initA4Agent(allocator, &agent_exports, &tool_names, &resolved_tools, limits);
+    defer agent.prompt_schema.deinit();
+
+    const rt = try HandlerInstance.init(allocator, .{ .contract_has_agent = true });
+    defer rt.deinit();
+    try rt.loadHandler(
+        \\import { routerMatch } from "zttp:router";
+        \\import { callTool } from "zttp:tool";
+        \\let completedCalls = 0;
+        \\function completedRoute(req) {
+        \\  completedCalls = completedCalls + 1;
+        \\  return Response.json({ route: "completedRoute", echoed: "done" });
+        \\}
+        \\function agentRoute(req) {
+        \\  const first = callTool("completed-call", "completed", "{\"value\":\"one\"}");
+        \\  const second = callTool("after-post-failure", "completed", "{\"value\":\"two\"}");
+        \\  return Response.json({
+        \\    first: first.ok ? first.value.echoed : first.error,
+        \\    second: second.ok ? "unexpected" : second.error,
+        \\    completedCalls: completedCalls
+        \\  });
+        \\}
+        \\function handler(req) {
+        \\  const routes = { "POST /agent": agentRoute, "POST /tools/completed": completedRoute };
+        \\  const found = routerMatch(routes, req);
+        \\  if (found !== undefined) return found.handler(req);
+        \\  return Response.text("missing", { status: 404 });
+        \\}
+    , "<a4-tool-post-failure>");
+
+    var recorder = turn_recorder.Recorder.initMemory(std.testing.allocator, 64 * 1024);
+    defer recorder.deinit();
+    const now_ns = try zq.monotonicNowNs();
+    var turn = try initAgentTurnForTest(allocator, &recorder, limits, now_ns + 5 * std.time.ns_per_s);
+    defer turn.deinit();
+    try recorder.failMemoryWriteAfter(1);
+    var request = try makeTestRequest(allocator, "POST", "/agent", null);
+    defer request.deinit(allocator);
+    var view = request.asView();
+    configureA4AgentRequest(&view, &agent, &turn);
+    var response = try rt.executeHandler(view);
+    defer response.deinit();
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, response.body, .{});
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings("done", parsed.value.object.get("first").?.string);
+    try std.testing.expectEqualStrings("outcome_unknown", parsed.value.object.get("second").?.string);
+    try std.testing.expectEqual(@as(i64, 1), parsed.value.object.get("completedCalls").?.integer);
+    try std.testing.expectEqual(@as(u32, 1), turn.tool_calls_total);
+    try std.testing.expect(!turn.tool_in_flight);
+    try std.testing.expectEqual(turn_recorder.TerminalTag.recorder_unavailable, turn.latch.?);
+    try std.testing.expect(!recorder.isHealthy());
+    const records = try recorder.memoryBytes();
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, records, "\"kind\":\"pre\""));
+    try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, records, "\"kind\":\"post\""));
+}
+
+test "callTool deadline before pre-record starts no tool effect" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var listed = try initA4Tool(allocator, "listed", "/tools/listed", &.{});
+    defer deinitA4Tool(&listed);
+    const tool_names = [_][]const u8{"listed"};
+    const resolved_tools = [_]*const contract_runtime.AcceptedTool{&listed};
+    var agent_exports = [_]contract_runtime.Export{
+        .{ .module = "zttp:tool", .name = "callTool" },
+    };
+    const limits = agentTurnLimits(1, 4096, 5000);
+    var agent = try initA4Agent(allocator, &agent_exports, &tool_names, &resolved_tools, limits);
+    defer agent.prompt_schema.deinit();
+
+    const rt = try HandlerInstance.init(allocator, .{ .contract_has_agent = true });
+    defer rt.deinit();
+    try rt.loadHandler(
+        \\import { routerMatch } from "zttp:router";
+        \\import { callTool } from "zttp:tool";
+        \\let listedCalls = 0;
+        \\function listedRoute(req) {
+        \\  listedCalls = listedCalls + 1;
+        \\  return Response.json({ route: "listedRoute", echoed: "ran" });
+        \\}
+        \\function agentRoute(req) {
+        \\  const result = callTool("expired-call", "listed", "{\"value\":\"one\"}");
+        \\  return Response.json({ error: result.error, listedCalls: listedCalls });
+        \\}
+        \\function handler(req) {
+        \\  const routes = { "POST /agent": agentRoute, "POST /tools/listed": listedRoute };
+        \\  const found = routerMatch(routes, req);
+        \\  if (found !== undefined) return found.handler(req);
+        \\  return Response.text("missing", { status: 404 });
+        \\}
+    , "<a4-deadline-before-pre>");
+
+    var recorder = turn_recorder.Recorder.initMemory(std.testing.allocator, 64 * 1024);
+    defer recorder.deinit();
+    var turn = try initAgentTurnForTest(allocator, &recorder, limits, 0);
+    defer turn.deinit();
+    var request = try makeTestRequest(allocator, "POST", "/agent", null);
+    defer request.deinit(allocator);
+    var view = request.asView();
+    configureA4AgentRequest(&view, &agent, &turn);
+    var response = try rt.executeHandler(view);
+    defer response.deinit();
+    try finishAgentTurnForTest(&turn, response.status, false);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, response.body, .{});
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings("deadline_exceeded", parsed.value.object.get("error").?.string);
+    try std.testing.expectEqual(@as(i64, 0), parsed.value.object.get("listedCalls").?.integer);
+    try std.testing.expectEqual(@as(u32, 0), turn.tool_calls_total);
+    try std.testing.expect(!turn.tool_in_flight);
+    try std.testing.expectEqual(turn_recorder.TerminalTag.deadline_exceeded, turn.latch.?);
+    const records = try recorder.memoryBytes();
+    try std.testing.expect(std.mem.indexOf(u8, records, "\"toolName\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, records, "\"terminalTag\":\"deadline_exceeded\"") != null);
+}
+
+test "callTool maps a thrown tool outcome to outcome_unknown" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var exploding = try initA4Tool(allocator, "explode", "/tools/explode", &.{});
+    defer deinitA4Tool(&exploding);
+    const tool_names = [_][]const u8{"explode"};
+    const resolved_tools = [_]*const contract_runtime.AcceptedTool{&exploding};
+    var agent_exports = [_]contract_runtime.Export{
+        .{ .module = "zttp:tool", .name = "callTool" },
+    };
+    const limits = agentTurnLimits(1, 4096, 5000);
+    var agent = try initA4Agent(allocator, &agent_exports, &tool_names, &resolved_tools, limits);
+    defer agent.prompt_schema.deinit();
+
+    const rt = try HandlerInstance.init(allocator, .{ .contract_has_agent = true });
+    defer rt.deinit();
+    try rt.loadHandler(
+        \\import { routerMatch } from "zttp:router";
+        \\import { callTool } from "zttp:tool";
+        \\function explodingRoute(req) {
+        \\  const value = { present: true };
+        \\  const missing = value.missing;
+        \\  return missing();
+        \\}
+        \\function agentRoute(req) {
+        \\  const result = callTool("call-explode", "explode", "{\"value\":\"go\"}");
+        \\  return Response.json({ ok: result.ok, error: result.ok ? "unexpected" : result.error });
+        \\}
+        \\function handler(req) {
+        \\  const routes = { "POST /agent": agentRoute, "POST /tools/explode": explodingRoute };
+        \\  const found = routerMatch(routes, req);
+        \\  if (found !== undefined) return found.handler(req);
+        \\  return Response.text("missing", { status: 404 });
+        \\}
+    , "<a4-thrown-tool>");
+
+    var recorder = turn_recorder.Recorder.initMemory(std.testing.allocator, 64 * 1024);
+    defer recorder.deinit();
+    const now_ns = try zq.monotonicNowNs();
+    var turn = try initAgentTurnForTest(allocator, &recorder, limits, now_ns + 5 * std.time.ns_per_s);
+    defer turn.deinit();
+    var request = try makeTestRequest(allocator, "POST", "/agent", null);
+    defer request.deinit(allocator);
+    var view = request.asView();
+    configureA4AgentRequest(&view, &agent, &turn);
+    var response = try rt.executeHandler(view);
+    defer response.deinit();
+    try finishAgentTurnForTest(&turn, response.status, false);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, response.body, .{});
+    defer parsed.deinit();
+    try std.testing.expect(!parsed.value.object.get("ok").?.bool);
+    try std.testing.expectEqualStrings("outcome_unknown", parsed.value.object.get("error").?.string);
+    try std.testing.expectEqual(turn_recorder.TerminalTag.outcome_unknown, turn.latch.?);
+    try std.testing.expectEqual(@as(u32, 0), turn.round);
+    const records = try recorder.memoryBytes();
+    try std.testing.expect(std.mem.indexOf(u8, records, "\"class\":\"outcome_unknown\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, records, "\"terminalTag\":\"outcome_unknown\"") != null);
+}
+
+test "callTool keeps a caught nested fetch turn timeout outcome_unknown" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var upstream = try CredentialUpstream.init(.stall_before_head);
+    defer upstream.deinit();
+    try upstream.start();
+    const base = try upstream.url(allocator, "");
+    var endpoint_buf: [512]u8 = undefined;
+    const endpoint = egressEndpoint(base, &endpoint_buf);
+    const endpoints = [_][]const u8{endpoint};
+
+    const tool_exports = [_]contract_runtime.Export{
+        .{ .module = "zttp:fetch", .name = "fetch" },
+    };
+    var slow = try initA4Tool(allocator, "slow", "/tools/slow", &tool_exports);
+    defer deinitA4Tool(&slow);
+    const tool_names = [_][]const u8{"slow"};
+    const resolved_tools = [_]*const contract_runtime.AcceptedTool{&slow};
+    var agent_exports = [_]contract_runtime.Export{
+        .{ .module = "zttp:tool", .name = "callTool" },
+    };
+    const limits = agentTurnLimits(1, 4096, 150);
+    var agent = try initA4Agent(allocator, &agent_exports, &tool_names, &resolved_tools, limits);
+    defer agent.prompt_schema.deinit();
+
+    const rt = try HandlerInstance.init(allocator, .{
+        .contract_has_agent = true,
+        .outbound_http_enabled = true,
+        .outbound_timeout_ms = 1000,
+    });
+    defer rt.deinit();
+    configureAgentRuntime(rt, &endpoints);
+    const handler_code = try std.fmt.allocPrint(allocator,
+        \\import {{ routerMatch }} from "zttp:router";
+        \\import {{ callTool }} from "zttp:tool";
+        \\import {{ fetch }} from "zttp:fetch";
+        \\function slowRoute(req) {{
+        \\  const result = fetch("{s}/v1");
+        \\  if (result.status === 599) return Response.json({{ route: "caughtTimeout", echoed: "caught" }}, {{ status: 502 }});
+        \\  return Response.json({{ route: "unexpected", echoed: "unexpected" }});
+        \\}}
+        \\function agentRoute(req) {{
+        \\  const result = callTool("call-slow", "slow", "{{\"value\":\"go\"}}");
+        \\  return Response.json({{ ok: result.ok, error: result.ok ? "unexpected" : result.error }});
+        \\}}
+        \\function handler(req) {{
+        \\  const routes = {{ "POST /agent": agentRoute, "POST /tools/slow": slowRoute }};
+        \\  const found = routerMatch(routes, req);
+        \\  if (found !== undefined) return found.handler(req);
+        \\  return Response.text("missing", {{ status: 404 }});
+        \\}}
+    , .{base});
+    try rt.loadHandler(handler_code, "<a4-nested-fetch-timeout>");
+
+    var recorder = turn_recorder.Recorder.initMemory(std.testing.allocator, 64 * 1024);
+    defer recorder.deinit();
+    const now_ns = try zq.monotonicNowNs();
+    var turn = try initAgentTurnForTest(
+        allocator,
+        &recorder,
+        limits,
+        now_ns + @as(u64, limits.turn_deadline_ms) * std.time.ns_per_ms,
+    );
+    defer turn.deinit();
+    var request = try makeTestRequest(allocator, "POST", "/agent", null);
+    defer request.deinit(allocator);
+    var view = request.asView();
+    configureA4AgentRequest(&view, &agent, &turn);
+    const started_ns = try zq.monotonicNowNs();
+    var response = try rt.executeHandler(view);
+    const elapsed_ns = (try zq.monotonicNowNs()) - started_ns;
+    defer response.deinit();
+    try finishAgentTurnForTest(&turn, response.status, false);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, response.body, .{});
+    defer parsed.deinit();
+    try std.testing.expect(!parsed.value.object.get("ok").?.bool);
+    try std.testing.expectEqualStrings("outcome_unknown", parsed.value.object.get("error").?.string);
+    try std.testing.expectEqual(turn_recorder.TerminalTag.outcome_unknown, turn.latch.?);
+    try std.testing.expectEqual(@as(u32, 0), turn.round);
+    try std.testing.expect(elapsed_ns < 400 * std.time.ns_per_ms);
+    try expectUpstreamCounts(&upstream, 1);
+    const records = try recorder.memoryBytes();
+    try std.testing.expect(std.mem.indexOf(u8, records, "\"class\":\"outcome_unknown\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, records, "\"terminalTag\":\"outcome_unknown\"") != null);
+}
+
+test "sseEvents returns events and a tagged framing failure through the JS API" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const rt = try HandlerInstance.init(allocator, .{});
+    defer rt.deinit();
+    try rt.loadHandler(
+        \\import { sseEvents } from "zttp:sse";
+        \\function handler(req) {
+        \\  const bounds = { maxBodyBytes: 128, maxBlockBytes: 128, maxEvents: 4 };
+        \\  const events = sseEvents("id: shared\ndata: one\n\ndata: two\n\n", bounds);
+        \\  const incomplete = sseEvents("data: unfinished", bounds);
+        \\  return Response.json({
+        \\    eventsOk: events.ok,
+        \\    eventCount: events.ok ? events.value.length : -1,
+        \\    firstEvent: events.ok ? events.value[0].event : "",
+        \\    firstData: events.ok ? events.value[0].data : "",
+        \\    firstId: events.ok ? events.value[0].id : "",
+        \\    secondData: events.ok ? events.value[1].data : "",
+        \\    secondId: events.ok ? events.value[1].id : "",
+        \\    incompleteOk: incomplete.ok,
+        \\    errorTag: incomplete.ok ? "" : incomplete.error.tag,
+        \\    errorOffset: incomplete.ok ? -1 : incomplete.error.offset
+        \\  });
+        \\}
+    , "<sse-js-result>");
+
+    var request = try makeTestRequest(allocator, "GET", "/sse", null);
+    defer request.deinit(allocator);
+    var response = try rt.executeHandler(request.asView());
+    defer response.deinit();
+    try std.testing.expectEqual(@as(u16, 200), response.status);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, response.body, .{});
+    defer parsed.deinit();
+    const output = parsed.value.object;
+    try std.testing.expect(output.get("eventsOk").?.bool);
+    try std.testing.expectEqual(@as(i64, 2), output.get("eventCount").?.integer);
+    try std.testing.expectEqualStrings("message", output.get("firstEvent").?.string);
+    try std.testing.expectEqualStrings("one", output.get("firstData").?.string);
+    try std.testing.expectEqualStrings("shared", output.get("firstId").?.string);
+    try std.testing.expectEqualStrings("two", output.get("secondData").?.string);
+    try std.testing.expectEqualStrings("shared", output.get("secondId").?.string);
+    try std.testing.expect(!output.get("incompleteOk").?.bool);
+    try std.testing.expectEqualStrings("unterminated_event", output.get("errorTag").?.string);
+    try std.testing.expectEqual(@as(i64, 0), output.get("errorOffset").?.integer);
 }
 
 test "ambient HTTP refuses tool and agent grants" {

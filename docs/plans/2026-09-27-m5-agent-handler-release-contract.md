@@ -2,9 +2,11 @@
 
 Status: accepted by the owner on 2026-09-27, with decisions 1 to 5 of section 2.
 This authorizes A1 to A6 in order. Each unit gets a design note that the owner
-accepts before its code starts, as in M4. A1 and A2 are complete
+accepts before its code starts, as in M4. A1 to A4 are complete
 ([A1 note](2026-09-27-m5-a1-agent-entry-design.md), section 11;
-[A2 note](2026-09-27-m5-a2-turn-state-design.md), section 12). Two review rounds (a design critique and
+[A2 note](2026-09-27-m5-a2-turn-state-design.md), section 12;
+[A3 note](2026-09-27-m5-a3-sse-framer-design.md), section 10;
+[A4 note](2026-09-28-m5-a4-call-tool-design.md), section 8). Two review rounds (a design critique and
 a citation check) are folded in.
 Baseline: local `main` at `e6f33dfc`. This contract resumes the work that the
 [M4 release contract](2026-09-22-m4-release-contract.md) parked, under the
@@ -297,9 +299,9 @@ the validation and scope steps it runs inline at `:686-859`),
   `toolInput` reads the pending arguments. The design note lists each M4 tool
   route field that reads the request and confirms it still works.
 - The flow checker computes the ok arm's labels at the call site: the labels of
-  `argsJson`, joined with the union of the declared output labels of every tool
+  `argsJson`, joined with the union of the route return labels of every tool
   the agent entry lists. The union fails closed: one listed tool with a secret
-  output labels every result. A labelled value that goes in comes back out.
+  return labels every result. A labelled value that goes in comes back out.
 
 The runtime sees one call at a time, so R9's whole-round validation stays in
 adapter code. The runtime supplies two parts: the latch stops the rest of a

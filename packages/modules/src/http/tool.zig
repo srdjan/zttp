@@ -18,19 +18,35 @@
 //! route's catalog input.
 //!
 //! `agentPrompt()` reads the prompt that the agent gate admitted from the
-//! active runtime frame. `callTool(callId, name, argsJson)` has its final public
-//! signature but stays inert until M5 A4 implements tool dispatch.
+//! active runtime frame. `callTool(callId, name, argsJson)` delegates to the
+//! runtime callback installed for the active handler.
 
 const std = @import("std");
 const sdk = @import("zttp-sdk");
 
+pub const MODULE_STATE_SLOT: usize = 12; // module_slots.Slot.tool
+
+pub const CallToolFn = *const fn (
+    runtime_ptr: *anyopaque,
+    handle: *sdk.ModuleHandle,
+    args: []const sdk.JSValue,
+) anyerror!sdk.JSValue;
+
+pub const ToolState = struct {
+    runtime_ptr: *anyopaque,
+    call_fn: CallToolFn,
+};
+
 pub const binding = sdk.ModuleBinding{
     .specifier = "zttp:tool",
     .name = "tool",
-    .summary = "Call toolCatalog({...}) once at module scope with an object literal; each entry names a routerMatch route key. A tool reads its validated input with toolInput(inputSchemaName, req), and an agent reads its admitted prompt with agentPrompt(). callTool(callId, name, argsJson) is reserved for agent routes.",
+    .summary = "Declare tools with toolCatalog({...}), read validated tool input with toolInput(inputSchemaName, req), read an admitted agent prompt with agentPrompt(), and call a listed tool with callTool(callId, name, argsJson).",
+    .required_capabilities = &.{.runtime_callback},
+    .stateful = true,
     .exports = &.{
         .{
             .name = "toolCatalog",
+            .required_capabilities = &.{},
             .module_func = toolCatalogImpl,
             .arg_count = 1,
             .effect = .none,
@@ -44,6 +60,7 @@ pub const binding = sdk.ModuleBinding{
         },
         .{
             .name = "toolInput",
+            .required_capabilities = &.{},
             .module_func = toolInputImpl,
             .arg_count = 2,
             .effect = .none,
@@ -56,6 +73,7 @@ pub const binding = sdk.ModuleBinding{
         },
         .{
             .name = "agentPrompt",
+            .required_capabilities = &.{},
             .module_func = agentPromptImpl,
             .arg_count = 0,
             .effect = .read,
@@ -65,6 +83,7 @@ pub const binding = sdk.ModuleBinding{
         },
         .{
             .name = "callTool",
+            .required_capabilities = &.{.runtime_callback},
             .module_func = callToolImpl,
             .arg_count = 3,
             .effect = .write,
@@ -86,8 +105,6 @@ pub const Refusal = enum {
     not_a_tool_request,
     /// The current request is not an admitted agent request.
     not_an_agent_request,
-    /// The export has its final signature but no runtime behavior yet.
-    not_implemented,
     /// The gate validated the request against another input schema.
     schema_mismatch,
     /// The arguments are not a schema name and the handler's request.
@@ -97,6 +114,12 @@ pub const Refusal = enum {
     /// The body does not parse. The gate validated it, so this does not occur
     /// on a tool request.
     invalid_json,
+    unknown_tool,
+    tool_denied,
+    tool_failed,
+    budget_exhausted,
+    deadline_exceeded,
+    outcome_unknown,
 };
 
 fn toolInputImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const sdk.JSValue) anyerror!sdk.JSValue {
@@ -115,8 +138,11 @@ fn agentPromptImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, _: []const sdk.JSV
     return sdk.resultOk(handle, try sdk.createString(handle, prompt));
 }
 
-fn callToolImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, _: []const sdk.JSValue) anyerror!sdk.JSValue {
-    return refuse(handle, .not_implemented);
+fn callToolImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const sdk.JSValue) anyerror!sdk.JSValue {
+    const state = sdk.getModuleState(handle, ToolState, MODULE_STATE_SLOT) orelse
+        return refuse(handle, .not_an_agent_request);
+    try sdk.requireCapability(handle, .runtime_callback);
+    return state.call_fn(state.runtime_ptr, handle, args);
 }
 
 fn refuse(handle: *sdk.ModuleHandle, reason: Refusal) anyerror!sdk.JSValue {
@@ -163,7 +189,7 @@ test "agentPrompt returns the runtime-held prompt and refuses outside an agent r
     try std.testing.expectEqualStrings("admitted prompt", sdk.extractString(admitted).?);
 }
 
-test "callTool has its final pass-through signature" {
+test "callTool has its runtime callback signature" {
     const call_tool = binding.exports[3];
     try std.testing.expectEqualStrings("callTool", call_tool.name);
     try std.testing.expectEqual(@as(u8, 3), call_tool.arg_count);
@@ -171,5 +197,14 @@ test "callTool has its final pass-through signature" {
     try std.testing.expectEqual(sdk.ReturnKind.result, call_tool.returns);
     try std.testing.expectEqualSlices(sdk.ReturnKind, &.{ .string, .string, .string }, call_tool.param_types);
     try std.testing.expect(call_tool.derives_from_args);
+    try std.testing.expectEqual(sdk.FailureSeverity.none, call_tool.failure_severity);
+    try std.testing.expectEqualSlices(
+        sdk.ModuleCapability,
+        &.{.runtime_callback},
+        call_tool.required_capabilities.?,
+    );
+    for (binding.exports[0..3]) |other| {
+        try std.testing.expectEqual(@as(usize, 0), other.required_capabilities.?.len);
+    }
     try std.testing.expectEqual(@as(sdk.LabelSet, .{}), call_tool.return_labels);
 }

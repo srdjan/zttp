@@ -23,6 +23,7 @@ const atom_table = @import("zts-engine").atom_table;
 const builtin_modules = @import("zts-engine").builtin_modules;
 const module_facts_mod = @import("module_facts.zig");
 const route_resolution = @import("route_resolution.zig");
+const contract_types = @import("zts-contracts").contract_types;
 const type_checker_mod = @import("type_checker.zig");
 const mb = @import("zts-engine").module_binding;
 const bool_checker_mod = @import("bool_checker.zig");
@@ -298,6 +299,14 @@ pub const FlowChecker = struct {
     /// Function bodies resolved from literal route tables passed to
     /// `routerMatch`. Each is walked as a request root after the handler.
     route_function_roots: std.ArrayListUnmanaged(NodeIndex),
+    /// Route functions for every tool named by the current agent entry. A
+    /// `callTool` result carries the union of these summaries regardless of
+    /// the runtime `name`, because that name is model-controlled.
+    listed_tool_route_functions: std.ArrayListUnmanaged(NodeIndex),
+    listed_tool_routes_ready: bool,
+    /// True when the catalog-to-route mapping was incomplete. A `callTool`
+    /// call then contributes `.unknown` and cannot discharge a flow proof.
+    listed_tool_routes_unresolved: bool,
     /// When non-null, the walk is summarizing a callee body: return statements
     /// merge their labels here instead of running sink checks, and expression
     /// sinks stay silent (diagnostics belong to the handler walk).
@@ -385,6 +394,9 @@ pub const FlowChecker = struct {
             .binding_value_nodes = .empty,
             .user_fn_decls = .empty,
             .route_function_roots = .empty,
+            .listed_tool_route_functions = .empty,
+            .listed_tool_routes_ready = false,
+            .listed_tool_routes_unresolved = false,
             .summary_returns = null,
             .summary_stack = @splat(0),
             .summary_depth = 0,
@@ -428,6 +440,7 @@ pub const FlowChecker = struct {
         self.binding_value_nodes.deinit(self.allocator);
         self.user_fn_decls.deinit(self.allocator);
         self.route_function_roots.deinit(self.allocator);
+        self.listed_tool_route_functions.deinit(self.allocator);
 
         // Free dynamically formatted diagnostic messages
         for (self.allocated_messages.items) |msg| {
@@ -446,6 +459,7 @@ pub const FlowChecker = struct {
         self.scanImports();
         self.scanFunctionDecls();
         self.scanRouteFunctionRoots();
+        self.scanListedToolRoutes();
         self.findHandlerParam(handler_func);
         self.walkStmt(handler_func);
 
@@ -625,6 +639,45 @@ pub const FlowChecker = struct {
     /// `check`; the labels come from `exportedReturnLabels` run over that file.
     pub fn setFileFunctionLabels(self: *FlowChecker, slot: u16, labels: LabelSet) void {
         self.file_fn_labels.put(self.allocator, slot, labels) catch self.markAllocationFailure();
+    }
+
+    /// Install the agent-to-tool mapping from the catalog that contract
+    /// extraction accepted. Production precompile uses this path, so runtime
+    /// lowering and flow inference consume the same names and route strings.
+    /// Standalone checker callers fall back to the conservative literal scan.
+    pub fn setAcceptedToolCatalog(self: *FlowChecker, entries: []const contract_types.ToolEntry) !void {
+        const facts = self.resolveFacts() orelse {
+            self.listed_tool_routes_ready = true;
+            self.listed_tool_routes_unresolved = true;
+            return;
+        };
+        const agent_entry = for (entries) |*entry| {
+            if (entry.agent != null) break entry;
+        } else return;
+
+        self.listed_tool_route_functions.clearRetainingCapacity();
+        self.listed_tool_routes_ready = true;
+        self.listed_tool_routes_unresolved = false;
+        const resolver = route_resolution.Resolver.init(self.ir_view, self.atoms, facts);
+        for (agent_entry.agent.?.tools.items) |tool_name| {
+            const tool = for (entries) |*entry| {
+                if (std.mem.eql(u8, entry.name, tool_name)) break entry;
+            } else {
+                self.listed_tool_routes_unresolved = true;
+                continue;
+            };
+            if (tool.agent != null) {
+                self.listed_tool_routes_unresolved = true;
+                continue;
+            }
+            var targets = try resolver.resolveRouteKey(self.allocator, tool.route);
+            defer targets.deinit(self.allocator);
+            if (targets.unresolved) self.listed_tool_routes_unresolved = true;
+            for (targets.functions.items) |function| {
+                if (std.mem.indexOfScalar(NodeIndex, self.listed_tool_route_functions.items, function) != null) continue;
+                try self.listed_tool_route_functions.append(self.allocator, function);
+            }
+        }
     }
 
     /// Return labels of the exported function named `name`, for a caller in
@@ -1012,6 +1065,182 @@ pub const FlowChecker = struct {
         defer roots.deinit(self.allocator);
         for (roots.functions.items) |function| self.appendRouteFunctionRoot(function);
         if (roots.unresolved) _ = self.unknownRouteCallLabels();
+    }
+
+    /// Resolve the current agent's literal `tools` list through the same
+    /// catalog route keys and `routerMatch` tables that contract extraction
+    /// accepts. This is intentionally a closed read. Any missing literal,
+    /// duplicate agent, unknown tool, or unresolved route sets the conservative
+    /// bit; contract construction later emits the precise ZTS513 refusal.
+    fn scanListedToolRoutes(self: *FlowChecker) void {
+        if (self.listed_tool_routes_ready) return;
+        const facts = self.resolveFacts() orelse {
+            self.listed_tool_routes_unresolved = true;
+            return;
+        };
+        const catalog_slot = for (facts.imports.items) |record| {
+            if (record.resolution != .builtin) continue;
+            if (std.mem.eql(u8, record.module_specifier, "zttp:tool") and
+                std.mem.eql(u8, record.imported_name, "toolCatalog")) break record.slot;
+        } else return;
+
+        var catalog_call: ?Node.CallExpr = null;
+        for (0..self.ir_view.nodeCount()) |idx_usize| {
+            const idx: NodeIndex = @intCast(idx_usize);
+            if (self.ir_view.getTag(idx) != .call) continue;
+            const call = self.ir_view.getCall(idx) orelse continue;
+            if (self.ir_view.getTag(call.callee) != .identifier) continue;
+            const binding = self.ir_view.getBinding(call.callee) orelse continue;
+            if (binding.slot != catalog_slot) continue;
+            if (catalog_call != null) {
+                self.listed_tool_routes_unresolved = true;
+                self.listed_tool_routes_ready = true;
+                return;
+            }
+            catalog_call = call;
+        }
+        const call = catalog_call orelse return;
+        self.listed_tool_routes_ready = true;
+        if (call.args_count != 1) {
+            self.listed_tool_routes_unresolved = true;
+            return;
+        }
+        const catalog_node = self.resolveCatalogObject(
+            self.ir_view.getListIndex(call.args_start, 0),
+        ) orelse {
+            self.listed_tool_routes_unresolved = true;
+            return;
+        };
+        const catalog = self.ir_view.getObject(catalog_node) orelse {
+            self.listed_tool_routes_unresolved = true;
+            return;
+        };
+
+        var agent_entry: ?NodeIndex = null;
+        for (0..catalog.properties_count) |index| {
+            const property_node = self.ir_view.getListIndex(catalog.properties_start, @intCast(index));
+            if (self.ir_view.getTag(property_node) != .object_property) {
+                self.listed_tool_routes_unresolved = true;
+                continue;
+            }
+            const property = self.ir_view.getProperty(property_node) orelse {
+                self.listed_tool_routes_unresolved = true;
+                continue;
+            };
+            const entry_node = self.resolveCatalogObject(property.value) orelse {
+                self.listed_tool_routes_unresolved = true;
+                continue;
+            };
+            if (self.catalogField(entry_node, "agent") == null) continue;
+            if (agent_entry != null) {
+                self.listed_tool_routes_unresolved = true;
+                return;
+            }
+            agent_entry = entry_node;
+        }
+        const agent = agent_entry orelse {
+            self.listed_tool_routes_unresolved = true;
+            return;
+        };
+        const agent_value = self.catalogField(agent, "agent") orelse {
+            self.listed_tool_routes_unresolved = true;
+            return;
+        };
+        const agent_object = self.resolveCatalogObject(agent_value) orelse {
+            self.listed_tool_routes_unresolved = true;
+            return;
+        };
+        const tools_node = self.catalogField(agent_object, "tools") orelse {
+            self.listed_tool_routes_unresolved = true;
+            return;
+        };
+        const tools = self.ir_view.getArray(tools_node) orelse {
+            self.listed_tool_routes_unresolved = true;
+            return;
+        };
+        if (tools.elements_count == 0) self.listed_tool_routes_unresolved = true;
+
+        const resolver = route_resolution.Resolver.init(self.ir_view, self.atoms, facts);
+        for (0..tools.elements_count) |index| {
+            const tool_node = self.ir_view.getListIndex(tools.elements_start, @intCast(index));
+            const tool_name = self.catalogString(tool_node) orelse {
+                self.listed_tool_routes_unresolved = true;
+                continue;
+            };
+            const tool_entry = self.catalogEntry(catalog_node, tool_name) orelse {
+                self.listed_tool_routes_unresolved = true;
+                continue;
+            };
+            if (self.catalogField(tool_entry, "agent") != null) {
+                self.listed_tool_routes_unresolved = true;
+                continue;
+            }
+            const route_node = self.catalogField(tool_entry, "route") orelse {
+                self.listed_tool_routes_unresolved = true;
+                continue;
+            };
+            const route = self.catalogString(route_node) orelse {
+                self.listed_tool_routes_unresolved = true;
+                continue;
+            };
+            var targets = resolver.resolveRouteKey(self.allocator, route) catch {
+                self.markAllocationFailure();
+                self.listed_tool_routes_unresolved = true;
+                continue;
+            };
+            defer targets.deinit(self.allocator);
+            if (targets.unresolved) self.listed_tool_routes_unresolved = true;
+            for (targets.functions.items) |function| {
+                if (std.mem.indexOfScalar(NodeIndex, self.listed_tool_route_functions.items, function) != null) continue;
+                self.listed_tool_route_functions.append(self.allocator, function) catch self.markAllocationFailure();
+            }
+        }
+    }
+
+    fn resolveCatalogObject(self: *const FlowChecker, node: NodeIndex) ?NodeIndex {
+        const tag = self.ir_view.getTag(node) orelse return null;
+        if (tag == .object_literal) return node;
+        if (tag != .identifier) return null;
+        const binding = self.ir_view.getBinding(node) orelse return null;
+        const binding_decl = self.findBindingDecl(binding) orelse return null;
+        if (self.bindingIsMutated(binding) or self.bindingHasAlias(binding)) return null;
+        return if (self.ir_view.getTag(binding_decl.init) == .object_literal) binding_decl.init else null;
+    }
+
+    fn catalogField(self: *const FlowChecker, object_node: NodeIndex, wanted: []const u8) ?NodeIndex {
+        const catalog_object = self.ir_view.getObject(object_node) orelse return null;
+        var found: ?NodeIndex = null;
+        for (0..catalog_object.properties_count) |index| {
+            const property_node = self.ir_view.getListIndex(catalog_object.properties_start, @intCast(index));
+            if (self.ir_view.getTag(property_node) != .object_property) return null;
+            const property = self.ir_view.getProperty(property_node) orelse return null;
+            const name = self.getPropertyKeyName(property.key) orelse return null;
+            if (!std.mem.eql(u8, name, wanted)) continue;
+            if (found != null) return null;
+            found = property.value;
+        }
+        return found;
+    }
+
+    fn catalogEntry(self: *const FlowChecker, catalog_node: NodeIndex, wanted: []const u8) ?NodeIndex {
+        const catalog = self.ir_view.getObject(catalog_node) orelse return null;
+        var found: ?NodeIndex = null;
+        for (0..catalog.properties_count) |index| {
+            const property_node = self.ir_view.getListIndex(catalog.properties_start, @intCast(index));
+            if (self.ir_view.getTag(property_node) != .object_property) return null;
+            const property = self.ir_view.getProperty(property_node) orelse return null;
+            const name = self.getPropertyKeyName(property.key) orelse return null;
+            if (!std.mem.eql(u8, name, wanted)) continue;
+            if (found != null) return null;
+            found = self.resolveCatalogObject(property.value);
+        }
+        return found;
+    }
+
+    fn catalogString(self: *const FlowChecker, node: NodeIndex) ?[]const u8 {
+        if (self.ir_view.getTag(node) != .lit_string) return null;
+        const string_idx = self.ir_view.getStringIdx(node) orelse return null;
+        return self.ir_view.getString(string_idx);
     }
 
     fn appendRouteFunctionRoot(self: *FlowChecker, fn_node: NodeIndex) void {
@@ -2123,6 +2352,12 @@ pub const FlowChecker = struct {
         if (callee_tag == .identifier) {
             const binding = self.ir_view.getBinding(call_data.callee) orelse return LabelSet.empty;
 
+            // `callTool` has a catalog-directed rule. Its ok value carries the
+            // pending argument JSON and the union of every tool the agent may
+            // select. `callId` and `name` do not carry into the value. This
+            // must precede the export's generic `derives_from_args` rule.
+            if (self.isCallToolSlot(binding.slot)) return self.callToolLabels(call_data);
+
             if (self.module_fn_labels.get(binding.slot)) |base_labels| {
                 if (self.env_fn_slot != null and binding.slot == self.env_fn_slot.? and call_data.args_count > 0) {
                     const arg = self.ir_view.getListIndex(call_data.args_start, 0);
@@ -2241,6 +2476,72 @@ pub const FlowChecker = struct {
         }
         if (self.isUnresolvedFunctionValueCallee(call_data.callee)) labels.unknown = true;
         return labels;
+    }
+
+    fn isCallToolSlot(self: *FlowChecker, slot: u16) bool {
+        const facts = self.resolveFacts() orelse return false;
+        for (facts.imports.items) |record| {
+            if (record.slot != slot or record.resolution != .builtin) continue;
+            return std.mem.eql(u8, record.module_specifier, "zttp:tool") and
+                std.mem.eql(u8, record.imported_name, "callTool");
+        }
+        return false;
+    }
+
+    fn callToolLabels(self: *FlowChecker, call_data: Node.CallExpr) LabelSet {
+        var labels = if (call_data.args_count > 2)
+            self.inferLabels(self.ir_view.getListIndex(call_data.args_start, 2))
+        else
+            LabelSet{ .unknown = true };
+
+        if (!self.listed_tool_routes_ready or self.listed_tool_routes_unresolved or
+            self.listed_tool_route_functions.items.len == 0)
+        {
+            return LabelSet.merge(labels, self.unknownRouteCallLabels());
+        }
+        for (self.listed_tool_route_functions.items) |function| {
+            labels = LabelSet.merge(labels, self.listedToolRouteLabels(function));
+        }
+        return labels;
+    }
+
+    /// Summarize a listed tool as a request root. The synthetic request still
+    /// has request provenance on its dispatch fields, while `argsJson` is
+    /// joined separately at the call site. Response helpers contribute only
+    /// their payload, matching the runtime response body surface.
+    fn listedToolRouteLabels(self: *FlowChecker, fn_node: NodeIndex) LabelSet {
+        if (self.summary_depth >= max_summary_depth) return .{ .unknown = true };
+        for (self.summary_stack[0..self.summary_depth]) |active| {
+            if (active == fn_node) return .{ .unknown = true };
+        }
+        const function = self.ir_view.getFunction(fn_node) orelse return .{ .unknown = true };
+
+        const saved_req_key = self.req_binding_key;
+        const saved_identity_trusted = self.req_identity_trusted;
+        self.req_binding_key = null;
+        self.req_identity_trusted = false;
+        self.findHandlerParam(fn_node);
+        defer {
+            self.req_binding_key = saved_req_key;
+            self.req_identity_trusted = saved_identity_trusted;
+        }
+
+        self.summary_stack[self.summary_depth] = fn_node;
+        self.summary_depth += 1;
+        defer self.summary_depth -= 1;
+        self.route_summary_depth += 1;
+        defer self.route_summary_depth -= 1;
+
+        const body_tag = self.ir_view.getTag(function.body) orelse return .{ .unknown = true };
+        if (body_tag == .block or body_tag == .program or body_tag == .return_stmt) {
+            var collected = LabelSet.empty;
+            const saved_returns = self.summary_returns;
+            self.summary_returns = &collected;
+            defer self.summary_returns = saved_returns;
+            self.walkStmt(function.body);
+            return collected;
+        }
+        return self.inferLabels(function.body);
     }
 
     fn isUnresolvedFunctionValueCallee(self: *const FlowChecker, callee: NodeIndex) bool {
@@ -5403,6 +5704,243 @@ test "FlowChecker unions routerMatch route return labels at dispatch" {
     try std.testing.expect(!properties.pii_contained);
 }
 
+test "FlowChecker unions every listed tool return at the callTool call site" {
+    const source =
+        \\import { routerMatch } from "zttp:router";
+        \\import { callTool, toolCatalog } from "zttp:tool";
+        \\import { fetch } from "zttp:fetch";
+        \\function clean(req) { return Response.json({ ok: true }); }
+        \\function tainted(req) { return Response.json({ url: req.url }); }
+        \\function assistant(req) {
+        \\  const result = callTool("call-1", "clean", "{}");
+        \\  fetch("https://api.example.com/collect", { body: result.value });
+        \\  return Response.json({ ok: true });
+        \\}
+        \\const routes = {
+        \\  "POST /clean": clean,
+        \\  "POST /tainted": tainted,
+        \\  "POST /agent": assistant,
+        \\};
+        \\toolCatalog({
+        \\  clean: { route: "POST /clean", description: "clean", input: "In", output: "Out", maxInputBytes: 64 },
+        \\  tainted: { route: "POST /tainted", description: "tainted", input: "In", output: "Out", maxInputBytes: 64 },
+        \\  assistant: {
+        \\    route: "POST /agent", description: "agent", maxInputBytes: 64,
+        \\    agent: {
+        \\      tools: ["clean", "tainted"],
+        \\      provider: { endpoint: "https://api.example.com", credential: "provider" },
+        \\      limits: { rounds: 1, toolCalls: 2, toolCallsPerRound: 2, argumentBytes: 64, resultBytes: 64, turnDeadlineMs: 1000, providerRequestBytes: 64 },
+        \\    },
+        \\  },
+        \\});
+        \\function handler(req) {
+        \\  const found = routerMatch(routes, req);
+        \\  if (found === undefined) return Response.json({ error: "not found" });
+        \\  return found.handler(req);
+        \\}
+    ;
+    const properties = try runFlowProperties(std.testing.allocator, source);
+    // The selected name is clean. Only the union of the other listed route's
+    // return can carry request input to this egress sink.
+    try std.testing.expect(!properties.injection_safe);
+}
+
+test "FlowChecker preserves secret labels through the callTool route union" {
+    const direct_source =
+        \\import { routerMatch } from "zttp:router";
+        \\import { env } from "zttp:env";
+        \\function secretTool(req) { return Response.json({ value: env("SECRET_KEY") }); }
+        \\const routes = { "POST /secret": secretTool };
+        \\function handler(req) {
+        \\  const found = routerMatch(routes, req);
+        \\  if (found === undefined) return Response.json({});
+        \\  return found.handler(req);
+        \\}
+    ;
+    try std.testing.expect(!(try runFlowProperties(
+        std.testing.allocator,
+        direct_source,
+    )).no_secret_leakage);
+
+    const call_tool_source =
+        \\import { routerMatch } from "zttp:router";
+        \\import { callTool, toolCatalog } from "zttp:tool";
+        \\import { env } from "zttp:env";
+        \\function secretTool(req) { return Response.json({ value: env("SECRET_KEY") }); }
+        \\function assistant(req) {
+        \\  const result = callTool("call-1", "secret", "{}");
+        \\  return Response.json({ value: result.value });
+        \\}
+        \\const routes = { "POST /secret": secretTool, "POST /agent": assistant };
+        \\toolCatalog({
+        \\  secret: { route: "POST /secret", description: "secret", input: "In", output: "Out", maxInputBytes: 64 },
+        \\  assistant: {
+        \\    route: "POST /agent", description: "agent", maxInputBytes: 64,
+        \\    agent: {
+        \\      tools: ["secret"],
+        \\      provider: { endpoint: "https://api.example.com", credential: "provider" },
+        \\      limits: { rounds: 1, toolCalls: 1, toolCallsPerRound: 1, argumentBytes: 64, resultBytes: 64, turnDeadlineMs: 1000, providerRequestBytes: 64 },
+        \\    },
+        \\  },
+        \\});
+        \\function handler(req) {
+        \\  const found = routerMatch(routes, req);
+        \\  if (found === undefined) return Response.json({});
+        \\  return found.handler(req);
+        \\}
+    ;
+    try std.testing.expect(!(try runFlowProperties(
+        std.testing.allocator,
+        call_tool_source,
+    )).no_secret_leakage);
+
+    const clean_source =
+        \\import { routerMatch } from "zttp:router";
+        \\import { callTool, toolCatalog } from "zttp:tool";
+        \\function clean(req) { return Response.json({ value: "clean" }); }
+        \\function assistant(req) {
+        \\  const result = callTool("call-1", "clean", "{}");
+        \\  return Response.json({ value: result.value });
+        \\}
+        \\const routes = { "POST /clean": clean, "POST /agent": assistant };
+        \\toolCatalog({
+        \\  clean: { route: "POST /clean", description: "clean", input: "In", output: "Out", maxInputBytes: 64 },
+        \\  assistant: {
+        \\    route: "POST /agent", description: "agent", maxInputBytes: 64,
+        \\    agent: {
+        \\      tools: ["clean"],
+        \\      provider: { endpoint: "https://api.example.com", credential: "provider" },
+        \\      limits: { rounds: 1, toolCalls: 1, toolCallsPerRound: 1, argumentBytes: 64, resultBytes: 64, turnDeadlineMs: 1000, providerRequestBytes: 64 },
+        \\    },
+        \\  },
+        \\});
+        \\function handler(req) {
+        \\  const found = routerMatch(routes, req);
+        \\  if (found === undefined) return Response.json({});
+        \\  return found.handler(req);
+        \\}
+    ;
+    try std.testing.expect((try runFlowProperties(
+        std.testing.allocator,
+        clean_source,
+    )).no_secret_leakage);
+}
+
+test "FlowChecker keeps callTool callId and name out of the ok labels" {
+    const source =
+        \\import { routerMatch } from "zttp:router";
+        \\import { callTool, toolCatalog } from "zttp:tool";
+        \\import { fetch } from "zttp:fetch";
+        \\function clean(req) { return Response.json({ ok: true }); }
+        \\function assistant(req) {
+        \\  const result = callTool(req.body, req.url, "{}");
+        \\  fetch("https://api.example.com/collect", { body: result.value });
+        \\  return Response.json({ ok: true });
+        \\}
+        \\const routes = { "POST /clean": clean, "POST /agent": assistant };
+        \\toolCatalog({
+        \\  clean: { route: "POST /clean", description: "clean", input: "In", output: "Out", maxInputBytes: 64 },
+        \\  assistant: {
+        \\    route: "POST /agent", description: "agent", maxInputBytes: 64,
+        \\    agent: {
+        \\      tools: ["clean"],
+        \\      provider: { endpoint: "https://api.example.com", credential: "provider" },
+        \\      limits: { rounds: 1, toolCalls: 1, toolCallsPerRound: 1, argumentBytes: 64, resultBytes: 64, turnDeadlineMs: 1000, providerRequestBytes: 64 },
+        \\    },
+        \\  },
+        \\});
+        \\function handler(req) {
+        \\  const found = routerMatch(routes, req);
+        \\  if (found === undefined) return Response.json({});
+        \\  return found.handler(req);
+        \\}
+    ;
+    const properties = try runFlowProperties(std.testing.allocator, source);
+    try std.testing.expect(properties.injection_safe);
+}
+
+test "FlowChecker fails closed when a callTool route table escapes" {
+    const source =
+        \\import { routerMatch } from "zttp:router";
+        \\import { callTool, toolCatalog } from "zttp:tool";
+        \\import { fetch } from "zttp:fetch";
+        \\function clean(req) { return Response.json({ ok: true }); }
+        \\function assistant(req) {
+        \\  const result = callTool("call-1", "clean", "{}");
+        \\  fetch("https://api.example.com/collect", { body: result.value });
+        \\  return Response.json({ ok: true });
+        \\}
+        \\function mutate(value) { value.changed = clean; }
+        \\const routes = { "POST /clean": clean, "POST /agent": assistant };
+        \\mutate(routes);
+        \\toolCatalog({
+        \\  clean: { route: "POST /clean", description: "clean", input: "In", output: "Out", maxInputBytes: 64 },
+        \\  assistant: {
+        \\    route: "POST /agent", description: "agent", maxInputBytes: 64,
+        \\    agent: {
+        \\      tools: ["clean"],
+        \\      provider: { endpoint: "https://api.example.com", credential: "provider" },
+        \\      limits: { rounds: 1, toolCalls: 1, toolCallsPerRound: 1, argumentBytes: 64, resultBytes: 64, turnDeadlineMs: 1000, providerRequestBytes: 64 },
+        \\    },
+        \\  },
+        \\});
+        \\function handler(req) {
+        \\  const found = routerMatch(routes, req);
+        \\  if (found === undefined) return Response.json({});
+        \\  return found.handler(req);
+        \\}
+    ;
+    const properties = try runFlowProperties(std.testing.allocator, source);
+    try std.testing.expect(!properties.injection_safe);
+}
+
+test "FlowChecker joins argsJson and fails closed for an unresolved listed tool" {
+    const args_source =
+        \\import { routerMatch } from "zttp:router";
+        \\import { callTool, toolCatalog } from "zttp:tool";
+        \\import { env } from "zttp:env";
+        \\function clean(req) { return Response.json({ ok: true }); }
+        \\function assistant(req) {
+        \\  const secret = env("SECRET_KEY");
+        \\  const result = callTool("call-1", "clean", secret);
+        \\  return Response.json({ value: result.value });
+        \\}
+        \\const routes = { "POST /clean": clean, "POST /agent": assistant };
+        \\toolCatalog({
+        \\  clean: { route: "POST /clean", description: "clean", input: "In", output: "Out", maxInputBytes: 64 },
+        \\  assistant: { route: "POST /agent", description: "agent", maxInputBytes: 64, agent: { tools: ["clean"], provider: { endpoint: "https://api.example.com", credential: "provider" }, limits: { rounds: 1, toolCalls: 1, toolCallsPerRound: 1, argumentBytes: 64, resultBytes: 64, turnDeadlineMs: 1000, providerRequestBytes: 64 } } },
+        \\});
+        \\function handler(req) {
+        \\  const found = routerMatch(routes, req);
+        \\  if (found === undefined) return Response.json({});
+        \\  return found.handler(req);
+        \\}
+    ;
+    try std.testing.expect(!(try runFlowProperties(std.testing.allocator, args_source)).no_secret_leakage);
+
+    const unresolved_source =
+        \\import { routerMatch } from "zttp:router";
+        \\import { callTool, toolCatalog } from "zttp:tool";
+        \\import { fetch } from "zttp:fetch";
+        \\function assistant(req) {
+        \\  const result = callTool("call-1", "ghost", "{}");
+        \\  fetch("https://api.example.com/collect", { body: result.value });
+        \\  return Response.json({ ok: true });
+        \\}
+        \\const routes = { "POST /agent": assistant };
+        \\toolCatalog({
+        \\  ghost: { route: "POST /missing", description: "ghost", input: "In", output: "Out", maxInputBytes: 64 },
+        \\  assistant: { route: "POST /agent", description: "agent", maxInputBytes: 64, agent: { tools: ["ghost"], provider: { endpoint: "https://api.example.com", credential: "provider" }, limits: { rounds: 1, toolCalls: 1, toolCallsPerRound: 1, argumentBytes: 64, resultBytes: 64, turnDeadlineMs: 1000, providerRequestBytes: 64 } } },
+        \\});
+        \\function handler(req) {
+        \\  const found = routerMatch(routes, req);
+        \\  if (found === undefined) return Response.json({});
+        \\  return found.handler(req);
+        \\}
+    ;
+    try std.testing.expect(!(try runFlowProperties(std.testing.allocator, unresolved_source)).injection_safe);
+}
+
 test "FlowChecker proves every flow property for clean routerMatch routes" {
     const source =
         \\import { routerMatch } from "zttp:router";
@@ -6699,6 +7237,38 @@ test "stringifyJson does not launder a secret" {
         \\function handler(req) {
         \\  const r = stringifyJson(env("API_SECRET"));
         \\  return Response.json({ v: r.value });
+        \\}
+    ;
+    try std.testing.expect(!try runNoSecretLeakage(std.testing.allocator, source));
+}
+
+test "sseEvents does not launder a secret through its success arm" {
+    const source =
+        \\import { env } from "zttp:env";
+        \\import { sseEvents } from "zttp:sse";
+        \\function handler(req) {
+        \\  const framed = sseEvents(env("PROVIDER_SECRET"), {
+        \\    maxBodyBytes: 8388608,
+        \\    maxBlockBytes: 8388608,
+        \\    maxEvents: 65536,
+        \\  });
+        \\  return Response.json({ events: framed.value });
+        \\}
+    ;
+    try std.testing.expect(!try runNoSecretLeakage(std.testing.allocator, source));
+}
+
+test "sseEvents does not launder a secret through its error offset" {
+    const source =
+        \\import { env } from "zttp:env";
+        \\import { sseEvents } from "zttp:sse";
+        \\function handler(req) {
+        \\  const framed = sseEvents(env("PROVIDER_SECRET"), {
+        \\    maxBodyBytes: 8388608,
+        \\    maxBlockBytes: 8388608,
+        \\    maxEvents: 65536,
+        \\  });
+        \\  return Response.json({ offset: framed.error.offset });
         \\}
     ;
     try std.testing.expect(!try runNoSecretLeakage(std.testing.allocator, source));

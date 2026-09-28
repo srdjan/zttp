@@ -14,8 +14,7 @@ pub const Slot = enum(u4) {
     service = 9,
     scope = 10,
     fetch = 11,
-    // 12 was `websocket`, removed with the subsystem. The number stays
-    // reserved so the slots after it keep their identity.
+    tool = 12,
     workflow = 13,
     queue = 14,
     ledger = 15,
@@ -32,6 +31,7 @@ pub fn ownerSpecifier(slot: usize) ?[]const u8 {
         @intFromEnum(Slot.service) => "zttp:service",
         @intFromEnum(Slot.scope) => "zttp:scope",
         @intFromEnum(Slot.fetch) => "zttp:fetch",
+        @intFromEnum(Slot.tool) => "zttp:tool",
         @intFromEnum(Slot.workflow) => "zttp:workflow",
         @intFromEnum(Slot.queue) => "zttp:queue",
         @intFromEnum(Slot.ledger) => "zttp:ledger",
@@ -65,6 +65,8 @@ test "module state slots are owned by one active module specifier" {
     try testing.expect(!isOwnedBySpecifier(@intFromEnum(Slot.sql), "zttp:decode"));
     try testing.expect(!isOwnedBySpecifier(@intFromEnum(Slot.cache), "zttp:decode"));
     try testing.expect(isOwnedBySpecifier(@intFromEnum(Slot.queue), "zttp:queue"));
+    try testing.expect(isOwnedBySpecifier(@intFromEnum(Slot.tool), "zttp:tool"));
+    try testing.expect(!isOwnedBySpecifier(@intFromEnum(Slot.tool), "zttp:fetch"));
     try testing.expect(ownerSpecifier(@intFromEnum(Slot.replay)) == null);
     try testing.expect(isOwnedBySpecifier(@intFromEnum(Slot.ledger), "zttp:ledger"));
     try testing.expect(!isOwnedBySpecifier(@intFromEnum(Slot.ledger), "zttp:sql"));

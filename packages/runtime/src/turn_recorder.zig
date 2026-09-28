@@ -69,6 +69,7 @@ pub const Record = struct {
     effect: ?Effect = null,
     round: ?u32 = null,
     call_id: ?[]const u8 = null,
+    tool_name: ?[]const u8 = null,
     authorization: ?AuthorizationDecision = null,
     outcome_class: ?OutcomeClass = null,
     head_received: ?bool = null,
@@ -342,6 +343,53 @@ pub const Recorder = struct {
         }, true);
     }
 
+    pub fn appendToolPre(
+        self: *Recorder,
+        turn_id: TurnId,
+        sequence: u32,
+        round: u32,
+        call_id: []const u8,
+        tool_name: []const u8,
+        now_ns: i128,
+    ) !void {
+        return self.append(.{
+            .turn_id = turn_id,
+            .sequence = sequence,
+            .kind = .pre,
+            .monotonic_ns = now_ns,
+            .effect = .tool_call,
+            .round = round,
+            .call_id = call_id,
+            .tool_name = tool_name,
+            .authorization = .allowed,
+        });
+    }
+
+    pub fn appendToolPost(
+        self: *Recorder,
+        turn_id: TurnId,
+        sequence: u32,
+        round: u32,
+        call_id: []const u8,
+        outcome_class: OutcomeClass,
+        head_received: bool,
+        status: ?u16,
+        now_ns: i128,
+    ) !void {
+        return self.appendRecord(.{
+            .turn_id = turn_id,
+            .sequence = sequence,
+            .kind = .post,
+            .monotonic_ns = now_ns,
+            .effect = .tool_call,
+            .round = round,
+            .call_id = call_id,
+            .outcome_class = outcome_class,
+            .head_received = head_received,
+            .status = status,
+        }, true);
+    }
+
     /// Return replay bytes. The slice is stable until the next recorder write.
     pub fn memoryBytes(self: *Recorder) ![]const u8 {
         self.mutex.lock();
@@ -431,6 +479,7 @@ fn fits(written: u64, reserved: u64, line_len: usize, extra_reservation: u64, ce
 fn validateRecord(record: Record) RecorderError!void {
     for ([_]?[]const u8{
         record.call_id,
+        record.tool_name,
         record.agent_name,
         record.catalog_digest,
         record.runtime_policy_hash,
@@ -445,7 +494,7 @@ fn validateRecord(record: Record) RecorderError!void {
         record.runtime_policy_hash != null or
         record.wall_time_unix_ns != null;
     const has_effect_fields = record.effect != null or record.round != null or
-        record.call_id != null or record.authorization != null or
+        record.call_id != null or record.tool_name != null or record.authorization != null or
         record.outcome_class != null or record.head_received != null or
         record.status != null;
 
@@ -466,11 +515,12 @@ fn validateRecord(record: Record) RecorderError!void {
                 return error.InvalidRecord;
             }
             try validateCallIdentity(record.effect.?, record.call_id);
+            if ((record.effect.? == .tool_call) != (record.tool_name != null)) return error.InvalidRecord;
         },
         .post => {
             if (record.effect == null or record.round == null or
                 record.outcome_class == null or record.head_received == null or
-                record.authorization != null or record.terminal_tag != null or has_admit_fields)
+                record.tool_name != null or record.authorization != null or record.terminal_tag != null or has_admit_fields)
             {
                 return error.InvalidRecord;
             }
@@ -509,6 +559,7 @@ fn writeRecordJson(writer: *std.Io.Writer, record: Record) !void {
     if (record.effect) |effect| try writeEnumField(writer, "effect", @tagName(effect));
     if (record.round) |round| try writer.print(",\"round\":{d}", .{round});
     if (record.call_id) |call_id| try writeStringField(writer, "callId", call_id);
+    if (record.tool_name) |tool_name| try writeStringField(writer, "toolName", tool_name);
     if (record.authorization) |decision| try writeEnumField(writer, "authorization", @tagName(decision));
     if (record.outcome_class) |class| try writeEnumField(writer, "class", @tagName(class));
     if (record.head_received) |received| {
@@ -770,6 +821,19 @@ test "largest accepted metadata values stay within one record" {
         .status = 599,
     }, &buffer);
     try std.testing.expect(post_line.len <= max_record_bytes);
+
+    const pre_line = try serialize(.{
+        .turn_id = turn_id,
+        .sequence = std.math.maxInt(u32),
+        .kind = .pre,
+        .monotonic_ns = std.math.maxInt(i128),
+        .effect = .tool_call,
+        .round = std.math.maxInt(u32),
+        .call_id = "d" ** 64,
+        .tool_name = "e" ** 64,
+        .authorization = .allowed,
+    }, &buffer);
+    try std.testing.expect(pre_line.len <= max_record_bytes);
 }
 
 test "admission reserves terminal capacity and ceiling refusal stays healthy" {

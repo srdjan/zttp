@@ -45,8 +45,10 @@ fi
 # for the M4 T2 tool catalog.
 # Moved 2026-09-24: ZTS514 (schema_not_compilable) joins the policy registry
 # for M4 T7: a validation call that names a schema zttp:validate cannot compile.
+# Moved 2026-09-28: ZTS513 names the new refusal for an agent-listed tool
+# route with a path parameter (M5 A4).
 EXPECTED_PROFILE="zts-model-1"
-EXPECTED_POLICY_HASH="6ae21f9cbdf8240b130c77e7b258cb149dcae7890cdfc047d1ee01849d146f3a"
+EXPECTED_POLICY_HASH="84e3ba342bad0a0e05e19410829c382248d2d1d8e9e362cde5f934df749c5bb1"
 # TSX is separately identified, and its hash binds the core grammar it lowers
 # into, so the declaration cut moves both hashes even though TSX syntax did not.
 EXPECTED_GRAMMAR_HASH="8c555c6dfe5afb98cf73d034a548dd5f18db5a6b540f334a43f0ac871f4d73be"
@@ -70,7 +72,9 @@ EXPECTED_RESTRICTION_HASH="3409f9e0490c698e67dcd1e7a6e3465f0d14c50e0a611bbe96520
 # Moved 2026-09-23: zttp:tool joins, the inert toolCatalog declaration of M4 T2.
 # Moved 2026-09-24: zttp:tool adds toolInput, a tool's gate-validated input (M4 T7).
 # Moved 2026-09-27: zttp:tool adds agentPrompt and callTool (M5 A1 U2).
-EXPECTED_BUILTIN_HASH="1c6ed893dcb89d44dd94d1faea25ff2bf600da0d288f876ee8eede8b3f95066f"
+# Moved 2026-09-28: A4 updates zttp:fetch and zttp:tool, and A3 registers
+# zttp:sse. These surfaces share one generated module registry hash.
+EXPECTED_BUILTIN_HASH="c4098fd57cb0b4b2f3a646899ca41f55dadbfc525df4413b0c258a2b9f9d7394"
 
 fail() {
   printf 'meta drift: %s\n' "$1" >&2

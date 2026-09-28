@@ -45,6 +45,10 @@ const unixMillis = zq.trace.unixMillis;
 
 fn effectiveOutboundTimeoutMs(rt: *HandlerInstance) u32 {
     var timeout_ms = rt.config.outbound_timeout_ms;
+    if (rt.nestedToolTurn()) |turn| {
+        const now_ns = zq.monotonicNowNs() catch return 1;
+        timeout_ms = turn.effectiveOutboundTimeoutMs(timeout_ms, now_ns);
+    }
     if (rt.active_request) |request| {
         if (request.turn) |turn| {
             if (turn.provider_timeout_ms) |turn_timeout_ms| {
@@ -63,6 +67,17 @@ fn effectiveOutboundTimeoutMs(rt: *HandlerInstance) u32 {
         }
     }
     return timeout_ms;
+}
+
+fn nestedToolDeadlinePassed(rt: *HandlerInstance) bool {
+    const turn = rt.nestedToolTurn() orelse return false;
+    const now_ns = zq.monotonicNowNs() catch {
+        turn.markToolDeadlineHit();
+        return true;
+    };
+    if (!turn.deadlineExpired(now_ns)) return false;
+    turn.markToolDeadlineHit();
+    return true;
 }
 
 fn stepDeadlinePassed(rt: *HandlerInstance) bool {
@@ -1289,14 +1304,28 @@ fn fetchSyncResult(rt: *HandlerInstance, args: []const zq.JSValue) !zq.JSValue {
             turn.setProviderTimeout(rt.config.outbound_timeout_ms, budget_now_ns);
         }
     }
+    if (nestedToolDeadlinePassed(rt)) {
+        return createFetchErrorResponse(rt, "TimedOut", "exceeded agent turn deadline");
+    }
 
     // One budget for connect, handshake, and exchange, starting after name
     // resolution. The backend arms the watchdog when the connect succeeds.
-    var deadline: FetchDeadline = .{ .timeout_ms = effectiveOutboundTimeoutMs(rt), .io = client.io };
+    const nested_turn = rt.nestedToolTurn();
+    const fetch_timeout_ms = effectiveOutboundTimeoutMs(rt);
+    const turn_cap_applied = if (nested_turn) |turn| blk: {
+        const cap_now = zq.monotonicNowNs() catch break :blk true;
+        break :blk turn.effectiveOutboundTimeoutMs(rt.config.outbound_timeout_ms, cap_now) < rt.config.outbound_timeout_ms;
+    } else false;
+    var deadline: FetchDeadline = .{ .timeout_ms = fetch_timeout_ms, .io = client.io };
     backend.beginFetch(&deadline) catch |err| return createFetchErrorResponse(rt, "DeadlineUnavailable", @errorName(err));
     // Declared after the client's deinit defer, so the watchdog is joined
     // before the client closes any connection.
-    defer backend.endFetch();
+    defer {
+        if (turn_cap_applied and deadline.expired()) {
+            if (nested_turn) |turn| turn.markToolDeadlineHit();
+        }
+        backend.endFetch();
+    }
 
     const connection = client.connectTcpOptions(.{
         // Connect to the address that passed, name the destination for TLS.

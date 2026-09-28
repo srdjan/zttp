@@ -25,7 +25,6 @@ const ported = struct {
     const env = adapter.adaptModuleBinding(modules.catalog.env);
     const crypto = adapter.adaptModuleBinding(modules.catalog.crypto);
     const router = adapter.adaptModuleBinding(modules.catalog.router);
-    const tool = adapter.adaptModuleBinding(modules.catalog.tool);
     const auth = adapter.adaptModuleBinding(modules.catalog.auth);
     const validate = adapter.adaptModuleBinding(modules.catalog.validate);
     const decode = adapter.adaptModuleBinding(modules.catalog.decode);
@@ -37,6 +36,7 @@ const ported = struct {
     const log = adapter.adaptModuleBinding(modules.catalog.log);
     const text = adapter.adaptModuleBinding(modules.catalog.text);
     const time = adapter.adaptModuleBinding(modules.catalog.time);
+    const sse = adapter.adaptModuleBinding(modules.catalog.sse);
 };
 
 // installState helpers run during runtime bootstrap, outside any
@@ -46,6 +46,7 @@ const sql_mod = @import("modules/data/sql.zig");
 const ledger_mod = @import("modules/data/ledger.zig");
 const service_mod = @import("modules/net/service.zig");
 const fetch_mod = @import("modules/net/fetch.zig");
+const tool_mod = @import("modules/http/tool.zig");
 
 // Coupled to zts internals: io installs Context-owned state read by fetchSync;
 // scope manipulates GC roots directly. durable is pending further work.
@@ -89,7 +90,8 @@ const runtime_builtins = [_]ModuleBinding{
     ported.ratelimit,
     service_mod.binding,
     fetch_mod.binding,
-    ported.tool,
+    tool_mod.binding,
+    ported.sse,
 };
 
 /// The freestanding analyzer consumes module names, signatures, effects, and
@@ -192,6 +194,7 @@ pub const builtin_governance_entries = [_]BuiltinGovernanceEntry{
     .{ .specifier = "zttp:service", .module_path = "packages/modules/src/net/service.zig", .spec_path = "packages/modules/module-specs/net/service.json" },
     .{ .specifier = "zttp:fetch", .module_path = "packages/modules/src/net/fetch.zig", .spec_path = "packages/modules/module-specs/net/fetch.json" },
     .{ .specifier = "zttp:tool", .module_path = "packages/modules/src/http/tool.zig", .spec_path = "packages/modules/module-specs/http/tool.json" },
+    .{ .specifier = "zttp:sse", .module_path = "packages/modules/src/net/sse.zig", .spec_path = "packages/modules/module-specs/net/sse.json" },
 };
 
 comptime {
@@ -275,6 +278,7 @@ test "fromSpecifier finds known modules" {
     try std.testing.expect(fromSpecifier("zttp:url") != null);
     try std.testing.expect(fromSpecifier("zttp:id") != null);
     try std.testing.expect(fromSpecifier("zttp:queue") != null);
+    try std.testing.expect(fromSpecifier("zttp:sse") != null);
     try std.testing.expect(fromSpecifier("zttp-ext:math") == null);
     try std.testing.expect(fromSpecifier("zttp:unknown") == null);
 }
@@ -418,7 +422,7 @@ test "governance entries stay aligned with public built-ins" {
     try std.testing.expectEqualStrings("zttp:env", entries[0].specifier);
     try std.testing.expectEqualStrings("packages/modules/src/platform/env.zig", entries[0].module_path);
     try std.testing.expectEqualStrings("packages/modules/module-specs/platform/env.json", entries[0].spec_path);
-    try std.testing.expectEqualStrings("zttp:tool", entries[entries.len - 1].specifier);
+    try std.testing.expectEqualStrings("zttp:sse", entries[entries.len - 1].specifier);
 }
 
 /// Union `required_capabilities` across every module resolved from

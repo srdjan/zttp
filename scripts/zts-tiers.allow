@@ -116,6 +116,7 @@ zts module_binding/types.zig
 zts module_binding_adapter.zig
 zts modules/data/ledger.zig
 zts modules/data/sql.zig
+zts modules/http/tool.zig
 zts modules/internal/compiler.zig
 zts modules/internal/file_resolver.zig
 zts modules/internal/module_graph.zig

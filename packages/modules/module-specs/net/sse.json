@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "specifier": "zttp:sse",
+  "source": "packages/modules/src/net/sse.zig",
+  "requiredCapabilities": [],
+  "exports": [
+    {
+      "name": "sseEvents",
+      "effect": "none",
+      "returns": "result",
+      "params": [
+        "string",
+        "object"
+      ],
+      "paramNames": [
+        "body",
+        "bounds"
+      ],
+      "failureSeverity": "critical",
+      "laws": [
+        "pure"
+      ]
+    }
+  ]
+}

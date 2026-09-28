@@ -2,6 +2,7 @@
   "schemaVersion": 1,
   "specifier": "zttp:fetch",
   "source": "packages/modules/src/net/fetch.zig",
+  "summary": "Fetch an HTTP resource. In an agent turn, a refused fetch returns status 599 with error AgentTurnRefused and a details tag: deadline_exceeded, budget_exhausted, recorder_unavailable, outcome_unknown, tool_denied, or tool_failed.",
   "requiredCapabilities": [
     "network",
     "runtime_callback"

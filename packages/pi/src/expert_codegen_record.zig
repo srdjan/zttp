@@ -1389,7 +1389,11 @@ const record_corpus = [_]RecordCase{
         // time(s)" on the reserve-then-charge test. This is inferred to be the
         // third pass's stub gap with a different module call; the literal
         // counterfactual was not run for this draw.
-        .expect_committed_intent_pass = false,
+        // Sixth pass, 2026-09-28 (M5 A3/A4 re-record). The draft uses the
+        // literal ids "rsv-1" and "chg-1" inside the two step results. The
+        // committed runtime intent passes because neither value needs an
+        // unstubbed virtual-module call. The spec and prompt are unchanged.
+        .expect_committed_intent_pass = true,
         .prompt = "Create a durable handler in handler.ts using zttp:durable that runs a " ++
             "two-step order workflow via run() and step(): a `reserve` step returning " ++
             "{ reservationId }, then a `charge` step returning { chargeId }. Respond 201 " ++
@@ -1549,11 +1553,16 @@ const record_corpus = [_]RecordCase{
         // to run, and the 2026-08-27 draft did the task and was marked down for
         // a step name and an egress call nobody asked it to make.
         //
-        // 2026-09-27 (M5 A1 U2 re-record): the pin moves to false, and this
-        // time the model did fail the task. The draft calls
-        // `zttp:workflow`.`call("notify", ...)` inside the `run` callback, the
-        // nested dispatch the case exists to measure.
-        .expect_committed_intent_pass = false,
+        // 2026-09-27 (M5 A1 U2 re-record): the pin moved to false. The note
+        // then attributed the failure to call("notify", ...) being inside
+        // run(). The new passing draw also calls after the reserve step but
+        // inside run(), so that placement alone does not explain the old
+        // failure. The old cause needs a separate runtime measurement.
+        // 2026-09-28 (M5 A3/A4 re-record): the draft calls notify after the
+        // reserve step returns. The call remains inside run(), as the prompt
+        // requires, but it is outside the step callback. The committed
+        // runtime intent passes.
+        .expect_committed_intent_pass = true,
     },
     .{
         .name = "workflow-saga-compensation",

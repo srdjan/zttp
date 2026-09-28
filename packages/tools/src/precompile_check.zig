@@ -1030,7 +1030,8 @@ fn signatureCorpusDigest(allocator: std.mem.Allocator, out_members: *usize) ![32
 // Moved 2026-09-23 when zttp:tool added `toolCatalog(entries: object): undefined`.
 // Moved 2026-09-24 when zttp:tool added `toolInput(name: string, request: object): result` (M4 T7).
 // Moved 2026-09-27 when zttp:tool added agentPrompt() and callTool(callId, name, argsJson) (M5 A1 U2).
-const frozen_signature_digest = "07362b7d0298f41543fa10ea570405aeb2e8c57ce64a001094b5d9ce70a55b10";
+// Moved 2026-09-28 when A4 changed the fetch return signatures and A3 added sseEvents.
+const frozen_signature_digest = "ba9e2761e385d6581a34131185f7ec495014e6cc20b41f87c0a44da467ab1c92";
 
 test "frozen signature corpus: the gate has an input before it has a verdict" {
     // The floor. A corpus that is empty, or an emitter that writes nothing,

@@ -109,6 +109,80 @@ pub const Resolver = struct {
         return self.resolveDispatchDepth(allocator, callee, 0);
     }
 
+    /// Resolve one catalog route key to the function held by the stable
+    /// `routerMatch` table. The tool catalog uses the same `METHOD /path`
+    /// spelling as the table. A non-null result can still be unresolved: that
+    /// means a matching function was found, but another table shape or later
+    /// mutation prevents the caller from treating the answer as closed.
+    pub fn resolveRouteKey(
+        self: *const Resolver,
+        allocator: std.mem.Allocator,
+        route_key: []const u8,
+    ) !FunctionSet {
+        var result: FunctionSet = .{};
+        errdefer result.deinit(allocator);
+
+        const wanted = parseRouteKey(route_key) orelse {
+            result.unresolved = true;
+            return result;
+        };
+        var matched_count: usize = 0;
+        for (0..self.ir_view.nodeCount()) |idx_usize| {
+            const idx: NodeIndex = @intCast(idx_usize);
+            if (self.ir_view.getTag(idx) != .call) continue;
+            const call = self.ir_view.getCall(idx) orelse continue;
+            if (!self.isRouterMatchCallee(call.callee)) continue;
+            if (call.args_count == 0) {
+                result.unresolved = true;
+                continue;
+            }
+
+            const table_arg = self.ir_view.getListIndex(call.args_start, 0);
+            const table = self.resolveStableRouteTable(table_arg) orelse {
+                result.unresolved = true;
+                continue;
+            };
+            const route_object = self.ir_view.getObject(table) orelse {
+                result.unresolved = true;
+                continue;
+            };
+            for (0..route_object.properties_count) |property_index| {
+                const property_node = self.ir_view.getListIndex(
+                    route_object.properties_start,
+                    @intCast(property_index),
+                );
+                if (self.ir_view.getTag(property_node) != .object_property) {
+                    result.unresolved = true;
+                    continue;
+                }
+                const property = self.ir_view.getProperty(property_node) orelse {
+                    result.unresolved = true;
+                    continue;
+                };
+                const raw_key = self.propertyKey(property.key) orelse {
+                    result.unresolved = true;
+                    continue;
+                };
+                const found = parseRouteKey(raw_key) orelse {
+                    result.unresolved = true;
+                    continue;
+                };
+                if (!std.ascii.eqlIgnoreCase(wanted.method, found.method) or
+                    !std.mem.eql(u8, wanted.path, found.path)) continue;
+
+                matched_count += 1;
+                const function = self.resolveInitialFunctionNode(property.value) orelse {
+                    result.unresolved = true;
+                    continue;
+                };
+                try result.appendUnique(allocator, function);
+            }
+            if (self.routerMatchResultIsUnstable(idx)) result.unresolved = true;
+        }
+        if (matched_count != 1 or result.functions.items.len != 1) result.unresolved = true;
+        return result;
+    }
+
     fn resolveDispatchDepth(
         self: *const Resolver,
         allocator: std.mem.Allocator,
@@ -392,6 +466,22 @@ pub const Resolver = struct {
         return false;
     }
 
+    fn propertyKey(self: *const Resolver, node: NodeIndex) ?[]const u8 {
+        const tag = self.ir_view.getTag(node) orelse return null;
+        return switch (tag) {
+            .lit_string => blk: {
+                const string_idx = self.ir_view.getStringIdx(node) orelse break :blk null;
+                break :blk self.ir_view.getString(string_idx);
+            },
+            .identifier => blk: {
+                const binding = self.ir_view.getBinding(node) orelse break :blk null;
+                break :blk self.resolveAtomName(binding.name_atom);
+            },
+            // exhaustive: other expressions are not static route keys; the caller marks the route unresolved.
+            else => null,
+        };
+    }
+
     fn hasRouterMatchImport(self: *const Resolver) bool {
         for (self.facts.imports.items) |record| {
             if (record.resolution != .builtin) continue;
@@ -562,9 +652,13 @@ pub const Resolver = struct {
         return packBindingKey(binding.scope_id, binding.slot) == key;
     }
 
-    fn nodeContainsBinding(self: *const Resolver, node: NodeIndex, key: u32, depth: u8) bool {
+    fn nodeContainsBinding(self: *const Resolver, node: NodeIndex, key: u32, depth: usize) bool {
         if (node == null_node) return false;
-        if (depth >= max_resolution_depth) return true;
+        // Expression edges point to nodes that already exist, so this walk is
+        // acyclic. Use the parsed node count as the structural bound. The
+        // route-resolution depth bounds alias chains and must not make a deep
+        // object literal look as if it contains every binding.
+        if (depth >= self.ir_view.nodeCount()) return true;
         const tag = self.ir_view.getTag(node) orelse return true;
         if (tag == .identifier) return self.nodeIsBinding(node, key);
         return switch (tag) {
@@ -721,3 +815,16 @@ pub const Resolver = struct {
         return self.ir_view.getString(string_idx);
     }
 };
+
+const ParsedRouteKey = struct {
+    method: []const u8,
+    path: []const u8,
+};
+
+fn parseRouteKey(raw: []const u8) ?ParsedRouteKey {
+    const separator = std.mem.indexOfScalar(u8, raw, ' ') orelse return null;
+    if (separator == 0 or separator + 1 >= raw.len) return null;
+    const path = raw[separator + 1 ..];
+    if (path.len == 0 or path[0] != '/') return null;
+    return .{ .method = raw[0..separator], .path = path };
+}

@@ -3176,6 +3176,10 @@ fn buildContractWithPolicy(
                     if (resolved_module.type_checker) |*checker| owned_flow.?.setTypeChecker(checker);
                 }
                 if (declaration) |decl| try owned_flow.?.setDeclaration(decl);
+                // The accepted catalog is the runtime lowering authority.
+                // Install that same agent-to-tool mapping before the flow walk
+                // so callTool cannot drift from the catalog that will ship.
+                try owned_flow.?.setAcceptedToolCatalog(contract.tools.items);
                 const errors = try owned_flow.?.check(hf);
                 if (resolved) |resolved_module| {
                     if (resolved_module.type_checker) |*checker| try checker.ensureHealthy();

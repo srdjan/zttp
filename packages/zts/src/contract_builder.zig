@@ -2053,6 +2053,10 @@ pub const ContractBuilder = struct {
                     try self.refuseToolCatalog(contract, .agent_tool_is_agent, entry.name, 0, tool_name);
                     return;
                 }
+                if (routeHasPathParam(target.route)) {
+                    try self.refuseToolCatalog(contract, .agent_tool_route_param, entry.name, 0, target.route);
+                    return;
+                }
             }
         }
     }
@@ -6082,6 +6086,15 @@ fn parseRouteKey(raw: []const u8) ?ParsedRouteKey {
     };
 }
 
+fn routeHasPathParam(raw: []const u8) bool {
+    const route = parseRouteKey(raw) orelse return false;
+    var segments = std.mem.splitScalar(u8, route.path, '/');
+    while (segments.next()) |segment| {
+        if (segment.len > 0 and segment[0] == ':') return true;
+    }
+    return false;
+}
+
 fn contentTypeFor(idx: u8) []const u8 {
     return switch (idx) {
         0 => "application/json",
@@ -7531,6 +7544,17 @@ const tool_refusal_cases = [_]ToolRefusalCase{
     .{ .reason = .agent_tool_duplicate, .source = agentSource("{ tools: [\"ta\", \"ta\"], provider: " ++ agent_test_provider ++ ", limits: " ++ agent_test_limits ++ " }") },
     .{ .reason = .agent_tool_unknown, .source = agentSource("{ tools: [\"missing\"], provider: " ++ agent_test_provider ++ ", limits: " ++ agent_test_limits ++ " }") },
     .{ .reason = .agent_tool_is_agent, .source = agentSource("{ tools: [\"assistant\"], provider: " ++ agent_test_provider ++ ", limits: " ++ agent_test_limits ++ " }") },
+    .{
+        .reason = .agent_tool_route_param,
+        .source = toolSource(
+            "function assistant(req) { return Response.json({}); }",
+            "\"POST /tools/:id\": a, \"POST /agent\": assistant",
+            toolCatalogOf(
+                "ta: { route: \"POST /tools/:id\", description: \"d\", input: \"In\", output: \"Out\", maxInputBytes: 64 }, " ++
+                    agentEntry("assistant", "POST /agent", agent_test_value),
+            ),
+        ),
+    },
     .{ .reason = .agent_provider_not_literal, .source = agentSource("{ tools: [\"ta\"], provider: 7, limits: " ++ agent_test_limits ++ " }") },
     .{ .reason = .agent_provider_field_missing, .source = agentSource("{ tools: [\"ta\"], provider: { endpoint: \"https://api.deepseek.com\" }, limits: " ++ agent_test_limits ++ " }") },
     .{ .reason = .agent_provider_field_unknown, .source = agentSource("{ tools: [\"ta\"], provider: { endpoint: \"https://api.deepseek.com\", credential: \"provider\", model: \"x\" }, limits: " ++ agent_test_limits ++ " }") },

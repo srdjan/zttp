@@ -78,6 +78,7 @@ The extension SDK and runtime bridge are revision-locked. Native extensions must
 | `zttp:scope` | `runtime_callback` | Request-scoped lifecycle hooks call back into the runtime at request end. |
 | `zttp:service` | `network`, `filesystem`, `runtime_callback` | Reads cross-handler service contracts from disk and dispatches via the runtime. |
 | `zttp:sql` | `sqlite`, `policy_check` | SQLite connection plus query-name allowlist check. |
+| `zttp:tool` | `runtime_callback` | `callTool` dispatches through the runtime. The other exports narrow their capability set to none. |
 | `zttp:workflow` | `runtime_callback` | `call`, `follow`, `fanout`, and `saga` dispatch to co-located sub-handlers through the runtime. |
 
 ### Modules that declare no capabilities
@@ -91,9 +92,9 @@ These modules are pure compute - string manipulation, parsing, URL encoding, str
 - `zttp:json`
 - `zttp:result`
 - `zttp:router`
+- `zttp:sse`
 - `zttp:text`
 - `zttp:time`
-- `zttp:tool`
 - `zttp:url`
 - `zttp:validate`
 
