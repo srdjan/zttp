@@ -1591,6 +1591,7 @@ Rules:
 
 - `parseJson` validates syntax, depth, and configured input size,
 - `parseJsonBytes` first validates UTF-8 and then applies the same JSON rules,
+- a raw byte from 0x00 through 0x1F inside a string is `invalid-syntax` at that byte's offset,
 - duplicate object keys are rejected,
 - object insertion order follows wire order,
 - the checker admits `stringifyJson<T>` only when `T` contains JSON scalars,

@@ -192,6 +192,7 @@ const Parser = struct {
                 self.pos += 1;
                 return out.toOwnedSlice(self.ctx.allocator) catch return error.OutOfMemory;
             }
+            if (c < 0x20) return self.fail(.invalid_syntax, self.pos);
             if (c != '\\') {
                 out.append(self.ctx.allocator, c) catch return error.OutOfMemory;
                 self.pos += 1;
@@ -698,6 +699,85 @@ fn resultField(h: *Harness, result: JSValue, name: []const u8) !JSValue {
     const pool = h.ctx.hidden_class_pool orelse return error.TestNoPool;
     const atom = try h.ctx.atoms.intern(name);
     return payload.getProperty(pool, atom) orelse JSValue.undefined_val;
+}
+
+fn expectInvalidSyntaxAt(h: *Harness, result: JSValue, offset: i32) !void {
+    const outer = helpers.getObject(result) orelse return error.TestExpectedResult;
+    try testing.expect(!outer.inline_slots[JSObject.Slots.RESULT_IS_OK].isTrue());
+    const kind = helpers.getStringDataCtx(try resultField(h, result, "kind"), h.ctx) orelse
+        return error.TestExpectedString;
+    try testing.expectEqualStrings("invalid-syntax", kind);
+    try testing.expectEqual(offset, (try resultField(h, result, "offset")).getInt());
+}
+
+fn expectOk(result: JSValue) !void {
+    const outer = helpers.getObject(result) orelse return error.TestExpectedResult;
+    try testing.expect(outer.inline_slots[JSObject.Slots.RESULT_IS_OK].isTrue());
+}
+
+test "parseJson and parseJsonBytes refuse raw controls in keys and values at their offsets" {
+    const h = try harness();
+    defer releaseHarness(h);
+
+    var control: u8 = 0;
+    while (control < 0x20) : (control += 1) {
+        const key_text = [_]u8{ '{', '"', control, '"', ':', '0', '}' };
+        try expectInvalidSyntaxAt(
+            h,
+            try callExport(h, "parseJson", &.{try h.ctx.createString(&key_text)}),
+            2,
+        );
+        try expectInvalidSyntaxAt(
+            h,
+            try callExport(h, "parseJsonBytes", &.{JSValue.fromPtr(try bytes_mod.fromSlice(h.ctx, &key_text))}),
+            2,
+        );
+
+        const value_text = [_]u8{ '{', '"', 'a', '"', ':', '"', control, '"', '}' };
+        try expectInvalidSyntaxAt(
+            h,
+            try callExport(h, "parseJson", &.{try h.ctx.createString(&value_text)}),
+            6,
+        );
+        try expectInvalidSyntaxAt(
+            h,
+            try callExport(h, "parseJsonBytes", &.{JSValue.fromPtr(try bytes_mod.fromSlice(h.ctx, &value_text))}),
+            6,
+        );
+    }
+}
+
+test "parseJson and parseJsonBytes accept space and DEL in keys and values" {
+    const h = try harness();
+    defer releaseHarness(h);
+
+    for ([_]u8{ 0x20, 0x7F }) |accepted| {
+        const key_text = [_]u8{ '{', '"', accepted, '"', ':', '0', '}' };
+        try expectOk(try callExport(h, "parseJson", &.{try h.ctx.createString(&key_text)}));
+        try expectOk(try callExport(h, "parseJsonBytes", &.{JSValue.fromPtr(try bytes_mod.fromSlice(h.ctx, &key_text))}));
+
+        const value_text = [_]u8{ '{', '"', 'a', '"', ':', '"', accepted, '"', '}' };
+        try expectOk(try callExport(h, "parseJson", &.{try h.ctx.createString(&value_text)}));
+        try expectOk(try callExport(h, "parseJsonBytes", &.{JSValue.fromPtr(try bytes_mod.fromSlice(h.ctx, &value_text))}));
+    }
+}
+
+test "parseJson and parseJsonBytes decode escaped controls" {
+    const h = try harness();
+    defer releaseHarness(h);
+
+    const text = "\"\\n\\t\\u0001\"";
+    const from_text = try callExport(h, "parseJson", &.{try h.ctx.createString(text)});
+    const from_bytes = try callExport(h, "parseJsonBytes", &.{JSValue.fromPtr(try bytes_mod.fromSlice(h.ctx, text))});
+
+    const expected = [_]u8{ '\n', '\t', 0x01 };
+    for ([_]JSValue{ from_text, from_bytes }) |result| {
+        const outer = helpers.getObject(result) orelse return error.TestExpectedResult;
+        try testing.expect(outer.inline_slots[JSObject.Slots.RESULT_IS_OK].isTrue());
+        const decoded = helpers.getStringDataCtx(outer.inline_slots[JSObject.Slots.RESULT_VALUE], h.ctx) orelse
+            return error.TestExpectedString;
+        try testing.expectEqualSlices(u8, &expected, decoded);
+    }
 }
 
 test "parseJsonBytes over UTF-8 agrees with parseJson over the same text" {

@@ -1630,6 +1630,23 @@ test "requestJson applies the body rules first and the JSON rules after" {
     );
 }
 
+test "requestJson refuses a raw newline inside a JSON string" {
+    const rh = try readerHarness();
+    defer releaseReaderHarness(rh);
+
+    const result = try requestJson(@ptrCast(rh.ctx), value.JSValue.undefined_val, &.{
+        try fakeRequest(rh, "{\"a\":\"line\nbreak\"}"),
+    });
+    try std.testing.expect(!isOk(result));
+    const kind = helpers.getStringDataCtx(try readerField(rh, result, "kind"), rh.ctx) orelse
+        return error.TestExpectedString;
+    try std.testing.expectEqualStrings(
+        "invalid-syntax",
+        kind,
+    );
+    try std.testing.expectEqual(@as(i32, 10), (try readerField(rh, result, "offset")).getInt());
+}
+
 test "a Dict serializes its entries rather than as an empty object" {
     // `writeJson` walked hidden-class properties and a Dict has none, so
     // `Response.json({ config: d })` served `{"config":{}}` - every key and
