@@ -1,6 +1,7 @@
 # M5 A2 design note: turn state, the turn recorder, and the turn cap
 
-Status: accepted by the owner on 2026-09-27, with the recommended answer to each
+Status: implemented 2026-09-27; U1 to U3 complete, evidence in section 12.
+Accepted by the owner on 2026-09-27, with the recommended answer to each
 question in section 9 (section 10 records them). Revised once before acceptance
 after a design critique (run on Opus; Fable credits were exhausted) and a
 citation check. Unit A2 of the
@@ -364,3 +365,24 @@ the kernel decoder.
   recorder with its settings, readiness, and replay sink, the cap, the dev
   values, and the tag set in the `zttp:fetch` spec and the user guide.
 - **U3. Close.** The full gate, C-A2 evidence in this note.
+
+## 12. C-A2 evidence
+
+A2 closed on 2026-09-27 at `d272a678`. `bash scripts/verify.sh` exited 0 ("all
+CI test-job steps passed"), and `zig build test`, `test-zruntime`,
+`test-server`, `test-cli`, `test-expert-app`, `test-reference-tools`,
+`test-runtime-purity`, `test-proof-swallow`, `test-module-boundary`, and fmt each
+exited 0 on the committed trees.
+
+- U1 (`85690496`): `providerRequestBytes` through the builder, contract version
+  24, and `ZTCAT1` schema 5; removing the kernel guard or the builder maximum
+  each failed a test.
+- U2 (`8f2442bc`): every C-A2 case in section 8 through a loopback provider peer
+  that counts connections and requests exactly; the census over refusal tags
+  and outcome classes; removing the pre-record, the latch check, the terminal
+  precedence, or the turn-deadline cap on the fetch budget each failed a test.
+  The implementation was written in a sandbox that denied sockets; its socket
+  tests were first run on the host, where three test defects and one
+  implementation defect surfaced and were fixed before commit.
+- `9e8f54ef`: a body shorter than its Content-Length is refused on every fetch.
+- No codegen cassette moved in A2.
