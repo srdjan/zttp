@@ -11,7 +11,7 @@ index when a plan starts, closes, or moves to the archive.
 | [M5 A2: turn state, recorder, and cap](2026-09-27-m5-a2-turn-state-design.md) | Implemented 2026-09-27; U1 to U3 complete | Owner accepted the design and answered its eight questions |
 | [M5 A3: SSE framer and strict JSON strings](2026-09-27-m5-a3-sse-framer-design.md) | Implemented 2026-09-28; U1 to U3 complete | Owner accepted the design and answered its five questions |
 | [M5 A4: callTool](2026-09-28-m5-a4-call-tool-design.md) | Implemented 2026-09-28 | Owner accepted the four design decisions |
-| [M5 A5: buffered reference agent](2026-09-28-m5-a5-reference-agent-design.md) | Draft 2026-09-28; owner decisions open | M5 contract requires acceptance before A5 code starts |
+| [M5 A5: buffered reference agent](2026-09-28-m5-a5-reference-agent-design.md) | Accepted 2026-09-28; next to implement in a fresh session | Owner directed A5 as the next unit with the note's recommended decisions |
 | [Proof-checker rederive review](2026-09-24-proof-checker-rederive-review.md) | Implemented 2026-09-25; Phases 0 to 4 committed, results and section 7 leftovers at the end of the plan | Owner accepted the plan and answered its four decisions |
 | [M4: release contract for scoped tool routes](2026-09-22-m4-release-contract.md) | Accepted 2026-09-22; T1a to T7 complete | Owner accepted the contract on 2026-09-22 |
 | [M4 T7: reference tools and documentation](2026-09-24-m4-t7-reference-tools-design.md) | Implemented 2026-09-24; U1 to U3 complete | Owner accepted the design and answered its six questions |

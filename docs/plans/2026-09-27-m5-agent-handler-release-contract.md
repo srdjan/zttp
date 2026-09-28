@@ -6,8 +6,10 @@ accepts before its code starts, as in M4. A1 to A4 are complete
 ([A1 note](2026-09-27-m5-a1-agent-entry-design.md), section 11;
 [A2 note](2026-09-27-m5-a2-turn-state-design.md), section 12;
 [A3 note](2026-09-27-m5-a3-sse-framer-design.md), section 10;
-[A4 note](2026-09-28-m5-a4-call-tool-design.md), section 8). Two review rounds (a design critique and
-a citation check) are folded in.
+[A4 note](2026-09-28-m5-a4-call-tool-design.md), section 8). The
+[A5 design note](2026-09-28-m5-a5-reference-agent-design.md) was accepted on
+2026-09-28 and is next to implement in a fresh session. Two review rounds (a
+design critique and a citation check) are folded in.
 Baseline: local `main` at `e6f33dfc`. This contract resumes the work that the
 [M4 release contract](2026-09-22-m4-release-contract.md) parked, under the
 resume conditions of its section "Parked work and conditions to resume". It

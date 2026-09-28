@@ -1,9 +1,10 @@
 # M5 A5 design note: the buffered reference agent
 
-Status: draft for owner review, 2026-09-28. No A5 code is authorized by this
-note until the owner accepts its decisions and the wider file scope in section
-10. Unit A5 of the [M5 release contract](2026-09-27-m5-agent-handler-release-contract.md)
-uses check C-A5. Code references are to local `main` at `2ebab8e1`.
+Status: accepted for implementation in the next session on 2026-09-28. The
+owner directed A5 to be the next implementation unit. The recommended answers
+to Q1 to Q3 in section 10 govern that work. Unit A5 of the
+[M5 release contract](2026-09-27-m5-agent-handler-release-contract.md) uses
+check C-A5. Code references are to local `main` at `2ebab8e1`.
 
 ## 1. What A5 must deliver
 
@@ -314,7 +315,11 @@ after these compile and runtime paths are established. Add the loopback corpus,
 R22 report, and user guide last. Commit each complete unit separately. Do not
 run a live DeepSeek pilot in A5; A6 owns that run and its approval.
 
-## 10. Decisions for the owner
+## 10. Accepted decisions
+
+The owner selected the recommended answer to Q1 to Q3 on 2026-09-28 by
+directing this note to be the next implementation unit. The alternatives stay
+here to record the choice.
 
 1. **Q1, A5 scope.** Accept the agent-only catalog view, turn ID, and
    whole-round preflight and the wider owned-file list above (recommended),
@@ -328,6 +333,5 @@ run a live DeepSeek pilot in A5; A6 owns that run and its approval.
    completion reasons (recommended), or add a provider-specific reasoning
    transcript contract and its fixtures before the adapter is accepted.
 
-These are design choices, not measured deployment values. Acceptance of this
-note authorizes A5 implementation under the M5 release contract; A6 still
-owns the limits and live pilot.
+These are design choices, not measured deployment values. A6 still owns the
+limits and live pilot.
