@@ -1024,6 +1024,13 @@ fn readResponseBody(response: *std.http.Client.Response, allocator: std.mem.Allo
         allocator.free(body);
         return error.StreamTooLong;
     }
+    // std's Content-Length reader reports a peer close before the declared
+    // length as a clean EndOfStream, which allocRemaining accepts as the end.
+    // A body still owed bytes was not read in full, so it is not a response.
+    if (response.request.reader.state == .body_remaining_content_length) {
+        allocator.free(body);
+        return error.HttpContentLengthTruncated;
+    }
     return body;
 }
 
