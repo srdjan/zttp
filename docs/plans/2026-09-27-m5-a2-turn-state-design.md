@@ -1,8 +1,9 @@
 # M5 A2 design note: turn state, the turn recorder, and the turn cap
 
-Status: proposed on 2026-09-27, revised once after a design critique (run on
-Opus; Fable credits were exhausted) and a citation check. It needs the owner's
-answers to section 9 before code starts. Unit A2 of the
+Status: accepted by the owner on 2026-09-27, with the recommended answer to each
+question in section 9 (section 10 records them). Revised once before acceptance
+after a design critique (run on Opus; Fable credits were exhausted) and a
+citation check. Unit A2 of the
 [M5 release contract](2026-09-27-m5-agent-handler-release-contract.md) is
 written against the approach this note names; check C-A2 is its completion
 check.
@@ -331,3 +332,22 @@ These defaults are recommended and are not questions unless the owner objects:
 records hold metadata only; the 512-byte record ceiling; the 128-bit random turn
 identity; the terminal precedence of section 5; readiness 503 while the recorder
 is unhealthy; the pool reserve of one runtime until A6.
+
+## 10. Decisions
+
+The owner accepted the recommended answer to Q1 to Q8 on 2026-09-27, and the
+defaults listed after them. The contract's A2 file list gains `server.zig`,
+`http_types.zig`, `handler_instance.zig`, and, for Q5, A1's carriage files and
+the kernel decoder.
+
+## 11. Implementation units
+
+- **U1. The provider request limit (Q5).** `providerRequestBytes` in the agent
+  literal, the builder refusals and census cases, contract version 24, `ZTCAT1`
+  schema 5 in the encoder and the kernel decoder with mutant rows, the runtime
+  lowering and cross-check, and the consumer-contract section 4.6 text.
+- **U2. Turn state, recorder, and cap.** Sections 3 to 7: the turn state and
+  hook, the phase marker and classification, the terminal precedence, the
+  recorder with its settings, readiness, and replay sink, the cap, the dev
+  values, and the tag set in the `zttp:fetch` spec and the user guide.
+- **U3. Close.** The full gate, C-A2 evidence in this note.

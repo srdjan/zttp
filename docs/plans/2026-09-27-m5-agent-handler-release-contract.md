@@ -229,7 +229,9 @@ new `packages/runtime/src/turn_state.zig`, a new
 `packages/modules/src/net/fetch.zig` and its module spec (new refusal tags for a
 latched or over-budget fetch), `runtime_config.zig` and `runtime_cli.zig` (the
 cap), and `scripts/module-boundary.allow` if the recorder reaches a `zts`
-internal module.
+internal module. The A2 design note (accepted 2026-09-27) adds `server.zig`,
+`http_types.zig`, `handler_instance.zig`, and A1's carriage files for a seventh
+agent limit, `providerRequestBytes`.
 
 - The turn state holds the server-created turn identity, the round ordinal,
   the call identities seen in the turn, the remaining budgets, and a latch.
