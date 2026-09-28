@@ -15,9 +15,9 @@ const ToolEntry = zts.handler_contract.ToolEntry;
 const tool_schema = zts.tool_schema;
 
 pub const magic = "ZTCAT1\x00\x00";
-/// Schema 4 (M5 A1) prefixes each entry with its kind and carries agent entries.
+/// Schema 5 (M5 A2) adds the provider request byte limit to agent entries.
 /// The kernel decoder accepts this one schema only.
-pub const schema_version: u16 = 4;
+pub const schema_version: u16 = 5;
 
 comptime {
     if (schema_version != pcc.tool_catalog.schema_version) @compileError("ZTCAT1 encoder and kernel decoder disagree on the schema");
@@ -28,6 +28,7 @@ comptime {
     if (pcc.tool_catalog.max_agent_argument_bytes != zts.handler_contract.max_agent_argument_bytes) @compileError("ZTCAT1 agent argument bounds disagree");
     if (pcc.tool_catalog.max_agent_result_bytes != zts.handler_contract.max_agent_result_bytes) @compileError("ZTCAT1 agent result bounds disagree");
     if (pcc.tool_catalog.max_agent_turn_deadline_ms != zts.handler_contract.max_agent_turn_deadline_ms) @compileError("ZTCAT1 agent deadline bounds disagree");
+    if (pcc.tool_catalog.max_agent_provider_request_bytes != zts.handler_contract.max_agent_provider_request_bytes) @compileError("ZTCAT1 agent provider request bounds disagree");
 }
 
 pub const EncodeError = std.mem.Allocator.Error || error{
@@ -83,6 +84,7 @@ pub fn encode(allocator: std.mem.Allocator, tools: []const ToolEntry) EncodeErro
             try appendInt(allocator, &out, u32, agent.limits.argument_bytes);
             try appendInt(allocator, &out, u32, agent.limits.result_bytes);
             try appendInt(allocator, &out, u32, agent.limits.turn_deadline_ms);
+            try appendInt(allocator, &out, u32, agent.limits.provider_request_bytes);
             continue;
         }
         try appendString(allocator, &out, tool.input_schema_name);
@@ -217,6 +219,7 @@ fn testAgentEntry(allocator: std.mem.Allocator, name: []const u8, route: []const
             .argument_bytes = 4096,
             .result_bytes = 16384,
             .turn_deadline_ms = 20000,
+            .provider_request_bytes = 32768,
         },
     };
     errdefer agent.deinit(allocator);
@@ -269,7 +272,7 @@ test "entries are sorted, routes split, and schemas canonical in the encoding" {
     try testing.expect((try it.next()) == null);
 }
 
-test "schema 4 inserts only the kind byte before a tool's schema 3 body" {
+test "schema 5 keeps a tool's schema 4 body" {
     const allocator = testing.allocator;
     var tools = [_]ToolEntry{try testEntry(allocator, "alpha", "POST /a", &.{})};
     defer tools[0].deinit(allocator);
@@ -279,8 +282,9 @@ test "schema 4 inserts only the kind byte before a tool's schema 3 body" {
     var legacy_buf: [1024]u8 = undefined;
     var legacy = pcc.tool_catalog.test_support.Writer{ .buf = &legacy_buf };
     legacy.raw(magic);
-    legacy.int(u16, 3);
+    legacy.int(u16, 4);
     legacy.int(u16, 1);
+    legacy.int(u8, @intFromEnum(pcc.tool_catalog.EntryKind.tool));
     legacy.string("alpha");
     legacy.string("POST");
     legacy.string("/a");
@@ -295,11 +299,10 @@ test "schema 4 inserts only the kind byte before a tool's schema 3 body" {
     legacy.int(u16, 0);
     legacy.int(u16, 0);
 
-    try testing.expectEqual(@as(u8, @intFromEnum(pcc.tool_catalog.EntryKind.tool)), bytes[pcc.tool_catalog.header_size]);
     try testing.expectEqualSlices(
         u8,
         legacy.bytes()[pcc.tool_catalog.header_size..],
-        bytes[pcc.tool_catalog.header_size + 1 ..],
+        bytes[pcc.tool_catalog.header_size..],
     );
 }
 
@@ -341,6 +344,7 @@ test "an agent entry encodes its exports tools provider and limits" {
     try testing.expectEqual(@as(u32, 4096), agent.limits.argument_bytes);
     try testing.expectEqual(@as(u32, 16384), agent.limits.result_bytes);
     try testing.expectEqual(@as(u32, 20000), agent.limits.turn_deadline_ms);
+    try testing.expectEqual(@as(u32, 32768), agent.limits.provider_request_bytes);
 }
 
 test "the encoding does not depend on source order or schema spelling" {

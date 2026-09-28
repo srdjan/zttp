@@ -87,6 +87,7 @@ pub const max_agent_tool_calls = contract_types.max_agent_tool_calls;
 pub const max_agent_argument_bytes = contract_types.max_agent_argument_bytes;
 pub const max_agent_result_bytes = contract_types.max_agent_result_bytes;
 pub const max_agent_turn_deadline_ms = contract_types.max_agent_turn_deadline_ms;
+pub const max_agent_provider_request_bytes = contract_types.max_agent_provider_request_bytes;
 pub const ToolAuth = contract_types.ToolAuth;
 /// Credential references (M4 T6): the canonical type and its loader.
 pub const credential_ref = contract_types.credential_ref;
@@ -1273,7 +1274,7 @@ test "writeContractJson minimal" {
     output = aw.toArrayList();
 
     // Should be valid-looking JSON with expected fields
-    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"version\": 23") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"version\": 24") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"handler.ts\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"modules\": []") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"serviceCalls\": []") != null);
@@ -2239,7 +2240,7 @@ test "a contract with no declaration writes an empty classifications array" {
     defer out.deinit();
     try writeContractJson(&contract, &out.writer);
     try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"classifications\": [],") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"version\": 23,") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"version\": 24,") != null);
 }
 
 test "a contract with no ceiling writes ceiling null and reads it back as null" {

@@ -14,7 +14,7 @@
 //!
 //! ```text
 //! magic            8 bytes  "ZTCAT1\0\0"
-//! schema           u16      4
+//! schema           u16      5
 //! entry_count      u16      1..64
 //! entry, entry_count times, strictly increasing by name bytes:
 //!   kind             u8      0 tool, 1 agent
@@ -49,6 +49,7 @@
 //!     argument_bytes   u32     1..1048576
 //!     result_bytes     u32     1..1048576
 //!     turn_deadline_ms u32     1..600000
+//!     provider_request_bytes u32     1..8388608
 //! trailing bytes: refused
 //! ```
 //!
@@ -59,8 +60,8 @@
 //! the field in the compiled schema it validates with.
 //!
 //! Schema 2 (M4 T5) added scope fields. Schema 3 (M4 T6) added credential
-//! names. Schema 4 (M5 A1) adds the entry kind and agent entry layout. Older
-//! schemas are refused.
+//! names. Schema 4 (M5 A1) added the entry kind and agent entry layout. Schema
+//! 5 (M5 A2) adds the provider request byte limit. Older schemas are refused.
 
 const std = @import("std");
 const residual = @import("residual.zig");
@@ -69,7 +70,7 @@ const wire = @import("wire.zig");
 const Reader = wire.Reader;
 
 pub const magic = "ZTCAT1\x00\x00";
-pub const schema_version: u16 = 4;
+pub const schema_version: u16 = 5;
 pub const header_size: usize = magic.len + 2 + 2;
 
 pub const digest_domain = "zttp-tool-catalog-v1";
@@ -96,6 +97,7 @@ pub const max_agent_tool_calls: u32 = 256;
 pub const max_agent_argument_bytes: u32 = max_max_input_bytes;
 pub const max_agent_result_bytes: u32 = max_max_input_bytes;
 pub const max_agent_turn_deadline_ms: u32 = 600000;
+pub const max_agent_provider_request_bytes: u32 = 8388608;
 
 /// Every refusal the decoder can report. Closed, and each member names one
 /// distinct defect so a diagnostic can say which rule the bytes broke.
@@ -144,6 +146,7 @@ pub const DecodeError = error{
     AgentArgumentBytesOutOfRange,
     AgentResultBytesOutOfRange,
     AgentTurnDeadlineMsOutOfRange,
+    AgentProviderRequestBytesOutOfRange,
     InvalidUtf8,
     TrailingData,
 };
@@ -169,6 +172,7 @@ pub const AgentLimits = struct {
     argument_bytes: u32,
     result_bytes: u32,
     turn_deadline_ms: u32,
+    provider_request_bytes: u32,
 };
 
 pub const ExportIterator = wire.Iterator(Export, DecodeError, readExport);
@@ -267,6 +271,7 @@ fn readAgent(reader: *Reader) DecodeError!Agent {
         .argument_bytes = try reader.int(u32),
         .result_bytes = try reader.int(u32),
         .turn_deadline_ms = try reader.int(u32),
+        .provider_request_bytes = try reader.int(u32),
     };
     return .{ .tools = tools, .provider_endpoint = provider_endpoint, .provider_credential = provider_credential, .limits = limits };
 }
@@ -391,6 +396,7 @@ fn validateEntry(entry: Entry) DecodeError!void {
         if (agent.limits.argument_bytes == 0 or agent.limits.argument_bytes > max_agent_argument_bytes) return error.AgentArgumentBytesOutOfRange;
         if (agent.limits.result_bytes == 0 or agent.limits.result_bytes > max_agent_result_bytes) return error.AgentResultBytesOutOfRange;
         if (agent.limits.turn_deadline_ms == 0 or agent.limits.turn_deadline_ms > max_agent_turn_deadline_ms) return error.AgentTurnDeadlineMsOutOfRange;
+        if (agent.limits.provider_request_bytes == 0 or agent.limits.provider_request_bytes > max_agent_provider_request_bytes) return error.AgentProviderRequestBytesOutOfRange;
     }
 }
 
@@ -478,6 +484,7 @@ pub const test_support = struct {
             .argument_bytes = 4096,
             .result_bytes = 16384,
             .turn_deadline_ms = 20000,
+            .provider_request_bytes = 32768,
         },
     };
 
@@ -524,6 +531,7 @@ pub const test_support = struct {
             w.int(u32, agent.limits.argument_bytes);
             w.int(u32, agent.limits.result_bytes);
             w.int(u32, agent.limits.turn_deadline_ms);
+            w.int(u32, agent.limits.provider_request_bytes);
             return;
         }
         w.string(entry.input_name);
@@ -688,6 +696,7 @@ test "an agent at every limit maximum decodes through its zero-copy view" {
         .argument_bytes = max_agent_argument_bytes,
         .result_bytes = max_agent_result_bytes,
         .turn_deadline_ms = max_agent_turn_deadline_ms,
+        .provider_request_bytes = max_agent_provider_request_bytes,
     };
     const entries = [_]test_support.SampleEntry{
         .{
@@ -846,6 +855,7 @@ const DecodeSite = enum {
     agent_argument_bytes,
     agent_result_bytes,
     agent_turn_deadline_ms,
+    agent_provider_request_bytes,
 };
 
 const Case = struct {
@@ -913,11 +923,20 @@ fn schemaTwo(w: *test_support.Writer) void {
     test_support.writeEntry(w, test_support.sample_entries[0]);
 }
 
-/// Schema 3 is the immediately previous layout and is refused outright.
+/// Schema 3, the layout before entry kinds and agents, is refused too.
 fn schemaThree(w: *test_support.Writer) void {
     @setRuntimeSafety(true);
     w.raw(magic);
     w.int(u16, 3);
+    w.int(u16, 1);
+    test_support.writeEntry(w, test_support.sample_entries[0]);
+}
+
+/// Schema 4 is the immediately previous layout and is refused outright.
+fn schemaFour(w: *test_support.Writer) void {
+    @setRuntimeSafety(true);
+    w.raw(magic);
+    w.int(u16, 4);
     w.int(u16, 1);
     test_support.writeEntry(w, test_support.sample_entries[0]);
 }
@@ -1024,6 +1043,7 @@ const valid_agent_limits = AgentLimits{
     .argument_bytes = 4096,
     .result_bytes = 16384,
     .turn_deadline_ms = 20000,
+    .provider_request_bytes = 32768,
 };
 const valid_z_tool = test_support.SampleEntry{ .name = "z", .path = "/z" };
 
@@ -1068,6 +1088,7 @@ const cases = [_]Case{
     .{ .site = .schema, .expected = error.UnsupportedSchema, .custom = unsupportedSchema },
     .{ .site = .schema, .expected = error.UnsupportedSchema, .custom = schemaTwo },
     .{ .site = .schema, .expected = error.UnsupportedSchema, .custom = schemaThree },
+    .{ .site = .schema, .expected = error.UnsupportedSchema, .custom = schemaFour },
     .{ .site = .entry_kind, .expected = error.EntryKindInvalid, .entries = &.{.{ .kind = 2, .name = "a", .path = "/x" }} },
     .{ .site = .entry_count, .expected = error.EntryCountOutOfRange, .custom = zeroEntries },
     .{ .site = .entry_count, .expected = error.EntryCountOutOfRange, .custom = tooManyEntries },
@@ -1195,6 +1216,7 @@ const cases = [_]Case{
         .argument_bytes = 4096,
         .result_bytes = 16384,
         .turn_deadline_ms = 20000,
+        .provider_request_bytes = 32768,
     }), valid_z_tool } },
     .{ .site = .agent_rounds, .expected = error.AgentRoundsOutOfRange, .entries = &.{ sampleAgentEntry("a", "/agent", &.{"z"}, .{
         .rounds = max_agent_rounds + 1,
@@ -1203,6 +1225,7 @@ const cases = [_]Case{
         .argument_bytes = 4096,
         .result_bytes = 16384,
         .turn_deadline_ms = 20000,
+        .provider_request_bytes = 32768,
     }), valid_z_tool } },
     .{ .site = .agent_tool_calls, .expected = error.AgentToolCallsOutOfRange, .entries = &.{ sampleAgentEntry("a", "/agent", &.{"z"}, .{
         .rounds = 4,
@@ -1211,6 +1234,7 @@ const cases = [_]Case{
         .argument_bytes = 4096,
         .result_bytes = 16384,
         .turn_deadline_ms = 20000,
+        .provider_request_bytes = 32768,
     }), valid_z_tool } },
     .{ .site = .agent_tool_calls, .expected = error.AgentToolCallsOutOfRange, .entries = &.{ sampleAgentEntry("a", "/agent", &.{"z"}, .{
         .rounds = 4,
@@ -1219,6 +1243,7 @@ const cases = [_]Case{
         .argument_bytes = 4096,
         .result_bytes = 16384,
         .turn_deadline_ms = 20000,
+        .provider_request_bytes = 32768,
     }), valid_z_tool } },
     .{ .site = .agent_tool_calls_per_round, .expected = error.AgentToolCallsPerRoundOutOfRange, .entries = &.{ sampleAgentEntry("a", "/agent", &.{"z"}, .{
         .rounds = 4,
@@ -1227,6 +1252,7 @@ const cases = [_]Case{
         .argument_bytes = 4096,
         .result_bytes = 16384,
         .turn_deadline_ms = 20000,
+        .provider_request_bytes = 32768,
     }), valid_z_tool } },
     .{ .site = .agent_tool_calls_per_round, .expected = error.AgentToolCallsPerRoundOutOfRange, .entries = &.{ sampleAgentEntry("a", "/agent", &.{"z"}, .{
         .rounds = 4,
@@ -1235,6 +1261,7 @@ const cases = [_]Case{
         .argument_bytes = 4096,
         .result_bytes = 16384,
         .turn_deadline_ms = 20000,
+        .provider_request_bytes = 32768,
     }), valid_z_tool } },
     .{ .site = .agent_tool_calls_relation, .expected = error.AgentToolCallsPerRoundExceedsToolCalls, .entries = &.{ sampleAgentEntry("a", "/agent", &.{"z"}, .{
         .rounds = 4,
@@ -1243,6 +1270,7 @@ const cases = [_]Case{
         .argument_bytes = 4096,
         .result_bytes = 16384,
         .turn_deadline_ms = 20000,
+        .provider_request_bytes = 32768,
     }), valid_z_tool } },
     .{ .site = .agent_argument_bytes, .expected = error.AgentArgumentBytesOutOfRange, .entries = &.{ sampleAgentEntry("a", "/agent", &.{"z"}, .{
         .rounds = 4,
@@ -1251,6 +1279,7 @@ const cases = [_]Case{
         .argument_bytes = max_agent_argument_bytes + 1,
         .result_bytes = 16384,
         .turn_deadline_ms = 20000,
+        .provider_request_bytes = 32768,
     }), valid_z_tool } },
     .{ .site = .agent_argument_bytes, .expected = error.AgentArgumentBytesOutOfRange, .entries = &.{ sampleAgentEntry("a", "/agent", &.{"z"}, .{
         .rounds = 4,
@@ -1259,6 +1288,7 @@ const cases = [_]Case{
         .argument_bytes = 0,
         .result_bytes = 16384,
         .turn_deadline_ms = 20000,
+        .provider_request_bytes = 32768,
     }), valid_z_tool } },
     .{ .site = .agent_result_bytes, .expected = error.AgentResultBytesOutOfRange, .entries = &.{ sampleAgentEntry("a", "/agent", &.{"z"}, .{
         .rounds = 4,
@@ -1267,6 +1297,7 @@ const cases = [_]Case{
         .argument_bytes = 4096,
         .result_bytes = 0,
         .turn_deadline_ms = 20000,
+        .provider_request_bytes = 32768,
     }), valid_z_tool } },
     .{ .site = .agent_result_bytes, .expected = error.AgentResultBytesOutOfRange, .entries = &.{ sampleAgentEntry("a", "/agent", &.{"z"}, .{
         .rounds = 4,
@@ -1275,6 +1306,7 @@ const cases = [_]Case{
         .argument_bytes = 4096,
         .result_bytes = max_agent_result_bytes + 1,
         .turn_deadline_ms = 20000,
+        .provider_request_bytes = 32768,
     }), valid_z_tool } },
     .{ .site = .agent_turn_deadline_ms, .expected = error.AgentTurnDeadlineMsOutOfRange, .entries = &.{ sampleAgentEntry("a", "/agent", &.{"z"}, .{
         .rounds = 4,
@@ -1283,6 +1315,7 @@ const cases = [_]Case{
         .argument_bytes = 4096,
         .result_bytes = 16384,
         .turn_deadline_ms = 0,
+        .provider_request_bytes = 32768,
     }), valid_z_tool } },
     .{ .site = .agent_turn_deadline_ms, .expected = error.AgentTurnDeadlineMsOutOfRange, .entries = &.{ sampleAgentEntry("a", "/agent", &.{"z"}, .{
         .rounds = 4,
@@ -1291,6 +1324,25 @@ const cases = [_]Case{
         .argument_bytes = 4096,
         .result_bytes = 16384,
         .turn_deadline_ms = max_agent_turn_deadline_ms + 1,
+        .provider_request_bytes = 32768,
+    }), valid_z_tool } },
+    .{ .site = .agent_provider_request_bytes, .expected = error.AgentProviderRequestBytesOutOfRange, .entries = &.{ sampleAgentEntry("a", "/agent", &.{"z"}, .{
+        .rounds = 4,
+        .tool_calls = 8,
+        .tool_calls_per_round = 4,
+        .argument_bytes = 4096,
+        .result_bytes = 16384,
+        .turn_deadline_ms = 20000,
+        .provider_request_bytes = 0,
+    }), valid_z_tool } },
+    .{ .site = .agent_provider_request_bytes, .expected = error.AgentProviderRequestBytesOutOfRange, .entries = &.{ sampleAgentEntry("a", "/agent", &.{"z"}, .{
+        .rounds = 4,
+        .tool_calls = 8,
+        .tool_calls_per_round = 4,
+        .argument_bytes = 4096,
+        .result_bytes = 16384,
+        .turn_deadline_ms = 20000,
+        .provider_request_bytes = max_agent_provider_request_bytes + 1,
     }), valid_z_tool } },
 };
 

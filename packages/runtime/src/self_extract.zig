@@ -37,10 +37,11 @@ pub const max_declaration_section_bytes: usize = blk: {
 };
 
 /// The largest `ZTCAT1` section the reader accepts, derived from the kernel's
-/// own per-field bounds. Schema 4 adds a kind byte to each entry. A tool entry
-/// includes schemas, scopes, exports, and credentials; an agent entry includes
-/// tool names, a provider, and six limits. Use the larger entry bound so either
-/// kind fits. Anything larger cannot decode and is refused before it is copied.
+/// own per-field bounds. Schema 4 added a kind byte to each entry. Schema 5
+/// added the seventh u32 agent limit. A tool entry includes schemas, scopes,
+/// exports, and credentials. An agent entry includes tool names, a provider,
+/// and seven limits. Use the larger entry bound so either kind fits. Anything
+/// larger cannot decode and is refused before it is copied.
 pub const max_tool_catalog_section_bytes: usize = blk: {
     const cat = @import("zttp_proof_checker").tool_catalog;
     const strings: usize = 8 * 4 + cat.max_name_bytes + cat.max_method_bytes + cat.max_path_bytes +
@@ -52,7 +53,7 @@ pub const max_tool_catalog_section_bytes: usize = blk: {
     const agent_entry: usize = 1 + 4 * 4 + cat.max_name_bytes + cat.max_method_bytes +
         cat.max_path_bytes + cat.max_description_bytes + 4 + 2 +
         @as(usize, cat.max_agent_tools) * (4 + cat.max_name_bytes) +
-        4 + cat.max_endpoint_bytes + 4 + cat.max_credential_name_bytes + 6 * 4;
+        4 + cat.max_endpoint_bytes + 4 + cat.max_credential_name_bytes + 7 * 4;
     const entry = @max(tool_entry, agent_entry);
     break :blk cat.header_size + @as(usize, cat.max_entries) * entry;
 };
@@ -1587,7 +1588,7 @@ test "payload parser rejects oversized and duplicate tool catalog sections" {
     try std.testing.expectError(error.DuplicatePayloadSection, parse(allocator, encoded.items));
 }
 
-test "payload catalog bound admits a schema 4 catalog with every tool field at its maximum" {
+test "payload catalog bound admits a schema 5 catalog with every tool field at its maximum" {
     const allocator = std.testing.allocator;
     const cat = @import("zttp_proof_checker").tool_catalog;
     const storage = try allocator.alloc(u8, max_tool_catalog_section_bytes);

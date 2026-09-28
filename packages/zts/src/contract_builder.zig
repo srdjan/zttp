@@ -1720,6 +1720,7 @@ pub const ContractBuilder = struct {
         "argumentBytes",
         "resultBytes",
         "turnDeadlineMs",
+        "providerRequestBytes",
     };
 
     fn readAgentEntry(
@@ -2005,6 +2006,7 @@ pub const ContractBuilder = struct {
             contract_types.max_agent_argument_bytes,
             contract_types.max_agent_result_bytes,
             contract_types.max_agent_turn_deadline_ms,
+            contract_types.max_agent_provider_request_bytes,
         };
         var values: [agent_limit_fields.len]u32 = undefined;
         for (fields, maxima, 0..) |field, maximum, index| {
@@ -2029,6 +2031,7 @@ pub const ContractBuilder = struct {
             .argument_bytes = values[3],
             .result_bytes = values[4],
             .turn_deadline_ms = values[5],
+            .provider_request_bytes = values[6],
         };
     }
 
@@ -7229,7 +7232,7 @@ fn toolCatalogOf(comptime entries: []const u8) []const u8 {
 }
 
 const agent_test_limits =
-    "{ rounds: 4, toolCalls: 8, toolCallsPerRound: 4, argumentBytes: 4096, resultBytes: 16384, turnDeadlineMs: 20000 }";
+    "{ rounds: 4, toolCalls: 8, toolCallsPerRound: 4, argumentBytes: 4096, resultBytes: 16384, turnDeadlineMs: 20000, providerRequestBytes: 32768 }";
 const agent_test_provider =
     "{ endpoint: \"https://api.deepseek.com/chat/completions\", credential: \"provider\" }";
 const agent_test_value =
@@ -7270,6 +7273,7 @@ fn agentLimitSource(
     comptime argument_bytes: []const u8,
     comptime result_bytes: []const u8,
     comptime deadline_ms: []const u8,
+    comptime provider_request_bytes: []const u8,
 ) []const u8 {
     return agentSource(
         "{ tools: [\"ta\"], provider: " ++ agent_test_provider ++ ", limits: { rounds: " ++ rounds ++
@@ -7277,7 +7281,8 @@ fn agentLimitSource(
             ", toolCallsPerRound: " ++ per_round ++
             ", argumentBytes: " ++ argument_bytes ++
             ", resultBytes: " ++ result_bytes ++
-            ", turnDeadlineMs: " ++ deadline_ms ++ " } }",
+            ", turnDeadlineMs: " ++ deadline_ms ++
+            ", providerRequestBytes: " ++ provider_request_bytes ++ " } }",
     );
 }
 
@@ -7316,11 +7321,12 @@ const tool_refusal_cases = [_]ToolRefusalCase{
     .{ .reason = .agent_provider_value_invalid, .source = agentSource("{ tools: [\"ta\"], provider: { endpoint: \"https://api.deepseek.com\", credential: 7 }, limits: " ++ agent_test_limits ++ " }") },
     .{ .reason = .agent_provider_value_invalid, .source = agentSource("{ tools: [\"ta\"], provider: { endpoint: providerUrl, credential: \"provider\" }, limits: " ++ agent_test_limits ++ " }") },
     .{ .reason = .agent_limits_not_literal, .source = agentSource("{ tools: [\"ta\"], provider: " ++ agent_test_provider ++ ", limits: 7 }") },
-    .{ .reason = .agent_limit_field_missing, .source = agentSource("{ tools: [\"ta\"], provider: " ++ agent_test_provider ++ ", limits: { rounds: 4, toolCalls: 8, toolCallsPerRound: 4, argumentBytes: 4096, resultBytes: 16384 } }") },
-    .{ .reason = .agent_limit_field_unknown, .source = agentSource("{ tools: [\"ta\"], provider: " ++ agent_test_provider ++ ", limits: { rounds: 4, toolCalls: 8, toolCallsPerRound: 4, argumentBytes: 4096, resultBytes: 16384, turnDeadlineMs: 20000, turns: 4 } }") },
-    .{ .reason = .agent_limit_field_repeated, .source = agentSource("{ tools: [\"ta\"], provider: " ++ agent_test_provider ++ ", limits: { rounds: 4, rounds: 4, toolCalls: 8, toolCallsPerRound: 4, argumentBytes: 4096, resultBytes: 16384, turnDeadlineMs: 20000 } }") },
-    .{ .reason = .agent_limit_invalid, .source = agentSource("{ tools: [\"ta\"], provider: " ++ agent_test_provider ++ ", limits: { rounds: 0, toolCalls: 8, toolCallsPerRound: 4, argumentBytes: 4096, resultBytes: 16384, turnDeadlineMs: 20000 } }") },
-    .{ .reason = .agent_tool_calls_per_round_invalid, .source = agentSource("{ tools: [\"ta\"], provider: " ++ agent_test_provider ++ ", limits: { rounds: 4, toolCalls: 8, toolCallsPerRound: 9, argumentBytes: 4096, resultBytes: 16384, turnDeadlineMs: 20000 } }") },
+    .{ .reason = .agent_limit_field_missing, .source = agentSource("{ tools: [\"ta\"], provider: " ++ agent_test_provider ++ ", limits: { rounds: 4, toolCalls: 8, toolCallsPerRound: 4, argumentBytes: 4096, resultBytes: 16384, providerRequestBytes: 32768 } }") },
+    .{ .reason = .agent_limit_field_missing, .source = agentSource("{ tools: [\"ta\"], provider: " ++ agent_test_provider ++ ", limits: { rounds: 4, toolCalls: 8, toolCallsPerRound: 4, argumentBytes: 4096, resultBytes: 16384, turnDeadlineMs: 20000 } }") },
+    .{ .reason = .agent_limit_field_unknown, .source = agentSource("{ tools: [\"ta\"], provider: " ++ agent_test_provider ++ ", limits: { rounds: 4, toolCalls: 8, toolCallsPerRound: 4, argumentBytes: 4096, resultBytes: 16384, turnDeadlineMs: 20000, providerRequestBytes: 32768, turns: 4 } }") },
+    .{ .reason = .agent_limit_field_repeated, .source = agentSource("{ tools: [\"ta\"], provider: " ++ agent_test_provider ++ ", limits: { rounds: 4, rounds: 4, toolCalls: 8, toolCallsPerRound: 4, argumentBytes: 4096, resultBytes: 16384, turnDeadlineMs: 20000, providerRequestBytes: 32768 } }") },
+    .{ .reason = .agent_limit_invalid, .source = agentSource("{ tools: [\"ta\"], provider: " ++ agent_test_provider ++ ", limits: { rounds: 0, toolCalls: 8, toolCallsPerRound: 4, argumentBytes: 4096, resultBytes: 16384, turnDeadlineMs: 20000, providerRequestBytes: 32768 } }") },
+    .{ .reason = .agent_tool_calls_per_round_invalid, .source = agentSource("{ tools: [\"ta\"], provider: " ++ agent_test_provider ++ ", limits: { rounds: 4, toolCalls: 8, toolCallsPerRound: 9, argumentBytes: 4096, resultBytes: 16384, turnDeadlineMs: 20000, providerRequestBytes: 32768 } }") },
     .{ .reason = .agent_repeated, .source = toolSource("function assistant(req) { return Response.json({}); }\nfunction assistant2(req) { return Response.json({}); }", "\"POST /a\": a, \"POST /agent\": assistant, \"POST /agent2\": assistant2", toolCatalogOf(tool_test_entry ++ ", " ++ agentEntry("assistant", "POST /agent", agent_test_value) ++ ", " ++ agentEntry("assistant2", "POST /agent2", agent_test_value))) },
     .{ .reason = .duplicate_name, .source = toolSource("", "\"POST /a\": a", toolCatalogOf(tool_test_entry ++ ", " ++ tool_test_entry)) },
     .{ .reason = .duplicate_route, .source = toolSource("", "\"POST /a\": a", toolCatalogOf(tool_test_entry ++ ", tb: { route: \"POST /a\", description: \"d\", input: \"In\", output: \"Out\", maxInputBytes: 64 }")) },
@@ -7461,24 +7467,27 @@ test "a tool catalog is refused for each build rule it breaks" {
 }
 
 const agent_limit_refusal_cases = [_]ToolRefusalCase{
-    .{ .reason = .agent_limit_invalid, .source = agentLimitSource("0", "8", "4", "4096", "16384", "20000") },
-    .{ .reason = .agent_limit_invalid, .source = agentLimitSource("4", "0", "4", "4096", "16384", "20000") },
-    .{ .reason = .agent_limit_invalid, .source = agentLimitSource("4", "8", "0", "4096", "16384", "20000") },
-    .{ .reason = .agent_limit_invalid, .source = agentLimitSource("4", "8", "4", "0", "16384", "20000") },
-    .{ .reason = .agent_limit_invalid, .source = agentLimitSource("4", "8", "4", "4096", "0", "20000") },
-    .{ .reason = .agent_limit_invalid, .source = agentLimitSource("4", "8", "4", "4096", "16384", "0") },
-    .{ .reason = .agent_limit_invalid, .source = agentLimitSource("65", "8", "4", "4096", "16384", "20000") },
-    .{ .reason = .agent_limit_invalid, .source = agentLimitSource("4", "257", "4", "4096", "16384", "20000") },
-    .{ .reason = .agent_limit_invalid, .source = agentLimitSource("4", "256", "257", "4096", "16384", "20000") },
-    .{ .reason = .agent_limit_invalid, .source = agentLimitSource("4", "8", "4", "1048577", "16384", "20000") },
-    .{ .reason = .agent_limit_invalid, .source = agentLimitSource("4", "8", "4", "4096", "1048577", "20000") },
-    .{ .reason = .agent_limit_invalid, .source = agentLimitSource("4", "8", "4", "4096", "16384", "600001") },
-    .{ .reason = .agent_limit_invalid, .source = agentLimitSource("1.5", "8", "4", "4096", "16384", "20000") },
-    .{ .reason = .agent_limit_invalid, .source = agentLimitSource("4", "1.5", "1", "4096", "16384", "20000") },
-    .{ .reason = .agent_limit_invalid, .source = agentLimitSource("4", "8", "1.5", "4096", "16384", "20000") },
-    .{ .reason = .agent_limit_invalid, .source = agentLimitSource("4", "8", "4", "1.5", "16384", "20000") },
-    .{ .reason = .agent_limit_invalid, .source = agentLimitSource("4", "8", "4", "4096", "1.5", "20000") },
-    .{ .reason = .agent_limit_invalid, .source = agentLimitSource("4", "8", "4", "4096", "16384", "1.5") },
+    .{ .reason = .agent_limit_invalid, .source = agentLimitSource("4", "8", "4", "4096", "16384", "20000", "0") },
+    .{ .reason = .agent_limit_invalid, .source = agentLimitSource("4", "8", "4", "4096", "16384", "20000", "1.5") },
+    .{ .reason = .agent_limit_invalid, .source = agentLimitSource("4", "8", "4", "4096", "16384", "20000", "8388609") },
+    .{ .reason = .agent_limit_invalid, .source = agentLimitSource("0", "8", "4", "4096", "16384", "20000", "32768") },
+    .{ .reason = .agent_limit_invalid, .source = agentLimitSource("4", "0", "4", "4096", "16384", "20000", "32768") },
+    .{ .reason = .agent_limit_invalid, .source = agentLimitSource("4", "8", "0", "4096", "16384", "20000", "32768") },
+    .{ .reason = .agent_limit_invalid, .source = agentLimitSource("4", "8", "4", "0", "16384", "20000", "32768") },
+    .{ .reason = .agent_limit_invalid, .source = agentLimitSource("4", "8", "4", "4096", "0", "20000", "32768") },
+    .{ .reason = .agent_limit_invalid, .source = agentLimitSource("4", "8", "4", "4096", "16384", "0", "32768") },
+    .{ .reason = .agent_limit_invalid, .source = agentLimitSource("65", "8", "4", "4096", "16384", "20000", "32768") },
+    .{ .reason = .agent_limit_invalid, .source = agentLimitSource("4", "257", "4", "4096", "16384", "20000", "32768") },
+    .{ .reason = .agent_limit_invalid, .source = agentLimitSource("4", "256", "257", "4096", "16384", "20000", "32768") },
+    .{ .reason = .agent_limit_invalid, .source = agentLimitSource("4", "8", "4", "1048577", "16384", "20000", "32768") },
+    .{ .reason = .agent_limit_invalid, .source = agentLimitSource("4", "8", "4", "4096", "1048577", "20000", "32768") },
+    .{ .reason = .agent_limit_invalid, .source = agentLimitSource("4", "8", "4", "4096", "16384", "600001", "32768") },
+    .{ .reason = .agent_limit_invalid, .source = agentLimitSource("1.5", "8", "4", "4096", "16384", "20000", "32768") },
+    .{ .reason = .agent_limit_invalid, .source = agentLimitSource("4", "1.5", "1", "4096", "16384", "20000", "32768") },
+    .{ .reason = .agent_limit_invalid, .source = agentLimitSource("4", "8", "1.5", "4096", "16384", "20000", "32768") },
+    .{ .reason = .agent_limit_invalid, .source = agentLimitSource("4", "8", "4", "1.5", "16384", "20000", "32768") },
+    .{ .reason = .agent_limit_invalid, .source = agentLimitSource("4", "8", "4", "4096", "1.5", "20000", "32768") },
+    .{ .reason = .agent_limit_invalid, .source = agentLimitSource("4", "8", "4", "4096", "16384", "1.5", "32768") },
 };
 
 test "every agent limit refuses zero non-integer and values over its maximum" {
@@ -7486,7 +7495,7 @@ test "every agent limit refuses zero non-integer and values over its maximum" {
 }
 
 test "agent limits admit every named maximum" {
-    var contract = try buildTestContract(agentLimitSource("64", "256", "256", "1048576", "1048576", "600000"));
+    var contract = try buildTestContract(agentLimitSource("64", "256", "256", "1048576", "1048576", "600000", "8388608"));
     defer contract.deinit(std.testing.allocator);
     for (contract.spec_diagnostics.items) |d| try std.testing.expect(d.kind != .tool_catalog_refused);
     const agent = contract.tools.items[1].agent orelse return error.TestExpectedAgent;
@@ -7496,6 +7505,7 @@ test "agent limits admit every named maximum" {
     try std.testing.expectEqual(contract_types.max_agent_argument_bytes, agent.limits.argument_bytes);
     try std.testing.expectEqual(contract_types.max_agent_result_bytes, agent.limits.result_bytes);
     try std.testing.expectEqual(contract_types.max_agent_turn_deadline_ms, agent.limits.turn_deadline_ms);
+    try std.testing.expectEqual(contract_types.max_agent_provider_request_bytes, agent.limits.provider_request_bytes);
 }
 
 test "every tool catalog refusal is driven by a case or names why none can reach it" {
@@ -7543,6 +7553,7 @@ test "a well-formed agent entry carries its sorted tools provider limits and rou
     try std.testing.expectEqual(@as(u32, 4096), agent.limits.argument_bytes);
     try std.testing.expectEqual(@as(u32, 16384), agent.limits.result_bytes);
     try std.testing.expectEqual(@as(u32, 20000), agent.limits.turn_deadline_ms);
+    try std.testing.expectEqual(@as(u32, 32768), agent.limits.provider_request_bytes);
     try std.testing.expectEqual(@as(usize, 1), entry.credentials.items.len);
     try std.testing.expectEqualStrings("provider", entry.credentials.items[0].name);
     try std.testing.expectEqualStrings("https://api.deepseek.com:443", entry.credentials.items[0].endpoint);

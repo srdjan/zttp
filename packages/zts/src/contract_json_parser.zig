@@ -162,6 +162,7 @@ const AgentLimitsWire = struct {
     argumentBytes: WireU32 = .{ .value = null },
     resultBytes: WireU32 = .{ .value = null },
     turnDeadlineMs: WireU32 = .{ .value = null },
+    providerRequestBytes: WireU32 = .{ .value = null },
 };
 
 const AgentLimitsWireV2 = struct {
@@ -171,6 +172,7 @@ const AgentLimitsWireV2 = struct {
     argument_bytes: WireU32 = .{ .value = null },
     result_bytes: WireU32 = .{ .value = null },
     turn_deadline_ms: WireU32 = .{ .value = null },
+    provider_request_bytes: WireU32 = .{ .value = null },
 };
 
 const AgentWire = struct {
@@ -1161,6 +1163,7 @@ fn projectAgentJson(allocator: std.mem.Allocator, json: []const u8, snake_case: 
             wire.limits.argument_bytes,
             wire.limits.result_bytes,
             wire.limits.turn_deadline_ms,
+            wire.limits.provider_request_bytes,
         );
     }
     var parsed = std.json.parseFromSlice(AgentWire, allocator, json, options) catch |err| switch (err) {
@@ -1179,6 +1182,7 @@ fn projectAgentJson(allocator: std.mem.Allocator, json: []const u8, snake_case: 
         wire.limits.argumentBytes,
         wire.limits.resultBytes,
         wire.limits.turnDeadlineMs,
+        wire.limits.providerRequestBytes,
     );
 }
 
@@ -1192,6 +1196,7 @@ fn projectAgentWire(
     argument_bytes_wire: WireU32,
     result_bytes_wire: WireU32,
     turn_deadline_ms_wire: WireU32,
+    provider_request_bytes_wire: WireU32,
 ) !contract_types.AgentEntry {
     if (tool_wires.len == 0) return error.InvalidToolCatalog;
 
@@ -1226,12 +1231,14 @@ fn projectAgentWire(
     const argument_bytes = argument_bytes_wire.value orelse return error.InvalidToolCatalog;
     const result_bytes = result_bytes_wire.value orelse return error.InvalidToolCatalog;
     const turn_deadline_ms = turn_deadline_ms_wire.value orelse return error.InvalidToolCatalog;
+    const provider_request_bytes = provider_request_bytes_wire.value orelse return error.InvalidToolCatalog;
     if (rounds == 0 or rounds > contract_types.max_agent_rounds or
         tool_calls == 0 or tool_calls > contract_types.max_agent_tool_calls or
         tool_calls_per_round == 0 or tool_calls_per_round > tool_calls or
         argument_bytes == 0 or argument_bytes > contract_types.max_agent_argument_bytes or
         result_bytes == 0 or result_bytes > contract_types.max_agent_result_bytes or
-        turn_deadline_ms == 0 or turn_deadline_ms > contract_types.max_agent_turn_deadline_ms)
+        turn_deadline_ms == 0 or turn_deadline_ms > contract_types.max_agent_turn_deadline_ms or
+        provider_request_bytes == 0 or provider_request_bytes > contract_types.max_agent_provider_request_bytes)
     {
         return error.InvalidToolCatalog;
     }
@@ -1247,6 +1254,7 @@ fn projectAgentWire(
             .argument_bytes = argument_bytes,
             .result_bytes = result_bytes,
             .turn_deadline_ms = turn_deadline_ms,
+            .provider_request_bytes = provider_request_bytes,
         },
     };
 }
@@ -2334,7 +2342,7 @@ fn agentContractJson(
 }
 
 const valid_agent_provider = "{\"endpoint\":\"https://api.example:443\",\"credential\":\"provider\"}";
-const valid_agent_limits = "{\"rounds\":4,\"toolCalls\":8,\"toolCallsPerRound\":4,\"argumentBytes\":4096,\"resultBytes\":16384,\"turnDeadlineMs\":20000}";
+const valid_agent_limits = "{\"rounds\":4,\"toolCalls\":8,\"toolCallsPerRound\":4,\"argumentBytes\":4096,\"resultBytes\":16384,\"turnDeadlineMs\":20000,\"providerRequestBytes\":32768}";
 const valid_agent_credentials = "[{\"name\":\"provider\",\"endpoint\":\"https://api.example:443\"}]";
 
 test "agent contract JSON preserves every field and reachable export" {
@@ -2359,24 +2367,29 @@ test "agent contract JSON preserves every field and reachable export" {
     try std.testing.expectEqual(@as(u32, 4096), agent.limits.argument_bytes);
     try std.testing.expectEqual(@as(u32, 16384), agent.limits.result_bytes);
     try std.testing.expectEqual(@as(u32, 20000), agent.limits.turn_deadline_ms);
+    try std.testing.expectEqual(@as(u32, 32768), agent.limits.provider_request_bytes);
     try std.testing.checkAllAllocationFailures(allocator, parseAllocationFixture, .{json});
 }
 
 test "agent contract JSON refuses malformed fields and relations as an invalid catalog" {
     const Case = struct { name: []const u8, json: []const u8 };
     const cases = [_]Case{
-        .{ .name = "rounds", .json = agentContractJson("[\"lookup\"]", valid_agent_provider, "{\"rounds\":0,\"toolCalls\":8,\"toolCallsPerRound\":4,\"argumentBytes\":4096,\"resultBytes\":16384,\"turnDeadlineMs\":20000}", "", "", valid_agent_credentials) },
-        .{ .name = "toolCalls", .json = agentContractJson("[\"lookup\"]", valid_agent_provider, "{\"rounds\":4,\"toolCalls\":0,\"toolCallsPerRound\":4,\"argumentBytes\":4096,\"resultBytes\":16384,\"turnDeadlineMs\":20000}", "", "", valid_agent_credentials) },
-        .{ .name = "toolCallsPerRound relation", .json = agentContractJson("[\"lookup\"]", valid_agent_provider, "{\"rounds\":4,\"toolCalls\":8,\"toolCallsPerRound\":9,\"argumentBytes\":4096,\"resultBytes\":16384,\"turnDeadlineMs\":20000}", "", "", valid_agent_credentials) },
-        .{ .name = "argumentBytes", .json = agentContractJson("[\"lookup\"]", valid_agent_provider, "{\"rounds\":4,\"toolCalls\":8,\"toolCallsPerRound\":4,\"argumentBytes\":0,\"resultBytes\":16384,\"turnDeadlineMs\":20000}", "", "", valid_agent_credentials) },
-        .{ .name = "resultBytes", .json = agentContractJson("[\"lookup\"]", valid_agent_provider, "{\"rounds\":4,\"toolCalls\":8,\"toolCallsPerRound\":4,\"argumentBytes\":4096,\"resultBytes\":0,\"turnDeadlineMs\":20000}", "", "", valid_agent_credentials) },
-        .{ .name = "turnDeadlineMs", .json = agentContractJson("[\"lookup\"]", valid_agent_provider, "{\"rounds\":4,\"toolCalls\":8,\"toolCallsPerRound\":4,\"argumentBytes\":4096,\"resultBytes\":16384,\"turnDeadlineMs\":0}", "", "", valid_agent_credentials) },
-        .{ .name = "rounds maximum", .json = agentContractJson("[\"lookup\"]", valid_agent_provider, "{\"rounds\":65,\"toolCalls\":8,\"toolCallsPerRound\":4,\"argumentBytes\":4096,\"resultBytes\":16384,\"turnDeadlineMs\":20000}", "", "", valid_agent_credentials) },
-        .{ .name = "toolCalls maximum", .json = agentContractJson("[\"lookup\"]", valid_agent_provider, "{\"rounds\":4,\"toolCalls\":257,\"toolCallsPerRound\":4,\"argumentBytes\":4096,\"resultBytes\":16384,\"turnDeadlineMs\":20000}", "", "", valid_agent_credentials) },
-        .{ .name = "toolCallsPerRound maximum", .json = agentContractJson("[\"lookup\"]", valid_agent_provider, "{\"rounds\":4,\"toolCalls\":256,\"toolCallsPerRound\":257,\"argumentBytes\":4096,\"resultBytes\":16384,\"turnDeadlineMs\":20000}", "", "", valid_agent_credentials) },
-        .{ .name = "argumentBytes maximum", .json = agentContractJson("[\"lookup\"]", valid_agent_provider, "{\"rounds\":4,\"toolCalls\":8,\"toolCallsPerRound\":4,\"argumentBytes\":1048577,\"resultBytes\":16384,\"turnDeadlineMs\":20000}", "", "", valid_agent_credentials) },
-        .{ .name = "resultBytes maximum", .json = agentContractJson("[\"lookup\"]", valid_agent_provider, "{\"rounds\":4,\"toolCalls\":8,\"toolCallsPerRound\":4,\"argumentBytes\":4096,\"resultBytes\":1048577,\"turnDeadlineMs\":20000}", "", "", valid_agent_credentials) },
-        .{ .name = "turnDeadlineMs maximum", .json = agentContractJson("[\"lookup\"]", valid_agent_provider, "{\"rounds\":4,\"toolCalls\":8,\"toolCallsPerRound\":4,\"argumentBytes\":4096,\"resultBytes\":16384,\"turnDeadlineMs\":600001}", "", "", valid_agent_credentials) },
+        .{ .name = "providerRequestBytes missing", .json = agentContractJson("[\"lookup\"]", valid_agent_provider, "{\"rounds\":4,\"toolCalls\":8,\"toolCallsPerRound\":4,\"argumentBytes\":4096,\"resultBytes\":16384,\"turnDeadlineMs\":20000}", "", "", valid_agent_credentials) },
+        .{ .name = "providerRequestBytes zero", .json = agentContractJson("[\"lookup\"]", valid_agent_provider, "{\"rounds\":4,\"toolCalls\":8,\"toolCallsPerRound\":4,\"argumentBytes\":4096,\"resultBytes\":16384,\"turnDeadlineMs\":20000,\"providerRequestBytes\":0}", "", "", valid_agent_credentials) },
+        .{ .name = "providerRequestBytes maximum", .json = agentContractJson("[\"lookup\"]", valid_agent_provider, "{\"rounds\":4,\"toolCalls\":8,\"toolCallsPerRound\":4,\"argumentBytes\":4096,\"resultBytes\":16384,\"turnDeadlineMs\":20000,\"providerRequestBytes\":8388609}", "", "", valid_agent_credentials) },
+        .{ .name = "providerRequestBytes non-integer", .json = agentContractJson("[\"lookup\"]", valid_agent_provider, "{\"rounds\":4,\"toolCalls\":8,\"toolCallsPerRound\":4,\"argumentBytes\":4096,\"resultBytes\":16384,\"turnDeadlineMs\":20000,\"providerRequestBytes\":1.5}", "", "", valid_agent_credentials) },
+        .{ .name = "rounds", .json = agentContractJson("[\"lookup\"]", valid_agent_provider, "{\"rounds\":0,\"toolCalls\":8,\"toolCallsPerRound\":4,\"argumentBytes\":4096,\"resultBytes\":16384,\"turnDeadlineMs\":20000,\"providerRequestBytes\":32768}", "", "", valid_agent_credentials) },
+        .{ .name = "toolCalls", .json = agentContractJson("[\"lookup\"]", valid_agent_provider, "{\"rounds\":4,\"toolCalls\":0,\"toolCallsPerRound\":4,\"argumentBytes\":4096,\"resultBytes\":16384,\"turnDeadlineMs\":20000,\"providerRequestBytes\":32768}", "", "", valid_agent_credentials) },
+        .{ .name = "toolCallsPerRound relation", .json = agentContractJson("[\"lookup\"]", valid_agent_provider, "{\"rounds\":4,\"toolCalls\":8,\"toolCallsPerRound\":9,\"argumentBytes\":4096,\"resultBytes\":16384,\"turnDeadlineMs\":20000,\"providerRequestBytes\":32768}", "", "", valid_agent_credentials) },
+        .{ .name = "argumentBytes", .json = agentContractJson("[\"lookup\"]", valid_agent_provider, "{\"rounds\":4,\"toolCalls\":8,\"toolCallsPerRound\":4,\"argumentBytes\":0,\"resultBytes\":16384,\"turnDeadlineMs\":20000,\"providerRequestBytes\":32768}", "", "", valid_agent_credentials) },
+        .{ .name = "resultBytes", .json = agentContractJson("[\"lookup\"]", valid_agent_provider, "{\"rounds\":4,\"toolCalls\":8,\"toolCallsPerRound\":4,\"argumentBytes\":4096,\"resultBytes\":0,\"turnDeadlineMs\":20000,\"providerRequestBytes\":32768}", "", "", valid_agent_credentials) },
+        .{ .name = "turnDeadlineMs", .json = agentContractJson("[\"lookup\"]", valid_agent_provider, "{\"rounds\":4,\"toolCalls\":8,\"toolCallsPerRound\":4,\"argumentBytes\":4096,\"resultBytes\":16384,\"turnDeadlineMs\":0,\"providerRequestBytes\":32768}", "", "", valid_agent_credentials) },
+        .{ .name = "rounds maximum", .json = agentContractJson("[\"lookup\"]", valid_agent_provider, "{\"rounds\":65,\"toolCalls\":8,\"toolCallsPerRound\":4,\"argumentBytes\":4096,\"resultBytes\":16384,\"turnDeadlineMs\":20000,\"providerRequestBytes\":32768}", "", "", valid_agent_credentials) },
+        .{ .name = "toolCalls maximum", .json = agentContractJson("[\"lookup\"]", valid_agent_provider, "{\"rounds\":4,\"toolCalls\":257,\"toolCallsPerRound\":4,\"argumentBytes\":4096,\"resultBytes\":16384,\"turnDeadlineMs\":20000,\"providerRequestBytes\":32768}", "", "", valid_agent_credentials) },
+        .{ .name = "toolCallsPerRound maximum", .json = agentContractJson("[\"lookup\"]", valid_agent_provider, "{\"rounds\":4,\"toolCalls\":256,\"toolCallsPerRound\":257,\"argumentBytes\":4096,\"resultBytes\":16384,\"turnDeadlineMs\":20000,\"providerRequestBytes\":32768}", "", "", valid_agent_credentials) },
+        .{ .name = "argumentBytes maximum", .json = agentContractJson("[\"lookup\"]", valid_agent_provider, "{\"rounds\":4,\"toolCalls\":8,\"toolCallsPerRound\":4,\"argumentBytes\":1048577,\"resultBytes\":16384,\"turnDeadlineMs\":20000,\"providerRequestBytes\":32768}", "", "", valid_agent_credentials) },
+        .{ .name = "resultBytes maximum", .json = agentContractJson("[\"lookup\"]", valid_agent_provider, "{\"rounds\":4,\"toolCalls\":8,\"toolCallsPerRound\":4,\"argumentBytes\":4096,\"resultBytes\":1048577,\"turnDeadlineMs\":20000,\"providerRequestBytes\":32768}", "", "", valid_agent_credentials) },
+        .{ .name = "turnDeadlineMs maximum", .json = agentContractJson("[\"lookup\"]", valid_agent_provider, "{\"rounds\":4,\"toolCalls\":8,\"toolCallsPerRound\":4,\"argumentBytes\":4096,\"resultBytes\":16384,\"turnDeadlineMs\":600001,\"providerRequestBytes\":32768}", "", "", valid_agent_credentials) },
         .{ .name = "empty tool name", .json = agentContractJson("[\"\"]", valid_agent_provider, valid_agent_limits, "", "", valid_agent_credentials) },
         .{ .name = "unknown tool", .json = agentContractJson("[\"missing\"]", valid_agent_provider, valid_agent_limits, "", "", valid_agent_credentials) },
         .{ .name = "agent tool", .json = agentContractJson("[\"assistant\"]", valid_agent_provider, valid_agent_limits, "", "", valid_agent_credentials) },
@@ -2398,7 +2411,7 @@ test "agent contract JSON refuses malformed fields and relations as an invalid c
     const wrong_v1_limit_in_v2 =
         \\{"version":2,"handler":{"path":"agent.ts"},"tools":[
         \\{"name":"lookup","route":"POST /tools/lookup","description":"Lookup.","input_schema":{"name":"In","json":"{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{}}"},"output_schema":{"name":"Out","json":"{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{}}"},"max_input_bytes":64,"reachable_exports":[]},
-        \\{"name":"assistant","route":"POST /agent","description":"Answer.","max_input_bytes":8192,"agent":{"tools":["lookup"],"provider":{"endpoint":"https://api.example:443","credential":"provider"},"limits":{"rounds":4,"tool_calls":8,"tool_calls_per_round":4,"argument_bytes":4096,"result_bytes":16384,"turn_deadline_ms":20000,"toolCalls":99999999999999999999}},"reachable_exports":[],"credentials":[{"name":"provider","endpoint":"https://api.example:443"}]}
+        \\{"name":"assistant","route":"POST /agent","description":"Answer.","max_input_bytes":8192,"agent":{"tools":["lookup"],"provider":{"endpoint":"https://api.example:443","credential":"provider"},"limits":{"rounds":4,"tool_calls":8,"tool_calls_per_round":4,"argument_bytes":4096,"result_bytes":16384,"turn_deadline_ms":20000,"provider_request_bytes":32768,"toolCalls":99999999999999999999}},"reachable_exports":[],"credentials":[{"name":"provider","endpoint":"https://api.example:443"}]}
         \\]}
     ;
     try std.testing.expectError(error.InvalidToolCatalog, parseFromJson(std.testing.allocator, wrong_v1_limit_in_v2));
@@ -2461,7 +2474,7 @@ test "parseFromJson compatibility matrix preserves duplicate trailing and overfl
         version: u32,
     }{
         .{ .json = "{\"version\":1,\"version\":23} trailing", .version = 23 },
-        .{ .json = "{\"version\":99999999999999999999}", .version = 23 },
+        .{ .json = "{\"version\":99999999999999999999}", .version = 24 },
     };
     for (cases) |case| {
         var contract = try parseFromJson(std.testing.allocator, case.json);
@@ -2484,7 +2497,7 @@ test "parseFromJson keeps raw structural keys and appends repeated collections" 
     var contract = try parseFromJson(std.testing.allocator, json);
     defer contract.deinit(std.testing.allocator);
 
-    try std.testing.expectEqual(@as(u32, 23), contract.version);
+    try std.testing.expectEqual(@as(u32, 24), contract.version);
     try std.testing.expectEqual(@as(usize, 2), contract.modules.items.len);
     try std.testing.expectEqualStrings("zttp:env", contract.modules.items[0]);
     try std.testing.expectEqualStrings("zttp:cache", contract.modules.items[1]);

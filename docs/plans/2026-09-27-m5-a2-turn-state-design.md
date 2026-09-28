@@ -342,7 +342,9 @@ the kernel decoder.
 
 ## 11. Implementation units
 
-- **U1. The provider request limit (Q5).** `providerRequestBytes` in the agent
+- **U1. The provider request limit (Q5).** Done 2026-09-27: full `zig build test`,
+  `test-zruntime`, `test-expert-app`, the proof-checker and mutant gates, and fmt
+  pass; two removed-check probes each failed a test. `providerRequestBytes` in the agent
   literal, the builder refusals and census cases, contract version 24, `ZTCAT1`
   schema 5 in the encoder and the kernel decoder with mutant rows, the runtime
   lowering and cross-check, and the consumer-contract section 4.6 text.

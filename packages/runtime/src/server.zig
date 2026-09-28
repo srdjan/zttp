@@ -5638,7 +5638,7 @@ fn agentTestServer(handler_code: []const u8, install_catalog: bool) !Server {
                 .tools = .{ .items = &names, .capacity = names.len },
                 .provider_endpoint = "https://provider.example:443",
                 .provider_credential = "provider",
-                .limits = .{ .rounds = 4, .tool_calls = 8, .tool_calls_per_round = 4, .argument_bytes = 4096, .result_bytes = 16384, .turn_deadline_ms = 20000 },
+                .limits = .{ .rounds = 4, .tool_calls = 8, .tool_calls_per_round = 4, .argument_bytes = 4096, .result_bytes = 16384, .turn_deadline_ms = 20000, .provider_request_bytes = 32768 },
             },
         },
         .{

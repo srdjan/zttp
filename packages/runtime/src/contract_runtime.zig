@@ -679,6 +679,7 @@ fn lowerAcceptedCatalog(allocator: std.mem.Allocator, bytes: []const u8) Promote
                             .argument_bytes = agent.limits.argument_bytes,
                             .result_bytes = agent.limits.result_bytes,
                             .turn_deadline_ms = agent.limits.turn_deadline_ms,
+                            .provider_request_bytes = agent.limits.provider_request_bytes,
                         },
                         .prompt_schema = prompt_schema,
                     } },
@@ -834,7 +835,8 @@ fn agentLimitsEqual(a: zq.handler_contract.AgentLimits, b: zq.handler_contract.A
         a.tool_calls_per_round == b.tool_calls_per_round and
         a.argument_bytes == b.argument_bytes and
         a.result_bytes == b.result_bytes and
-        a.turn_deadline_ms == b.turn_deadline_ms;
+        a.turn_deadline_ms == b.turn_deadline_ms and
+        a.provider_request_bytes == b.provider_request_bytes;
 }
 
 fn stringListsEqual(a: []const []const u8, b: []const []const u8) bool {
@@ -2881,6 +2883,7 @@ test "promotion enforces every agent deadline relation" {
         .argument_bytes = 4096,
         .result_bytes = 16384,
         .turn_deadline_ms = 20_000,
+        .provider_request_bytes = 32_768,
     };
     const summaries = [_]ToolSummary{
         .{
@@ -2950,7 +2953,7 @@ test "producer agent lowering preserves its reachable exports" {
         \\    agent: {
         \\      tools: ["lookup"],
         \\      provider: { endpoint: "https://api.example.com", credential: "provider" },
-        \\      limits: { rounds: 4, toolCalls: 8, toolCallsPerRound: 4, argumentBytes: 4096, resultBytes: 16384, turnDeadlineMs: 20000 }
+        \\      limits: { rounds: 4, toolCalls: 8, toolCallsPerRound: 4, argumentBytes: 4096, resultBytes: 16384, turnDeadlineMs: 20000, providerRequestBytes: 32768 }
         \\    }
         \\  }
         \\});
@@ -2987,6 +2990,7 @@ test "producer agent lowering preserves its reachable exports" {
         };
     }
     const agent = lowered orelse return error.TestExpectedAgent;
+    try std.testing.expectEqual(@as(u32, 32768), agent.limits.provider_request_bytes);
     try std.testing.expectEqual(built.reachable_exports.items.len, agent.exports.len);
     for (built.reachable_exports.items, agent.exports) |expected, actual| {
         try std.testing.expectEqualStrings(expected.module, actual.module);
@@ -3021,6 +3025,7 @@ test "agent catalog cross-check compares every agent field" {
         .argument_bytes = 4096,
         .result_bytes = 16384,
         .turn_deadline_ms = 20000,
+        .provider_request_bytes = 32768,
     };
     const good_agent = AgentSummary{
         .tools = &names,
@@ -3040,7 +3045,7 @@ test "agent catalog cross-check compares every agent field" {
     };
     try crossCheckToolCatalog(&catalog, &.{ good, lookup });
 
-    var cases: [11]ToolSummary = undefined;
+    var cases: [12]ToolSummary = undefined;
     for (&cases) |*case| case.* = good;
     cases[0].description = "Changed.";
     var changed_agent = good_agent;
@@ -3071,6 +3076,9 @@ test "agent catalog cross-check compares every agent field" {
     changed_agent = good_agent;
     changed_agent.limits.turn_deadline_ms += 1;
     cases[10].agent = changed_agent;
+    changed_agent = good_agent;
+    changed_agent.limits.provider_request_bytes += 1;
+    cases[11].agent = changed_agent;
     for (cases) |changed| {
         try std.testing.expectError(error.ToolCatalogContractMismatch, crossCheckToolCatalog(&catalog, &.{ changed, lookup }));
     }

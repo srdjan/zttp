@@ -290,6 +290,7 @@ fn writeContractJsonVersion(
             const argument_bytes_key = comptime contractKey(json_version, "argumentBytes");
             const result_bytes_key = comptime contractKey(json_version, "resultBytes");
             const turn_deadline_ms_key = comptime contractKey(json_version, "turnDeadlineMs");
+            const provider_request_bytes_key = comptime contractKey(json_version, "providerRequestBytes");
             try writer.writeAll("      \"agent\": { \"tools\": [");
             for (agent.tools.items, 0..) |name, j| {
                 if (j > 0) try writer.writeAll(", ");
@@ -300,13 +301,14 @@ fn writeContractJsonVersion(
             try writer.writeAll(", \"credential\": ");
             try writeJsonString(writer, agent.provider_credential);
             try writer.writeAll(" }, \"limits\": {");
-            try writer.print(" \"rounds\": {d}, \"" ++ tool_calls_key ++ "\": {d}, \"" ++ tool_calls_per_round_key ++ "\": {d}, \"" ++ argument_bytes_key ++ "\": {d}, \"" ++ result_bytes_key ++ "\": {d}, \"" ++ turn_deadline_ms_key ++ "\": {d} }} }},\n", .{
+            try writer.print(" \"rounds\": {d}, \"" ++ tool_calls_key ++ "\": {d}, \"" ++ tool_calls_per_round_key ++ "\": {d}, \"" ++ argument_bytes_key ++ "\": {d}, \"" ++ result_bytes_key ++ "\": {d}, \"" ++ turn_deadline_ms_key ++ "\": {d}, \"" ++ provider_request_bytes_key ++ "\": {d} }} }},\n", .{
                 agent.limits.rounds,
                 agent.limits.tool_calls,
                 agent.limits.tool_calls_per_round,
                 agent.limits.argument_bytes,
                 agent.limits.result_bytes,
                 agent.limits.turn_deadline_ms,
+                agent.limits.provider_request_bytes,
             });
         }
         // `scope` (M4 T5) is written only when the entry binds a field, so a
@@ -1645,7 +1647,7 @@ test "agent JSON writes only the agent shape and round trips its exports" {
     const json =
         \\{"version":23,"handler":{"path":"agent.ts"},"tools":[
         \\{"name":"lookup","route":"POST /tools/lookup","description":"Lookup.","inputSchema":{"name":"In","json":"{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{}}"},"outputSchema":{"name":"Out","json":"{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{}}"},"maxInputBytes":64,"reachableExports":[]},
-        \\{"name":"assistant","route":"POST /agent","description":"Answer.","maxInputBytes":8192,"agent":{"tools":["lookup"],"provider":{"endpoint":"https://api.example:443","credential":"provider"},"limits":{"rounds":4,"toolCalls":8,"toolCallsPerRound":4,"argumentBytes":4096,"resultBytes":16384,"turnDeadlineMs":20000}},"reachableExports":[{"module":"zttp:fetch","name":"fetch"}],"credentials":[{"name":"provider","endpoint":"https://api.example:443"}]}
+        \\{"name":"assistant","route":"POST /agent","description":"Answer.","maxInputBytes":8192,"agent":{"tools":["lookup"],"provider":{"endpoint":"https://api.example:443","credential":"provider"},"limits":{"rounds":4,"toolCalls":8,"toolCallsPerRound":4,"argumentBytes":4096,"resultBytes":16384,"turnDeadlineMs":20000,"providerRequestBytes":32768}},"reachableExports":[{"module":"zttp:fetch","name":"fetch"}],"credentials":[{"name":"provider","endpoint":"https://api.example:443"}]}
         \\]}
     ;
     var contract = try handler_contract.parseFromJson(allocator, json);
@@ -1656,6 +1658,7 @@ test "agent JSON writes only the agent shape and round trips its exports" {
         defer allocator.free(output);
         try std.testing.expect(std.mem.indexOf(u8, output, "\"agent\":") != null);
         try std.testing.expect(std.mem.indexOf(u8, output, if (version == .v1) "\"toolCallsPerRound\": 4" else "\"tool_calls_per_round\": 4") != null);
+        try std.testing.expect(std.mem.indexOf(u8, output, if (version == .v1) "\"providerRequestBytes\": 32768" else "\"provider_request_bytes\": 32768") != null);
         try std.testing.expect(std.mem.indexOf(u8, output, "{ \"module\": \"zttp:fetch\", \"name\": \"fetch\" }") != null);
 
         var round_trip = try handler_contract.parseFromJson(allocator, output);
@@ -1664,6 +1667,7 @@ test "agent JSON writes only the agent shape and round trips its exports" {
         const agent = agent_entry.agent orelse return error.TestExpectedAgent;
         try std.testing.expectEqualStrings("", agent_entry.input_schema_name);
         try std.testing.expectEqualStrings("lookup", agent.tools.items[0]);
+        try std.testing.expectEqual(@as(u32, 32768), agent.limits.provider_request_bytes);
         try std.testing.expectEqual(@as(usize, 1), agent_entry.reachable_exports.items.len);
         try std.testing.expectEqualStrings("provider", agent_entry.credentials.items[0].name);
     }

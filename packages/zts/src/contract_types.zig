@@ -1563,9 +1563,9 @@ pub const ToolCatalogRefusal = enum {
     agent_credential_endpoint_mismatch,
     /// `agent.limits` is not an object literal.
     agent_limits_not_literal,
-    /// `agent.limits` lacks one of its six required fields.
+    /// `agent.limits` lacks one of its seven required fields.
     agent_limit_field_missing,
-    /// `agent.limits` holds a field outside its closed six-field shape.
+    /// `agent.limits` holds a field outside its closed seven-field shape.
     agent_limit_field_unknown,
     /// `agent.limits` names the same field twice.
     agent_limit_field_repeated,
@@ -1686,8 +1686,8 @@ pub const ToolCatalogRefusal = enum {
             .agent_credential_unknown => "the agent provider credential must name a credential reference in zttp.json",
             .agent_credential_endpoint_mismatch => "the agent provider endpoint must match the endpoint of its zttp.json credential reference",
             .agent_limits_not_literal => "agent.limits must be an object literal",
-            .agent_limit_field_missing => "agent.limits needs rounds, toolCalls, toolCallsPerRound, argumentBytes, resultBytes, and turnDeadlineMs",
-            .agent_limit_field_unknown => "agent.limits may hold only rounds, toolCalls, toolCallsPerRound, argumentBytes, resultBytes, and turnDeadlineMs",
+            .agent_limit_field_missing => "agent.limits needs rounds, toolCalls, toolCallsPerRound, argumentBytes, resultBytes, turnDeadlineMs, and providerRequestBytes",
+            .agent_limit_field_unknown => "agent.limits may hold only rounds, toolCalls, toolCallsPerRound, argumentBytes, resultBytes, turnDeadlineMs, and providerRequestBytes",
             .agent_limit_field_repeated => "agent.limits names the same field twice",
             .agent_limit_invalid => "each agent limit must be a positive integer literal no larger than its named maximum",
             .agent_tool_calls_per_round_invalid => "toolCallsPerRound must not be greater than toolCalls",
@@ -1755,6 +1755,8 @@ pub const max_agent_tool_calls: u32 = 256;
 pub const max_agent_argument_bytes: u32 = tool_schema.max_input_bytes_ceiling;
 pub const max_agent_result_bytes: u32 = tool_schema.max_input_bytes_ceiling;
 pub const max_agent_turn_deadline_ms: u32 = 600000;
+/// An encoding bound of 8 MiB, not a recommended value.
+pub const max_agent_provider_request_bytes: u32 = 8388608;
 
 /// The closed execution bounds of one agent entry. These are encoding bounds,
 /// not recommended defaults.
@@ -1765,6 +1767,7 @@ pub const AgentLimits = struct {
     argument_bytes: u32,
     result_bytes: u32,
     turn_deadline_ms: u32,
+    provider_request_bytes: u32,
 };
 
 /// The agent-only part of a tool catalog entry. Every string is owned. Tool
@@ -2468,7 +2471,7 @@ pub const HoleSummary = struct {
 };
 
 pub const HandlerContract = struct {
-    version: u32 = 23,
+    version: u32 = 24,
     handler: HandlerLoc,
     routes: std.ArrayList(RouteInfo),
     modules: std.ArrayList([]const u8), // each entry owned
