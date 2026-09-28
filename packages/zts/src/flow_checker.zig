@@ -22,6 +22,7 @@ const object = @import("zts-engine").object;
 const atom_table = @import("zts-engine").atom_table;
 const builtin_modules = @import("zts-engine").builtin_modules;
 const module_facts_mod = @import("module_facts.zig");
+const type_checker_mod = @import("type_checker.zig");
 const mb = @import("zts-engine").module_binding;
 const bool_checker_mod = @import("bool_checker.zig");
 const known_globals = @import("zts-base").known_globals;
@@ -293,6 +294,9 @@ pub const FlowChecker = struct {
     /// User function declarations: packed binding key -> function expression
     /// node. Feeds callee return-label summaries in `userCallLabels`.
     user_fn_decls: std.AutoHashMapUnmanaged(u32, NodeIndex),
+    /// Function bodies resolved from literal route tables passed to
+    /// `routerMatch`. Each is walked as a request root after the handler.
+    route_function_roots: std.ArrayListUnmanaged(NodeIndex),
     /// When non-null, the walk is summarizing a callee body: return statements
     /// merge their labels here instead of running sink checks, and expression
     /// sinks stay silent (diagnostics belong to the handler walk).
@@ -300,6 +304,9 @@ pub const FlowChecker = struct {
     /// Callee summaries in progress (recursion guard).
     summary_stack: [max_summary_depth]u32,
     summary_depth: u8,
+    /// Nonzero only while a `routerMatch` dispatch unions route returns.
+    /// Response summaries then follow the runtime's payload-only surface.
+    route_summary_depth: u8,
     /// Guard provenance for validated bindings: packed(scope_id, slot) -> the
     /// validator call that set the `.validated` label. Lets a defended path
     /// name the guard ("validated by schemaCompile()"). Populated alongside
@@ -321,6 +328,10 @@ pub const FlowChecker = struct {
     /// Shared import index, injected by the orchestrator when one exists.
     /// Borrowed; must outlive the checker. Null means build a private one.
     facts: ?*const module_facts_mod.ModuleFacts = null,
+    /// The authoritative type session for this IR, when the typed frontend ran.
+    /// Borrowed; used only to recognize primitive and array receivers that the
+    /// stripped IR cannot identify, such as a parameter declared `string`.
+    type_checker: ?*type_checker_mod.TypeChecker = null,
     owned_facts: ?module_facts_mod.ModuleFacts = null,
     /// Constraint stack maintained as `walkStmt` descends into conditional
     /// branches. Snapshotted onto every diagnostic at emission time.
@@ -372,9 +383,11 @@ pub const FlowChecker = struct {
             .result_binding_guard = .empty,
             .binding_value_nodes = .empty,
             .user_fn_decls = .empty,
+            .route_function_roots = .empty,
             .summary_returns = null,
             .summary_stack = @splat(0),
             .summary_depth = 0,
+            .route_summary_depth = 0,
             .defended_paths = .empty,
             .req_binding_key = null,
             .env_fn_slot = null,
@@ -413,6 +426,7 @@ pub const FlowChecker = struct {
         }
         self.binding_value_nodes.deinit(self.allocator);
         self.user_fn_decls.deinit(self.allocator);
+        self.route_function_roots.deinit(self.allocator);
 
         // Free dynamically formatted diagnostic messages
         for (self.allocated_messages.items) |msg| {
@@ -430,8 +444,34 @@ pub const FlowChecker = struct {
     pub fn check(self: *FlowChecker, handler_func: NodeIndex) !u32 {
         self.scanImports();
         self.scanFunctionDecls();
+        self.scanRouteFunctionRoots();
         self.findHandlerParam(handler_func);
         self.walkStmt(handler_func);
+
+        const handler_req_key = self.req_binding_key;
+        const handler_identity_trusted = self.req_identity_trusted;
+        {
+            const handler_constraints = self.working_constraints;
+            const handler_io = self.working_io_calls;
+            self.working_constraints = .empty;
+            self.working_io_calls = .empty;
+            defer {
+                self.working_constraints.deinit(self.allocator);
+                self.working_io_calls.deinit(self.allocator);
+                self.working_constraints = handler_constraints;
+                self.working_io_calls = handler_io;
+            }
+            for (self.route_function_roots.items) |route_func| {
+                self.working_constraints.clearRetainingCapacity();
+                self.working_io_calls.clearRetainingCapacity();
+                self.req_binding_key = null;
+                self.req_identity_trusted = false;
+                self.findHandlerParam(route_func);
+                self.walkStmt(route_func);
+            }
+        }
+        self.req_binding_key = handler_req_key;
+        self.req_identity_trusted = handler_identity_trusted;
         self.recordContainedSecrets();
         if (self.allocation_failed) return error.OutOfMemory;
 
@@ -809,6 +849,10 @@ pub const FlowChecker = struct {
         self.declaration = decl;
     }
 
+    pub fn setTypeChecker(self: *FlowChecker, checker: *type_checker_mod.TypeChecker) void {
+        self.type_checker = checker;
+    }
+
     /// The P8 status of each classification, in the declaration's order.
     pub fn classificationStatuses(self: *const FlowChecker) []const EntryStatus {
         return self.entry_status;
@@ -950,6 +994,377 @@ pub const FlowChecker = struct {
             const key = packBindingKey(vd.binding.scope_id, vd.binding.slot);
             self.user_fn_decls.put(self.allocator, key, vd.init) catch self.markAllocationFailure();
         }
+    }
+
+    /// Index every function value in a literal object table passed to the
+    /// imported `routerMatch`. This uses the same two table shapes as the
+    /// contract builder: an object literal, or a module binding initialized by
+    /// an object literal. A route value resolves when it is a function value or
+    /// an identifier bound to one.
+    fn scanRouteFunctionRoots(self: *FlowChecker) void {
+        const node_count = self.ir_view.nodeCount();
+        for (0..node_count) |idx_usize| {
+            const idx: NodeIndex = @intCast(idx_usize);
+            if (self.ir_view.getTag(idx) != .call) continue;
+            const call = self.ir_view.getCall(idx) orelse continue;
+            if (!self.isRouterMatchCallee(call.callee) or call.args_count == 0) continue;
+
+            const table_arg = self.ir_view.getListIndex(call.args_start, 0);
+            const table = self.resolveRouteTableForRoots(table_arg) orelse continue;
+            const obj = self.ir_view.getObject(table) orelse continue;
+            var i: u16 = 0;
+            while (i < obj.properties_count) : (i += 1) {
+                const prop_idx = self.ir_view.getListIndex(obj.properties_start, i);
+                if (self.ir_view.getTag(prop_idx) != .object_property) continue;
+                const prop = self.ir_view.getProperty(prop_idx) orelse continue;
+                self.appendRouteFunctionRoots(prop.value);
+            }
+            self.appendAssignedTableFunctions(table_arg);
+        }
+    }
+
+    fn appendRouteFunctionRoots(self: *FlowChecker, value: NodeIndex) void {
+        if (self.resolveInitialFunctionNode(value)) |fn_node| self.appendRouteFunctionRoot(fn_node);
+        if (self.ir_view.getTag(value) != .identifier) return;
+        const binding = self.ir_view.getBinding(value) orelse return;
+        const key = packBindingKey(binding.scope_id, binding.slot);
+        const node_count = self.ir_view.nodeCount();
+        for (0..node_count) |idx_usize| {
+            const idx: NodeIndex = @intCast(idx_usize);
+            if (self.ir_view.getTag(idx) != .assignment) continue;
+            const asgn = self.ir_view.getAssignment(idx) orelse continue;
+            const target = self.assignmentRootBinding(asgn.target) orelse continue;
+            if (packBindingKey(target.scope_id, target.slot) != key) continue;
+            const fn_node = self.resolveInitialFunctionNode(asgn.value) orelse continue;
+            self.appendRouteFunctionRoot(fn_node);
+        }
+    }
+
+    fn appendAssignedTableFunctions(self: *FlowChecker, table_arg: NodeIndex) void {
+        if (self.ir_view.getTag(table_arg) != .identifier) return;
+        const binding = self.ir_view.getBinding(table_arg) orelse return;
+        const key = packBindingKey(binding.scope_id, binding.slot);
+        const node_count = self.ir_view.nodeCount();
+        for (0..node_count) |idx_usize| {
+            const idx: NodeIndex = @intCast(idx_usize);
+            if (self.ir_view.getTag(idx) != .assignment) continue;
+            const asgn = self.ir_view.getAssignment(idx) orelse continue;
+            const target = self.assignmentRootBinding(asgn.target) orelse continue;
+            if (packBindingKey(target.scope_id, target.slot) != key) continue;
+            const fn_node = self.resolveInitialFunctionNode(asgn.value) orelse continue;
+            self.appendRouteFunctionRoot(fn_node);
+        }
+    }
+
+    fn appendRouteFunctionRoot(self: *FlowChecker, fn_node: NodeIndex) void {
+        if (std.mem.indexOfScalar(NodeIndex, self.route_function_roots.items, fn_node) != null) return;
+        self.route_function_roots.append(self.allocator, fn_node) catch self.markAllocationFailure();
+    }
+
+    fn isRouterMatchCallee(self: *const FlowChecker, callee: NodeIndex) bool {
+        if (self.ir_view.getTag(callee) != .identifier) return false;
+        const binding = self.ir_view.getBinding(callee) orelse return false;
+        const meta = self.module_fn_meta.get(binding.slot) orelse return false;
+        return std.mem.eql(u8, meta.module, "router") and std.mem.eql(u8, meta.func, "routerMatch");
+    }
+
+    fn resolveRouteTableForRoots(self: *const FlowChecker, node: NodeIndex) ?NodeIndex {
+        const tag = self.ir_view.getTag(node) orelse return null;
+        if (tag == .object_literal) return node;
+        if (tag != .identifier) return null;
+        const binding = self.ir_view.getBinding(node) orelse return null;
+        if (binding.kind != .global) return null;
+        const initializer = self.findBindingInitNode(binding) orelse return null;
+        return if (self.ir_view.getTag(initializer) == .object_literal) initializer else null;
+    }
+
+    fn resolveStableRouteTable(self: *const FlowChecker, node: NodeIndex) ?NodeIndex {
+        const tag = self.ir_view.getTag(node) orelse return null;
+        if (tag == .object_literal) return node;
+        if (tag != .identifier) return null;
+        const binding = self.ir_view.getBinding(node) orelse return null;
+        if (binding.kind != .global) return null;
+        const decl = self.findBindingDecl(binding) orelse return null;
+        if (self.bindingIsMutated(binding) or
+            self.bindingHasAlias(binding) or
+            self.bindingEscapesStableResolution(binding, true)) return null;
+        return if (self.ir_view.getTag(decl.init) == .object_literal) decl.init else null;
+    }
+
+    fn resolveLiteralObjectMethod(self: *const FlowChecker, node: NodeIndex) ?NodeIndex {
+        const tag = self.ir_view.getTag(node) orelse return null;
+        if (tag == .object_literal) return node;
+        if (tag != .identifier) return null;
+        const binding = self.ir_view.getBinding(node) orelse return null;
+        const decl = self.findBindingDecl(binding) orelse return null;
+        if (self.bindingIsMutated(binding) or
+            self.bindingHasAlias(binding) or
+            self.bindingEscapesStableResolution(binding, false)) return null;
+        return if (self.ir_view.getTag(decl.init) == .object_literal) decl.init else null;
+    }
+
+    fn findBindingInitNode(self: *const FlowChecker, binding: ir.BindingRef) ?NodeIndex {
+        const decl = self.findBindingDecl(binding) orelse return null;
+        return if (decl.init != null_node) decl.init else null;
+    }
+
+    fn findBindingDecl(self: *const FlowChecker, binding: ir.BindingRef) ?Node.VarDecl {
+        const key = packBindingKey(binding.scope_id, binding.slot);
+        const node_count = self.ir_view.nodeCount();
+        for (0..node_count) |idx_usize| {
+            const idx: NodeIndex = @intCast(idx_usize);
+            const tag = self.ir_view.getTag(idx) orelse continue;
+            if (tag != .var_decl and tag != .function_decl) continue;
+            const decl = self.ir_view.getVarDecl(idx) orelse continue;
+            if (packBindingKey(decl.binding.scope_id, decl.binding.slot) != key) continue;
+            return decl;
+        }
+        return null;
+    }
+
+    fn bindingIsMutated(self: *const FlowChecker, binding: ir.BindingRef) bool {
+        const key = packBindingKey(binding.scope_id, binding.slot);
+        const node_count = self.ir_view.nodeCount();
+        for (0..node_count) |idx_usize| {
+            const idx: NodeIndex = @intCast(idx_usize);
+            if (self.ir_view.getTag(idx) != .assignment) continue;
+            const asgn = self.ir_view.getAssignment(idx) orelse return true;
+            const root = self.assignmentRootBinding(asgn.target) orelse continue;
+            if (packBindingKey(root.scope_id, root.slot) == key) return true;
+        }
+        return false;
+    }
+
+    fn bindingHasAlias(self: *const FlowChecker, binding: ir.BindingRef) bool {
+        const key = packBindingKey(binding.scope_id, binding.slot);
+        const node_count = self.ir_view.nodeCount();
+        for (0..node_count) |idx_usize| {
+            const idx: NodeIndex = @intCast(idx_usize);
+            const tag = self.ir_view.getTag(idx) orelse continue;
+            if (tag == .var_decl) {
+                const decl = self.ir_view.getVarDecl(idx) orelse continue;
+                if (self.ir_view.getTag(decl.init) != .identifier) continue;
+                const source = self.ir_view.getBinding(decl.init) orelse continue;
+                if (packBindingKey(source.scope_id, source.slot) == key) return true;
+            } else if (tag == .assignment) {
+                const asgn = self.ir_view.getAssignment(idx) orelse continue;
+                if (self.ir_view.getTag(asgn.value) != .identifier) continue;
+                const source = self.ir_view.getBinding(asgn.value) orelse continue;
+                if (packBindingKey(source.scope_id, source.slot) == key) return true;
+            }
+        }
+        return false;
+    }
+
+    /// Stable object resolution is valid only while no other value can mutate
+    /// the object. Reject bindings stored in aggregates, passed to unknown
+    /// calls, assigned elsewhere, or returned. The route table's direct use as
+    /// routerMatch's first argument is the one modeled escape.
+    fn bindingEscapesStableResolution(
+        self: *const FlowChecker,
+        binding: ir.BindingRef,
+        allow_router_match: bool,
+    ) bool {
+        return self.bindingEscapesStableResolutionDepth(binding, allow_router_match, 0);
+    }
+
+    fn bindingEscapesStableResolutionDepth(
+        self: *const FlowChecker,
+        binding: ir.BindingRef,
+        allow_router_match: bool,
+        depth: u8,
+    ) bool {
+        if (depth >= max_summary_depth) return true;
+        const key = packBindingKey(binding.scope_id, binding.slot);
+        const node_count = self.ir_view.nodeCount();
+        for (0..node_count) |idx_usize| {
+            const idx: NodeIndex = @intCast(idx_usize);
+            const tag = self.ir_view.getTag(idx) orelse continue;
+            switch (tag) {
+                .var_decl => {
+                    const decl = self.ir_view.getVarDecl(idx) orelse return true;
+                    if (decl.init == null_node) continue;
+                    if (packBindingKey(decl.binding.scope_id, decl.binding.slot) == key) continue;
+                    if (self.nodeContainsBinding(decl.init, key, 0)) {
+                        return true;
+                    }
+                },
+                .assignment => {
+                    const assignment = self.ir_view.getAssignment(idx) orelse return true;
+                    if (self.nodeContainsBinding(assignment.value, key, 0)) return true;
+                },
+                .call, .method_call => {
+                    const call = self.ir_view.getCall(idx) orelse return true;
+                    for (0..call.args_count) |arg_index| {
+                        const arg = self.ir_view.getListIndex(call.args_start, @intCast(arg_index));
+                        if (!self.nodeContainsBinding(arg, key, 0)) continue;
+                        if (allow_router_match and arg_index == 0 and
+                            self.isRouterMatchCallee(call.callee) and
+                            self.nodeIsBinding(arg, key)) continue;
+                        if (self.nodeIsBinding(arg, key) and
+                            self.callKeepsArgumentLocal(call, arg_index, depth + 1)) continue;
+                        return true;
+                    }
+                },
+                .return_stmt => {
+                    const value = self.ir_view.getOptValue(idx) orelse continue;
+                    if (self.nodeContainsBinding(value, key, 0)) {
+                        return true;
+                    }
+                },
+                // exhaustive: the remaining nodes do not themselves store,
+                // return, or pass a value. Their enclosing expression is checked.
+                else => {},
+            }
+        }
+        return false;
+    }
+
+    fn callKeepsArgumentLocal(self: *const FlowChecker, call: Node.CallExpr, arg_index: usize, depth: u8) bool {
+        // Type-test patterns lower to this predicate. It reads the value kind
+        // without retaining or changing the argument.
+        if (arg_index == 0 and self.isGlobalMethodCall(call.callee, "Array", &.{"isArray"})) {
+            const member = self.ir_view.getMember(call.callee) orelse return false;
+            const array_binding = self.ir_view.getBinding(member.object) orelse return false;
+            return !self.bindingIsMutated(array_binding) and
+                !self.bindingHasAlias(array_binding) and
+                !self.bindingEscapesStableResolutionDepth(array_binding, false, depth);
+        }
+        const fn_node = self.resolveFunctionNode(call.callee) orelse return false;
+        const func = self.ir_view.getFunction(fn_node) orelse return false;
+        if (arg_index >= func.params_count) return false;
+        const param = self.ir_view.getListIndex(func.params_start, @intCast(arg_index));
+        const binding = self.paramBinding(param) orelse return false;
+        const key = packBindingKey(binding.scope_id, binding.slot);
+        for (0..self.ir_view.nodeCount()) |idx_usize| {
+            const idx: NodeIndex = @intCast(idx_usize);
+            const tag = self.ir_view.getTag(idx) orelse continue;
+            if (tag != .call and tag != .method_call) continue;
+            const nested_call = self.ir_view.getCall(idx) orelse return false;
+            const receiver = self.assignmentRootBinding(nested_call.callee) orelse continue;
+            if (packBindingKey(receiver.scope_id, receiver.slot) == key) return false;
+        }
+        return !self.bindingIsMutated(binding) and
+            !self.bindingHasAlias(binding) and
+            !self.bindingEscapesStableResolutionDepth(binding, false, depth);
+    }
+
+    fn nodeIsBinding(self: *const FlowChecker, node: NodeIndex, key: u64) bool {
+        if (self.ir_view.getTag(node) != .identifier) return false;
+        const found = self.ir_view.getBinding(node) orelse return false;
+        return packBindingKey(found.scope_id, found.slot) == key;
+    }
+
+    fn nodeContainsBinding(self: *const FlowChecker, node: NodeIndex, key: u64, depth: u8) bool {
+        if (node == null_node) return false;
+        if (depth >= max_summary_depth) return true;
+        const tag = self.ir_view.getTag(node) orelse return true;
+        if (tag == .identifier) return self.nodeIsBinding(node, key);
+        return switch (tag) {
+            // Reading a field does not pass the containing object. In
+            // particular, assigning found.params cannot replace found.handler.
+            // A stored self-reference already fails the mutation/escape scan.
+            .member_access, .optional_chain => blk: {
+                const member = self.ir_view.getMember(node) orelse break :blk true;
+                if (self.nodeIsBinding(member.object, key)) break :blk false;
+                break :blk self.nodeContainsBinding(member.object, key, depth + 1);
+            },
+            .computed_access => blk: {
+                const computed = self.ir_view.getMember(node) orelse break :blk true;
+                if (self.nodeIsBinding(computed.object, key)) break :blk false;
+                break :blk self.nodeContainsBinding(computed.object, key, depth + 1);
+            },
+            .array_literal => blk: {
+                const array = self.ir_view.getArray(node) orelse break :blk true;
+                for (0..array.elements_count) |i| {
+                    const element = self.ir_view.getListIndex(array.elements_start, @intCast(i));
+                    if (self.nodeContainsBinding(element, key, depth + 1)) break :blk true;
+                }
+                break :blk false;
+            },
+            .object_literal => blk: {
+                const object_expr = self.ir_view.getObject(node) orelse break :blk true;
+                for (0..object_expr.properties_count) |i| {
+                    const property = self.ir_view.getListIndex(object_expr.properties_start, @intCast(i));
+                    if (self.nodeContainsBinding(property, key, depth + 1)) break :blk true;
+                }
+                break :blk false;
+            },
+            .object_property => blk: {
+                const property = self.ir_view.getProperty(node) orelse break :blk true;
+                break :blk self.nodeContainsBinding(property.value, key, depth + 1);
+            },
+            .spread, .object_spread => blk: {
+                const value = self.ir_view.getOptValue(node) orelse break :blk true;
+                break :blk self.nodeContainsBinding(value, key, depth + 1);
+            },
+            .ternary => blk: {
+                const ternary = self.ir_view.getTernary(node) orelse break :blk true;
+                break :blk self.nodeContainsBinding(ternary.condition, key, depth + 1) or
+                    self.nodeContainsBinding(ternary.then_branch, key, depth + 1) or
+                    self.nodeContainsBinding(ternary.else_branch, key, depth + 1);
+            },
+            .binary_op => blk: {
+                const binary = self.ir_view.getBinary(node) orelse break :blk true;
+                break :blk self.nodeContainsBinding(binary.left, key, depth + 1) or
+                    self.nodeContainsBinding(binary.right, key, depth + 1);
+            },
+            .unary_op => blk: {
+                const unary = self.ir_view.getUnary(node) orelse break :blk true;
+                break :blk self.nodeContainsBinding(unary.operand, key, depth + 1);
+            },
+            .match_expr => blk: {
+                const match_expr = self.ir_view.getMatchExpr(node) orelse break :blk true;
+                for (0..match_expr.arms_count) |i| {
+                    const arm_idx = self.ir_view.getListIndex(match_expr.arms_start, @intCast(i));
+                    const arm = self.ir_view.getMatchArm(arm_idx) orelse break :blk true;
+                    if (self.nodeContainsBinding(arm.body, key, depth + 1)) break :blk true;
+                }
+                break :blk false;
+            },
+            // exhaustive: literals do not contain this binding; call arguments
+            // and function return statements are scanned separately above.
+            else => false,
+        };
+    }
+
+    fn resolveFunctionNode(self: *const FlowChecker, node: NodeIndex) ?NodeIndex {
+        const tag = self.ir_view.getTag(node) orelse return null;
+        return switch (tag) {
+            .function_expr, .arrow_function => node,
+            .function_decl => blk: {
+                const decl = self.ir_view.getVarDecl(node) orelse break :blk null;
+                break :blk if (decl.init != null_node) decl.init else null;
+            },
+            .identifier => blk: {
+                const binding = self.ir_view.getBinding(node) orelse break :blk null;
+                const decl = self.findBindingDecl(binding) orelse break :blk null;
+                if (self.bindingIsMutated(binding)) break :blk null;
+                const init_tag = self.ir_view.getTag(decl.init) orelse break :blk null;
+                if (init_tag != .function_expr and init_tag != .arrow_function) break :blk null;
+                break :blk decl.init;
+            },
+            // exhaustive: every other expression is not a statically resolved
+            // function value, so dispatch adds `.unknown` instead of proving it.
+            else => null,
+        };
+    }
+
+    fn resolveInitialFunctionNode(self: *const FlowChecker, node: NodeIndex) ?NodeIndex {
+        const tag = self.ir_view.getTag(node) orelse return null;
+        return switch (tag) {
+            .function_expr, .arrow_function => node,
+            .identifier => blk: {
+                const binding = self.ir_view.getBinding(node) orelse break :blk null;
+                const initializer = self.findBindingInitNode(binding) orelse break :blk null;
+                const init_tag = self.ir_view.getTag(initializer) orelse break :blk null;
+                if (init_tag != .function_expr and init_tag != .arrow_function) break :blk null;
+                break :blk initializer;
+            },
+            // exhaustive: only these three shapes can name an initial route
+            // function. Other values add no root and make dispatch unknown.
+            else => null,
+        };
     }
 
     fn findHandlerParam(self: *FlowChecker, handler_func: NodeIndex) void {
@@ -1804,6 +2219,10 @@ pub const FlowChecker = struct {
     fn inferCallLabels(self: *FlowChecker, call_data: Node.CallExpr) LabelSet {
         const callee_tag = self.ir_view.getTag(call_data.callee) orelse return LabelSet.empty;
 
+        if (callee_tag == .function_expr or callee_tag == .arrow_function) {
+            return self.resolvedFunctionCallLabels(call_data.callee, call_data);
+        }
+
         if (callee_tag == .identifier) {
             const binding = self.ir_view.getBinding(call_data.callee) orelse return LabelSet.empty;
 
@@ -1890,23 +2309,440 @@ pub const FlowChecker = struct {
             return .{ .nondeterministic = true };
         }
 
-        // Any other callee shape (member `obj.method(x)`, computed `obj[k](x)`,
-        // a call result `f()(x)`, or an IIFE) is not a known
-        // pure builtin. Returning empty here would LAUNDER taint: a labelled
-        // value routed through `JSON.stringify(secret)`, `[secret].join()`,
-        // `secret.slice()`, etc. would reach a sink carrying no label, falsely
-        // discharging no_secret_leakage / no_credential_leakage / injection_safe
-        // / pii_contained. Fail closed with the conservative union of the
-        // callee/receiver labels and every argument's labels (the same merge the
-        // never-emitted `.method_call` arm computes). This only adds labels when
-        // the receiver or an argument is genuinely tainted, so benign method
-        // calls on untainted data stay clean.
+        // A route dispatch is an indirect call, but the literal table makes
+        // its finite callee set known. Its value carries the union of every
+        // resolved route function's return labels. A table or entry that
+        // cannot be resolved contributes `.unknown`.
+        if (self.routerDispatchLabels(call_data.callee, call_data)) |labels| return labels;
+
+        // A function-valued field of an unmodified literal object is another
+        // finite callee set. Resolution refuses spreads, duplicate keys, and
+        // any assignment through the object binding.
+        if (self.literalObjectMethodLabels(call_data.callee, call_data)) |labels| return labels;
+
+        // Response helpers transmit only their first argument. The runtime
+        // currently reads the second argument for status and ignores custom
+        // headers, so a callee summary must use the same sink surface.
+        if (self.route_summary_depth > 0 and self.isResponseHelper(call_data.callee)) {
+            if (call_data.args_count == 0) return LabelSet.empty;
+            return self.inferLabels(self.ir_view.getListIndex(call_data.args_start, 0));
+        }
+
+        // Known intrinsic calls carry receiver and argument labels. Unknown
+        // is limited to unresolved function values: a function parameter
+        // (handled in userCallLabels), an unresolved member such as
+        // found.handler, a computed array/object/dict element, or a function
+        // returned by another call, or a selector expression such as a ternary
+        // or nullish coalesce whose result is invoked. Resolved user functions,
+        // imported module exports, builtin globals, and primitive/array methods
+        // return above or are recognized here and keep their ordinary label
+        // union.
         var labels = self.inferLabels(call_data.callee);
         for (0..call_data.args_count) |i| {
             const arg = self.ir_view.getListIndex(call_data.args_start, @intCast(i));
             labels = LabelSet.merge(labels, self.inferLabels(arg));
         }
+        if (self.isUnresolvedFunctionValueCallee(call_data.callee)) labels.unknown = true;
         return labels;
+    }
+
+    fn isUnresolvedFunctionValueCallee(self: *const FlowChecker, callee: NodeIndex) bool {
+        const tag = self.ir_view.getTag(callee) orelse return false;
+        return switch (tag) {
+            .member_access, .optional_chain => !self.isKnownBuiltinMemberCall(callee),
+            // Computed elements, call results, binary/ternary selectors,
+            // assignments, and every other expression-valued callee have no
+            // resolved function body here.
+            else => true,
+        };
+    }
+
+    fn routerDispatchLabels(self: *FlowChecker, callee: NodeIndex, call_data: Node.CallExpr) ?LabelSet {
+        if (self.ir_view.getTag(callee) != .member_access) return null;
+        const member = self.ir_view.getMember(callee) orelse return null;
+        const property = self.resolveAtomName(member.property) orelse return null;
+        if (!std.mem.eql(u8, property, "handler")) return null;
+        if (self.ir_view.getTag(member.object) != .identifier) return null;
+
+        const binding = self.ir_view.getBinding(member.object) orelse return null;
+        const unstable = self.bindingIsMutated(binding) or
+            self.bindingHasAlias(binding) or
+            self.bindingEscapesStableResolution(binding, false);
+        const key = packBindingKey(binding.scope_id, binding.slot);
+        const values = self.binding_value_nodes.get(key) orelse return null;
+        var matched = false;
+        var unresolved_value = false;
+        var labels = LabelSet.empty;
+        for (values.items) |value| {
+            if (self.labelsFromRouterMatch(value, call_data)) |found| {
+                matched = true;
+                labels = LabelSet.merge(labels, found);
+            } else {
+                unresolved_value = true;
+            }
+        }
+        if (!matched) return null;
+        if (unstable) return self.unknownRouteCallLabels();
+        if (unresolved_value) labels.unknown = true;
+        return labels;
+    }
+
+    fn labelsFromRouterMatch(self: *FlowChecker, node: NodeIndex, dispatch: Node.CallExpr) ?LabelSet {
+        if (self.ir_view.getTag(node) != .call) return null;
+        const call = self.ir_view.getCall(node) orelse return null;
+        if (!self.isRouterMatchCallee(call.callee)) return null;
+        if (call.args_count == 0) return self.unknownRouteCallLabels();
+
+        const table_arg = self.ir_view.getListIndex(call.args_start, 0);
+        const table = self.resolveStableRouteTable(table_arg) orelse return self.unknownRouteCallLabels();
+        const obj = self.ir_view.getObject(table) orelse return self.unknownRouteCallLabels();
+        var labels = LabelSet.empty;
+        var resolved_count: usize = 0;
+        var unresolved = false;
+        var i: u16 = 0;
+        while (i < obj.properties_count) : (i += 1) {
+            const prop_idx = self.ir_view.getListIndex(obj.properties_start, i);
+            if (self.ir_view.getTag(prop_idx) != .object_property) {
+                labels.unknown = true;
+                unresolved = true;
+                continue;
+            }
+            const prop = self.ir_view.getProperty(prop_idx) orelse {
+                labels.unknown = true;
+                unresolved = true;
+                continue;
+            };
+            const fn_node = self.resolveFunctionNode(prop.value) orelse {
+                labels.unknown = true;
+                unresolved = true;
+                continue;
+            };
+            resolved_count += 1;
+            labels = LabelSet.merge(labels, self.routeFunctionCallLabels(fn_node, dispatch));
+        }
+        if (resolved_count == 0) {
+            labels.unknown = true;
+            unresolved = true;
+        }
+        if (unresolved) _ = self.unknownRouteCallLabels();
+        return labels;
+    }
+
+    fn unknownRouteCallLabels(self: *FlowChecker) LabelSet {
+        self.properties.no_secret_leakage = false;
+        self.properties.no_credential_leakage = false;
+        self.properties.input_validated = false;
+        self.properties.pii_contained = false;
+        self.properties.injection_safe = false;
+        self.properties.deterministic = false;
+        return .{ .unknown = true };
+    }
+
+    fn routeFunctionCallLabels(self: *FlowChecker, fn_node: NodeIndex, call_data: Node.CallExpr) LabelSet {
+        const saved_req_key = self.req_binding_key;
+        const saved_identity_trusted = self.req_identity_trusted;
+        self.req_binding_key = null;
+        self.req_identity_trusted = false;
+        self.findHandlerParam(fn_node);
+        self.route_summary_depth += 1;
+        const labels = self.resolvedFunctionCallLabels(fn_node, call_data);
+        self.route_summary_depth -= 1;
+        self.req_binding_key = saved_req_key;
+        self.req_identity_trusted = saved_identity_trusted;
+        return labels;
+    }
+
+    fn literalObjectMethodLabels(self: *FlowChecker, callee: NodeIndex, call_data: Node.CallExpr) ?LabelSet {
+        if (self.ir_view.getTag(callee) != .member_access) return null;
+        const member = self.ir_view.getMember(callee) orelse return null;
+        const method = self.resolveAtomName(member.property) orelse return null;
+        const object_node = self.resolveLiteralObjectMethod(member.object) orelse return null;
+        const obj = self.ir_view.getObject(object_node) orelse return .{ .unknown = true };
+
+        var matched: ?NodeIndex = null;
+        var i: u16 = 0;
+        while (i < obj.properties_count) : (i += 1) {
+            const prop_idx = self.ir_view.getListIndex(obj.properties_start, i);
+            if (self.ir_view.getTag(prop_idx) != .object_property) return .{ .unknown = true };
+            const prop = self.ir_view.getProperty(prop_idx) orelse return .{ .unknown = true };
+            const key = self.getObjectPropertyKey(prop.key) orelse return .{ .unknown = true };
+            if (!std.mem.eql(u8, key, method)) continue;
+            if (matched != null) return .{ .unknown = true };
+            matched = self.resolveFunctionNode(prop.value) orelse return .{ .unknown = true };
+        }
+        const fn_node = matched orelse return .{ .unknown = true };
+        return self.resolvedFunctionCallLabels(fn_node, call_data);
+    }
+
+    fn getObjectPropertyKey(self: *const FlowChecker, node: NodeIndex) ?[]const u8 {
+        const tag = self.ir_view.getTag(node) orelse return null;
+        return switch (tag) {
+            .identifier => blk: {
+                const binding = self.ir_view.getBinding(node) orelse break :blk null;
+                break :blk self.resolveAtomName(binding.name_atom);
+            },
+            .lit_string => blk: {
+                const string_idx = self.ir_view.getStringIdx(node) orelse break :blk null;
+                break :blk self.ir_view.getString(string_idx);
+            },
+            // exhaustive: a dynamic key makes literal-method resolution fail,
+            // which routes the call through the `.unknown` fallback.
+            else => null,
+        };
+    }
+
+    const BuiltinReceiverKind = enum {
+        global_array,
+        global_console,
+        global_date,
+        global_json,
+        global_math,
+        global_number,
+        global_object,
+        global_response,
+        global_string,
+        string,
+        array,
+        response,
+        headers,
+        result,
+    };
+
+    fn isKnownBuiltinMemberCall(self: *const FlowChecker, callee: NodeIndex) bool {
+        const tag = self.ir_view.getTag(callee) orelse return false;
+        if (tag != .member_access and tag != .optional_chain) return false;
+        const member = self.ir_view.getMember(callee) orelse return false;
+        const method = self.resolveAtomName(member.property) orelse return false;
+        const kind = self.builtinReceiverKind(member.object, 0) orelse return false;
+        return switch (kind) {
+            .global_array => std.mem.eql(u8, method, "isArray") or std.mem.eql(u8, method, "from") or std.mem.eql(u8, method, "of"),
+            .global_console => std.mem.eql(u8, method, "log") or std.mem.eql(u8, method, "warn") or std.mem.eql(u8, method, "error"),
+            .global_date => std.mem.eql(u8, method, "now"),
+            .global_json => std.mem.eql(u8, method, "parse") or std.mem.eql(u8, method, "tryParse") or std.mem.eql(u8, method, "stringify"),
+            .global_math => isMathMethod(method),
+            .global_number => std.mem.eql(u8, method, "isInteger") or std.mem.eql(u8, method, "isNaN") or std.mem.eql(u8, method, "isFinite") or std.mem.eql(u8, method, "parseFloat") or std.mem.eql(u8, method, "parseInt"),
+            .global_object => std.mem.eql(u8, method, "keys") or std.mem.eql(u8, method, "values") or std.mem.eql(u8, method, "entries") or std.mem.eql(u8, method, "hasOwn"),
+            .global_response => std.mem.eql(u8, method, "json") or std.mem.eql(u8, method, "text") or std.mem.eql(u8, method, "html") or std.mem.eql(u8, method, "redirect") or std.mem.eql(u8, method, "rawJson"),
+            .global_string => std.mem.eql(u8, method, "fromCharCode"),
+            .string => isStringMethod(method),
+            .array => isArrayMethod(method),
+            .response => std.mem.eql(u8, method, "json") or std.mem.eql(u8, method, "text"),
+            .headers => std.mem.eql(u8, method, "get"),
+            .result => isResultMethod(method),
+        };
+    }
+
+    fn builtinReceiverKind(self: *const FlowChecker, node: NodeIndex, depth: u8) ?BuiltinReceiverKind {
+        if (depth >= max_summary_depth) return null;
+        const tag = self.ir_view.getTag(node) orelse return null;
+        switch (tag) {
+            .lit_string => return .string,
+            .array_literal => return .array,
+            .identifier => {
+                const binding = self.ir_view.getBinding(node) orelse return null;
+                if (binding.kind == .undeclared_global) {
+                    const name = self.resolveAtomName(binding.name_atom) orelse return null;
+                    return globalReceiverKind(name);
+                }
+                if (binding.kind == .argument) {
+                    if (self.bindingIsMutated(binding)) return null;
+                    const kind = self.checkedBuiltinReceiverKind(node) orelse return null;
+                    if (kind != .string and (self.bindingHasAlias(binding) or
+                        self.bindingEscapesStableResolution(binding, false)))
+                    {
+                        return null;
+                    }
+                    return kind;
+                }
+                const decl = self.findBindingDecl(binding) orelse return null;
+                if (self.bindingIsMutated(binding)) return null;
+                const kind = self.builtinReceiverKind(decl.init, depth + 1) orelse return null;
+                if (kind != .string and (self.bindingHasAlias(binding) or
+                    self.bindingEscapesStableResolution(binding, false)))
+                {
+                    return null;
+                }
+                return kind;
+            },
+            .call, .method_call => {
+                const call = self.ir_view.getCall(node) orelse return null;
+                if (self.ir_view.getTag(call.callee) == .identifier) {
+                    const binding = self.ir_view.getBinding(call.callee) orelse return null;
+                    if (binding.kind == .undeclared_global) {
+                        const name = self.resolveAtomName(binding.name_atom) orelse return null;
+                        if (std.mem.eql(u8, name, "String")) return .string;
+                        if (std.mem.eql(u8, name, "Array") or std.mem.eql(u8, name, "range")) return .array;
+                        return null;
+                    }
+                    if (self.module_fn_meta.get(binding.slot)) |meta| {
+                        if (meta.returns == .string or meta.returns == .optional_string) return .string;
+                        if (meta.returns == .result) return .result;
+                        if ((std.mem.eql(u8, meta.module, "fetch") and
+                            (std.mem.eql(u8, meta.func, "fetch") or std.mem.eql(u8, meta.func, "fetchWithRetry"))) or
+                            (std.mem.eql(u8, meta.module, "service") and std.mem.eql(u8, meta.func, "serviceCall")) or
+                            (std.mem.eql(u8, meta.module, "workflow") and
+                                (std.mem.eql(u8, meta.func, "call") or std.mem.eql(u8, meta.func, "follow"))) or
+                            (std.mem.eql(u8, meta.module, "io") and std.mem.eql(u8, meta.func, "race"))) return .response;
+                    }
+                }
+                if (self.ir_view.getTag(call.callee) != .member_access) return null;
+                const member = self.ir_view.getMember(call.callee) orelse return null;
+                const method = self.resolveAtomName(member.property) orelse return null;
+                const receiver = self.builtinReceiverKind(member.object, depth + 1) orelse return null;
+                return builtinMethodResult(receiver, method);
+            },
+            .member_access, .optional_chain => {
+                const member = self.ir_view.getMember(node) orelse return null;
+                const name = self.resolveAtomName(member.property) orelse return null;
+                if (std.mem.eql(u8, name, "headers") and self.isReqBinding(member.object)) return .headers;
+                if ((std.mem.eql(u8, name, "body") or std.mem.eql(u8, name, "url") or std.mem.eql(u8, name, "method") or
+                    std.mem.eql(u8, name, "subject") or std.mem.eql(u8, name, "tenant")) and
+                    self.isReqBinding(member.object)) return .string;
+                if (std.mem.eql(u8, name, "headers")) {
+                    const object_kind = self.builtinReceiverKind(member.object, depth + 1) orelse return null;
+                    if (object_kind == .response) return .headers;
+                }
+                return null;
+            },
+            .binary_op => {
+                const binary = self.ir_view.getBinary(node) orelse return null;
+                if (binary.op != .nullish) return null;
+                const left_kind = self.builtinReceiverKind(binary.left, depth + 1) orelse return null;
+                const right_kind = self.builtinReceiverKind(binary.right, depth + 1) orelse return null;
+                return if (left_kind == right_kind) left_kind else null;
+            },
+            .ternary => {
+                const ternary = self.ir_view.getTernary(node) orelse return null;
+                const then_kind = self.builtinReceiverKind(ternary.then_branch, depth + 1) orelse return null;
+                const else_kind = self.builtinReceiverKind(ternary.else_branch, depth + 1) orelse return null;
+                return if (then_kind == else_kind) then_kind else null;
+            },
+            // exhaustive: no other expression proves an intrinsic receiver;
+            // null makes its member call carry `.unknown`.
+            else => return null,
+        }
+    }
+
+    fn checkedBuiltinReceiverKind(self: *const FlowChecker, node: NodeIndex) ?BuiltinReceiverKind {
+        const checker = self.type_checker orelse return null;
+        const type_idx = checker.inferTypeWithoutDiagnostics(node);
+        return switch (checker.env.pool.getTag(type_idx) orelse return null) {
+            .t_string, .t_literal_string, .t_template_literal => .string,
+            .t_array, .t_tuple => .array,
+            // exhaustive: records, functions, unknown types, and all other
+            // types do not prove a primitive or array receiver. Keep their
+            // method calls unresolved so the fallback retains `.unknown`.
+            else => null,
+        };
+    }
+
+    fn isStringMethod(name: []const u8) bool {
+        return std.mem.eql(u8, name, "charAt") or
+            std.mem.eql(u8, name, "charCodeAt") or
+            std.mem.eql(u8, name, "indexOf") or
+            std.mem.eql(u8, name, "lastIndexOf") or
+            std.mem.eql(u8, name, "startsWith") or
+            std.mem.eql(u8, name, "endsWith") or
+            std.mem.eql(u8, name, "includes") or
+            std.mem.eql(u8, name, "slice") or
+            std.mem.eql(u8, name, "substring") or
+            std.mem.eql(u8, name, "toLowerCase") or
+            std.mem.eql(u8, name, "toUpperCase") or
+            std.mem.eql(u8, name, "trim") or
+            std.mem.eql(u8, name, "trimStart") or
+            std.mem.eql(u8, name, "trimEnd") or
+            std.mem.eql(u8, name, "split") or
+            std.mem.eql(u8, name, "repeat") or
+            std.mem.eql(u8, name, "padStart") or
+            std.mem.eql(u8, name, "padEnd") or
+            std.mem.eql(u8, name, "concat") or
+            std.mem.eql(u8, name, "replace") or
+            std.mem.eql(u8, name, "replaceAll");
+    }
+
+    fn isArrayMethod(name: []const u8) bool {
+        const methods = [_][]const u8{
+            "push",  "pop",       "shift",    "unshift",    "splice", "indexOf", "includes", "join",
+            "slice", "concat",    "map",      "filter",     "reduce", "forEach", "every",    "some",
+            "find",  "findIndex", "toSorted", "toReversed",
+        };
+        for (methods) |method| {
+            if (std.mem.eql(u8, name, method)) return true;
+        }
+        return false;
+    }
+
+    fn builtinMethodResult(receiver: BuiltinReceiverKind, method: []const u8) ?BuiltinReceiverKind {
+        return switch (receiver) {
+            .global_json => if (std.mem.eql(u8, method, "stringify")) .string else null,
+            .global_object => if (std.mem.eql(u8, method, "keys") or std.mem.eql(u8, method, "values") or std.mem.eql(u8, method, "entries")) .array else null,
+            .global_response => if (std.mem.eql(u8, method, "json") or std.mem.eql(u8, method, "text") or std.mem.eql(u8, method, "html") or std.mem.eql(u8, method, "redirect") or std.mem.eql(u8, method, "rawJson")) .response else null,
+            .global_string => if (std.mem.eql(u8, method, "fromCharCode")) .string else null,
+            .global_array => if (std.mem.eql(u8, method, "from") or std.mem.eql(u8, method, "of")) .array else null,
+            .global_console, .global_date, .global_math, .global_number => null,
+            .string => if (std.mem.eql(u8, method, "split")) .array else if (std.mem.eql(u8, method, "charAt") or
+                std.mem.eql(u8, method, "slice") or
+                std.mem.eql(u8, method, "substring") or
+                std.mem.eql(u8, method, "toLowerCase") or
+                std.mem.eql(u8, method, "toUpperCase") or
+                std.mem.eql(u8, method, "trim") or
+                std.mem.eql(u8, method, "trimStart") or
+                std.mem.eql(u8, method, "trimEnd") or
+                std.mem.eql(u8, method, "repeat") or
+                std.mem.eql(u8, method, "padStart") or
+                std.mem.eql(u8, method, "padEnd") or
+                std.mem.eql(u8, method, "concat") or
+                std.mem.eql(u8, method, "replace") or
+                std.mem.eql(u8, method, "replaceAll")) .string else null,
+            .array => if (std.mem.eql(u8, method, "join")) .string else if (std.mem.eql(u8, method, "slice") or
+                std.mem.eql(u8, method, "concat") or
+                std.mem.eql(u8, method, "map") or
+                std.mem.eql(u8, method, "filter") or
+                std.mem.eql(u8, method, "splice") or
+                std.mem.eql(u8, method, "toSorted") or
+                std.mem.eql(u8, method, "toReversed")) .array else null,
+            .response => if (std.mem.eql(u8, method, "text")) .string else null,
+            .headers => if (std.mem.eql(u8, method, "get")) .string else null,
+            .result => if (std.mem.eql(u8, method, "map") or std.mem.eql(u8, method, "mapErr") or
+                std.mem.eql(u8, method, "andThen") or std.mem.eql(u8, method, "orElse")) .result else null,
+        };
+    }
+
+    fn globalReceiverKind(name: []const u8) ?BuiltinReceiverKind {
+        if (std.mem.eql(u8, name, "Array")) return .global_array;
+        if (std.mem.eql(u8, name, "console")) return .global_console;
+        if (std.mem.eql(u8, name, "Date") or std.mem.eql(u8, name, "performance")) return .global_date;
+        if (std.mem.eql(u8, name, "JSON")) return .global_json;
+        if (std.mem.eql(u8, name, "Math")) return .global_math;
+        if (std.mem.eql(u8, name, "Number")) return .global_number;
+        if (std.mem.eql(u8, name, "Object")) return .global_object;
+        if (std.mem.eql(u8, name, "Response")) return .global_response;
+        if (std.mem.eql(u8, name, "String")) return .global_string;
+        return null;
+    }
+
+    fn isMathMethod(name: []const u8) bool {
+        const methods = [_][]const u8{
+            "abs", "floor", "ceil", "round", "min", "max",    "pow", "trunc", "sqrt",
+            "sin", "cos",   "tan",  "log",   "exp", "random",
+        };
+        for (methods) |method| {
+            if (std.mem.eql(u8, name, method)) return true;
+        }
+        return false;
+    }
+
+    fn isResultMethod(name: []const u8) bool {
+        return std.mem.eql(u8, name, "isOk") or
+            std.mem.eql(u8, name, "isErr") or
+            std.mem.eql(u8, name, "unwrap") or
+            std.mem.eql(u8, name, "unwrapOr") or
+            std.mem.eql(u8, name, "unwrapErr") or
+            std.mem.eql(u8, name, "map") or
+            std.mem.eql(u8, name, "mapErr") or
+            std.mem.eql(u8, name, "andThen") or
+            std.mem.eql(u8, name, "orElse") or
+            std.mem.eql(u8, name, "match");
     }
 
     /// True for `req.headers.get("authorization")` (case-insensitive header
@@ -1949,13 +2785,18 @@ pub const FlowChecker = struct {
         const unresolved = LabelSet.merge(arg_union, .{ .unknown = true });
 
         const fn_key = packBindingKey(binding.scope_id, binding.slot);
+        if (self.bindingIsMutated(binding)) return unresolved;
         const fn_node = self.user_fn_decls.get(fn_key) orelse {
             // An implicit global is a builtin - `h`, `range`, `renderToString`
             // - whose body is not in this module to walk and which launders
             // nothing on its own. Any other binding without a declaration is a
             // call through a value: a callback parameter, or an import the
             // resolver did not follow.
-            if (binding.kind == .undeclared_global) return arg_union;
+            if (binding.kind == .undeclared_global) {
+                const name = self.resolveAtomName(binding.name_atom) orelse return unresolved;
+                if (known_globals.isKnownGlobalFunction(name)) return arg_union;
+                return unresolved;
+            }
             // A function imported from another file, whose return labels the
             // caller computed from that file and installed here. Unioned with
             // the arguments rather than replacing them, because those labels
@@ -1965,13 +2806,35 @@ pub const FlowChecker = struct {
             }
             return unresolved;
         };
+        return self.functionCallLabels(fn_node, call_data, arg_labels, arg_union, unresolved);
+    }
+
+    fn resolvedFunctionCallLabels(self: *FlowChecker, fn_node: NodeIndex, call_data: Node.CallExpr) LabelSet {
+        var arg_labels: [max_summary_params]LabelSet = @splat(LabelSet.empty);
+        var arg_union = LabelSet.empty;
+        for (0..call_data.args_count) |i| {
+            const arg = self.ir_view.getListIndex(call_data.args_start, @intCast(i));
+            const labels = self.inferLabels(arg);
+            if (i < max_summary_params) arg_labels[i] = labels;
+            arg_union = LabelSet.merge(arg_union, labels);
+        }
+        const unresolved = LabelSet.merge(arg_union, .{ .unknown = true });
+        return self.functionCallLabels(fn_node, call_data, arg_labels, arg_union, unresolved);
+    }
+
+    fn functionCallLabels(
+        self: *FlowChecker,
+        fn_node: NodeIndex,
+        call_data: Node.CallExpr,
+        arg_labels: [max_summary_params]LabelSet,
+        arg_union: LabelSet,
+        unresolved: LabelSet,
+    ) LabelSet {
         if (self.summary_depth >= max_summary_depth) return unresolved;
         for (self.summary_stack[0..self.summary_depth]) |active| {
             // Recursion, and the only exit that stays with the argument union.
-            // The value this call produces is one of the callee's returns, and
-            // the frame already on the stack for that same function collects
-            // every one of them, so nothing is lost by stopping here.
-            if (active == fn_key) return arg_union;
+            // The active frame collects all returns from this function.
+            if (active == fn_node) return arg_union;
         }
         const func = self.ir_view.getFunction(fn_node) orelse return unresolved;
         // Past the parameter cap the arguments cannot be bound, so the body
@@ -1989,7 +2852,7 @@ pub const FlowChecker = struct {
             };
         }
 
-        self.summary_stack[self.summary_depth] = fn_key;
+        self.summary_stack[self.summary_depth] = fn_node;
         self.summary_depth += 1;
         defer self.summary_depth -= 1;
 
@@ -4264,18 +5127,33 @@ fn runWithImportedFunction(
     imported_source: []const u8,
     name: []const u8,
 ) !bool {
-    var imported_parser = try @import("zts-engine").parser.JsParser.init(allocator, imported_source);
+    var imported_prepared = try source_frontend.PreparedSource.init(allocator, imported_source, "utils.ts", .{});
+    defer imported_prepared.deinit();
+    var imported_parser = try @import("zts-engine").parser.JsParser.init(allocator, imported_prepared.parserInput());
     var imported_atoms = atom_table.AtomTable.init(allocator);
     defer imported_atoms.deinit();
     imported_parser.setAtomTable(&imported_atoms);
     defer imported_parser.deinit();
-    _ = try imported_parser.parse();
+    const imported_root = try imported_parser.parse();
     const imported_view = IrView.fromIRStore(&imported_parser.nodes, &imported_parser.constants);
+
+    const pipeline = @import("pipeline.zig");
+    var type_env_storage: pipeline.TypeEnvStorage = .{};
+    defer type_env_storage.deinit(allocator);
+    if (imported_prepared.typeMap()) |type_map| try type_env_storage.init(allocator, type_map);
+    var type_checker: ?type_checker_mod.TypeChecker = null;
+    defer if (type_checker) |*checker| checker.deinit();
+    if (type_env_storage.envPtr()) |type_env| {
+        type_checker = type_checker_mod.TypeChecker.init(allocator, imported_view, &imported_atoms, type_env, null);
+        try std.testing.expectEqual(@as(u32, 0), try type_checker.?.check(imported_root));
+    }
 
     var imported_checker = FlowChecker.init(allocator, imported_view, &imported_atoms);
     defer imported_checker.deinit();
+    if (type_checker) |*checker| imported_checker.setTypeChecker(checker);
     const imported_labels = imported_checker.exportedReturnLabels(name) orelse
         return error.ExportNotFound;
+    if (type_checker) |*checker| try checker.ensureHealthy();
 
     var parser = try @import("zts-engine").parser.JsParser.init(allocator, source);
     var atoms = atom_table.AtomTable.init(allocator);
@@ -4292,9 +5170,9 @@ fn runWithImportedFunction(
     var checker = FlowChecker.init(allocator, ir_view, &atoms);
     defer checker.deinit();
     // The import's local slot, recovered the way the caller recovers it.
-    var facts = try @import("pipeline.zig").buildModuleFacts(
+    var facts = try pipeline.buildModuleFacts(
         allocator,
-        @import("pipeline.zig").ParsedModule.fromExisting(ir_view, root, &atoms),
+        pipeline.ParsedModule.fromExisting(ir_view, root, &atoms),
         null,
     );
     defer facts.deinit();
@@ -4339,6 +5217,60 @@ test "an imported function carrying nothing keeps the property" {
         source,
         imported,
         "greet",
+    ));
+}
+
+test "typed imported builtin receivers keep their pre-fallback labels" {
+    const source =
+        \\import { normalizeLabel } from "./utils.ts";
+        \\function handler(req) { return Response.json({ v: normalizeLabel(" Ready ") }); }
+    ;
+    const string_helper =
+        \\export structural LabelText = string;
+        \\export structural NormalizedLabel = string;
+        \\export function normalizeLabel(text: LabelText): NormalizedLabel {
+        \\  return text.trim().toLowerCase();
+        \\}
+    ;
+    try std.testing.expect(try runWithImportedFunction(
+        std.testing.allocator,
+        source,
+        string_helper,
+        "normalizeLabel",
+    ));
+
+    const array_source =
+        \\import { normalizeLabels } from "./utils.ts";
+        \\function handler(req) { return Response.json({ v: normalizeLabels(["a", "b"]) }); }
+    ;
+    const array_helper =
+        \\export structural Labels = readonly string[];
+        \\export function normalizeLabels(values: Labels): string {
+        \\  return values.slice(0, 2).join("");
+        \\}
+    ;
+    try std.testing.expect(try runWithImportedFunction(
+        std.testing.allocator,
+        array_source,
+        array_helper,
+        "normalizeLabels",
+    ));
+}
+
+test "a typed arbitrary object method remains an unresolved function value" {
+    const imported =
+        \\export structural Trimmer = { trim: () => string };
+        \\export function invoke(value: Trimmer): string { return value.trim(); }
+    ;
+    const source =
+        \\import { invoke } from "./utils.ts";
+        \\function handler(req) { return Response.json({ v: invoke({ trim: () => "ok" }) }); }
+    ;
+    try std.testing.expect(!try runWithImportedFunction(
+        std.testing.allocator,
+        source,
+        imported,
+        "invoke",
     ));
 }
 
@@ -4405,6 +5337,690 @@ fn runInputValidated(allocator: std.mem.Allocator, source: []const u8) !bool {
     defer checker.deinit();
     _ = try checker.check(handler_fn);
     return checker.getProperties().input_validated;
+}
+
+/// Shared harness for route-dispatch regressions that must assert the exact
+/// flow property a source is meant to break.
+fn runFlowProperties(allocator: std.mem.Allocator, source: []const u8) !FlowProperties {
+    var parser = try @import("zts-engine").parser.JsParser.init(allocator, source);
+    var atoms = atom_table.AtomTable.init(allocator);
+    defer atoms.deinit();
+    parser.setAtomTable(&atoms);
+    defer parser.deinit();
+    const root = try parser.parse();
+    const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+
+    const handler_verifier = @import("handler_verifier.zig");
+    const handler_fn = handler_verifier.findHandlerFunction(ir_view, root) orelse
+        return error.HandlerNotFound;
+
+    var checker = FlowChecker.init(allocator, ir_view, &atoms);
+    defer checker.deinit();
+    _ = try checker.check(handler_fn);
+    return checker.getProperties();
+}
+
+const FlowProperty = enum {
+    no_secret_leakage,
+    no_credential_leakage,
+    input_validated,
+    pii_contained,
+    injection_safe,
+    deterministic,
+
+    fn holds(property: FlowProperty, properties: FlowProperties) bool {
+        return switch (property) {
+            .no_secret_leakage => properties.no_secret_leakage,
+            .no_credential_leakage => properties.no_credential_leakage,
+            .input_validated => properties.input_validated,
+            .pii_contained => properties.pii_contained,
+            .injection_safe => properties.injection_safe,
+            .deterministic => properties.deterministic,
+        };
+    }
+};
+
+test "FlowChecker checks each flow property inside routerMatch route functions" {
+    const Case = struct {
+        property: FlowProperty,
+        direct: []const u8,
+        routed: []const u8,
+    };
+    const cases = [_]Case{
+        .{
+            .property = .no_secret_leakage,
+            .direct =
+            \\import { env } from "zttp:env";
+            \\function handler(req) { return Response.json({ key: env("SECRET_KEY") }); }
+            ,
+            .routed =
+            \\import { routerMatch } from "zttp:router";
+            \\import { env } from "zttp:env";
+            \\function leak(req) { return Response.json({ key: env("SECRET_KEY") }); }
+            \\const routes = { "GET /leak": leak };
+            \\function handler(req) {
+            \\  const found = routerMatch(routes, req);
+            \\  if (found === undefined) return Response.json({ error: "not found" });
+            \\  return found.handler(req);
+            \\}
+            ,
+        },
+        .{
+            .property = .no_credential_leakage,
+            .direct =
+            \\function handler(req) {
+            \\  console.log(req.headers.authorization);
+            \\  return Response.json({ ok: true });
+            \\}
+            ,
+            .routed =
+            \\import { routerMatch } from "zttp:router";
+            \\function leak(req) {
+            \\  console.log(req.headers.authorization);
+            \\  return Response.json({ ok: true });
+            \\}
+            \\const routes = { "GET /leak": leak };
+            \\function handler(req) {
+            \\  const found = routerMatch(routes, req);
+            \\  if (found === undefined) return Response.json({ error: "not found" });
+            \\  return found.handler(req);
+            \\}
+            ,
+        },
+        .{
+            .property = .input_validated,
+            .direct =
+            \\import { fetch } from "zttp:fetch";
+            \\function handler(req) {
+            \\  fetch("https://api.example.com/collect", { body: req.body ?? "" });
+            \\  return Response.json({ ok: true });
+            \\}
+            ,
+            .routed =
+            \\import { routerMatch } from "zttp:router";
+            \\import { fetch } from "zttp:fetch";
+            \\function send(req) {
+            \\  fetch("https://api.example.com/collect", { body: req.body ?? "" });
+            \\  return Response.json({ ok: true });
+            \\}
+            \\const routes = { "POST /send": send };
+            \\function handler(req) {
+            \\  const found = routerMatch(routes, req);
+            \\  if (found === undefined) return Response.json({ error: "not found" });
+            \\  return found.handler(req);
+            \\}
+            ,
+        },
+        .{
+            .property = .pii_contained,
+            .direct =
+            \\import { fetch } from "zttp:fetch";
+            \\function handler(req) {
+            \\  fetch(req.url, {});
+            \\  return Response.json({ ok: true });
+            \\}
+            ,
+            .routed =
+            \\import { routerMatch } from "zttp:router";
+            \\import { fetch } from "zttp:fetch";
+            \\function send(req) {
+            \\  fetch(req.url, {});
+            \\  return Response.json({ ok: true });
+            \\}
+            \\const routes = { "POST /send": send };
+            \\function handler(req) {
+            \\  const found = routerMatch(routes, req);
+            \\  if (found === undefined) return Response.json({ error: "not found" });
+            \\  return found.handler(req);
+            \\}
+            ,
+        },
+        .{
+            .property = .injection_safe,
+            .direct =
+            \\function handler(req) { return Response.html(req.url); }
+            ,
+            .routed =
+            \\import { routerMatch } from "zttp:router";
+            \\function show(req) { return Response.html(req.url); }
+            \\const routes = { "GET /show": show };
+            \\function handler(req) {
+            \\  const found = routerMatch(routes, req);
+            \\  if (found === undefined) return Response.json({ error: "not found" });
+            \\  return found.handler(req);
+            \\}
+            ,
+        },
+        .{
+            .property = .deterministic,
+            .direct =
+            \\function handler(req) { return Response.json({ now: Date.now() }); }
+            ,
+            .routed =
+            \\import { routerMatch } from "zttp:router";
+            \\function clock(req) { return Response.json({ now: Date.now() }); }
+            \\const routes = { "GET /clock": clock };
+            \\function handler(req) {
+            \\  const found = routerMatch(routes, req);
+            \\  if (found === undefined) return Response.json({ error: "not found" });
+            \\  return found.handler(req);
+            \\}
+            ,
+        },
+    };
+
+    try std.testing.expectEqual(std.meta.fields(FlowProperties).len, cases.len);
+    inline for (std.meta.fields(FlowProperties), cases) |field, case| {
+        try std.testing.expectEqualStrings(field.name, @tagName(case.property));
+    }
+    for (cases) |case| {
+        const direct = try runFlowProperties(std.testing.allocator, case.direct);
+        const routed = try runFlowProperties(std.testing.allocator, case.routed);
+        try std.testing.expect(!case.property.holds(direct));
+        try std.testing.expect(!case.property.holds(routed));
+    }
+}
+
+test "FlowChecker checks egress headers inside routerMatch route functions" {
+    const source =
+        \\import { routerMatch } from "zttp:router";
+        \\import { fetch } from "zttp:fetch";
+        \\import { env } from "zttp:env";
+        \\function send(req) {
+        \\  fetch("https://api.example.com/collect", { headers: { authorization: env("SECRET_KEY") ?? "" } });
+        \\  return Response.json({ ok: true });
+        \\}
+        \\const routes = { "POST /send": send };
+        \\function handler(req) {
+        \\  const found = routerMatch(routes, req);
+        \\  if (found === undefined) return Response.json({ error: "not found" });
+        \\  return found.handler(req);
+        \\}
+    ;
+    try std.testing.expect(!(try runFlowProperties(std.testing.allocator, source)).no_secret_leakage);
+}
+
+test "FlowChecker unions routerMatch route return labels at dispatch" {
+    const source =
+        \\import { routerMatch } from "zttp:router";
+        \\import { fetch } from "zttp:fetch";
+        \\function clean(req) { return Response.json({ ok: true }); }
+        \\function tainted(req) { return Response.json({ url: req.url }); }
+        \\const routes = { "GET /clean": clean, "GET /tainted": tainted };
+        \\function handler(req) {
+        \\  const found = routerMatch(routes, req);
+        \\  if (found === undefined) return Response.json({ error: "not found" });
+        \\  const result = found.handler(req);
+        \\  fetch("https://api.example.com/collect", { body: JSON.stringify(result) });
+        \\  return Response.json({ ok: true });
+        \\}
+    ;
+    const properties = try runFlowProperties(std.testing.allocator, source);
+    try std.testing.expect(!properties.input_validated);
+    try std.testing.expect(!properties.pii_contained);
+}
+
+test "FlowChecker proves every flow property for clean routerMatch routes" {
+    const source =
+        \\import { routerMatch } from "zttp:router";
+        \\function first(req) { return Response.json({ route: "first" }); }
+        \\const second = (req) => Response.text("second");
+        \\let routes = { "GET /first": first, "GET /second": second };
+        \\function handler(req) {
+        \\  const found = routerMatch(routes, req);
+        \\  if (found === undefined) return Response.json({ error: "not found" });
+        \\  req.params = found.params;
+        \\  return found.handler(req);
+        \\}
+    ;
+    const properties = try runFlowProperties(std.testing.allocator, source);
+    inline for (std.meta.tags(FlowProperty)) |property| {
+        try std.testing.expect(property.holds(properties));
+    }
+}
+
+test "FlowChecker isolates route witness IO from other roots" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { routerMatch } from "zttp:router";
+        \\import { cacheGet } from "zttp:cache";
+        \\import { env } from "zttp:env";
+        \\function first(req) { cacheGet("ns", "key"); return Response.json({ ok: true }); }
+        \\function second(req) {
+        \\  const secret = env("SECRET_KEY");
+        \\  return Response.json({ key: secret });
+        \\}
+        \\const routes = { "GET /first": first, "GET /second": second };
+        \\function handler(req) {
+        \\  const found = routerMatch(routes, req);
+        \\  return Response.json({ ok: true });
+        \\}
+    ;
+    var parser = try @import("zts-engine").parser.JsParser.init(allocator, source);
+    var atoms = atom_table.AtomTable.init(allocator);
+    defer atoms.deinit();
+    parser.setAtomTable(&atoms);
+    defer parser.deinit();
+    const root = try parser.parse();
+    const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    const handler_fn = @import("handler_verifier.zig").findHandlerFunction(ir_view, root) orelse
+        return error.HandlerNotFound;
+    var checker = FlowChecker.init(allocator, ir_view, &atoms);
+    defer checker.deinit();
+    _ = try checker.check(handler_fn);
+    var found = false;
+    for (checker.getDiagnostics()) |diag| {
+        if (diag.kind != .secret_in_response) continue;
+        found = true;
+        const witness = diag.witness orelse return error.MissingWitness;
+        try std.testing.expectEqual(@as(usize, 1), witness.io_calls.len);
+        try std.testing.expectEqualStrings("env", witness.io_calls[0].func);
+    }
+    try std.testing.expect(found);
+}
+
+test "FlowChecker gives an unresolved dynamic call unknown response labels" {
+    const cases = [_][]const u8{
+        // A function value received as a parameter.
+        \\function invoke(callback) { return callback(); }
+        \\function handler(req) { return Response.json({ value: invoke(req.callback) }); }
+        ,
+        // Member call on a parameter.
+        \\function invoke(api) { return api.run(); }
+        \\function handler(req) { return Response.json({ value: invoke(req.callback) }); }
+        ,
+        // The same value through a local alias.
+        \\function invoke(api) { const alias = api; return alias.run(); }
+        \\function handler(req) { return Response.json({ value: invoke(req.callback) }); }
+        ,
+        // A call result used as the next callee.
+        \\function factory(req) { return req.callback; }
+        \\function handler(req) { return Response.json({ value: factory(req)() }); }
+        ,
+        // A conditional selector whose result is called.
+        \\function handler(req) { return Response.json({ value: (req.method === "GET" ? req.first : req.second)() }); }
+        ,
+        // A nullish selector whose result is called.
+        \\function handler(req) { return Response.json({ value: (req.callback ?? req.other)() }); }
+        ,
+        // An arbitrary request property used as a method.
+        \\function handler(req) { return Response.json({ value: req.callback() }); }
+        ,
+        // A computed array element has no resolved method body.
+        \\function handler(req) { return Response.json({ value: [{ run: () => "ok" }][0].run() }); }
+        ,
+        // A computed element used directly as the callee.
+        \\function handler(req) { return Response.json({ value: [req.callback][0]() }); }
+        ,
+        // A computed object field used directly as the callee.
+        \\function handler(req) { return Response.json({ value: ({ run: req.callback })["run"]() }); }
+        ,
+        // A function read from a dictionary has no resolved body at the call.
+        \\import { dictEmpty, dictSet, dictGet } from "zttp:collections";
+        \\function handler(req) {
+        \\  const callbacks = dictSet(dictEmpty(), "run", () => "ok");
+        \\  return Response.json({ value: dictGet(callbacks, "run")() });
+        \\}
+        ,
+        // A parsed object's arbitrary method is not a JSON intrinsic.
+        \\function handler(req) { return Response.json({ value: JSON.parse("{}").run() }); }
+        ,
+        // Array methods that return elements or accumulator values are not arrays.
+        \\function handler(req) { return Response.json({ value: [{ run: () => "ok" }].pop().run() }); }
+        ,
+        \\function handler(req) { return Response.json({ value: [{ run: () => "ok" }].reduce((a, x) => x).run() }); }
+        ,
+        // A module object return does not make every property a known method.
+        \\import { urlParse } from "zttp:url";
+        \\function handler(req) { return Response.json({ value: urlParse("https://example.com").run() }); }
+        ,
+        // An alias can replace a method on a mutable intrinsic receiver.
+        \\function handler(req) {
+        \\  const values = ["ok"];
+        \\  const alias = values;
+        \\  alias.join = req.callback;
+        \\  return Response.json({ value: values.join() });
+        \\}
+        ,
+    };
+    for (cases) |source| {
+        const properties = try runFlowProperties(std.testing.allocator, source);
+        try std.testing.expect(!properties.no_secret_leakage);
+        try std.testing.expect(!properties.no_credential_leakage);
+        try std.testing.expect(!properties.deterministic);
+    }
+}
+
+test "FlowChecker resolves only immutable literal object methods" {
+    const clean =
+        \\function handler(req) {
+        \\  const api = { run: () => "ok" };
+        \\  return Response.json({ value: api.run() });
+        \\}
+    ;
+    try std.testing.expect((try runFlowProperties(std.testing.allocator, clean)).no_secret_leakage);
+
+    const mutated =
+        \\import { env } from "zttp:env";
+        \\function handler(req) {
+        \\  const api = { run: () => "ok" };
+        \\  api.run = () => env("SECRET_KEY");
+        \\  return Response.json({ value: api.run() });
+        \\}
+    ;
+    try std.testing.expect(!(try runFlowProperties(std.testing.allocator, mutated)).no_secret_leakage);
+
+    const reassigned_function =
+        \\import { env } from "zttp:env";
+        \\function handler(req) {
+        \\  let f = () => "ok";
+        \\  f = () => env("SECRET_KEY");
+        \\  return Response.json({ value: f() });
+        \\}
+    ;
+    try std.testing.expect(!(try runFlowProperties(std.testing.allocator, reassigned_function)).no_secret_leakage);
+
+    const alias_mutated =
+        \\import { env } from "zttp:env";
+        \\function handler(req) {
+        \\  const api = { run: () => "ok" };
+        \\  const alias = api;
+        \\  alias.run = () => env("SECRET_KEY");
+        \\  return Response.json({ value: api.run() });
+        \\}
+    ;
+    try std.testing.expect(!(try runFlowProperties(std.testing.allocator, alias_mutated)).no_secret_leakage);
+
+    const aggregate_alias_mutated =
+        \\import { env } from "zttp:env";
+        \\function handler(req) {
+        \\  const api = { run: () => "ok" };
+        \\  const box = { api: api };
+        \\  box.api.run = () => env("SECRET_KEY");
+        \\  return Response.json({ value: api.run() });
+        \\}
+    ;
+    try std.testing.expect(!(try runFlowProperties(std.testing.allocator, aggregate_alias_mutated)).no_secret_leakage);
+
+    const call_escape_mutated =
+        \\import { env } from "zttp:env";
+        \\function mutate(api) { api.run = () => env("SECRET_KEY"); }
+        \\function handler(req) {
+        \\  const api = { run: () => "ok" };
+        \\  mutate(api);
+        \\  return Response.json({ value: api.run() });
+        \\}
+    ;
+    try std.testing.expect(!(try runFlowProperties(std.testing.allocator, call_escape_mutated)).no_secret_leakage);
+}
+
+test "FlowChecker refuses mutated and local routerMatch tables" {
+    const cases = [_][]const u8{
+        // A replaced type predicate can mutate the table passed to it.
+        \\import { routerMatch } from "zttp:router";
+        \\function clean(req) { return Response.json({ ok: true }); }
+        \\const routes = { "GET /probe": clean };
+        \\Array.isArray = (table) => { table["GET /probe"] = () => Response.html("changed"); return false; };
+        \\Array.isArray(routes);
+        \\function handler(req) {
+        \\  const found = routerMatch(routes, req);
+        \\  if (found === undefined) return Response.json({ error: "not found" });
+        \\  return found.handler(req);
+        \\}
+        ,
+        // Selecting the table from an aggregate retains a mutable alias.
+        \\import { routerMatch } from "zttp:router";
+        \\function clean(req) { return Response.json({ ok: true }); }
+        \\const routes = { "GET /probe": clean };
+        \\const alias = [routes][0];
+        \\alias["GET /probe"] = () => Response.html("changed");
+        \\function handler(req) {
+        \\  const found = routerMatch(routes, req);
+        \\  if (found === undefined) return Response.json({ error: "not found" });
+        \\  return found.handler(req);
+        \\}
+        ,
+        // The same aggregate selector can change the selected handler.
+        \\import { routerMatch } from "zttp:router";
+        \\function clean(req) { return Response.json({ ok: true }); }
+        \\const routes = { "GET /probe": clean };
+        \\function handler(req) {
+        \\  const found = routerMatch(routes, req);
+        \\  if (found === undefined) return Response.json({ error: "not found" });
+        \\  const selected = [found][0];
+        \\  selected.handler = () => Response.html("changed");
+        \\  return found.handler(req);
+        \\}
+        ,
+        // The table binding is immutable, but a property write changes runtime dispatch.
+        \\import { routerMatch } from "zttp:router";
+        \\import { env } from "zttp:env";
+        \\function clean(req) { return Response.json({ ok: true }); }
+        \\function leak(req) { return Response.json({ key: env("SECRET_KEY") }); }
+        \\const routes = { "GET /probe": clean };
+        \\routes["GET /probe"] = leak;
+        \\function handler(req) {
+        \\  const found = routerMatch(routes, req);
+        \\  if (found === undefined) return Response.json({ error: "not found" });
+        \\  return found.handler(req);
+        \\}
+        ,
+        // Mutation through an alias also invalidates stable dispatch.
+        \\import { routerMatch } from "zttp:router";
+        \\import { env } from "zttp:env";
+        \\function clean(req) { return Response.json({ ok: true }); }
+        \\function leak(req) { return Response.json({ key: env("SECRET_KEY") }); }
+        \\const routes = { "GET /probe": clean };
+        \\const alias = routes;
+        \\alias["GET /probe"] = leak;
+        \\function handler(req) {
+        \\  const found = routerMatch(routes, req);
+        \\  if (found === undefined) return Response.json({ error: "not found" });
+        \\  return found.handler(req);
+        \\}
+        ,
+        // The selected result can itself be overwritten before dispatch.
+        \\import { routerMatch } from "zttp:router";
+        \\import { env } from "zttp:env";
+        \\function clean(req) { return Response.json({ ok: true }); }
+        \\const routes = { "GET /probe": clean };
+        \\function handler(req) {
+        \\  const found = routerMatch(routes, req);
+        \\  if (found === undefined) return Response.json({ error: "not found" });
+        \\  found.handler = () => Response.json({ key: env("SECRET_KEY") });
+        \\  return found.handler(req);
+        \\}
+        ,
+        // Reassignment makes a mutable table's dispatch uncertain. Its initial
+        // route still contributes its route-only egress root.
+        \\import { routerMatch } from "zttp:router";
+        \\import { fetch } from "zttp:fetch";
+        \\function send(req) {
+        \\  fetch(req.url, { body: req.body ?? "" });
+        \\  return Response.json({ ok: true });
+        \\}
+        \\function clean(req) { return Response.json({ ok: true }); }
+        \\let routes = { "POST /send": send };
+        \\routes = { "POST /send": clean };
+        \\function handler(req) {
+        \\  const found = routerMatch(routes, req);
+        \\  if (found === undefined) return Response.json({ error: "not found" });
+        \\  return found.handler(req);
+        \\}
+        ,
+        // An aggregate can retain a mutable alias to the route table.
+        \\import { routerMatch } from "zttp:router";
+        \\import { env } from "zttp:env";
+        \\function clean(req) { return Response.json({ ok: true }); }
+        \\function leak(req) { return Response.json({ key: env("SECRET_KEY") }); }
+        \\const routes = { "GET /probe": clean };
+        \\const box = { table: routes };
+        \\box.table["GET /probe"] = leak;
+        \\function handler(req) {
+        \\  const found = routerMatch(routes, req);
+        \\  if (found === undefined) return Response.json({ error: "not found" });
+        \\  return found.handler(req);
+        \\}
+        ,
+        // Passing the table to an unknown function can mutate its routes.
+        \\import { routerMatch } from "zttp:router";
+        \\import { env } from "zttp:env";
+        \\function clean(req) { return Response.json({ ok: true }); }
+        \\function leak(req) { return Response.json({ key: env("SECRET_KEY") }); }
+        \\function mutate(table) { table["GET /probe"] = leak; }
+        \\const routes = { "GET /probe": clean };
+        \\mutate(routes);
+        \\function handler(req) {
+        \\  const found = routerMatch(routes, req);
+        \\  if (found === undefined) return Response.json({ error: "not found" });
+        \\  return found.handler(req);
+        \\}
+        ,
+        // An alias can overwrite the selected handler before dispatch.
+        \\import { routerMatch } from "zttp:router";
+        \\import { env } from "zttp:env";
+        \\function clean(req) { return Response.json({ ok: true }); }
+        \\const routes = { "GET /probe": clean };
+        \\function handler(req) {
+        \\  const found = routerMatch(routes, req);
+        \\  if (found === undefined) return Response.json({ error: "not found" });
+        \\  const selected = found;
+        \\  selected.handler = () => Response.json({ key: env("SECRET_KEY") });
+        \\  return found.handler(req);
+        \\}
+        ,
+        // A function binding can change before the table captures it.
+        \\import { routerMatch } from "zttp:router";
+        \\import { env } from "zttp:env";
+        \\function clean(req) { return Response.json({ ok: true }); }
+        \\function leak(req) { return Response.json({ key: env("SECRET_KEY") }); }
+        \\let route = clean;
+        \\route = leak;
+        \\const routes = { "GET /probe": route };
+        \\function handler(req) {
+        \\  const found = routerMatch(routes, req);
+        \\  if (found === undefined) return Response.json({ error: "not found" });
+        \\  return found.handler(req);
+        \\}
+        ,
+        // A named table inside the handler is outside the contract surface.
+        \\import { routerMatch } from "zttp:router";
+        \\function clean(req) { return Response.json({ ok: true }); }
+        \\function handler(req) {
+        \\  const routes = { "GET /probe": clean };
+        \\  const found = routerMatch(routes, req);
+        \\  if (found === undefined) return Response.json({ error: "not found" });
+        \\  return found.handler(req);
+        \\}
+        ,
+    };
+    for (cases, 0..) |source, case_index| {
+        const properties = try runFlowProperties(std.testing.allocator, source);
+        inline for (std.meta.tags(FlowProperty)) |property| {
+            if (property.holds(properties)) {
+                std.debug.print("router uncertainty case {d} still proves {s}\n", .{ case_index, @tagName(property) });
+                return error.TestUnexpectedFlowProperty;
+            }
+        }
+    }
+}
+
+test "FlowChecker preserves known request string and rawJson calls" {
+    const preview =
+        \\export function handler(req) {
+        \\  if (req.method !== "POST") {
+        \\    return Response.json({ error: "method_not_allowed" }, { status: 405 });
+        \\  }
+        \\  const body = req.body ?? "";
+        \\  if (body === "") {
+        \\    return Response.json({ error: "body_required" }, { status: 400 });
+        \\  }
+        \\  const preview = body.slice(0, 8).toUpperCase();
+        \\  return Response.json({ preview: preview });
+        \\}
+    ;
+    const preview_properties = try runFlowProperties(std.testing.allocator, preview);
+    inline for (std.meta.tags(FlowProperty)) |property| {
+        try std.testing.expect(property.holds(preview_properties));
+    }
+
+    const routed_preview =
+        \\import { routerMatch } from "zttp:router";
+        \\function preview(req) {
+        \\  const body = req.body ?? "";
+        \\  const value = body.slice(0, 8).toUpperCase();
+        \\  return Response.json({ preview: value });
+        \\}
+        \\const routes = { "POST /preview": preview };
+        \\function handler(req) {
+        \\  const found = routerMatch(routes, req);
+        \\  if (found === undefined) return Response.json({ error: "not found" });
+        \\  return found.handler(req);
+        \\}
+    ;
+    const routed_preview_properties = try runFlowProperties(std.testing.allocator, routed_preview);
+    inline for (std.meta.tags(FlowProperty)) |property| {
+        try std.testing.expect(property.holds(routed_preview_properties));
+    }
+
+    const inspected_array =
+        \\function kindOf(value) { return match (value) { when array: "array" default: "other" }; }
+        \\function handler(req) {
+        \\  const document = [1, "two", true, null, [3]];
+        \\  const kinds = document.map(kindOf);
+        \\  return Response.json({ outer: kindOf(document), kinds: kinds });
+        \\}
+    ;
+    const inspected_properties = try runFlowProperties(std.testing.allocator, inspected_array);
+    inline for (std.meta.tags(FlowProperty)) |property| {
+        try std.testing.expect(property.holds(inspected_properties));
+    }
+
+    const joined_array =
+        \\function handler(req) { return Response.json({ value: ["a", "b"].map((x) => x).join("") }); }
+    ;
+    const joined_properties = try runFlowProperties(std.testing.allocator, joined_array);
+    inline for (std.meta.tags(FlowProperty)) |property| {
+        try std.testing.expect(property.holds(joined_properties));
+    }
+
+    const number_builtin =
+        \\function handler(req) {
+        \\  return Response.json({
+        \\    integer: Number.isInteger(42),
+        \\    nan: Number.isNaN(42),
+        \\    finite: Number.isFinite(42),
+        \\    int: Number.parseInt("42", 10),
+        \\    float: Number.parseFloat("4.2"),
+        \\  });
+        \\}
+    ;
+    const number_properties = try runFlowProperties(std.testing.allocator, number_builtin);
+    inline for (std.meta.tags(FlowProperty)) |property| {
+        try std.testing.expect(property.holds(number_properties));
+    }
+
+    const request_string =
+        \\function handler(req) { return Response.json({ part: req.url.slice(0, 2) }); }
+    ;
+    const request_properties = try runFlowProperties(std.testing.allocator, request_string);
+    try std.testing.expect(request_properties.no_secret_leakage);
+    try std.testing.expect(request_properties.deterministic);
+
+    const routed_raw_json =
+        \\import { routerMatch } from "zttp:router";
+        \\function raw(req) { return Response.rawJson("{}"); }
+        \\const routes = { "GET /raw": raw };
+        \\function handler(req) {
+        \\  const found = routerMatch(routes, req);
+        \\  if (found === undefined) return Response.json({ error: "not found" });
+        \\  return found.handler(req);
+        \\}
+    ;
+    const raw_properties = try runFlowProperties(std.testing.allocator, routed_raw_json);
+    inline for (std.meta.tags(FlowProperty)) |property| {
+        try std.testing.expect(property.holds(raw_properties));
+    }
 }
 
 // ---------------------------------------------------------------------------

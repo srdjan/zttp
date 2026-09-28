@@ -524,16 +524,31 @@ fn importedFunctionLabels(
     var parser = zts.parser.JsParser.init(allocator, prepared.parserInput()) catch return null;
     defer parser.deinit();
     parser.setAtomTable(&atoms);
-    _ = parser.parse() catch return null;
+    const root = parser.parse() catch return null;
 
     const view = zts.IrView.fromIRStore(&parser.nodes, &parser.constants);
+    var type_env_storage: zts.pipeline.TypeEnvStorage = .{};
+    defer type_env_storage.deinit(allocator);
+    if (prepared.typeMap()) |type_map| {
+        type_env_storage.init(allocator, type_map) catch return null;
+    }
+    var type_checker: ?zts.TypeChecker = null;
+    defer if (type_checker) |*checker| checker.deinit();
+    if (type_env_storage.envPtr()) |type_env| {
+        type_checker = zts.TypeChecker.init(allocator, view, &atoms, type_env, null);
+        const type_errors = type_checker.?.check(root) catch return null;
+        if (type_errors != 0) return null;
+    }
+
     var flow = zts.FlowChecker.init(allocator, view, &atoms);
     defer flow.deinit();
+    if (type_checker) |*checker| flow.setTypeChecker(checker);
     // Without the declaration a helper that reads a declared field would hand
     // the handler a value carrying none of its declared labels. A failed
     // install drops the entry, which leaves the call untraceable.
     if (declaration) |decl| flow.setDeclaration(decl) catch return null;
     const labels = flow.exportedReturnLabels(name);
+    if (type_checker) |*checker| checker.ensureHealthy() catch return null;
     if (declaration) |decl| {
         const statuses = flow.classificationStatuses();
         if (statuses.len == decl.classifications.len and seen.len == statuses.len) {
@@ -3147,8 +3162,15 @@ fn buildContractWithPolicy(
             const flow_errors: u32 = if (precomputed_flow) |_| 0 else blk: {
                 owned_flow = zts.FlowChecker.init(allocator, ir_view, atoms);
                 owned_flow.?.facts = &module_facts;
+                if (resolved) |resolved_module| {
+                    if (resolved_module.type_checker) |*checker| owned_flow.?.setTypeChecker(checker);
+                }
                 if (declaration) |decl| try owned_flow.?.setDeclaration(decl);
-                break :blk try owned_flow.?.check(hf);
+                const errors = try owned_flow.?.check(hf);
+                if (resolved) |resolved_module| {
+                    if (resolved_module.type_checker) |*checker| try checker.ensureHealthy();
+                }
+                break :blk errors;
             };
 
             const flow: *const zts.FlowChecker = precomputed_flow orelse &owned_flow.?;
@@ -7242,6 +7264,40 @@ test "check follows a declared field through an imported helper and reports it m
     try std.testing.expect(!contract.properties.?.no_secret_leakage);
     try std.testing.expectEqual(handler_contract.ClassificationStatus.matched, contract.classifications.items[0].status);
     try std.testing.expectEqual(@as(u32, 0), result.classificationErrors());
+}
+
+test "check keeps typed imported builtin methods deterministic" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "handler.ts", .data =
+        \\import { normalizeLabel } from "./label.ts";
+        \\function handler(req: Request): Response {
+        \\  const body = req.body ?? "";
+        \\  return Response.json({ label: normalizeLabel(body) });
+        \\}
+        \\
+    });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "label.ts", .data =
+        \\export structural LabelText = string;
+        \\export structural NormalizedLabel = string;
+        \\export function normalizeLabel(text: LabelText): NormalizedLabel {
+        \\  return text.trim().toLowerCase();
+        \\}
+        \\
+    });
+    const handler_path = try tmp.dir.realPathFileAlloc(std.testing.io, "handler.ts", allocator);
+    defer allocator.free(handler_path);
+
+    var result = try runCheckOnlyWithOptions(allocator, handler_path, .{ .json_mode = true });
+    defer result.deinit(allocator);
+    try std.testing.expectEqual(@as(u32, 0), result.parse_errors);
+    try std.testing.expectEqual(@as(u32, 0), result.type_errors);
+    const properties = result.contract.?.properties.?;
+    try std.testing.expect(properties.deterministic);
+    try std.testing.expect(properties.idempotent);
+    try std.testing.expect(properties.no_secret_leakage);
+    try std.testing.expect(properties.no_credential_leakage);
 }
 
 test "a declaration cannot ride the multi-module build path, which runs no flow check" {

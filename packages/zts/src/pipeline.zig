@@ -332,12 +332,14 @@ pub fn check(
         resolved.parsed.atoms,
     );
     flow.facts = opts.module_facts;
+    if (tc_ptr) |tc| flow.setTypeChecker(tc);
     errdefer flow.deinit();
     for (opts.imported_fn_labels) |entry| {
         flow.setFileFunctionLabels(entry.slot, entry.labels);
     }
     if (opts.declaration) |decl| try flow.setDeclaration(decl);
     const flow_errors = try flow.check(handler_func);
+    if (tc_ptr) |tc| try tc.ensureHealthy();
 
     return .{
         .resolved = resolved,
