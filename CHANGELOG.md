@@ -10,6 +10,25 @@ For releases prior to v0.16 see git tags and [RELEASE_CHECKLIST.md](RELEASE_CHEC
 
 ## [Unreleased]
 
+### Security
+
+- **Flow properties now cover route functions dispatched through
+  `routerMatch`.** The flow checker walked only the handler, so a route
+  function reached through `found.handler(req)` was never checked as a sink,
+  and its return value came back with no labels. A routed handler whose route
+  returned `env("SECRET_KEY")` was reported `no_secret_leakage` PROVEN. The same
+  gap covered `no_credential_leakage`, `input_validated`, `injection_safe`,
+  `pii_contained`, and `deterministic`. Every resolvable route function is now a
+  root of the flow walk, a dispatched call's value is the union of its routes'
+  return labels, and a call to a function value the checker cannot resolve
+  carries `unknown`. **Artifacts built by 0.21.1 and earlier from a routed
+  handler may carry these six properties falsely; rebuild them.** Two examples
+  claimed properties they did not hold: `examples/system/orders.ts` and
+  `examples/system/users.ts` return cache reads, whose provenance is unknown,
+  and now claim only what they hold. The same route-body gap remains in the
+  `response_total`, `results_safe`, `read_only`, `state_isolated`, and
+  `fault_covered` analyses; it is the next fix.
+
 ## [0.21.1] - 2026-09-26
 
 A maintenance release. The shipped binaries behave as in 0.21.0; artifacts,
