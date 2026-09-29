@@ -59,7 +59,13 @@ cross-compile without Docker.
       `packages/runtime/build.zig.zon` match the intended release.
 - [ ] Confirm `packages/zts/src/root.zig` `version.string` matches the intended release.
 - [ ] Promote `CHANGELOG.md` `[Unreleased]` to `[X.Y.Z] - <date>`, open a fresh `[Unreleased]` section, and update the bottom compare-link anchors (`[Unreleased]` base + a new `[X.Y.Z]` link).
-- [ ] Draft release notes from `CHANGELOG.md` and `.github/RELEASE_NOTES_TEMPLATE.md`.
+- [ ] Add `### Highlights` and `### Breaking changes` to the versioned
+      `CHANGELOG.md` entry. Use `.github/RELEASE_NOTES_TEMPLATE.md` as the
+      authoring guide. List every breaking change with its migration action;
+      write `None.` when there are no breaking changes.
+- [ ] Run `sh scripts/render-release-notes.sh vX.Y.Z release-notes.md` and
+      review the complete body. The command fails if the exact version entry,
+      Highlights, or Breaking changes is missing or empty.
 - [ ] `git tag -a vX.Y.Z -m "zttp vX.Y.Z"`
 - [ ] `git push origin vX.Y.Z`
 

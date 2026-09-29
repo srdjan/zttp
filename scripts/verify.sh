@@ -54,6 +54,8 @@ step() {
 if [ "$release_mode" = true ]; then
   step "bash scripts/test-release-workflow.sh  (release workflow invariants)"
   bash scripts/test-release-workflow.sh
+  step "sh scripts/test-release-notes.sh  (curated release notes)"
+  sh scripts/test-release-notes.sh
 fi
 
 step "zig build test  (aggregate unit suite)"

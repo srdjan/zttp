@@ -218,25 +218,15 @@ jobs:
       - name: Create checksums file
         run: cat *.sha256 > checksums-sha256.txt
 
+      - name: Render release notes
+        run: sh scripts/render-release-notes.sh "$GITHUB_REF_NAME" release-notes.md
+
       - name: Create GitHub Release
         # softprops/action-gh-release@v2
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65
         with:
           generate_release_notes: true
-          body: |
-            ## Install
-
-            ```
-            curl -fsSL https://raw.githubusercontent.com/srdjan/zigttp/main/install.sh | sh
-            ```
-
-            Or download a tarball below and extract it manually.
-
-            ## Documentation
-
-            - [User Guide](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/docs/user-guide.md)
-            - [CLI Reference](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/docs/cli.md)
-            - [Examples](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/examples/README.md)
+          body_path: release-notes.md
           files: |
             zttp-*.tar.gz
             zttp-*.tar.gz.sha256

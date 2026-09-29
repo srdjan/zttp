@@ -1,44 +1,35 @@
-# zttp vX.Y.Z
+# CHANGELOG.md release entry
 
-<!--
-Curated release notes. The Release workflow also auto-generates a commit-level
-changelog; this template is the human-written summary that goes above it.
-Keep entries user-facing. Mirror the wording landed in CHANGELOG.md.
--->
+Before tagging, add the release entry to `CHANGELOG.md`. The release workflow
+copies the complete entry into the GitHub Release, then adds the stable Install
+and Documentation sections. GitHub adds the generated commit list after this
+curated body.
 
-## Highlights
+```markdown
+## [X.Y.Z] - YYYY-MM-DD
 
-<!-- Two or three sentences on what this release is about. -->
+### Highlights
 
-## Added
+<!-- Write two or three user-facing sentences that summarize the release. -->
 
--
+### Breaking changes
 
-## Changed
+<!-- List every breaking change with its migration action. Write `None.` when
+the release has no breaking changes. -->
 
--
+### Added
 
-## Fixed
+<!-- List user-facing additions, or omit this section. -->
 
--
+### Changed
 
-## Breaking changes
+<!-- List user-facing changes, or omit this section. -->
 
-<!-- Pre-1.0, minor bumps may include breaking changes. List each one with a
-migration note, or write "None". -->
+### Fixed
 
-None.
-
-## Install
-
-```
-curl -fsSL https://raw.githubusercontent.com/srdjan/zigttp/main/install.sh | sh
+<!-- List user-facing fixes, or omit this section. -->
 ```
 
-Tarballs and SHA-256 checksums for macOS and Linux (x86-64 and ARM64) are
-attached below.
-
-## Verification
-
-- Toolchain: Zig `0.16.0`
-- Policy hash: `<output of zts describe-rule --hash>`
+`Highlights` and `Breaking changes` are required. Keep their headings exact.
+Run `sh scripts/render-release-notes.sh vX.Y.Z release-notes.md` and review the
+complete output before tagging.
