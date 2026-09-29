@@ -2,7 +2,7 @@
 # verdict. Enforced in both directions by scripts/check-proof-swallow.sh: an
 # unlisted swallow fails, and so does a row nothing matches.
 #
-# One row per (file, enclosing function, pattern), with the reason above it.
+# One row per (file, enclosing function, pattern occurrence), with the reason above it.
 # A row is not an exemption. It is a claim that this particular swallow cannot
 # turn an unproven program into a reported-proven one. If that claim is wrong,
 # the fix is the code, not the row.
@@ -79,3 +79,228 @@ packages/proof-checker/src/checker.zig checkGraphMemberDigest catch-break
 # `pcc.check`, which decodes them independently and refuses at the decode stage
 # if they are undecodable. Neither path can buy acceptance with a null.
 packages/runtime/src/proof_activation.zig certificateCommitments catch-return
+
+# Kernel catch blocks return a Rejection. Neither policy, certificate, guard,
+# nor graph decode failure can reach the acceptance result. The multiline
+# invariant catches also return an undecodable-spec rejection.
+packages/proof-checker/src/checker.zig bindExecutableGraph catch-block
+packages/proof-checker/src/checker.zig check catch-block
+packages/proof-checker/src/checker.zig checkConfiguredInvariants catch-multiline
+packages/proof-checker/src/checker.zig checkGuardCoverage catch-block
+
+# A missing observed root refuses server startup. Accept converts graph and
+# invariant observer errors to refusals; OutOfMemory still propagates.
+packages/runtime/src/proof_activation.zig observedRoot catch-switch
+packages/runtime/src/proof_activation.zig observedRoot catch-value
+packages/runtime/src/proof_activation.zig accept catch-switch
+
+# Invalid extracted endpoints become dynamic, which removes static egress
+# proof. Provider and tool fetch failures record a refusal or dynamic reach.
+# A schema compilation error either propagates OOM or refuses the tool scope.
+# getOrPutDuped releases its new key and propagates the allocation error.
+# Query parameter decode failures mark the extraction dynamic.
+packages/zts/src/contract_builder.zig normalizeEndpoint catch-value
+packages/zts/src/contract_builder.zig readAgentProvider catch-block
+packages/zts/src/contract_builder.zig checkToolScope catch-switch
+packages/zts/src/contract_builder.zig checkToolFetchCall catch-multiline
+packages/zts/src/contract_builder.zig checkAgentFetchCall catch-multiline
+packages/zts/src/contract_builder.zig getOrPutDuped catch-block
+packages/zts/src/contract_builder.zig appendQueryParamsFromSchema catch-block
+
+# An external severity parse error propagates as InvalidJson. Map insertion
+# failure releases its new key and propagates the allocation error.
+packages/zts/src/fault_coverage.zig parseExternalSeverities catch-multiline
+packages/zts/src/fault_coverage.zig getOrPutEntry catch-block
+
+# FlowChecker.check and exportedReturnLabels both reject allocation poison.
+# These sites record that poison before returning a partial local value. The
+# cross-file summary entry point checks the flag before publishing labels.
+packages/zts/src/flow_checker.zig appendRouteFunctionRoot catch-poison
+packages/zts/src/flow_checker.zig applyAssignmentLabels catch-poison
+packages/zts/src/flow_checker.zig findHandlerParam catch-poison
+packages/zts/src/flow_checker.zig propagateMutatingMethodTaint catch-poison
+packages/zts/src/flow_checker.zig recordBindingValue catch-block
+packages/zts/src/flow_checker.zig recordBindingValue catch-poison
+packages/zts/src/flow_checker.zig recordContainedSecrets catch-poison
+packages/zts/src/flow_checker.zig recordValidated catch-poison
+packages/zts/src/flow_checker.zig resolveFacts catch-block
+packages/zts/src/flow_checker.zig scanFunctionDecls catch-poison
+packages/zts/src/flow_checker.zig scanImports catch-multiline
+packages/zts/src/flow_checker.zig scanImports catch-poison
+packages/zts/src/flow_checker.zig setFileFunctionLabels catch-poison
+packages/zts/src/flow_checker.zig trackResultBinding catch-poison
+packages/zts/src/flow_checker.zig walkStmt catch-poison
+
+# Route resolution errors set allocation poison or return unknown-route
+# labels; a clean route cannot be inferred from the partial target list.
+packages/zts/src/flow_checker.zig functionCallLabels catch-block
+packages/zts/src/flow_checker.zig routerDispatchLabels catch-block
+packages/zts/src/flow_checker.zig scanListedToolRoutes catch-block
+packages/zts/src/flow_checker.zig scanListedToolRoutes catch-poison
+packages/zts/src/flow_checker.zig scanRouteFunctionRoots catch-block
+
+# A witness copy or condition allocation error records poison, so no result
+# that lacks the witness can leave the checker as a successful proof. The
+# module-call and diagnostic paths obey the same final poison check.
+packages/zts/src/flow_checker.zig addDiagnostic catch-block
+packages/zts/src/flow_checker.zig pushConditionConstraints catch-block
+packages/zts/src/flow_checker.zig trackModuleCallInit catch-block
+packages/zts/src/flow_checker.zig trackModuleCallInit catch-poison
+
+# Message formatting failure keeps the original diagnostic and its kind.
+packages/zts/src/flow_checker.zig messageWithReason catch-block
+
+# HandlerVerifier checks allocation_failed before it returns a verdict. Its
+# fact, import, walk, and diagnostic catches only defer that failure.
+packages/zts/src/handler_verifier.zig addDiagnostic catch-poison
+packages/zts/src/handler_verifier.zig collectImportBindings catch-poison
+packages/zts/src/handler_verifier.zig resolveFacts catch-block
+packages/zts/src/handler_verifier.zig scanImports catch-poison
+packages/zts/src/handler_verifier.zig walkForResultsAndRefs catch-poison
+
+# A nonliteral or incomplete assertion makes the whole intent dynamic. Other
+# parse errors propagate; the catch never installs a partial assertion.
+packages/zts/src/intent_extractor.zig collectAssertions catch-switch
+
+# TypeChecker and its TypeEnv report allocation poison through ensureHealthy
+# before a build can use the inferred types. Local unknown/null values below
+# are temporary results while the poisoned checker unwinds.
+packages/zts/src/type_checker.zig addAllocatedDiagnostic catch-block
+packages/zts/src/type_checker.zig addDiagnostic catch-block
+packages/zts/src/type_checker.zig admitOneTypePredicate catch-poison
+packages/zts/src/type_checker.zig bindCallableMetadata catch-block
+packages/zts/src/type_checker.zig bindPatternBindings catch-poison
+packages/zts/src/type_checker.zig bindVarDeclaration catch-block
+packages/zts/src/type_checker.zig bindVarDeclaration catch-poison
+packages/zts/src/type_checker.zig buildServiceResponseMember catch-block
+packages/zts/src/type_checker.zig endNarrowScope catch-poison
+packages/zts/src/type_checker.zig extractServiceObjectKeys catch-poison
+packages/zts/src/type_checker.zig inferObjectLiteralType catch-block
+packages/zts/src/type_checker.zig pushActiveDeclared catch-poison
+packages/zts/src/type_checker.zig putNarrowed catch-poison
+packages/zts/src/type_checker.zig recordNarrowChange catch-poison
+packages/zts/src/type_checker.zig registerParamTypes catch-poison
+packages/zts/src/type_checker.zig schemaValueToType catch-block
+packages/zts/src/type_checker.zig schemaValueToType catch-poison
+packages/zts/src/type_checker.zig walkExpr catch-poison
+packages/zts/src/type_checker.zig walkMatchWithNarrowing catch-poison
+packages/zts/src/type_checker.zig walkStmt catch-block
+packages/zts/src/type_checker.zig walkStmt catch-poison
+
+# Invalid schema JSON yields no compiled type entry, so no schema shape can be
+# inferred from it. Contract extraction independently marks that surface
+# dynamic. OutOfMemory still propagates and poisons the checker.
+packages/zts/src/type_checker.zig schemaJsonToType catch-switch
+
+# These catches change only the text of an error diagnostic. The same kind,
+# error severity, source node, and error count are recorded.
+packages/zts/src/type_checker.zig addArgCountMismatch catch-value
+packages/zts/src/type_checker.zig addArgTypeMismatch catch-value
+packages/zts/src/type_checker.zig addGenericDiagnostic catch-value
+packages/zts/src/type_checker.zig addNominalConstructorCall catch-block
+packages/zts/src/type_checker.zig addReadonlyMutation catch-block
+packages/zts/src/type_checker.zig addTypeMismatch catch-block
+packages/zts/src/type_checker.zig checkModuleEncodableArgs catch-value
+packages/zts/src/type_checker.zig reportIfNonContractive catch-block
+packages/zts/src/type_checker.zig reportIfUnencodable catch-value
+
+# TypeEnv.ensureHealthy and TypePool.ensureHealthy reject their recorded
+# allocation failure before their types can support a verdict.
+packages/zts/src/type_env.zig findNonContractiveAliases catch-poison
+packages/zts/src/type_env.zig instantiateCompositeMembers catch-block
+packages/zts/src/type_env.zig internName catch-block
+packages/zts/src/type_env.zig populateFromTypeMap catch-block
+packages/zts/src/type_env.zig populateFromTypeMap catch-poison
+packages/zts/src/type_env.zig processDistinctType catch-poison
+packages/zts/src/type_env.zig processTypeAlias catch-poison
+packages/zts/src/type_env.zig processVarAnnotation catch-poison
+packages/zts/src/type_env.zig pushGenericScope catch-poison
+packages/zts/src/type_env.zig putTypeAlias catch-poison
+packages/zts/src/type_env.zig registerCapsuleAlias catch-poison
+
+# These two parts functions are test fixtures with runtime safety enabled.
+# Their fixed member arrays satisfy computeRoot; no production path calls them.
+packages/proof-checker/src/checker.zig parts catch-trap
+packages/proof-checker/src/checker.zig parts catch-trap@2
+
+# Each additional kernel catch in these functions returns a rejection. The
+# second bound-byte decode returns the same undecodable rejection as the first.
+packages/proof-checker/src/checker.zig bindExecutableGraph catch-block@2
+packages/proof-checker/src/checker.zig bindExecutableGraph catch-block@3
+packages/proof-checker/src/checker.zig bindExecutableGraph catch-block@4
+packages/proof-checker/src/checker.zig bindExecutableGraph catch-return@2
+packages/proof-checker/src/checker.zig check catch-block@2
+packages/proof-checker/src/checker.zig check catch-block@3
+packages/proof-checker/src/checker.zig check catch-block@4
+packages/proof-checker/src/checker.zig checkBoundBytes catch-return@2
+packages/proof-checker/src/checker.zig checkConfiguredInvariants catch-multiline@2
+
+# The second observed graph build or invariant read in accept refuses the
+# artifact. Each certificate digest failure returns null to a caller that
+# refuses an unreadable graph root or decodes the bytes independently.
+packages/runtime/src/proof_activation.zig accept catch-switch@2
+packages/runtime/src/proof_activation.zig certificateCommitments catch-return@2
+packages/runtime/src/proof_activation.zig certificateCommitments catch-return@3
+
+# A second query parameter decode failure also marks the extraction dynamic.
+# The policy hash is hex text produced by the registry from 32 digest bytes;
+# decoding into exactly 32 bytes cannot return an invalid-length error.
+packages/zts/src/contract_builder.zig appendQueryParamsFromSchema catch-block@2
+packages/zts/src/contract_builder.zig currentPolicyHashRaw catch-trap
+
+# These further flow catches either mark allocation poison or retain the same
+# diagnostic. Both checker entry points reject poison before publishing proof.
+packages/zts/src/flow_checker.zig addDiagnostic catch-block@2
+packages/zts/src/flow_checker.zig addDiagnostic catch-block@3
+packages/zts/src/flow_checker.zig applyAssignmentLabels catch-poison@2
+packages/zts/src/flow_checker.zig applyAssignmentLabels catch-poison@3
+packages/zts/src/flow_checker.zig pushConditionConstraints catch-block@2
+packages/zts/src/flow_checker.zig scanImports catch-multiline@2
+packages/zts/src/flow_checker.zig scanImports catch-poison@2
+packages/zts/src/flow_checker.zig trackResultBinding catch-poison@2
+packages/zts/src/flow_checker.zig walkStmt catch-poison@2
+packages/zts/src/flow_checker.zig walkStmt catch-poison@3
+
+# The extra verifier catches record poison; verify checks it before it returns.
+packages/zts/src/handler_verifier.zig scanImports catch-poison@2
+packages/zts/src/handler_verifier.zig walkForResultsAndRefs catch-poison@2
+packages/zts/src/handler_verifier.zig walkForResultsAndRefs catch-poison@3
+
+# Each escaped control byte formats as six ASCII bytes into a six-byte buffer:
+# backslash-u plus four hex digits. bufPrint cannot exhaust that buffer.
+packages/zts/src/intent_extractor.zig writeLiteralAsJson catch-trap
+
+# Each second narrowing allocation failure returns null. The un-narrowed type
+# is wider, so these sites cannot remove a required diagnostic.
+packages/zts/src/type_checker.zig extractIsArrayGuard catch-return@2
+packages/zts/src/type_checker.zig extractIsBytesGuard catch-return@2
+packages/zts/src/type_checker.zig extractIsDictGuard catch-return@2
+packages/zts/src/type_checker.zig extractTypeofGuard catch-return@2
+
+# These extra type-checker catches retain diagnostic kind or set the poison
+# that ensureHealthy checks before the result can support a build.
+packages/zts/src/type_checker.zig inferObjectLiteralType catch-block@2
+packages/zts/src/type_checker.zig registerParamTypes catch-poison@2
+packages/zts/src/type_checker.zig schemaValueToType catch-block@2
+packages/zts/src/type_checker.zig walkMatchWithNarrowing catch-poison@2
+
+# TypeEnv and its pool reject poison before a caller can use the partial type
+# maps. The numbered rows cover separate insertions in the same function.
+packages/zts/src/type_env.zig findNonContractiveAliases catch-poison@2
+packages/zts/src/type_env.zig internName catch-block@2
+packages/zts/src/type_env.zig populateFromTypeMap catch-block@2
+packages/zts/src/type_env.zig populateFromTypeMap catch-block@3
+packages/zts/src/type_env.zig populateFromTypeMap catch-block@4
+packages/zts/src/type_env.zig populateFromTypeMap catch-poison@2
+packages/zts/src/type_env.zig populateFromTypeMap catch-poison@3
+packages/zts/src/type_env.zig populateFromTypeMap catch-poison@4
+packages/zts/src/type_env.zig populateFromTypeMap catch-poison@5
+packages/zts/src/type_env.zig populateFromTypeMap catch-poison@6
+packages/zts/src/type_env.zig populateFromTypeMap catch-poison@7
+packages/zts/src/type_env.zig populateFromTypeMap catch-poison@8
+packages/zts/src/type_env.zig populateFromTypeMap catch-poison@9
+packages/zts/src/type_env.zig populateFromTypeMap catch-poison@10
+packages/zts/src/type_env.zig populateFromTypeMap catch-poison@11
+packages/zts/src/type_env.zig processTypeAlias catch-poison@2
+packages/zts/src/type_env.zig processVarAnnotation catch-poison@2
+packages/zts/src/type_env.zig processVarAnnotation catch-poison@3

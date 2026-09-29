@@ -25,13 +25,20 @@
 # Every row is a swallow someone read and found sound. A row whose reason says
 # it fails open is a bug, not an exemption: fix it or the count is a lie.
 #
-# The key is (file, enclosing function, pattern) rather than a line number, so
-# the list survives edits above it. Renaming the function invalidates the row,
-# which is the point - a rename is when the reason deserves re-reading.
+# The key is (file, enclosing function, pattern, occurrence) rather than a
+# line number. Edits above a function do not invalidate its rows. A second
+# catch of the same form in one function gets a new occurrence number. Methods
+# with the same name in one file share that sequence; insertion still forces
+# review, but can renumber another method's row.
 
 set -euo pipefail
 
-cd "$(dirname "$0")/.."
+repo_root="$(cd "$(dirname "$0")/.." && pwd)"
+if [[ "${PROOF_SWALLOW_INTERNAL_PROBE:-}" == 1 && -n "${PROOF_SWALLOW_ROOT:-}" ]]; then
+  cd "$PROOF_SWALLOW_ROOT"
+else
+  cd "$repo_root"
+fi
 
 allow_file="scripts/proof-swallow.allow"
 
@@ -70,52 +77,66 @@ fail() {
 
 [[ -f "$allow_file" ]] || fail "missing $allow_file"
 
+# A row must belong to a reason block. Repeated rows are errors, not extra
+# review: the same allow key cannot explain two different source sites.
+if ! awk '
+  /^[[:space:]]*#/ { reason = 1; next }
+  /^[[:space:]]*$/ { reason = 0; next }
+  {
+    if (!reason || NF != 3 || $3 !~ /^catch-[a-z]+(@[0-9]+)?$/) {
+      printf "proof swallow: allowlist row %d needs a preceding reason and three fields\n", NR > "/dev/stderr"
+      exit 1
+    }
+  }
+' "$allow_file"; then
+  exit 1
+fi
+
 for f in "${proof_files[@]}"; do
   [[ -f "$f" ]] || fail "listed file $f does not exist; update proof_files in $0"
 done
 
-# One row per swallow: "<file> <enclosing fn> <pattern>". `catch` forms that
-# discard the error, plus `else => {}` inside a switch, are what turned each of
-# the three shipped fail-opens into silence.
+# One row per (file, enclosing function, pattern occurrence). Catch blocks and values
+# need review too: a poison flag only stops proof if every entry point checks it.
 found_rows="$(
   for f in "${proof_files[@]}"; do
     awk -v file="$f" '
-      # A `test "..."` block runs under the testing allocator and reports its
-      # own failures, so a swallow there cannot weaken a build verdict. Entries
-      # stay excluded until the next declaration at column zero.
+      # A `test "..."` block reports its own failures. Resume scanning at any
+      # top-level declaration after it, including an inline function or const.
       /^test "/ { in_test = 1; current_fn = "<test>" }
-      /^(pub )?fn [A-Za-z_]/ { in_test = 0 }
-      match($0, /^[[:space:]]*(pub )?fn [A-Za-z_][A-Za-z0-9_]*/) {
+      /^(pub |export |extern |inline )*(fn|const|var|comptime) / { in_test = 0 }
+      /^(pub |export |extern |inline )*(const|var|comptime) / { current_fn = "<file-scope>" }
+      match($0, /^[[:space:]]*(pub |export |extern |inline )*fn [A-Za-z_][A-Za-z0-9_]*/) {
         line = substr($0, RSTART, RLENGTH)
-        sub(/^[[:space:]]*(pub )?fn /, "", line)
+        sub(/^[[:space:]]*(pub |export |extern |inline )*fn /, "", line)
         if (!in_test) current_fn = line
       }
       in_test { next }
       {
+        if ($0 ~ /^[[:space:]]*\/\//) next
+        line = $0
+        if (gsub(/catch([[:space:]]|$)/, "&", line) > 1) {
+          printf "proof swallow: multiple catches on one line at %s:%d; split the line for review\n", file, NR > "/dev/stderr"
+          exit 2
+        }
         pattern = ""
-        # `catch return error.X` propagates the failure to the caller, which is
-        # the outcome this gate wants; only a `catch` that substitutes a value
-        # counts as a swallow.
-        #
-        # That comment describes a shape these patterns do not match, and the
-        # inversion is real: `catch <value>` - an analysis answer replaced by a
-        # substitute the caller cannot tell from a real one - is the stated
-        # subject and the one form not looked for. It is not added here yet
-        # because the population is not what closing it would suggest.
-        # Measured over these files, a `catch <value>` pattern that already
-        # excludes the fail-closed markAllocationFailure idiom, bound-error
-        # handling, and `catch unreachable` still surfaces 35 rows in the
-        # eleven analysis files and 7 in the kernel files below. Every row of
-        # an allowlist here is a claim that someone read the site and found it
-        # sound, so closing this needs 42 code reviews rather than 42 rows -
-        # and rows carrying invented reasons would be worse than the gap.
-        if ($0 ~ /catch return error\./)       pattern = ""
-        else if ($0 ~ /catch \{\}/)            pattern = "catch-empty"
-        else if ($0 ~ /catch \|_\| \{\}/)      pattern = "catch-empty"
-        else if ($0 ~ /catch return/)          pattern = "catch-return"
-        else if ($0 ~ /catch break/)           pattern = "catch-break"
-        else if ($0 ~ /catch continue/)        pattern = "catch-continue"
+        # Direct error propagation cannot yield a proof answer. Review an
+        # unreachable catch as an invariant claim, because it is not a safe
+        # error result when the claimed invariant fails.
+        if ($0 ~ /catch return error\./) next
+        if ($0 ~ /catch[[:space:]]+unreachable/) pattern = "catch-trap"
+        else if ($0 ~ /catch[[:space:]]+return/ || $0 ~ /catch[[:space:]]+\|[^|]+\|[[:space:]]+return/) pattern = "catch-return"
+        else if ($0 ~ /catch[[:space:]]+break/) pattern = "catch-break"
+        else if ($0 ~ /catch[[:space:]]+continue/) pattern = "catch-continue"
+        else if ($0 ~ /catch[[:space:]]+\|[^|]+\|[[:space:]]+switch/) pattern = "catch-switch"
+        else if ($0 ~ /catch[[:space:]]+self\.markAllocationFailure\(\)/ || $0 ~ /catch[[:space:]]+@constCast\(self\)\.markAllocationFailure\(\)/) pattern = "catch-poison"
+        else if ($0 ~ /catch[[:space:]]+\{/ || $0 ~ /catch[[:space:]]+\|[^|]+\|[[:space:]]+\{/ || $0 ~ /catch[[:space:]]+[A-Za-z_][A-Za-z0-9_]*:[[:space:]]+\{/) pattern = "catch-block"
+        else if ($0 ~ /catch[[:space:]]*$/) pattern = "catch-multiline"
+        else if ($0 ~ /catch[[:space:]]+/) pattern = "catch-value"
         if (pattern != "") {
+          key = file SUBSEP current_fn SUBSEP pattern
+          seen[key]++
+          if (seen[key] > 1) pattern = pattern "@" seen[key]
           printf "%s %s %s\n", file, (current_fn == "" ? "<file-scope>" : current_fn), pattern
         }
       }
@@ -123,7 +144,11 @@ found_rows="$(
   done | sort -u
 )"
 
-allowed_rows="$(sed 's/#.*$//' "$allow_file" | grep -v '^[[:space:]]*$' | sed 's/[[:space:]]*$//' | sort -u || true)"
+allowed_rows="$(sed 's/#.*$//' "$allow_file" | grep -v '^[[:space:]]*$' | sed 's/[[:space:]]*$//' | sort || true)"
+duplicates="$(printf '%s\n' "$allowed_rows" | uniq -d)"
+if [[ -n "${duplicates//[[:space:]]/}" ]]; then
+  fail "duplicate allowlist rows: $duplicates"
+fi
 
 unlisted="$(comm -23 <(printf '%s\n' "$found_rows") <(printf '%s\n' "$allowed_rows") || true)"
 if [[ -n "${unlisted//[[:space:]]/}" ]]; then
@@ -156,19 +181,23 @@ row_count="$(printf '%s\n' "$found_rows" | grep -c . || true)"
 # walker ignores node kinds with no children - and the justification is about
 # which kinds fall through, which belongs beside the arm rather than in a file
 # keyed on a function name that renames break. So the marker is inline: an
-# `// exhaustive:` comment on the arm or within the three lines above it,
+# `// exhaustive:` comment on the arm or directly above it,
 # naming why the ignored cases cannot carry anything this function owes.
 #
-# Arms that re-raise (`else => return err`, `else => return error.X`) are
-# propagation, not silence, and are not counted.
-unmarked_arms="$(
+# This scan covers no-op arms, early exits, and direct literal or named-value
+# fallbacks. Arms that re-raise (`else => return err`, `else => return error.X`)
+# are propagation, not silence, and are not counted.
+arm_rows="$(
   for f in "${proof_files[@]}"; do
     awk -v file="$f" '
       /^test "/ { in_test = 1 }
-      /^(pub )?fn [A-Za-z_]/ { in_test = 0 }
-      !in_test && /else => (\{\}|return|continue|null)/ &&
+      /^(pub |export |extern |inline )*(fn|const|var|comptime) / { in_test = 0 }
+      !in_test && /else => (\{\}|return|continue|\.\{|[0-9-]|"|\.|[A-Za-z_][A-Za-z0-9_.]*[,;}])/ &&
       $0 !~ /else => return err[;,]?$/ && $0 !~ /else => return error\./ {
-        if (!pending && $0 !~ /\/\/ exhaustive:/) printf "%s:%d: %s\n", file, NR, $0
+        if (!pending && $0 !~ /\/\/ exhaustive:/)
+          printf "unmarked %s:%d: %s\n", file, NR, $0
+        else
+          printf "reviewed %s:%d\n", file, NR
         pending = 0
         next
       }
@@ -182,6 +211,7 @@ unmarked_arms="$(
     ' "$f"
   done
 )"
+unmarked_arms="$(printf '%s\n' "$arm_rows" | sed -n 's/^unmarked //p')"
 
 if [[ -n "${unmarked_arms//[[:space:]]/}" ]]; then
   printf 'proof swallow: these switch arms drop cases in silence and carry no `// exhaustive:` reason:\n' >&2
@@ -190,10 +220,137 @@ if [[ -n "${unmarked_arms//[[:space:]]/}" ]]; then
   exit 1
 fi
 
-arm_count="$(
-  for f in "${proof_files[@]}"; do grep -c '// exhaustive:' "$f" || true; done |
-    awk '{s += $1} END {print s + 0}'
-)"
+arm_count="$(printf '%s\n' "$arm_rows" | awk '/^reviewed / { count++ } END { print count + 0 }')"
+
+# Change one declared input file in a copy and require the gate to reject it.
+# Compile the probe code first, then exercise the same source shape the gate
+# will see after a future proof-pipeline edit.
+if [[ "${PROOF_SWALLOW_INTERNAL_PROBE:-}" != 1 ]]; then
+  probe_dir="$(mktemp -d)"
+  trap 'rm -rf "$probe_dir"' EXIT
+  git ls-files -z -- "${proof_files[@]}" "$allow_file" |
+    xargs -0 -n 1 sh -c '
+      mkdir -p "$1/$(dirname "$2")"
+      cp "$2" "$1/$2"
+    ' _ "$probe_dir"
+  cat > "$probe_dir/proof_swallow_probe.zig" <<'EOF'
+fn proofSwallowValueProbe() void {
+    const result: error{Missing}![]const u8 = error.Missing;
+    _ = result catch "fallback";
+    const second: error{Missing}![]const u8 = error.Missing;
+    _ = second catch "second fallback";
+}
+
+fn proofSwallowBlockProbe() void {
+    const result: error{Missing}!void = error.Missing;
+    _ = result catch {};
+}
+
+const ProofSwallowPoisonProbe = struct {
+    fn markAllocationFailure(_: *@This()) void {}
+
+    fn proofSwallowPoisonProbe(self: *@This()) void {
+        const result: error{Missing}!void = error.Missing;
+        _ = result catch self.markAllocationFailure();
+    }
+};
+
+fn proofSwallowSwitchProbe() void {
+    const result: error{Missing}!void = error.Missing;
+    _ = result catch |err| switch (err) {
+        error.Missing => return,
+    };
+}
+
+fn proofSwallowMultilineProbe() void {
+    const result: error{Missing}!void = error.Missing;
+    _ = result catch
+        return;
+}
+
+fn proofSwallowTrapProbe() void {
+    const result: error{Missing}!void = {};
+    _ = result catch unreachable;
+}
+
+test "proof swallow probe compiles" {
+    proofSwallowValueProbe();
+    proofSwallowBlockProbe();
+    var poison: ProofSwallowPoisonProbe = .{};
+    poison.proofSwallowPoisonProbe();
+    proofSwallowSwitchProbe();
+    proofSwallowMultilineProbe();
+    proofSwallowTrapProbe();
+}
+EOF
+  if ! probe_compile="$(zig test "$probe_dir/proof_swallow_probe.zig" 2>&1)"; then
+    fail "catch probes do not compile: $probe_compile"
+  fi
+  cat "$probe_dir/proof_swallow_probe.zig" >> "$probe_dir/packages/zts/src/contract_builder.zig"
+  if probe_output="$(PROOF_SWALLOW_ROOT="$probe_dir" PROOF_SWALLOW_INTERNAL_PROBE=1 bash "$repo_root/scripts/check-proof-swallow.sh" 2>&1)"; then
+    fail "the catch probes passed without allowlist rows"
+  fi
+  for expected in \
+    "proofSwallowValueProbe catch-value" \
+    "proofSwallowValueProbe catch-value@2" \
+    "proofSwallowBlockProbe catch-block" \
+    "proofSwallowPoisonProbe catch-poison" \
+    "proofSwallowSwitchProbe catch-switch" \
+    "proofSwallowMultilineProbe catch-multiline" \
+    "proofSwallowTrapProbe catch-trap"; do
+    if [[ "$probe_output" != *"packages/zts/src/contract_builder.zig $expected"* ]]; then
+      fail "the catch probe missed $expected: $probe_output"
+    fi
+  done
+
+  cat > "$probe_dir/proof_swallow_multiple.zig" <<'EOF'
+fn proofSwallowMultipleProbe() void {
+    const first: error{Missing}![]const u8 = error.Missing;
+    const second: error{Missing}![]const u8 = error.Missing;
+    _ = first catch "first"; _ = second catch "second";
+}
+
+test "multiple catch probe compiles" {
+    proofSwallowMultipleProbe();
+}
+EOF
+  if ! probe_compile="$(zig test "$probe_dir/proof_swallow_multiple.zig" 2>&1)"; then
+    fail "multiple-catch probe does not compile: $probe_compile"
+  fi
+  cat "$probe_dir/proof_swallow_multiple.zig" >> "$probe_dir/packages/zts/src/contract_builder.zig"
+  if probe_output="$(PROOF_SWALLOW_ROOT="$probe_dir" PROOF_SWALLOW_INTERNAL_PROBE=1 bash "$repo_root/scripts/check-proof-swallow.sh" 2>&1)"; then
+    fail "the multiple-catch probe passed"
+  fi
+  if [[ "$probe_output" != *"multiple catches on one line"* ]]; then
+    fail "the multiple-catch probe failed for another reason: $probe_output"
+  fi
+
+  cp "$repo_root/packages/zts/src/contract_builder.zig" "$probe_dir/packages/zts/src/contract_builder.zig"
+  cat > "$probe_dir/proof_swallow_arm.zig" <<'EOF'
+const ProofSwallowArmKind = enum { known, other };
+
+fn proofSwallowArmProbe(kind: ProofSwallowArmKind) bool {
+    return switch (kind) {
+        .known => true,
+        else => false,
+    };
+}
+
+test "silent arm probe compiles" {
+    _ = proofSwallowArmProbe(.other);
+}
+EOF
+  if ! probe_compile="$(zig test "$probe_dir/proof_swallow_arm.zig" 2>&1)"; then
+    fail "silent-arm probe does not compile: $probe_compile"
+  fi
+  cat "$probe_dir/proof_swallow_arm.zig" >> "$probe_dir/packages/zts/src/contract_builder.zig"
+  if probe_output="$(PROOF_SWALLOW_ROOT="$probe_dir" PROOF_SWALLOW_INTERNAL_PROBE=1 bash "$repo_root/scripts/check-proof-swallow.sh" 2>&1)"; then
+    fail "the silent-arm probe passed without a reason"
+  fi
+  if [[ "$probe_output" != *"proof swallow: these switch arms drop cases in silence"* || "$probe_output" != *"else => false"* ]]; then
+    fail "the silent-arm probe failed for another reason: $probe_output"
+  fi
+fi
 
 printf 'proof swallow: OK (%s files, %s reviewed swallows, %s reviewed silent arms, 0 unreviewed)\n' \
   "${#proof_files[@]}" "$row_count" "$arm_count"
