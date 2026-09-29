@@ -156,15 +156,16 @@ fn renderSearchOutput(
     // caller asked for. Refusing the whole search there returns zero matches for
     // a common term, which is strictly less useful than a bounded page plus the
     // statement that the inventory was cut.
-    var records = std.ArrayList([]const u8).empty;
+    var records = std.ArrayList(SearchRecord).empty;
     defer records.deinit(allocator);
-    var raw_lines = std.mem.splitScalar(u8, output.stdout, '\n');
-    while (raw_lines.next()) |line| {
-        if (line.len > 0) try records.append(allocator, line);
-    }
-    std.mem.sort([]const u8, records.items, {}, struct {
-        fn lessThan(_: void, a: []const u8, b: []const u8) bool {
-            return std.mem.lessThan(u8, a, b);
+    try parseSearchRecords(allocator, output.stdout, &records);
+    std.mem.sort(SearchRecord, records.items, {}, struct {
+        fn lessThan(_: void, a: SearchRecord, b: SearchRecord) bool {
+            const path_order = std.mem.order(u8, a.path, b.path);
+            if (path_order != .eq) return path_order == .lt;
+            const line_order = std.mem.order(u8, a.line_text, b.line_text);
+            if (line_order != .eq) return line_order == .lt;
+            return std.mem.lessThan(u8, a.text, b.text);
         }
     }.lessThan);
     if (offset > records.items.len) {
@@ -183,38 +184,29 @@ fn renderSearchOutput(
     try w.print("{d}", .{offset});
     try w.writeAll(",\"matches\":[");
 
-    var seen: usize = 0;
     var returned: usize = 0;
     // Paging state only. A cut inventory is reported by `inventory_complete`;
     // folding it in here would publish a `next_offset` one past the last record
     // and turn the final page into a hard projection error.
     var has_more = false;
-    for (records.items) |line| {
-        if (seen < offset) {
-            seen += 1;
-            continue;
-        }
+    for (records.items[offset..]) |record| {
         if (returned >= limit) {
             has_more = true;
             break;
         }
-        var parts = std.mem.splitScalar(u8, line, ':');
-        const file = parts.next() orelse continue;
-        const line_str = parts.next() orelse continue;
-        const match_text = parts.rest();
-        const preview_end = common.utf8PrefixEnd(match_text, @min(match_text.len, 512));
+        const preview_end = common.utf8PrefixEnd(record.text, @min(record.text.len, 512));
         const before = text_buf.written().len;
         if (returned > 0) try w.writeByte(',');
         try w.writeAll("{\"path\":");
-        try json_writer.writeString(w, file);
+        try json_writer.writeString(w, record.path);
         try w.writeAll(",\"line\":");
-        try w.print("{d}", .{std.fmt.parseInt(usize, line_str, 10) catch 0});
+        try w.print("{d}", .{record.line});
         try w.writeAll(",\"text\":");
-        try json_writer.writeString(w, match_text[0..preview_end]);
+        try json_writer.writeString(w, record.text[0..preview_end]);
         try w.writeAll(",\"text_complete\":");
-        try w.writeAll(if (preview_end == match_text.len) "true" else "false");
+        try w.writeAll(if (preview_end == record.text.len) "true" else "false");
         try w.writeAll(",\"text_omitted_bytes\":");
-        try w.print("{d}", .{match_text.len - preview_end});
+        try w.print("{d}", .{record.text.len - preview_end});
         try w.writeByte('}');
         if (text_buf.written().len + 768 > common.max_projected_tool_result_bytes) {
             text_buf.shrinkRetainingCapacity(before);
@@ -222,7 +214,6 @@ fn renderSearchOutput(
             break;
         }
         returned += 1;
-        seen += 1;
     }
     if (returned == 0 and has_more) return error.ToolContextEntryTooLarge;
 
@@ -251,9 +242,51 @@ fn renderSearchOutput(
     return .{ .ok = semantic_ok, .llm_text = llm_text };
 }
 
-/// Match lines in `rg -n --no-heading` format (`path:line:text`). Both the
-/// ripgrep path and the in-process fallback produce this shape so the JSON
-/// emitter above stays single-sourced.
+const SearchRecord = struct {
+    path: []const u8,
+    line_text: []const u8,
+    line: usize,
+    text: []const u8,
+};
+
+/// Decode `path\x00line:text\n` records. NUL terminates the path because it
+/// cannot occur in a file name. This keeps colons and newlines in legal paths
+/// distinct from the line number and match text. A malformed internal record is
+/// an error because skipping it would make the published inventory and offsets
+/// inaccurate.
+fn parseSearchRecords(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    records: *std.ArrayList(SearchRecord),
+) !void {
+    var start: usize = 0;
+    while (start < bytes.len) {
+        const nul_offset = std.mem.findScalar(u8, bytes[start..], 0) orelse return error.InvalidSearchOutput;
+        const nul = start + nul_offset;
+        const path = bytes[start..nul];
+        if (path.len == 0) return error.InvalidSearchOutput;
+
+        const payload_start = nul + 1;
+        const newline_offset = std.mem.findScalar(u8, bytes[payload_start..], '\n') orelse return error.InvalidSearchOutput;
+        const newline = payload_start + newline_offset;
+        const payload = bytes[payload_start..newline];
+        const colon = std.mem.findScalar(u8, payload, ':') orelse return error.InvalidSearchOutput;
+        const line_text = payload[0..colon];
+        const line = std.fmt.parseInt(usize, line_text, 10) catch return error.InvalidSearchOutput;
+        if (line == 0) return error.InvalidSearchOutput;
+
+        try records.append(allocator, .{
+            .path = path,
+            .line_text = line_text,
+            .line = line,
+            .text = payload[colon + 1 ..],
+        });
+        start = newline + 1;
+    }
+}
+
+/// Both ripgrep and the in-process fallback emit `path\x00line:text\n` records
+/// so parsing, sorting, paging, and JSON rendering stay single-sourced.
 const SearchOutput = struct {
     stdout: []u8,
     stderr: []u8,
@@ -269,7 +302,7 @@ const SearchOutput = struct {
 /// The trailing "--" ends rg's flag parsing, so a model-controlled query
 /// beginning with "-" (e.g. "--pre", which executes a command) is always
 /// treated as the search pattern, never as an rg option.
-const rg_argv_prefix = [_][]const u8{ "rg", "-n", "--no-heading", "--color", "never", "--hidden", "-g", "!.git", "-g", "!zig-out", "-g", "!.zig-cache", "-g", "!node_modules", "-g", "!.zttp", "--" };
+const rg_argv_prefix = [_][]const u8{ "rg", "-n", "--no-heading", "--with-filename", "--null", "--color", "never", "--hidden", "-g", "!.git", "-g", "!zig-out", "-g", "!.zig-cache", "-g", "!node_modules", "-g", "!.zttp", "--" };
 
 fn buildRgArgv(
     buf: *[rg_argv_prefix.len + 2][]const u8,
@@ -323,9 +356,9 @@ fn isExcluded(entry_name: []const u8) bool {
 
 /// In-process substring search used when ripgrep is unavailable. Walks the same
 /// file set workspace_list_files walks (excluding the noise directories), reads
-/// each file, and emits `path:line:text` lines for every line containing the
-/// literal `query`. Binary-ish files (those containing a NUL byte) are skipped,
-/// mirroring ripgrep's default. Stops once `limit` matches are recorded.
+/// each file, and emits framed records for every line containing the literal
+/// `query`. Binary-ish files (those containing a NUL byte) are skipped, mirroring
+/// ripgrep's default. Stops once `limit` matches are recorded.
 fn searchInProcess(
     allocator: std.mem.Allocator,
     root: []const u8,
@@ -412,7 +445,7 @@ fn grepFile(
         line_no += 1;
         if (std.mem.indexOf(u8, line, query) == null) continue;
         if (count.* >= limit) return;
-        try out.print(allocator, "{s}:{d}:{s}\n", .{ rel, line_no, line });
+        try out.print(allocator, "{s}\x00{d}:{s}\n", .{ rel, line_no, line });
         count.* += 1;
     }
 }
@@ -453,9 +486,9 @@ test "workspace_search_text: malformed JSON returns structured error" {
 
 test "workspace_search_text: paged previews retain exact match locators" {
     const stdout =
-        "src/a.ts:2:first match\n" ++
-        "src/b.ts:7:second match\n" ++
-        "src/c.ts:9:third match\n";
+        "src/a.ts\x002:first match\n" ++
+        "src/b.ts\x007:second match\n" ++
+        "src/c.ts\x009:third match\n";
     const output: SearchOutput = .{
         .stdout = @constCast(stdout),
         .stderr = @constCast(""),
@@ -473,6 +506,18 @@ test "workspace_search_text: paged previews retain exact match locators" {
     try testing.expectEqualStrings("src/b.ts", matches[0].object.get("path").?.string);
     try testing.expectEqual(@as(i64, 7), matches[0].object.get("line").?.integer);
     try testing.expectEqualStrings("second match", matches[0].object.get("text").?.string);
+}
+
+test "workspace_search_text: malformed match frames are rejected" {
+    const output: SearchOutput = .{
+        .stdout = @constCast("src/a.ts\x00not-a-line:first match\n"),
+        .stderr = @constCast(""),
+        .ok = true,
+    };
+    try testing.expectError(
+        error.InvalidSearchOutput,
+        renderSearchOutput(testing.allocator, "match", 0, 1, true, &output),
+    );
 }
 
 test "workspace_search_text: dash-leading query reaches rg as a pattern, after --" {
@@ -531,11 +576,39 @@ test "workspace_search_text: positional args do not allocate owned buffers" {
 }
 
 const IsolatedTmp = @import("../test_support/tmp.zig").IsolatedTmp;
+const cwd_support = @import("../test_support/cwd.zig");
 
-test "workspace_search_text: in-process fallback finds matches, emits path:line:text, skips noise dirs" {
+test "workspace_search_text: public tool API preserves a colon in the match path" {
+    const allocator = testing.allocator;
+    var tmp = try IsolatedTmp.init(allocator, "search-colon-path");
+    defer tmp.cleanup(allocator);
+    try tmp.writeFile(allocator, "src/a:b.ts", "needle\n");
+
+    const saved_cwd = try cwd_support.cwdPathAlloc(allocator);
+    defer allocator.free(saved_cwd);
+    try std.Io.Threaded.chdir(tmp.abs_path);
+    defer std.Io.Threaded.chdir(saved_cwd) catch {};
+
+    var result = try tool.execute(
+        allocator,
+        &.{"{\"query\":\"needle\",\"path\":\"src\"}"},
+    );
+    defer result.deinit(allocator);
+    try testing.expect(result.ok);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, result.llm_text, .{});
+    defer parsed.deinit();
+    const matches = parsed.value.object.get("matches").?.array.items;
+    try testing.expectEqual(@as(usize, 1), matches.len);
+    try testing.expectEqualStrings("src/a:b.ts", matches[0].object.get("path").?.string);
+    try testing.expectEqual(@as(i64, 1), matches[0].object.get("line").?.integer);
+    try testing.expectEqualStrings("needle", matches[0].object.get("text").?.string);
+}
+
+test "workspace_search_text: in-process fallback finds framed matches and skips noise dirs" {
     // The ripgrep-absent fallback must keep the tool working: it walks the same
     // files workspace_list_files walks, greps each, and emits rg-compatible
-    // `path:line:text` lines so the JSON emitter is single-sourced.
+    // framed records so the JSON emitter is single-sourced.
     const allocator = testing.allocator;
     var tmp = try IsolatedTmp.init(allocator, "search-inprocess");
     defer tmp.cleanup(allocator);
@@ -557,8 +630,8 @@ test "workspace_search_text: in-process fallback finds matches, emits path:line:
     defer output.deinit(allocator);
 
     try testing.expect(output.ok);
-    // The handler hit is on line 2, in rg `-n --no-heading` shape.
-    try testing.expect(std.mem.indexOf(u8, output.stdout, "src/handler.ts:2:find-me here") != null);
+    // The handler hit is on line 2, in the shared framed shape.
+    try testing.expect(std.mem.indexOf(u8, output.stdout, "src/handler.ts\x002:find-me here") != null);
     // The excluded directories contributed nothing.
     try testing.expect(std.mem.indexOf(u8, output.stdout, "node_modules") == null);
     try testing.expect(std.mem.indexOf(u8, output.stdout, ".zttp") == null);
@@ -576,12 +649,10 @@ test "workspace_search_text: in-process fallback honors the match limit" {
     var output = try searchInProcess(allocator, tmp.abs_path, tmp.abs_path, "needle", 2);
     defer output.deinit(allocator);
 
-    var count: usize = 0;
-    var lines = std.mem.splitScalar(u8, output.stdout, '\n');
-    while (lines.next()) |line| {
-        if (line.len > 0) count += 1;
-    }
-    try testing.expectEqual(@as(usize, 2), count);
+    var records = std.ArrayList(SearchRecord).empty;
+    defer records.deinit(allocator);
+    try parseSearchRecords(allocator, output.stdout, &records);
+    try testing.expectEqual(@as(usize, 2), records.items.len);
 }
 
 test "workspace_search_text: in-process fallback skips binary files" {
@@ -596,6 +667,6 @@ test "workspace_search_text: in-process fallback skips binary files" {
     var output = try searchInProcess(allocator, tmp.abs_path, tmp.abs_path, "find-me", 50);
     defer output.deinit(allocator);
 
-    try testing.expect(std.mem.indexOf(u8, output.stdout, "text.txt:1:find-me") != null);
+    try testing.expect(std.mem.indexOf(u8, output.stdout, "text.txt\x001:find-me") != null);
     try testing.expect(std.mem.indexOf(u8, output.stdout, "blob.bin") == null);
 }
