@@ -3932,59 +3932,65 @@ pub const ContractBuilder = struct {
     fn describeWorkflowCall(self: *ContractBuilder, call: Node.CallExpr) !?WorkflowCall {
         if (self.isModuleBindingName(call.callee, "step")) {
             const label = if (call.args_count > 0)
-                self.workflowStringLabel(call.args_start, 0, "<dynamic step>")
+                try self.workflowStringLabel(call.args_start, 0, "<dynamic step>")
             else
                 try self.allocator.dupe(u8, "step");
             return .{ .kind = .step, .label = label };
         }
         if (self.isModuleBindingName(call.callee, "stepWithTimeout")) {
             const label = if (call.args_count > 0)
-                self.workflowStringLabel(call.args_start, 0, "<dynamic step>")
+                try self.workflowStringLabel(call.args_start, 0, "<dynamic step>")
             else
                 try self.allocator.dupe(u8, "stepWithTimeout");
+            errdefer self.allocator.free(label);
             return .{
                 .kind = .step_with_timeout,
                 .label = label,
-                .detail = self.workflowNumberDetail(call.args_start, 1, "timeoutMs"),
+                .detail = try self.workflowNumberDetail(call.args_start, 1, "timeoutMs"),
             };
         }
         if (self.isModuleBindingName(call.callee, "sleep")) {
+            const label = try self.allocator.dupe(u8, "sleep");
+            errdefer self.allocator.free(label);
             return .{
                 .kind = .sleep,
-                .label = try self.allocator.dupe(u8, "sleep"),
-                .detail = self.workflowNumberDetail(call.args_start, 0, "delayMs"),
+                .label = label,
+                .detail = try self.workflowNumberDetail(call.args_start, 0, "delayMs"),
             };
         }
         if (self.isModuleBindingName(call.callee, "sleepUntil")) {
+            const label = try self.allocator.dupe(u8, "sleepUntil");
+            errdefer self.allocator.free(label);
             return .{
                 .kind = .sleep_until,
-                .label = try self.allocator.dupe(u8, "sleepUntil"),
-                .detail = self.workflowNumberDetail(call.args_start, 0, "untilMs"),
+                .label = label,
+                .detail = try self.workflowNumberDetail(call.args_start, 0, "untilMs"),
             };
         }
         if (self.isModuleBindingName(call.callee, "waitSignal")) {
             const label = if (call.args_count > 0)
-                self.workflowStringLabel(call.args_start, 0, "<dynamic signal>")
+                try self.workflowStringLabel(call.args_start, 0, "<dynamic signal>")
             else
                 try self.allocator.dupe(u8, "waitSignal");
             return .{ .kind = .wait_signal, .label = label };
         }
         if (self.isModuleBindingName(call.callee, "signal")) {
             const label = if (call.args_count > 1)
-                self.workflowStringLabel(call.args_start, 1, "<dynamic signal>")
+                try self.workflowStringLabel(call.args_start, 1, "<dynamic signal>")
             else
                 try self.allocator.dupe(u8, "signal");
             return .{ .kind = .signal, .label = label };
         }
         if (self.isModuleBindingName(call.callee, "signalAt")) {
             const label = if (call.args_count > 1)
-                self.workflowStringLabel(call.args_start, 1, "<dynamic signal>")
+                try self.workflowStringLabel(call.args_start, 1, "<dynamic signal>")
             else
                 try self.allocator.dupe(u8, "signalAt");
+            errdefer self.allocator.free(label);
             return .{
                 .kind = .signal_at,
                 .label = label,
-                .detail = self.workflowNumberDetail(call.args_start, 2, "atMs"),
+                .detail = try self.workflowNumberDetail(call.args_start, 2, "atMs"),
             };
         }
         return null;
@@ -4040,13 +4046,19 @@ pub const ContractBuilder = struct {
         status: ?u16,
         cursors: *std.ArrayList(WorkflowCursor),
     ) ![]const u8 {
+        // This function takes ownership of label and detail on entry. Keep the
+        // payload local until the node append transfers it to the workflow.
+        var owns_payload = true;
+        errdefer if (owns_payload) {
+            self.allocator.free(label);
+            if (detail) |value| self.allocator.free(value);
+        };
+
         const id = try std.fmt.allocPrint(self.allocator, "n{d}", .{self.durable_workflow.nodes.items.len + 1});
+        var owns_id = true;
+        errdefer if (owns_id) self.allocator.free(id);
         for (cursors.items) |cursor| {
-            try self.durable_workflow.edges.append(self.allocator, .{
-                .from = try self.allocator.dupe(u8, cursor.node_id),
-                .to = try self.allocator.dupe(u8, id),
-                .condition = if (cursor.condition) |condition| try self.allocator.dupe(u8, condition) else null,
-            });
+            try self.appendWorkflowEdge(cursor, id);
         }
         try self.durable_workflow.nodes.append(self.allocator, .{
             .id = id,
@@ -4055,6 +4067,8 @@ pub const ContractBuilder = struct {
             .detail = detail,
             .status = status,
         });
+        owns_id = false;
+        owns_payload = false;
 
         self.deinitWorkflowCursors(cursors);
         try cursors.append(self.allocator, .{
@@ -4062,6 +4076,24 @@ pub const ContractBuilder = struct {
             .condition = null,
         });
         return id;
+    }
+
+    fn appendWorkflowEdge(self: *ContractBuilder, cursor: WorkflowCursor, to: []const u8) !void {
+        const from_copy = try self.allocator.dupe(u8, cursor.node_id);
+        errdefer self.allocator.free(from_copy);
+        const to_copy = try self.allocator.dupe(u8, to);
+        errdefer self.allocator.free(to_copy);
+        const condition_copy = if (cursor.condition) |condition|
+            try self.allocator.dupe(u8, condition)
+        else
+            null;
+        errdefer if (condition_copy) |condition| self.allocator.free(condition);
+
+        try self.durable_workflow.edges.append(self.allocator, .{
+            .from = from_copy,
+            .to = to_copy,
+            .condition = condition_copy,
+        });
     }
 
     fn deinitWorkflowCursors(self: *ContractBuilder, cursors: *std.ArrayList(WorkflowCursor)) void {
@@ -4075,19 +4107,19 @@ pub const ContractBuilder = struct {
         args_start: NodeIndex,
         arg_pos: u8,
         fallback: []const u8,
-    ) []const u8 {
+    ) ![]const u8 {
         const arg_idx = self.ir_view.getListIndex(args_start, arg_pos);
         if (self.getLiteralString(arg_idx)) |label| {
-            return self.allocator.dupe(u8, label) catch fallback;
+            return try self.allocator.dupe(u8, label);
         }
         self.markWorkflowPartial();
-        return self.allocator.dupe(u8, fallback) catch fallback;
+        return try self.allocator.dupe(u8, fallback);
     }
 
-    fn workflowNumberDetail(self: *ContractBuilder, args_start: NodeIndex, arg_pos: u8, field_name: []const u8) ?[]const u8 {
+    fn workflowNumberDetail(self: *ContractBuilder, args_start: NodeIndex, arg_pos: u8, field_name: []const u8) !?[]const u8 {
         const arg_idx = self.ir_view.getListIndex(args_start, arg_pos);
         if (self.getLiteralNumber(arg_idx)) |num| {
-            return std.fmt.allocPrint(self.allocator, "{s}={d}", .{ field_name, num }) catch null;
+            return try std.fmt.allocPrint(self.allocator, "{s}={d}", .{ field_name, num });
         }
         self.markWorkflowPartial();
         return null;
@@ -6154,6 +6186,27 @@ fn buildTestContract(source: []const u8) !HandlerContract {
     return try builder.build("handler.ts", null, handler_fn, root, null, false, null);
 }
 
+fn buildWorkflowContractUnderAllocationFailure(
+    allocator: std.mem.Allocator,
+    view: IrView,
+    atoms: *atom_table.AtomTable,
+    root: NodeIndex,
+    handler_fn: ?NodeIndex,
+) !void {
+    var builder = ContractBuilder.init(allocator, view, atoms, null, null);
+    defer builder.deinit();
+
+    var contract = try builder.build("handler.ts", null, handler_fn, root, null, false, null);
+    defer contract.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 4), contract.durable.workflow.nodes.items.len);
+    try std.testing.expectEqualStrings("charge", contract.durable.workflow.nodes.items[0].label);
+    try std.testing.expectEqualStrings("timeoutMs=1000", contract.durable.workflow.nodes.items[0].detail.?);
+    try std.testing.expectEqualStrings("sleep", contract.durable.workflow.nodes.items[1].label);
+    try std.testing.expectEqualStrings("approved", contract.durable.workflow.nodes.items[2].label);
+    try std.testing.expectEqualStrings("atMs=20", contract.durable.workflow.nodes.items[2].detail.?);
+}
+
 fn findTestFunctionNode(view: IrView, atoms: *atom_table.AtomTable, name: []const u8) ?NodeIndex {
     const node_count = view.nodeCount();
     for (0..node_count) |idx_usize| {
@@ -6723,6 +6776,36 @@ test "durable workflow properties prove stable step workflow" {
     try std.testing.expect(contract.durable.workflow.properties.retry_safe);
     try std.testing.expect(contract.durable.workflow.properties.idempotent);
     try std.testing.expect(contract.durable.workflow.properties.fault_covered);
+}
+
+test "durable workflow contract releases ownership on allocation failure" {
+    const source =
+        \\import { run, stepWithTimeout, sleep, signalAt } from "zttp:durable";
+        \\function handler(req) {
+        \\  return run("job:ownership", () => {
+        \\    const value = stepWithTimeout("charge", 1000, () => 1);
+        \\    sleep(10);
+        \\    signalAt("job:next", "approved", 20);
+        \\    return Response.json({ value: value });
+        \\  });
+        \\}
+    ;
+
+    var atoms = atom_table.AtomTable.init(std.testing.allocator);
+    defer atoms.deinit();
+    var parser = try JsParser.init(std.testing.allocator, source);
+    defer parser.deinit();
+    parser.setAtomTable(&atoms);
+
+    const root = try parser.parse();
+    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    const handler_fn = findTestFunctionNode(view, &atoms, "handler");
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        buildWorkflowContractUnderAllocationFailure,
+        .{ view, &atoms, root, handler_fn },
+    );
+    try buildWorkflowContractUnderAllocationFailure(std.testing.allocator, view, &atoms, root, handler_fn);
 }
 
 test "durable workflow properties reject a side effect inside a match arm" {
