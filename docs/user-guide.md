@@ -889,6 +889,10 @@ the model just wrote. The compiler's
 veto verdict comes back as a tool result and can quote diagnostics with source
 spans.
 
+`workspace_search_text` treats its query as literal text. It searches one named
+file when ripgrep is unavailable or its output limit is reached. It refuses a
+recursive fallback because that path cannot apply ripgrep's ignore rules.
+
 Each result is appended to the raw session journal. The provider sees a bounded
 active projection: file reads are UTF-8-safe pages with an explicit range and
 completeness flag, searches and file lists carry deterministic continuation

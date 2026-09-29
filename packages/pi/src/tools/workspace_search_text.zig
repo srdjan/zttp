@@ -43,6 +43,10 @@ const ParseResult = union(enum) {
     err: registry_mod.ToolResult,
 };
 
+fn queryIsSingleLine(query: []const u8) bool {
+    return std.mem.findAny(u8, query, "\n\x00") == null;
+}
+
 /// Parse and validate the tool input. JSON-derived strings are duped only after
 /// every field validates, so no error path leaks an allocation, and the duped
 /// query/path outlive `parsed.deinit()` (the use-after-free fixed in ae881b6).
@@ -57,6 +61,7 @@ fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) !ParseResul
         const query_val = obj.get("query") orelse return .{ .err = try registry_mod.ToolResult.err(allocator, name ++ ": missing query\n") };
         if (query_val != .string) return .{ .err = try registry_mod.ToolResult.err(allocator, name ++ ": query must be a string\n") };
         if (query_val.string.len > 512) return .{ .err = try registry_mod.ToolResult.err(allocator, name ++ ": query must be at most 512 bytes\n") };
+        if (!queryIsSingleLine(query_val.string)) return .{ .err = try registry_mod.ToolResult.err(allocator, name ++ ": query must not contain a newline or NUL byte\n") };
 
         var path_str: ?[]const u8 = null;
         if (obj.get("path")) |value| {
@@ -89,6 +94,7 @@ fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) !ParseResul
             .owned_path = owned_path,
         } };
     } else if (args.len > 0) {
+        if (!queryIsSingleLine(args[0])) return .{ .err = try registry_mod.ToolResult.err(allocator, name ++ ": query must not contain a newline or NUL byte\n") };
         return .{ .ok = .{
             .query = args[0],
             .path = if (args.len > 1) args[1] else ".",
@@ -121,15 +127,16 @@ fn execute(
     defer allocator.free(absolute);
     const relative = common.relativeToRoot(root, absolute);
 
-    // Search via `rg` when present, otherwise fall back to an in-process walk.
+    // Search via `rg` when present, otherwise fall back to an in-process search
+    // for an explicitly named file.
     // `runCommand` spawns children under an empty environ and resolves a bare
     // `rg` against PATH; when ripgrep is not installed the exec fails with
     // FileNotFound. Rather than surfacing that as a cryptic tool error (the
-    // problem the sibling workspace_list_files tool already fixed), fall back to
-    // a zero-dependency in-process substring search over the same files, with
-    // the same noise-directory exclusions.
+    // problem the sibling workspace_list_files tool already fixed), the safe
+    // fallback searches one caller-selected file. Directory fallback refuses
+    // because it cannot reproduce ripgrep's ignore policy.
     var output = searchWithRipgrep(allocator, root, relative, query) catch |err| switch (err) {
-        error.FileNotFound, error.AccessDenied => try searchInProcess(
+        error.FileNotFound, error.AccessDenied, error.StreamTooLong => try searchInProcess(
             allocator,
             root,
             absolute,
@@ -302,7 +309,7 @@ const SearchOutput = struct {
 /// The trailing "--" ends rg's flag parsing, so a model-controlled query
 /// beginning with "-" (e.g. "--pre", which executes a command) is always
 /// treated as the search pattern, never as an rg option.
-const rg_argv_prefix = [_][]const u8{ "rg", "-n", "--no-heading", "--with-filename", "--null", "--color", "never", "--hidden", "-g", "!.git", "-g", "!zig-out", "-g", "!.zig-cache", "-g", "!node_modules", "-g", "!.zttp", "--" };
+const rg_argv_prefix = [_][]const u8{ "rg", "-n", "--fixed-strings", "--no-heading", "--with-filename", "--null", "--color", "never", "--hidden", "-g", "!.git", "-g", "!zig-out", "-g", "!.zig-cache", "-g", "!node_modules", "-g", "!.zttp", "--" };
 
 fn buildRgArgv(
     buf: *[rg_argv_prefix.len + 2][]const u8,
@@ -342,23 +349,11 @@ fn searchWithRipgrep(
     return .{ .stdout = out_stdout, .stderr = out_stderr, .ok = ok };
 }
 
-/// Mirrors `workspace_list_files`: `.zttp` is agent-owned state whose paths
-/// carry a per-workspace hash, so searching it makes the result depend on where
-/// the run happens to live.
-const excluded_names = [_][]const u8{ ".git", "zig-out", ".zig-cache", "node_modules", ".zttp" };
-
-fn isExcluded(entry_name: []const u8) bool {
-    for (excluded_names) |ex| {
-        if (std.mem.eql(u8, entry_name, ex)) return true;
-    }
-    return false;
-}
-
-/// In-process substring search used when ripgrep is unavailable. Walks the same
-/// file set workspace_list_files walks (excluding the noise directories), reads
-/// each file, and emits framed records for every line containing the literal
-/// `query`. Binary-ish files (those containing a NUL byte) are skipped, mirroring
-/// ripgrep's default. Stops once `limit` matches are recorded.
+/// In-process substring search used when ripgrep is unavailable or its bounded
+/// output buffer fills. An explicitly named file is safe to search because the
+/// caller selected it. A recursive fallback would need to reproduce `.gitignore`,
+/// `.ignore`, `.rgignore`, and global ignore policy before it could promise the
+/// same file set as ripgrep, so directory targets return a structured refusal.
 fn searchInProcess(
     allocator: std.mem.Allocator,
     root: []const u8,
@@ -373,11 +368,29 @@ fn searchInProcess(
     defer io_backend.deinit();
     const io = io_backend.io();
 
+    const target_stat = try std.Io.Dir.cwd().statFile(io, target_abs, .{ .follow_symlinks = false });
+    if (target_stat.kind == .directory) {
+        const stdout = try out.toOwnedSlice(allocator);
+        errdefer allocator.free(stdout);
+        return .{
+            .stdout = stdout,
+            .stderr = try allocator.dupe(u8, "recursive fallback cannot apply ripgrep ignore policy; name one file path, or use ripgrep with a narrower query"),
+            .ok = false,
+            .complete = false,
+        };
+    }
+    if (target_stat.kind != .file) return error.UnsupportedFileType;
+
     var count: usize = 0;
-    grepTree(allocator, io, root, target_abs, query, limit, &out, &count, true) catch {
-        // A walk error (e.g. unreadable root) yields an empty result set rather
-        // than a hard failure; the caller still reports ok=true with no matches.
-    };
+    try grepFile(
+        allocator,
+        root,
+        target_abs,
+        query,
+        limit,
+        &out,
+        &count,
+    );
 
     return .{
         .stdout = try out.toOwnedSlice(allocator),
@@ -385,38 +398,6 @@ fn searchInProcess(
         .ok = true,
         .complete = count < limit,
     };
-}
-
-fn grepTree(
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    root: []const u8,
-    dir_abs: []const u8,
-    query: []const u8,
-    limit: usize,
-    out: *std.ArrayList(u8),
-    count: *usize,
-    is_root: bool,
-) !void {
-    if (count.* >= limit) return;
-    var dir = std.Io.Dir.openDirAbsolute(io, dir_abs, .{ .iterate = true }) catch |err| {
-        if (is_root) return err;
-        return; // skip an unreadable sub-directory
-    };
-    defer dir.close(io);
-
-    var it = dir.iterate();
-    while (try it.next(io)) |entry| {
-        if (count.* >= limit) return;
-        if (isExcluded(entry.name)) continue;
-        const child_abs = try std.fs.path.join(allocator, &.{ dir_abs, entry.name });
-        defer allocator.free(child_abs);
-        switch (entry.kind) {
-            .directory => try grepTree(allocator, io, root, child_abs, query, limit, out, count, false),
-            .file => try grepFile(allocator, root, child_abs, query, limit, out, count),
-            else => {},
-        }
-    }
 }
 
 fn grepFile(
@@ -428,9 +409,8 @@ fn grepFile(
     out: *std.ArrayList(u8),
     count: *usize,
 ) !void {
-    // 16 MiB matches the spirit of ripgrep's defaults and keeps a single huge
-    // file from exhausting memory; oversized or unreadable files are skipped.
-    const contents = zts.file_io.readFile(allocator, file_abs, 16 * 1024 * 1024) catch return;
+    // Bound each file read. A failed read must not report a complete search.
+    const contents = try zts.file_io.readFile(allocator, file_abs, 16 * 1024 * 1024);
     defer allocator.free(contents);
     if (std.mem.indexOfScalar(u8, contents, 0) != null) return; // skip binary files
     // A stray non-UTF-8 byte does not make a text file unsearchable: the match
@@ -439,14 +419,22 @@ fn grepFile(
     // the whole file instead reports "no matches" for a symbol that exists.
 
     const rel = common.relativeToRoot(root, file_abs);
-    var line_no: usize = 0;
-    var lines = std.mem.splitScalar(u8, contents, '\n');
-    while (lines.next()) |line| {
+    var line_no: usize = 1;
+    var line_start: usize = 0;
+    while (line_start < contents.len) {
+        const line_end = if (std.mem.findScalar(u8, contents[line_start..], '\n')) |offset|
+            line_start + offset
+        else
+            contents.len;
+        const line = contents[line_start..line_end];
+        if (std.mem.indexOf(u8, line, query) != null) {
+            if (count.* >= limit) return;
+            try out.print(allocator, "{s}\x00{d}:{s}\n", .{ rel, line_no, line });
+            count.* += 1;
+        }
+        if (line_end == contents.len) break;
+        line_start = line_end + 1;
         line_no += 1;
-        if (std.mem.indexOf(u8, line, query) == null) continue;
-        if (count.* >= limit) return;
-        try out.print(allocator, "{s}\x00{d}:{s}\n", .{ rel, line_no, line });
-        count.* += 1;
     }
 }
 
@@ -482,6 +470,13 @@ test "workspace_search_text: malformed JSON returns structured error" {
     defer result.deinit(testing.allocator);
     try testing.expect(!result.ok);
     try testing.expect(std.mem.indexOf(u8, result.llm_text, "invalid JSON input") != null);
+}
+
+test "workspace_search_text: multiline query returns structured error" {
+    var result = try tool.execute(testing.allocator, &.{"{\"query\":\"a\\nb\"}"});
+    defer result.deinit(testing.allocator);
+    try testing.expect(!result.ok);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "newline") != null);
 }
 
 test "workspace_search_text: paged previews retain exact match locators" {
@@ -578,11 +573,11 @@ test "workspace_search_text: positional args do not allocate owned buffers" {
 const IsolatedTmp = @import("../test_support/tmp.zig").IsolatedTmp;
 const cwd_support = @import("../test_support/cwd.zig");
 
-test "workspace_search_text: public tool API preserves a colon in the match path" {
+test "workspace_search_text: public tool API preserves a colon path and treats the query literally" {
     const allocator = testing.allocator;
     var tmp = try IsolatedTmp.init(allocator, "search-colon-path");
     defer tmp.cleanup(allocator);
-    try tmp.writeFile(allocator, "src/a:b.ts", "needle\n");
+    try tmp.writeFile(allocator, "src/a:b.ts", "axb\na.b\n");
 
     const saved_cwd = try cwd_support.cwdPathAlloc(allocator);
     defer allocator.free(saved_cwd);
@@ -591,7 +586,7 @@ test "workspace_search_text: public tool API preserves a colon in the match path
 
     var result = try tool.execute(
         allocator,
-        &.{"{\"query\":\"needle\",\"path\":\"src\"}"},
+        &.{"{\"query\":\"a.b\",\"path\":\"src/a:b.ts\"}"},
     );
     defer result.deinit(allocator);
     try testing.expect(result.ok);
@@ -601,42 +596,98 @@ test "workspace_search_text: public tool API preserves a colon in the match path
     const matches = parsed.value.object.get("matches").?.array.items;
     try testing.expectEqual(@as(usize, 1), matches.len);
     try testing.expectEqualStrings("src/a:b.ts", matches[0].object.get("path").?.string);
-    try testing.expectEqual(@as(i64, 1), matches[0].object.get("line").?.integer);
-    try testing.expectEqualStrings("needle", matches[0].object.get("text").?.string);
+    try testing.expectEqual(@as(i64, 2), matches[0].object.get("line").?.integer);
+    try testing.expectEqualStrings("a.b", matches[0].object.get("text").?.string);
 }
 
-test "workspace_search_text: in-process fallback finds framed matches and skips noise dirs" {
-    // The ripgrep-absent fallback must keep the tool working: it walks the same
-    // files workspace_list_files walks, greps each, and emits rg-compatible
-    // framed records so the JSON emitter is single-sourced.
+test "workspace_search_text: public tool API bounds an explicit file and refuses recursive fallback" {
+    const allocator = testing.allocator;
+    var tmp = try IsolatedTmp.init(allocator, "search-stream-limit");
+    defer tmp.cleanup(allocator);
+
+    var contents: std.ArrayList(u8) = .empty;
+    defer contents.deinit(allocator);
+    for (0..max_search_matches + 2) |_| {
+        try contents.appendSlice(allocator, "needle-0123456789\n");
+    }
+    try tmp.writeFile(allocator, "bulk.txt", contents.items);
+
+    const saved_cwd = try cwd_support.cwdPathAlloc(allocator);
+    defer allocator.free(saved_cwd);
+    try std.Io.Threaded.chdir(tmp.abs_path);
+    defer std.Io.Threaded.chdir(saved_cwd) catch {};
+
+    var file_result = try tool.execute(
+        allocator,
+        &.{"{\"query\":\"needle\",\"path\":\"bulk.txt\",\"limit\":1}"},
+    );
+    defer file_result.deinit(allocator);
+    try testing.expect(file_result.ok);
+    var parsed_file = try std.json.parseFromSlice(std.json.Value, allocator, file_result.llm_text, .{});
+    defer parsed_file.deinit();
+    try testing.expectEqual(@as(i64, 1), parsed_file.value.object.get("returned").?.integer);
+    try testing.expect(!parsed_file.value.object.get("inventory_complete").?.bool);
+
+    var directory_result = try tool.execute(
+        allocator,
+        &.{"{\"query\":\"needle\",\"path\":\".\",\"limit\":1}"},
+    );
+    defer directory_result.deinit(allocator);
+    try testing.expect(!directory_result.ok);
+    var parsed_directory = try std.json.parseFromSlice(std.json.Value, allocator, directory_result.llm_text, .{});
+    defer parsed_directory.deinit();
+    try testing.expect(!parsed_directory.value.object.get("inventory_complete").?.bool);
+    try testing.expect(std.mem.indexOf(
+        u8,
+        parsed_directory.value.object.get("stderr").?.string,
+        "ignore policy",
+    ) != null);
+}
+
+test "workspace_search_text: in-process fallback searches one explicit file" {
     const allocator = testing.allocator;
     var tmp = try IsolatedTmp.init(allocator, "search-inprocess");
     defer tmp.cleanup(allocator);
 
     try tmp.writeFile(allocator, "src/handler.ts", "const x = 1;\nfind-me here\nbye\n");
-    try tmp.writeFile(allocator, "README.md", "nothing\n");
-    // A match inside an excluded directory must never surface.
-    try tmp.writeFile(allocator, "node_modules/dep.js", "find-me in noise\n");
-    // Agent-owned witness state carries an absolute path in its contents and a
-    // hash of that path in its directory name, so a hit here would differ
-    // between two runs of the same recorded flow.
-    try tmp.writeFile(
-        allocator,
-        ".zttp/witnesses/f0812d0e79287bb9/handler.path",
-        "/tmp/zttp-flow-simulator-abc/find-me\n",
-    );
+    const handler_path = try tmp.childPath(allocator, "src/handler.ts");
+    defer allocator.free(handler_path);
 
-    var output = try searchInProcess(allocator, tmp.abs_path, tmp.abs_path, "find-me", 50);
+    var output = try searchInProcess(allocator, tmp.abs_path, handler_path, "find-me", 50);
     defer output.deinit(allocator);
 
     try testing.expect(output.ok);
-    // The handler hit is on line 2, in the shared framed shape.
+    try testing.expect(output.complete);
     try testing.expect(std.mem.indexOf(u8, output.stdout, "src/handler.ts\x002:find-me here") != null);
-    // The excluded directories contributed nothing.
-    try testing.expect(std.mem.indexOf(u8, output.stdout, "node_modules") == null);
-    try testing.expect(std.mem.indexOf(u8, output.stdout, ".zttp") == null);
-    // The non-matching file contributed nothing.
-    try testing.expect(std.mem.indexOf(u8, output.stdout, "README.md") == null);
+}
+
+test "workspace_search_text: in-process recursive fallback refuses without ignore policy" {
+    const allocator = testing.allocator;
+    var tmp = try IsolatedTmp.init(allocator, "search-inprocess-dir");
+    defer tmp.cleanup(allocator);
+    try tmp.writeFile(allocator, ".gitignore", ".env\n");
+    try tmp.writeFile(allocator, ".env", "secret-needle\n");
+
+    var output = try searchInProcess(allocator, tmp.abs_path, tmp.abs_path, "secret-needle", 50);
+    defer output.deinit(allocator);
+
+    try testing.expect(!output.ok);
+    try testing.expect(!output.complete);
+    try testing.expectEqual(@as(usize, 0), output.stdout.len);
+    try testing.expect(std.mem.indexOf(u8, output.stderr, "ignore policy") != null);
+}
+
+test "workspace_search_text: in-process fallback propagates a missing named file" {
+    const allocator = testing.allocator;
+    var tmp = try IsolatedTmp.init(allocator, "search-inprocess-missing");
+    defer tmp.cleanup(allocator);
+    const file_path = try tmp.childPath(allocator, "missing.txt");
+    defer allocator.free(file_path);
+
+    try testing.expectError(
+        error.FileNotFound,
+        searchInProcess(allocator, tmp.abs_path, file_path, "needle", 50),
+    );
 }
 
 test "workspace_search_text: in-process fallback honors the match limit" {
@@ -645,14 +696,17 @@ test "workspace_search_text: in-process fallback honors the match limit" {
     defer tmp.cleanup(allocator);
 
     try tmp.writeFile(allocator, "a.txt", "needle\nneedle\nneedle\n");
+    const file_path = try tmp.childPath(allocator, "a.txt");
+    defer allocator.free(file_path);
 
-    var output = try searchInProcess(allocator, tmp.abs_path, tmp.abs_path, "needle", 2);
+    var output = try searchInProcess(allocator, tmp.abs_path, file_path, "needle", 2);
     defer output.deinit(allocator);
 
     var records = std.ArrayList(SearchRecord).empty;
     defer records.deinit(allocator);
     try parseSearchRecords(allocator, output.stdout, &records);
     try testing.expectEqual(@as(usize, 2), records.items.len);
+    try testing.expect(!output.complete);
 }
 
 test "workspace_search_text: in-process fallback skips binary files" {
@@ -662,11 +716,36 @@ test "workspace_search_text: in-process fallback skips binary files" {
 
     // A NUL byte marks the file as binary; ripgrep skips these by default.
     try tmp.writeFile(allocator, "blob.bin", "find-me\x00more\n");
-    try tmp.writeFile(allocator, "text.txt", "find-me\n");
+    const file_path = try tmp.childPath(allocator, "blob.bin");
+    defer allocator.free(file_path);
 
-    var output = try searchInProcess(allocator, tmp.abs_path, tmp.abs_path, "find-me", 50);
+    var output = try searchInProcess(allocator, tmp.abs_path, file_path, "find-me", 50);
     defer output.deinit(allocator);
 
-    try testing.expect(std.mem.indexOf(u8, output.stdout, "text.txt\x001:find-me") != null);
-    try testing.expect(std.mem.indexOf(u8, output.stdout, "blob.bin") == null);
+    try testing.expectEqual(@as(usize, 0), output.stdout.len);
+    try testing.expect(output.complete);
+}
+
+fn searchFileUnderAllocationFailure(
+    allocator: std.mem.Allocator,
+    root: []const u8,
+    file_path: []const u8,
+) !void {
+    var output = try searchInProcess(allocator, root, file_path, "needle", 50);
+    defer output.deinit(allocator);
+}
+
+test "workspace_search_text: in-process fallback propagates allocation failure" {
+    const allocator = testing.allocator;
+    var tmp = try IsolatedTmp.init(allocator, "search-inprocess-oom");
+    defer tmp.cleanup(allocator);
+    try tmp.writeFile(allocator, "a.txt", "needle\n");
+    const file_path = try tmp.childPath(allocator, "a.txt");
+    defer allocator.free(file_path);
+
+    try testing.checkAllAllocationFailures(
+        allocator,
+        searchFileUnderAllocationFailure,
+        .{ tmp.abs_path, file_path },
+    );
 }
