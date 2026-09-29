@@ -224,6 +224,8 @@ fn pureStmtReturns(ir_view: IrView, node: NodeIndex) ReturnStatus {
         .return_stmt => .always,
         .block, .program => pureBlockReturns(ir_view, node),
         .if_stmt => pureIfReturns(ir_view, node),
+        // exhaustive: an unlisted statement does not establish a return.
+        // `.never` can only cost the total-return proof.
         else => .never,
     };
 }
@@ -323,12 +325,20 @@ fn lookupTrackedFunction(module_specifier: []const u8, name: []const u8) ?Functi
         .result => .result,
         .optional_string => .optional_string,
         .optional_object => .optional_object,
-        // exhaustive: null means "this export returns nothing that needs
-        // unwrap-checking". The remaining `returns` kinds are plain values with
-        // no Result or optional to guard. A new kind that did need guarding
-        // would land here silently, which is why the set is spelled out rather
-        // than defaulted - adding one means visiting this arm.
-        else => null,
+        // Keep this list exhaustive so a new return kind cannot silently skip
+        // caller-side checking. optional_number is listed explicitly to keep
+        // the current verifier behavior unchanged; supporting it needs a new
+        // OptionalKind and its own diagnostics.
+        .boolean,
+        .number,
+        .string,
+        .object,
+        .undefined,
+        .unknown,
+        .optional_number,
+        .dict,
+        .bytes,
+        => null,
     };
 }
 
@@ -607,6 +617,8 @@ pub const HandlerVerifier = struct {
             .continue_stmt,
             => .never,
 
+            // exhaustive: an unlisted statement does not establish a return.
+            // `.never` can only cost the total-return proof.
             else => .never,
         };
     }
@@ -1377,6 +1389,8 @@ pub const HandlerVerifier = struct {
                 const else_s = self.stmtReturnsQuick(if_stmt.else_branch);
                 break :blk if (then_s == .always and else_s == .always) .always else .sometimes;
             },
+            // exhaustive: an unlisted statement does not establish a return.
+            // `.never` can only prevent post-dominator narrowing.
             else => .never,
         };
     }

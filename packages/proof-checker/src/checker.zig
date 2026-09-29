@@ -294,6 +294,7 @@ pub fn check(inputs: Inputs, policy: Policy) Assessment {
             .code = switch (err) {
                 error.WorkBudgetExhausted => .work_budget_exhausted,
                 error.Truncated => .truncated_input,
+                // exhaustive: every other decode error still reaches rejectAt.
                 else => .unknown_enum_member,
             },
             .recertifiable = true,

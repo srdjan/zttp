@@ -476,6 +476,7 @@ pub const ContractBuilder = struct {
                 const is_aot = switch (pattern.pattern_type) {
                     .exact => true,
                     .prefix => false,
+                    // exhaustive: other pattern kinds do not have an exact route.
                     else => false,
                 };
                 if (!is_aot) continue;
@@ -488,10 +489,12 @@ pub const ContractBuilder = struct {
                     .route_type = switch (pattern.pattern_type) {
                         .exact => "exact",
                         .prefix => "prefix",
+                        // exhaustive: the non-exact kinds were skipped above.
                         else => "unknown",
                     },
                     .field = switch (pattern.url_atom) {
                         .path => "path",
+                        // exhaustive: a non-path atom uses the URL field.
                         else => "url",
                     },
                     .status = pattern.status,
@@ -6131,6 +6134,8 @@ fn contentTypeFor(idx: u8) []const u8 {
     return switch (idx) {
         0 => "application/json",
         1 => "text/plain; charset=utf-8",
+        // exhaustive: the route producer uses 2 for HTML; other values have
+        // no more specific content type in this contract.
         else => "text/html; charset=utf-8",
     };
 }

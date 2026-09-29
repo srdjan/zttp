@@ -1468,9 +1468,68 @@ pub const FlowChecker = struct {
                 }
                 break :blk false;
             },
-            // exhaustive: literals do not contain this binding; call arguments
-            // and function return statements are scanned separately above.
-            else => false,
+            // These nodes either have no value child, or their relevant edges
+            // are scanned directly by bindingEscapesStableResolutionDepth.
+            // Keep this list exhaustive so a new child-bearing tag cannot
+            // silently make an escaping binding look stable.
+            .lit_int,
+            .lit_float,
+            .lit_string,
+            .lit_bool,
+            .lit_null,
+            .lit_undefined,
+            .identifier,
+            .call,
+            .method_call,
+            .assignment,
+            .object_method,
+            .object_getter,
+            .object_setter,
+            .function_expr,
+            .arrow_function,
+            .await_expr,
+            .yield_expr,
+            .sequence_expr,
+            .comma_expr,
+            .match_arm,
+            .match_pattern,
+            .match_type_test,
+            .expr_stmt,
+            .var_decl,
+            .if_stmt,
+            .for_stmt,
+            .for_of_stmt,
+            .for_in_stmt,
+            .while_stmt,
+            .do_while_stmt,
+            .switch_stmt,
+            .case_clause,
+            .return_stmt,
+            .assert_stmt,
+            .throw_stmt,
+            .break_stmt,
+            .continue_stmt,
+            .try_stmt,
+            .block,
+            .labeled_stmt,
+            .function_decl,
+            .array_pattern,
+            .pattern_element,
+            .pattern_rest,
+            .pattern_default,
+            .import_decl,
+            .import_specifier,
+            .import_default,
+            .import_namespace,
+            .export_decl,
+            .export_specifier,
+            .export_default,
+            .export_all,
+            .program,
+            .param_list,
+            .arg_list,
+            .stmt_list,
+            => false,
         };
     }
 
@@ -2113,14 +2172,58 @@ pub const FlowChecker = struct {
             // recorded-and-replayed read stays deterministic.
             .arrow_function, .function_expr => return self.closureResultLabels(node),
 
-            // exhaustive: the empty set here means "carries no label", and the
-            // arms above cover every expression that can hold one - literals,
-            // identifiers, calls, operators, both literal containers, member and
-            // computed reads, templates, match, spread, and lowered `h` calls.
-            // A new
-            // expression kind would land here silently, so adding one means
-            // visiting this arm.
-            else => return LabelSet.empty,
+            // These are the current no-label, statement-only, or
+            // parser-unreachable expression tags. Keep the list exhaustive:
+            // adding an expression kind must classify how labels cross it.
+            .lit_null,
+            .object_property,
+            .object_method,
+            .object_getter,
+            .object_setter,
+            .object_spread,
+            .await_expr,
+            .yield_expr,
+            .sequence_expr,
+            .comma_expr,
+            .match_arm,
+            .match_pattern,
+            .match_type_test,
+            .expr_stmt,
+            .var_decl,
+            .if_stmt,
+            .for_stmt,
+            .for_of_stmt,
+            .for_in_stmt,
+            .while_stmt,
+            .do_while_stmt,
+            .switch_stmt,
+            .case_clause,
+            .return_stmt,
+            .assert_stmt,
+            .throw_stmt,
+            .break_stmt,
+            .continue_stmt,
+            .try_stmt,
+            .block,
+            .labeled_stmt,
+            .function_decl,
+            .array_pattern,
+            .pattern_element,
+            .pattern_rest,
+            .pattern_default,
+            .import_decl,
+            .import_specifier,
+            .import_default,
+            .import_namespace,
+            .export_decl,
+            .export_specifier,
+            .export_default,
+            .export_all,
+            .program,
+            .param_list,
+            .arg_list,
+            .stmt_list,
+            => return LabelSet.empty,
         }
     }
 
@@ -2551,9 +2654,10 @@ pub const FlowChecker = struct {
         const tag = self.ir_view.getTag(callee) orelse return false;
         return switch (tag) {
             .member_access, .optional_chain => !self.isKnownBuiltinMemberCall(callee),
-            // Computed elements, call results, binary/ternary selectors,
+            // exhaustive: computed elements, call results, binary/ternary selectors,
             // assignments, and every other expression-valued callee have no
-            // resolved function body here.
+            // resolved function body here. True adds `.unknown`, so an
+            // unrecognized form costs proof rather than granting it.
             else => true,
         };
     }
@@ -3916,6 +4020,8 @@ pub const FlowChecker = struct {
     fn isRequestConstraint(c: counterexample.WitnessConstraint) bool {
         return switch (c) {
             .req_method, .req_method_not, .req_url, .req_url_not => true,
+            // exhaustive: the remaining witness constraints do not describe
+            // request fields. False affects witness choice, not the verdict.
             else => false,
         };
     }

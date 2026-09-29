@@ -1237,6 +1237,7 @@ pub const TypeEnv = struct {
                 }
                 break :blk true;
             },
+            // exhaustive: other type tags do not meet this object-like check.
             else => false,
         };
     }

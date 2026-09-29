@@ -1002,6 +1002,7 @@ pub const TypeChecker = struct {
                         },
                         .float => pool.idx_number,
                         .bool => |b| pool.addLiteralBool(self.allocator, b),
+                        // exhaustive: a nonprimitive enum item gives no literal type.
                         else => pool.idx_unknown,
                     };
                     members.append(self.allocator, member) catch {
@@ -1016,6 +1017,7 @@ pub const TypeChecker = struct {
         const type_name = if (obj.get("type")) |type_val|
             switch (type_val) {
                 .string => |s| s,
+                // exhaustive: a non-string type name is not recognized.
                 else => "",
             }
         else
@@ -1996,6 +1998,7 @@ pub const TypeChecker = struct {
                 for (pool.getUnionMembers(current)) |candidate| {
                     const is_array = switch (pool.getTag(candidate) orelse continue) {
                         .t_array, .t_tuple => true,
+                        // exhaustive: keep every other member outside the array branch.
                         else => false,
                     };
                     if (is_array) {
@@ -2340,7 +2343,28 @@ pub const TypeChecker = struct {
                 }
                 break :blk false;
             },
-            else => false,
+            // This predicate does not resolve references or nullable wrappers.
+            .t_boolean,
+            .t_number,
+            .t_null,
+            .t_dict,
+            .t_bytes,
+            .t_undefined,
+            .t_void,
+            .t_never,
+            .t_unknown_type,
+            .t_record,
+            .t_array,
+            .t_tuple,
+            .t_function,
+            .t_intersection,
+            .t_literal_number,
+            .t_literal_bool,
+            .t_ref,
+            .t_generic_param,
+            .t_generic_app,
+            .t_nullable,
+            => false,
         };
     }
 
