@@ -126,12 +126,14 @@ pub const SqlStore = struct {
     }
 
     pub fn configure(self: *SqlStore, db_path: ?[]const u8) !void {
+        const new_path = if (db_path) |path| try self.allocator.dupe(u8, path) else null;
+
         if (self.db) |db| {
             sdk.sqliteClose(db);
             self.db = null;
         }
         if (self.db_path) |existing| self.allocator.free(existing);
-        self.db_path = if (db_path) |path| try self.allocator.dupe(u8, path) else null;
+        self.db_path = new_path;
     }
 
     fn deinitSelf(self: *SqlStore) void {
@@ -177,6 +179,23 @@ pub const SqlStore = struct {
         return db;
     }
 };
+
+test "SqlStore configure preserves its path after allocation failure" {
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    const allocator = failing.allocator();
+
+    const store = try allocator.create(SqlStore);
+    store.* = try SqlStore.init(allocator, "existing.sqlite");
+    defer SqlStore.sdkDeinit(@ptrCast(store));
+
+    failing.fail_index = failing.alloc_index;
+    try std.testing.expectError(error.OutOfMemory, store.configure("replacement.sqlite"));
+    try std.testing.expectEqualStrings("existing.sqlite", store.db_path.?);
+
+    failing.fail_index = std.math.maxInt(usize);
+    try store.configure("replacement.sqlite");
+    try std.testing.expectEqualStrings("replacement.sqlite", store.db_path.?);
+}
 
 fn getOrCreateStore(handle: *sdk.ModuleHandle) !*SqlStore {
     if (sdk.getModuleState(handle, SqlStore, MODULE_STATE_SLOT)) |store| return store;
