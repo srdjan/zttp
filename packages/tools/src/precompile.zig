@@ -547,7 +547,7 @@ fn importedFunctionLabels(
     // the handler a value carrying none of its declared labels. A failed
     // install drops the entry, which leaves the call untraceable.
     if (declaration) |decl| flow.setDeclaration(decl) catch return null;
-    const labels = flow.exportedReturnLabels(name);
+    const labels = flow.exportedReturnLabels(name) catch return null;
     if (type_checker) |*checker| checker.ensureHealthy() catch return null;
     if (declaration) |decl| {
         const statuses = flow.classificationStatuses();

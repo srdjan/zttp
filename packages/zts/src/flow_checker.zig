@@ -688,24 +688,27 @@ pub const FlowChecker = struct {
     ///
     /// Only the named function's body is walked. Its own calls into modules
     /// this checker cannot resolve stay `unknown`, so the answer never claims
-    /// more than one file's worth of evidence.
-    pub fn exportedReturnLabels(self: *FlowChecker, name: []const u8) ?LabelSet {
+    /// more than one file's worth of evidence. Allocation failure is returned
+    /// rather than letting a partial label set look complete.
+    pub fn exportedReturnLabels(self: *FlowChecker, name: []const u8) !?LabelSet {
         self.scanImports();
         self.scanFunctionDecls();
+        if (self.allocation_failed) return error.OutOfMemory;
 
         const fn_node = self.findFunctionByName(name) orelse return null;
         const func = self.ir_view.getFunction(fn_node) orelse return null;
 
-        var collected = LabelSet.empty;
         const body_tag = self.ir_view.getTag(func.body) orelse return null;
-        if (body_tag == .block or body_tag == .program or body_tag == .return_stmt) {
+        const labels = if (body_tag == .block or body_tag == .program or body_tag == .return_stmt) blk: {
+            var collected = LabelSet.empty;
             const saved = self.summary_returns;
             self.summary_returns = &collected;
             defer self.summary_returns = saved;
             self.walkStmt(func.body);
-            return collected;
-        }
-        return self.inferLabels(func.body);
+            break :blk collected;
+        } else self.inferLabels(func.body);
+        if (self.allocation_failed) return error.OutOfMemory;
+        return labels;
     }
 
     /// The function declaration bound to `name` at module scope, or null.
@@ -4107,6 +4110,40 @@ test "FlowChecker fails closed when diagnostic storage cannot allocate" {
     try std.testing.expectError(error.OutOfMemory, checker.check(handler_fn));
 }
 
+fn expectExportedSecretLabels(
+    allocator: std.mem.Allocator,
+    view: IrView,
+    atoms: *atom_table.AtomTable,
+) !void {
+    var checker = FlowChecker.init(allocator, view, atoms);
+    defer checker.deinit();
+
+    const labels = (try checker.exportedReturnLabels("encodeKey")) orelse
+        return error.ExportNotFound;
+    try std.testing.expect(labels.has(.secret));
+}
+
+test "exported return labels propagate allocation failure" {
+    const source =
+        \\import { env } from "zttp:env";
+        \\import { urlEncode } from "zttp:url";
+        \\export function encodeKey() { return urlEncode(env("SECRET_KEY")); }
+    ;
+    var parser = try @import("zts-engine").parser.JsParser.init(std.testing.allocator, source);
+    var atoms = atom_table.AtomTable.init(std.testing.allocator);
+    defer atoms.deinit();
+    parser.setAtomTable(&atoms);
+    defer parser.deinit();
+    _ = try parser.parse();
+    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        expectExportedSecretLabels,
+        .{ view, &atoms },
+    );
+}
+
 test "FlowChecker captures witness constraints on secret-in-response" {
     const allocator = std.testing.allocator;
     const source =
@@ -5295,7 +5332,7 @@ fn runWithImportedFunction(
     var imported_checker = FlowChecker.init(allocator, imported_view, &imported_atoms);
     defer imported_checker.deinit();
     if (type_checker) |*checker| imported_checker.setTypeChecker(checker);
-    const imported_labels = imported_checker.exportedReturnLabels(name) orelse
+    const imported_labels = (try imported_checker.exportedReturnLabels(name)) orelse
         return error.ExportNotFound;
     if (type_checker) |*checker| try checker.ensureHealthy();
 
