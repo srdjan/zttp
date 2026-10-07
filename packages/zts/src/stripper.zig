@@ -919,6 +919,11 @@ const Stripper = struct {
                 self.recordTypeAnnotation(kind, ret_type_start, ret_type_end, fn_name_start, fn_name_end);
                 // Blank from ws3_start (includes whitespace before ':') to preserve output length.
                 self.blankSpan(ws3_start, self.pos);
+            } else {
+                // A colon with no type after it is not an annotation. Keep the
+                // bytes that were consumed so every later offset still maps back
+                // to the source; the parser refuses the colon.
+                self.output.appendSlice(self.allocator, self.source[ws3_start..self.pos]) catch return StripError.OutOfMemory;
             }
         } else {
             // No return type - output the whitespace we skipped
@@ -4950,4 +4955,24 @@ test "a fold spanning lines keeps the lines below it on their own numbers" {
     const mapped = result.sourcePosition(source, @intCast(stripped_line), 1);
     try std.testing.expectEqual(@as(u32, 4), mapped.line);
     try std.testing.expectEqual(@as(u32, 1), mapped.column);
+}
+
+// Regression: a function declaration's return-type colon consumed the `:` and
+// the whitespace after it, then dropped both when no type followed. The strip
+// succeeded with output shorter than the source, so every later position in
+// that file was reported at the wrong column. Found by the stripper stress
+// loop on "function f(x: ((a: number) => number)[]):".
+test "a return-type colon with no type after it keeps its bytes" {
+    const inputs = [_][]const u8{
+        "function f(x: ((a: number) => number)[]):",
+        "function f():",
+        "function f() :   ",
+        "function f(): 1 {}",
+        "function f(): ;",
+    };
+    for (inputs) |src| {
+        var result = try strip(std.testing.allocator, src, .{});
+        defer result.deinit();
+        try std.testing.expectEqual(src.len, result.code.len);
+    }
 }
