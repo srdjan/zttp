@@ -109,6 +109,31 @@ acknowledgement. Pure planner tests check exact actions and reject incomplete
 plan publication. These matrices test named behaviors; they are not source
 coverage or a power-loss simulation.
 
+`test-cli-abuse` is an executable check, not a test root. It runs the built
+`zts` in a new temporary directory against eight hostile inputs: an empty file,
+a missing path, a directory given as the file, a file one byte over the 10 MiB
+read cap, invalid UTF-8, a NUL byte, 600 nested parentheses, and an unknown
+flag. Each input runs in text mode and with `--json`, which gives 16 cases. For
+each case the check asserts that the process exited and was not killed by a
+signal, that it finished within 30 seconds, and the exact exit code. Today every
+case exits 1. Under `--json` the standard output is empty or exactly one
+parseable JSON document, and the unknown-flag cases assert an empty standard
+output because they print stderr text only. The check refuses to run when a
+`zttp.json` exists in any ancestor of its temporary directory, because project
+discovery walks every ancestor, and it fails when it ran a different number of
+cases than it defines. It does not assert stderr content. In text mode a
+missing path and a directory leave `main` through an error return, so a Debug
+build prints a Zig stack trace to stderr; the check pins the exit code only.
+
+`test-instruction-counter` covers `packages/tools/src/instruction_counter.zig`,
+which reports retired user-space instructions for the process and names its
+source: `proc_pid_rusage` on macOS, `perf_event_open` on Linux, or CPU time from
+`getrusage` when neither is available. The macOS test fails when the source is
+not the instruction counter, so a silent fallback on a developer machine cannot
+pass. The count for twice the work must be between 1.5 and 2.5 times the count
+for the base work on the instruction sources. On the CPU-time fallback the test
+asserts only growth.
+
 The package suites: `test-zts`, `test-sdk`, `test-modules`,
 `test-proof-review`, `test-proof-checker`, `test-release-check`, `test-server`,
 `test-compile-bench`, `test-bench-diff`, `test-wasm-playground-publish`.

@@ -125,4 +125,23 @@ pub fn addIntegration(ctx: Context, bins: artifacts.Binaries, test_step: *std.Bu
     const reference_tools_step = b.step("test-reference-tools", "Build examples/tools, run the artifact, and check each boundary case over loopback");
     reference_tools_step.dependOn(&reference_tools_cmd.step);
     test_step.dependOn(&reference_tools_cmd.step);
+
+    // U5.3: run the built `zts` against hostile input in a new temporary
+    // directory and pin exit status, deadline, and JSON completeness. The
+    // check fails on its own when it runs fewer cases than it defines.
+    const cli_abuse_mod = b.createModule(.{
+        .root_source_file = b.path("packages/tools/src/cli_abuse_check.zig"),
+        .target = b.graph.host,
+        .optimize = ctx.optimize,
+    });
+    const cli_abuse_exe = b.addExecutable(.{
+        .name = "cli-abuse-check",
+        .root_module = cli_abuse_mod,
+    });
+    const cli_abuse_cmd = b.addRunArtifact(cli_abuse_exe);
+    cli_abuse_cmd.addFileArg(bins.zts_exe.getEmittedBin());
+    cli_abuse_cmd.has_side_effects = true;
+    const cli_abuse_step = b.step("test-cli-abuse", "Run the built zts against hostile input: exit status, deadline, JSON completeness");
+    cli_abuse_step.dependOn(&cli_abuse_cmd.step);
+    test_step.dependOn(&cli_abuse_cmd.step);
 }
