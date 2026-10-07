@@ -148,9 +148,21 @@ The audits and gates: `test-capability-audit`, `test-module-boundary`,
 `test-residual-guards-drift`, `test-invariant-drift`, `test-proof-swallow`,
 `test-zts-layering`, `test-module-governance`,
 `test-runtime-purity`, `test-contract-golden`, `test-expert-golden`,
-`test-docs-drift`, `test-doc-links`, `test-convergence-emitter`,
+`test-docs-drift`, `test-doc-links`, `test-diagnostic-corpus`, `test-convergence-emitter`,
 `test-production-branch-metric`, `test-comptime-cli-matrix`,
 `test-generic-intersection-cli-matrix`.
+
+`test-diagnostic-corpus` pins the output of the default check over the cases
+under `tests/corpus/`. Each case is a source file with a sibling `.diag` golden
+that records the stages that ran and the diagnostics, so a diagnostic that
+changes text, position, or severity fails here, and a `good` case cannot pass
+because a stage was skipped. The gate fails below a committed case floor, on a
+source with no golden, on a golden with no source, and on a filter that matches
+no case. `zig build diagnostic-corpus-write` rewrites the goldens; read every
+golden diff against the case's stated intent before committing it. An argument
+after `--` filters both steps by path substring, and the aggregate `test` and
+`scripts/verify.sh` pass none. The gate's own tests probe every failure kind
+through a scratch corpus. The format is in `tests/corpus/README.md`.
 
 The docs drift and link gates run here and only here. Neither Run step is
 cached, so `zig build test` always executes both scripts, and `verify.sh` and

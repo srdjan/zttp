@@ -99,3 +99,11 @@ vocab-envelope-write regeneration
 # 98.81 seconds on this machine. Run this explicit gate while strengthening
 # the acceptance suite.
 test-proof-checker-mutants slow-mutation-probe
+
+# Rewrites tests/corpus/**/*.diag from the current check output. The verdict
+# lives in `test-diagnostic-corpus`, which `zig build test` runs and which fails
+# when a golden and the check disagree. This is the write half: a human runs it
+# after changing a case or a diagnostic, reads every golden diff against the
+# case's stated intent, and commits it. Wiring it into a check would defeat the
+# gate, because a build that rewrites its own expected output never disagrees.
+diagnostic-corpus-write regeneration

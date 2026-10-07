@@ -11,6 +11,7 @@ const packages = @import("build/packages.zig");
 const proof_gates = @import("build/proof_gates.zig");
 const host_tests = @import("build/host_tests.zig");
 const repo_gates = @import("build/repo_gates.zig");
+const corpus = @import("build/corpus.zig");
 const tooling = @import("build/tooling.zig");
 const artifacts = @import("build/artifacts.zig");
 const wasm = @import("build/wasm.zig");
@@ -26,6 +27,7 @@ pub fn build(b: *std.Build) void {
     const pkgs = packages.add(ctx);
     const proofs = proof_gates.add(ctx, pkgs);
     const host = host_tests.add(ctx, proofs);
+    const diagnostic_corpus = corpus.add(ctx);
     const capability_audit = repo_gates.addCapabilityAudit(ctx);
     const tools = tooling.add(ctx);
     const gates = repo_gates.add(ctx, tools);
@@ -80,6 +82,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&proofs.proof_ratchet_drift.step);
     test_step.dependOn(&proofs.proof_checker_purity.step);
     test_step.dependOn(&proofs.diagnostic_producers.step);
+    test_step.dependOn(diagnostic_corpus.step);
     test_step.dependOn(&proofs.script_reachability.step);
     test_step.dependOn(golden.expert_golden_step);
     test_step.dependOn(golden.contract_golden_step);

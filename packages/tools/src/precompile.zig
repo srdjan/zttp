@@ -42,6 +42,8 @@ const collectArgs = args_mod.collectArgs;
 
 const check_mod = @import("precompile_check.zig");
 pub const CheckResult = check_mod.CheckResult;
+pub const Stage = check_mod.Stage;
+pub const StageSet = check_mod.StageSet;
 pub const formatProofCard = check_mod.formatProofCard;
 pub const generateTypeDefs = check_mod.generateTypeDefs;
 const persistFlowWitnesses = check_mod.persistFlowWitnesses;
@@ -1013,6 +1015,10 @@ pub const CheckOptions = struct {
     /// The flow check enforces it, the contract carries its P8 report, and a
     /// required entry the analysis never saw counts as a check error.
     declaration: ?*const zts.declaration.Declaration = null,
+    /// Write flow-property witnesses to the on-disk corpus under
+    /// `.zttp/witnesses/`. On for every real check. The diagnostic corpus gate
+    /// turns it off so a gate run leaves nothing in the working tree.
+    persist_witnesses: bool = true,
 };
 
 /// Why a declaration was refused, for a caller that reports it itself.
@@ -1475,6 +1481,7 @@ fn runCheckOnPreparedSource(
         },
         &frontend_diag,
     ) catch |err| {
+        result.stages_run.insert(.strip);
         if (!builtin.is_test) debugPrint("TypeScript strip error: {}\n", .{err});
         if (err == error.UnsupportedSourceExtension) {
             result.json_diagnostics.append(
@@ -1492,6 +1499,7 @@ fn runCheckOnPreparedSource(
         result.parse_errors = 1;
         return result;
     };
+    result.stages_run.insert(.strip);
     const prepared = &prepared_out.*.?;
     // Recovered type-assertion diagnostics: surface them all and stop before
     // parse. The recovered code has the assertions dropped, so parsing it
@@ -1519,6 +1527,7 @@ fn runCheckOnPreparedSource(
     var js_parser = try zts.parser.JsParser.init(allocator, prepared.parserInput());
     defer js_parser.deinit();
     js_parser.setAtomTable(&atoms);
+    result.stages_run.insert(.parse);
     const root = js_parser.parse() catch {
         const errors = js_parser.errors.getErrors();
         if (json_mode) {
@@ -1540,6 +1549,7 @@ fn runCheckOnPreparedSource(
     };
 
     // Stage 3: Import validation
+    result.stages_run.insert(.imports);
     var import_diagnostic: ?VirtualImportDiagnostic = null;
     validateVirtualModuleImports(
         zts.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants),
@@ -1622,6 +1632,7 @@ fn runCheckOnPreparedSource(
         },
     );
     defer resolved.deinit();
+    result.stages_run.insert(.boolean);
 
     {
         const bool_diags = resolved.boolDiagnostics();
@@ -1650,6 +1661,7 @@ fn runCheckOnPreparedSource(
     }
 
     if (type_env_storage.envPtr() != null) {
+        result.stages_run.insert(.types);
         const tc_diags = resolved.typeDiagnostics();
         result.type_errors = @intCast(resolved.typeErrorCount());
         if (tc_diags.len > 0) {
@@ -1674,6 +1686,7 @@ fn runCheckOnPreparedSource(
     }
 
     if (resolved.strict_checker != null) {
+        result.stages_run.insert(.strict);
         const strict_diags = resolved.strictDiagnostics();
         result.strict_errors = @intCast(resolved.strict_error_count);
         // Count by severity rather than by subtraction. `len - errors` folded
@@ -1741,6 +1754,8 @@ fn runCheckOnPreparedSource(
             .declaration = opts.declaration,
         });
         result.verify_ran = true;
+        result.stages_run.insert(.verifier);
+        result.stages_run.insert(.flow);
         result.verify_errors = @intCast(checked.verifier_error_count);
         const verifier_diags = checked.verifierDiagnostics();
         result.verify_warnings = @intCast(verifier_diags.len -| result.verify_errors);
@@ -1813,7 +1828,9 @@ fn runCheckOnPreparedSource(
                 flow_witnesses.appendAssumeCapacity(witness);
             }
         } else |_| {}
-        result.pinned_witness_regressions = persistFlowWitnesses(allocator, flow_witnesses.items, handler_path);
+        if (opts.persist_witnesses) {
+            result.pinned_witness_regressions = persistFlowWitnesses(allocator, flow_witnesses.items, handler_path);
+        }
 
         checked_opt = checked;
     }
@@ -1839,6 +1856,7 @@ fn runCheckOnPreparedSource(
         &resolved,
         opts.declaration,
     );
+    result.stages_run.insert(.contract);
     if (result.contract) |*contract_ref| mergeImportedClassificationStatus(contract_ref, imported_seen);
 
     // Stage 8b: capability policy. Reported, not thrown.
@@ -1855,6 +1873,7 @@ fn runCheckOnPreparedSource(
     // an env var the project forbids passed all three with exit 0, and POL001
     // through POL008 were codes nothing ever emitted.
     if (opts.policy_source) |policy_source| {
+        result.stages_run.insert(.policy);
         if (result.contract) |*contract_ref| {
             try appendPolicyDiagnostics(allocator, &result, contract_ref, policy_source, handler_path);
         }
@@ -1883,6 +1902,7 @@ fn runCheckOnPreparedSource(
             );
             defer path_analysis.deinit(allocator);
 
+            result.stages_run.insert(.paths);
             result.paths_enumerated = path_analysis.paths_enumerated;
             result.paths_exhaustive = path_analysis.paths_exhaustive;
             result.paths_coverage_note = path_analysis.paths_coverage_note;
@@ -1913,6 +1933,7 @@ fn runCheckOnPreparedSource(
     // Renders while the IR view and flow diagnostics are still alive; the
     // result is a pre-formatted JSON object stored on CheckResult.
     if (result.contract) |*c| {
+        result.stages_run.insert(.trace);
         var trace_arena = std.heap.ArenaAllocator.init(allocator);
         defer trace_arena.deinit();
         const flow_for_trace = if (checked_opt) |*ck| ck.flowDiagnostics() else &.{};
@@ -1938,7 +1959,9 @@ fn runCheckOnPreparedSource(
     // Later analysis stages mutate contract.properties, so keep the flat
     // CheckResult mirror aligned with the finalized contract before returning.
     syncCheckResultProperties(&result);
+    result.stages_run.insert(.spec);
     try refreshSpecDiagnostics(allocator, &result);
+    result.stages_run.insert(.canonical);
     appendCanonicalPublicHelperDiagnostics(allocator, &result, handler_path);
     if (json_mode) appendSpecDiagnosticsJson(allocator, &result, handler_path);
 

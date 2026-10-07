@@ -12,7 +12,35 @@ const HandlerContract = zts.HandlerContract;
 const SpecDiagnostic = zts.SpecDiagnostic;
 const json_diag = @import("json_diagnostics.zig");
 
+/// The analysis stages `runCheckOnlyFromSource*` can run, in pipeline order.
+/// A stage is recorded once its work has been performed, including when it
+/// then reports errors. A stage the pipeline skips is absent, which is the
+/// point: the diagnostic corpus pins this set, so a `good` case cannot pass
+/// because a stage never ran (the type checker, for one, runs only when the
+/// type environment exists).
+pub const Stage = enum {
+    strip,
+    parse,
+    imports,
+    boolean,
+    types,
+    strict,
+    verifier,
+    flow,
+    contract,
+    policy,
+    paths,
+    trace,
+    spec,
+    canonical,
+};
+
+pub const StageSet = std.EnumSet(Stage);
+
 pub const CheckResult = struct {
+    /// Which stages ran. Internal record for the corpus gate; never part of
+    /// the `--json` output.
+    stages_run: StageSet = StageSet.initEmpty(),
     line_count: u32 = 0,
     parse_errors: u32 = 0,
     bool_specializations: u32 = 0,

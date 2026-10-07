@@ -1,0 +1,2 @@
+stages: strip,parse
+{"code":"ZTS062","severity":"error","message":"a `default` arm must be the last arm of a match","file":"parse/bad/default_arm_not_last.ts","line":5,"column":9,"suggestion":"move it after the `when` arms","repair_intent":null}

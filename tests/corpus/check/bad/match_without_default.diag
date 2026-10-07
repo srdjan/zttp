@@ -1,0 +1,3 @@
+stages: strip,parse,imports,boolean,types,strict
+{"code":"ZTS205","severity":"warning","message":"match expression is not provably exhaustive","file":"check/bad/match_without_default.ts","line":5,"column":12,"suggestion":"add a 'default:' arm, or cover every union variant","repair_intent":null}
+{"code":"ZTS603","severity":"error","message":"match expression must be exhaustive in strict ZigTS","file":"check/bad/match_without_default.ts","line":5,"column":12,"suggestion":"cover every finite union member or add an explicit default when the type is not finite","repair_intent":"add_trailing_return"}
