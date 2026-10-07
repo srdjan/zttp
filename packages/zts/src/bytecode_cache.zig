@@ -213,7 +213,30 @@ pub const DeserializeError = error{
     OutOfMemory,
     IncompleteRead,
     InvalidTag,
+    /// A decoded count or length needs more bytes than the input still holds.
+    InvalidLength,
+    /// Nested functions go deeper than `max_function_nesting`.
+    NestingTooDeep,
 };
+
+/// Deepest chain of nested functions the decoder accepts, the top-level
+/// function included. The parser refuses statements and expressions that nest
+/// deeper than 512 (`max_recursion_depth` in `parser/parse.zig`), and every
+/// nested function costs at least one level, so the decoder never refuses a
+/// blob that the compiler can emit. The span walker keeps its own, tighter
+/// bound of 256 for the artifact commitment. A test decodes a blob nested to
+/// exactly this depth in a Debug build; before the bound, a 10000 level blob
+/// overflowed the stack.
+pub const max_function_nesting: u16 = 512;
+
+/// Refuse a count whose elements cannot fit in the input that remains. Every
+/// element takes at least `min_bytes_each` bytes on the wire, so a count that
+/// needs more than `reader.remaining()` is damaged, and the check runs before
+/// the count sizes an allocation.
+fn requireInput(reader: anytype, count: usize, min_bytes_each: usize) DeserializeError!void {
+    const needed = std.math.mul(usize, count, min_bytes_each) catch return error.InvalidLength;
+    if (needed > reader.remaining()) return error.InvalidLength;
+}
 
 /// Decode a raw byte into an exhaustive enum, returning a catchable error
 /// instead of panicking (Debug/ReleaseSafe) or invoking undefined behavior
@@ -270,13 +293,25 @@ pub fn deserializeConstants(
     allocator: std.mem.Allocator,
     strings_table: ?*string.StringTable,
 ) DeserializeError![]value.JSValue {
+    return deserializeConstantsAtDepth(reader, allocator, strings_table, 0);
+}
+
+/// `depth` is the nesting depth a function decoded from this pool would have.
+fn deserializeConstantsAtDepth(
+    reader: anytype,
+    allocator: std.mem.Allocator,
+    strings_table: ?*string.StringTable,
+    depth: u16,
+) DeserializeError![]value.JSValue {
     const count = try reader.readInt(u16, .little);
+    // Every constant takes at least its tag byte.
+    try requireInput(reader, count, 1);
     const constants = try allocator.alloc(value.JSValue, count);
     var initialized_count: usize = 0;
     errdefer destroyDeserializedConstants(allocator, constants, initialized_count);
 
     for (constants) |*slot| {
-        slot.* = try deserializeConstant(reader, allocator, strings_table);
+        slot.* = try deserializeConstant(reader, allocator, strings_table, depth);
         initialized_count += 1;
     }
 
@@ -288,6 +323,7 @@ fn deserializeConstant(
     reader: anytype,
     allocator: std.mem.Allocator,
     strings_table: ?*string.StringTable,
+    depth: u16,
 ) DeserializeError!value.JSValue {
     const tag_byte = try reader.readByte();
     const tag: ConstantTag = try decodeTag(ConstantTag, tag_byte);
@@ -311,6 +347,7 @@ fn deserializeConstant(
         },
         .string => {
             const len = try reader.readInt(u16, .little);
+            try requireInput(reader, len, 1);
             const bytes = try allocator.alloc(u8, len);
             defer allocator.free(bytes);
             const read_count = try reader.readAll(bytes);
@@ -336,7 +373,7 @@ fn deserializeConstant(
             };
         },
         .nested_function => {
-            const func = try deserializeFunctionBytecode(reader, allocator, strings_table);
+            const func = try deserializeFunctionAtDepth(reader, allocator, strings_table, depth);
             return value.JSValue.fromExternPtr(func);
         },
     }
@@ -348,6 +385,19 @@ pub fn deserializeFunctionBytecode(
     allocator: std.mem.Allocator,
     strings_table: ?*string.StringTable,
 ) DeserializeError!*bytecode.FunctionBytecode {
+    return deserializeFunctionAtDepth(reader, allocator, strings_table, 0);
+}
+
+/// `depth` counts the functions that enclose this one; the top-level function
+/// is at depth zero. A chain of `max_function_nesting` functions is accepted.
+fn deserializeFunctionAtDepth(
+    reader: anytype,
+    allocator: std.mem.Allocator,
+    strings_table: ?*string.StringTable,
+    depth: u16,
+) DeserializeError!*bytecode.FunctionBytecode {
+    if (depth >= max_function_nesting) return error.NestingTooDeep;
+
     // Read fixed fields
     const name_atom = try reader.readInt(u32, .little);
     const arg_count = try reader.readInt(u16, .little);
@@ -358,6 +408,7 @@ pub fn deserializeFunctionBytecode(
 
     // Read code
     const code_len = try reader.readInt(u32, .little);
+    try requireInput(reader, code_len, 1);
     const code = try allocator.alloc(u8, code_len);
     errdefer allocator.free(code);
     const code_read = try reader.readAll(code);
@@ -376,6 +427,8 @@ pub fn deserializeFunctionBytecode(
     }
 
     const line_count = try reader.readInt(u32, .little);
+    // Each line entry is three u32 fields.
+    try requireInput(reader, line_count, 12);
     const line_table = if (line_count > 0) blk: {
         const entries = try allocator.alloc(bytecode.LineEntry, line_count);
         errdefer allocator.free(entries);
@@ -391,7 +444,7 @@ pub fn deserializeFunctionBytecode(
     errdefer if (line_table.len > 0) allocator.free(line_table);
 
     // Recursively deserialize constants
-    const constants = try deserializeConstants(reader, allocator, strings_table);
+    const constants = try deserializeConstantsAtDepth(reader, allocator, strings_table, depth + 1);
     errdefer destroyDeserializedConstants(allocator, constants, constants.len);
 
     // Deserialize handler flags and pattern dispatch
@@ -425,6 +478,9 @@ pub fn deserializeFunctionBytecode(
 fn deserializePatternDispatch(reader: anytype, allocator: std.mem.Allocator) DeserializeError!?*bytecode.PatternDispatchTable {
     const pattern_count = try reader.readInt(u16, .little);
     if (pattern_count == 0) return null;
+    // A pattern takes at least twelve bytes: type, route atom, url length,
+    // body length, status and content type.
+    try requireInput(reader, pattern_count, 12);
 
     const dispatch = try allocator.create(bytecode.PatternDispatchTable);
     errdefer allocator.destroy(dispatch);
@@ -460,12 +516,14 @@ fn deserializePatternDispatch(reader: anytype, allocator: std.mem.Allocator) Des
 
         // URL bytes
         const url_len = try reader.readInt(u16, .little);
+        try requireInput(reader, url_len, 1);
         pattern.url_bytes = try allocator.alloc(u8, url_len);
         const url_read = try reader.readAll(@constCast(pattern.url_bytes));
         if (url_read != url_len) return error.IncompleteRead;
 
         // Static body
         const body_len = try reader.readInt(u32, .little);
+        try requireInput(reader, body_len, 1);
         pattern.static_body = try allocator.alloc(u8, body_len);
         const body_read = try reader.readAll(@constCast(pattern.static_body));
         if (body_read != body_len) return error.IncompleteRead;
@@ -886,6 +944,11 @@ pub const SliceReader = struct {
         return result;
     }
 
+    /// Bytes the reader can still supply.
+    pub fn remaining(self: *const SliceReader) usize {
+        return self.data.len - self.pos;
+    }
+
     pub fn readAll(self: *SliceReader, buffer: []u8) !usize {
         const available = self.data.len - self.pos;
         const to_read = @min(buffer.len, available);
@@ -916,7 +979,7 @@ test "deserializeConstant rejects out-of-range ConstantTag byte" {
 
     // ConstantTag is exhaustive with values 0-4; 0xFF is out of range.
     var reader = SliceReader{ .data = &.{0xFF} };
-    const result = deserializeConstant(&reader, allocator, null);
+    const result = deserializeConstant(&reader, allocator, null, 0);
     try std.testing.expectError(error.InvalidTag, result);
 }
 
@@ -926,7 +989,7 @@ test "deserializeConstant rejects out-of-range SpecialCode byte" {
     // ConstantTag.special (3) followed by an out-of-range SpecialCode byte.
     // SpecialCode is exhaustive with values 0-4; 0xFF is out of range.
     var reader = SliceReader{ .data = &.{ @intFromEnum(ConstantTag.special), 0xFF } };
-    const result = deserializeConstant(&reader, allocator, null);
+    const result = deserializeConstant(&reader, allocator, null, 0);
     try std.testing.expectError(error.InvalidTag, result);
 }
 
@@ -1514,6 +1577,8 @@ pub fn deserializeAtoms(
     errdefer remap.deinit();
 
     const count = try reader.readInt(u16, .little);
+    // Every entry takes at least its tag byte and a u32 atom id.
+    try requireInput(reader, count, 5);
 
     for (0..count) |_| {
         const tag = try reader.readByte();
@@ -1526,6 +1591,7 @@ pub fn deserializeAtoms(
         } else {
             // Dynamic atom: re-intern string and map old ID to new ID
             const len = try reader.readInt(u16, .little);
+            try requireInput(reader, len, 1);
             const name_buf = try allocator.alloc(u8, len);
             defer allocator.free(name_buf);
 
@@ -1540,9 +1606,16 @@ pub fn deserializeAtoms(
     return remap;
 }
 
+pub const RemapError = error{
+    /// An opcode operand holds a u16 atom id, and the remap table sends the
+    /// atom to an id above 65535.
+    AtomIdOutOfRange,
+};
+
 /// Remap all atom references in bytecode using the remapping table
-/// Modifies the bytecode in place (requires mutable bytecode buffer)
-pub fn remapBytecodeAtoms(func: *bytecode.FunctionBytecode, remap: *const AtomRemap) void {
+/// Modifies the bytecode in place (requires mutable bytecode buffer).
+/// On error the bytecode is partly remapped and the caller must discard it.
+pub fn remapBytecodeAtoms(func: *bytecode.FunctionBytecode, remap: *const AtomRemap) RemapError!void {
     // Remap function name atom
     if (func.name_atom != 0) {
         func.name_atom = remap.get(func.name_atom);
@@ -1571,9 +1644,9 @@ pub fn remapBytecodeAtoms(func: *bytecode.FunctionBytecode, remap: *const AtomRe
             => {
                 if (pc + 2 <= code_mutable.len) {
                     const old_atom = std.mem.readInt(u16, code_mutable[pc..][0..2], .little);
-                    const new_atom = remap.get(old_atom);
-                    // Safety: new_atom should fit in u16 for property atoms
-                    std.mem.writeInt(u16, code_mutable[pc..][0..2], @intCast(new_atom), .little);
+                    const new_atom = std.math.cast(u16, remap.get(old_atom)) orelse
+                        return error.AtomIdOutOfRange;
+                    std.mem.writeInt(u16, code_mutable[pc..][0..2], new_atom, .little);
                 }
                 pc += info.size - 1;
             },
@@ -1587,7 +1660,7 @@ pub fn remapBytecodeAtoms(func: *bytecode.FunctionBytecode, remap: *const AtomRe
     for (func.constants) |constant| {
         if (constant.isExternPtr()) {
             const nested_func = constant.toExternPtr(bytecode.FunctionBytecode);
-            remapBytecodeAtoms(nested_func, remap);
+            try remapBytecodeAtoms(nested_func, remap);
         }
     }
 }
@@ -1647,6 +1720,8 @@ pub fn deserializeShapes(
     allocator: std.mem.Allocator,
 ) ![][]object.Atom {
     const count = try reader.readInt(u16, .little);
+    // Every shape takes at least its u16 property count.
+    try requireInput(reader, count, 2);
 
     const shapes = try allocator.alloc([]object.Atom, count);
     var initialized_count: usize = 0;
@@ -1659,6 +1734,7 @@ pub fn deserializeShapes(
 
     for (shapes, 0..) |*shape, i| {
         const prop_count = try reader.readInt(u16, .little);
+        try requireInput(reader, prop_count, 4);
         shape.* = try allocator.alloc(object.Atom, prop_count);
         errdefer allocator.free(shape.*);
 
@@ -1931,7 +2007,7 @@ pub fn deserializeBytecodeWithAtomsAndShapes(
     errdefer destroyDeserializedFunction(allocator, func);
 
     // Remap all atom references in bytecode
-    remapBytecodeAtoms(func, &remap);
+    try remapBytecodeAtoms(func, &remap);
 
     // Deserialize shapes with remapping
     const shapes = try deserializeShapes(reader, &remap, allocator);
@@ -1960,7 +2036,7 @@ pub fn deserializeBytecodeWithAtoms(
     errdefer destroyDeserializedFunction(allocator, func);
 
     // Remap all atom references
-    remapBytecodeAtoms(func, &remap);
+    try remapBytecodeAtoms(func, &remap);
 
     return func;
 }
@@ -2110,7 +2186,7 @@ test "atom remapping in bytecode" {
     try remap.put(226, 302);
 
     // Apply remapping
-    remapBytecodeAtoms(&func, &remap);
+    try remapBytecodeAtoms(&func, &remap);
 
     // Verify name_atom remapped
     try std.testing.expectEqual(@as(u32, 302), func.name_atom);
@@ -2364,4 +2440,594 @@ test "executable span walk refuses a truncated or overlong blob" {
 
     var no_room: [0]ExecutableSpan = undefined;
     try std.testing.expectError(error.TooManyFunctions, walkExecutableSpans(blob, &no_room));
+}
+
+// ============================================================================
+// Decoder mutation sweep
+// ============================================================================
+//
+// `deserializeBytecodeWithAtomsAndShapes` decodes a blob that arrives from
+// disk or from an embedded binary trailer. The format has no checksum, so the
+// decoder itself is the only line of defense against a damaged or hostile
+// blob. The contract, for every input below:
+//
+//   1. The decode returns a typed error, or a value. It never panics, never
+//      overflows the stack, and never leaks.
+//   2. No single allocation request exceeds `decode_request_cap_factor` times
+//      the input length plus `decode_request_cap_slack`. A decoded length that
+//      the remaining input cannot satisfy is refused before it sizes anything.
+//   3. A decoded value goes through the same verifier the runtime applies in
+//      `HandlerInstance.verifyBytecodeRecursive`; the verifier must not panic.
+//
+// The sweep is deterministic: every bit of every byte, every truncation
+// length, and two one-byte extensions.
+
+const bytecode_verifier = @import("bytecode_verifier.zig");
+
+/// Largest legitimate request is eight bytes of allocation per input byte
+/// (the constant pool and the shape list); sixteen leaves headroom.
+const decode_request_cap_factor: usize = 16;
+const decode_request_cap_slack: usize = 1024;
+
+/// Allocator that refuses any single request above `cap`, and counts live
+/// bytes so a mutant that leaks is attributed to its own input.
+const CappedAllocator = struct {
+    backing: std.mem.Allocator,
+    cap: usize,
+    largest: usize = 0,
+    refused: usize = 0,
+    live: usize = 0,
+
+    fn allocator(self: *CappedAllocator) std.mem.Allocator {
+        return .{
+            .ptr = self,
+            .vtable = &.{
+                .alloc = capAlloc,
+                .resize = capResize,
+                .remap = capRemap,
+                .free = capFree,
+            },
+        };
+    }
+
+    fn capAlloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ra: usize) ?[*]u8 {
+        const self: *CappedAllocator = @ptrCast(@alignCast(ctx));
+        self.largest = @max(self.largest, len);
+        if (len > self.cap) {
+            self.refused += 1;
+            return null;
+        }
+        const result = self.backing.rawAlloc(len, alignment, ra) orelse return null;
+        self.live += len;
+        return result;
+    }
+
+    fn capResize(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ra: usize) bool {
+        const self: *CappedAllocator = @ptrCast(@alignCast(ctx));
+        self.largest = @max(self.largest, new_len);
+        if (new_len > self.cap) {
+            self.refused += 1;
+            return false;
+        }
+        if (!self.backing.rawResize(memory, alignment, new_len, ra)) return false;
+        self.live = self.live - memory.len + new_len;
+        return true;
+    }
+
+    fn capRemap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ra: usize) ?[*]u8 {
+        const self: *CappedAllocator = @ptrCast(@alignCast(ctx));
+        self.largest = @max(self.largest, new_len);
+        if (new_len > self.cap) {
+            self.refused += 1;
+            return null;
+        }
+        const result = self.backing.rawRemap(memory, alignment, new_len, ra) orelse return null;
+        self.live = self.live - memory.len + new_len;
+        return result;
+    }
+
+    fn capFree(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ra: usize) void {
+        const self: *CappedAllocator = @ptrCast(@alignCast(ctx));
+        self.live -= memory.len;
+        self.backing.rawFree(memory, alignment, ra);
+    }
+};
+
+fn verifyDecodedTree(func: *const bytecode.FunctionBytecode) bool {
+    if (!bytecode_verifier.verify(func).valid) return false;
+    for (func.constants) |constant| {
+        if (!constant.isExternPtr()) continue;
+        if (constant.toExternPtr(u32).* != bytecode.MAGIC) continue;
+        if (!verifyDecodedTree(constant.toExternPtr(bytecode.FunctionBytecode))) return false;
+    }
+    return true;
+}
+
+const DecodeOutcome = struct {
+    /// Null when the decode returned a value.
+    err: ?anyerror = null,
+    /// True when the decode returned a value and the verifier accepted it.
+    verified: bool = false,
+    largest_request: usize = 0,
+    cap: usize = 0,
+    refused: usize = 0,
+    leaked_bytes: usize = 0,
+};
+
+fn decodeOutcome(input: []const u8) DecodeOutcome {
+    var capped = CappedAllocator{
+        .backing = std.testing.allocator,
+        .cap = decode_request_cap_factor * input.len + decode_request_cap_slack,
+    };
+    const a = capped.allocator();
+    var out = DecodeOutcome{};
+    {
+        var atoms = AtomTable.init(a);
+        defer atoms.deinit();
+        var reader = SliceReader{ .data = input };
+        if (deserializeBytecodeWithAtomsAndShapes(&reader, &atoms, a, null)) |decoded| {
+            var owned = decoded;
+            out.verified = verifyDecodedTree(owned.func);
+            owned.deinit();
+        } else |err| {
+            out.err = err;
+        }
+    }
+    out.largest_request = capped.largest;
+    out.cap = capped.cap;
+    out.refused = capped.refused;
+    out.leaked_bytes = capped.live;
+    return out;
+}
+
+/// The errors the decoder may return for a damaged blob. Any other error name
+/// means a failure path the contract does not know about.
+fn isTypedDecodeError(err: anyerror) bool {
+    return switch (err) {
+        error.EndOfStream,
+        error.IncompleteRead,
+        error.InvalidTag,
+        error.InvalidLength,
+        error.NestingTooDeep,
+        error.AtomIdOutOfRange,
+        // An allocation failure is a typed error. The capped allocator's
+        // refusals are counted separately and fail the sweep on their own.
+        error.OutOfMemory,
+        => true,
+        else => false,
+    };
+}
+
+const SweepTally = struct {
+    mutants: usize = 0,
+    rejected: usize = 0,
+    accepted: usize = 0,
+    accepted_unverified: usize = 0,
+    untyped_error: usize = 0,
+    over_cap: usize = 0,
+    leaked: usize = 0,
+    truncation_accepted: usize = 0,
+    first_untyped: ?anyerror = null,
+
+    fn failures(self: *const SweepTally) usize {
+        return self.untyped_error + self.over_cap + self.leaked + self.truncation_accepted;
+    }
+
+    fn record(self: *SweepTally, kind: []const u8, index: usize, outcome: DecodeOutcome) void {
+        self.mutants += 1;
+        if (outcome.err) |err| {
+            self.rejected += 1;
+            if (!isTypedDecodeError(err)) {
+                self.untyped_error += 1;
+                if (self.first_untyped == null) self.first_untyped = err;
+            }
+        } else {
+            self.accepted += 1;
+            if (!outcome.verified) self.accepted_unverified += 1;
+        }
+        if (outcome.refused > 0 or outcome.largest_request > outcome.cap) {
+            self.over_cap += 1;
+            std.debug.print("sweep over-cap {s} {d}: request {d} cap {d}\n", .{ kind, index, outcome.largest_request, outcome.cap });
+        }
+        if (outcome.leaked_bytes > 0) {
+            self.leaked += 1;
+            std.debug.print("sweep leak {s} {d}: {d} bytes\n", .{ kind, index, outcome.leaked_bytes });
+        }
+    }
+};
+
+fn serializeSweepFixture(allocator: std.mem.Allocator, buffer: []u8) ![]const u8 {
+    var source_atoms = AtomTable.init(allocator);
+    defer source_atoms.deinit();
+    const alpha = try source_atoms.intern("sweepAlpha");
+    const beta = try source_atoms.intern("sweepBeta");
+    const alpha_id: u16 = @intCast(@intFromEnum(alpha));
+
+    // Nested function: reads one dynamic global, has one upvalue, two lines.
+    const nested_code = [_]u8{
+        @intFromEnum(bytecode.Opcode.get_global),
+        @truncate(alpha_id),
+        @truncate(alpha_id >> 8),
+        @intFromEnum(bytecode.Opcode.ret),
+    };
+    const nested_upvalues = [_]bytecode.UpvalueInfo{.{ .is_local = true, .index = 0 }};
+    const nested_lines = [_]bytecode.LineEntry{
+        .{ .offset = 0, .line = 3, .column = 5 },
+        .{ .offset = 3, .line = 4, .column = 1 },
+    };
+    const nested_constants = [_]value.JSValue{value.JSValue.fromInt(7)};
+    const nested = bytecode.FunctionBytecode{
+        .header = .{},
+        .name_atom = @intFromEnum(beta),
+        .arg_count = 1,
+        .local_count = 1,
+        .stack_size = 2,
+        .flags = .{},
+        .upvalue_count = 1,
+        .upvalue_info = &nested_upvalues,
+        .code = &nested_code,
+        .constants = &nested_constants,
+        .source_map = null,
+        .line_table = &nested_lines,
+    };
+
+    const float_box = try allocator.create(value.JSValue.Float64Box);
+    defer allocator.destroy(float_box);
+    float_box.* = .{
+        .header = heap.MemBlockHeader.init(.float64, @sizeOf(value.JSValue.Float64Box)),
+        ._pad = 0,
+        .value = 42.5,
+    };
+    const js_string = try string.createString(allocator, "sweep");
+    defer string.freeString(allocator, js_string);
+
+    const top_constants = [_]value.JSValue{
+        value.JSValue.fromInt(-5),
+        value.JSValue.fromPtr(float_box),
+        value.JSValue.fromPtr(js_string),
+        value.JSValue.true_val,
+        value.JSValue.fromExternPtr(@constCast(&nested)),
+    };
+
+    var dispatch_buffer: [512]u8 = undefined;
+    const dispatch_bytes = try serializePatternDispatchFixture(&dispatch_buffer);
+    var dispatch_reader = SliceReader{ .data = dispatch_bytes };
+    const dispatch = (try deserializePatternDispatch(&dispatch_reader, allocator)) orelse
+        return error.MissingPatternDispatch;
+    defer destroyPatternDispatch(allocator, dispatch);
+
+    const top_code = [_]u8{
+        @intFromEnum(bytecode.Opcode.push_const),
+        0,
+        0,
+        @intFromEnum(bytecode.Opcode.ret),
+    };
+    const top = bytecode.FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 2,
+        .flags = .{},
+        .code = &top_code,
+        .constants = &top_constants,
+        .source_map = null,
+        .pattern_dispatch = dispatch,
+        .handler_flags = .{ .is_http_handler = true, .has_static_routes = true },
+    };
+
+    const shape = [_]object.Atom{ alpha, beta, .url };
+    const shapes = [_][]const object.Atom{&shape};
+    var writer = SliceWriter{ .buffer = buffer };
+    try serializeBytecodeWithAtomsAndShapes(&top, &source_atoms, &shapes, &writer, allocator);
+    return writer.getWritten();
+}
+
+test "decoder sweep: the fixture decodes and verifies before any mutation" {
+    var buffer: [4096]u8 = undefined;
+    const valid = try serializeSweepFixture(std.testing.allocator, &buffer);
+    const outcome = decodeOutcome(valid);
+    try std.testing.expectEqual(@as(?anyerror, null), outcome.err);
+    try std.testing.expect(outcome.verified);
+    try std.testing.expectEqual(@as(usize, 0), outcome.refused);
+    try std.testing.expectEqual(@as(usize, 0), outcome.leaked_bytes);
+}
+
+test "decoder sweep: every bit flip, truncation, and extension" {
+    var buffer: [4096]u8 = undefined;
+    const valid = try serializeSweepFixture(std.testing.allocator, &buffer);
+    var tally = SweepTally{};
+
+    var mutated: [4096]u8 = undefined;
+    for (0..valid.len) |byte_index| {
+        for (0..8) |bit| {
+            @memcpy(mutated[0..valid.len], valid);
+            mutated[byte_index] ^= @as(u8, 1) << @intCast(bit);
+            tally.record("flip", byte_index * 8 + bit, decodeOutcome(mutated[0..valid.len]));
+        }
+    }
+
+    for (0..valid.len) |cut| {
+        const before = tally.accepted;
+        tally.record("truncate", cut, decodeOutcome(valid[0..cut]));
+        // Every strict prefix lacks the shapes section or more.
+        if (tally.accepted != before) tally.truncation_accepted += 1;
+    }
+
+    for ([_]u8{ 0x00, 0xFF }) |extra| {
+        @memcpy(mutated[0..valid.len], valid);
+        mutated[valid.len] = extra;
+        tally.record("extend", extra, decodeOutcome(mutated[0 .. valid.len + 1]));
+    }
+
+    // The floor: the sweep ran every mutant it claims to run, and it reached
+    // both outcomes, so it cannot pass by rejecting everything or by
+    // accepting everything.
+    try std.testing.expectEqual(valid.len * 8 + valid.len + 2, tally.mutants);
+    try std.testing.expect(tally.rejected > 0);
+    try std.testing.expect(tally.accepted > 0);
+
+    if (tally.failures() != 0) {
+        std.debug.print(
+            "sweep: {d} mutants, {d} rejected, {d} accepted ({d} fail the verifier), {d} untyped errors (first {?}), {d} over-cap, {d} leaked, {d} accepted truncations\n",
+            .{ tally.mutants, tally.rejected, tally.accepted, tally.accepted_unverified, tally.untyped_error, tally.first_untyped, tally.over_cap, tally.leaked, tally.truncation_accepted },
+        );
+    }
+    try std.testing.expectEqual(@as(usize, 0), tally.failures());
+}
+
+// ----------------------------------------------------------------------------
+// Crafted inputs: one damaged field each, with the exact error it must give.
+// ----------------------------------------------------------------------------
+
+const Craft = struct {
+    bytes: std.ArrayList(u8) = .empty,
+    allocator: std.mem.Allocator,
+
+    fn deinit(self: *Craft) void {
+        self.bytes.deinit(self.allocator);
+    }
+
+    fn byte(self: *Craft, v: u8) !void {
+        try self.bytes.append(self.allocator, v);
+    }
+
+    fn word(self: *Craft, v: u16) !void {
+        var raw: [2]u8 = undefined;
+        std.mem.writeInt(u16, &raw, v, .little);
+        try self.bytes.appendSlice(self.allocator, &raw);
+    }
+
+    fn dword(self: *Craft, v: u32) !void {
+        var raw: [4]u8 = undefined;
+        std.mem.writeInt(u32, &raw, v, .little);
+        try self.bytes.appendSlice(self.allocator, &raw);
+    }
+
+    /// The fixed fields of a function and its code, up to the line count.
+    /// `code_len` is what the stream declares; `code_bytes` is what it holds.
+    fn functionHead(self: *Craft, code_len: u32, code_bytes: usize) !void {
+        try self.dword(0); // name atom
+        try self.word(0); // arg count
+        try self.word(0); // local count
+        try self.word(1); // stack size
+        try self.byte(0); // flags
+        try self.byte(0); // upvalue count
+        try self.dword(code_len);
+        for (0..code_bytes) |_| try self.byte(@intFromEnum(bytecode.Opcode.ret_undefined));
+    }
+
+    /// A function with no lines, up to and including its constant count.
+    fn functionToConstants(self: *Craft, constant_count: u16) !void {
+        try self.functionHead(1, 1);
+        try self.dword(0); // line count
+        try self.word(constant_count);
+    }
+
+    /// The handler flags and an empty pattern table that end a function.
+    fn functionTail(self: *Craft) !void {
+        try self.byte(0); // handler flags
+        try self.word(0); // pattern count
+    }
+
+    /// An empty atom table and a function with nothing in it.
+    fn emptyFunction(self: *Craft) !void {
+        try self.word(0); // atom count
+        try self.functionToConstants(0);
+        try self.functionTail();
+    }
+};
+
+/// A module whose every function holds the next one as its only constant.
+fn craftNestedModule(allocator: std.mem.Allocator, depth: usize) !std.ArrayList(u8) {
+    var craft = Craft{ .allocator = allocator };
+    errdefer craft.deinit();
+    try craft.word(0); // atom count
+    for (0..depth) |level| {
+        const is_innermost = level + 1 == depth;
+        try craft.functionToConstants(if (is_innermost) 0 else 1);
+        if (!is_innermost) try craft.byte(@intFromEnum(ConstantTag.nested_function));
+    }
+    for (0..depth) |_| try craft.functionTail();
+    try craft.word(0); // shape count
+    return craft.bytes;
+}
+
+fn expectDecodeFails(expected: anyerror, input: []const u8) !void {
+    const outcome = decodeOutcome(input);
+    try std.testing.expectEqual(@as(?anyerror, expected), outcome.err);
+    try std.testing.expectEqual(@as(usize, 0), outcome.refused);
+    try std.testing.expectEqual(@as(usize, 0), outcome.leaked_bytes);
+}
+
+test "decoder crafted: nesting to the depth bound decodes and one deeper is refused" {
+    const allocator = std.testing.allocator;
+
+    var at_bound = try craftNestedModule(allocator, max_function_nesting);
+    defer at_bound.deinit(allocator);
+    const accepted = decodeOutcome(at_bound.items);
+    try std.testing.expectEqual(@as(?anyerror, null), accepted.err);
+    try std.testing.expectEqual(@as(usize, 0), accepted.refused);
+    try std.testing.expectEqual(@as(usize, 0), accepted.leaked_bytes);
+
+    var one_deeper = try craftNestedModule(allocator, max_function_nesting + 1);
+    defer one_deeper.deinit(allocator);
+    try expectDecodeFails(error.NestingTooDeep, one_deeper.items);
+}
+
+test "decoder crafted: ten thousand nested functions are refused, not recursed into" {
+    var module = try craftNestedModule(std.testing.allocator, 10_000);
+    defer module.deinit(std.testing.allocator);
+    try expectDecodeFails(error.NestingTooDeep, module.items);
+}
+
+test "decoder crafted: a code length the input cannot hold" {
+    var craft = Craft{ .allocator = std.testing.allocator };
+    defer craft.deinit();
+    try craft.word(0); // atom count
+    try craft.functionHead(std.math.maxInt(u32), 0);
+    try expectDecodeFails(error.InvalidLength, craft.bytes.items);
+}
+
+test "decoder crafted: a code length one byte past the input" {
+    var craft = Craft{ .allocator = std.testing.allocator };
+    defer craft.deinit();
+    try craft.word(0); // atom count
+    try craft.functionHead(5, 4);
+    try expectDecodeFails(error.InvalidLength, craft.bytes.items);
+}
+
+test "decoder crafted: a line count the input cannot hold" {
+    var craft = Craft{ .allocator = std.testing.allocator };
+    defer craft.deinit();
+    try craft.word(0); // atom count
+    try craft.functionHead(1, 1);
+    try craft.dword(std.math.maxInt(u32)); // line count
+    try expectDecodeFails(error.InvalidLength, craft.bytes.items);
+}
+
+test "decoder crafted: a constant count the input cannot hold" {
+    var craft = Craft{ .allocator = std.testing.allocator };
+    defer craft.deinit();
+    try craft.word(0); // atom count
+    try craft.functionToConstants(std.math.maxInt(u16));
+    try expectDecodeFails(error.InvalidLength, craft.bytes.items);
+}
+
+test "decoder crafted: a string length the input cannot hold" {
+    var craft = Craft{ .allocator = std.testing.allocator };
+    defer craft.deinit();
+    try craft.word(0); // atom count
+    try craft.functionToConstants(1);
+    try craft.byte(@intFromEnum(ConstantTag.string));
+    try craft.word(std.math.maxInt(u16));
+    try expectDecodeFails(error.InvalidLength, craft.bytes.items);
+}
+
+test "decoder crafted: a pattern count the input cannot hold" {
+    var craft = Craft{ .allocator = std.testing.allocator };
+    defer craft.deinit();
+    try craft.word(0); // atom count
+    try craft.functionToConstants(0);
+    try craft.byte(0); // handler flags
+    try craft.word(std.math.maxInt(u16)); // pattern count
+    try expectDecodeFails(error.InvalidLength, craft.bytes.items);
+}
+
+test "decoder crafted: a pattern url length the input cannot hold" {
+    var craft = Craft{ .allocator = std.testing.allocator };
+    defer craft.deinit();
+    try craft.word(0); // atom count
+    try craft.functionToConstants(0);
+    try craft.byte(0); // handler flags
+    try craft.word(1); // pattern count
+    try craft.byte(0); // pattern type
+    try craft.word(0); // route atom
+    try craft.word(std.math.maxInt(u16)); // url length
+    try craft.dword(0); // body length
+    try craft.word(200); // status
+    try craft.byte(0); // content type
+    try expectDecodeFails(error.InvalidLength, craft.bytes.items);
+}
+
+test "decoder crafted: a pattern body length the input cannot hold" {
+    var craft = Craft{ .allocator = std.testing.allocator };
+    defer craft.deinit();
+    try craft.word(0); // atom count
+    try craft.functionToConstants(0);
+    try craft.byte(0); // handler flags
+    try craft.word(1); // pattern count
+    try craft.byte(0); // pattern type
+    try craft.word(0); // route atom
+    try craft.word(0); // url length
+    try craft.dword(std.math.maxInt(u32)); // body length
+    try craft.word(200); // status
+    try craft.byte(0); // content type
+    try expectDecodeFails(error.InvalidLength, craft.bytes.items);
+}
+
+test "decoder crafted: a shape count the input cannot hold" {
+    var craft = Craft{ .allocator = std.testing.allocator };
+    defer craft.deinit();
+    try craft.emptyFunction();
+    try craft.word(std.math.maxInt(u16)); // shape count
+    try expectDecodeFails(error.InvalidLength, craft.bytes.items);
+}
+
+test "decoder crafted: a shape property count the input cannot hold" {
+    var craft = Craft{ .allocator = std.testing.allocator };
+    defer craft.deinit();
+    try craft.emptyFunction();
+    try craft.word(1); // shape count
+    try craft.word(std.math.maxInt(u16)); // property count
+    try expectDecodeFails(error.InvalidLength, craft.bytes.items);
+}
+
+test "decoder crafted: an atom count the input cannot hold" {
+    var craft = Craft{ .allocator = std.testing.allocator };
+    defer craft.deinit();
+    try craft.word(std.math.maxInt(u16)); // atom count
+    try expectDecodeFails(error.InvalidLength, craft.bytes.items);
+}
+
+test "decoder crafted: an atom name length the input cannot hold" {
+    var craft = Craft{ .allocator = std.testing.allocator };
+    defer craft.deinit();
+    try craft.word(1); // atom count
+    try craft.byte(1); // dynamic atom
+    try craft.dword(300); // source id
+    try craft.word(std.math.maxInt(u16)); // name length
+    try expectDecodeFails(error.InvalidLength, craft.bytes.items);
+}
+
+test "decoder crafted: remapBytecodeAtoms refuses a target atom above u16" {
+    const allocator = std.testing.allocator;
+    const code = try allocator.dupe(u8, &[_]u8{
+        @intFromEnum(bytecode.Opcode.get_global), 0xE0, 0x00,
+        @intFromEnum(bytecode.Opcode.ret),
+    });
+    defer allocator.free(code);
+    var func = bytecode.FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 1,
+        .flags = .{},
+        .code = code,
+        .constants = &.{},
+        .source_map = null,
+    };
+    var remap = AtomRemap.init(allocator);
+    defer remap.deinit();
+
+    // The largest id that fits is written; the next one is refused.
+    try remap.put(0xE0, std.math.maxInt(u16));
+    try remapBytecodeAtoms(&func, &remap);
+    try std.testing.expectEqual(@as(u16, std.math.maxInt(u16)), std.mem.readInt(u16, code[1..3], .little));
+
+    code[1] = 0xE0;
+    code[2] = 0x00;
+    try remap.put(0xE0, std.math.maxInt(u16) + 1);
+    try std.testing.expectError(error.AtomIdOutOfRange, remapBytecodeAtoms(&func, &remap));
 }
