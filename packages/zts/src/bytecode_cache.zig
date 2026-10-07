@@ -485,25 +485,10 @@ fn deserializePatternDispatch(reader: anytype, allocator: std.mem.Allocator) Des
     return dispatch;
 }
 
-/// Bytecode serialization format version
-pub const CACHE_VERSION: u32 = 5;
-
-/// Cache file magic bytes "ZTSC" (zts cache)
-pub const CACHE_MAGIC: u32 = 0x5A545343;
-
 /// Conservative default for the in-memory bytecode cache. One runtime pool
 /// normally compiles a single handler, but dev/live-reload and tool paths can
 /// see many sources in one process.
 pub const DEFAULT_MAX_ENTRIES: usize = 256;
-
-/// Cache entry header
-pub const CacheHeader = extern struct {
-    magic: u32 = CACHE_MAGIC,
-    version: u32 = CACHE_VERSION,
-    source_hash: CacheKey,
-    bytecode_size: u32,
-    checksum: u32, // CRC32 of bytecode data
-};
 
 /// Bytecode cache for storing and retrieving compiled functions
 pub const BytecodeCache = struct {
@@ -727,131 +712,6 @@ pub const BytecodeCache = struct {
     }
 };
 
-/// Serialize bytecode to a writer
-pub fn serialize(func: *const bytecode.FunctionBytecodeCompact, source_hash: CacheKey, writer: anytype) !void {
-    const bytes = func.asBytes();
-
-    // Write header
-    const header = CacheHeader{
-        .source_hash = source_hash,
-        .bytecode_size = @intCast(bytes.len),
-        .checksum = std.hash.crc.Crc32IsoHdlc.hash(bytes),
-    };
-
-    try writer.writeAll(std.mem.asBytes(&header));
-    try writer.writeAll(bytes);
-}
-
-/// Deserialize bytecode from a reader
-pub fn deserialize(reader: anytype, allocator: std.mem.Allocator) !*bytecode.FunctionBytecodeCompact {
-    // Read header
-    var header: CacheHeader = undefined;
-    const header_bytes = try reader.readBytesNoEof(@sizeOf(CacheHeader));
-    header = @bitCast(header_bytes);
-
-    // Validate magic and version
-    if (header.magic != CACHE_MAGIC) {
-        return error.InvalidMagic;
-    }
-    if (header.version != CACHE_VERSION) {
-        return error.VersionMismatch;
-    }
-
-    // Allocate and read bytecode
-    const alignment: std.mem.Alignment = .@"8";
-    const bytes = try allocator.alignedAlloc(u8, alignment, header.bytecode_size);
-    errdefer allocator.free(bytes);
-
-    const read_count = try reader.readAll(bytes);
-    if (read_count != header.bytecode_size) {
-        return error.IncompleteRead;
-    }
-
-    // Verify checksum
-    const computed_checksum = std.hash.crc.Crc32IsoHdlc.hash(bytes);
-    if (computed_checksum != header.checksum) {
-        return error.ChecksumMismatch;
-    }
-
-    const func: *bytecode.FunctionBytecodeCompact = @ptrCast(@alignCast(bytes.ptr));
-    try validateBytecode(func, header.bytecode_size);
-    return func;
-}
-
-/// Validate deserialized bytecode: opcodes, operand bounds, instruction alignment.
-/// Called after CRC verification to reject malformed or tampered cache files.
-pub fn validateBytecode(func: *const bytecode.FunctionBytecodeCompact, total_size: usize) !void {
-    // Structural: header fields must produce a size within the allocation
-    const min_size = bytecode.FunctionBytecodeCompact.calcSizeWithLineTable(func.code_len, func.const_count, func.upvalue_count, func.line_count);
-    if (min_size > total_size) return error.InvalidBytecode;
-
-    const line_table = func.getLineTable();
-    var last_line_offset: u32 = 0;
-    for (line_table, 0..) |entry, idx| {
-        // Reject only offsets past the end; `offset == code_len` is a legitimate
-        // trailing end-boundary marker the codegen can emit.
-        if (entry.offset > func.code_len) return error.InvalidBytecode;
-        if (idx > 0 and entry.offset < last_line_offset) return error.InvalidBytecode;
-        last_line_offset = entry.offset;
-    }
-
-    // Walk opcodes: every byte must decode to a known opcode with valid size
-    const code = func.getCode();
-    var pos: usize = 0;
-    while (pos < code.len) {
-        const op: bytecode.Opcode = @enumFromInt(code[pos]);
-        const info = bytecode.getOpcodeInfo(op);
-        // Unknown opcodes get name "unknown" from the catch-all
-        if (std.mem.eql(u8, info.name, "unknown")) return error.InvalidBytecode;
-        if (pos + info.size > code.len) return error.InvalidBytecode;
-        // Validate operand bounds for instructions that index into tables
-        switch (op) {
-            .push_const, .make_function => {
-                const idx = std.mem.readInt(u16, code[pos + 1 ..][0..2], .little);
-                if (idx >= func.const_count) return error.InvalidBytecode;
-            },
-            .get_loc, .put_loc => {
-                if (code[pos + 1] >= func.local_count) return error.InvalidBytecode;
-            },
-            .get_upvalue, .put_upvalue, .close_upvalue => {
-                if (code[pos + 1] >= func.upvalue_count) return error.InvalidBytecode;
-            },
-            .make_closure => {
-                const func_idx = std.mem.readInt(u16, code[pos + 1 ..][0..2], .little);
-                if (func_idx >= func.const_count) return error.InvalidBytecode;
-            },
-            // cache_idx (at pos+3) indexes Interpreter.pic_cache directly; reject
-            // an out-of-range value rather than allow an OOB read/write at run time.
-            .get_field_ic, .put_field_ic => {
-                const cache_idx = std.mem.readInt(u16, code[pos + 3 ..][0..2], .little);
-                if (cache_idx >= ic.IC_CACHE_SIZE) return error.InvalidBytecode;
-            },
-            else => {},
-        }
-        pos += info.size;
-    }
-    // Instructions must consume exactly code_len bytes
-    if (pos != code.len) return error.InvalidBytecode;
-}
-
-/// Validate cached bytecode integrity
-pub fn validateCache(bytes: []const u8) bool {
-    if (bytes.len < @sizeOf(CacheHeader)) return false;
-
-    const header: *const CacheHeader = @ptrCast(@alignCast(bytes.ptr));
-
-    if (header.magic != CACHE_MAGIC) return false;
-    if (header.version != CACHE_VERSION) return false;
-
-    const data_start = @sizeOf(CacheHeader);
-    if (bytes.len < data_start + header.bytecode_size) return false;
-
-    const data = bytes[data_start..][0..header.bytecode_size];
-    const computed = std.hash.crc.Crc32IsoHdlc.hash(data);
-
-    return computed == header.checksum;
-}
-
 test "BytecodeCache basic operations" {
     const allocator = std.testing.allocator;
 
@@ -1035,52 +895,6 @@ pub const SliceReader = struct {
     }
 };
 
-test "BytecodeCache serialization roundtrip" {
-    const allocator = std.testing.allocator;
-
-    // Create test bytecode: push_const 0, add, ret
-    const code = [_]u8{ 0x01, 0x00, 0x00, 0x20, 0x53 };
-    const constants = [_]u32{ 10, 20 };
-    const upvalues = [_]bytecode.UpvalueInfo{
-        .{ .is_local = true, .index = 0 },
-    };
-
-    const func = try bytecode.FunctionBytecodeCompact.create(
-        allocator,
-        .{},
-        123, // name_atom
-        2, // arg_count
-        4, // local_count
-        8, // stack_size
-        .{ .is_generator = true },
-        &code,
-        &constants,
-        &upvalues,
-    );
-    defer func.destroy(allocator);
-
-    // Serialize
-    const source_hash = BytecodeCache.cacheKey("test source");
-    var buffer: [4096]u8 = undefined;
-    var writer = SliceWriter{ .buffer = &buffer };
-
-    try serialize(func, source_hash, &writer);
-
-    // Deserialize
-    const written = writer.getWritten();
-    var reader = SliceReader{ .data = written };
-    const restored = try deserialize(&reader, allocator);
-    defer restored.destroy(allocator);
-
-    // Verify fields match
-    try std.testing.expectEqual(func.name_atom, restored.name_atom);
-    try std.testing.expectEqual(func.arg_count, restored.arg_count);
-    try std.testing.expectEqual(func.local_count, restored.local_count);
-    try std.testing.expectEqual(func.code_len, restored.code_len);
-    try std.testing.expectEqual(func.const_count, restored.const_count);
-    try std.testing.expectEqual(func.upvalue_count, restored.upvalue_count);
-}
-
 test "BytecodeCache cache key determinism" {
     const source1 = "const x = 1;";
     const source2 = "const x = 1;";
@@ -1095,20 +909,6 @@ test "BytecodeCache cache key determinism" {
 
     // Different source should produce different key
     try std.testing.expect(!std.mem.eql(u8, &key1, &key3));
-}
-
-test "validateCache detects corruption" {
-    // Valid header with invalid checksum
-    var bad_data: [100]u8 = undefined;
-    @memset(&bad_data, 0);
-
-    const header: *CacheHeader = @ptrCast(@alignCast(&bad_data));
-    header.magic = CACHE_MAGIC;
-    header.version = CACHE_VERSION;
-    header.bytecode_size = 10;
-    header.checksum = 0xDEADBEEF; // Wrong checksum
-
-    try std.testing.expect(!validateCache(&bad_data));
 }
 
 test "deserializeConstant rejects out-of-range ConstantTag byte" {
