@@ -1651,6 +1651,114 @@ test "a truncated certificate rejects rather than reading past the end" {
     }
 }
 
+fn isRecordTable(comptime T: type) bool {
+    return @typeInfo(T) == .@"struct" and @hasField(T, "count") and @hasField(T, "bytes");
+}
+
+/// The structural contract of an accepted certificate, checked without
+/// re-encoding. Every record table lies inside the input buffer, an empty table
+/// holds no bytes, an index past the count refuses, and every record either
+/// decodes or refuses with a typed error: a typed refusal from `get` is a
+/// valid outcome, an untyped failure or a panic is not.
+fn expectStructurallyValid(input: []const u8, cert: Certificate) !void {
+    try testing.expectEqual(ps.schema_version, cert.schema_version);
+    const input_start = @intFromPtr(input.ptr);
+    const input_end = input_start + input.len;
+    inline for (@typeInfo(Certificate).@"struct".fields) |field| {
+        if (comptime isRecordTable(field.type)) {
+            const table = @field(cert, field.name);
+            if (table.count == 0) {
+                try testing.expectEqual(@as(usize, 0), table.bytes.len);
+            } else {
+                const start = @intFromPtr(table.bytes.ptr);
+                try testing.expect(start >= input_start);
+                try testing.expect(start + table.bytes.len <= input_end);
+            }
+            var index: u32 = 0;
+            while (index < table.count) : (index += 1) {
+                _ = table.get(index) catch continue;
+            }
+            try testing.expectError(error.Truncated, table.get(table.count));
+        }
+    }
+}
+
+test "a byte-mutation sweep of a valid certificate yields a typed error or a structurally valid value" {
+    var buf: [4096]u8 = undefined;
+    const bytes = try buildMinimal(&buf);
+    try testing.expect(bytes.len > header_size);
+
+    var work: [4097]u8 = undefined;
+    var decoded: usize = 0;
+    var rejected: usize = 0;
+    var accepted: usize = 0;
+
+    // 1. Flip each bit of each byte. Each mutant gets a fresh budget: a reused
+    //    budget would run dry and turn every later mutant into exhaustion.
+    var flip_count: usize = 0;
+    var offset: usize = 0;
+    while (offset < bytes.len) : (offset += 1) {
+        var bit: u3 = 0;
+        while (true) : (bit += 1) {
+            @memcpy(work[0..bytes.len], bytes);
+            work[offset] ^= @as(u8, 1) << bit;
+            const mutant = work[0..bytes.len];
+            var budget = Budget.init(.{});
+            decoded += 1;
+            flip_count += 1;
+            if (decode(mutant, .{}, &budget)) |cert| {
+                accepted += 1;
+                try expectStructurallyValid(mutant, cert);
+            } else |_| {
+                rejected += 1;
+            }
+            if (bit == 7) break;
+        }
+    }
+    try testing.expectEqual(bytes.len * 8, flip_count);
+
+    // 2. Truncate at every length below the full length. The header fixes the
+    //    section count, so a prefix can never be a complete certificate.
+    var cut: usize = 0;
+    while (cut < bytes.len) : (cut += 1) {
+        @memcpy(work[0..cut], bytes[0..cut]);
+        var budget = Budget.init(.{});
+        decoded += 1;
+        if (decode(work[0..cut], .{}, &budget)) |_| {
+            return error.TruncatedCertificateWasAccepted;
+        } else |_| {
+            rejected += 1;
+        }
+    }
+
+    // 3. Extend by one trailing byte. The section count is fixed, so any extra
+    //    byte is trailing data and must be refused.
+    const extension = [_]u8{ 0x00, 0xFF };
+    for (extension) |extra| {
+        @memcpy(work[0..bytes.len], bytes);
+        work[bytes.len] = extra;
+        var budget = Budget.init(.{});
+        decoded += 1;
+        if (decode(work[0 .. bytes.len + 1], .{}, &budget)) |_| {
+            return error.ExtendedCertificateWasAccepted;
+        } else |err| {
+            try testing.expectEqual(error.TrailingData, err);
+            rejected += 1;
+        }
+    }
+
+    // The floor: the sweep decoded exactly the mutants the fixture length
+    // implies, so an empty or shrunken fixture cannot pass by checking nothing.
+    const expected = bytes.len * 8 + bytes.len + extension.len;
+    try testing.expectEqual(expected, decoded);
+    try testing.expectEqual(decoded, accepted + rejected);
+    // The decoder refuses some mutants, and accepts the ones that only move
+    // bytes it does not constrain (digests); a sweep that did either alone
+    // would prove a degenerate decoder.
+    try testing.expect(rejected > 0);
+    try testing.expect(accepted > 0);
+}
+
 test "every decode error maps to a distinct stable reason code" {
     const errors = @typeInfo(DecodeError).error_set.?;
     inline for (errors, 0..) |a_member, i| {
