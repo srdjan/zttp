@@ -355,6 +355,9 @@ depends on a local rule.
 
 ## 7. Decisions for the owner
 
+Answered 2026-10-07: D1 (a), D2 (a), D3 (a). The owner chose Tier 1 for the
+next plan. That answer authorizes a plan, not implementation.
+
 **D1 (first tier to plan).**
 Options: (a) Tier 1, items R1 to R5; (b) Tier 2, items R6 to R9;
 (c) R10 measurement first.
