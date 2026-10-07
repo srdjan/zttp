@@ -278,9 +278,8 @@ pub fn globalIsDict(_: *context.Context, _: value.JSValue, args: []const value.J
 /// `match` patterns lower to (spec 5.5). It is engine-private: the name is not
 /// an identifier, so a program cannot call, declare, or shadow it.
 ///
-/// A record is any object that is not an array, a Dict, a Bytes, or a function.
-/// That leaves plain records and `Result` values, which spec 6.1 defines as
-/// records. An unknown shape answers false, so a mismatched compiler and
+/// A record is a plain object or a `Result` value, which spec 6.1 defines as a
+/// record. An unknown shape answers false, so a mismatched compiler and
 /// runtime refuse an arm rather than take it.
 pub fn globalMatchShape(_: *context.Context, _: value.JSValue, args: []const value.JSValue) value.JSValue {
     if (args.len < 2 or !args[1].isInt()) return value.JSValue.false_val;
@@ -295,9 +294,13 @@ pub fn globalMatchShape(_: *context.Context, _: value.JSValue, args: []const val
 
 fn isRecord(val: value.JSValue) bool {
     if (!val.isObject() or val.isCallable()) return false;
+    // Every class is named, so a class added later is not a record until
+    // someone decides it is: a record pattern that matched it would be taken
+    // as covering a value the coverage check never modelled.
     return switch (object.JSObject.fromValue(val).class_id) {
-        .array, .dict, .bytes, .function, .bound_function, .range_iterator => false,
-        else => true,
+        .object, .result => true,
+        .array, .function, .bound_function, .generator, .@"error", .array_buffer, .typed_array, .data_view, .promise, .map, .set, .weak_map, .weak_set, .regexp, .date, .proxy, .string_object, .number_object, .boolean_object, .symbol_object, .arguments, .range_iterator, .dict, .bytes => false,
+        _ => false,
     };
 }
 

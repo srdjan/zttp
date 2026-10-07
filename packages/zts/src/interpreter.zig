@@ -4406,6 +4406,9 @@ test "End-to-end: a record pattern matches only a record, at every depth" {
         \\let a3 = match ("") { when []: "empty" default: "other" };
         \\let a4 = match ([]) { when []: "empty" default: "other" };
         \\let a5 = match ({ v: [] }) { when { v: [] }: "empty" default: "other" };
+        \\let a6 = match (lengthy) { when [_, _, _]: "array" default: "other" };
+        \\let a7 = match ("abc") { when [_, _, _]: "array" default: "other" };
+        \\let a8 = match ([1, 2, 3]) { when [_, _, _]: "array" default: "other" };
     ;
     try runMatchProgram(source, struct {
         fn check(ctx: *context.Context) anyerror!void {
@@ -4430,6 +4433,9 @@ test "End-to-end: a record pattern matches only a record, at every depth" {
             try expectGlobalString(ctx, "a3", "other");
             try expectGlobalString(ctx, "a4", "empty");
             try expectGlobalString(ctx, "a5", "empty");
+            try expectGlobalString(ctx, "a6", "other");
+            try expectGlobalString(ctx, "a7", "other");
+            try expectGlobalString(ctx, "a8", "array");
         }
     }.check);
 }

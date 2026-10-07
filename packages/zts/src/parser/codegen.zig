@@ -2324,9 +2324,9 @@ pub const CodeGen = struct {
 
     /// Emit length check + per-element tests for an array pattern.
     fn emitArrayLengthAndElementTests(self: *CodeGen, elements_start: NodeIndex, elements_count: u16, fail_label: u32) !void {
-        // An empty pattern has no element test to reject a non-array whose
-        // length reads as 0, such as "" or { length: 0 }, so it tests the shape.
-        if (elements_count == 0) try self.emitShapeTest(.array, fail_label);
+        // A length alone does not make an array: "ab" and { length: 2 } have
+        // one too, so every array pattern tests the shape before the length.
+        try self.emitShapeTest(.array, fail_label);
 
         try self.emit(.dup);
         self.pushStack(1);
