@@ -79,6 +79,13 @@ before and then answered by the `default` arm.
 |---|---|---|
 | A `default` arm followed by a `when` arm | ZTS062 | Move `default` after the `when` arms. The diagnostic points at the misplaced `default` |
 | A second `default` arm | ZTS062 | A match has at most one `default`. The diagnostic points at the second one |
+| `when { v: string }` or `when [string]` - a type-test name below the top level of a pattern | ZTS001 | Nested type tests are not supported. Bind the field and match it in a nested `match`, or use a top-level type test (`when string:`) |
+
+A renamed binding (`value: v`) declares a variable, so `{ v: string }` bound a
+variable called `string` and matched every value. That spelling and the
+array-element spelling are refused for the six type-test names `boolean`,
+`number`, `string`, `array`, `Dict`, and `Bytes`. A shorthand binding such as
+`{ string }` is not refused: it binds a field that is literally named `string`.
 
 ## Supported Module Syntax
 

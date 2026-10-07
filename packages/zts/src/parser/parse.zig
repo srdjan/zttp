@@ -958,7 +958,7 @@ pub const Parser = struct {
                     self.advance();
                     return error.ParseError;
                 }
-                pattern = try self.parseMatchPattern();
+                pattern = try self.parseMatchPattern(false);
             } else if (self.check(.kw_default)) {
                 // default arm - pattern stays null_node
                 default_arm = self.current;
@@ -1013,7 +1013,9 @@ pub const Parser = struct {
         });
     }
 
-    fn parseMatchPattern(self: *Parser) anyerror!NodeIndex {
+    /// `nested` is true below the arm's top-level pattern. A type test reads the
+    /// scrutinee, so it exists only at the top level (spec 5.5).
+    fn parseMatchPattern(self: *Parser, nested: bool) anyerror!NodeIndex {
         // Object pattern: { key: value, ... }
         if (self.check(.lbrace)) {
             return self.parseMatchObjectPattern();
@@ -1029,7 +1031,10 @@ pub const Parser = struct {
                 self.advance();
                 return null_node;
             }
-            if (typeTestKindFor(text)) |kind| return self.parseTypeTestPattern(kind);
+            if (typeTestKindFor(text)) |kind| {
+                if (nested) return self.refuseNestedTypeTest(text);
+                return self.parseTypeTestPattern(kind);
+            }
         }
 
         // Literal pattern: string, number, boolean, null, undefined
@@ -1045,6 +1050,23 @@ pub const Parser = struct {
                 return error.ParseError;
             },
         };
+    }
+
+    /// Refuse a type-test name below the top level of a pattern. In a renamed
+    /// field (`{ v: string }`) it is a binding named `string`, which matches
+    /// every value; in an array element it would test the whole scrutinee. Only
+    /// a shorthand binding (`{ string }`) is a variable of that name on purpose.
+    fn refuseNestedTypeTest(self: *Parser, name: []const u8) anyerror {
+        // The suggestion follows the "; " that json_diagnostics splits on. The
+        // message is static, so one is built per name.
+        inline for (.{ "boolean", "number", "string", "array", "Dict", "Bytes" }) |type_test| {
+            if (std.mem.eql(u8, name, type_test)) {
+                self.errors.addErrorAt(.unsupported_feature, self.current, "`" ++ type_test ++ "` below the top level of a pattern is not a type test; nested type tests are not supported, so bind the field and match it in a nested `match`, or use a top-level type test (`when " ++ type_test ++ ":`)");
+                return error.ParseError;
+            }
+        }
+        self.errors.addErrorAt(.unsupported_feature, self.current, "a type-test name below the top level of a pattern is not a type test; nested type tests are not supported, so bind the field and match it in a nested `match`, or use a top-level type test");
+        return error.ParseError;
     }
 
     /// The value kind a type-test pattern names, or null when the identifier
@@ -1224,12 +1246,13 @@ pub const Parser = struct {
                 if (self.check(.identifier)) {
                     const text = self.current.text(self.source);
                     if (!std.mem.eql(u8, text, "_")) {
+                        if (typeTestKindFor(text) != null) return self.refuseNestedTypeTest(text);
                         const name_loc = self.current.location();
                         self.advance();
                         break :blk try self.declarePatternBinding(text, name_loc);
                     }
                 }
-                break :blk try self.parseMatchPattern();
+                break :blk try self.parseMatchPattern(true);
             };
 
             const prop_node = try self.nodes.add(.{
@@ -1284,7 +1307,7 @@ pub const Parser = struct {
                 continue;
             }
 
-            const elem = try self.parseMatchPattern();
+            const elem = try self.parseMatchPattern(true);
             try elements.append(self.allocator, elem);
 
             if (!self.match(.comma)) break;
@@ -4996,6 +5019,67 @@ test "parse match expression accepts default as the only or the last arm" {
     defer last.deinit();
     _ = try last.parse();
     try std.testing.expect(!last.hasErrors());
+}
+
+test "parse match expression refuses a renamed binding named like a type test" {
+    // Spec 5.5: `value: v` binds the field under a new name. `{ v: string }`
+    // therefore bound a variable called `string` and matched every value, which
+    // is never what an author who wrote a type name meant.
+    const names = [_][]const u8{ "boolean", "number", "string", "array", "Dict", "Bytes" };
+    for (names) |name| {
+        var source_buf: [128]u8 = undefined;
+        const source = try std.fmt.bufPrint(&source_buf, "const x = match (v) {{ when {{ k: {s} }}: 1, default: 0 }};", .{name});
+
+        var parser = try Parser.init(std.testing.allocator, source);
+        defer parser.deinit();
+
+        try std.testing.expectError(error.ParseError, parser.parse());
+        const errors = parser.getErrors();
+        try std.testing.expectEqual(@as(usize, 1), errors.len);
+        try std.testing.expectEqual(error_mod.ErrorKind.unsupported_feature, errors[0].kind);
+        try std.testing.expect(std.mem.indexOf(u8, errors[0].message, name) != null);
+        try std.testing.expect(std.mem.indexOf(u8, errors[0].message, "nested type tests are not supported") != null);
+        try std.testing.expect(std.mem.indexOf(u8, errors[0].message, "nested `match`") != null);
+        // Located at the name, which starts at column 33 for every spelling.
+        try std.testing.expectEqual(@as(u32, 1), errors[0].location.line);
+        try std.testing.expectEqual(@as(u32, 33), errors[0].location.column);
+    }
+}
+
+test "parse match expression refuses a type-test name as an array element" {
+    // The element used to parse as a type test of the whole scrutinee.
+    var parser = try Parser.init(std.testing.allocator, "const x = match (v) { when [string]: 1, default: 0 };");
+    defer parser.deinit();
+
+    try std.testing.expectError(error.ParseError, parser.parse());
+    const errors = parser.getErrors();
+    try std.testing.expectEqual(@as(usize, 1), errors.len);
+    try std.testing.expectEqual(error_mod.ErrorKind.unsupported_feature, errors[0].kind);
+    try std.testing.expect(std.mem.indexOf(u8, errors[0].message, "nested type tests are not supported") != null);
+}
+
+test "parse match expression keeps shorthand bindings and top-level type tests" {
+    // `{ string }` binds a field literally named `string`; only the renamed
+    // and array-element spellings are the trap.
+    var shorthand = try Parser.init(std.testing.allocator, "const x = match (v) { when { string }: string, default: 0 };");
+    defer shorthand.deinit();
+    _ = try shorthand.parse();
+    try std.testing.expect(!shorthand.hasErrors());
+
+    var mixed = try Parser.init(std.testing.allocator, "const x = match (v) { when { kind: \"a\", Dict }: Dict, default: 0 };");
+    defer mixed.deinit();
+    _ = try mixed.parse();
+    try std.testing.expect(!mixed.hasErrors());
+
+    var top_level = try Parser.init(std.testing.allocator, "const x = match (v) { when string: 1, when Dict: 2, default: 0 };");
+    defer top_level.deinit();
+    _ = try top_level.parse();
+    try std.testing.expect(!top_level.hasErrors());
+
+    var renamed = try Parser.init(std.testing.allocator, "const x = match (v) { when { k: other }: other, default: 0 };");
+    defer renamed.deinit();
+    _ = try renamed.parse();
+    try std.testing.expect(!renamed.hasErrors());
 }
 
 test "parse match expression with nested object and array patterns" {
