@@ -1652,6 +1652,7 @@ test "a truncated certificate rejects rather than reading past the end" {
 }
 
 fn isRecordTable(comptime T: type) bool {
+    @setRuntimeSafety(true);
     return @typeInfo(T) == .@"struct" and @hasField(T, "count") and @hasField(T, "bytes");
 }
 
@@ -1661,6 +1662,7 @@ fn isRecordTable(comptime T: type) bool {
 /// decodes or refuses with a typed error: a typed refusal from `get` is a
 /// valid outcome, an untyped failure or a panic is not.
 fn expectStructurallyValid(input: []const u8, cert: Certificate) !void {
+    @setRuntimeSafety(true);
     try testing.expectEqual(ps.schema_version, cert.schema_version);
     const input_start = @intFromPtr(input.ptr);
     const input_end = input_start + input.len;
