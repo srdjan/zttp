@@ -411,6 +411,11 @@ All other units must leave the four hashes unchanged.
 
 ## 6. Decisions for the owner
 
+Answered 2026-10-07: T1 (a), T2 (a), T3 (a), T4 (a), T5 (a). The owner
+approved implementation in plan order. The DeepSeek re-record runs longer
+than two minutes, so the main session confirms with the owner before it
+starts.
+
 **T1 (redundant arms).** This covers a `default:` after full coverage and an
 arm that can never match. Spec 5.5 says a closed union must not include
 `default`, and treats unreachable arms as errors.
