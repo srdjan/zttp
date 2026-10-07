@@ -5,6 +5,7 @@
 //! and contains the initBuiltins wiring function.
 
 const std = @import("std");
+const bytecode = @import("../bytecode.zig");
 
 // Sub-modules
 pub const helpers = @import("helpers.zig");
@@ -242,6 +243,11 @@ pub fn initBuiltins(ctx: *context.Context) !void {
     const is_bytes_atom = try ctx.atoms.intern("isBytes");
     const is_bytes_func = try createBuiltinNativeFunction(ctx, pool, root_class_idx, wrap(number.globalIsBytes), is_bytes_atom, 1);
     try ctx.setGlobal(is_bytes_atom, is_bytes_func.toValue());
+
+    // Engine-private shape test behind record and empty-array match patterns.
+    const match_shape_atom = try ctx.atoms.intern(bytecode.match_shape_global);
+    const match_shape_func = try createBuiltinNativeFunction(ctx, pool, root_class_idx, wrap(number.globalMatchShape), match_shape_atom, 2);
+    try ctx.setGlobal(match_shape_atom, match_shape_func.toValue());
 
     // Global range()
     const range_atom = try ctx.atoms.intern("range");

@@ -4364,6 +4364,76 @@ test "End-to-end: a nested empty array or record pattern is still a test" {
     }.check);
 }
 
+test "End-to-end: a record pattern matches only a record, at every depth" {
+    // Spec 5.5: patterns are fixed record patterns. A binding-only or empty
+    // record pattern has no field test to fail, so codegen matched it against
+    // any value: a string, a number, an array, null. Every record pattern now
+    // tests that the value is a record before it reads a field.
+    const source =
+        \\let str = "s";
+        \\let num = 5;
+        \\let arr = [1];
+        \\let nothing = null;
+        \\let rec = { w: 1 };
+        \\let empty = {};
+        \\let lengthy = { length: 3 };
+        \\let fun = () => 1;
+        \\let t1 = match (str) { when { w }: "record" default: "other" };
+        \\let t2 = match (rec) { when { w }: "record" default: "other" };
+        \\let t3 = match (arr) { when { w }: "record" default: "other" };
+        \\let t4 = match (num) { when {}: "record" default: "other" };
+        \\let t5 = match (empty) { when {}: "record" default: "other" };
+        \\let t6 = match (nothing) { when {}: "record" default: "other" };
+        \\let t7 = match (lengthy) { when { length }: "record" default: "other" };
+        \\let t8 = match (fun) { when {}: "record" default: "other" };
+        \\let t9 = match (arr) { when {}: "record" default: "other" };
+        \\let outer_str = { a: "str" };
+        \\let outer_rec = { a: { b: 1 } };
+        \\let outer_arr = { a: [1] };
+        \\let n1 = match (outer_str) { when { a: { b } }: "record" default: "other" };
+        \\let n2 = match (outer_rec) { when { a: { b } }: "record" default: "other" };
+        \\let n3 = match (outer_str) { when { a: {} }: "record" default: "other" };
+        \\let n4 = match (outer_arr) { when { a: {} }: "record" default: "other" };
+        \\let n5 = match (outer_rec) { when { a: {} }: "record" default: "other" };
+        \\let strs = ["s"];
+        \\let n6 = match (strs) { when [{ n }]: "record" default: "other" };
+        \\let recs = [{ n: 1 }];
+        \\let n7 = match (recs) { when [{ n }]: "record" default: "other" };
+        \\let empty_str = { v: "" };
+        \\let empty_lengthy = { v: { length: 0 } };
+        \\let a1 = match (empty_str) { when { v: [] }: "empty" default: "other" };
+        \\let a2 = match (empty_lengthy) { when { v: [] }: "empty" default: "other" };
+        \\let a3 = match ("") { when []: "empty" default: "other" };
+        \\let a4 = match ([]) { when []: "empty" default: "other" };
+        \\let a5 = match ({ v: [] }) { when { v: [] }: "empty" default: "other" };
+    ;
+    try runMatchProgram(source, struct {
+        fn check(ctx: *context.Context) anyerror!void {
+            try expectGlobalString(ctx, "t1", "other");
+            try expectGlobalString(ctx, "t2", "record");
+            try expectGlobalString(ctx, "t3", "other");
+            try expectGlobalString(ctx, "t4", "other");
+            try expectGlobalString(ctx, "t5", "record");
+            try expectGlobalString(ctx, "t6", "other");
+            try expectGlobalString(ctx, "t7", "record");
+            try expectGlobalString(ctx, "t8", "other");
+            try expectGlobalString(ctx, "t9", "other");
+            try expectGlobalString(ctx, "n1", "other");
+            try expectGlobalString(ctx, "n2", "record");
+            try expectGlobalString(ctx, "n3", "other");
+            try expectGlobalString(ctx, "n4", "other");
+            try expectGlobalString(ctx, "n5", "record");
+            try expectGlobalString(ctx, "n6", "other");
+            try expectGlobalString(ctx, "n7", "record");
+            try expectGlobalString(ctx, "a1", "other");
+            try expectGlobalString(ctx, "a2", "other");
+            try expectGlobalString(ctx, "a3", "other");
+            try expectGlobalString(ctx, "a4", "empty");
+            try expectGlobalString(ctx, "a5", "empty");
+        }
+    }.check);
+}
+
 test "End-to-end: computed compound assignment evaluates key once (object)" {
     // Regression: `obj[k()] += v` double-evaluated the key expression - once for
     // the read, once for the store - running k()'s side effect twice. The

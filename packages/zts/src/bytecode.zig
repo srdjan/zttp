@@ -45,6 +45,19 @@ pub const LineEntry = struct {
     column: u32,
 };
 
+/// The engine-private global that match lowering calls to test the shape of a
+/// value (spec 5.5). A record pattern asks whether the value is a record and
+/// an empty array pattern whether it is an array; no opcode answers either, and
+/// a new opcode would move the semantics hash. The name is not a valid
+/// identifier, so no program can declare or shadow it.
+pub const match_shape_global = "%matchShape";
+
+/// The second argument of the `match_shape_global` call.
+pub const MatchShape = enum(u8) {
+    record = 0,
+    array = 1,
+};
+
 /// Opcode definitions
 pub const Opcode = enum(u8) {
     // Stack operations

@@ -4,6 +4,7 @@ const context = h.context;
 const value = h.value;
 const object = h.object;
 const string = h.string;
+const bytecode = @import("../bytecode.zig");
 
 // Aliased helpers for use in this module
 const allocFloat = h.allocFloat;
@@ -273,6 +274,38 @@ pub fn globalIsDict(_: *context.Context, _: value.JSValue, args: []const value.J
     return if (@import("../dict.zig").isDict(args[0])) value.JSValue.true_val else value.JSValue.false_val;
 }
 
+/// `%matchShape(value, shape)` - the shape test that record and empty-array
+/// `match` patterns lower to (spec 5.5). It is engine-private: the name is not
+/// an identifier, so a program cannot call, declare, or shadow it.
+///
+/// A record is any object that is not an array, a Dict, a Bytes, or a function.
+/// That leaves plain records and `Result` values, which spec 6.1 defines as
+/// records. An unknown shape answers false, so a mismatched compiler and
+/// runtime refuse an arm rather than take it.
+pub fn globalMatchShape(_: *context.Context, _: value.JSValue, args: []const value.JSValue) value.JSValue {
+    if (args.len < 2 or !args[1].isInt()) return value.JSValue.false_val;
+    const code = std.math.cast(u8, args[1].getInt()) orelse return value.JSValue.false_val;
+    const shape = std.enums.fromInt(bytecode.MatchShape, code) orelse return value.JSValue.false_val;
+    const matched = switch (shape) {
+        .record => isRecord(args[0]),
+        .array => isArray(args[0]),
+    };
+    return if (matched) value.JSValue.true_val else value.JSValue.false_val;
+}
+
+fn isRecord(val: value.JSValue) bool {
+    if (!val.isObject() or val.isCallable()) return false;
+    return switch (object.JSObject.fromValue(val).class_id) {
+        .array, .dict, .bytes, .function, .bound_function, .range_iterator => false,
+        else => true,
+    };
+}
+
+fn isArray(val: value.JSValue) bool {
+    if (!val.isObject()) return false;
+    return object.JSObject.fromValue(val).class_id == .array;
+}
+
 /// `isBytes(value)` - the intrinsic type guard for `Bytes` (spec 6.3), for the
 /// same reason `isDict` exists: `when Bytes:` lowers to a call to this name, so
 /// a guard the checker recognizes has to be a real function at runtime.
@@ -424,4 +457,43 @@ test "Number() flattens a concat rope into the request arena, not libc" {
 
     const flat = rope.asLeaf() orelse return error.TestUnexpectedResult;
     try std.testing.expect(req_arena.contains(flat));
+}
+
+test "%matchShape tells a record from the other object classes" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const gc_mod = @import("../gc.zig");
+
+    var gc_state = try gc_mod.GC.init(allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+    try @import("root.zig").initBuiltins(ctx);
+
+    const undef = value.JSValue.undefined_val;
+    const record_shape = value.JSValue.fromInt(@intFromEnum(bytecode.MatchShape.record));
+    const array_shape = value.JSValue.fromInt(@intFromEnum(bytecode.MatchShape.array));
+
+    const record = (try ctx.createObject(null)).toValue();
+    const array = (try ctx.createArray()).toValue();
+    const dict = (try ctx.createDict()).toValue();
+    const bytes = (try ctx.createBytes(&[_]u8{1})).toValue();
+    const text = try ctx.createString("s");
+    const result_val = h.createResultOk(ctx, value.JSValue.fromInt(1));
+
+    try std.testing.expect(globalMatchShape(ctx, undef, &.{ record, record_shape }).toBoolean());
+    try std.testing.expect(globalMatchShape(ctx, undef, &.{ result_val, record_shape }).toBoolean());
+    for ([_]value.JSValue{ array, dict, bytes, text, undef, value.JSValue.null_val, value.JSValue.fromInt(1), value.JSValue.true_val }) |other| {
+        try std.testing.expect(!globalMatchShape(ctx, undef, &.{ other, record_shape }).toBoolean());
+    }
+
+    try std.testing.expect(globalMatchShape(ctx, undef, &.{ array, array_shape }).toBoolean());
+    for ([_]value.JSValue{ record, dict, bytes, text, undef, value.JSValue.null_val }) |other| {
+        try std.testing.expect(!globalMatchShape(ctx, undef, &.{ other, array_shape }).toBoolean());
+    }
+
+    // An unknown shape or a missing argument refuses rather than matches.
+    try std.testing.expect(!globalMatchShape(ctx, undef, &.{ record, value.JSValue.fromInt(9) }).toBoolean());
+    try std.testing.expect(!globalMatchShape(ctx, undef, &.{record}).toBoolean());
 }

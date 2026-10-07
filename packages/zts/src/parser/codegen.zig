@@ -2105,15 +2105,12 @@ pub const CodeGen = struct {
 
     fn emitObjectPatternTest(self: *CodeGen, pattern_node: NodeIndex, target_label: u32) !void {
         const pattern = self.ir.getMatchPattern(pattern_node) orelse return;
-        if (pattern.props_count == 0) {
-            // Empty pattern always matches
-            try self.emitJump(.goto, target_label);
-            return;
-        }
 
-        // For multi-property patterns, we need to test all properties.
-        // If any fails, skip to after this arm's test block.
+        // If any test fails, skip to after this arm's test block. An empty
+        // pattern still tests the shape: it matches every record and nothing
+        // else.
         const skip_label = try self.createLabel();
+        try self.emitShapeTest(.record, skip_label);
 
         var j: u8 = 0;
         while (j < pattern.props_count) : (j += 1) {
@@ -2181,6 +2178,33 @@ pub const CodeGen = struct {
 
     const NestedPatternKind = enum { object, array };
 
+    /// The engine-private global that answers the shape test (see
+    /// `bytecode.match_shape_global`). Without an atom table the bytecode is
+    /// only parsed and analyzed, never run, so the atom is not looked up.
+    fn matchShapeAtom(self: *CodeGen) !u16 {
+        const atoms = self.atoms orelse return 0;
+        const atom = try atoms.intern(bytecode.match_shape_global);
+        return @truncate(@intFromEnum(atom));
+    }
+
+    /// Test the shape of the value on top of the stack, which stays there:
+    /// jump to `fail_label` unless it is a record (spec 5.5 record pattern) or
+    /// an array. The test is a call, because no opcode names a value's class.
+    fn emitShapeTest(self: *CodeGen, shape: bytecode.MatchShape, fail_label: u32) !void {
+        try self.emit(.dup); // [v, v]
+        self.pushStack(1);
+        try self.emit(.get_global);
+        try self.emitU16(try self.matchShapeAtom());
+        self.pushStack(1); // [v, v, test]
+        try self.emit(.swap); // [v, test, v]
+        try self.emitSmallInt(@intFromEnum(shape)); // [v, test, v, shape]
+        try self.emit(.call);
+        try self.emitByte(2);
+        self.popStack(2); // [v, matched]
+        try self.emitJump(.if_false, fail_label);
+        self.popStack(1);
+    }
+
     /// Emit undefined guard around a nested object or array pattern test.
     /// If the value is undefined, jumps to fail_label. Otherwise dispatches
     /// to the appropriate nested test.
@@ -2243,6 +2267,8 @@ pub const CodeGen = struct {
         const cleanup_label = try self.createLabel();
         const done_label = try self.createLabel();
 
+        try self.emitShapeTest(.record, cleanup_label);
+
         var j: u8 = 0;
         while (j < pattern.props_count) : (j += 1) {
             const prop_idx = self.ir.getListIndex(pattern.props_start, j);
@@ -2298,6 +2324,10 @@ pub const CodeGen = struct {
 
     /// Emit length check + per-element tests for an array pattern.
     fn emitArrayLengthAndElementTests(self: *CodeGen, elements_start: NodeIndex, elements_count: u16, fail_label: u32) !void {
+        // An empty pattern has no element test to reject a non-array whose
+        // length reads as 0, such as "" or { length: 0 }, so it tests the shape.
+        if (elements_count == 0) try self.emitShapeTest(.array, fail_label);
+
         try self.emit(.dup);
         self.pushStack(1);
         try self.emit(.get_length);
