@@ -871,12 +871,21 @@ const Stripper = struct {
         // Check for generic params <T, U>
         if (self.pos < self.source.len and self.source[self.pos] == '<') {
             const generic_start = self.pos;
+            const generic_line = self.line;
+            const generic_col = self.col;
             if (try self.skipBalancedAngles()) {
                 try self.rejectRemovedTypeFormInType(generic_start + 1, self.pos - 1);
                 // Record generic params in TypeMap (inside the angle brackets)
                 self.recordTypeAnnotation(.generic_params, generic_start + 1, self.pos - 1, fn_name_start, fn_name_end);
                 // Blank the generic params
                 self.blankSpan(generic_start, self.pos);
+            } else {
+                // An unclosed `<` is not a generic list. The scan advanced past
+                // text it did not copy, so rewind and let the normal token pass
+                // emit it; dropping it would shorten the output.
+                self.pos = generic_start;
+                self.line = generic_line;
+                self.col = generic_col;
             }
         }
 
@@ -4972,6 +4981,26 @@ test "a return-type colon with no type after it keeps its bytes" {
     };
     for (inputs) |src| {
         var result = try strip(std.testing.allocator, src, .{});
+        defer result.deinit();
+        try std.testing.expectEqual(src.len, result.code.len);
+    }
+}
+
+// Regression: `skipBalancedAngles` returns false for an unclosed `<` after it
+// has already advanced past the text it scanned. The function-declaration
+// caller did not rewind, so everything from the `<` to the end of the scan was
+// dropped from the output and the strip still succeeded. Found by the stripper
+// stress loop on the first input below.
+test "an unclosed generic list on a function keeps its bytes" {
+    const inputs = [_][]const u8{
+        "+for (function <A !...true\t$!=>if (when :==/!\"stringasync ",
+        "function <A",
+        "function f<T extends {",
+        "function f<A !x\nconst y = 1;\n",
+        "function f<'abc",
+    };
+    for (inputs) |src| {
+        var result = strip(std.testing.allocator, src, .{}) catch continue;
         defer result.deinit();
         try std.testing.expectEqual(src.len, result.code.len);
     }
