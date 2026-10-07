@@ -50,6 +50,7 @@ there without a row here fails `zig build test-docs-drift`:
 | `test-proof-quest-fixture` | `packages/tools/src/proof_quest_fixture.zig` |
 | `test-openapi-manifest` | `packages/tools/src/openapi_manifest.zig` |
 | `test-vocab-envelope` | `packages/tools/src/vocab_envelope.zig` |
+| `test-instruction-counter` | `packages/tools/src/instruction_counter.zig` |
 | `test-expert-app` | `packages/pi/src/tests.zig` |
 | `test-provable-reach` | `packages/pi/src/expert_reach_tests.zig` |
 | `test-cassette` | `packages/pi/src/cassette_tests.zig` |

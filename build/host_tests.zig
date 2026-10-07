@@ -82,6 +82,7 @@ const host_test_roots = [_]HostTestRoot{
     .{ .owner = .tools, .src = "src/proof_quest_fixture.zig", .step = "test-proof-quest-fixture", .desc = "Run proof quest fixture tests", .project_config = true },
     .{ .owner = .tools, .src = "src/openapi_manifest.zig", .step = "test-openapi-manifest", .desc = "Run OpenAPI manifest tests", .project_config = true },
     .{ .owner = .tools, .src = "src/vocab_envelope.zig", .step = "test-vocab-envelope", .desc = "Run published vocabulary envelope derivation tests" },
+    .{ .owner = .tools, .src = "src/instruction_counter.zig", .step = "test-instruction-counter", .desc = "Run retired-instruction counter tests" },
     .{ .owner = .pi, .src = "src/tests.zig", .step = "test-expert-app", .desc = "Run zts expert in-process app tests", .project_config = true, .pi_modules = true, .needs_install = true },
     .{ .owner = .pi, .src = "src/expert_reach_tests.zig", .step = "test-provable-reach", .desc = "Check bounded reach admission and report integrity (offline)", .project_config = true, .pi_modules = true, .needs_install = true },
     // Focused subset covering only the record/replay layer: runs offline,
