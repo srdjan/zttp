@@ -157,6 +157,7 @@ zts sqlite.zig
 zts string.zig
 zts stripper.zig
 zts tests/asi_census.zig
+zts tests/frontend_fuzz.zig
 zts tests/opcode_parity.zig
 zts translation_witness.zig
 zts trace.zig

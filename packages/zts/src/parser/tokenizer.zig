@@ -28,7 +28,10 @@ pub const Tokenizer = struct {
     /// subst_brace_depths[d] counts unmatched '{' seen after the '${' that
     /// opened substitution depth d+1. A '}' only closes the substitution
     /// (routing to scanTemplateMiddleOrTail) when the depth for that level is 0.
-    subst_brace_depths: [16]u8,
+    /// A u16 counts exactly past the parser's nesting limit of 512. The count
+    /// saturates at 65535 instead of overflowing, because a u8 panicked in safe
+    /// builds on 256 unmatched braces and the parser refuses that nesting anyway.
+    subst_brace_depths: [16]u16,
 
     /// Cached token for lookahead
     current: Token,
@@ -42,7 +45,7 @@ pub const Tokenizer = struct {
             .line_start = 0,
             .can_be_regex = true,
             .template_depth = 0,
-            .subst_brace_depths = [_]u8{0} ** 16,
+            .subst_brace_depths = [_]u16{0} ** 16,
             .current = undefined,
             .has_current = false,
         };
@@ -81,7 +84,7 @@ pub const Tokenizer = struct {
                 // '}' closing an object literal or block is not mistaken for
                 // the end of the ${...} substitution.
                 if (self.template_depth > 0 and self.template_depth <= 16) {
-                    self.subst_brace_depths[self.template_depth - 1] += 1;
+                    self.subst_brace_depths[self.template_depth - 1] +|= 1;
                 }
                 break :blk self.tok1(start, start_col, start_line, .lbrace);
             },
@@ -676,7 +679,7 @@ pub const TokenizerState = struct {
     // Saved so a single-token lookahead that crosses a '{' or '}' inside a
     // template substitution does not permanently corrupt the brace-depth
     // counters when the lookahead is rewound via restoreState.
-    subst_brace_depths: [16]u8,
+    subst_brace_depths: [16]u16,
 };
 
 fn isDigit(c: u8) bool {
