@@ -2036,10 +2036,19 @@ pub const CodeGen = struct {
 
     /// Store every field a record pattern binds into its arm-scoped local.
     /// The scrutinee is on top of the stack and stays there: each binding
-    /// duplicates it, reads one field, and stores that.
+    /// duplicates it, reads one field, and stores that. A nested record or
+    /// array pattern is read the same way one level down, so a binding is
+    /// stored wherever it sits in the pattern.
     fn emitPatternBindings(self: *CodeGen, pattern_node: NodeIndex) anyerror!void {
         if (pattern_node == null_node) return;
-        if (self.ir.getTag(pattern_node) != .match_pattern) return;
+        switch (self.ir.getTag(pattern_node) orelse return) {
+            .match_pattern => try self.emitRecordPatternBindings(pattern_node),
+            .array_pattern => try self.emitArrayPatternBindings(pattern_node),
+            else => {},
+        }
+    }
+
+    fn emitRecordPatternBindings(self: *CodeGen, pattern_node: NodeIndex) anyerror!void {
         const pattern = self.ir.getMatchPattern(pattern_node) orelse return;
 
         var j: u8 = 0;
@@ -2047,8 +2056,12 @@ pub const CodeGen = struct {
             const prop_idx = self.ir.getListIndex(pattern.props_start, j);
             const prop = self.ir.getProperty(prop_idx) orelse continue;
             if (prop.value == null_node) continue;
-            if (self.ir.getTag(prop.value) != .identifier) continue;
-            const binding = self.ir.getBinding(prop.value) orelse continue;
+            const value_tag = self.ir.getTag(prop.value) orelse continue;
+            if (value_tag != .identifier and value_tag != .match_pattern and value_tag != .array_pattern) continue;
+            const binding = if (value_tag == .identifier)
+                (self.ir.getBinding(prop.value) orelse continue)
+            else
+                null;
 
             const key_str_idx = self.ir.getStringIdx(prop.key) orelse continue;
             const key_str = self.ir.getString(key_str_idx) orelse continue;
@@ -2057,7 +2070,36 @@ pub const CodeGen = struct {
             try self.emit(.dup);
             self.pushStack(1);
             try self.emitGetField(@truncate(@intFromEnum(atom)));
-            try self.emitSetBinding(binding);
+            if (binding) |b| {
+                try self.emitSetBinding(b);
+            } else {
+                try self.emitPatternBindings(prop.value);
+                try self.emit(.drop);
+                self.popStack(1);
+            }
+        }
+    }
+
+    fn emitArrayPatternBindings(self: *CodeGen, pattern_node: NodeIndex) anyerror!void {
+        const pattern = self.ir.getArray(pattern_node) orelse return;
+
+        var i: u16 = 0;
+        while (i < pattern.elements_count) : (i += 1) {
+            const elem_idx = self.ir.getListIndex(pattern.elements_start, i);
+            if (elem_idx == null_node) continue;
+            // Only a record or array element can hold a binding; a literal or
+            // type-test element binds nothing.
+            const elem_tag = self.ir.getTag(elem_idx) orelse continue;
+            if (elem_tag != .match_pattern and elem_tag != .array_pattern) continue;
+
+            try self.emit(.dup);
+            self.pushStack(1);
+            try self.emitIntValue(@intCast(i));
+            try self.emit(.get_elem);
+            self.popStack(1);
+            try self.emitPatternBindings(elem_idx);
+            try self.emit(.drop);
+            self.popStack(1);
         }
     }
 

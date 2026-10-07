@@ -4251,6 +4251,90 @@ test "End-to-end: a match evaluates exactly one arm" {
     try std.testing.expectEqual(@as(i32, 12), result_val.getInt());
 }
 
+/// Compile `source`, run it with the builtins installed, and hand the context
+/// to `check`, which reads the globals the program left behind. Match tests
+/// need the builtins because a record or array pattern lowers to a call.
+fn runMatchProgram(source: []const u8, comptime check: fn (*context.Context) anyerror!void) !void {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const gc_mod = @import("gc.zig");
+    const parser_mod = @import("parser/root.zig");
+    const string_mod = @import("string.zig");
+
+    var gc_state = try gc_mod.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+    try builtins.initBuiltins(ctx);
+
+    var strings = string_mod.StringTable.init(allocator);
+    defer strings.deinit();
+
+    var p = try parser_mod.Parser.init(allocator, source, &strings, &ctx.atoms);
+    defer p.deinit();
+
+    const code = try p.parse();
+    try std.testing.expect(code.len > 0);
+
+    const shapes = p.getShapes();
+    if (shapes.len > 0) {
+        try ctx.materializeShapes(shapes);
+    }
+
+    var func = bytecode.FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = p.max_local_count,
+        .stack_size = 256,
+        .flags = .{},
+        .code = code,
+        .constants = p.constants.items,
+        .source_map = null,
+        .line_table = null,
+    };
+
+    var interp = Interpreter.init(ctx);
+    _ = try interp.run(&func);
+    try check(ctx);
+}
+
+fn expectGlobalString(ctx: *context.Context, name: []const u8, expected: []const u8) !void {
+    const atom = try ctx.atoms.intern(name);
+    const val = ctx.getGlobal(atom) orelse return error.MissingResult;
+    try std.testing.expect(val.isString());
+    try std.testing.expectEqualStrings(expected, val.toPtr(string.JSString).data());
+}
+
+test "End-to-end: a match binding is stored at every depth of the pattern" {
+    // Spec 5.5: a binding in a record pattern introduces an arm-scoped const.
+    // The parser declared the nested ones, but codegen stored only the direct
+    // fields of the top-level pattern, so a nested binding read as undefined.
+    const source =
+        \\let nested = { a: { b: "deep" } };
+        \\let r1 = match (nested) { when { a: { b: x } }: x default: "none" };
+        \\let boxed = { kind: "box", inner: { v: "seven" } };
+        \\let r2 = match (boxed) { when { kind: "box", inner: { v } }: v default: "none" };
+        \\let arr = [{ n: "first" }];
+        \\let r3 = match (arr) { when [{ n }]: n default: "none" };
+        \\let three = { a: { b: { c: "c3" } } };
+        \\let r4 = match (three) { when { a: { b: { c: renamed } } }: renamed default: "none" };
+        \\let mixed = { items: [{ id: "i1" }] };
+        \\let r5 = match (mixed) { when { items: [{ id }] }: id default: "none" };
+    ;
+    try runMatchProgram(source, struct {
+        fn check(ctx: *context.Context) anyerror!void {
+            try expectGlobalString(ctx, "r1", "deep");
+            try expectGlobalString(ctx, "r2", "seven");
+            try expectGlobalString(ctx, "r3", "first");
+            try expectGlobalString(ctx, "r4", "c3");
+            try expectGlobalString(ctx, "r5", "i1");
+        }
+    }.check);
+}
+
 test "End-to-end: computed compound assignment evaluates key once (object)" {
     // Regression: `obj[k()] += v` double-evaluated the key expression - once for
     // the read, once for the store - running k()'s side effect twice. The
