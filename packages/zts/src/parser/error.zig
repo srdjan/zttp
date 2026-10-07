@@ -30,6 +30,11 @@ pub const ErrorKind = enum {
     /// A statement with no `;`. Spec 5.5 mandates no automatic semicolon
     /// insertion, so termination is written rather than inferred.
     missing_semicolon,
+    /// A `default` arm that is not the last arm of a `match`, or a second
+    /// `default`. Spec 5.5 grammar is `MatchArm+ [DefaultArm]`, and the code
+    /// generator tests arms in order and takes `default` last, so a `when`
+    /// written after `default` could never be what the author meant.
+    misplaced_default_arm,
 
     // Syntax errors
     unexpected_token,

@@ -68,6 +68,18 @@ declaration augmentation were never supported and are not repaired into an
 alias. The heuristic that made an all-function interface nominal went with the
 form - nominal identity now comes only from a `nominal` declaration.
 
+## Match Rules
+
+Spec 5.5 gives `match` the grammar `MatchArm+ [DefaultArm]`. The parser enforces
+the position of `default` because the code generator tests the `when` arms in
+order and takes `default` last. A `when` written after `default` was accepted
+before and then answered by the `default` arm.
+
+| Form | Code | What it does instead |
+|---|---|---|
+| A `default` arm followed by a `when` arm | ZTS062 | Move `default` after the `when` arms. The diagnostic points at the misplaced `default` |
+| A second `default` arm | ZTS062 | A match has at most one `default`. The diagnostic points at the second one |
+
 ## Supported Module Syntax
 
 The parser supports ES6 `import`/`export` syntax for built-in virtual modules

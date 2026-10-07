@@ -929,8 +929,21 @@ pub const Parser = struct {
 
         var arms: [255]NodeIndex = undefined;
         var arms_len: u8 = 0;
+        // The `default` arm seen so far. Spec 5.5 grammar is
+        // `MatchArm+ [DefaultArm]`: nothing may follow it.
+        var default_arm: ?Token = null;
 
         while (!self.check(.rbrace) and !self.check(.eof)) {
+            if (default_arm) |seen| {
+                if (self.check(.kw_when)) {
+                    self.errors.addErrorAt(.misplaced_default_arm, seen, "a `default` arm must be the last arm of a match; move it after the `when` arms");
+                    return error.ParseError;
+                }
+                if (self.check(.kw_default)) {
+                    self.errors.addErrorAt(.misplaced_default_arm, self.current, "a match has at most one `default` arm; remove this one or merge it into the first");
+                    return error.ParseError;
+                }
+            }
             const arm_loc = self.current.location();
             var pattern: NodeIndex = null_node;
 
@@ -946,8 +959,10 @@ pub const Parser = struct {
                     return error.ParseError;
                 }
                 pattern = try self.parseMatchPattern();
-            } else if (self.match(.kw_default)) {
+            } else if (self.check(.kw_default)) {
                 // default arm - pattern stays null_node
+                default_arm = self.current;
+                self.advance();
             } else {
                 self.scopes.popScope();
                 self.errorAtCurrent("expected 'when' or 'default'");
@@ -4921,6 +4936,66 @@ test "parse match expression refuses top-level wildcard" {
     try std.testing.expectError(error.ParseError, parser.parse());
     try std.testing.expectEqual(error_mod.ErrorKind.unsupported_feature, parser.getErrors()[0].kind);
     try std.testing.expect(std.mem.indexOf(u8, parser.getErrors()[0].message, "default:") != null);
+}
+
+test "parse match expression refuses a default arm that is not last" {
+    // Spec 5.5 grammar is `MatchArm+ [DefaultArm]`. Codegen tests every `when`
+    // in order and takes `default` last, so `when 2` below used to be accepted
+    // and then answered by `default`.
+    var parser = try Parser.init(std.testing.allocator,
+        \\const x = match (v) {
+        \\  when 1: "one",
+        \\  default: "other",
+        \\  when 2: "two"
+        \\};
+    );
+    defer parser.deinit();
+
+    try std.testing.expectError(error.ParseError, parser.parse());
+    const errors = parser.getErrors();
+    try std.testing.expectEqual(@as(usize, 1), errors.len);
+    try std.testing.expectEqual(error_mod.ErrorKind.misplaced_default_arm, errors[0].kind);
+    // The diagnostic points at the misplaced `default`, which is line 3.
+    try std.testing.expectEqual(@as(u32, 3), errors[0].location.line);
+    try std.testing.expectEqual(@as(u32, 3), errors[0].location.column);
+    try std.testing.expect(std.mem.indexOf(u8, errors[0].message, "last") != null);
+}
+
+test "parse match expression refuses a second default arm" {
+    var parser = try Parser.init(std.testing.allocator,
+        \\const x = match (v) {
+        \\  when 1: "one",
+        \\  default: "other",
+        \\  default: "again"
+        \\};
+    );
+    defer parser.deinit();
+
+    try std.testing.expectError(error.ParseError, parser.parse());
+    const errors = parser.getErrors();
+    try std.testing.expectEqual(@as(usize, 1), errors.len);
+    try std.testing.expectEqual(error_mod.ErrorKind.misplaced_default_arm, errors[0].kind);
+    // The diagnostic points at the second `default`, which is line 4.
+    try std.testing.expectEqual(@as(u32, 4), errors[0].location.line);
+    try std.testing.expect(std.mem.indexOf(u8, errors[0].message, "at most one") != null);
+}
+
+test "parse match expression accepts default as the only or the last arm" {
+    var only = try Parser.init(std.testing.allocator, "const x = match (v) { default: 0 };");
+    defer only.deinit();
+    _ = try only.parse();
+    try std.testing.expect(!only.hasErrors());
+
+    var last = try Parser.init(std.testing.allocator,
+        \\const x = match (v) {
+        \\  when 1: "one",
+        \\  when 2: "two",
+        \\  default: "other"
+        \\};
+    );
+    defer last.deinit();
+    _ = try last.parse();
+    try std.testing.expect(!last.hasErrors());
 }
 
 test "parse match expression with nested object and array patterns" {

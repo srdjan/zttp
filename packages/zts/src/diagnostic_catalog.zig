@@ -168,6 +168,7 @@ pub fn parserCode(kind: ParserKind) []const u8 {
         .string_line_continuation => "ZTS045",
         .non_ascii_identifier => "ZTS046",
         .missing_semicolon => "ZTS047",
+        .misplaced_default_arm => "ZTS062",
     };
 }
 

@@ -71,8 +71,8 @@ fn parserErrorCode(kind: ErrorKind) []const u8 {
 // Conversion helpers
 // -------------------------------------------------------------------------
 
-/// Extract suggestion from unsupported_feature parser errors.
-/// These follow the pattern: "'X' is not supported; use Y instead"
+/// Extract suggestion from unsupported_feature and misplaced_default_arm
+/// parser errors. These follow the pattern: "'X' is not supported; use Y instead"
 fn splitSuggestion(message: []const u8) struct { msg: []const u8, suggestion: ?[]const u8 } {
     if (std.mem.indexOf(u8, message, "; ")) |sep| {
         return .{
@@ -86,7 +86,7 @@ fn splitSuggestion(message: []const u8) struct { msg: []const u8, suggestion: ?[
 pub fn fromParseError(err: ParseError, file: []const u8) JsonDiagnostic {
     const code = parserErrorCode(err.kind);
 
-    if (err.kind == .unsupported_feature) {
+    if (err.kind == .unsupported_feature or err.kind == .misplaced_default_arm) {
         const parts = splitSuggestion(err.message);
         return .{
             .code = code,
@@ -1097,6 +1097,21 @@ test "fromParseError: unsupported feature extracts suggestion" {
     try std.testing.expectEqual(@as(u32, 23), diag.line);
     try std.testing.expectEqual(@as(u32, 3), diag.column);
     try std.testing.expectEqualStrings("use Result types for error handling", diag.suggestion.?);
+}
+
+test "fromParseError: a misplaced default arm is ZTS062 with a suggestion" {
+    const err = ParseError{
+        .kind = .misplaced_default_arm,
+        .location = .{ .line = 7, .column = 5, .offset = 60 },
+        .message = "a `default` arm must be the last arm of a match; move it after the `when` arms",
+        .token_text = null,
+        .expected = null,
+    };
+    const diag = fromParseError(err, "handler.ts");
+    try std.testing.expectEqualStrings("ZTS062", diag.code);
+    try std.testing.expectEqualStrings("a `default` arm must be the last arm of a match", diag.message);
+    try std.testing.expectEqualStrings("move it after the `when` arms", diag.suggestion.?);
+    try std.testing.expectEqual(@as(u32, 7), diag.line);
 }
 
 test "fromParseError: expected token uses expected field" {
