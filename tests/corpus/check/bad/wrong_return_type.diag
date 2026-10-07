@@ -1,0 +1,2 @@
+stages: strip,parse,imports,boolean,types
+{"code":"ZTS204","severity":"error","message":"return type does not match declared return type","file":"check/bad/wrong_return_type.ts","line":3,"column":5,"suggestion":"the enclosing function's declared return type is what this value must match; when it comes back from a virtual-module call, wrap it rather than returning it directly","repair_intent":null}

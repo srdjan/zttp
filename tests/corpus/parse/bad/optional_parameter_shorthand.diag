@@ -1,0 +1,2 @@
+stages: strip
+{"code":"ZTS055","severity":"error","message":"optional parameter shorthand is not part of this profile","file":"parse/bad/optional_parameter_shorthand.ts","line":2,"column":20,"suggestion":"replace `name?: T` with `name: T | undefined`","repair_intent":null}

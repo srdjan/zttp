@@ -1,0 +1,2 @@
+stages: strip,parse,imports,boolean,types
+{"code":"ZTS200","severity":"error","message":"type '\"text\"' is not assignable to type 'number'","file":"check/bad/string_assigned_to_number.ts","line":3,"column":5,"suggestion":null,"repair_intent":null}

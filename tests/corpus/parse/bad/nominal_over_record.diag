@@ -1,0 +1,2 @@
+stages: strip
+{"code":"ZTS048","severity":"error","message":"a nominal declaration carries scalar identity only","file":"parse/bad/nominal_over_record.ts","line":2,"column":15,"suggestion":"its base must be `string`, `number`, or `boolean`","repair_intent":null}

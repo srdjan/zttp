@@ -1,0 +1,2 @@
+stages: strip,parse,imports,boolean,types,strict
+{"code":"ZTS622","severity":"error","message":"the collection being iterated is mutated inside the loop","file":"check/bad/loop_mutates_iterated_collection.ts","line":4,"column":5,"suggestion":"iterate a snapshot instead: bind the collection you are reading, and build the mutated one separately","repair_intent":null}

@@ -1,0 +1,2 @@
+stages: strip,parse
+{"code":"ZTS062","severity":"error","message":"a match has at most one `default` arm","file":"parse/bad/match_second_default_arm.ts","line":6,"column":9,"suggestion":"remove this one or merge it into the first","repair_intent":null}

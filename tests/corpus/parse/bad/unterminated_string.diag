@@ -1,0 +1,2 @@
+stages: strip
+{"code":"ZTS008","severity":"error","message":"unterminated string literal","file":"parse/bad/unterminated_string.ts","line":3,"column":41,"suggestion":"close the quote, or write the newline as \\n","repair_intent":null}

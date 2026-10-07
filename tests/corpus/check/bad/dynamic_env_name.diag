@@ -1,0 +1,2 @@
+stages: strip,parse,imports,boolean,types,strict
+{"code":"ZTS602","severity":"error","message":"capability access computes a resource no policy section covers","file":"check/bad/dynamic_env_name.ts","line":6,"column":19,"suggestion":"residual guard env_key requires env.allow; when configured, the operation is guarded rather than proven. Add the section to the policy named by zttp.json, or use a literal key. Rerun `zttp check <handler.ts> --contract`","repair_intent":null}

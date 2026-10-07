@@ -1,0 +1,2 @@
+stages: strip
+{"code":"ZTS042","severity":"error","message":"'as' type assertion is not supported","file":"parse/bad/as_type_assertion.ts","line":3,"column":22,"suggestion":"use type-safe patterns instead","repair_intent":null}

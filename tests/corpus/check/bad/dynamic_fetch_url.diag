@@ -1,0 +1,2 @@
+stages: strip,parse,imports,boolean,types,strict
+{"code":"ZTS602","severity":"error","message":"capability access computes a resource no policy section covers","file":"check/bad/dynamic_fetch_url.ts","line":6,"column":23,"suggestion":"residual guard egress_endpoint requires egress.allow_endpoints and egress.allow_address_scopes; when configured, the operation is guarded rather than proven. Add both to the policy named by zttp.json, or use a literal URL. Rerun `zttp check <handler.ts> --contract`","repair_intent":null}

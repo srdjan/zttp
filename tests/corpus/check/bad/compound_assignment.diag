@@ -1,0 +1,2 @@
+stages: strip,parse,imports,boolean,types,strict
+{"code":"ZTS613","severity":"error","message":"compound assignment is not part of canonical ZigTS","file":"check/bad/compound_assignment.ts","line":4,"column":11,"suggestion":"write the update explicitly: `x = x + 1` instead of `x += 1`","repair_intent":"replace_compound_assign_with_explicit"}

@@ -1,0 +1,2 @@
+stages: strip
+{"code":"ZTS056","severity":"error","message":"default exports are not part of this profile","file":"parse/bad/default_export.ts","line":2,"column":1,"suggestion":"write a named export, for example `export function handler(...) { ... }`","repair_intent":null}

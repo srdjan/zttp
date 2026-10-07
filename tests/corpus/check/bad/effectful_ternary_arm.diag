@@ -1,0 +1,2 @@
+stages: strip,parse,imports,boolean,types,strict
+{"code":"ZTS612","severity":"error","message":"a ?: arm must be a pure value; effectful selection uses match or if","file":"check/bad/effectful_ternary_arm.ts","line":8,"column":26,"suggestion":"bind the effectful call first, or use `match` over the condition for an effectful two-way choice","repair_intent":"replace_effectful_ternary_with_match"}

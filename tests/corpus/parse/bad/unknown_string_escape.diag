@@ -1,0 +1,2 @@
+stages: strip,parse
+{"code":"ZTS013","severity":"error","message":"unknown escape sequence; the escape set is closed to \\n \\r \\t \\b \\f \\v \\0 \\\\ \\' \\\" \\` \\$ \\xNN \\uNNNN and \\u{N..}","file":"parse/bad/unknown_string_escape.ts","line":3,"column":26,"suggestion":null,"repair_intent":null}

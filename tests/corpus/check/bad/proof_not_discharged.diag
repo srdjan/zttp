@@ -1,0 +1,2 @@
+stages: strip,parse,imports,boolean,types,strict,verifier,flow,contract,paths,trace,spec,canonical
+{"code":"ZTS500","severity":"error","message":"declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 3:23 by `Date.now()`)","file":"check/bad/proof_not_discharged.ts","line":2,"column":17,"suggestion":"remove Date.now() / Math.random() / performance.now() or move the call inside a `durable.step`.","repair_intent":null}

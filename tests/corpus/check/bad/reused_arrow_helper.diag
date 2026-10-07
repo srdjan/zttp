@@ -1,0 +1,2 @@
+stages: strip,parse,imports,boolean,types,strict
+{"code":"ZTS608","severity":"error","message":"reused arrow helper should be a named function","file":"check/bad/reused_arrow_helper.ts","line":2,"column":1,"suggestion":"rewrite reusable helpers as `function name(...) { ... }`; keep arrows for callbacks and local one-off values","repair_intent":"replace_arrow_with_function"}

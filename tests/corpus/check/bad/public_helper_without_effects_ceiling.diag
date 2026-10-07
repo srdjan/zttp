@@ -1,0 +1,3 @@
+stages: strip,parse,imports,boolean,types,strict,verifier,flow,contract,paths,trace,spec,canonical
+{"code":"ZTS610","severity":"error","message":"public helper reaches capabilities and should declare Effects<...>","file":"check/bad/public_helper_without_effects_ceiling.ts","line":6,"column":1,"suggestion":"annotate the exported helper's return type with `Effects<T, \"crypto\">`.","repair_intent":null}
+{"code":"ZTS611","severity":"error","message":"public helper participates in declared specs and should declare Proof<...>","file":"check/bad/public_helper_without_effects_ceiling.ts","line":6,"column":1,"suggestion":"annotate the exported helper's return type with `Proof<T, \"total\" | \"read_only\" | \"deterministic\">`.","repair_intent":null}

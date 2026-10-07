@@ -1,0 +1,2 @@
+stages: strip,parse,imports,boolean,types,strict
+{"code":"ZTS624","severity":"error","message":"an absence operator swallows `null` on an operand whose type admits it","file":"check/bad/nullish_on_nullable.ts","line":10,"column":20,"suggestion":"test the value explicitly: `x === null ? fallback : x`, or `x === undefined ? fallback : x`, or take it apart with `match`","repair_intent":"insert_guard_before_line"}

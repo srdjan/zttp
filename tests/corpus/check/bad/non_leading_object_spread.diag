@@ -1,0 +1,2 @@
+stages: strip,parse,imports,boolean,types,strict
+{"code":"ZTS614","severity":"error","message":"object spread must appear before any explicit keys","file":"check/bad/non_leading_object_spread.ts","line":4,"column":34,"suggestion":"reorder so the spread is first: `{...base, x: 1}` instead of `{x: 1, ...base}`. Later keys still override.","repair_intent":null}

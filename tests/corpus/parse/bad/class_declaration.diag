@@ -1,0 +1,2 @@
+stages: strip,parse
+{"code":"ZTS001","severity":"error","message":"'class' is not supported","file":"parse/bad/class_declaration.ts","line":2,"column":1,"suggestion":"use plain objects and functions instead","repair_intent":null}

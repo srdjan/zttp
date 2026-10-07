@@ -63,7 +63,7 @@ Rules live in the checker cluster (`type_checker.zig`, `flow_checker.zig`, `faul
 
 1. Update the corresponding checker and regenerate the rule registry if needed.
 2. Run `./zig-out/bin/zts describe-rule --hash > policy-hash.txt` and commit the new hash.
-3. Add a test case under `tests/verify/` that exercises the diagnostic end-to-end.
+3. Add a case under `tests/corpus/` that trips the diagnostic, with a `.diag` golden, and run `zig build diagnostic-corpus-write` (see `tests/corpus/README.md`). Review the golden against the case's stated intent, then raise `minimum_cases` in `packages/tools/src/diagnostic_corpus_gate.zig`.
 
 ## Code style
 

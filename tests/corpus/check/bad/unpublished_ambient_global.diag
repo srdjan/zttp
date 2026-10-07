@@ -1,0 +1,2 @@
+stages: strip,parse,imports,boolean,types,strict
+{"code":"ZTS629","severity":"error","message":"unpublished ambient global 'globalThis'","file":"check/bad/unpublished_ambient_global.ts","line":3,"column":19,"suggestion":"Import a published virtual-module capability or use an ambient name listed by meta.ambient_names.","repair_intent":null}

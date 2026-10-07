@@ -1,0 +1,2 @@
+stages: strip,parse,imports,boolean,types,strict
+{"code":"ZTS609","severity":"error","message":"exported function-valued const should be an export function declaration","file":"check/bad/exported_arrow_const.ts","line":2,"column":8,"suggestion":"use `export function name(...) { ... }` unless the export is intentionally a first-class function value","repair_intent":"replace_export_arrow_with_function"}

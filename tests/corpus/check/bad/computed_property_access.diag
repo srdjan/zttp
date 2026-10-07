@@ -1,0 +1,2 @@
+stages: strip,parse,imports,boolean,types,strict
+{"code":"ZTS605","severity":"error","message":"dynamic computed property access is not part of strict ZigTS","file":"check/bad/computed_property_access.ts","line":7,"column":18,"suggestion":"use a typed field, a literal key, or validate/narrow the object before indexing","repair_intent":null}

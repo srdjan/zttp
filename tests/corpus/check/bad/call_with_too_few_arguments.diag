@@ -1,0 +1,2 @@
+stages: strip,parse,imports,boolean,types
+{"code":"ZTS202","severity":"error","message":"wrong number of arguments: expected 1, got 0","file":"check/bad/call_with_too_few_arguments.ts","line":7,"column":21,"suggestion":null,"repair_intent":null}

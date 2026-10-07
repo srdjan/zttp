@@ -1,0 +1,2 @@
+stages: strip,parse
+{"code":"ZTS046","severity":"error","message":"identifiers are ASCII: letters, digits, `_` and `$`","file":"parse/bad/non_ascii_identifier.ts","line":3,"column":11,"suggestion":null,"repair_intent":null}

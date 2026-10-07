@@ -1,0 +1,2 @@
+stages: strip
+{"code":"ZTS057","severity":"error","message":"mutable exports are not part of this profile","file":"parse/bad/mutable_top_level_export.ts","line":2,"column":1,"suggestion":"use `export const` for module values and keep reassignment inside a function activation","repair_intent":null}

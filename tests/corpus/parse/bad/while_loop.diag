@@ -1,0 +1,4 @@
+stages: strip,parse
+{"code":"ZTS001","severity":"error","message":"'while' is not supported","file":"parse/bad/while_loop.ts","line":4,"column":5,"suggestion":"use 'for-of' with a finite collection instead","repair_intent":null}
+{"code":"ZTS002","severity":"error","message":"'return' outside of function","file":"parse/bad/while_loop.ts","line":7,"column":5,"suggestion":null,"repair_intent":null}
+{"code":"ZTS002","severity":"error","message":"expected expression","file":"parse/bad/while_loop.ts","line":8,"column":1,"suggestion":null,"repair_intent":null}

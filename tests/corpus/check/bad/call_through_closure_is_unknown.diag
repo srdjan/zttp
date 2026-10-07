@@ -1,0 +1,2 @@
+stages: strip,parse,imports,boolean,types,strict
+{"code":"ZTS600","severity":"error","message":"call result has implicit unknown type","file":"check/bad/call_through_closure_is_unknown.ts","line":6,"column":27,"suggestion":"add a return type annotation, use a modeled virtual module, or narrow with a type guard/assert","repair_intent":null}

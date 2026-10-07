@@ -1,0 +1,2 @@
+stages: strip,parse,imports,boolean,types,strict
+{"code":"ZTS621","severity":"error","message":"a conditional expression may not appear as an arm of another conditional expression","file":"check/bad/chained_ternary.ts","line":5,"column":20,"suggestion":"use `match` over one scrutinee, or an if/else chain feeding a named function","repair_intent":"replace_chained_ternary_with_match"}

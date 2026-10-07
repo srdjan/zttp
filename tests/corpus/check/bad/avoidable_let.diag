@@ -1,0 +1,2 @@
+stages: strip,parse,imports,boolean,types,strict
+{"code":"ZTS604","severity":"error","message":"let binding is never reassigned","file":"check/bad/avoidable_let.ts","line":3,"column":5,"suggestion":"use const for bindings that do not change","repair_intent":"replace_let_with_const"}

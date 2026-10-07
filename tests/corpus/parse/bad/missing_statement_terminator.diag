@@ -1,0 +1,2 @@
+stages: strip,parse
+{"code":"ZTS047","severity":"error","message":"statement is not terminated; this profile has no automatic semicolon insertion","file":"parse/bad/missing_statement_terminator.ts","line":3,"column":19,"suggestion":null,"repair_intent":null}

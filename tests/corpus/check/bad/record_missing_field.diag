@@ -1,0 +1,2 @@
+stages: strip,parse,imports,boolean,types
+{"code":"ZTS200","severity":"error","message":"type '{ x: 1 }' is not assignable to type '{ x: number; y: number }'","file":"check/bad/record_missing_field.ts","line":5,"column":5,"suggestion":null,"repair_intent":null}

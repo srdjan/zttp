@@ -1,0 +1,2 @@
+stages: strip,parse,imports,boolean,types,strict
+{"code":"ZTS620","severity":"error","message":"comparing a boolean against a boolean literal is not canonical ZigTS","file":"check/bad/redundant_bool_compare.ts","line":4,"column":15,"suggestion":"drop the comparison and use the boolean directly: `x`","repair_intent":"drop_redundant_bool_compare"}

@@ -1,0 +1,2 @@
+stages: strip,parse,imports
+{"code":"ZTS206","severity":"error","message":"unknown virtual module 'zttp:no-such-module'","file":"parse/bad/unknown_virtual_module.ts","line":2,"column":1,"suggestion":"Use a specifier published by meta.module_catalog.","repair_intent":null}

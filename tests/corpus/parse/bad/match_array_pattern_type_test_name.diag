@@ -1,0 +1,2 @@
+stages: strip,parse
+{"code":"ZTS001","severity":"error","message":"`string` below the top level of a pattern is not a type test","file":"parse/bad/match_array_pattern_type_test_name.ts","line":5,"column":15,"suggestion":"nested type tests are not supported, so bind the field and match it in a nested `match`, or use a top-level type test (`when string:`)","repair_intent":null}

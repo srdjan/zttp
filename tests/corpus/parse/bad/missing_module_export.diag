@@ -1,0 +1,2 @@
+stages: strip,parse,imports
+{"code":"ZTS207","severity":"error","message":"module 'zttp:env' does not export 'noSuchExport'","file":"parse/bad/missing_module_export.ts","line":2,"column":1,"suggestion":"Use an export published for this module by meta.module_catalog.","repair_intent":null}

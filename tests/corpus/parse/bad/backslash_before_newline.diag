@@ -1,0 +1,2 @@
+stages: strip,parse
+{"code":"ZTS045","severity":"error","message":"a string may not continue across a line; join the lines, or write the newline as \\n","file":"parse/bad/backslash_before_newline.ts","line":3,"column":15,"suggestion":null,"repair_intent":null}

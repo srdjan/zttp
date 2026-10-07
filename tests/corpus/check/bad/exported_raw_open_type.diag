@@ -1,0 +1,3 @@
+stages: strip,parse,imports,boolean,types,strict
+{"code":"ZTS061","severity":"error","message":"exported function parameter type `object` exposes raw `object`","file":"check/bad/exported_raw_open_type.ts","line":2,"column":23,"suggestion":"declare a nominal or structural alias and name it in the exported signature","repair_intent":"declare_boundary_type"}
+{"code":"ZTS061","severity":"error","message":"exported function return type `object` exposes raw `object`","file":"check/bad/exported_raw_open_type.ts","line":2,"column":22,"suggestion":"declare a nominal or structural alias and name it in the exported signature","repair_intent":"declare_boundary_type"}

@@ -1,0 +1,2 @@
+stages: strip
+{"code":"ZTS050","severity":"error","message":"`type` is not a declaration form in this profile","file":"parse/bad/type_alias_declaration.ts","line":2,"column":1,"suggestion":"write `structural Name = ...;`","repair_intent":null}

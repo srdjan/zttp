@@ -1,0 +1,2 @@
+stages: strip
+{"code":"ZTS060","severity":"error","message":"`void` is not a type spelling in this profile","file":"parse/bad/void_type_spelling.ts","line":2,"column":27,"suggestion":"write `undefined`","repair_intent":null}

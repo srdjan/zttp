@@ -1,0 +1,3 @@
+stages: strip
+{"code":"ZTS041","severity":"error","message":"'any' type is not supported","file":"parse/bad/any_type_annotation.ts","line":3,"column":14,"suggestion":"use specific types (string, number, object) or union types instead","repair_intent":null}
+{"code":"ZTS041","severity":"error","message":"'any' type is not supported","file":"parse/bad/any_type_annotation.ts","line":3,"column":14,"suggestion":"use specific types (string, number, object) or union types instead","repair_intent":null}

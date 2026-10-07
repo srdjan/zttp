@@ -1,0 +1,2 @@
+stages: strip,parse
+{"code":"ZTS012","severity":"error","message":"hexadecimal literal has no digits after `0x`","file":"parse/bad/hex_literal_without_digits.ts","line":3,"column":15,"suggestion":null,"repair_intent":null}

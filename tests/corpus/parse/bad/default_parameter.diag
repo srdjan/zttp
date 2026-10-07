@@ -1,0 +1,2 @@
+stages: strip
+{"code":"ZTS054","severity":"error","message":"default parameters are not part of this profile","file":"parse/bad/default_parameter.ts","line":2,"column":29,"suggestion":"replace `name: T = value` with `name: T | undefined`, then resolve `const resolved = name ?? value;` at the start of the body","repair_intent":null}

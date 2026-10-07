@@ -1,0 +1,2 @@
+stages: strip,parse,imports,boolean,types,strict,verifier,flow,contract,paths,trace,spec,canonical
+{"code":"ZTS306","severity":"warning","message":"imported binding is never used","file":"check/bad/unused_import.ts","line":2,"column":10,"suggestion":"remove the unused import, or prefix with '_' to suppress this warning","repair_intent":null}

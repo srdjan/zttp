@@ -1,0 +1,2 @@
+stages: strip,parse
+{"code":"ZTS012","severity":"error","message":"legacy octal literals are not supported; write `0o755` for octal, or drop the leading zero for decimal","file":"parse/bad/legacy_octal_literal.ts","line":3,"column":18,"suggestion":null,"repair_intent":null}

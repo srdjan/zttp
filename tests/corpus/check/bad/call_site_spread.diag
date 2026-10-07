@@ -1,0 +1,2 @@
+stages: strip,parse,imports,boolean,types,strict
+{"code":"ZTS616","severity":"error","message":"spread arguments are not part of canonical ZigTS","file":"check/bad/call_site_spread.ts","line":8,"column":22,"suggestion":"pass positional arguments or widen the helper signature to accept the array directly","repair_intent":"widen_signature_drop_spread"}

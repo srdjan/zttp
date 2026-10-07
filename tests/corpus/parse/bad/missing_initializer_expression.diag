@@ -1,0 +1,2 @@
+stages: strip,parse
+{"code":"ZTS002","severity":"error","message":"expected expression","file":"parse/bad/missing_initializer_expression.ts","line":3,"column":15,"suggestion":null,"repair_intent":null}

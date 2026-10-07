@@ -1,0 +1,2 @@
+stages: strip
+{"code":"ZTS058","severity":"error","message":"`Array<T>` is not a type spelling in this profile","file":"parse/bad/array_generic_spelling.ts","line":3,"column":15,"suggestion":"write `T[]`","repair_intent":null}

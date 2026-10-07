@@ -912,7 +912,9 @@ current proof, guard, and invariant rules.
 ## Running Tests
 
 ```bash
-bash tests/verify/run_tests.sh
+zig build test-diagnostic-corpus
 ```
 
-The test suite verifies expected diagnostics from handler files in `tests/verify/`.
+The golden diagnostic corpus in `tests/corpus/` pins the diagnostics and the
+analysis stages for each handler file. `zig build test` runs it. The format is
+in `tests/corpus/README.md`.

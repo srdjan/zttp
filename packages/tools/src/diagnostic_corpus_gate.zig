@@ -37,7 +37,7 @@ const zts = @import("zts");
 /// The number of cases committed under `tests/corpus`. The gate fails below
 /// it, so deleting a case fails. Raise it in the commit that adds cases, to
 /// the count the gate prints. Never lower it to make a deletion pass.
-pub const minimum_cases: usize = 4;
+pub const minimum_cases: usize = 107;
 
 const corpus_root = "tests/corpus";
 const max_file_bytes = 1024 * 1024;
@@ -421,6 +421,9 @@ fn printReport(report: *const Report, options: Options) void {
         "diagnostic corpus: {d} case(s) found, {d} run, {d} failure(s), floor {d}{s}\n",
         .{ report.cases_found, report.cases_run, report.failures.items.len, options.floor, if (options.write) " (golden write mode)" else "" },
     );
+    if (options.filter) |text| {
+        std.debug.print("diagnostic corpus: FILTERED run for \"{s}\": {d} of {d} case(s), not a verdict on the corpus\n", .{ text, report.cases_run, report.cases_found });
+    }
 }
 
 fn usage() error{InvalidArguments} {

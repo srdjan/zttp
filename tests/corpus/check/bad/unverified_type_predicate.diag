@@ -1,0 +1,2 @@
+stages: strip,parse,imports,boolean,types
+{"code":"ZTS211","severity":"error","message":"type predicate 'isBig' is not verified by its body","file":"check/bad/unverified_type_predicate.ts","line":2,"column":1,"suggestion":"Return one admitted narrowing test over the named parameter, combined with &&, || or !.","repair_intent":null}

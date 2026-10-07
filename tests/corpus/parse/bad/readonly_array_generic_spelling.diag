@@ -1,0 +1,2 @@
+stages: strip
+{"code":"ZTS059","severity":"error","message":"`ReadonlyArray<T>` is not a type spelling in this profile","file":"parse/bad/readonly_array_generic_spelling.ts","line":3,"column":15,"suggestion":"write `readonly T[]`","repair_intent":null}

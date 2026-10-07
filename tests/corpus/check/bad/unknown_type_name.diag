@@ -1,0 +1,2 @@
+stages: strip,parse,imports,boolean,types
+{"code":"ZTS200","severity":"error","message":"type '1' is not assignable to type 'Missing'","file":"check/bad/unknown_type_name.ts","line":3,"column":5,"suggestion":null,"repair_intent":null}
