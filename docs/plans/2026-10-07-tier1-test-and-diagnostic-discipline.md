@@ -30,22 +30,22 @@ those defects come first. The order is:
 
 ## 2. Binding constraints
 
-- **C1 (hashes that pin replay).** Every one of the 19 DeepSeek traces pins
-  an apply-receipt digest (`simulator/runner.zig:368-380`). The receipt holds
-  `policy_hash`, `grammarHash()`, `semanticsHash()`, and
-  `diagnosticCatalogHash()` (`change_set_receipt.zig:75-81`). A change to any
-  of these four hashes breaks replay of all 19 traces. A new diagnostic kind
-  in any checker moves `diagnosticCatalogHash`. A new `rule_registry` row
-  moves `policy_hash`, which `meta` also shows to the model
-  (`agent_protocol.zig:789,913`). No offline tool re-stamps receipts. The
-  precedent is a DeepSeek re-record after each new code (`0ce1d45d`,
-  `d037e696`). Rules:
-  - Each unit records the four hashes before and after. A unit that is not
-    listed in section 5 as a hash mover must leave all four unchanged.
-  - Hash-moving units are batched. The re-record happens once, after the last
-    of them, and only with owner approval (T5). Until then, a failing
-    `test-expert-app` is an expected state that the unit's commit message
-    states, not a defect to fix by other means.
+- **C1 (what replay checks).** Corrected 2026-10-07 after U0. The committed
+  corpus replay in `test-expert-app` compares model-request transcript
+  digests through `simulator/model_client.zig`. It does not compare the
+  apply-receipt digests that the 19 DeepSeek traces also hold: the
+  receipt-checking `Runner` (`simulator/runner.zig:368-380`) runs only at
+  promotion time and in unit tests with synthetic fixtures. U0.4 moved
+  `diagnosticCatalogHash`, and `test-expert-app` still replayed 19 of 19.
+  Replay breaks only when something the model sees changes: `policy_hash` and
+  `grammarHash()` in the `meta` output (`agent_protocol.zig:789-792,913-915`),
+  or the text, position, or count of a diagnostic that a recorded turn
+  produced (C3). Rules:
+  - Each unit records the four hashes (policy, diagnostic catalog, grammar,
+    semantics) before and after, and names any that moved.
+  - A unit that moves `policy_hash` or `grammarHash()` is a replay mover. It
+    stops and reports before commit. T5 covers one batched re-record for
+    such units.
 - **C2 (corpus identity).** Do not edit codegen prompts or the `seed_files`
   of codegen cases. Defect-seed edits do not move the codegen identity, but
   they move the stand-in pin `content_hash` (`standin/range.zig:14`, hashed at
@@ -400,14 +400,10 @@ time that the new gates added to `zig build test`, and the four C1 hashes.
 
 ## 5. Hash movers
 
-These units move `diagnosticCatalogHash` or `grammarHash` and break replay
-of the 19 DeepSeek traces until a re-record (C1):
-
-- U0.4, if no existing parser code fits.
-- U0.5, if T4 is (a).
-- U1.2 (the redundant-arm kind).
-
-All other units must leave the four hashes unchanged.
+U0.4 moved `diagnosticCatalogHash` (ZTS062). U1.2 will move it again (the
+redundant-arm kind). Neither move breaks replay (C1). No planned unit moves
+`policy_hash` or `grammarHash()`. A DeepSeek re-record under T5 is needed only
+if a unit changes what a recorded turn shows the model.
 
 ## 6. Decisions for the owner
 
