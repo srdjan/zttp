@@ -4335,6 +4335,35 @@ test "End-to-end: a match binding is stored at every depth of the pattern" {
     }.check);
 }
 
+test "End-to-end: a nested empty array or record pattern is still a test" {
+    // Spec 5.5: a nested `[]` matches an array of length 0 and a nested `{}`
+    // matches a record. Codegen used to drop both without a test, so the arm
+    // matched whatever the field held, present or not.
+    const source =
+        \\let full = { v: [1, 2] };
+        \\let empty = { v: [] };
+        \\let absent = {};
+        \\let e1 = match (full) { when { v: [] }: "empty" default: "other" };
+        \\let e2 = match (empty) { when { v: [] }: "empty" default: "other" };
+        \\let e3 = match (absent) { when { v: [] }: "empty" default: "other" };
+        \\let inner = [[1]];
+        \\let e4 = match (inner) { when [[]]: "empty" default: "other" };
+        \\let rec = { w: { k: 1 } };
+        \\let r1 = match (rec) { when { w: {} }: "record" default: "other" };
+        \\let r2 = match (absent) { when { w: {} }: "record" default: "other" };
+    ;
+    try runMatchProgram(source, struct {
+        fn check(ctx: *context.Context) anyerror!void {
+            try expectGlobalString(ctx, "e1", "other");
+            try expectGlobalString(ctx, "e2", "empty");
+            try expectGlobalString(ctx, "e3", "other");
+            try expectGlobalString(ctx, "e4", "other");
+            try expectGlobalString(ctx, "r1", "record");
+            try expectGlobalString(ctx, "r2", "other");
+        }
+    }.check);
+}
+
 test "End-to-end: computed compound assignment evaluates key once (object)" {
     // Regression: `obj[k()] += v` double-evaluated the key expression - once for
     // the read, once for the store - running k()'s side effect twice. The

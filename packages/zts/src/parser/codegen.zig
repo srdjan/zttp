@@ -2165,24 +2165,10 @@ pub const CodeGen = struct {
 
         const pattern_tag = self.ir.getTag(pattern_node) orelse return;
         switch (pattern_tag) {
-            .match_pattern => {
-                const nested = self.ir.getMatchPattern(pattern_node) orelse return;
-                if (nested.props_count == 0) {
-                    try self.emit(.drop);
-                    self.popStack(1);
-                    return;
-                }
-                try self.emitGuardedNestedTest(pattern_node, fail_label, .object);
-            },
-            .array_pattern => {
-                const nested = self.ir.getArray(pattern_node) orelse return;
-                if (nested.elements_count == 0) {
-                    try self.emit(.drop);
-                    self.popStack(1);
-                    return;
-                }
-                try self.emitGuardedNestedTest(pattern_node, fail_label, .array);
-            },
+            // An empty nested `{}` or `[]` is a test like any other: a value
+            // must be there for it to match, and the array must be empty.
+            .match_pattern => try self.emitGuardedNestedTest(pattern_node, fail_label, .object),
+            .array_pattern => try self.emitGuardedNestedTest(pattern_node, fail_label, .array),
             else => {
                 try self.emitNode(pattern_node);
                 try self.emit(.strict_eq);
