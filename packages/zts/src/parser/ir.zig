@@ -681,35 +681,32 @@ pub const ConstantPool = struct {
 
     pub fn addString(self: *ConstantPool, str: []const u8) !u16 {
         // O(1) hash lookup for deduplication
-        const result = try self.string_index.getOrPut(self.allocator, str);
-        if (result.found_existing) {
-            return result.value_ptr.*;
-        }
-        // New string - deep-copy so ConstantPool owns the memory and deinit
-        // can free it unconditionally (callers may pass slices into source text
-        // or freshly-allocated unescape buffers; ownership is not transferred).
+        if (self.string_index.get(str)) |idx| return idx;
+        // A constant is addressed by a u16, so the 65537th distinct string has no
+        // index. Refuse it rather than wrap: a wrapped index would name another
+        // constant. The key goes into the map only after the string is stored,
+        // so a failure leaves no entry without a value behind.
+        const idx = std.math.cast(u16, self.strings.items.len) orelse return error.TooManyConstants;
+        // Deep-copy so ConstantPool owns the memory and deinit can free it
+        // unconditionally (callers may pass slices into source text or
+        // freshly-allocated unescape buffers; ownership is not transferred).
         const owned = try self.allocator.dupe(u8, str);
         errdefer self.allocator.free(owned);
-        result.key_ptr.* = owned;
-        const idx: u16 = @intCast(self.strings.items.len);
         try self.strings.append(self.allocator, owned);
-        result.value_ptr.* = idx;
+        errdefer _ = self.strings.pop();
+        try self.string_index.put(self.allocator, owned, idx);
         return idx;
     }
 
     pub fn addFloat(self: *ConstantPool, f: f64) !u16 {
         // Use bit representation as key for stable hashing
         const bits: u64 = @bitCast(f);
-
-        // O(1) hash lookup for deduplication
-        const result = try self.float_index.getOrPut(self.allocator, bits);
-        if (result.found_existing) {
-            return result.value_ptr.*;
-        }
-        // New float - add to array and update hash map
-        const idx: u16 = @intCast(self.floats.items.len);
+        if (self.float_index.get(bits)) |idx| return idx;
+        // Same u16 address space and the same refusal as `addString`.
+        const idx = std.math.cast(u16, self.floats.items.len) orelse return error.TooManyConstants;
         try self.floats.append(self.allocator, f);
-        result.value_ptr.* = idx;
+        errdefer _ = self.floats.pop();
+        try self.float_index.put(self.allocator, bits, idx);
         return idx;
     }
 
@@ -2374,4 +2371,23 @@ test "IrView IRStore basic operations" {
     // Test validity
     try std.testing.expect(view.isValid(int_idx));
     try std.testing.expect(!view.isValid(null_node));
+}
+
+test "ConstantPool refuses the 65537th distinct constant and keeps deduplicating" {
+    var pool = ConstantPool.init(std.testing.allocator);
+    defer pool.deinit();
+
+    var buf: [16]u8 = undefined;
+    var i: usize = 0;
+    while (i <= std.math.maxInt(u16)) : (i += 1) {
+        const text = try std.fmt.bufPrint(&buf, "s{d}", .{i});
+        try std.testing.expectEqual(@as(u16, @intCast(i)), try pool.addString(text));
+        try std.testing.expectEqual(@as(u16, @intCast(i)), try pool.addFloat(@floatFromInt(i)));
+    }
+    try std.testing.expectError(error.TooManyConstants, pool.addString("one more"));
+    try std.testing.expectError(error.TooManyConstants, pool.addFloat(-1.5));
+    // A refused constant leaves no entry behind, and existing ones still resolve.
+    try std.testing.expectEqual(@as(?u16, null), pool.string_index.get("one more"));
+    try std.testing.expectEqual(@as(u16, 7), try pool.addString("s7"));
+    try std.testing.expectEqual(@as(u16, 7), try pool.addFloat(7));
 }

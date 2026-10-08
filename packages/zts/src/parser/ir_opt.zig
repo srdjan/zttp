@@ -136,7 +136,11 @@ pub const IROptimizer = struct {
         if (op == .neg and operand_tag == .lit_float) {
             const float_idx: u16 = @truncate(self.ir_store.getData(opt_operand).a);
             if (self.constants.getFloat(float_idx)) |f| {
-                const neg_idx = try self.constants.addFloat(-f);
+                // A full constant pool leaves the negation unfolded: same meaning.
+                const neg_idx = self.constants.addFloat(-f) catch |err| switch (err) {
+                    error.TooManyConstants => return idx,
+                    error.OutOfMemory => return error.OutOfMemory,
+                };
                 const loc = self.ir_store.getLoc(idx);
                 const result = try self.ir_store.addLitFloat(loc, neg_idx);
                 try self.replacements.put(self.allocator, idx, result);
@@ -222,7 +226,11 @@ pub const IROptimizer = struct {
                     };
 
                     if (result_val) |val| {
-                        const result_idx = try self.constants.addFloat(val);
+                        // A full constant pool leaves the expression unfolded.
+                        const result_idx = self.constants.addFloat(val) catch |err| switch (err) {
+                            error.TooManyConstants => return idx,
+                            error.OutOfMemory => return error.OutOfMemory,
+                        };
                         const result = try self.ir_store.addLitFloat(loc, result_idx);
                         try self.replacements.put(self.allocator, idx, result);
                         self.stats.float_folds += 1;

@@ -252,10 +252,7 @@ pub const Parser = struct {
             if (self.parseStatement()) |stmt| {
                 try stmts.append(self.allocator, stmt);
             } else |err| {
-                // An out-of-memory error inside a statement records no parse
-                // error, so the recovery path below would skip the statement and
-                // return a program with part of the source gone. Fail instead.
-                if (err == error.OutOfMemory) return err;
+                try self.recordUnreportedStatementError(err);
                 // An error the list could not record is an out-of-memory, not a
                 // syntax error. Report it as one: `hasErrors` counts it, so the
                 // loop stops, but `err` would name the wrong cause. Without this
@@ -1332,6 +1329,29 @@ pub const Parser = struct {
         });
     }
 
+    /// Statement recovery skips a statement that failed to parse. That is safe
+    /// only when the failure recorded a diagnostic, because the recorded error is
+    /// what fails the parse at the end. An out-of-memory error, a constant pool
+    /// past its u16 address space, or any other error that recorded nothing
+    /// would let recovery drop the statement and accept a program with part of
+    /// the source gone.
+    fn recordUnreportedStatementError(self: *Parser, err: anyerror) anyerror!void {
+        if (err == error.OutOfMemory) return err;
+        if (err == error.TooManyConstants) {
+            // The error passes through block recovery and then program
+            // recovery; report it once.
+            for (self.errors.getErrors()) |recorded| {
+                if (recorded.kind == .too_many_constants) return err;
+            }
+            self.errors.addErrorAt(.too_many_constants, self.current, "the program has more than 65536 distinct string or number constants");
+            return err;
+        }
+        if (self.errors.outOfMemory()) return error.OutOfMemory;
+        if (!self.errors.hasErrors()) {
+            self.errors.addErrorAt(.expected_statement, self.current, "this statement could not be parsed");
+        }
+    }
+
     fn parseBlock(self: *Parser) anyerror!NodeIndex {
         const loc = self.current.location();
         try self.expect(.lbrace, "'{'");
@@ -1346,7 +1366,8 @@ pub const Parser = struct {
         while (!self.check(.rbrace) and !self.check(.eof)) {
             if (self.parseStatement()) |stmt| {
                 try stmts.append(stmts_alloc, stmt);
-            } else |_| {
+            } else |err| {
+                try self.recordUnreportedStatementError(err);
                 const before = self.current.location().offset;
                 self.synchronize();
                 // `synchronize` returns without consuming anything when
@@ -5381,6 +5402,68 @@ test "an out-of-memory error inside a statement fails the parse" {
         "let y = 2;",
         "function f(a) { return a; }",
         "const o = { k: 1 };",
+    };
+    for (sources) |source| {
+        try std.testing.checkAllAllocationFailures(std.testing.allocator, Sweep.parseWholeProgram, .{source});
+    }
+}
+
+// Regression: a float table index was narrowed with @intCast, so an array of
+// 70000 distinct floats panicked `zts check` (found by the U2.3 corpus ratchet,
+// which had to allowlist ZTS031 as a defect). The pool now refuses the
+// constant past its u16 address space and the parser records ZTS031.
+test "a program with more distinct constants than a u16 indexes fails the parse with too_many_constants" {
+    const allocator = std.testing.allocator;
+    var source: std.ArrayList(u8) = .empty;
+    defer source.deinit(allocator);
+    try source.appendSlice(allocator, "const xs = [");
+    for (0..70_000) |index| try source.print(allocator, "{d}.5, ", .{index});
+    try source.appendSlice(allocator, "0.5];");
+
+    var parser = try Parser.init(allocator, source.items);
+    defer parser.deinit();
+    try std.testing.expectError(error.TooManyConstants, parser.parse());
+    var found = false;
+    for (parser.getErrors()) |recorded| {
+        if (recorded.kind == .too_many_constants) found = true;
+    }
+    try std.testing.expect(found);
+}
+
+// Regression: block recovery discarded every statement error, so the same
+// constant overflow inside a function body dropped the statement, the parse
+// succeeded, and the type checker later failed on the missing binding with no
+// diagnostic. Block and program recovery now share one rule for an error that
+// recorded nothing.
+test "a constant overflow inside a function body fails the parse once with too_many_constants" {
+    const allocator = std.testing.allocator;
+    var source: std.ArrayList(u8) = .empty;
+    defer source.deinit(allocator);
+    try source.appendSlice(allocator, "function f() { const xs = [");
+    for (0..70_000) |index| try source.print(allocator, "{d}.5, ", .{index});
+    try source.appendSlice(allocator, "0.5]; return xs; }");
+
+    var parser = try Parser.init(allocator, source.items);
+    defer parser.deinit();
+    try std.testing.expectError(error.TooManyConstants, parser.parse());
+    var found: usize = 0;
+    for (parser.getErrors()) |recorded| {
+        if (recorded.kind == .too_many_constants) found += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), found);
+}
+
+test "an out-of-memory error inside a function body fails the parse" {
+    const Sweep = struct {
+        fn parseWholeProgram(allocator: std.mem.Allocator, source: []const u8) !void {
+            var parser = try Parser.init(allocator, source);
+            defer parser.deinit();
+            _ = try parser.parse();
+        }
+    };
+    const sources = [_][]const u8{
+        "function f() { const x = 1; const y = \"s\"; return x; }",
+        "function f(a) { if (a) { const o = { k: 1.5 }; return o; } return a; }",
     };
     for (sources) |source| {
         try std.testing.checkAllAllocationFailures(std.testing.allocator, Sweep.parseWholeProgram, .{source});

@@ -89,7 +89,7 @@ ZTS011 DEFECT: a block comment with no closing `*/` is refused with no diagnosti
 ZTS016 DEFECT: `1 = 2;` inside a handler with a narrow capsule passes with exit 0; invalid_assignment_target has no producer
 ZTS018 DEFECT: `function pair(a: number, a: number): number { return a; }` passes with exit 0; duplicate_parameter has no producer
 ZTS019 DEFECT: `const a = 1; const a = 2;` in one scope passes the redeclaration (only ZTS305 "declared variable is never used" appears); duplicate_binding has no producer
-ZTS031 DEFECT: an array literal of 70000 distinct floats crashes the check with "panic: integer does not fit in destination type" at parser/ir.zig:710 (addFloat narrows the float table index to u16); too_many_constants has no producer
+ZTS031 needs more than 65536 distinct string or number constants, a source of about 600 KB that the corpus does not carry; the parser tests "a program with more distinct constants than a u16 indexes fails the parse with too_many_constants" and "a constant overflow inside a function body fails the parse once with too_many_constants" pin the diagnostic
 ZTS039 DEFECT: two `export function f(): number` declarations in one file pass the duplicate (only ZTS061 appears, once per export); duplicate_export has no producer
 
 # --- Other producers and modes the default check does not run --------------
