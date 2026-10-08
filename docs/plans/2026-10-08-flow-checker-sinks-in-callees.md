@@ -1,9 +1,9 @@
 # Plan: flow-checker sinks in callees, captured values, and stores
 
-Status: draft for owner approval, 2026-10-08, revision 2. Source: section 7 of the
+Status: accepted 2026-10-08, revision 2. Source: section 7 of the
 [boolean and arity plan](2026-10-08-boolean-and-arity-checks.md), decision
 P1 (a): this plan is written and fixed before that plan. Code references are
-to local `main` at `f63415a8`. This plan does not authorize implementation.
+to local `main` at `f63415a8`. The owner approved implementation on 2026-10-08 (section 6).
 
 ## 1. Summary
 
@@ -336,6 +336,12 @@ failing on the old code), unit tests for the new paths, unfiltered
 `test-expert-app -j1`, and the four hashes. Final: `bash scripts/verify.sh`.
 
 ## 6. Decisions for the owner
+
+Answered 2026-10-08: Q1 (a), Q2 (a), Q3 (a), Q5 (a), Q6 (a). Q4 does not
+apply, because Q3 is (a). The owner approved this plan. Sonnet subagents
+implement the units in section 5 order, one commit per unit. The boolean and
+arity plan follows. V and F8 join one batched DeepSeek re-record, which is
+paid, so the main session confirms with the owner before it starts.
 
 **Q1 (`durable_approval.ts` and `examples/durable/approval.ts`).** F2 makes
 the `.unknown` label of `waitSignal`, read through a closure, reach the
