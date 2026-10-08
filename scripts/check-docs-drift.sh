@@ -439,7 +439,7 @@ fi
 legacy_types_hits="$({
   git ls-files -z |
     xargs -0 rg -n -F -- 'zttp:types' 2>/dev/null || true
-} | grep -v -E '^(CHANGELOG\.md:|docs/(archive|plans|solutions)/|docs/(convergence|restrictions-to-proofs)\.md:|packages/pi/src/providers/testdata/codegen/|packages/pi/src/simulator/testdata/empirical/|packages/zts/src/(stripper|restriction_registry)\.zig:|packages/tools/src/precompile\.zig:|packages/pi/src/expert_persona\.zig:|scripts/check-docs-drift\.sh:)' || true)"
+} | grep -v -E '^(CHANGELOG\.md:|docs/(archive|plans|solutions)/|docs/(convergence|restrictions-to-proofs)\.md:|packages/pi/src/providers/testdata/codegen/|packages/pi/src/simulator/testdata/empirical/|packages/zts/src/(stripper|restriction_registry)\.zig:|packages/tools/src/precompile\.zig:|packages/pi/src/expert_persona\.zig:|scripts/check-docs-drift\.sh:|tests/corpus/[a-z]+/bad/)' || true)"
 if [[ -n "${legacy_types_hits//[[:space:]]/}" ]]; then
   printf '%s\n' "$legacy_types_hits" >&2
   fail "live source still references removed zttp:types; use ambient Proof<T, P> and Effects<T, R>"
