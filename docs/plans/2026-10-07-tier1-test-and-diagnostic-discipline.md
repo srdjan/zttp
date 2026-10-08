@@ -494,11 +494,41 @@ decision before it gets a plan.
    builds (U5.3 observation). JSON mode gives ZTS000.
 6. **ZTS044 says "type syntax nests too deeply"** for 600 nested
    parenthesised expressions, which are not types.
-7. **ZTS404 and ZTS405 are unreachable on the default path**: a computed URL
-   is refused first as ZTS602 (R2 observation). The R2 code ratchet (U2.3)
-   must give them an allowlist row with this mechanism, or a case that
-   reaches them.
+7. **ZTS404 and ZTS405 are unreachable through a computed URL**: a computed
+   URL is refused first as ZTS602 (R2 observation). U2.3 corrected the
+   conclusion. Both codes are reachable through a secret or credential in a
+   request header, and `secret_in_egress_headers` and
+   `credential_in_egress_headers` in `tests/corpus/check/bad/` now pin them.
+   Those two cases also pin a second code each: ZTS406 reports a header-only
+   secret as flowing into the request body, and ZTS407 is reported twice
+   beside ZTS405.
 8. **`const x: Missing = 1`** is reported as an assignability error (ZTS200),
    not as an unknown type name.
 9. **The bytecode decoder accepts trailing bytes** after a valid function;
    the later span walker refuses them (U3.2 observation).
+10. **The boolean checker does not report inside function bodies** (U2.3
+    observation). `if (n)` with `n: number`, `n && ok`, `!n`, `s - 1`, and
+    `true + 1` all pass `zts check` when they sit inside a function, handler
+    or helper. At module scope they report ZTS100 to ZTS106. The
+    `bool_*` cases in `tests/corpus/check/bad/` therefore use module-scope
+    statements. `docs/sound-mode.md` says conditions in `if`, `assert` and `?:`
+    must be boolean.
+11. **`String(p.z)` passes for a record `p` with no `z`** (U2.3 observation).
+    `const z = p.z;` reports ZTS201, but the same read as a call argument
+    reports nothing, because inference diagnostics are suppressed there.
+12. **Catalog codes with no producer.** The corpus allowlist records them. The
+    parser never constructs `unterminated_regex`, `expected_statement`,
+    `expected_identifier`, `invalid_assignment_target`, `invalid_destructuring`,
+    `duplicate_parameter`, `duplicate_binding`, `undeclared_variable`,
+    `const_without_initializer`, `invalid_break`, `invalid_continue`,
+    `invalid_return`, `invalid_yield`, `invalid_super`, `too_many_*`,
+    `jump_too_large`, `invalid_import`, `invalid_export`, `duplicate_export`,
+    `unexpected_character`, `expected_property_name`, `invalid_unicode_escape`,
+    or `expected_expression`. Most of those sources are refused under ZTS001,
+    ZTS002 or ZTS003. Five pass or crash, and their rows start with `DEFECT:`:
+    `1 = 2;` (ZTS016), a duplicate parameter (ZTS018), a duplicate `const`
+    (ZTS019), a duplicate `export function` (ZTS039), and 70000 distinct
+    float constants, which panic at `parser/ir.zig:710` (ZTS031).
+13. **An unterminated block comment is refused with no diagnostic** (ZTS011).
+    `zts check --json` prints `{"success":false,"diagnostics":[]}` and logs
+    only `TypeScript strip error: error.UnterminatedComment`.

@@ -66,3 +66,44 @@ lower it to make a deletion pass.
 The check runs with no policy, no declaration, no SQL schema, and no system
 file, so the POL rules and the declaration rules are outside this corpus. It
 reads neither `zttp.json` nor `.zttp/witnesses`, and it writes no witness.
+
+## The code ratchet
+
+The gate also iterates every distinct code in the diagnostic catalog
+(`zts.DiagnosticCatalog.entries()` in `packages/zts/src/diagnostic_catalog.zig`).
+The catalog is the universe, not `rule_registry`. Each code needs one of two
+things:
+
+- a `bad` case whose diagnostics carry that code in their `code` field. The
+  gate compares the field. It never searches a message, because ZTS codes
+  appear inside other messages.
+- a row in `scripts/corpus-uncovered.allow`, with a reason that states the
+  mechanism that stops the default check from producing the code.
+
+The gate prints one line with the three counts, and they sum to the universe:
+
+```
+code ratchet over the diagnostic catalog: N code(s) = C covered by a bad case + A allowlisted (D DEFECT) + U uncovered (floor F)
+```
+
+The gate fails on each of these. A filtered run skips the ratchet.
+
+| Failure | Meaning |
+|---|---|
+| `uncovered_code` | a catalog code with neither a case nor a row |
+| `stale_allow_row` | a row for a code that a `bad` case now reports; delete the row |
+| `unknown_code_row` | a row for a code that is not in the catalog |
+| `duplicate_row` | two rows for one code |
+| `empty_reason` | a row with no reason |
+| `weak_reason` | a reason under 12 characters, or a placeholder such as "not written yet" |
+| `universe_below_floor` | the catalog holds fewer codes than `minimum_universe` |
+
+The list only ratchets down. "Not written yet" is not a mechanism: write the
+case. The gate supplies no policy, no SQL schema, no system file, no
+declaration, and its source is a string, so a code that needs one of those
+carries a row. A reason that starts with `DEFECT:` records a catalog code that
+does not fire when it should. The row keeps the gap visible and leaves when the
+checker is fixed and a case proves the code.
+
+When a row's reason is no longer true, for example because a producer now exists
+for the code, write the case and delete the row in the same commit.

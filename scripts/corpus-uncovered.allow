@@ -1,0 +1,112 @@
+# Diagnostic codes that no `bad` case in tests/corpus reports, and why.
+#
+# THE UNIVERSE OF THIS FILE IS THE DIAGNOSTIC CATALOG
+# (`zts.DiagnosticCatalog.entries()` in packages/zts/src/diagnostic_catalog.zig),
+# NOT `rule_registry`. A code the catalog names and the policy rule registry
+# does not is still in scope here, and the reverse is out of scope.
+#
+# The gate is packages/tools/src/diagnostic_corpus_gate.zig, which runs under
+# `zig build test-diagnostic-corpus`. It iterates every distinct catalog code.
+# Each code needs one of:
+#
+#   - a `bad` case whose golden holds a diagnostic with that code in its
+#     `code` field (a field match, never a substring, because ZTS codes appear
+#     inside other messages); or
+#   - one row below.
+#
+# The gate fails on each of these, and each has its own probe in the gate's
+# unit tests:
+#
+#   uncovered_code     a catalog code with neither a case nor a row
+#   stale_allow_row    a row for a code that a `bad` case now reports
+#   unknown_code_row   a row for a code that is not in the catalog
+#   duplicate_row      two rows for one code
+#   empty_reason       a row with no reason
+#   weak_reason        a reason under 12 characters, or a placeholder such as
+#                      "not written yet", "todo" or "tbd"
+#   universe_below_floor  the catalog holds fewer codes than the floor
+#
+# The list only ratchets down. A row is a claim that the DEFAULT in-process
+# check cannot produce the code: the gate supplies no policy, no SQL schema, no
+# system file and no declaration, and its source is a string, not a file. The
+# reason states that MECHANISM. "Not written yet" is not a mechanism: write the
+# case.
+#
+# A reason that starts with "DEFECT:" records a documented diagnostic that does
+# not fire when it should. The check passes a program that the documentation
+# says it refuses. Such a row is not an exemption. It keeps the gap visible, and
+# it goes away when the checker is fixed and a case proves the code.
+#
+# Format: one row per line, `CODE reason...`. Lines that start with `#` and
+# blank lines are ignored.
+
+# --- Driver codes: emitted outside the in-process check call ---------------
+
+ZTS000 I/O failure: needs a missing or unreadable file, which an in-process source string cannot express; only the CLI drivers emit it
+ZTS052 needs a .js, .jsx or unknown extension; the corpus admits only .ts and .tsx files, and the gate refuses any other file as unexpected_file
+ZTS700 emitted by the CLI and agent-protocol drivers when zttp:sql is used without --sql-schema; the in-process check takes no schema option and never reaches that code
+
+# --- Parser kinds with no producer on the default path ---------------------
+#
+# The parser never constructs these ErrorKind variants (no construction site
+# in packages/). The observed code for the source that would trip each one is
+# named in the row. Deleting a variant, or giving it a producer and a case, are
+# the two ways a row leaves.
+
+ZTS004 no producer for expected_expression; `const x = 1 + ;` is reported as ZTS002
+ZTS005 no producer for expected_statement; a stray `)` at the top level is reported as ZTS002
+ZTS006 no producer for expected_identifier; `const 1 = 2;` is reported as ZTS003
+ZTS010 no producer for unterminated_regex; regex literals are unsupported and `const r = /abc;` is reported as ZTS002
+ZTS014 no producer for invalid_unicode_escape; `"\u{zz}"` is reported as ZTS013
+ZTS015 no producer for expected_property_name; `{ : 1 }` is reported as ZTS002 and ZTS003
+ZTS017 no producer for invalid_destructuring; `const { a } = req;` is reported as ZTS001 (declaration destructuring is unsupported)
+ZTS020 no producer for undeclared_variable; a read of an undeclared name is reported as ZTS629 (unpublished ambient global)
+ZTS021 no producer for const_without_initializer; `const a: number;` is reported as ZTS002
+ZTS022 no producer for invalid_break; `break;` outside a loop is reported as ZTS002
+ZTS023 no producer for invalid_continue; `continue;` outside a loop is reported as ZTS002
+ZTS024 no producer for invalid_return; a top-level `return 1;` is reported as ZTS002
+ZTS025 no producer for invalid_yield; `yield 1` is reported as ZTS001 (unsupported feature)
+ZTS027 no producer for invalid_super; `super.x` is reported as ZTS001 (unsupported feature)
+ZTS028 no producer for too_many_parameters; a function with 301 parameters is reported as ZTS002 "too many parameters"
+ZTS029 no producer for too_many_locals; 300 local constants in one function are reported as ZTS002 "too many local variables"
+ZTS030 no producer for too_many_upvalues; the parser has no construction site for the kind
+ZTS032 no producer for jump_too_large; the parser has no construction site for the kind
+ZTS037 no producer for invalid_import; `import foo;` is reported as ZTS002 (default imports are unsupported)
+ZTS038 no producer for invalid_export; `export 1;` is reported as ZTS002
+ZTS040 no producer for unexpected_character; `#` and `\` are reported as ZTS047 and `~` as ZTS002
+
+# --- Parser kinds produced only by the expression profile ------------------
+
+ZTS007 unexpected_eof is constructed only by parseExpressionOnly and parseExpressionPrefix (the legacy JSON.parse profile); a full program that ends early is reported as ZTS003
+ZTS009 unterminated_template is constructed only under the expression profile; in a full program an unterminated template literal is reported as ZTS047
+
+# --- DEFECT rows: a catalog code that does not fire when it should ---------
+#
+# Each row names a source the language should refuse. The check passes it, or
+# refuses it without a diagnostic. Observed 2026-10-07 with `zts check --json`.
+
+ZTS011 DEFECT: a block comment with no closing `*/` is refused with no diagnostic: `{"success":false,"diagnostics":[]}` and only the log line "TypeScript strip error: error.UnterminatedComment"
+ZTS016 DEFECT: `1 = 2;` inside a handler with a narrow capsule passes with exit 0; invalid_assignment_target has no producer
+ZTS018 DEFECT: `function pair(a: number, a: number): number { return a; }` passes with exit 0; duplicate_parameter has no producer
+ZTS019 DEFECT: `const a = 1; const a = 2;` in one scope passes the redeclaration (only ZTS305 "declared variable is never used" appears); duplicate_binding has no producer
+ZTS031 DEFECT: an array literal of 70000 distinct floats crashes the check with "panic: integer does not fit in destination type" at parser/ir.zig:710 (addFloat narrows the float table index to u16); too_many_constants has no producer
+ZTS039 DEFECT: two `export function f(): number` declarations in one file pass the duplicate (only ZTS061 appears, once per export); duplicate_export has no producer
+
+# --- Other producers and modes the default check does not run --------------
+
+ZTS508 emitted only under the opt-in docs mode; the default check never enables it (same claim as scripts/unseeded-rules.allow)
+POL001 needs a capability policy source; the gate supplies none, and the policy stage does not run
+POL003 needs a capability policy source; the gate supplies none, and the policy stage does not run
+POL005 needs a capability policy source; the gate supplies none, and the policy stage does not run
+POL007 needs a capability policy source; the gate supplies none, and the policy stage does not run
+ZTS750 produced by the semantics-conformance producer (spec-check and module-spec-render), which `check` never runs
+ZTS751 produced by the semantics-conformance producer (spec-check and module-spec-render), which `check` never runs
+ZTS752 produced by the semantics-conformance producer (spec-check and module-spec-render), which `check` never runs
+ZTS753 produced by the semantics-conformance producer (spec-check and module-spec-render), which `check` never runs
+ZTS754 produced by the semantics-conformance producer (spec-check and module-spec-render), which `check` never runs
+ZTS755 produced by the semantics-conformance producer (spec-check and module-spec-render), which `check` never runs
+ZTS756 produced by the semantics-conformance producer (spec-check and module-spec-render), which `check` never runs
+ZTS757 produced by the semantics-conformance producer (spec-check and module-spec-render), which `check` never runs
+ZTS758 produced by the semantics-conformance producer (spec-check and module-spec-render), which `check` never runs
+ZTS759 produced by the semantics-conformance producer (spec-check and module-spec-render), which `check` never runs
+ZTS760 produced by the semantics-conformance producer (spec-check and module-spec-render), which `check` never runs

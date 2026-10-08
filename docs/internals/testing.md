@@ -169,6 +169,16 @@ after `--` filters both steps by path substring, and the aggregate `test` and
 `scripts/verify.sh` pass none. The gate's own tests probe every failure kind
 through a scratch corpus. The format is in `tests/corpus/README.md`.
 
+The same gate runs a code ratchet over `zts.DiagnosticCatalog.entries()`. Each
+distinct catalog code needs a `bad` case whose diagnostic carries it in the
+`code` field, or a row in `scripts/corpus-uncovered.allow` that states the
+mechanism that stops the default check from producing it. A row for a covered
+code, for a code outside the catalog, a duplicate row, and a row with a missing
+or placeholder reason all fail, and so does a catalog smaller than
+`minimum_universe`. A `DEFECT:` row records a code that does not fire when it
+should. The universe is the catalog, not `rule_registry`. The ratchet pins
+exact output and does not replace `test-standin`, which checks veto outcomes.
+
 The docs drift and link gates run here and only here. Neither Run step is
 cached, so `zig build test` always executes both scripts, and `verify.sh` and
 CI deliberately do not invoke them a second time.
