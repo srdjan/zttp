@@ -22,6 +22,7 @@ index when a plan starts, closes, or moves to the archive.
 | [M4 T2: tool catalog and schema subset](2026-09-23-m4-t2-tool-catalog-design.md) | Implemented 2026-09-23 | Owner accepted the design and answered its four questions |
 | [M4 T1b: connect and handshake deadline](2026-09-23-m4-t1b-connect-deadline-design.md) | Implemented 2026-09-23 | Owner accepted the design and answered its three questions |
 | [M3: provable-set reach measurement](2026-09-21-0955-feat-provable-set-reach-plan.md) | Complete, 2026-09-21 | User approved pilot and full DeepSeek runs; [8/8 reached](../provable-reach.md#first-full-measurement) |
+| [Flow-checker sinks in callees](2026-10-08-flow-checker-sinks-in-callees.md) | Draft revision 2, 2026-10-08; reviewed by Fable and Codex astra; decisions Q1 to Q6 open; first per P1 of the boolean and arity plan | None until the owner approves the plan |
 | [Boolean checks and call arity](2026-10-08-boolean-and-arity-checks.md) | Accepted revision 2, 2026-10-08; P1 to P5 answered (a); waits for the flow-checker plan (P1) | Owner approved on 2026-10-08 |
 | [Tier 1: test and diagnostic discipline](2026-10-07-tier1-test-and-diagnostic-discipline.md) | Complete 2026-10-08; section 8 lists 15 findings for owner decision | Owner approved implementation in plan order on 2026-10-07 |
 | [Beni study: retrofit items](2026-10-07-beni-retrofit-study.md) | Research, 2026-10-07; 18 candidate items in four tiers | Owner chose Tier 1 (R1 to R5) for planning on 2026-10-07; no implementation authority |
