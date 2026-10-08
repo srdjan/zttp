@@ -6,6 +6,7 @@ index when a plan starts, closes, or moves to the archive.
 
 | Document | Role and status | Work authority |
 |---|---|---|
+| [Minimal design audit](2026-10-08-minimal-design-audit.md) | Research complete; reductions, compatibility questions, and acceptance checks | User requested simplification discovery; implementation scope remains unselected |
 | [M5: release contract for agent handlers](2026-09-27-m5-agent-handler-release-contract.md) | Accepted 2026-09-27 with decisions 1 to 5; A1 to A4 complete, A5 next | Owner accepted the contract on 2026-09-27 |
 | [M5 A1: agent entry, admission, and grants](2026-09-27-m5-a1-agent-entry-design.md) | Implemented 2026-09-27; U1 to U4 complete | Owner accepted the design and answered its eight questions |
 | [M5 A2: turn state, recorder, and cap](2026-09-27-m5-a2-turn-state-design.md) | Implemented 2026-09-27; U1 to U3 complete | Owner accepted the design and answered its eight questions |
