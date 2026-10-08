@@ -252,6 +252,10 @@ pub const Parser = struct {
             if (self.parseStatement()) |stmt| {
                 try stmts.append(self.allocator, stmt);
             } else |err| {
+                // An out-of-memory error inside a statement records no parse
+                // error, so the recovery path below would skip the statement and
+                // return a program with part of the source gone. Fail instead.
+                if (err == error.OutOfMemory) return err;
                 // An error the list could not record is an out-of-memory, not a
                 // syntax error. Report it as one: `hasErrors` counts it, so the
                 // loop stops, but `err` would name the wrong cause. Without this
@@ -5293,4 +5297,28 @@ test "parser construction reports allocation failure instead of panicking" {
     // reached `catch unreachable` and was undefined behavior.
     var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
     try std.testing.expectError(error.OutOfMemory, Parser.init(failing.allocator(), "const x = 1;"));
+}
+
+// Regression: an out-of-memory error inside a statement recorded no parse
+// error, so `parse` took its recovery path, skipped to the next statement, and
+// returned a program that was missing the statement. The parse succeeded with
+// part of the source gone. Found by the allocation sweep in
+// tests/frontend_fuzz.zig on "const x = 1;".
+test "an out-of-memory error inside a statement fails the parse" {
+    const Sweep = struct {
+        fn parseWholeProgram(allocator: std.mem.Allocator, source: []const u8) !void {
+            var parser = try Parser.init(allocator, source);
+            defer parser.deinit();
+            _ = try parser.parse();
+        }
+    };
+    const sources = [_][]const u8{
+        "const x = 1;",
+        "let y = 2;",
+        "function f(a) { return a; }",
+        "const o = { k: 1 };",
+    };
+    for (sources) |source| {
+        try std.testing.checkAllAllocationFailures(std.testing.allocator, Sweep.parseWholeProgram, .{source});
+    }
 }
