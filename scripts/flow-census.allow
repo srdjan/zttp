@@ -121,9 +121,6 @@ user_input__egress_url__parallel_cb fail_open F2
 user_input__response_html__nested_arrow_capture fail_open F2
 user_input__response_html__nested_fn_capture fail_open F2
 
-# F3: 1 row(s)
-x13_helper_clean_then_secret_return_only over_refusal F3
-
 # F4: 2 row(s)
 user_input__response_html__hof_callback over_refusal F4
 user_input__response_html__twice_secret_first over_refusal F4

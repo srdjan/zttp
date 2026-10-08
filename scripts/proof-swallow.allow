@@ -279,6 +279,7 @@ packages/zts/src/flow_checker.zig scanImports catch-poison@2
 packages/zts/src/flow_checker.zig trackResultBinding catch-poison@2
 packages/zts/src/flow_checker.zig walkStmt catch-poison@2
 packages/zts/src/flow_checker.zig walkStmt catch-poison@3
+packages/zts/src/flow_checker.zig walkStmt catch-poison@4
 
 # The extra verifier catches record poison; verify checks it before it returns.
 packages/zts/src/handler_verifier.zig scanImports catch-poison@2

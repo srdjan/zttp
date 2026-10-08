@@ -1952,7 +1952,10 @@ pub const FlowChecker = struct {
                     if (init_origin != null) self.member_object_depth += 1;
                     const labels = self.inferLabels(vd.init);
                     if (init_origin != null) self.member_object_depth -= 1;
-                    if (!labels.isEmpty()) {
+                    // A declaration is a fresh binding, so it overwrites even with
+                    // the empty set: a callee walked once per call site must not
+                    // keep the labels an earlier call bound here (plan unit F3).
+                    {
                         const key = packBindingKey(vd.binding.scope_id, vd.binding.slot);
                         self.binding_labels.put(self.allocator, key, labels) catch self.markAllocationFailure();
                     }
@@ -1969,6 +1972,10 @@ pub const FlowChecker = struct {
                     // not only on bare-statement calls. checkExprSinks self-guards
                     // to a no-op for any initializer that is not such a call.
                     self.checkExprSinks(vd.init);
+                } else {
+                    // `let y;` starts empty on every walk for the same reason.
+                    const key = packBindingKey(vd.binding.scope_id, vd.binding.slot);
+                    self.binding_labels.put(self.allocator, key, LabelSet.empty) catch self.markAllocationFailure();
                 }
             },
 
@@ -6458,6 +6465,50 @@ test "FlowChecker reports unvalidated input built into Response.html inside a he
     const clean_report = try runFlowDiagnostics(std.testing.allocator, clean, .unvalidated_input_in_egress, &buf);
     try std.testing.expectEqual(@as(usize, 0), clean_report.count);
     try std.testing.expect(clean_report.properties.injection_safe);
+}
+
+test "FlowChecker re-walks a callee without the labels an earlier call bound" {
+    // `id` is walked first with a secret, then with a literal. Its `y` must
+    // not keep the secret into the second walk, or `shout` logs a clean value
+    // as a secret.
+    const source =
+        \\import { env } from "zttp:env";
+        \\function id(x) {
+        \\  const y = x;
+        \\  return y;
+        \\}
+        \\function shout(x) {
+        \\  console.log(x);
+        \\  return 1;
+        \\}
+        \\function handler(req) {
+        \\  const a = id(env("SECRET_KEY"));
+        \\  const b = id("hello");
+        \\  const n = shout(b);
+        \\  return Response.json({ n: n });
+        \\}
+    ;
+    try std.testing.expect((try runFlowProperties(std.testing.allocator, source)).no_secret_leakage);
+
+    // The control: the secret through the same path is still refused.
+    const leaking =
+        \\import { env } from "zttp:env";
+        \\function id(x) {
+        \\  const y = x;
+        \\  return y;
+        \\}
+        \\function shout(x) {
+        \\  console.log(x);
+        \\  return 1;
+        \\}
+        \\function handler(req) {
+        \\  const b = id("hello");
+        \\  const a = id(env("SECRET_KEY"));
+        \\  const n = shout(a);
+        \\  return Response.json({ n: n });
+        \\}
+    ;
+    try std.testing.expect(!(try runFlowProperties(std.testing.allocator, leaking)).no_secret_leakage);
 }
 
 test "FlowChecker fails closed on a discarded method of a record a function returned" {
