@@ -158,7 +158,8 @@ The audits and gates: `test-capability-audit`, `test-module-boundary`,
 `test-residual-guards-drift`, `test-invariant-drift`, `test-proof-swallow`,
 `test-zts-layering`, `test-module-governance`,
 `test-runtime-purity`, `test-contract-golden`, `test-expert-golden`,
-`test-docs-drift`, `test-doc-links`, `test-diagnostic-corpus`, `test-convergence-emitter`,
+`test-docs-drift`, `test-doc-links`, `test-diagnostic-corpus`, `test-flow-census`,
+`test-convergence-emitter`,
 `test-production-branch-metric`, `test-comptime-cli-matrix`,
 `test-generic-intersection-cli-matrix`.
 
@@ -192,6 +193,20 @@ GitHub runners' counter source has not been read yet. Every run prints one line
 that names the source. The budget is for a Debug build of the gate. The
 measurement table, the headroom, and the thread caveat are in
 `tests/corpus/README.md`.
+
+`test-flow-census` measures the flow checker's leak properties over a generated
+census of probes, in `packages/tools/src/flow_census_probes.zig`. Each probe puts
+one labelled value (secret, credential, user input, or clean) on a path to one
+sink, through one kind of callee, and claims one property. The expected verdict
+of each (label, sink) pair is an explicit table derived from the documented
+promise, not from the checker, so a fail-open in the handler body cannot make a
+whole column read as held. A probe that misses its expected verdict needs one
+row in `scripts/flow-census.allow` that names the outcome and the plan unit that
+closes it, and a row for a probe that now matches fails, so the list only
+shrinks. The gate fails on a probe with no verdict, asserts a floor on the
+probes in total, per group, and per (label, sink) column, prints the counts on
+every run, and probes every failure kind through a small synthetic census.
+`-- --list` prints every probe, and `-- --dump DIR` writes the probes to `DIR`.
 
 The docs drift and link gates run here and only here. Neither Run step is
 cached, so `zig build test` always executes both scripts, and `verify.sh` and
