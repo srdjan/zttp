@@ -3060,6 +3060,19 @@ const Stripper = struct {
         return self.source[start..self.pos];
     }
 
+    /// Step over a backslash and the byte after it. An escaped newline is a line
+    /// continuation, and it still ends the physical line: the next byte sits at
+    /// column 1 of the next line, so a later diagnostic names the right place.
+    fn skipEscape(self: *Self) void {
+        if (self.source[self.pos + 1] == '\n') {
+            self.line += 1;
+            self.col = 1;
+        } else {
+            self.col += 2;
+        }
+        self.pos += 2;
+    }
+
     fn skipString(self: *Self, quote: u8) StripError!void {
         self.pos += 1;
         self.col += 1;
@@ -3074,8 +3087,7 @@ const Stripper = struct {
                     return;
                 }
                 if (c == '\\' and self.pos + 1 < self.source.len) {
-                    self.pos += 2;
-                    self.col += 2;
+                    self.skipEscape();
                     continue;
                 }
                 if (c == '$' and self.pos + 1 < self.source.len and self.source[self.pos + 1] == '{') {
@@ -3094,8 +3106,7 @@ const Stripper = struct {
                             continue;
                         }
                         if (ic == '\\' and self.pos + 1 < self.source.len) {
-                            self.pos += 2;
-                            self.col += 2;
+                            self.skipEscape();
                             continue;
                         }
                         if (ic == '{') try self.increaseNestingDepth(&depth, 0, 0, 0);
@@ -3128,8 +3139,7 @@ const Stripper = struct {
                     return;
                 }
                 if (c == '\\' and self.pos + 1 < self.source.len) {
-                    self.pos += 2;
-                    self.col += 2;
+                    self.skipEscape();
                     continue;
                 }
                 if (c == '\n') {
@@ -5047,4 +5057,50 @@ test "an allocation failure while blanking or recording a diagnostic is not swal
         }
     }
     try std.testing.expect(failed_runs > 0);
+}
+
+test "a backslash before a newline inside a string still counts the line" {
+    // Found by the pipeline mutation test (U3.4). The three escape skips in
+    // `skipString` stepped over a `\` and the newline after it as two plain
+    // columns, so every stripper diagnostic after the string reported a line
+    // one too low for each such continuation.
+    const cases = [_]struct {
+        source: []const u8,
+        expected_error: StripError,
+        kind: StripDiagnosticKind,
+        line: u32,
+        column: u32,
+    }{
+        // Regular string, then an unterminated one on line 3.
+        .{
+            .source = "const s = \"a\\\nb\";\nconst t = \"x\n",
+            .expected_error = StripError.UnterminatedString,
+            .kind = .unterminated_string,
+            .line = 3,
+            .column = 13,
+        },
+        // Template literal, then an `any` annotation on line 3.
+        .{
+            .source = "const s = `a\\\nb`;\nlet x: any = 1;\n",
+            .expected_error = StripError.UnsupportedAnyType,
+            .kind = .any_type,
+            .line = 3,
+            .column = 8,
+        },
+        // Escape inside a template interpolation, then the same annotation.
+        .{
+            .source = "const s = `${ 1 \\\n }`;\nlet x: any = 1;\n",
+            .expected_error = StripError.UnsupportedAnyType,
+            .kind = .any_type,
+            .line = 3,
+            .column = 8,
+        },
+    };
+    for (cases) |case| {
+        var diag: ?StripDiagnostic = null;
+        try std.testing.expectError(case.expected_error, strip(std.testing.allocator, case.source, .{ .diagnostic_out = &diag }));
+        try std.testing.expectEqual(case.kind, diag.?.kind);
+        try std.testing.expectEqual(case.line, diag.?.line);
+        try std.testing.expectEqual(case.column, diag.?.column);
+    }
 }
