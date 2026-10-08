@@ -57,16 +57,6 @@
 # no verdict at all (no_verdict) is never allowlisted: fix the probe.
 #
 
-# F1b: 4 row(s)
-# These four are the accepted cost of failing closed. A chain of nine helpers and a
-# nine-parameter helper stay unresolved by design (the summary caps), and an
-# unresolved call clears every property a sink decides, including the one that
-# the user_input probe claims. No later unit resolves them.
-user_input__log__chain9 over_refusal F1b
-user_input__log__param9 over_refusal F1b
-user_input__response__chain9 over_refusal F1b
-user_input__response__param9 over_refusal F1b
-
 # F2: 62 row(s)
 credential__egress_headers__durable_run_cb fail_open F2
 credential__egress_headers__nested_arrow_capture fail_open F2

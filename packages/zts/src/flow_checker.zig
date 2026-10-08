@@ -2687,13 +2687,12 @@ pub const FlowChecker = struct {
         // union.
         const labels = self.mergeArgLabels(self.inferLabels(call_data.callee), call_data);
         if (self.isUnresolvedFunctionValueCallee(call_data.callee)) {
-            // A method of a parameter that no call site bound has a body the
-            // walk cannot enter, so a discarded result must clear what a sink
-            // decides as well. Other unresolved members stay `.unknown` only:
-            // a method on a value of unknown type is usually a builtin
-            // (`receipt.json()`), and clearing for each would cost every
-            // proof that touches one.
-            if (self.isUnboundParameterMethodCall(call_data.callee)) return self.unresolvedCallLabels(labels);
+            // A user method the walk cannot resolve has a body it cannot
+            // enter, so a discarded result must clear what a sink decides as
+            // well. A builtin method name on a value of unknown type
+            // (`receipt.json()`) stays `.unknown` only: clearing for each
+            // would cost every proof that touches one.
+            if (self.isUnresolvedUserMethodCall(call_data.callee)) return self.unresolvedCallLabels(labels);
             var unknown_labels = labels;
             unknown_labels.unknown = true;
             return unknown_labels;
@@ -2701,20 +2700,20 @@ pub const FlowChecker = struct {
         return labels;
     }
 
-    /// True for `o.run(...)` inside a summarized callee, where `o` is a parameter
-    /// of that callee, the method is not a builtin one, and the record literal
-    /// that the call site passed was not resolved (`param_values` has no entry,
-    /// or `literalObjectMethodLabels` would have answered).
-    fn isUnboundParameterMethodCall(self: *const FlowChecker, callee: NodeIndex) bool {
-        if (self.summary_depth == 0) return false;
+    /// True for `o.run(...)` that the walk could not resolve, where the method
+    /// name is not a builtin one and `o` is not the request: a parameter no
+    /// call site bound, a record a function returned, or any other value whose
+    /// methods are user closures. A record literal the walk can see was
+    /// resolved by `literalObjectMethodLabels` before this point.
+    fn isUnresolvedUserMethodCall(self: *const FlowChecker, callee: NodeIndex) bool {
         const tag = self.ir_view.getTag(callee) orelse return false;
         if (tag != .member_access and tag != .optional_chain) return false;
         const member = self.ir_view.getMember(callee) orelse return false;
-        const root = self.assignmentRootBinding(callee) orelse return false;
-        if (root.kind != .argument) return false;
-        const key = packBindingKey(root.scope_id, root.slot);
-        if (self.req_binding_key) |req_key| {
-            if (req_key == key) return false;
+        if (self.assignmentRootBinding(callee)) |root| {
+            const key = packBindingKey(root.scope_id, root.slot);
+            if (self.req_binding_key) |req_key| {
+                if (req_key == key) return false;
+            }
         }
         const method = self.resolveAtomName(member.property) orelse return true;
         return !isBuiltinMethodName(method);
@@ -6459,6 +6458,48 @@ test "FlowChecker reports unvalidated input built into Response.html inside a he
     const clean_report = try runFlowDiagnostics(std.testing.allocator, clean, .unvalidated_input_in_egress, &buf);
     try std.testing.expectEqual(@as(usize, 0), clean_report.count);
     try std.testing.expect(clean_report.properties.injection_safe);
+}
+
+test "FlowChecker fails closed on a discarded method of a record a function returned" {
+    // Bound to the response, the result carries the argument's secret, so the
+    // leak is refused there already.
+    const bound =
+        \\import { env } from "zttp:env";
+        \\function makeOps() {
+        \\  return { run: (s) => { console.log(s); return 1; } };
+        \\}
+        \\function handler(req) {
+        \\  const ops = makeOps();
+        \\  const n = ops.run(env("SECRET_KEY"));
+        \\  return Response.json({ n: n });
+        \\}
+    ;
+    try std.testing.expect(!(try runFlowProperties(std.testing.allocator, bound)).no_secret_leakage);
+
+    // Discarded, the closure's log is the only leak, and the walk cannot
+    // resolve `run` through the returned record, so the property is cleared.
+    const discarded =
+        \\import { env } from "zttp:env";
+        \\function makeOps() {
+        \\  return { run: (s) => { console.log(s); return 1; } };
+        \\}
+        \\function handler(req) {
+        \\  const ops = makeOps();
+        \\  ops.run(env("SECRET_KEY"));
+        \\  return Response.json({ ok: true });
+        \\}
+    ;
+    try std.testing.expect(!(try runFlowProperties(std.testing.allocator, discarded)).no_secret_leakage);
+
+    // A builtin method name on a value of unknown type keeps the property.
+    const builtin =
+        \\function handler(req) {
+        \\  const parts = req.url.split("/");
+        \\  parts.join("-");
+        \\  return Response.json({ ok: true });
+        \\}
+    ;
+    try std.testing.expect((try runFlowProperties(std.testing.allocator, builtin)).no_secret_leakage);
 }
 
 test "FlowChecker fails closed on a discarded call beyond the summary depth cap" {

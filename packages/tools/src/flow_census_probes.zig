@@ -57,6 +57,10 @@ pub const Expect = enum {
     /// The labelled value never reaches a sink, or the sink is not one by
     /// policy. The claimed property holds.
     hold,
+    /// The labelled value never reaches a sink, but the call lies past a
+    /// summary cap, so the checker cannot walk the body and can only fail
+    /// closed. A held or an unproven property is correct; a refusal is not.
+    hold_or_unprove,
 };
 
 /// Which part of the census a probe belongs to. The counts are per group.
@@ -181,6 +185,9 @@ fn expectationFor(label: Label, sink: Sink, spec: Spec) Cell {
     }
     if (spec.unresolved and base.expect == .refuse) {
         return .{ .expect = .refuse_or_unprove, .reason = "the call cannot be resolved by the summary, so it can only fail closed: refuse or leave the property unproven" };
+    }
+    if (spec.past_cap and base.expect == .hold) {
+        return .{ .expect = .hold_or_unprove, .reason = "the call lies past a summary cap, so the checker cannot walk it and clears every property a sink decides; an unproven property is the accepted cost of failing closed" };
     }
     return base;
 }
@@ -747,6 +754,9 @@ const Spec = struct {
     discards_result: bool = false,
     /// The call cannot be resolved by the summary.
     unresolved: bool = false,
+    /// The call lies past a summary cap (depth or parameter count), so it
+    /// stays unresolved by design and clears the properties a sink decides.
+    past_cap: bool = false,
 };
 
 const specs = [_]Spec{
@@ -772,8 +782,8 @@ const specs = [_]Spec{
     .{ .name = "module_const_handler", .group = .extended, .labels = &env_labels, .template = t_module_const_handler },
     .{ .name = "module_const_helper", .group = .extended, .labels = &env_labels, .template = t_module_const_helper },
     .{ .name = "module_const_closure", .group = .extended, .labels = &env_labels, .template = t_module_const_closure },
-    .{ .name = "chain9", .group = .extended, .labels = &leaking_labels, .template = t_chain9, .unresolved = true },
-    .{ .name = "param9", .group = .extended, .labels = &leaking_labels, .template = t_param9, .unresolved = true },
+    .{ .name = "chain9", .group = .extended, .labels = &leaking_labels, .template = t_chain9, .unresolved = true, .past_cap = true },
+    .{ .name = "param9", .group = .extended, .labels = &leaking_labels, .template = t_param9, .unresolved = true, .past_cap = true },
     .{ .name = "apply_cb", .group = .extended, .labels = &leaking_labels, .template = t_apply_cb, .unresolved = true },
     .{ .name = "apply_record", .group = .extended, .labels = &leaking_labels, .template = t_apply_record, .unresolved = true },
     .{ .name = "recursion_taint", .group = .extended, .template = t_recursion_taint },
@@ -1202,6 +1212,24 @@ const hand_written = [_]Hand{
         \\}
         ,
     },
+    .{
+        .name = "x22_returned_record_method_discarded",
+        .property = .no_secret_leakage,
+        .expect = .refuse_or_unprove,
+        .reason = "a closure in a record that a function returns logs the secret; the walk cannot resolve the method, so it can only fail closed",
+        .body =
+        \\structural Ops = { run: (s: string) => number };
+        \\function makeOps(): Ops {
+        \\  return { run: (s: string): number => { logInfo(s, { n: 1 }); return 1; } };
+        \\}
+        \\function handler(req: Request): Claim<Response> {
+        \\  const t = env("API_TOKEN") ?? "";
+        \\  const ops = makeOps();
+        \\  ops.run(t);
+        \\  return Response.json({ ok: 1 });
+        \\}
+        ,
+    },
 };
 
 /// Every probe of the census, in a fixed order. All memory comes from `a`.
@@ -1255,7 +1283,7 @@ pub fn generate(a: std.mem.Allocator) ![]Probe {
 /// Never lower one to make a deletion pass.
 pub const minimum_matrix: usize = 504;
 pub const minimum_extended: usize = 246;
-pub const minimum_hand: usize = 21;
+pub const minimum_hand: usize = 22;
 /// The fewest probes a (label, sink) column holds: the 18 research kinds.
 pub const minimum_per_column: usize = 18;
 

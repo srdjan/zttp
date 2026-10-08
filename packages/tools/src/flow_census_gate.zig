@@ -14,8 +14,8 @@
 //!   * `held`: the claimed property is true;
 //!   * `no_verdict`: the probe did not reach a flow verdict. The gate reads
 //!     that as a failure, never as a refusal of the leak.
-//! The expected verdict is `refuse`, `refuse_or_unprove`, or `hold`. The
-//! outcome of the comparison is `match`, `fail_open` (expected a refusal, the
+//! The expected verdict is `refuse`, `refuse_or_unprove`, `hold`, or
+//! `hold_or_unprove`. The outcome of the comparison is `match`, `fail_open` (expected a refusal, the
 //! property held), `over_refusal` (expected a hold, got a refusal or an
 //! unproven property), `weak` (expected a refusal, got only an unproven
 //! property), or `no_verdict`.
@@ -297,16 +297,16 @@ pub fn outcomeOf(expect: Expect, observed: Observed) Outcome {
     return switch (observed) {
         .no_verdict => .no_verdict,
         .held => switch (expect) {
-            .hold => .match,
+            .hold, .hold_or_unprove => .match,
             .refuse, .refuse_or_unprove => .fail_open,
         },
         .refused => switch (expect) {
             .refuse, .refuse_or_unprove => .match,
-            .hold => .over_refusal,
+            .hold, .hold_or_unprove => .over_refusal,
         },
         .unproven => switch (expect) {
             .refuse => .weak,
-            .refuse_or_unprove => .match,
+            .refuse_or_unprove, .hold_or_unprove => .match,
             .hold => .over_refusal,
         },
     };
@@ -443,7 +443,7 @@ pub fn runCensus(
         if (outcome == .match) {
             switch (probe.expect) {
                 .refuse, .refuse_or_unprove => report.matched_refuse[@intFromEnum(probe.group)] += 1,
-                .hold => report.matched_hold[@intFromEnum(probe.group)] += 1,
+                .hold, .hold_or_unprove => report.matched_hold[@intFromEnum(probe.group)] += 1,
             }
         }
     }
@@ -943,7 +943,7 @@ test "every row outcome that is not a match needs a mechanism, and a row cannot 
 }
 
 test "the outcome of every expected and observed pair is the one written here" {
-    // The census of the comparison: three expectations by four observations.
+    // The census of the comparison: four expectations by four observations.
     const table = [_]struct { Expect, Observed, Outcome }{
         .{ .refuse, .refused, .match },
         .{ .refuse, .unproven, .weak },
@@ -957,6 +957,10 @@ test "the outcome of every expected and observed pair is the one written here" {
         .{ .hold, .unproven, .over_refusal },
         .{ .hold, .held, .match },
         .{ .hold, .no_verdict, .no_verdict },
+        .{ .hold_or_unprove, .refused, .over_refusal },
+        .{ .hold_or_unprove, .unproven, .match },
+        .{ .hold_or_unprove, .held, .match },
+        .{ .hold_or_unprove, .no_verdict, .no_verdict },
     };
     try testing.expectEqual(std.meta.fields(Expect).len * std.meta.fields(Observed).len, table.len);
     for (table) |row| try testing.expectEqual(row[2], outcomeOf(row[0], row[1]));
