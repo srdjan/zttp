@@ -4440,6 +4440,39 @@ test "End-to-end: a record pattern matches only a record, at every depth" {
     }.check);
 }
 
+test "End-to-end: a record field underscore is a presence check and a binding is not" {
+    // Spec 5.5, and the model `match_analysis.zig` uses: a field `_` fails on
+    // `undefined` and matches every other value, `null` included; a field
+    // binding matches any value, `undefined` too; an array element `_` is a
+    // plain wildcard.
+    const source =
+        \\let present = { a: 1 };
+        \\let nulled = { a: null };
+        \\let absent = { b: 1 };
+        \\let undef = { a: undefined };
+        \\let u1 = match (present) { when { a: _ }: "present" default: "other" };
+        \\let u2 = match (nulled) { when { a: _ }: "present" default: "other" };
+        \\let u3 = match (absent) { when { a: _ }: "present" default: "other" };
+        \\let u4 = match (undef) { when { a: _ }: "present" default: "other" };
+        \\let b1 = match (absent) { when { a }: "bound" default: "other" };
+        \\let b2 = match (undef) { when { a }: "bound" default: "other" };
+        \\let w1 = match ([undefined, 2]) { when [_, 2]: "wild" default: "other" };
+        \\let w2 = match ([1, 3]) { when [_, 2]: "wild" default: "other" };
+    ;
+    try runMatchProgram(source, struct {
+        fn check(ctx: *context.Context) anyerror!void {
+            try expectGlobalString(ctx, "u1", "present");
+            try expectGlobalString(ctx, "u2", "present");
+            try expectGlobalString(ctx, "u3", "other");
+            try expectGlobalString(ctx, "u4", "other");
+            try expectGlobalString(ctx, "b1", "bound");
+            try expectGlobalString(ctx, "b2", "bound");
+            try expectGlobalString(ctx, "w1", "wild");
+            try expectGlobalString(ctx, "w2", "other");
+        }
+    }.check);
+}
+
 test "End-to-end: computed compound assignment evaluates key once (object)" {
     // Regression: `obj[k()] += v` double-evaluated the key expression - once for
     // the read, once for the store - running k()'s side effect twice. The

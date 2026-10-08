@@ -1908,9 +1908,14 @@ pub const IrView = struct {
                 // Mask the value field: @truncate to NodeIndex (u32) would leave the flag
                 // bits in place, so a shorthand property (bit 24) would read back with
                 // 0x01000000 OR'd into the node index and resolve to garbage.
+                // The 24-bit field also holds `null_node` (a match-pattern field
+                // `_`, which has no pattern node), truncated on the way in. Widen
+                // the all-ones value back to `null_node`, or a field `_` would
+                // read as a node index no tree holds and lose its presence test.
+                const packed_value: u24 = @truncate(d.b);
                 break :blk .{
                     .key = d.a,
-                    .value = @as(NodeIndex, @as(u24, @truncate(d.b))),
+                    .value = if (packed_value == std.math.maxInt(u24)) null_node else @as(NodeIndex, packed_value),
                     .is_shorthand = (d.b >> 24) & 1 != 0,
                 };
             },
