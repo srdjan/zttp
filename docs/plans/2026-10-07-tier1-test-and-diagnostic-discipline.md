@@ -527,8 +527,11 @@ decision before it gets a plan.
     or `expected_expression`. Most of those sources are refused under ZTS001,
     ZTS002 or ZTS003. Five pass or crash, and their rows start with `DEFECT:`:
     `1 = 2;` (ZTS016), a duplicate parameter (ZTS018), a duplicate `const`
-    (ZTS019), a duplicate `export function` (ZTS039), and 70000 distinct
-    float constants, which panic at `parser/ir.zig:710` (ZTS031).
+    (ZTS019), and a duplicate `export function` (ZTS039). A fifth, 70000
+    distinct float constants panicking at `parser/ir.zig:710` (ZTS031), is
+    fixed in `22132e31`: the pool refuses the constant and the parser reports
+    ZTS031. The same commit closes a wider hole: block recovery dropped any
+    statement whose error recorded no diagnostic, and the parse succeeded.
 13. **An unterminated block comment is refused with no diagnostic** (ZTS011).
     `zts check --json` prints `{"success":false,"diagnostics":[]}` and logs
     only `TypeScript strip error: error.UnterminatedComment`.
