@@ -55,43 +55,7 @@
 # closes in the same commit, and edits the expected-verdict table in
 # flow_census_probes.zig where the promise itself changes. A probe that reaches
 # no verdict at all (no_verdict) is never allowlisted: fix the probe.
-#
 
-# F6: 30 row(s)
-# The apply_cb, apply_record, and recursion_taint rows moved here from F1b and F1c.
-# The summary now resolves the call, and the callee reads the credential from the
-# request that it was passed (apply(req, f), rec(req, x, k)), which has no
-# credential label outside the handler.
-credential__egress_headers__apply_cb fail_open F6
-credential__egress_headers__apply_record fail_open F6
-credential__egress_headers__export_fn fail_open F6
-credential__egress_headers__recursion_taint fail_open F6
-credential__egress_headers__top_fn_self fail_open F6
-credential__egress_opaque__apply_cb fail_open F6
-credential__egress_opaque__apply_record fail_open F6
-credential__egress_opaque__export_fn fail_open F6
-credential__egress_opaque__recursion_taint fail_open F6
-credential__egress_opaque__top_fn_self fail_open F6
-credential__egress_url__apply_cb fail_open F6
-credential__egress_url__apply_record fail_open F6
-credential__egress_url__export_fn fail_open F6
-credential__egress_url__recursion_taint fail_open F6
-credential__egress_url__top_fn_self fail_open F6
-credential__log__apply_cb fail_open F6
-credential__log__apply_record fail_open F6
-credential__log__export_fn fail_open F6
-credential__log__recursion_taint fail_open F6
-credential__log__top_fn_self fail_open F6
-credential__response__apply_cb fail_open F6
-credential__response__apply_record fail_open F6
-credential__response__export_fn fail_open F6
-credential__response__recursion_taint fail_open F6
-credential__response__top_fn_self fail_open F6
-credential__response_html__apply_cb fail_open F6
-credential__response_html__apply_record fail_open F6
-credential__response_html__export_fn fail_open F6
-credential__response_html__recursion_taint fail_open F6
-credential__response_html__top_fn_self fail_open F6
 
 # F7: 30 row(s)
 clean__response__import2 over_refusal F7

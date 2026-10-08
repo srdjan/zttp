@@ -377,6 +377,10 @@ pub const FlowChecker = struct {
     /// The `Response.html` calls that built an `unsafe_html` fact while the
     /// current response value is evaluated; see `noteHtmlProducer`.
     html_producers: std.ArrayListUnmanaged(NodeIndex) = .empty,
+    /// Bindings that stand for the request or its headers, other than the
+    /// handler's own parameter (`req_binding_key`): a parameter bound at a call
+    /// site to the request, and a name initialised from it. See `carrierKind`.
+    request_carriers: std.AutoHashMapUnmanaged(u32, CarrierKind) = .empty,
     /// Guard provenance for validated bindings: packed(scope_id, slot) -> the
     /// validator call that set the `.validated` label. Lets a defended path
     /// name the guard ("validated by schemaCompile()"). Populated alongside
@@ -507,6 +511,7 @@ pub const FlowChecker = struct {
         self.import_bindings.deinit(self.allocator);
         self.capture_targets.deinit(self.allocator);
         self.html_producers.deinit(self.allocator);
+        self.request_carriers.deinit(self.allocator);
         self.param_values.deinit(self.allocator);
         self.route_function_roots.deinit(self.allocator);
         self.listed_tool_route_functions.deinit(self.allocator);
@@ -2182,6 +2187,49 @@ pub const FlowChecker = struct {
         return isReqIdentityField(name);
     }
 
+    /// What a value is when it is the request or the request's headers (plan
+    /// unit F6). Only these give a `headers.authorization` read its credential
+    /// label; an object that happens to have a `headers` field is neither.
+    const CarrierKind = enum { request, headers };
+
+    /// The request or headers a node stands for, or null. The handler's own
+    /// parameter is the request. So is a binding that `request_carriers`
+    /// records: a parameter that a call site bound to the request, or a name
+    /// initialised from it. `<request>.headers` is the headers.
+    fn carrierKind(self: *const FlowChecker, node: NodeIndex) ?CarrierKind {
+        const tag = self.ir_view.getTag(node) orelse return null;
+        switch (tag) {
+            .identifier => {
+                const binding = self.bindingAt(node) orelse return null;
+                const key = packBindingKey(binding.scope_id, binding.slot);
+                if (self.req_binding_key) |req_key| {
+                    if (key == req_key) return .request;
+                }
+                return self.request_carriers.get(key);
+            },
+            .member_access, .optional_chain => {
+                const member = self.ir_view.getMember(node) orelse return null;
+                if (self.carrierKind(member.object) != .request) return null;
+                const name = self.resolveAtomName(member.property) orelse return null;
+                return if (std.mem.eql(u8, name, "headers")) .headers else null;
+            },
+            // exhaustive: any other expression is not known to be the request,
+            // so a header read on it earns no credential label.
+            else => return null,
+        }
+    }
+
+    /// Record, or forget, that `key` names the request or its headers. A
+    /// declaration is a fresh binding, so it forgets whatever an earlier walk
+    /// of the same function recorded (the F3 rule for labels).
+    fn setCarrier(self: *FlowChecker, key: u32, kind: ?CarrierKind) void {
+        if (kind) |k| {
+            self.request_carriers.put(self.allocator, key, k) catch self.markAllocationFailure();
+        } else {
+            _ = self.request_carriers.remove(key);
+        }
+    }
+
     fn isReqBinding(self: *const FlowChecker, node: NodeIndex) bool {
         if (self.ir_view.getTag(node) != .identifier) return false;
         const binding = self.bindingAt(node) orelse return false;
@@ -2218,6 +2266,10 @@ pub const FlowChecker = struct {
             } else {
                 // Simple assignment: replace
                 self.binding_labels.put(self.allocator, key, labels) catch self.markAllocationFailure();
+                // The name may now hold the request. It keeps an earlier
+                // record when this branch assigns something else, because
+                // another branch may have assigned the request.
+                if (self.carrierKind(asgn.value)) |kind| self.setCarrier(key, kind);
             }
             self.recordBindingValue(binding, asgn.value);
         } else if (target_tag == .member_access or target_tag == .optional_chain or target_tag == .computed_access) {
@@ -2358,6 +2410,7 @@ pub const FlowChecker = struct {
                     {
                         const key = packBindingKey(vd.binding.scope_id, vd.binding.slot);
                         self.binding_labels.put(self.allocator, key, labels) catch self.markAllocationFailure();
+                        self.setCarrier(key, self.carrierKind(vd.init));
                     }
                     if (init_origin) |origin| {
                         const key = packBindingKey(vd.binding.scope_id, vd.binding.slot);
@@ -2376,6 +2429,7 @@ pub const FlowChecker = struct {
                     // `let y;` starts empty on every walk for the same reason.
                     const key = packBindingKey(vd.binding.scope_id, vd.binding.slot);
                     self.binding_labels.put(self.allocator, key, LabelSet.empty) catch self.markAllocationFailure();
+                    self.setCarrier(key, null);
                 }
             },
 
@@ -2588,7 +2642,7 @@ pub const FlowChecker = struct {
                 }
 
                 // req.headers.authorization carries credential label
-                if (self.isReqProperty(member.object, "headers")) {
+                if (self.carrierKind(member.object) == .headers) {
                     const prop_name = self.resolveAtomName(member.property) orelse return labels;
                     if (std.mem.eql(u8, prop_name, "authorization")) {
                         return LabelSet.merge(labels, .{ .credential = true });
@@ -2625,7 +2679,7 @@ pub const FlowChecker = struct {
                 }
                 // req.headers["authorization"] is the dominant header-read idiom
                 // and carries the credential label, mirroring the dot-access form.
-                if (self.isReqProperty(member.object, "headers")) {
+                if (self.carrierKind(member.object) == .headers) {
                     if (self.ir_view.getTag(member.computed) == .lit_string) {
                         if (self.ir_view.getStringIdx(member.computed)) |str_idx| {
                             if (self.ir_view.getString(str_idx)) |key| {
@@ -3627,7 +3681,7 @@ pub const FlowChecker = struct {
         const member = self.ir_view.getMember(call_data.callee) orelse return false;
         const prop_name = self.resolveAtomName(member.property) orelse return false;
         if (!std.mem.eql(u8, prop_name, "get")) return false;
-        if (!self.isReqProperty(member.object, "headers")) return false;
+        if (self.carrierKind(member.object) != .headers) return false;
         if (call_data.args_count == 0) return false;
         const arg = self.ir_view.getListIndex(call_data.args_start, 0);
         if (self.ir_view.getTag(arg) != .lit_string) return false;
@@ -3757,18 +3811,27 @@ pub const FlowChecker = struct {
         var passed: [max_summary_params]?NodeIndex = @splat(null);
         var saved: [max_summary_params]?NodeIndex = @splat(null);
         var keys: [max_summary_params]?u32 = @splat(null);
+        // Whether each argument is the request or its headers, read with the
+        // same pass-through rule: a parameter that the call site bound to the
+        // request makes the callee's reads of `authorization` credentials.
+        var carriers: [max_summary_params]?CarrierKind = @splat(null);
+        var saved_carriers: [max_summary_params]?CarrierKind = @splat(null);
         for (0..param_count) |i| {
             const param_idx = self.ir_view.getListIndex(func.params_start, @intCast(i));
             const pb = self.paramBinding(param_idx) orelse continue;
             const key = packBindingKey(pb.scope_id, pb.slot);
             keys[i] = key;
             saved[i] = self.param_values.get(key);
+            saved_carriers[i] = self.request_carriers.get(key);
             if (i < call_data.args_count) {
-                passed[i] = self.passedValueNode(self.ir_view.getListIndex(call_data.args_start, @intCast(i)));
+                const arg = self.ir_view.getListIndex(call_data.args_start, @intCast(i));
+                passed[i] = self.passedValueNode(arg);
+                carriers[i] = self.carrierKind(arg);
             }
         }
         // A binding made for this call site ends with its frame.
         defer self.restoreParamValues(&keys, &saved);
+        defer self.restoreCarriers(&keys, &saved_carriers);
 
         for (0..param_count) |i| {
             const key = keys[i] orelse continue;
@@ -3785,6 +3848,7 @@ pub const FlowChecker = struct {
             } else {
                 _ = self.param_values.remove(key);
             }
+            self.setCarrier(key, carriers[i]);
         }
 
         const frame = self.summary_depth;
@@ -3829,6 +3893,19 @@ pub const FlowChecker = struct {
             } else {
                 _ = self.param_values.remove(key);
             }
+        }
+    }
+
+    /// Put each parameter's carrier record back to what it was before the
+    /// frame bound it.
+    fn restoreCarriers(
+        self: *FlowChecker,
+        keys: *const [max_summary_params]?u32,
+        saved: *const [max_summary_params]?CarrierKind,
+    ) void {
+        for (keys, saved) |maybe_key, previous| {
+            const key = maybe_key orelse continue;
+            self.setCarrier(key, previous);
         }
     }
 
@@ -7306,6 +7383,146 @@ test "FlowChecker reports a nested sink once, with the same text as the statemen
     const nested_report = try runFlowDiagnostics(std.testing.allocator, nested, .secret_in_egress_body, &nested_buf);
     try std.testing.expectEqual(@as(usize, 1), nested_report.count);
     try std.testing.expectEqualStrings(statement_report.help, nested_report.help);
+}
+
+test "FlowChecker labels credential reads on any binding that carries the request (F6)" {
+    const Case = struct { name: []const u8, source: []const u8 };
+
+    // The direct form: the handler's own request parameter. Refused today.
+    const direct =
+        \\function handler(req) {
+        \\  console.log(req.headers["authorization"]);
+        \\  return Response.json({ ok: 1 });
+        \\}
+    ;
+    const direct_properties = try runFlowProperties(std.testing.allocator, direct);
+    try std.testing.expect(!direct_properties.no_credential_leakage);
+
+    // The routed forms: the same read through a binding other than the
+    // handler's parameter. Each must lose `no_credential_leakage`.
+    const leaking = [_]Case{
+        .{ .name = "parameter bound to the request", .source =
+        \\function leak(r) {
+        \\  console.log(r.headers["authorization"]);
+        \\  return 1;
+        \\}
+        \\function handler(req) {
+        \\  const n = leak(req);
+        \\  return Response.json({ ok: 1 });
+        \\}
+        },
+        .{ .name = "dot read in a helper that responds", .source =
+        \\function show(r) { return Response.json({ k: r.headers.authorization }); }
+        \\function handler(req) { return show(req); }
+        },
+        .{ .name = "headers.get in a helper", .source =
+        \\function leak(r) {
+        \\  console.log(r.headers.get("authorization"));
+        \\  return 1;
+        \\}
+        \\function handler(req) {
+        \\  const n = leak(req);
+        \\  return Response.json({ ok: 1 });
+        \\}
+        },
+        .{ .name = "request passed through two helpers", .source =
+        \\function leak(r) {
+        \\  console.log(r.headers["authorization"]);
+        \\  return 1;
+        \\}
+        \\function outer(q) { return leak(q); }
+        \\function handler(req) {
+        \\  const n = outer(req);
+        \\  return Response.json({ ok: 1 });
+        \\}
+        },
+        .{ .name = "const alias of the request", .source =
+        \\function handler(req) {
+        \\  const r = req;
+        \\  console.log(r.headers["authorization"]);
+        \\  return Response.json({ ok: 1 });
+        \\}
+        },
+        .{ .name = "const alias of the headers", .source =
+        \\function handler(req) {
+        \\  const h = req.headers;
+        \\  console.log(h["authorization"]);
+        \\  return Response.json({ ok: 1 });
+        \\}
+        },
+        .{ .name = "headers passed to a helper", .source =
+        \\function leak(h) {
+        \\  console.log(h.authorization);
+        \\  return 1;
+        \\}
+        \\function handler(req) {
+        \\  const n = leak(req.headers);
+        \\  return Response.json({ ok: 1 });
+        \\}
+        },
+        .{ .name = "callback receives the credential", .source =
+        \\function apply(r, f) {
+        \\  const t = r.headers["authorization"] ?? "";
+        \\  return f(t);
+        \\}
+        \\function handler(req) {
+        \\  const n = apply(req, (x) => { console.log(x); return 1; });
+        \\  return Response.json({ ok: 1 });
+        \\}
+        },
+        .{ .name = "recursion", .source =
+        \\function rec(r, x, k) {
+        \\  if (k <= 0) { return Response.json({ k: x }); }
+        \\  const t = r.headers["authorization"] ?? "";
+        \\  return rec(r, t, k - 1);
+        \\}
+        \\function handler(req) { return rec(req, "hello", 1); }
+        },
+    };
+    for (leaking) |case| {
+        errdefer std.debug.print("case still proven: {s}\n", .{case.name});
+        const properties = try runFlowProperties(std.testing.allocator, case.source);
+        try std.testing.expect(!properties.no_credential_leakage);
+    }
+
+    // Controls: a header read that is not the credential, and an object that
+    // happens to have a `headers` field but is not the request, stay clean.
+    const clean = [_]Case{
+        .{ .name = "another header of the request", .source =
+        \\function show(r) { console.log(r.headers["x-trace-id"]); return 1; }
+        \\function handler(req) {
+        \\  const n = show(req);
+        \\  return Response.json({ ok: 1 });
+        \\}
+        },
+        .{ .name = "an object with a headers field", .source =
+        \\function show(o) { console.log(o.headers["authorization"]); return 1; }
+        \\function handler(req) {
+        \\  const n = show({ headers: { authorization: "public" } });
+        \\  return Response.json({ ok: 1 });
+        \\}
+        },
+        .{ .name = "an alias of such an object", .source =
+        \\function handler(req) {
+        \\  const o = { headers: { authorization: "public" } };
+        \\  const r = o;
+        \\  console.log(r.headers["authorization"]);
+        \\  return Response.json({ ok: 1 });
+        \\}
+        },
+        .{ .name = "a helper called with something other than the request", .source =
+        \\function show(r) { console.log(r.headers["authorization"]); return 1; }
+        \\function handler(req) {
+        \\  const n = show({ headers: { authorization: "public" } });
+        \\  return Response.json({ ok: 1 });
+        \\}
+        },
+    };
+    for (clean) |case| {
+        errdefer std.debug.print("case wrongly refused: {s}\n", .{case.name});
+        const properties = try runFlowProperties(std.testing.allocator, case.source);
+        try std.testing.expect(properties.no_credential_leakage);
+    }
 }
 
 test "FlowChecker re-walks a callee without the labels an earlier call bound" {

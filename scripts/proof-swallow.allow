@@ -347,3 +347,10 @@ packages/zts/src/flow_checker.zig helpWithCallChain catch-block
 # producer only chooses which node a report names; the `unsafe_html` fact that
 # decides the verdict travels in the label set.
 packages/zts/src/flow_checker.zig noteHtmlProducer catch-poison
+
+# The request carrier record (F6): a failed insert marks allocation poison. A
+# missing record would leave a credential read without its label, which is
+# what a verdict must never rest on, but both checker entry points reject
+# poison before they publish a proof, so the checker returns an error instead
+# of a verdict.
+packages/zts/src/flow_checker.zig setCarrier catch-poison
