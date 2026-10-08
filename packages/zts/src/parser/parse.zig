@@ -762,7 +762,7 @@ pub const Parser = struct {
                     name_atom,
                     .variable,
                     is_const,
-                ) catch return error.TooManyLocals;
+                ) catch |err| return self.bindingFailure(err);
 
                 // Check for for-in/for-of
                 if (self.check(.kw_in)) {
@@ -1201,7 +1201,7 @@ pub const Parser = struct {
             name_atom,
             .variable,
             true,
-        ) catch return error.TooManyLocals;
+        ) catch |err| return self.bindingFailure(err);
         return try self.nodes.add(Node.identifier(loc, binding));
     }
 
@@ -2610,7 +2610,7 @@ pub const Parser = struct {
                 param_atom,
                 .parameter,
                 false,
-            ) catch return error.TooManyLocals;
+            ) catch |err| return self.bindingFailure(err);
 
             const param_node = try self.nodes.add(.{
                 .tag = .pattern_element,
@@ -2647,7 +2647,7 @@ pub const Parser = struct {
                         param_atom,
                         .parameter,
                         false,
-                    ) catch return error.TooManyLocals;
+                    ) catch |err| return self.bindingFailure(err);
 
                     if (self.match(.assign)) {
                         self.errors.addErrorAt(.unsupported_feature, self.previous, "default parameters are not supported; accept `T | undefined` and resolve the default at the start of the body");
@@ -2967,6 +2967,16 @@ pub const Parser = struct {
 
     fn errorAtCurrent(self: *Parser, message: []const u8) void {
         self.errors.addErrorAt(.unexpected_token, self.current, message);
+    }
+
+    /// The error to return when `declareBinding` fails. It fails on an
+    /// allocation, or when a scope has no local slot left. The slot failure
+    /// must be recorded here: `parse` recovers from an error that recorded
+    /// nothing by skipping the statement, which drops it without a trace.
+    fn bindingFailure(self: *Parser, err: anyerror) anyerror {
+        if (err == error.OutOfMemory) return err;
+        self.errorAtCurrent("too many local variables");
+        return error.TooManyLocals;
     }
 
     fn errorAt(self: *Parser, loc: SourceLocation, message: []const u8) void {
@@ -5297,6 +5307,60 @@ test "parser construction reports allocation failure instead of panicking" {
     // reached `catch unreachable` and was undefined behavior.
     var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
     try std.testing.expectError(error.OutOfMemory, Parser.init(failing.allocator(), "const x = 1;"));
+}
+
+// Regression: four binding sites returned `error.TooManyLocals` from a failed
+// `declareBinding` without recording a parse error. `parse` then took its
+// recovery path, skipped the statement, and returned a program that was
+// missing it, with no error at all. An out-of-memory error inside
+// `declareBinding` took the same path under the same name. Found by the
+// allocation sweep in tests/frontend_fuzz.zig.
+test "a statement that needs more local slots than a scope has fails the parse" {
+    const allocator = std.testing.allocator;
+
+    // 300 parameters, as an arrow function and as a function declaration.
+    const parameter_shapes = [_]struct { open: []const u8, close: []const u8 }{
+        .{ .open = "const f = (", .close = ") => 1;" },
+        .{ .open = "function f(", .close = ") { return 1; }" },
+    };
+    for (parameter_shapes) |shape| {
+        var source: std.ArrayList(u8) = .empty;
+        defer source.deinit(allocator);
+        try source.appendSlice(allocator, shape.open);
+        for (0..300) |index| {
+            if (index > 0) try source.appendSlice(allocator, ", ");
+            try source.print(allocator, "p{d}", .{index});
+        }
+        try source.appendSlice(allocator, shape.close);
+        try expectParseFailsWithTooMany(allocator, source.items);
+    }
+
+    // 255 locals fill a function scope. The next binding, made by a `for`
+    // loop or by a `match` pattern, has no slot.
+    const tails = [_][]const u8{
+        "for (const x of xs) { }",
+        "match (v) { when { t }: t default: 0 };",
+    };
+    for (tails) |tail| {
+        var source: std.ArrayList(u8) = .empty;
+        defer source.deinit(allocator);
+        try source.appendSlice(allocator, "function f(xs, v) {\n");
+        for (0..253) |index| try source.print(allocator, "const a{d} = 1;\n", .{index});
+        try source.appendSlice(allocator, tail);
+        try source.appendSlice(allocator, "\n}");
+        try expectParseFailsWithTooMany(allocator, source.items);
+    }
+}
+
+fn expectParseFailsWithTooMany(allocator: std.mem.Allocator, source: []const u8) !void {
+    var parser = try Parser.init(allocator, source);
+    defer parser.deinit();
+    if (parser.parse()) |_| return error.ProgramWithTooManyLocalsWasAccepted else |_| {}
+    try std.testing.expect(parser.hasErrors());
+    for (parser.getErrors()) |recorded| {
+        if (std.mem.startsWith(u8, recorded.message, "too many ")) return;
+    }
+    return error.NoTooManyDiagnostic;
 }
 
 // Regression: an out-of-memory error inside a statement recorded no parse
