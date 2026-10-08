@@ -52,6 +52,8 @@ fn writeNode(
         .lit_float => {
             const float_idx = ir_view.getFloatIdx(node_idx) orelse return false;
             const value = ir_view.getFloat(float_idx) orelse return false;
+            // `{d}` spells infinity and NaN as `inf` and `nan`, which is not JSON.
+            if (!std.math.isFinite(value)) return false;
             try writer.print("{d}", .{value});
             return true;
         },
@@ -95,6 +97,9 @@ fn writeNode(
                 if (ir_view.getTag(property_idx) != .object_property) return false;
                 const property = ir_view.getProperty(property_idx) orelse return false;
                 const key = objectKey(ir_view, property.key, resolve_atom, resolver_ctx) orelse return false;
+                // A repeated key is legal in a JS literal and refused by `std.json`. The
+                // literal is unreadable here, so the caller treats the schema as dynamic.
+                if (keyRepeats(ir_view, object, i, key, resolve_atom, resolver_ctx)) return false;
 
                 if (i > 0) try writer.writeAll(", ");
                 try json_utils.writeJsonString(writer, key);
@@ -106,6 +111,24 @@ fn writeNode(
         },
         else => return false,
     }
+}
+
+/// True when a property before index `index` of `object` has the key `key`.
+fn keyRepeats(
+    ir_view: IrView,
+    object: ir.Node.ObjectExpr,
+    index: usize,
+    key: []const u8,
+    resolve_atom: AtomResolver,
+    resolver_ctx: *const anyopaque,
+) bool {
+    for (0..index) |earlier| {
+        const property_idx = ir_view.getListIndex(object.properties_start, @intCast(earlier));
+        const property = ir_view.getProperty(property_idx) orelse continue;
+        const earlier_key = objectKey(ir_view, property.key, resolve_atom, resolver_ctx) orelse continue;
+        if (std.mem.eql(u8, earlier_key, key)) return true;
+    }
+    return false;
 }
 
 fn objectKey(
@@ -140,6 +163,7 @@ test "serialize writes the supported literal language exactly" {
         \\  boolean: true,
         \\  nothing: null,
         \\  nested: [false, { key: "value" }],
+        \\  sibling: { key: "again" },
         \\};
     ;
 
@@ -169,7 +193,7 @@ test "serialize writes the supported literal language exactly" {
     defer allocator.free(json);
 
     try std.testing.expectEqualStrings(
-        "{\"integer\": 1, \"float\": 2.5, \"negativeInteger\": -3, \"negativeFloat\": -4.25, \"string\": \"line\\nquote:\\\" slash:\\\\ tab:\\t\", \"boolean\": true, \"nothing\": null, \"nested\": [false, {\"key\": \"value\"}]}",
+        "{\"integer\": 1, \"float\": 2.5, \"negativeInteger\": -3, \"negativeFloat\": -4.25, \"string\": \"line\\nquote:\\\" slash:\\\\ tab:\\t\", \"boolean\": true, \"nothing\": null, \"nested\": [false, {\"key\": \"value\"}], \"sibling\": {\"key\": \"again\"}}",
         json,
     );
 }
@@ -184,6 +208,12 @@ test "serialize refuses unsupported roots and partial literals without publishin
         "const value = { type: makeType() };",
         "const value = undefined;",
         "const value = !true;",
+        // A repeated key gives text that `std.json` refuses as a DuplicateField,
+        // and a non-finite number gives text that is not JSON at all (U3.4).
+        "const value = { type: \"object\", type: \"string\" };",
+        "const value = { properties: { a: 1, b: 2, a: 3 } };",
+        "const value = [{ k: 1 }, { \"k\": 2, k: 3 }];",
+        "const value = { x: 1e999 };",
     };
 
     const Fixture = struct {
