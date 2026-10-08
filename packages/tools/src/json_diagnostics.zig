@@ -110,8 +110,31 @@ pub fn fromParseError(err: ParseError, file: []const u8) JsonDiagnostic {
         .column = err.location.column,
         .start_offset = err.location.span().start,
         .end_offset = err.location.span().end,
-        .suggestion = err.expected,
+        .suggestion = err.suggestion orelse err.expected,
     };
+}
+
+/// `fromParseError` with the message and suggestion copied into `allocator`.
+///
+/// A parse error borrows its text from the parser: a literal for most kinds,
+/// the error list's own storage for a message that names a value (ZTS046 names
+/// the code point). The parser is gone before the JSON is written, so a caller
+/// that keeps the diagnostic past it copies. On out-of-memory the borrowed
+/// slice is kept, as `fromCheckerDiagnostic` does; `deinit` frees what was
+/// copied.
+pub fn fromParseErrorOwned(allocator: std.mem.Allocator, err: ParseError, file: []const u8) JsonDiagnostic {
+    var diag = fromParseError(err, file);
+    if (allocator.dupe(u8, diag.message)) |copy| {
+        diag.message = copy;
+        diag.message_owned = true;
+    } else |_| {}
+    if (diag.suggestion) |suggestion| {
+        if (allocator.dupe(u8, suggestion)) |copy| {
+            diag.suggestion = copy;
+            diag.suggestion_owned = true;
+        } else |_| {}
+    }
+    return diag;
 }
 
 /// Type stripper error codes: ZTS041-ZTS043 (inside the parser ZTS0xx range,

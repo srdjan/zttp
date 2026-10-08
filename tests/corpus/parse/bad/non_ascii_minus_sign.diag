@@ -1,0 +1,2 @@
+stages: strip,parse
+{"code":"ZTS046","severity":"error","message":"U+2212 MINUS SIGN is not ASCII","file":"parse/bad/non_ascii_minus_sign.ts","line":4,"column":17,"suggestion":"write the ASCII hyphen-minus `-`","repair_intent":null}

@@ -81,6 +81,9 @@ pub const ParseError = struct {
     message: []const u8,
     token_text: ?[]const u8,
     expected: ?[]const u8,
+    /// What to write instead, when the parser knows. JSON reports it as the
+    /// diagnostic's `suggestion`; `expected` fills that field otherwise.
+    suggestion: ?[]const u8 = null,
 
     /// Format error for display
     pub fn format(
@@ -153,6 +156,9 @@ pub const ErrorList = struct {
     panic_mode: bool,
     /// Set when errors could not be recorded due to allocation failure
     errors_truncated: bool,
+    /// Messages the list formatted for its own errors. `message` borrows from
+    /// here, so these live until `deinit`.
+    owned_messages: std.ArrayList([]u8) = .empty,
 
     pub fn init(allocator: std.mem.Allocator, source: []const u8) ErrorList {
         return .{
@@ -166,6 +172,8 @@ pub const ErrorList = struct {
     }
 
     pub fn deinit(self: *ErrorList) void {
+        for (self.owned_messages.items) |message| self.allocator.free(message);
+        self.owned_messages.deinit(self.allocator);
         self.errors.deinit(self.allocator);
     }
 
@@ -185,6 +193,41 @@ pub const ErrorList = struct {
             .message = message,
             .token_text = null,
             .expected = null,
+        }) catch {
+            self.errors_truncated = true;
+        };
+    }
+
+    /// Add an error whose message names a value, such as a code point. The list
+    /// formats and owns the message. Running out of memory marks the list
+    /// truncated, which the parser reports as out-of-memory.
+    pub fn addErrorFmt(
+        self: *ErrorList,
+        kind: ErrorKind,
+        loc: SourceLocation,
+        comptime fmt: []const u8,
+        args: anytype,
+        suggestion: ?[]const u8,
+    ) void {
+        if (self.panic_mode) return;
+        if (self.errors.items.len >= self.max_errors) return;
+
+        const message = std.fmt.allocPrint(self.allocator, fmt, args) catch {
+            self.errors_truncated = true;
+            return;
+        };
+        self.owned_messages.append(self.allocator, message) catch {
+            self.allocator.free(message);
+            self.errors_truncated = true;
+            return;
+        };
+        self.errors.append(self.allocator, .{
+            .kind = kind,
+            .location = loc,
+            .message = message,
+            .token_text = null,
+            .expected = null,
+            .suggestion = suggestion,
         }) catch {
             self.errors_truncated = true;
         };

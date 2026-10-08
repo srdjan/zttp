@@ -1,0 +1,2 @@
+stages: strip,parse
+{"code":"ZTS046","severity":"error","message":"U+201C LEFT DOUBLE QUOTATION MARK is not ASCII","file":"parse/bad/non_ascii_curly_quote.ts","line":3,"column":19,"suggestion":"write the ASCII double quote `\"`","repair_intent":null}

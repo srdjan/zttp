@@ -1,2 +1,2 @@
 stages: strip,parse
-{"code":"ZTS046","severity":"error","message":"identifiers are ASCII: letters, digits, `_` and `$`","file":"parse/bad/non_ascii_identifier.ts","line":3,"column":11,"suggestion":null,"repair_intent":null}
+{"code":"ZTS046","severity":"error","message":"U+00E9 is not allowed in an identifier","file":"parse/bad/non_ascii_identifier.ts","line":3,"column":14,"suggestion":"identifiers are ASCII: letters, digits, `_` and `$`; rename it","repair_intent":null}

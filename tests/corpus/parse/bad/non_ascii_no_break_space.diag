@@ -1,0 +1,2 @@
+stages: strip,parse
+{"code":"ZTS046","severity":"error","message":"U+00A0 NO-BREAK SPACE is not ASCII","file":"parse/bad/non_ascii_no_break_space.ts","line":4,"column":18,"suggestion":"write an ASCII space","repair_intent":null}

@@ -2791,32 +2791,122 @@ pub const Parser = struct {
         if (std.debug.runtime_safety) self.tokens_advanced +%= 1;
         self.previous = self.current;
         self.current = self.tokenizer.next();
-        self.reportNonAsciiIdentifier();
+        self.reportNonAscii();
     }
 
-    /// Report a byte above ASCII inside an identifier, once, at the token that
-    /// carries it.
+    /// A character that looks like an ASCII one and is not, with the ASCII
+    /// spelling the author meant. Characters outside this table are still
+    /// refused and named by code point; they just carry no replacement.
+    const Lookalike = struct {
+        code_point: u21,
+        name: []const u8,
+        suggestion: []const u8,
+    };
+
+    const ascii_lookalikes = [_]Lookalike{
+        .{ .code_point = 0x2212, .name = "MINUS SIGN", .suggestion = "write the ASCII hyphen-minus `-`" },
+        .{ .code_point = 0x2013, .name = "EN DASH", .suggestion = "write the ASCII hyphen-minus `-`" },
+        .{ .code_point = 0x2014, .name = "EM DASH", .suggestion = "write the ASCII hyphen-minus `-`" },
+        .{ .code_point = 0x201C, .name = "LEFT DOUBLE QUOTATION MARK", .suggestion = "write the ASCII double quote `\"`" },
+        .{ .code_point = 0x201D, .name = "RIGHT DOUBLE QUOTATION MARK", .suggestion = "write the ASCII double quote `\"`" },
+        .{ .code_point = 0x2018, .name = "LEFT SINGLE QUOTATION MARK", .suggestion = "write the ASCII apostrophe `'`" },
+        .{ .code_point = 0x2019, .name = "RIGHT SINGLE QUOTATION MARK", .suggestion = "write the ASCII apostrophe `'`" },
+        .{ .code_point = 0x00A0, .name = "NO-BREAK SPACE", .suggestion = "write an ASCII space" },
+        .{ .code_point = 0x3000, .name = "IDEOGRAPHIC SPACE", .suggestion = "write an ASCII space" },
+        .{ .code_point = 0xFEFF, .name = "ZERO WIDTH NO-BREAK SPACE (byte order mark)", .suggestion = "delete it; the file needs no byte order mark" },
+        .{ .code_point = 0x00D7, .name = "MULTIPLICATION SIGN", .suggestion = "write the ASCII asterisk `*`" },
+        .{ .code_point = 0x2026, .name = "HORIZONTAL ELLIPSIS", .suggestion = "write three ASCII dots `...`" },
+    };
+
+    fn isAsciiIdentifierStart(byte: u8) bool {
+        return std.ascii.isAlphabetic(byte) or byte == '_' or byte == '$';
+    }
+
+    /// Report the first character above ASCII in an `invalid` token, once.
     ///
-    /// Identifiers are ASCII by spec 5, and the tokenizer hands the whole run
-    /// back as one `invalid` token. Reporting here rather than where the token
-    /// is consumed is what makes the count one: every consumer of a token goes
-    /// through this funnel, and the panic mode the report enters suppresses the
-    /// parse errors that follow from the same fault - `const café = 1` reported
-    /// a const with no initializer and a missing expression, neither of which
-    /// named the byte that caused them.
-    fn reportNonAsciiIdentifier(self: *Parser) void {
+    /// The tokenizer hands back one `invalid` token for a whole run of such
+    /// bytes and the identifier characters around them. Reporting here rather
+    /// than where the token is consumed is what makes the count one: every
+    /// consumer of a token goes through this funnel, and the panic mode the
+    /// report enters suppresses the parse errors that follow from the same
+    /// fault - `const café = 1` reported a const with no initializer and a
+    /// missing expression, neither of which named the byte that caused them.
+    ///
+    /// The span is the one code point, and the text names it: a lookalike gets
+    /// its name and the ASCII spelling, a character inside an identifier gets
+    /// the identifier rule, and any other character is named without a claim
+    /// about identifiers. A character that is not in an identifier (`a − 1`,
+    /// a no-break space, a curly quote) must not be described as one.
+    fn reportNonAscii(self: *Parser) void {
         if (self.current.type != .invalid) return;
         const text = self.current.text(self.source);
-        var has_non_ascii = false;
-        for (text) |byte| {
-            if (byte >= 0x80) has_non_ascii = true;
+        const first = for (text, 0..) |byte, index| {
+            if (byte >= 0x80) break index;
+        } else return;
+
+        const sequence_len: usize = std.unicode.utf8ByteSequenceLength(text[first]) catch 0;
+        const decoded: ?u21 = decode: {
+            if (sequence_len == 0 or first + sequence_len > text.len) break :decode null;
+            const view = std.unicode.Utf8View.init(text[first..][0..sequence_len]) catch break :decode null;
+            var iterator = view.iterator();
+            break :decode iterator.nextCodepoint();
+        };
+
+        const width: u32 = if (decoded != null) @intCast(sequence_len) else 1;
+        const at: u32 = @intCast(first);
+        const loc: SourceLocation = .{
+            .line = self.current.line,
+            .column = self.current.column + at,
+            .offset = self.current.start + at,
+            .end_offset = self.current.start + at + width,
+        };
+
+        const code_point = decoded orelse {
+            self.errors.addErrorFmt(
+                .non_ascii_identifier,
+                loc,
+                "invalid UTF-8 byte 0x{X:0>2}",
+                .{text[first]},
+                "the file is not valid UTF-8; save it as UTF-8, or remove the byte",
+            );
+            self.errors.enterPanicMode();
+            return;
+        };
+
+        for (ascii_lookalikes) |lookalike| {
+            if (lookalike.code_point != code_point) continue;
+            self.errors.addErrorFmt(
+                .non_ascii_identifier,
+                loc,
+                "U+{X:0>4} {s} is not ASCII",
+                .{ code_point, lookalike.name },
+                lookalike.suggestion,
+            );
+            self.errors.enterPanicMode();
+            return;
         }
-        if (!has_non_ascii) return;
-        self.errors.addError(
-            .non_ascii_identifier,
-            self.current.location(),
-            "identifiers are ASCII: letters, digits, `_` and `$`",
-        );
+
+        const after = first + sequence_len;
+        const in_identifier = (first > 0 and isAsciiIdentifierStart(text[0]) and
+            (isAsciiIdentifierStart(text[first - 1]) or std.ascii.isDigit(text[first - 1]))) or
+            (after < text.len and isAsciiIdentifierStart(text[after]));
+        if (in_identifier) {
+            self.errors.addErrorFmt(
+                .non_ascii_identifier,
+                loc,
+                "U+{X:0>4} is not allowed in an identifier",
+                .{code_point},
+                "identifiers are ASCII: letters, digits, `_` and `$`; rename it",
+            );
+        } else {
+            self.errors.addErrorFmt(
+                .non_ascii_identifier,
+                loc,
+                "U+{X:0>4} is not an ASCII character",
+                .{code_point},
+                "source outside strings and comments is ASCII; remove the character, or put it inside a string",
+            );
+        }
         self.errors.enterPanicMode();
     }
 
@@ -5520,4 +5610,116 @@ test "an out-of-memory error inside a function body fails the parse" {
     for (sources) |source| {
         try std.testing.checkAllAllocationFailures(std.testing.allocator, Sweep.parseWholeProgram, .{source});
     }
+}
+
+fn firstNonAsciiError(allocator: std.mem.Allocator, source: []const u8, out: *Parser) !error_mod.ParseError {
+    out.* = try Parser.init(allocator, source);
+    _ = out.parse() catch 0;
+    const errors = out.getErrors();
+    try std.testing.expect(errors.len >= 1);
+    try std.testing.expectEqual(error_mod.ErrorKind.non_ascii_identifier, errors[0].kind);
+    return errors[0];
+}
+
+test "ZTS046 names a minus sign outside an identifier and says what to write" {
+    const allocator = std.testing.allocator;
+    var parser: Parser = undefined;
+    // `a − 1` holds U+2212, three bytes, at column 13 of line 2.
+    const err = try firstNonAsciiError(allocator, "const a = 2;\nconst b = a \xe2\x88\x92 1;", &parser);
+    defer parser.deinit();
+    try std.testing.expectEqualStrings("U+2212 MINUS SIGN is not ASCII", err.message);
+    try std.testing.expectEqualStrings("write the ASCII hyphen-minus `-`", err.suggestion.?);
+    try std.testing.expectEqual(@as(u32, 2), err.location.line);
+    try std.testing.expectEqual(@as(u32, 13), err.location.column);
+    const span = err.location.span();
+    try std.testing.expectEqual(@as(u32, 3), span.end - span.start);
+    // The text must not call this an identifier problem.
+    try std.testing.expect(std.mem.indexOf(u8, err.message, "identifier") == null);
+}
+
+test "ZTS046 narrows the span to the character inside an identifier run" {
+    const allocator = std.testing.allocator;
+    var parser: Parser = undefined;
+    const err = try firstNonAsciiError(allocator, "const caf\xc3\xa9 = 1;", &parser);
+    defer parser.deinit();
+    try std.testing.expectEqualStrings("U+00E9 is not allowed in an identifier", err.message);
+    try std.testing.expectEqualStrings(
+        "identifiers are ASCII: letters, digits, `_` and `$`; rename it",
+        err.suggestion.?,
+    );
+    // `const caf` is nine bytes, so the character starts at column 10.
+    try std.testing.expectEqual(@as(u32, 10), err.location.column);
+    const span = err.location.span();
+    try std.testing.expectEqual(@as(u32, 9), span.start);
+    try std.testing.expectEqual(@as(u32, 11), span.end);
+}
+
+test "ZTS046 does not call a stray symbol an identifier" {
+    const allocator = std.testing.allocator;
+    var parser: Parser = undefined;
+    const err = try firstNonAsciiError(allocator, "const price = \xe2\x82\xac5;", &parser);
+    defer parser.deinit();
+    try std.testing.expectEqualStrings("U+20AC is not an ASCII character", err.message);
+    try std.testing.expect(std.mem.indexOf(u8, err.message, "identifier") == null);
+    try std.testing.expect(std.mem.indexOf(u8, err.suggestion.?, "identifier") == null);
+}
+
+test "ZTS046 reports invalid UTF-8 in its own words" {
+    const allocator = std.testing.allocator;
+    var parser: Parser = undefined;
+    const err = try firstNonAsciiError(allocator, "const a = \xff;", &parser);
+    defer parser.deinit();
+    try std.testing.expectEqualStrings("invalid UTF-8 byte 0xFF", err.message);
+    try std.testing.expectEqual(@as(u32, 11), err.location.column);
+    const span = err.location.span();
+    try std.testing.expectEqual(@as(u32, 1), span.end - span.start);
+}
+
+test "ZTS046 names a truncated UTF-8 sequence as invalid" {
+    const allocator = std.testing.allocator;
+    var parser: Parser = undefined;
+    // A three-byte lead with one continuation byte before the token ends.
+    const err = try firstNonAsciiError(allocator, "const a = \xe2\x88;", &parser);
+    defer parser.deinit();
+    try std.testing.expectEqualStrings("invalid UTF-8 byte 0xE2", err.message);
+}
+
+test "ZTS046 knows every lookalike in the table" {
+    const allocator = std.testing.allocator;
+    const cases = [_]struct { bytes: []const u8, name: []const u8, replacement: []const u8 }{
+        .{ .bytes = "\xe2\x88\x92", .name = "U+2212 MINUS SIGN", .replacement = "`-`" },
+        .{ .bytes = "\xe2\x80\x93", .name = "U+2013 EN DASH", .replacement = "`-`" },
+        .{ .bytes = "\xe2\x80\x94", .name = "U+2014 EM DASH", .replacement = "`-`" },
+        .{ .bytes = "\xe2\x80\x9c", .name = "U+201C LEFT DOUBLE QUOTATION MARK", .replacement = "`\"`" },
+        .{ .bytes = "\xe2\x80\x9d", .name = "U+201D RIGHT DOUBLE QUOTATION MARK", .replacement = "`\"`" },
+        .{ .bytes = "\xe2\x80\x98", .name = "U+2018 LEFT SINGLE QUOTATION MARK", .replacement = "`'`" },
+        .{ .bytes = "\xe2\x80\x99", .name = "U+2019 RIGHT SINGLE QUOTATION MARK", .replacement = "`'`" },
+        .{ .bytes = "\xc2\xa0", .name = "U+00A0 NO-BREAK SPACE", .replacement = "ASCII space" },
+        .{ .bytes = "\xe3\x80\x80", .name = "U+3000 IDEOGRAPHIC SPACE", .replacement = "ASCII space" },
+        .{ .bytes = "\xef\xbb\xbf", .name = "U+FEFF ZERO WIDTH NO-BREAK SPACE", .replacement = "delete it" },
+        .{ .bytes = "\xc3\x97", .name = "U+00D7 MULTIPLICATION SIGN", .replacement = "`*`" },
+        .{ .bytes = "\xe2\x80\xa6", .name = "U+2026 HORIZONTAL ELLIPSIS", .replacement = "`...`" },
+    };
+    for (cases) |case| {
+        const source = try std.mem.concat(allocator, u8, &.{ "const a = 1 ", case.bytes, " 2;" });
+        defer allocator.free(source);
+        var parser: Parser = undefined;
+        const err = try firstNonAsciiError(allocator, source, &parser);
+        defer parser.deinit();
+        try std.testing.expect(std.mem.startsWith(u8, err.message, case.name));
+        try std.testing.expect(std.mem.endsWith(u8, err.message, "is not ASCII") or
+            std.mem.indexOf(u8, err.message, "is not ASCII") != null);
+        try std.testing.expect(std.mem.indexOf(u8, err.suggestion.?, case.replacement) != null);
+        const span = err.location.span();
+        try std.testing.expectEqual(@as(u32, @intCast(case.bytes.len)), span.end - span.start);
+    }
+}
+
+test "ZTS046 reports a byte order mark at the start of the file" {
+    const allocator = std.testing.allocator;
+    var parser: Parser = undefined;
+    const err = try firstNonAsciiError(allocator, "\xef\xbb\xbfconst a = 1;", &parser);
+    defer parser.deinit();
+    try std.testing.expect(std.mem.startsWith(u8, err.message, "U+FEFF"));
+    try std.testing.expectEqual(@as(u32, 1), err.location.column);
 }

@@ -39,7 +39,7 @@ Each of these was accepted silently before and is now refused with a location.
 | `0x`, `0b`, `0o` with no digits | ZTS012 | Write the digits |
 | `1e`, `1e+` with no exponent digits | ZTS012 | Write the exponent |
 | `0755` - a legacy octal literal | ZTS012 | `0o755` for octal, or drop the leading zero for decimal |
-| A byte above ASCII inside an identifier | ZTS046 | Identifiers are letters, digits, `_` and `$`. TSX text content never reaches this rule: the frontend lowers it to string literals before the core tokenizer runs |
+| A character above ASCII outside a string or comment | ZTS046 | The message names the first such character by code point (`U+2212 MINUS SIGN is not ASCII`) and the span covers that character alone. A lookalike gets its ASCII spelling in the suggestion: U+2212, U+2013, U+2014 (`-`), U+201C, U+201D (`"`), U+2018, U+2019 (`'`), U+00A0, U+3000 (a space), U+FEFF (delete it), U+00D7 (`*`), U+2026 (`...`). Inside an identifier the text says so and gives the rule: letters, digits, `_` and `$`. Invalid UTF-8 is reported as the byte. TSX text content never reaches this rule: the frontend lowers it to string literals before the core tokenizer runs |
 | A statement with no `;` | ZTS047 | Write the terminator; this profile has no automatic semicolon insertion |
 
 The last one is a statement-termination rule rather than a lexical one. It has

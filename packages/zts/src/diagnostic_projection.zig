@@ -159,6 +159,7 @@ pub fn writeParseError(view: SourceView, parse_error: ParseError, writer: anytyp
         .end_offset = span.end,
         .expected = parse_error.expected,
         .found = parse_error.token_text,
+        .help = parse_error.suggestion,
     }, writer);
 }
 

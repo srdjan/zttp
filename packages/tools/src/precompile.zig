@@ -1568,7 +1568,8 @@ fn runCheckOnPreparedSource(
         const errors = js_parser.errors.getErrors();
         if (json_mode) {
             for (errors) |parse_error| {
-                result.json_diagnostics.append(allocator, json_diag.fromParseError(parse_error, handler_path)) catch {};
+                var parse_diag = json_diag.fromParseErrorOwned(allocator, parse_error, handler_path);
+                result.json_diagnostics.append(allocator, parse_diag) catch parse_diag.deinit(allocator);
             }
         } else if (!builtin.is_test) {
             printParseErrors(allocator, diag_view, errors);

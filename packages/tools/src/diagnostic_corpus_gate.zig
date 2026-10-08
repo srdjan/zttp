@@ -63,7 +63,7 @@ const zts = @import("zts");
 /// The number of cases committed under `tests/corpus`. The gate fails below
 /// it, so deleting a case fails. Raise it in the commit that adds cases, to
 /// the count the gate prints. Never lower it to make a deletion pass.
-pub const minimum_cases: usize = 161;
+pub const minimum_cases: usize = 164;
 
 const corpus_root = "tests/corpus";
 const max_file_bytes = 1024 * 1024;
