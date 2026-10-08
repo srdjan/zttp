@@ -985,9 +985,15 @@ pub const FlowChecker = struct {
                 }
                 return null;
             },
-            .spread, .unary_op => {
+            .spread => {
                 if (self.ir_view.getOptValue(node)) |operand| return self.findGuardInExpr(operand);
                 return null;
+            },
+            .unary_op => {
+                // The first data word of a unary node holds the operator, so
+                // `getOptValue` would read an operator code as a node index.
+                const unary = self.ir_view.getUnary(node) orelse return null;
+                return self.findGuardInExpr(unary.operand);
             },
             .assignment => {
                 const asgn = self.ir_view.getAssignment(node) orelse return null;
@@ -6072,6 +6078,54 @@ test "FlowChecker records validated defended path reaching an HTML response" {
     }
     try std.testing.expect(found);
     try std.testing.expect(checker.getProperties().injection_safe);
+}
+
+test "FlowChecker names the guard of a validated value under a unary operator" {
+    // The guard search reads a unary operand from the operand field. It read
+    // the operator word instead, so a validated value under `!` or `-` named
+    // no guard and the defended path was dropped.
+    const allocator = std.testing.allocator;
+    const sources = [_][]const u8{
+        \\import { escapeHtml } from "zttp:text";
+        \\function handler(req) {
+        \\  const raw = req.headers.get("x-name");
+        \\  const safe = escapeHtml(raw);
+        \\  return Response.html(!safe);
+        \\}
+        ,
+        \\import { escapeHtml } from "zttp:text";
+        \\function handler(req) {
+        \\  const raw = req.headers.get("x-name");
+        \\  const safe = escapeHtml(raw);
+        \\  return Response.html(-safe);
+        \\}
+        ,
+    };
+    for (sources) |source| {
+        var parser = try @import("zts-engine").parser.JsParser.init(allocator, source);
+        var atoms = atom_table.AtomTable.init(allocator);
+        defer atoms.deinit();
+        parser.setAtomTable(&atoms);
+        defer parser.deinit();
+        const root = try parser.parse();
+        const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+        const handler_fn = @import("handler_verifier.zig").findHandlerFunction(ir_view, root) orelse
+            return error.HandlerNotFound;
+
+        var checker = FlowChecker.init(allocator, ir_view, &atoms);
+        defer checker.deinit();
+        _ = try checker.check(handler_fn);
+
+        var found = false;
+        for (checker.getDefendedPaths()) |d| {
+            if (d.property != .injection_safe) continue;
+            found = true;
+            try std.testing.expectEqual(SafeForm.validated, d.safe_form);
+            try std.testing.expectEqualStrings("escapeHtml", d.guard_func orelse "");
+        }
+        try std.testing.expect(found);
+        try std.testing.expect(checker.getProperties().injection_safe);
+    }
 }
 
 test "FlowChecker records never_reached defended path for unused secret" {
