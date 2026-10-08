@@ -1,5 +1,2 @@
 stages: strip,parse
 {"code":"ZTS001","severity":"error","message":"'switch' is not supported","file":"parse/bad/switch_statement.ts","line":3,"column":5,"suggestion":"use 'match' expression instead","repair_intent":null}
-{"code":"ZTS002","severity":"error","message":"expected expression","file":"parse/bad/switch_statement.ts","line":6,"column":9,"suggestion":null,"repair_intent":null}
-{"code":"ZTS002","severity":"error","message":"expected expression","file":"parse/bad/switch_statement.ts","line":6,"column":16,"suggestion":null,"repair_intent":null}
-{"code":"ZTS002","severity":"error","message":"expected expression","file":"parse/bad/switch_statement.ts","line":9,"column":1,"suggestion":null,"repair_intent":null}

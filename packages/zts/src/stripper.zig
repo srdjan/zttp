@@ -2559,6 +2559,11 @@ const Stripper = struct {
     /// has left the span the reader needs to be pointed at.
     fn recordDiagnosticAt(self: *Self, kind: StripDiagnosticKind, line: u32, col: u32) void {
         const d: StripDiagnostic = .{ .line = line, .column = col, .kind = kind };
+        // One fault gets one report. A second diagnostic at the same position
+        // restates the first: the `any` check used to run twice over one token.
+        for (self.diagnostics.items) |recorded| {
+            if (recorded.line == line and recorded.column == col) return;
+        }
         if (self.diagnostic_out) |out| out.* = d;
         // Best-effort: an OOM here will resurface at the next allocating step.
         self.diagnostics.append(self.allocator, d) catch {};
@@ -5309,4 +5314,19 @@ test "writeDiagnostic with no source line still names the position" {
     });
     defer std.testing.allocator.free(text);
     try std.testing.expectEqualStrings("error[ZTS999]: m\n  --> 3:2\n\n", text);
+}
+
+test "the stripper reports one diagnostic per position" {
+    // The `any` check ran twice over one token and recorded it twice.
+    const source = "function handler(req: Request): Response {\n    const x: any = 1;\n    return Response.text(\"ok\");\n}\n";
+    var result = try strip(std.testing.allocator, source, .{ .collect_all_diagnostics = true, .report_errors = false });
+    defer result.deinit();
+    try std.testing.expectEqual(@as(usize, 1), result.diagnostics.len);
+    try std.testing.expectEqual(StripDiagnosticKind.any_type, result.diagnostics[0].kind);
+
+    // Two different positions stay two diagnostics.
+    const two = "const a: any = 1;\nconst b: any = 2;\n";
+    var both = try strip(std.testing.allocator, two, .{ .collect_all_diagnostics = true, .report_errors = false });
+    defer both.deinit();
+    try std.testing.expectEqual(@as(usize, 2), both.diagnostics.len);
 }

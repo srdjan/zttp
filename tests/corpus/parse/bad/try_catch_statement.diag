@@ -1,3 +1,2 @@
 stages: strip,parse
 {"code":"ZTS001","severity":"error","message":"'try/catch' is not supported","file":"parse/bad/try_catch_statement.ts","line":3,"column":5,"suggestion":"use Result types for error handling","repair_intent":null}
-{"code":"ZTS002","severity":"error","message":"expected expression","file":"parse/bad/try_catch_statement.ts","line":5,"column":7,"suggestion":null,"repair_intent":null}

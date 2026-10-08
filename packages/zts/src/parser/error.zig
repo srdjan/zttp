@@ -177,6 +177,17 @@ pub const ErrorList = struct {
         self.errors.deinit(self.allocator);
     }
 
+    /// True when an error is already recorded at byte `offset`. One fault gets
+    /// one report: a second diagnostic at the same offset restates the first
+    /// (the stripper once named one `any` twice), and the first is the one
+    /// that carries the cause.
+    fn recordedAt(self: *const ErrorList, offset: u32) bool {
+        for (self.errors.items) |recorded| {
+            if (recorded.location.offset == offset) return true;
+        }
+        return false;
+    }
+
     /// Add an error
     pub fn addError(
         self: *ErrorList,
@@ -186,6 +197,7 @@ pub const ErrorList = struct {
     ) void {
         if (self.panic_mode) return; // Don't accumulate in panic mode
         if (self.errors.items.len >= self.max_errors) return;
+        if (self.recordedAt(loc.offset)) return;
 
         self.errors.append(self.allocator, .{
             .kind = kind,
@@ -211,6 +223,7 @@ pub const ErrorList = struct {
     ) void {
         if (self.panic_mode) return;
         if (self.errors.items.len >= self.max_errors) return;
+        if (self.recordedAt(loc.offset)) return;
 
         const message = std.fmt.allocPrint(self.allocator, fmt, args) catch {
             self.errors_truncated = true;
@@ -242,6 +255,7 @@ pub const ErrorList = struct {
     ) void {
         if (self.panic_mode) return;
         if (self.errors.items.len >= self.max_errors) return;
+        if (self.recordedAt(tok.start)) return;
 
         const token_text = if (tok.len > 0 and tok.len <= 20)
             tok.text(self.source)
@@ -267,6 +281,7 @@ pub const ErrorList = struct {
     ) void {
         if (self.panic_mode) return;
         if (self.errors.items.len >= self.max_errors) return;
+        if (self.recordedAt(tok.start)) return;
 
         const token_text = if (tok.len > 0 and tok.len <= 20)
             tok.text(self.source)
@@ -391,7 +406,7 @@ test "max errors limit" {
 
     var i: usize = 0;
     while (i < 10) : (i += 1) {
-        list.addError(.unexpected_token, .{ .line = 1, .column = 1, .offset = 0 }, "error");
+        list.addError(.unexpected_token, .{ .line = 1, .column = 1, .offset = @intCast(i) }, "error");
     }
 
     try std.testing.expectEqual(@as(usize, 3), list.errorCount());

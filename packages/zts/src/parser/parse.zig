@@ -202,6 +202,13 @@ pub const Parser = struct {
     /// compares it between loop iterations; a release build never reads it.
     tokens_advanced: u32 = 0,
 
+    /// `{` consumed minus `}` consumed. `synchronize` reads it to tell how many
+    /// braces the failed statement opened and left open. False until the first
+    /// token is read, so `advance` does not account for a token that is not
+    /// there yet.
+    brace_depth: u32 = 0,
+    primed: bool = false,
+
     /// Maximum recursive-descent nesting. Far above any hand-written handler
     /// (real code rarely nests past ~30) yet well under the worker-thread stack
     /// budget. Roughly V8's parser nesting tolerance.
@@ -292,7 +299,7 @@ pub const Parser = struct {
                     return err;
                 }
                 // Otherwise try to recover for better error messages
-                self.synchronize();
+                self.synchronize(0);
             }
         }
 
@@ -1392,6 +1399,8 @@ pub const Parser = struct {
         try self.expect(.lbrace, "'{'");
 
         const scope_id = try self.scopes.pushScope(.block);
+        // The brace level this block's statements sit at. Recovery returns here.
+        const block_depth = self.brace_depth;
 
         var stmts_sfa = std.heap.stackFallback(temp_list_stack_bytes, self.allocator);
         const stmts_alloc = stmts_sfa.get();
@@ -1406,7 +1415,7 @@ pub const Parser = struct {
             } else |err| {
                 try self.recordUnreportedStatementError(err);
                 const before = self.current.location().offset;
-                self.synchronize();
+                self.synchronize(block_depth);
                 // `synchronize` returns without consuming anything when
                 // `previous` is a semicolon or `current` starts a statement, so
                 // an error raised at such a token would leave this loop
@@ -1414,7 +1423,11 @@ pub const Parser = struct {
                 // `advance()` by hand to dodge that; guarantee the progress
                 // here instead, so a site that forgets produces a diagnostic
                 // rather than a hang.
-                if (!self.check(.eof) and self.current.location().offset == before) {
+                //
+                // Not when the token is this block's own `}`: the loop ends on
+                // it and `expect` consumes it, and skipping it here would end
+                // the enclosing block early.
+                if (!self.check(.eof) and !self.check(.rbrace) and self.current.location().offset == before) {
                     self.advance();
                 }
             }
@@ -2789,6 +2802,12 @@ pub const Parser = struct {
 
     fn advance(self: *Parser) void {
         if (std.debug.runtime_safety) self.tokens_advanced +%= 1;
+        if (self.primed) switch (self.current.type) {
+            .lbrace => self.brace_depth +|= 1,
+            .rbrace => self.brace_depth -|= 1,
+            else => {},
+        };
+        self.primed = true;
         self.previous = self.current;
         self.current = self.tokenizer.next();
         self.reportNonAscii();
@@ -3160,19 +3179,38 @@ pub const Parser = struct {
         return @intCast(count);
     }
 
-    fn synchronize(self: *Parser) void {
+    /// Skip to the next point where parsing can safely resume, recording no
+    /// error on the way. `block_depth` is the brace level of the block whose
+    /// statement failed (0 at the top level). A synchronization point is a `;`
+    /// or a statement keyword at that level, or the `}` that closes that block,
+    /// which is left unconsumed for the block's own loop.
+    ///
+    /// Braces the failed statement opened are skipped whole. Stopping at a `;`
+    /// or a keyword inside them resumed in the middle of a construct that the
+    /// failed statement owned (the body of an unsupported `while`, the arms of
+    /// a `switch`) and reported the rest of it as new faults: a `return`
+    /// "outside of function", an expression "expected" at a `}`. Those follow
+    /// from the first fault and name nothing the author can fix separately.
+    fn synchronize(self: *Parser, block_depth: u32) void {
         self.errors.enterPanicMode();
 
         var progress: ProgressGuard = .{};
         while (!self.check(.eof)) {
             progress.iteration(self);
-            if (self.previous.type == .semicolon) {
+            const at_level = self.brace_depth <= block_depth;
+            if (at_level and self.previous.type == .semicolon) {
                 self.errors.exitPanicMode();
                 return;
             }
 
             switch (self.current.type) {
-                .kw_class, .kw_function, .kw_var, .kw_let, .kw_const, .kw_for, .kw_if, .kw_while, .kw_return, .kw_try, .kw_enum => {
+                // At the failed block's level this `}` closes that block.
+                // Above it, the `}` closes a brace the failed statement opened.
+                .rbrace => if (at_level) {
+                    self.errors.exitPanicMode();
+                    return;
+                },
+                .kw_class, .kw_function, .kw_var, .kw_let, .kw_const, .kw_for, .kw_if, .kw_while, .kw_return, .kw_try, .kw_enum => if (at_level) {
                     self.errors.exitPanicMode();
                     return;
                 },
@@ -5722,4 +5760,113 @@ test "ZTS046 reports a byte order mark at the start of the file" {
     defer parser.deinit();
     try std.testing.expect(std.mem.startsWith(u8, err.message, "U+FEFF"));
     try std.testing.expectEqual(@as(u32, 1), err.location.column);
+}
+
+fn parseErrorCount(allocator: std.mem.Allocator, source: []const u8) !usize {
+    var parser = try Parser.init(allocator, source);
+    defer parser.deinit();
+    _ = parser.parse() catch 0;
+    return parser.getErrors().len;
+}
+
+test "an unsupported while loop reports once, not once per resumed fragment" {
+    // Recovery used to stop at the first `;` inside the loop body, parse the
+    // rest of the body as new statements, and report a `return` "outside of
+    // function" and an expression "expected" at a `}`. Both followed from the
+    // `while` and named nothing the author could fix separately.
+    const source =
+        \\function handler(req) {
+        \\  let n = 0;
+        \\  while (n < 3) {
+        \\    n = n + 1;
+        \\  }
+        \\  return n;
+        \\}
+    ;
+    try std.testing.expectEqual(@as(usize, 1), try parseErrorCount(std.testing.allocator, source));
+}
+
+test "an unsupported switch and try report once" {
+    const switch_source =
+        \\function handler(req) {
+        \\  switch (req.method) {
+        \\    case "GET":
+        \\      return 1;
+        \\    default:
+        \\      return 2;
+        \\  }
+        \\}
+    ;
+    const try_source =
+        \\function handler(req) {
+        \\  try {
+        \\    return 1;
+        \\  } catch (e) {
+        \\    return 2;
+        \\  }
+        \\}
+    ;
+    try std.testing.expectEqual(@as(usize, 1), try parseErrorCount(std.testing.allocator, switch_source));
+    try std.testing.expectEqual(@as(usize, 1), try parseErrorCount(std.testing.allocator, try_source));
+}
+
+test "recovery in a nested block leaves the enclosing block intact" {
+    // The skipped braces belong to the failed statement. Treating the `}` of
+    // the `while` body as the end of the `if` block would end the function body
+    // early and report the statements after it as top-level code.
+    const source =
+        \\function handler(req) {
+        \\  if (req) {
+        \\    let n = 0;
+        \\    while (n < 3) { n = n + 1; }
+        \\    return n;
+        \\  }
+        \\  return 0;
+        \\}
+    ;
+    try std.testing.expectEqual(@as(usize, 1), try parseErrorCount(std.testing.allocator, source));
+}
+
+test "recovery from an error inside a match still lands on the statement after it" {
+    // The failed statement is the `match`, and the error is raised inside its
+    // braces, so the match's own `{` is open when recovery starts. Recovery
+    // returns to the enclosing block's level and stops after the match's `;`.
+    const source =
+        \\function handler(req) {
+        \\  const v = match (req.method) {
+        \\    when "GET": 1,
+        \\    default: 2,
+        \\    when "POST": 3,
+        \\  };
+        \\  return v;
+        \\}
+    ;
+    try std.testing.expectEqual(@as(usize, 1), try parseErrorCount(std.testing.allocator, source));
+}
+
+test "recovery still reports a second, independent fault in a later statement" {
+    // Silence ends at the synchronization point. Two separate unsupported
+    // statements are two faults and get two reports.
+    const source =
+        \\function handler(req) {
+        \\  let n = 0;
+        \\  while (n < 3) { n = n + 1; }
+        \\  let z = 1;
+        \\  var q = 2;
+        \\  return n;
+        \\}
+    ;
+    try std.testing.expectEqual(@as(usize, 2), try parseErrorCount(std.testing.allocator, source));
+}
+
+test "an error list records one error per offset" {
+    var list = error_mod.ErrorList.init(std.testing.allocator, "abc def");
+    defer list.deinit();
+    const at: SourceLocation = .{ .line = 1, .column = 1, .offset = 0 };
+    list.addError(.unexpected_token, at, "first");
+    list.addError(.expected_expression, at, "second at the same offset");
+    list.addError(.unexpected_token, .{ .line = 1, .column = 5, .offset = 4 }, "third, elsewhere");
+    try std.testing.expectEqual(@as(usize, 2), list.errorCount());
+    try std.testing.expectEqualStrings("first", list.getErrors()[0].message);
+    try std.testing.expectEqualStrings("third, elsewhere", list.getErrors()[1].message);
 }
