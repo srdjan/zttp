@@ -1,6 +1,7 @@
 # Tier 1 plan: test and diagnostic discipline (beni items R1 to R5)
 
-Status: draft for owner approval, 2026-10-07, revision 2. Source: the
+Status: complete, 2026-10-08 (revision 2, accepted 2026-10-07). All units are on
+local `main`; section 9 records the result. Source: the
 [beni retrofit study](2026-10-07-beni-retrofit-study.md), decision D1 (a).
 Code references are to local `main` at `84444568`. This plan does not
 authorize implementation until the owner approves it.
@@ -535,3 +536,43 @@ decision before it gets a plan.
 13. **An unterminated block comment is refused with no diagnostic** (ZTS011).
     `zts check --json` prints `{"success":false,"diagnostics":[]}` and logs
     only `TypeScript strip error: error.UnterminatedComment`.
+14. **ZTS105 does not fire on a string addition used as a method receiver**
+    (R4 observation). `(n + "y").toUpperCase()` passes the type checker with
+    no diagnostic, because `walkExpr` does not descend into a `member_access`
+    callee.
+15. **`zts check` hides Boolean-checker diagnostics on a program with a type
+    error.** For `if (n + "y")` it reports only ZTS105, while
+    `pipeline.resolve` also reports `condition_not_boolean`: the check stops
+    after the type stage.
+
+## 9. Result
+
+Completed 2026-10-08. Every unit is on local `main`; nothing is pushed.
+
+- U0: the four `match` runtime defects give spec answers; a misplaced
+  `default` is ZTS062; a type-test name below the top level is ZTS001. Every
+  record and array pattern tests the value's shape, and a field `_` tests
+  presence (R1 found that a 24-bit IR field hid `null_node`).
+- R2: `test-diagnostic-corpus` runs 165 cases with full-JSON goldens and the
+  stages that ran. Its code ratchet accounts for all 160 catalog codes: 112
+  covered by a case, 48 allowlisted with a mechanism (5 marked DEFECT, items
+  12 and 13). Each case has an instruction budget (U5.2).
+- R1: Maranget usefulness with witnesses in the suggestion, ZTS216 for an
+  unreachable arm, ZTS205 only when the strict checker does not run, and a
+  non-exhaustive `match` typed `T | undefined`.
+- R4: one human renderer with span underlines, a safe-build progress
+  assertion on 13 parser loops, ZTS046 naming the character, an error type
+  that removes the second message for a refused operator, and parser dampers.
+- R3: byte-mutation sweeps over the certificate and bytecode decoders,
+  frontend fuzz contracts, and a full-pipeline mutation test. They found and
+  fixed: a template-brace overflow panic, two stripper offset shifts, an
+  unbounded TSX recursion, statement drops on out-of-memory and on too many
+  locals, a 50 GB allocation and a stack overflow in the bytecode decoder, an
+  atom-remap panic, a ZTS031 constant-pool panic, a line-count error after a
+  string continuation, and a schema literal that crashed the check.
+- R5: a retired-instruction counter with a named source, and CLI abuse tests
+  over 16 hostile inputs. Ratio scaling tests moved to Tier 3.
+- Hashes: `diagnosticCatalogHash` moved (ZTS062, ZTS216). The policy, grammar,
+  and semantics hashes did not. `test-expert-app` replays 19 of 19, so the T5
+  re-record was not needed.
+- Final gate: `bash scripts/verify.sh` exit 0 on 2026-10-08 at `146c0f9e`.
