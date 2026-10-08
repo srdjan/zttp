@@ -1,0 +1,2 @@
+stages: strip,parse,imports,boolean,types,strict,verifier,flow,contract,paths,trace,spec,canonical
+{"code":"ZTS216","severity":"warning","message":"match arm is unreachable","file":"check/bad/match_arm_excluded_by_type.ts","line":6,"column":9,"suggestion":"earlier arms already match every value this arm matches, or the matched type excludes them; remove the arm","repair_intent":null}

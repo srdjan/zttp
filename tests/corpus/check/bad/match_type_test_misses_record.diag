@@ -1,0 +1,3 @@
+stages: strip,parse,imports,boolean,types,strict
+{"code":"ZTS216","severity":"warning","message":"match arm is unreachable","file":"check/bad/match_type_test_misses_record.ts","line":7,"column":9,"suggestion":"earlier arms already match every value this arm matches, or the matched type excludes them; remove the arm","repair_intent":null}
+{"code":"ZTS603","severity":"error","message":"match expression must be exhaustive in strict ZigTS","file":"check/bad/match_type_test_misses_record.ts","line":5,"column":17,"suggestion":"missing case: when {}. Add an arm for it, or add a 'default:' arm.","repair_intent":"add_trailing_return"}

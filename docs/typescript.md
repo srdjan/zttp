@@ -733,15 +733,36 @@ trick is unnecessary.
 In plain TypeScript the standard exhaustiveness guard is a `default` branch that
 assigns the discriminant to a `never`-typed parameter (`assertNever(x: never)`),
 which stops compiling when a new variant is added. zts checks `match`
-exhaustiveness directly, and the canonical profile requires every `match` to
-carry a `default:` catch-all arm so the unexpected case is always
-handled. Full variant coverage satisfies the type-level exhaustiveness check but
-does not lift that requirement - it applies to a local discriminant just as much
-as a parameter. So the rule is simple: give every `match` a `default` arm, and
-the `never`-parameter helper buys nothing. The companion
+exhaustiveness directly, so the `never`-parameter helper buys nothing.
+
+The rule depends on the type of the matched value (spec 5.5):
+
+- A closed type is covered by its arms and has no `default`. A closed type is a
+  union of literals, `boolean`, a union of records told apart by a literal field,
+  `null` and `undefined`, a fixed tuple, or a union of value kinds covered by the
+  type tests (`boolean`, `number`, `string`, `array`, `Dict`, `Bytes`). Several
+  arms may split one case, for example `{ x: true, y: true }`,
+  `{ x: true, y: false }`, and `{ x: false }`. A `default` after full coverage
+  is unreachable, and the check reports it as the warning ZTS216.
+- An open type needs a `default`. Open types are `string`, `number`, `unknown`,
+  an array `T[]` (its length has no bound), a type the checker cannot enumerate,
+  and a function. Literal arms never cover them. The `array` type test covers
+  every array.
+- A record pattern matches only a record, and an array pattern matches only an
+  array of its exact length. A binding-only arm such as `when { w }` therefore
+  does not cover a `string` member of the type.
+
+When the arms are not proved to cover the type, the strict check reports ZTS603
+and the type checker reports ZTS205. Both name the first missing case in their
+help text, for example `missing case: when { kind: "c" }`. A match that is not
+proved exhaustive evaluates to `undefined` when no arm matches, so its type is
+the union of the arm types and `undefined`. ZTS216 reports the first arm that no
+value can reach.
+
+The companion
 [discriminated-union-match.ts](../examples/patterns/discriminated-union-match.ts)
-dispatches on a parameter, carries a `default` arm, and checks with every
-property proven and no warnings.
+dispatches on a parameter, covers a closed union member by member with no
+`default`, and checks with every property proven and no warnings.
 
 #### 7. `as const` for config and constants
 

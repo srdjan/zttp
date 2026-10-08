@@ -117,16 +117,18 @@ verify warning: unused variable 'temp'
 
 ### 5. Non-Exhaustive Match
 
-Match expressions without a `default` arm are rejected by strict ZigTS unless the type checker can prove every finite union variant is covered.
+Match expressions without a `default` arm are rejected by strict ZigTS (ZTS603) unless the type checker can prove that the arms cover every value of the matched type. A closed type is covered by arms alone, and several arms may split one case. An open type such as `string`, `number`, `unknown`, or `T[]` needs a `default` arm. The help text names the first missing case.
 
 ```
 strict error: match expression must be exhaustive in strict ZigTS
   --> handler.ts:5:12
    |
-  5 |     return match (req) {
+  5 |     return match (command) {
    |            ^
-   = help: cover every finite union member or add an explicit default when the type is not finite
+   = help: missing case: when { kind: "c" }. Add an arm for it, or add a 'default:' arm.
 ```
+
+A `default` arm after full coverage of a closed type, and any arm that no value can reach, is the warning ZTS216 (`default arm is unreachable` or `match arm is unreachable`). The type checker reports ZTS205 for the same missing case when the strict check does not run. A match that is not proved exhaustive has the type of its arms or `undefined`.
 
 ### 6. Exhaustive Optional Handling
 

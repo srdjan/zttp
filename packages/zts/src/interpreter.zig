@@ -4473,6 +4473,176 @@ test "End-to-end: a record field underscore is a presence check and a binding is
     }.check);
 }
 
+// The tests below are the soundness check for `match_analysis.zig`. Each one
+// writes the arms of a match the analysis accepts without a `default` (the
+// corpus cases under `tests/corpus/check/good` carry the same arms), runs every
+// value of the matched type through it, and reads each result as a string. A
+// result of `undefined` would mean the model called a match exhaustive that the
+// runtime lets fall through.
+
+test "End-to-end: split coverage over record fields reaches an arm for every value" {
+    const source =
+        \\let f1 = { x: true, y: true };
+        \\let f2 = { x: true, y: false };
+        \\let f3 = { x: false, y: true };
+        \\let f4 = { x: false, y: false };
+        \\let s1 = match (f1) { when { x: true, y: true }: "both" when { x: true, y: false }: "x only" when { x: false }: "no x" };
+        \\let s2 = match (f2) { when { x: true, y: true }: "both" when { x: true, y: false }: "x only" when { x: false }: "no x" };
+        \\let s3 = match (f3) { when { x: true, y: true }: "both" when { x: true, y: false }: "x only" when { x: false }: "no x" };
+        \\let s4 = match (f4) { when { x: true, y: true }: "both" when { x: true, y: false }: "x only" when { x: false }: "no x" };
+        \\let n1 = { k: "x", inner: { t: "p" } };
+        \\let n2 = { k: "x", inner: { t: "q" } };
+        \\let n3 = { k: "y" };
+        \\let d1 = match (n1) { when { k: "x", inner: { t: "p" } }: "x-p" when { k: "x", inner: { t: "q" } }: "x-q" when { k: "y" }: "y" };
+        \\let d2 = match (n2) { when { k: "x", inner: { t: "p" } }: "x-p" when { k: "x", inner: { t: "q" } }: "x-q" when { k: "y" }: "y" };
+        \\let d3 = match (n3) { when { k: "x", inner: { t: "p" } }: "x-p" when { k: "x", inner: { t: "q" } }: "x-q" when { k: "y" }: "y" };
+        \\let c1 = { kind: "a", n: 1 };
+        \\let c2 = { kind: "b" };
+        \\let c3 = { kind: "c", t: "s" };
+        \\let k1 = match (c1) { when { kind: "a" }: "a" when { kind: "b" }: "b" when { kind: "c" }: "c" };
+        \\let k2 = match (c2) { when { kind: "a" }: "a" when { kind: "b" }: "b" when { kind: "c" }: "c" };
+        \\let k3 = match (c3) { when { kind: "a" }: "a" when { kind: "b" }: "b" when { kind: "c" }: "c" };
+    ;
+    try runMatchProgram(source, struct {
+        fn check(ctx: *context.Context) anyerror!void {
+            try expectGlobalString(ctx, "s1", "both");
+            try expectGlobalString(ctx, "s2", "x only");
+            try expectGlobalString(ctx, "s3", "no x");
+            try expectGlobalString(ctx, "s4", "no x");
+            try expectGlobalString(ctx, "d1", "x-p");
+            try expectGlobalString(ctx, "d2", "x-q");
+            try expectGlobalString(ctx, "d3", "y");
+            try expectGlobalString(ctx, "k1", "a");
+            try expectGlobalString(ctx, "k2", "b");
+            try expectGlobalString(ctx, "k3", "c");
+        }
+    }.check);
+}
+
+test "End-to-end: optional fields, tuples, and arrays reach an arm for every value" {
+    // `{ a?: string }` has three runtime shapes: the field holds a string, holds
+    // `undefined`, or is absent. A binding matches all three; `{ a: undefined }`
+    // plus `{ a: _ }` partition them. A `[boolean, "p" | "q"]` tuple has four
+    // values and a `number[]` is covered by `[]` plus the array type test.
+    const source =
+        \\let o1 = { a: "x" };
+        \\let o2 = { a: "z" };
+        \\let o3 = {};
+        \\let o4 = { a: undefined };
+        \\let b1 = match (o1) { when { a: "x" }: "x" when { a }: "other" };
+        \\let b2 = match (o2) { when { a: "x" }: "x" when { a }: "other" };
+        \\let b3 = match (o3) { when { a: "x" }: "x" when { a }: "other" };
+        \\let b4 = match (o4) { when { a: "x" }: "x" when { a }: "other" };
+        \\let u1 = match (o1) { when { a: undefined }: "absent" when { a: _ }: "present" };
+        \\let u2 = match (o3) { when { a: undefined }: "absent" when { a: _ }: "present" };
+        \\let u3 = match (o4) { when { a: undefined }: "absent" when { a: _ }: "present" };
+        \\let t1 = [true, "p"];
+        \\let t2 = [true, "q"];
+        \\let t3 = [false, "p"];
+        \\let t4 = [false, "q"];
+        \\let p1 = match (t1) { when [true, "p"]: "true-p" when [true, "q"]: "true-q" when [false, _]: "false" };
+        \\let p2 = match (t2) { when [true, "p"]: "true-p" when [true, "q"]: "true-q" when [false, _]: "false" };
+        \\let p3 = match (t3) { when [true, "p"]: "true-p" when [true, "q"]: "true-q" when [false, _]: "false" };
+        \\let p4 = match (t4) { when [true, "p"]: "true-p" when [true, "q"]: "true-q" when [false, _]: "false" };
+        \\let e1 = [];
+        \\let e2 = [1, 2, 3];
+        \\let a1 = match (e1) { when []: "empty" when array: "some" };
+        \\let a2 = match (e2) { when []: "empty" when array: "some" };
+    ;
+    try runMatchProgram(source, struct {
+        fn check(ctx: *context.Context) anyerror!void {
+            try expectGlobalString(ctx, "b1", "x");
+            try expectGlobalString(ctx, "b2", "other");
+            try expectGlobalString(ctx, "b3", "other");
+            try expectGlobalString(ctx, "b4", "other");
+            try expectGlobalString(ctx, "u1", "present");
+            try expectGlobalString(ctx, "u2", "absent");
+            try expectGlobalString(ctx, "u3", "absent");
+            try expectGlobalString(ctx, "p1", "true-p");
+            try expectGlobalString(ctx, "p2", "true-q");
+            try expectGlobalString(ctx, "p3", "false");
+            try expectGlobalString(ctx, "p4", "false");
+            try expectGlobalString(ctx, "a1", "empty");
+            try expectGlobalString(ctx, "a2", "some");
+        }
+    }.check);
+}
+
+test "End-to-end: literal and type-test partitions reach an arm for every value" {
+    // `string | { w: number }` needs a record arm and a string arm: the record
+    // arm does not take the string. The six value kinds of a JSON-like union
+    // each reach their own type test, and `boolean` and a literal pair reach
+    // theirs.
+    const source =
+        \\let m1 = "s";
+        \\let m2 = { w: 1 };
+        \\let r1 = match (m1) { when { w }: "record" when string: "text" };
+        \\let r2 = match (m2) { when { w }: "record" when string: "text" };
+        \\let v1 = null;
+        \\let v2 = true;
+        \\let v3 = 1;
+        \\let v4 = "s";
+        \\let v5 = [1];
+        \\let k1 = match (v1) { when null: "null" when boolean: "boolean" when number: "number" when string: "string" when array: "array" };
+        \\let k2 = match (v2) { when null: "null" when boolean: "boolean" when number: "number" when string: "string" when array: "array" };
+        \\let k3 = match (v3) { when null: "null" when boolean: "boolean" when number: "number" when string: "string" when array: "array" };
+        \\let k4 = match (v4) { when null: "null" when boolean: "boolean" when number: "number" when string: "string" when array: "array" };
+        \\let k5 = match (v5) { when null: "null" when boolean: "boolean" when number: "number" when string: "string" when array: "array" };
+        \\let t = true;
+        \\let f = false;
+        \\let l1 = match (t) { when true: "t" when false: "f" };
+        \\let l2 = match (f) { when true: "t" when false: "f" };
+        \\let one = 1;
+        \\let two = 2;
+        \\let n1 = match (one) { when 1: "one" when 2: "two" };
+        \\let n2 = match (two) { when 1: "one" when 2: "two" };
+        \\let present = "a";
+        \\let absent = undefined;
+        \\let q1 = match (present) { when "a": "a" when undefined: "none" };
+        \\let q2 = match (absent) { when "a": "a" when undefined: "none" };
+    ;
+    try runMatchProgram(source, struct {
+        fn check(ctx: *context.Context) anyerror!void {
+            try expectGlobalString(ctx, "r1", "text");
+            try expectGlobalString(ctx, "r2", "record");
+            try expectGlobalString(ctx, "k1", "null");
+            try expectGlobalString(ctx, "k2", "boolean");
+            try expectGlobalString(ctx, "k3", "number");
+            try expectGlobalString(ctx, "k4", "string");
+            try expectGlobalString(ctx, "k5", "array");
+            try expectGlobalString(ctx, "l1", "t");
+            try expectGlobalString(ctx, "l2", "f");
+            try expectGlobalString(ctx, "n1", "one");
+            try expectGlobalString(ctx, "n2", "two");
+            try expectGlobalString(ctx, "q1", "a");
+            try expectGlobalString(ctx, "q2", "none");
+        }
+    }.check);
+}
+
+test "End-to-end: a match with no covering arm evaluates to undefined" {
+    // The other half of the soundness check: where the analysis reports a
+    // missing case, the runtime really does fall through, which is why the type
+    // of such a match includes `undefined`.
+    const source =
+        \\let v = { kind: "c" };
+        \\let r = match (v) { when { kind: "a" }: "a" when { kind: "b" }: "b" };
+        \\let s = "text";
+        \\let r2 = match (s) { when { w }: "record" };
+        \\let tup = [true, "q"];
+        \\let r3 = match (tup) { when [true, "p"]: "true-p" when [false, _]: "false" };
+    ;
+    try runMatchProgram(source, struct {
+        fn check(ctx: *context.Context) anyerror!void {
+            for ([_][]const u8{ "r", "r2", "r3" }) |name| {
+                const atom = try ctx.atoms.intern(name);
+                const val = ctx.getGlobal(atom) orelse return error.MissingResult;
+                try std.testing.expect(val.isUndefined());
+            }
+        }
+    }.check);
+}
+
 test "End-to-end: computed compound assignment evaluates key once (object)" {
     // Regression: `obj[k()] += v` double-evaluated the key expression - once for
     // the read, once for the store - running k()'s side effect twice. The

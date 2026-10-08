@@ -1,0 +1,2 @@
+stages: strip,parse,imports,boolean,types,strict
+{"code":"ZTS603","severity":"error","message":"match expression must be exhaustive in strict ZigTS","file":"check/bad/match_duplicate_field_in_pattern.ts","line":5,"column":17,"suggestion":"an arm uses a pattern the analysis does not model, so the arms were not proved exhaustive. Add a 'default:' arm.","repair_intent":"add_trailing_return"}

@@ -1,0 +1,2 @@
+stages: strip,parse,imports,boolean,types,strict
+{"code":"ZTS603","severity":"error","message":"match expression must be exhaustive in strict ZigTS","file":"check/bad/match_missing_split_case.ts","line":5,"column":17,"suggestion":"missing case: when { x: false, y: false }. Add an arm for it, or add a 'default:' arm.","repair_intent":"add_trailing_return"}

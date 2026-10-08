@@ -533,8 +533,15 @@ function run(command: Command): string {
 ```
 
 A union covered member by member is exhaustive and needs no `default`; an open
-domain such as `string` or `number` needs one. Exactly one arm's expression is
-evaluated, and an arm expression may be effectful.
+domain such as `string`, `number`, or `T[]` needs one. Arms may split one case,
+for example `{ x: true, y: true }`, `{ x: true, y: false }`, and `{ x: false }`.
+A record pattern matches only a record and an array pattern only an array of
+its exact length, so `when { w }` does not cover a `string`. When the arms do
+not cover the type, the check reports ZTS603 and names the first missing case,
+for example `missing case: when { kind: "c" }`. A `default` after full coverage,
+and an arm no value can reach, is the warning ZTS216. Exactly one arm's
+expression is evaluated, and an arm expression may be effectful. A match that
+no arm covers evaluates to `undefined`, so its type includes `undefined`.
 
 ### `null`
 
