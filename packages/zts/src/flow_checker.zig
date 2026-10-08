@@ -309,11 +309,22 @@ pub const FlowChecker = struct {
     /// call then contributes `.unknown` and cannot discharge a flow proof.
     listed_tool_routes_unresolved: bool,
     /// When non-null, the walk is summarizing a callee body: return statements
-    /// merge their labels here instead of running sink checks, and expression
-    /// sinks stay silent (diagnostics belong to the handler walk).
+    /// merge their labels here instead of running response-sink checks.
+    /// Expression sinks (log, egress) still run, with the parameters bound from
+    /// the call site, so a sink inside a called function reports the labels
+    /// that call passes it. `addDiagnostic` deduplicates the repeats that
+    /// re-walking a callee per call site produces.
     summary_returns: ?*LabelSet,
     /// Callee summaries in progress (recursion guard).
     summary_stack: [max_summary_depth]u32,
+    /// The call expression that entered each summary frame, parallel to
+    /// `summary_stack`. `null_node` when the frame was entered without a call,
+    /// such as a closure literal walked where it is written. The outermost
+    /// real entry names where a diagnostic's chain starts.
+    summary_call_sites: [max_summary_depth]NodeIndex,
+    /// The call expression `inferLabels` is evaluating now, so a summary frame
+    /// can record the call that entered it. `null_node` outside any call.
+    active_call_node: NodeIndex = null_node,
     summary_depth: u8,
     /// Nonzero only while a `routerMatch` dispatch unions route returns.
     /// Response summaries then follow the runtime's payload-only surface.
@@ -400,6 +411,7 @@ pub const FlowChecker = struct {
             .listed_tool_routes_unresolved = false,
             .summary_returns = null,
             .summary_stack = @splat(0),
+            .summary_call_sites = @splat(null_node),
             .summary_depth = 0,
             .route_summary_depth = 0,
             .defended_paths = .empty,
@@ -613,13 +625,34 @@ pub const FlowChecker = struct {
     /// same union. Recursion is bounded by the same summary stack the
     /// user-function path uses.
     fn closureResultLabels(self: *FlowChecker, node: NodeIndex) LabelSet {
+        return self.closureResultLabelsBound(node, null);
+    }
+
+    /// `closureResultLabels` for a closure whose caller supplies its
+    /// arguments. `param_labels` is what a higher-order method hands the
+    /// callback: `[s].map((x) => ...)` passes the receiver's elements, so each
+    /// parameter carries the receiver's labels while the body is walked. Null
+    /// leaves the parameters as they are. The labels travel as an argument and
+    /// not as checker state, so no exit path can leave a stale binding source
+    /// behind for the next closure.
+    fn closureResultLabelsBound(self: *FlowChecker, node: NodeIndex, param_labels: ?LabelSet) LabelSet {
         const func = self.ir_view.getFunction(node) orelse return .{ .unknown = true };
         if (self.summary_depth >= max_summary_depth) return .{ .unknown = true };
         for (self.summary_stack[0..self.summary_depth]) |active| {
             if (active == node) return LabelSet.empty;
         }
 
+        if (param_labels) |labels| {
+            for (0..func.params_count) |i| {
+                const param_idx = self.ir_view.getListIndex(func.params_start, @intCast(i));
+                const pb = self.paramBinding(param_idx) orelse continue;
+                const key = packBindingKey(pb.scope_id, pb.slot);
+                self.binding_labels.put(self.allocator, key, labels) catch self.markAllocationFailure();
+            }
+        }
+
         self.summary_stack[self.summary_depth] = node;
+        self.summary_call_sites[self.summary_depth] = self.active_call_node;
         self.summary_depth += 1;
         defer self.summary_depth -= 1;
 
@@ -1885,6 +1918,7 @@ pub const FlowChecker = struct {
                 if (self.ir_view.getOptValue(node)) |ret_val| {
                     if (self.summary_returns) |acc| {
                         acc.* = LabelSet.merge(acc.*, self.inferLabels(ret_val));
+                        self.checkSummaryHtmlReturn(ret_val);
                     } else {
                         // Check if returning data via Response helpers
                         self.checkResponseSink(ret_val);
@@ -2005,6 +2039,9 @@ pub const FlowChecker = struct {
 
             .call => {
                 const call_data = self.ir_view.getCall(node) orelse return LabelSet.empty;
+                const saved_call = self.active_call_node;
+                self.active_call_node = node;
+                defer self.active_call_node = saved_call;
                 const labels = self.inferCallLabels(call_data);
                 // A response or body from a declared source carries the
                 // declared labels of everything it contains (M4 T4).
@@ -2163,12 +2200,10 @@ pub const FlowChecker = struct {
 
             .method_call => {
                 const call_data = self.ir_view.getCall(node) orelse return LabelSet.empty;
-                var labels = self.inferLabels(call_data.callee);
-                for (0..call_data.args_count) |i| {
-                    const arg = self.ir_view.getListIndex(call_data.args_start, @intCast(i));
-                    labels = LabelSet.merge(labels, self.inferLabels(arg));
-                }
-                return labels;
+                const saved_call = self.active_call_node;
+                self.active_call_node = node;
+                defer self.active_call_node = saved_call;
+                return self.mergeArgLabels(self.inferLabels(call_data.callee), call_data);
             },
 
             // A closure passed as a value carries what calling it would
@@ -2583,12 +2618,28 @@ pub const FlowChecker = struct {
         // imported module exports, builtin globals, and primitive/array methods
         // return above or are recognized here and keep their ordinary label
         // union.
-        var labels = self.inferLabels(call_data.callee);
+        var labels = self.mergeArgLabels(self.inferLabels(call_data.callee), call_data);
+        if (self.isUnresolvedFunctionValueCallee(call_data.callee)) labels.unknown = true;
+        return labels;
+    }
+
+    /// Union of `callee_labels` and every argument's labels. A closure written
+    /// directly as an argument of a method call (`[s].map((x) => ...)`,
+    /// `forEach`, `filter`) receives the receiver's elements, so it is walked
+    /// with its parameters bound to `callee_labels`, the receiver's labels.
+    /// Any other argument is read as before.
+    fn mergeArgLabels(self: *FlowChecker, callee_labels: LabelSet, call_data: Node.CallExpr) LabelSet {
+        const is_method = self.ir_view.getTag(call_data.callee) == .member_access;
+        var labels = callee_labels;
         for (0..call_data.args_count) |i| {
             const arg = self.ir_view.getListIndex(call_data.args_start, @intCast(i));
-            labels = LabelSet.merge(labels, self.inferLabels(arg));
+            const arg_tag = self.ir_view.getTag(arg) orelse .lit_undefined;
+            if (is_method and (arg_tag == .arrow_function or arg_tag == .function_expr)) {
+                labels = LabelSet.merge(labels, self.closureResultLabelsBound(arg, callee_labels));
+            } else {
+                labels = LabelSet.merge(labels, self.inferLabels(arg));
+            }
         }
-        if (self.isUnresolvedFunctionValueCallee(call_data.callee)) labels.unknown = true;
         return labels;
     }
 
@@ -2641,6 +2692,7 @@ pub const FlowChecker = struct {
         }
 
         self.summary_stack[self.summary_depth] = fn_node;
+        self.summary_call_sites[self.summary_depth] = self.active_call_node;
         self.summary_depth += 1;
         defer self.summary_depth -= 1;
         self.route_summary_depth += 1;
@@ -3021,10 +3073,10 @@ pub const FlowChecker = struct {
     }
 
     /// Labels for a call to a user-defined function: seed the callee's
-    /// parameters with the argument labels, walk its body with sink checks
-    /// suppressed, and union the labels of every return value. Falls back to
-    /// the union of argument labels when the body is unavailable, recursive,
-    /// or beyond the summary caps.
+    /// parameters with the argument labels, walk its body (its expression sinks
+    /// report the labels this call passes in), and union the labels of every
+    /// return value. Falls back to the union of argument labels when the body
+    /// is unavailable, recursive, or beyond the summary caps.
     fn userCallLabels(self: *FlowChecker, binding: ir.BindingRef, call_data: Node.CallExpr) LabelSet {
         var arg_labels: [max_summary_params]LabelSet = @splat(LabelSet.empty);
         var arg_union = LabelSet.empty;
@@ -3112,6 +3164,7 @@ pub const FlowChecker = struct {
         }
 
         self.summary_stack[self.summary_depth] = fn_node;
+        self.summary_call_sites[self.summary_depth] = self.active_call_node;
         self.summary_depth += 1;
         defer self.summary_depth -= 1;
 
@@ -3182,14 +3235,7 @@ pub const FlowChecker = struct {
                     // XSS check: Response.html with unvalidated user input
                     if (labels.has(.user_input) and !labels.has(.validated)) {
                         if (self.isGlobalMethodCall(call_data.callee, "Response", &.{"html"})) {
-                            self.addDiagnostic(.{
-                                .severity = .warning,
-                                .kind = .unvalidated_input_in_egress,
-                                .node = node,
-                                .message = "unvalidated user input in Response.html (potential XSS)",
-                                .help = "use JSX with renderToString() for auto-escaping, or pass input through validateObject() first",
-                            });
-                            self.properties.injection_safe = false;
+                            self.reportUnvalidatedHtml(node);
                         }
                     } else if (labels.has(.validated)) {
                         // Defended: a validated value safely reaches an HTML
@@ -3238,10 +3284,59 @@ pub const FlowChecker = struct {
         }
     }
 
+    /// Report unvalidated user input reaching `Response.html` at `node`.
+    /// Shared by the handler's response check and the summary-return check so
+    /// the message and help stay one text.
+    fn reportUnvalidatedHtml(self: *FlowChecker, node: NodeIndex) void {
+        self.addDiagnostic(.{
+            .severity = .warning,
+            .kind = .unvalidated_input_in_egress,
+            .node = node,
+            .message = "unvalidated user input in Response.html (potential XSS)",
+            .help = "use JSX with renderToString() for auto-escaping, or pass input through validateObject() first",
+        });
+        self.properties.injection_safe = false;
+    }
+
+    /// XSS check on a callee's direct `Response.html(x)` return, or a ternary
+    /// of such returns. A callee's return value is summarized into labels, and
+    /// the caller's label-only response check cannot see that the value was
+    /// built as an HTML response, so the check runs where the helper is
+    /// written. Only the first argument is read, as at the handler's own
+    /// response check. A callee that builds HTML and whose caller discards it
+    /// is reported too; carrying "HTML from unvalidated input" in the summary
+    /// result (plan unit F4) is what removes that over-report.
+    fn checkSummaryHtmlReturn(self: *FlowChecker, node: NodeIndex) void {
+        const tag = self.ir_view.getTag(node) orelse return;
+        switch (tag) {
+            .ternary => {
+                const t = self.ir_view.getTernary(node) orelse return;
+                self.checkSummaryHtmlReturn(t.then_branch);
+                self.checkSummaryHtmlReturn(t.else_branch);
+            },
+            .call, .method_call => {
+                const call_data = self.ir_view.getCall(node) orelse return;
+                if (!self.isGlobalMethodCall(call_data.callee, "Response", &.{"html"})) return;
+                if (call_data.args_count == 0) return;
+                const labels = self.inferLabels(self.ir_view.getListIndex(call_data.args_start, 0));
+                if (labels.has(.user_input) and !labels.has(.validated)) self.reportUnvalidatedHtml(node);
+            },
+            // exhaustive: only a direct HTML response or a ternary of them is
+            // resolved here. Every other shape reaches the caller as labels,
+            // and the caller's response check covers the secret and credential
+            // families for it.
+            else => {},
+        }
+    }
+
     fn checkExprSinks(self: *FlowChecker, node: NodeIndex) void {
-        // While summarizing a callee body, expression sinks stay silent:
-        // diagnostics belong to the handler walk.
-        if (self.summary_returns != null) return;
+        // Sinks run while a callee body is summarized too. The callee's
+        // parameters are bound from the call site, so the check sees the
+        // labels this call passes in, and a sink inside a called function is
+        // reported where it is written. A callee walked once per call site, or
+        // once per label evaluation, reaches the same sink node repeatedly;
+        // `addDiagnostic` reports each (node, kind) once, and the property
+        // updates in `checkSinkLabels` run on every walk regardless.
         const tag = self.ir_view.getTag(node) orelse return;
         if (tag != .call and tag != .method_call) return;
 
@@ -3897,8 +3992,53 @@ pub const FlowChecker = struct {
         return formatted;
     }
 
+    /// The help text for a diagnostic raised while a callee is summarized: the
+    /// plain help, then the outermost call that led to the sink. The
+    /// diagnostic itself stays at the sink node and its message is untouched,
+    /// because the expert replay hashes code plus message. A diagnostic raised
+    /// in the handler body, or in a closure walked where it is written, has no
+    /// call and keeps its help byte for byte. The text is human-only, so an
+    /// allocation failure falls back to the plain help.
+    fn helpWithCallChain(self: *FlowChecker, help: ?[]const u8) ?[]const u8 {
+        const site = for (self.summary_call_sites[0..self.summary_depth]) |candidate| {
+            if (candidate != null_node) break candidate;
+        } else return help;
+        const loc = self.ir_view.getLoc(site) orelse return help;
+        const formatted = if (help) |base|
+            std.fmt.allocPrint(self.allocator, "{s} (reached through the call at line {d}, column {d})", .{ base, loc.line, loc.column })
+        else
+            std.fmt.allocPrint(self.allocator, "reached through the call at line {d}, column {d}", .{ loc.line, loc.column });
+        const text = formatted catch return help;
+        self.allocated_messages.append(self.allocator, text) catch {
+            self.allocator.free(text);
+            return help;
+        };
+        return text;
+    }
+
+    /// Report a diagnostic once per sink. The key is the sink node and the
+    /// kind, which already names the label family, so a secret and a credential
+    /// that reach one helper both report. The message stays in the key because
+    /// one node can hold two sinks of one kind: a `fetch` call reports
+    /// `secret_in_egress_url` for its URL and again for its headers, each with
+    /// its own message. Callers update the flow properties before or after this
+    /// call and never depend on it adding a row, so a repeat that is dropped
+    /// here still demotes its property.
     fn addDiagnostic(self: *FlowChecker, diag: Diagnostic) void {
+        // A route function reached through a `routerMatch` dispatch is also
+        // walked as a request root, and that walk reports its sinks with the
+        // request labelled as the runtime delivers it. Reporting here as well
+        // would put the same sink in the list twice, first with the dispatch
+        // path's call chain and witness, and change what a routed handler
+        // reported before sinks were checked in summaries. The properties are
+        // already updated by the caller, so this drops text and never a verdict.
+        if (self.route_summary_depth > 0) return;
+        for (self.diagnostics.items) |existing| {
+            if (existing.node == diag.node and existing.kind == diag.kind and
+                std.mem.eql(u8, existing.message, diag.message)) return;
+        }
         var owned = diag;
+        owned.help = self.helpWithCallChain(diag.help);
         // Only diagnostics the counterexample surface can actually consume
         // carry a witness snapshot. Skipping the dupe for everything else
         // avoids allocator churn when the handler raises many non-witness
@@ -5833,6 +5973,261 @@ test "FlowChecker checks egress headers inside routerMatch route functions" {
         \\}
     ;
     try std.testing.expect(!(try runFlowProperties(std.testing.allocator, source)).no_secret_leakage);
+}
+
+/// Test harness: run the flow checker and hand back the number of diagnostics
+/// of one kind, plus a copy of the help text of the first one in `help_buf`.
+const FlowDiagnosticReport = struct {
+    properties: FlowProperties,
+    count: usize,
+    help: []const u8,
+};
+
+fn runFlowDiagnostics(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    kind: DiagnosticKind,
+    help_buf: []u8,
+) !FlowDiagnosticReport {
+    var parser = try @import("zts-engine").parser.JsParser.init(allocator, source);
+    var atoms = atom_table.AtomTable.init(allocator);
+    defer atoms.deinit();
+    parser.setAtomTable(&atoms);
+    defer parser.deinit();
+    const root = try parser.parse();
+    const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+
+    const handler_verifier = @import("handler_verifier.zig");
+    const handler_fn = handler_verifier.findHandlerFunction(ir_view, root) orelse
+        return error.HandlerNotFound;
+
+    var checker = FlowChecker.init(allocator, ir_view, &atoms);
+    defer checker.deinit();
+    _ = try checker.check(handler_fn);
+
+    var count: usize = 0;
+    var help: []const u8 = "";
+    for (checker.getDiagnostics()) |diag| {
+        if (diag.kind != kind) continue;
+        if (count == 0) {
+            const text = diag.help orelse "";
+            const n = @min(text.len, help_buf.len);
+            @memcpy(help_buf[0..n], text[0..n]);
+            help = help_buf[0..n];
+        }
+        count += 1;
+    }
+    return .{ .properties = checker.getProperties(), .count = count, .help = help };
+}
+
+test "FlowChecker reports a secret logged inside a called helper, call-sensitively" {
+    var buf: [512]u8 = undefined;
+
+    // Direct form: the secret logged in the handler body is refused, and its
+    // help text is the plain text with no call chain.
+    const direct =
+        \\import { env } from "zttp:env";
+        \\function handler(req) {
+        \\  console.log(env("SECRET_KEY"));
+        \\  return Response.json({ ok: true });
+        \\}
+    ;
+    const direct_report = try runFlowDiagnostics(std.testing.allocator, direct, .secret_in_log, &buf);
+    try std.testing.expectEqual(@as(usize, 1), direct_report.count);
+    try std.testing.expect(!direct_report.properties.no_secret_leakage);
+    try std.testing.expectEqualStrings("env vars with sensitive names must not be logged", direct_report.help);
+
+    // Routed form: the same log, reached through a top-level helper.
+    const routed =
+        \\import { env } from "zttp:env";
+        \\function note(t) {
+        \\  console.log(t);
+        \\  return 1;
+        \\}
+        \\function handler(req) {
+        \\  const n = note(env("SECRET_KEY"));
+        \\  return Response.json({ n: n });
+        \\}
+    ;
+    const routed_report = try runFlowDiagnostics(std.testing.allocator, routed, .secret_in_log, &buf);
+    try std.testing.expectEqual(@as(usize, 1), routed_report.count);
+    try std.testing.expect(!routed_report.properties.no_secret_leakage);
+    try std.testing.expect(std.mem.startsWith(u8, routed_report.help, "env vars with sensitive names must not be logged"));
+    try std.testing.expect(std.mem.indexOf(u8, routed_report.help, "line 7") != null);
+
+    // The same helper called with a clean literal reports nothing.
+    const clean =
+        \\import { env } from "zttp:env";
+        \\function note(t) {
+        \\  console.log(t);
+        \\  return 1;
+        \\}
+        \\function handler(req) {
+        \\  const n = note("ok");
+        \\  return Response.json({ n: n });
+        \\}
+    ;
+    const clean_report = try runFlowDiagnostics(std.testing.allocator, clean, .secret_in_log, &buf);
+    try std.testing.expectEqual(@as(usize, 0), clean_report.count);
+    try std.testing.expect(clean_report.properties.no_secret_leakage);
+}
+
+test "FlowChecker reports an egress body secret inside a nested arrow" {
+    var buf: [512]u8 = undefined;
+    const source =
+        \\import { env } from "zttp:env";
+        \\import { fetch } from "zttp:fetch";
+        \\function handler(req) {
+        \\  const send = (t) => {
+        \\    fetch("https://api.example.com/collect", { body: t });
+        \\    return 1;
+        \\  };
+        \\  const n = send(env("SECRET_KEY"));
+        \\  return Response.json({ n: n });
+        \\}
+    ;
+    const report = try runFlowDiagnostics(std.testing.allocator, source, .secret_in_egress_body, &buf);
+    try std.testing.expectEqual(@as(usize, 1), report.count);
+    try std.testing.expect(!report.properties.no_secret_leakage);
+}
+
+test "FlowChecker reports a credential logged inside a helper" {
+    var buf: [512]u8 = undefined;
+    const source =
+        \\function show(t) {
+        \\  console.log(t);
+        \\  return 1;
+        \\}
+        \\function handler(req) {
+        \\  const n = show(req.headers.authorization);
+        \\  return Response.json({ n: n });
+        \\}
+    ;
+    const report = try runFlowDiagnostics(std.testing.allocator, source, .credential_in_log, &buf);
+    try std.testing.expectEqual(@as(usize, 1), report.count);
+    try std.testing.expect(!report.properties.no_credential_leakage);
+}
+
+test "FlowChecker reports a credential response built inside a helper and discarded" {
+    var buf: [512]u8 = undefined;
+    const source =
+        \\function wrap(t) {
+        \\  return Response.json({ t: t });
+        \\}
+        \\function handler(req) {
+        \\  return wrap(req.headers.authorization);
+        \\}
+    ;
+    const report = try runFlowDiagnostics(std.testing.allocator, source, .credential_in_response, &buf);
+    try std.testing.expect(report.count >= 1);
+    try std.testing.expect(!report.properties.no_credential_leakage);
+}
+
+test "FlowChecker reports a secret logged by an array method callback" {
+    var buf: [512]u8 = undefined;
+    const leaking =
+        \\import { env } from "zttp:env";
+        \\function handler(req) {
+        \\  const s = env("SECRET_KEY");
+        \\  const out = [s].map((x) => {
+        \\    console.log(x);
+        \\    return 1;
+        \\  });
+        \\  return Response.json({ n: out.length });
+        \\}
+    ;
+    const leaking_report = try runFlowDiagnostics(std.testing.allocator, leaking, .secret_in_log, &buf);
+    try std.testing.expectEqual(@as(usize, 1), leaking_report.count);
+    try std.testing.expect(!leaking_report.properties.no_secret_leakage);
+
+    // A clean receiver leaves the same callback silent, so the binding is
+    // taken from the receiver and not from the callback's own text.
+    const clean =
+        \\import { env } from "zttp:env";
+        \\function handler(req) {
+        \\  const s = env("SECRET_KEY");
+        \\  const out = ["a"].map((x) => {
+        \\    console.log(x);
+        \\    return s.length;
+        \\  });
+        \\  return Response.json({ n: out.length });
+        \\}
+    ;
+    const clean_report = try runFlowDiagnostics(std.testing.allocator, clean, .secret_in_log, &buf);
+    try std.testing.expectEqual(@as(usize, 0), clean_report.count);
+}
+
+test "FlowChecker reports unvalidated input built into Response.html inside a helper" {
+    var buf: [512]u8 = undefined;
+    const direct =
+        \\function handler(req) { return Response.html(req.url); }
+    ;
+    const direct_report = try runFlowDiagnostics(std.testing.allocator, direct, .unvalidated_input_in_egress, &buf);
+    try std.testing.expectEqual(@as(usize, 1), direct_report.count);
+    try std.testing.expect(!direct_report.properties.injection_safe);
+
+    const routed =
+        \\function page(t) { return Response.html(t); }
+        \\function handler(req) { return page(req.url); }
+    ;
+    const routed_report = try runFlowDiagnostics(std.testing.allocator, routed, .unvalidated_input_in_egress, &buf);
+    try std.testing.expectEqual(@as(usize, 1), routed_report.count);
+    try std.testing.expect(!routed_report.properties.injection_safe);
+
+    const clean =
+        \\function page(t) { return Response.html(t); }
+        \\function handler(req) { return page("<p>ok</p>"); }
+    ;
+    const clean_report = try runFlowDiagnostics(std.testing.allocator, clean, .unvalidated_input_in_egress, &buf);
+    try std.testing.expectEqual(@as(usize, 0), clean_report.count);
+    try std.testing.expect(clean_report.properties.injection_safe);
+}
+
+test "FlowChecker keeps a routed sink's single report and plain help" {
+    var buf: [512]u8 = undefined;
+    const source =
+        \\import { routerMatch } from "zttp:router";
+        \\import { env } from "zttp:env";
+        \\function leak(req) {
+        \\  console.log(env("SECRET_KEY"));
+        \\  return Response.json({ ok: true });
+        \\}
+        \\const routes = { "GET /leak": leak };
+        \\function handler(req) {
+        \\  const found = routerMatch(routes, req);
+        \\  if (found === undefined) return Response.json({ error: "not found" });
+        \\  return found.handler(req);
+        \\}
+    ;
+    const report = try runFlowDiagnostics(std.testing.allocator, source, .secret_in_log, &buf);
+    try std.testing.expectEqual(@as(usize, 1), report.count);
+    try std.testing.expect(!report.properties.no_secret_leakage);
+    try std.testing.expectEqualStrings("env vars with sensitive names must not be logged", report.help);
+}
+
+test "FlowChecker reports one helper reached from two call sites once per kind" {
+    var buf: [512]u8 = undefined;
+    const source =
+        \\import { env } from "zttp:env";
+        \\function note(t) {
+        \\  console.log(t);
+        \\  return 1;
+        \\}
+        \\function handler(req) {
+        \\  const a = note(env("SECRET_KEY"));
+        \\  const b = note(env("SECRET_KEY"));
+        \\  const c = note(req.headers.authorization);
+        \\  return Response.json({ n: a + b + c });
+        \\}
+    ;
+    const secret = try runFlowDiagnostics(std.testing.allocator, source, .secret_in_log, &buf);
+    try std.testing.expectEqual(@as(usize, 1), secret.count);
+    try std.testing.expect(!secret.properties.no_secret_leakage);
+    // The credential reached the same log node through the third call, so it
+    // reports under its own kind and demotes its own property.
+    const credential = try runFlowDiagnostics(std.testing.allocator, source, .credential_in_log, &buf);
+    try std.testing.expectEqual(@as(usize, 1), credential.count);
+    try std.testing.expect(!credential.properties.no_credential_leakage);
 }
 
 test "FlowChecker unions routerMatch route return labels at dispatch" {

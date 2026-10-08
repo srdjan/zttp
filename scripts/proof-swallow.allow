@@ -312,3 +312,16 @@ packages/zts/src/type_env.zig populateFromTypeMap catch-poison@11
 packages/zts/src/type_env.zig processTypeAlias catch-poison@2
 packages/zts/src/type_env.zig processVarAnnotation catch-poison@2
 packages/zts/src/type_env.zig processVarAnnotation catch-poison@3
+
+# A closure's parameter labels (F1): a failed insert marks allocation poison,
+# the same handling as the user-call summary. Both checker entry points reject
+# poison before they publish a proof, so a parameter left unlabelled by the
+# failed insert cannot leave the checker as a successful verdict.
+packages/zts/src/flow_checker.zig closureResultLabelsBound catch-poison
+
+# Diagnostic prose only (F1). The call-chain note on a diagnostic's help text
+# falls back to the plain help when formatting or recording it fails. The
+# diagnostic still fires with the same kind, message, and node, and no analysis
+# result reads the help string.
+packages/zts/src/flow_checker.zig helpWithCallChain catch-return
+packages/zts/src/flow_checker.zig helpWithCallChain catch-block
