@@ -1256,3 +1256,284 @@ test "every compile stage releases what it allocated at any failure index" {
         runCompilePhasesForTest(failing.allocator(), source, &type_map) catch {};
     }
 }
+
+// ---------------------------------------------------------------------------
+// The refused-expression type (`t_error`) and its containment
+// ---------------------------------------------------------------------------
+
+/// What a probe sees: the phases the real pipeline ran over one TypeScript
+/// source. The error type is private to the type checker, so every probe goes
+/// through the real phases and reads what the other checkers decided.
+const Session = struct {
+    allocator: std.mem.Allocator,
+    resolved: *ResolvedModule,
+    parsed: ParsedModule,
+    type_map: *const TypeMap,
+    handler: ?NodeIndex,
+};
+
+fn withSession(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    comptime run: fn (Session) anyerror!void,
+) !void {
+    var frontend = try source_frontend_mod.PreparedSource.init(allocator, source, "probe.ts", .{});
+    defer frontend.deinit();
+    var atoms = AtomTable.init(allocator);
+    defer atoms.deinit();
+    var js_parser = try JsParser.init(allocator, frontend.parserInput());
+    defer js_parser.deinit();
+    js_parser.setAtomTable(&atoms);
+    const root = try js_parser.parse();
+    const view = IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
+    const parsed = ParsedModule.fromExisting(view, root, &atoms);
+
+    const type_map = frontend.typeMap().?;
+    var storage: TypeEnvStorage = .{};
+    defer storage.deinit(allocator);
+    try storage.init(allocator, type_map);
+
+    var resolved = try resolve(allocator, parsed, .{ .type_env = storage.envPtr(), .strict = true });
+    defer resolved.deinit();
+    try run(.{
+        .allocator = allocator,
+        .resolved = &resolved,
+        .parsed = parsed,
+        .type_map = type_map,
+        .handler = handler_verifier_mod.findHandlerFunction(view, root),
+    });
+}
+
+fn countKind(diagnostics: anytype, kind: anytype) usize {
+    var count: usize = 0;
+    for (diagnostics) |diagnostic| {
+        if (diagnostic.kind == kind) count += 1;
+    }
+    return count;
+}
+
+test "one refused operator gives one type diagnostic" {
+    const source =
+        \\function handler(req: Request): Response {
+        \\  const n: number = 1;
+        \\  const m: number = n + "y";
+        \\  return Response.text(String(m));
+        \\}
+    ;
+    try withSession(testing.allocator, source, struct {
+        fn run(session: Session) anyerror!void {
+            const diagnostics = session.resolved.typeDiagnostics();
+            try testing.expectEqual(@as(usize, 1), diagnostics.len);
+            try testing.expectEqual(type_checker_mod.DiagnosticKind.string_add, diagnostics[0].kind);
+            try testing.expectEqual(@as(usize, 1), session.resolved.type_checker.?.refusedExpressionCount());
+        }
+    }.run);
+}
+
+test "a refused value used again gives no second diagnostic" {
+    // The refused sum flows into a binding, a call argument, and a ternary.
+    // Each used to raise a mismatch of its own on top of ZTS105.
+    const source =
+        \\function twice(x: number): number {
+        \\  return x + x;
+        \\}
+        \\function handler(req: Request): Response {
+        \\  const n: number = 1;
+        \\  const m = n + "y";
+        \\  const k: number = m;
+        \\  const t: number = twice(m);
+        \\  const u: number = n === 1 ? m : 2;
+        \\  return Response.text(String(k + t + u));
+        \\}
+    ;
+    try withSession(testing.allocator, source, struct {
+        fn run(session: Session) anyerror!void {
+            const diagnostics = session.resolved.typeDiagnostics();
+            try testing.expectEqual(@as(usize, 1), diagnostics.len);
+            try testing.expectEqual(type_checker_mod.DiagnosticKind.string_add, diagnostics[0].kind);
+        }
+    }.run);
+}
+
+test "the error type exists only where a type error was reported" {
+    // A refused expression implies a reported error. That is the direction a
+    // regression breaks: an error type with no diagnostic would be accepted
+    // everywhere, silently. The converse holds too: a source with no refused
+    // operator never produces the type.
+    const refusing = [_][]const u8{
+        "function f(n: number): number {\n  const m: number = n + \"y\";\n  return m;\n}",
+        "function f(n: number): string {\n  const s = n + \"y\" + \"z\";\n  return s;\n}",
+        "function f(n: number): string {\n  const s = n + \"y\";\n  return s.toUpperCase();\n}",
+        "function f(n: number): number {\n  return n === 1 ? n + \"y\" : 2;\n}",
+        "const n: number = 1;\nif (n + \"y\") { const k = 1; }",
+    };
+    const clean = [_][]const u8{
+        "function f(n: number): number {\n  const m: number = n + 2;\n  return m;\n}",
+        "function f(parts: string[]): string {\n  return parts.join(\"\");\n}",
+        "const a: string = \"x\";\nconst b = a === \"x\" ? 1 : 2;",
+    };
+    inline for (refusing) |source| {
+        try withSession(testing.allocator, source, struct {
+            fn run(session: Session) anyerror!void {
+                try testing.expect(session.resolved.type_checker.?.refusedExpressionCount() > 0);
+                try testing.expect(session.resolved.typeErrorCount() > 0);
+            }
+        }.run);
+    }
+    inline for (clean) |source| {
+        try withSession(testing.allocator, source, struct {
+            fn run(session: Session) anyerror!void {
+                try testing.expectEqual(@as(usize, 0), session.resolved.type_checker.?.refusedExpressionCount());
+                try testing.expectEqual(@as(u32, 0), session.resolved.typeErrorCount());
+            }
+        }.run);
+    }
+}
+
+test "the public inference getter hides the error type and any type built from it" {
+    const source =
+        \\const n: number = 1;
+        \\const joined = n + "y";
+        \\const list = [n + "y", "z"];
+        \\const pick = n === 1 ? n + "y" : "z";
+    ;
+    try withSession(testing.allocator, source, struct {
+        fn run(session: Session) anyerror!void {
+            const checker = &session.resolved.type_checker.?;
+            const view = session.parsed.ir_view;
+            var seen: usize = 0;
+            var node: NodeIndex = 0;
+            while (node < view.nodeCount()) : (node += 1) {
+                const tag = view.getTag(node) orelse continue;
+                // Every expression kind the sources above build from a refused sum.
+                switch (tag) {
+                    .binary_op, .array_literal, .ternary => {},
+                    else => continue,
+                }
+                const inferred = checker.inferTypeWithoutDiagnostics(node);
+                // Whatever another checker is handed must not mention the error
+                // type, however deep: it is unknown to them or a real type.
+                try testing.expect(!checker.env.pool.mentionsError(inferred));
+                if (tag == .binary_op) {
+                    const bin = view.getBinary(node) orelse continue;
+                    if (bin.op == .add) {
+                        try testing.expectEqual(type_pool_mod.null_type_idx, inferred);
+                        seen += 1;
+                    }
+                }
+            }
+            try testing.expect(seen >= 3);
+        }
+    }.run);
+}
+
+test "a refused condition is still refused by the boolean checker" {
+    // If the error type leaked, `isAssignableTo(error, boolean)` would answer
+    // yes and the condition would pass as boolean.
+    try withSession(testing.allocator, "const n: number = 1;\nif (n + \"y\") { const k = 1; }", struct {
+        fn run(session: Session) anyerror!void {
+            try testing.expectEqual(@as(usize, 1), session.resolved.typeDiagnostics().len);
+            try testing.expectEqual(
+                @as(usize, 1),
+                countKind(session.resolved.boolDiagnostics(), bool_checker_mod.DiagnosticKind.condition_not_boolean),
+            );
+        }
+    }.run);
+    try withSession(testing.allocator, "const n: number = 1;\nconst q: boolean = !(n + \"y\");", struct {
+        fn run(session: Session) anyerror!void {
+            try testing.expectEqual(
+                @as(usize, 1),
+                countKind(session.resolved.boolDiagnostics(), bool_checker_mod.DiagnosticKind.not_operand_not_boolean),
+            );
+        }
+    }.run);
+}
+
+test "a refused operand is unknown to the strict checker, not a type it can reason from" {
+    // If the error type leaked, `isAssignableTo(null, error)` would answer yes
+    // and the strict checker would claim the operand admits null (ZTS624), a
+    // statement about a type it was never given.
+    try withSession(testing.allocator, "const n: number = 1;\nconst q = (n + \"y\") ?? 0;", struct {
+        fn run(session: Session) anyerror!void {
+            try testing.expectEqual(@as(usize, 1), session.resolved.typeDiagnostics().len);
+            try testing.expectEqual(
+                @as(usize, 0),
+                countKind(session.resolved.strictDiagnostics(), strict_checker_mod.DiagnosticKind.nullish_operator_on_null),
+            );
+        }
+    }.run);
+}
+
+const refused_flow_source =
+    \\import { env } from "zttp:env";
+    \\function handler(req: Request): Response {
+    \\  const token = env("API_TOKEN");
+    \\  const joined = token + "!";
+    \\  const shout = joined.toUpperCase();
+    \\  return Response.text(shout);
+    \\}
+;
+
+test "an error-typed receiver does not make the flow checker or the verifier clean" {
+    // `joined` holds a refused sum, so its binding type is the error type and
+    // `joined.toUpperCase()` has an error-typed receiver. The flow checker asks
+    // the type checker what the receiver is; it must get "unknown", and the
+    // secret must still reach the response as a finding. The verifier does not
+    // read inferred types, and its verdict is unchanged.
+    try withSession(testing.allocator, refused_flow_source, struct {
+        fn run(session: Session) anyerror!void {
+            try testing.expectEqual(@as(usize, 1), session.resolved.typeDiagnostics().len);
+            var checked = try check(session.allocator, session.resolved, session.handler.?, .{});
+            defer checked.deinit();
+            try testing.expectEqual(
+                @as(usize, 1),
+                countKind(checked.flowDiagnostics(), flow_checker_mod.DiagnosticKind.secret_in_response),
+            );
+            try testing.expectEqual(
+                @as(usize, 1),
+                countKind(checked.verifierDiagnostics(), handler_verifier_mod.DiagnosticKind.unchecked_optional_use),
+            );
+        }
+    }.run);
+}
+
+test "a refused payload is a dynamic response schema in the contract, not an inferred one" {
+    // The contract builder asks the type checker for the payload's type to
+    // derive a response schema. A refused payload must come back unknown, which
+    // the builder records as a dynamic response, never as a concrete schema.
+    const head = "import { routerMatch } from \"zttp:router\";\n" ++
+        "function getX(req: Request): Response {\n  const n: number = 1;\n";
+    const tail = "\n  return Response.json(joined);\n}\n" ++
+        "const routes = { \"GET /x\": getX };\n" ++
+        "function handler(req: Request): Response {\n" ++
+        "  const found = routerMatch(routes, req);\n" ++
+        "  if (found !== undefined) {\n    return found.handler(req);\n  }\n" ++
+        "  return Response.json({ error: \"Not Found\" }, { status: 404 });\n}";
+    try withSession(testing.allocator, head ++ "  const joined = n + \"y\";" ++ tail, struct {
+        fn run(session: Session) anyerror!void {
+            try testing.expect(session.resolved.type_checker.?.refusedExpressionCount() > 0);
+            var contract = try extractContractFromParsed(session.allocator, session.parsed, "probe.ts", .{
+                .type_map = session.type_map,
+                .resolved = session.resolved,
+            });
+            defer contract.deinit(session.allocator);
+            try testing.expectEqual(@as(usize, 1), contract.api.routes.items.len);
+            const route = contract.api.routes.items[0];
+            try testing.expectEqual(@as(usize, 1), route.responses.items.len);
+            try testing.expect(route.responses.items[0].schema == .dynamic);
+        }
+    }.run);
+    // The same route with an unrefused payload does infer a schema, so the
+    // dynamic answer above comes from the refusal and not from the route shape.
+    try withSession(testing.allocator, head ++ "  const joined = n + 2;" ++ tail, struct {
+        fn run(session: Session) anyerror!void {
+            var contract = try extractContractFromParsed(session.allocator, session.parsed, "probe.ts", .{
+                .type_map = session.type_map,
+                .resolved = session.resolved,
+            });
+            defer contract.deinit(session.allocator);
+            const route = contract.api.routes.items[0];
+            try testing.expect(route.responses.items[0].schema == .inline_json);
+        }
+    }.run);
+}

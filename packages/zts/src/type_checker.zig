@@ -282,7 +282,41 @@ pub const TypeChecker = struct {
         const previous = self.report_inference_diagnostics;
         self.report_inference_diagnostics = false;
         defer self.report_inference_diagnostics = previous;
-        return self.inferType(node);
+        return self.hideError(self.inferType(node));
+    }
+
+    /// The type another checker may see. A refused expression's error type
+    /// (`t_error`) is private to this checker: it exists so one mistake gives
+    /// one message here, and a consumer that read it would hold a type that
+    /// proves nothing. It becomes `null_type_idx`, which every consumer treats
+    /// as unknown and refuses to rely on. A type built from it goes the same
+    /// way. Every public getter that returns an inferred type routes through
+    /// this function.
+    fn hideError(self: *const TypeChecker, type_idx: TypeIndex) TypeIndex {
+        if (self.refusedExpressionCount() == 0) return type_idx;
+        if (self.env.pool.mentionsError(type_idx)) return null_type_idx;
+        return type_idx;
+    }
+
+    /// Whether the operator at `node` was refused. The answer is read from the
+    /// diagnostics the checker recorded, not from a second record, so the
+    /// error type exists for exactly the expressions that have a diagnostic:
+    /// there is no state to fall out of step and no allocation to fail.
+    fn isRefused(self: *const TypeChecker, node: NodeIndex) bool {
+        for (self.diagnostics.items) |diag| {
+            if (diag.kind == .string_add and diag.node == node) return true;
+        }
+        return false;
+    }
+
+    /// How many expressions had an operator refused. A test reads it to check
+    /// that the error type exists only where a diagnostic was reported.
+    pub fn refusedExpressionCount(self: *const TypeChecker) usize {
+        var count: usize = 0;
+        for (self.diagnostics.items) |diag| {
+            if (diag.kind == .string_add) count += 1;
+        }
+        return count;
     }
 
     /// Reject proof/type results after either the checker or its shared pool
@@ -1453,8 +1487,12 @@ pub const TypeChecker = struct {
     /// records hold different indices, and index equality would fall through to
     /// step 3 and produce the right answer only by accident - and the wrong one
     /// as soon as a field is optional on one side.
-    pub fn joinTypes(self: *const TypeChecker, when_true: TypeIndex, when_false: TypeIndex) TypeIndex {
+    fn joinTypes(self: *const TypeChecker, when_true: TypeIndex, when_false: TypeIndex) TypeIndex {
         const pool = self.env.pool;
+
+        // A refused branch makes the join refused: the mistake was reported
+        // once, where the branch was refused.
+        if (when_true == pool.idx_error or when_false == pool.idx_error) return pool.idx_error;
 
         // Outside the spec's join, which assumes both branches type: an
         // un-inferred branch contributes nothing, so defer to the other side
@@ -1484,7 +1522,7 @@ pub const TypeChecker = struct {
         return pool.addUnion(self.allocator, &.{ when_true, when_false });
     }
 
-    pub fn inferType(self: *const TypeChecker, node: NodeIndex) TypeIndex {
+    fn inferType(self: *const TypeChecker, node: NodeIndex) TypeIndex {
         self.env.pool.ensureHealthy() catch return null_type_idx;
         if (node == null_node) return null_type_idx;
         const tag = self.ir_view.getTag(node) orelse return null_type_idx;
@@ -2347,6 +2385,7 @@ pub const TypeChecker = struct {
             .sub, .mul, .div, .mod, .pow => pool.idx_number,
             .bit_and, .bit_or, .bit_xor, .shl, .shr, .ushr => pool.idx_number,
             .add => {
+                if (self.isRefused(node)) return pool.idx_error;
                 const lt = pool.widenLiteral(self.inferType(bin.left));
                 const rt = pool.widenLiteral(self.inferType(bin.right));
                 if (lt == pool.idx_string or rt == pool.idx_string) return pool.idx_string;
@@ -2390,6 +2429,7 @@ pub const TypeChecker = struct {
             .t_void,
             .t_never,
             .t_unknown_type,
+            .t_error,
             .t_record,
             .t_array,
             .t_tuple,

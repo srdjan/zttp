@@ -913,7 +913,7 @@ const Engine = struct {
             .t_function => try out.append(a, .function),
             // Types the model cannot enumerate: a value of one of these may be
             // anything, so only a binding or a `default:` covers it.
-            .t_unknown_type, .t_generic_app, .t_generic_param, .t_intersection => {
+            .t_unknown_type, .t_generic_app, .t_generic_param, .t_intersection, .t_error => {
                 open.* = true;
                 try appendUnknown(a, out, pool.idx_unknown);
             },

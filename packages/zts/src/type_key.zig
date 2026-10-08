@@ -125,6 +125,7 @@ const Encoder = struct {
             .t_void => try w.writeAll("v"),
             .t_never => try w.writeAll("!"),
             .t_unknown_type => try w.writeAll("?"),
+            .t_error => try w.writeAll("E"),
 
             .t_literal_string => {
                 const value = self.pool.getLiteralStringValue(idx) orelse "";

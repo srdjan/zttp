@@ -80,6 +80,15 @@ pub const TypeTag = enum(u8) {
 
     // Optional shorthand
     t_nullable, // T | undefined (wraps inner type)
+
+    /// The type of an expression whose operator the checker already refused.
+    /// One mistake gets one message: assignability accepts it silently, so the
+    /// refused expression does not raise a second diagnostic where its value is
+    /// used. It is not a pool failure (`TypePool.failure`) and not the absence
+    /// sentinel (`null_type_idx`), and it never leaves the type checker: every
+    /// getter another checker reads maps it to `null_type_idx`. Appended last
+    /// so the tags above keep their numbers.
+    t_error,
 };
 
 // ---------------------------------------------------------------------------
@@ -165,6 +174,9 @@ pub const TypePool = struct {
     idx_void: TypeIndex = null_type_idx,
     idx_never: TypeIndex = null_type_idx,
     idx_unknown: TypeIndex = null_type_idx,
+    /// The refused-expression type (`TypeTag.t_error`). Created with the pool
+    /// so asking for it cannot fail.
+    idx_error: TypeIndex = null_type_idx,
 
     pub fn init(allocator: std.mem.Allocator) TypePool {
         var pool = TypePool{
@@ -186,6 +198,7 @@ pub const TypePool = struct {
         pool.idx_void = pool.addNode(allocator, .{ .tag = .t_void, .data = .{} });
         pool.idx_never = pool.addNode(allocator, .{ .tag = .t_never, .data = .{} });
         pool.idx_unknown = pool.addNode(allocator, .{ .tag = .t_unknown_type, .data = .{} });
+        pool.idx_error = pool.addNode(allocator, .{ .tag = .t_error, .data = .{} });
         return pool;
     }
 
@@ -225,6 +238,72 @@ pub const TypePool = struct {
         errdefer allocator.free(owned);
         try self.key_memo.put(allocator, idx, owned);
         return owned;
+    }
+
+    /// True when `idx`, or any type it is built from, is the refused-expression
+    /// type. The walk is depth-bounded, and running out of depth answers true:
+    /// a caller uses this to keep the error type from escaping, so a doubtful
+    /// answer must be the one that hides the type.
+    pub fn mentionsError(self: *const TypePool, idx: TypeIndex) bool {
+        return self.mentionsErrorAt(idx, 0);
+    }
+
+    fn mentionsErrorAt(self: *const TypePool, idx: TypeIndex, depth: u8) bool {
+        if (idx == null_type_idx) return false;
+        if (idx == self.idx_error) return true;
+        if (depth >= 12) return true;
+        const tag = self.getTag(idx) orelse return false;
+        const next = depth + 1;
+        switch (tag) {
+            .t_error => return true,
+            .t_union => for (self.getUnionMembers(idx)) |member| {
+                if (self.mentionsErrorAt(member, next)) return true;
+            },
+            .t_intersection => for (self.getIntersectionMembers(idx)) |member| {
+                if (self.mentionsErrorAt(member, next)) return true;
+            },
+            .t_tuple => for (self.getTupleElements(idx)) |member| {
+                if (self.mentionsErrorAt(member, next)) return true;
+            },
+            .t_record => for (self.getRecordFields(idx)) |field| {
+                if (self.mentionsErrorAt(field.type_idx, next)) return true;
+            },
+            .t_array => return self.mentionsErrorAt(self.getArrayElement(idx), next),
+            .t_nullable => return self.mentionsErrorAt(self.getNullableInner(idx), next),
+            .t_dict => return self.mentionsErrorAt(self.getDictKey(idx), next) or
+                self.mentionsErrorAt(self.getDictValue(idx), next),
+            .t_function => {
+                const info = self.getFunctionInfo(idx);
+                if (self.mentionsErrorAt(info.ret, next)) return true;
+                for (info.params) |param| {
+                    if (self.mentionsErrorAt(param.type_idx, next)) return true;
+                }
+            },
+            .t_generic_app => {
+                const info = self.getGenericAppInfo(idx);
+                if (self.mentionsErrorAt(info.base, next)) return true;
+                for (info.args) |arg| {
+                    if (self.mentionsErrorAt(arg, next)) return true;
+                }
+            },
+            .t_boolean,
+            .t_number,
+            .t_string,
+            .t_null,
+            .t_bytes,
+            .t_undefined,
+            .t_void,
+            .t_never,
+            .t_unknown_type,
+            .t_literal_string,
+            .t_literal_number,
+            .t_literal_bool,
+            .t_ref,
+            .t_generic_param,
+            .t_template_literal,
+            => {},
+        }
+        return false;
     }
 
     /// Reject any type/proof result produced after the pool failed to allocate
@@ -1425,6 +1504,10 @@ pub const TypePool = struct {
         // produced no result, so skip rather than reject.
         if (target == null_type_idx or target == self.idx_unknown) return true;
         if (source == null_type_idx) return true;
+        // A refused expression (`t_error`) was already reported where it was
+        // refused; reporting it again where its value is used is the second
+        // message this type exists to prevent.
+        if (source == self.idx_error or target == self.idx_error) return true;
 
         const src_tag = self.getTag(source) orelse return false;
         const tgt_tag = self.getTag(target) orelse return false;
@@ -1960,6 +2043,7 @@ pub const TypePool = struct {
             .t_void => try writer.writeAll("void"),
             .t_never => try writer.writeAll("never"),
             .t_unknown_type => try writer.writeAll("unknown"),
+            .t_error => try writer.writeAll("<error>"),
             .t_record => {
                 try writer.writeAll("{ ");
                 for (self.getRecordFields(idx), 0..) |field, i| {
