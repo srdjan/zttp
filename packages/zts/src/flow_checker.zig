@@ -301,6 +301,14 @@ pub const FlowChecker = struct {
     /// User function declarations: packed binding key -> function expression
     /// node. Feeds callee return-label summaries in `userCallLabels`.
     user_fn_decls: std.AutoHashMapUnmanaged(u32, NodeIndex),
+    /// Binding keys of imported names. An import holds no datum a walk could
+    /// label, so a read of one is exempt from the unlabeled-global fallback in
+    /// `inferLabels`. Populated by `scanFunctionDecls`.
+    import_bindings: std.AutoHashMapUnmanaged(u32, void) = .empty,
+    /// True while `walkModuleDeclarations` runs. A module-level call happens at
+    /// load, not on a request path, so it must not enter the witness's stub
+    /// sequence (`trackModuleCallInit`).
+    walking_module_level: bool = false,
     /// Function bodies resolved from literal route tables passed to
     /// `routerMatch`. Each is walked as a request root after the handler.
     route_function_roots: std.ArrayListUnmanaged(NodeIndex),
@@ -483,6 +491,7 @@ pub const FlowChecker = struct {
         }
         self.binding_value_nodes.deinit(self.allocator);
         self.user_fn_decls.deinit(self.allocator);
+        self.import_bindings.deinit(self.allocator);
         self.param_values.deinit(self.allocator);
         self.route_function_roots.deinit(self.allocator);
         self.listed_tool_route_functions.deinit(self.allocator);
@@ -505,6 +514,7 @@ pub const FlowChecker = struct {
         self.scanFunctionDecls();
         self.scanRouteFunctionRoots();
         self.scanListedToolRoutes();
+        self.walkModuleDeclarations();
         self.findHandlerParam(handler_func);
         self.walkStmt(handler_func);
 
@@ -780,6 +790,9 @@ pub const FlowChecker = struct {
     pub fn exportedReturnLabels(self: *FlowChecker, name: []const u8) !?LabelSet {
         self.scanImports();
         self.scanFunctionDecls();
+        // The imported file's own module-level constants: an exported function
+        // that returns one answers with its labels, not with `.unknown`.
+        self.walkModuleDeclarations();
         if (self.allocation_failed) return error.OutOfMemory;
 
         const fn_node = self.findFunctionByName(name) orelse return null;
@@ -1132,6 +1145,10 @@ pub const FlowChecker = struct {
         for (0..node_count) |idx_usize| {
             const idx: NodeIndex = @intCast(idx_usize);
             const tag = self.ir_view.getTag(idx) orelse continue;
+            if (tag == .import_decl) {
+                self.scanImportBindings(idx);
+                continue;
+            }
             if (tag != .function_decl and tag != .var_decl) continue;
 
             // function_decl shares the var_decl layout: binding + init
@@ -1144,6 +1161,57 @@ pub const FlowChecker = struct {
             }
             const key = packBindingKey(vd.binding.scope_id, vd.binding.slot);
             self.user_fn_decls.put(self.allocator, key, vd.init) catch self.markAllocationFailure();
+        }
+    }
+
+    /// Record the local binding of each specifier of one `import` declaration.
+    fn scanImportBindings(self: *FlowChecker, decl_node: NodeIndex) void {
+        const import_decl = self.ir_view.getImportDecl(decl_node) orelse return;
+        var j: u8 = 0;
+        while (j < import_decl.specifiers_count) : (j += 1) {
+            const spec_idx = self.ir_view.getListIndex(import_decl.specifiers_start, j);
+            const spec = self.ir_view.getImportSpec(spec_idx) orelse continue;
+            const key = packBindingKey(spec.local_binding.scope_id, spec.local_binding.slot);
+            self.import_bindings.put(self.allocator, key, {}) catch self.markAllocationFailure();
+        }
+    }
+
+    /// The program node, or null when the IR holds none. A parse produces
+    /// exactly one, created last, so the search starts from the end.
+    fn programNode(self: *const FlowChecker) ?NodeIndex {
+        var idx = self.ir_view.nodeCount();
+        while (idx > 0) {
+            idx -= 1;
+            const node: NodeIndex = @intCast(idx);
+            if (self.ir_view.getTag(node) == .program) return node;
+        }
+        return null;
+    }
+
+    /// Walk the module-level data declarations in source order, so a read of a
+    /// `.global` binding finds the labels of its initializer and the sinks in
+    /// an initializer run once, as they do at load time. A function
+    /// declaration or a function-valued constant is walked where it is called
+    /// or rooted, not here: it holds no datum, and its body needs a request.
+    fn walkModuleDeclarations(self: *FlowChecker) void {
+        const program = self.programNode() orelse return;
+        const block = self.ir_view.getBlock(program) orelse return;
+        self.walking_module_level = true;
+        defer self.walking_module_level = false;
+        for (0..block.stmts_count) |i| {
+            const stmt = self.ir_view.getListIndex(block.stmts_start, @intCast(i));
+            var decl = stmt;
+            if (self.ir_view.getTag(stmt) == .export_decl) {
+                const export_decl = self.ir_view.getExportDecl(stmt) orelse continue;
+                decl = export_decl.declaration;
+            }
+            if (decl == null_node or self.ir_view.getTag(decl) != .var_decl) continue;
+            const vd = self.ir_view.getVarDecl(decl) orelse continue;
+            if (vd.init != null_node) {
+                const init_tag = self.ir_view.getTag(vd.init) orelse continue;
+                if (init_tag == .function_expr or init_tag == .arrow_function) continue;
+            }
+            self.walkStmt(decl);
         }
     }
 
@@ -2068,6 +2136,19 @@ pub const FlowChecker = struct {
         }
     }
 
+    /// The labels of a read whose binding has none recorded. A local or an
+    /// argument that no walk bound yet is empty, as it always was. A
+    /// module-level binding is different: `walkModuleDeclarations` records
+    /// every data declaration before any function runs, so a `.global` with no
+    /// record is one the walk did not reach, and the empty set would claim it
+    /// clean. It carries `.unknown`, which clears what a sink decides. A
+    /// function or an import holds no datum, so it stays empty.
+    fn unrecordedBindingLabels(self: *const FlowChecker, binding: ir.BindingRef, key: u32) LabelSet {
+        if (binding.kind != .global) return LabelSet.empty;
+        if (self.user_fn_decls.contains(key) or self.import_bindings.contains(key)) return LabelSet.empty;
+        return .{ .unknown = true };
+    }
+
     /// Labels a value carries. The empty set is a claim - "this carries
     /// nothing" - so an arm that returns it because the walk could not look is
     /// a fail-open, and five of those shipped before anyone noticed. Reading
@@ -2108,7 +2189,8 @@ pub const FlowChecker = struct {
                 // forwarded or a field is read (P8). Its labels are already on
                 // the binding; this only records the status.
                 if (self.binding_origins.get(key)) |origin| _ = self.declaredLabels(origin, true);
-                return self.binding_labels.get(key) orelse LabelSet.empty;
+                if (self.binding_labels.get(key)) |labels| return labels;
+                return self.unrecordedBindingLabels(binding, key);
             },
 
             .call => {
@@ -2266,10 +2348,12 @@ pub const FlowChecker = struct {
             },
 
             .unary_op => {
-                if (self.ir_view.getOptValue(node)) |operand| {
-                    return self.inferLabels(operand);
-                }
-                return LabelSet.empty;
+                // The operand is the second data word; the first holds the
+                // operator, so `getOptValue` would read an operator code as a
+                // node index and drop the operand's labels (or walk a node
+                // that is not the operand at all).
+                const unary = self.ir_view.getUnary(node) orelse return .{ .unknown = true };
+                return self.inferLabels(unary.operand);
             },
 
             .method_call => {
@@ -4407,6 +4491,7 @@ pub const FlowChecker = struct {
     /// originating module-function slot on the declared binding so that
     /// later `if (x)` patterns can emit stub_truthy.
     fn trackModuleCallInit(self: *FlowChecker, vd: Node.VarDecl) void {
+        if (self.walking_module_level) return;
         const init_tag = self.ir_view.getTag(vd.init) orelse return;
         if (init_tag != .call) return;
         const call = self.ir_view.getCall(vd.init) orelse return;
@@ -5921,6 +6006,41 @@ test "a secret returned by an imported function reaches the response" {
     ));
 }
 
+test "an imported function that returns a module-level secret reaches the response" {
+    const imported =
+        \\import { env } from "zttp:env";
+        \\const key = env("SECRET_KEY") ?? "";
+        \\export function readKey() { return key; }
+    ;
+    const source =
+        \\import { readKey } from "./utils.ts";
+        \\function handler(req) { return Response.json({ v: readKey() }); }
+    ;
+    try std.testing.expect(!try runWithImportedFunction(
+        std.testing.allocator,
+        source,
+        imported,
+        "readKey",
+    ));
+
+    // Control: a module-level constant that holds no secret keeps the property.
+    const clean_imported =
+        \\import { env } from "zttp:env";
+        \\const region = env("REGION") ?? "";
+        \\export function readRegion() { return region; }
+    ;
+    const clean_source =
+        \\import { readRegion } from "./utils.ts";
+        \\function handler(req) { return Response.json({ v: readRegion() }); }
+    ;
+    try std.testing.expect(try runWithImportedFunction(
+        std.testing.allocator,
+        clean_source,
+        clean_imported,
+        "readRegion",
+    ));
+}
+
 test "an imported function carrying nothing keeps the property" {
     // The point of the cross-file summary: an ordinary helper in another file
     // must not cost the proof the way an untraceable call does.
@@ -6509,6 +6629,150 @@ test "FlowChecker re-walks a callee without the labels an earlier call bound" {
         \\}
     ;
     try std.testing.expect(!(try runFlowProperties(std.testing.allocator, leaking)).no_secret_leakage);
+}
+
+test "FlowChecker carries labels on a module-level declaration" {
+    var buf: [512]u8 = undefined;
+
+    // The handler returns a secret held by a module-level constant.
+    const returned =
+        \\import { env } from "zttp:env";
+        \\const token = env("SECRET_KEY") ?? "";
+        \\function handler(req) {
+        \\  return Response.json({ k: token });
+        \\}
+    ;
+    const returned_report = try runFlowDiagnostics(std.testing.allocator, returned, .secret_in_response, &buf);
+    try std.testing.expectEqual(@as(usize, 1), returned_report.count);
+    try std.testing.expect(!returned_report.properties.no_secret_leakage);
+
+    // The same constant declared after the handler is read the same way.
+    const declared_later =
+        \\import { env } from "zttp:env";
+        \\function handler(req) {
+        \\  return Response.json({ k: token });
+        \\}
+        \\const token = env("SECRET_KEY") ?? "";
+    ;
+    try std.testing.expect(!(try runFlowProperties(std.testing.allocator, declared_later)).no_secret_leakage);
+
+    // A helper logs the constant.
+    const logged =
+        \\import { env } from "zttp:env";
+        \\const token = env("SECRET_KEY") ?? "";
+        \\function audit() {
+        \\  console.log(token);
+        \\  return 1;
+        \\}
+        \\function handler(req) {
+        \\  const n = audit();
+        \\  return Response.json({ n: n });
+        \\}
+    ;
+    const logged_report = try runFlowDiagnostics(std.testing.allocator, logged, .secret_in_log, &buf);
+    try std.testing.expectEqual(@as(usize, 1), logged_report.count);
+    try std.testing.expect(!logged_report.properties.no_secret_leakage);
+
+    // A module-level initializer is itself a sink at load time.
+    const initializer_sink =
+        \\import { env } from "zttp:env";
+        \\const logged = console.log(env("SECRET_KEY"));
+        \\function handler(req) {
+        \\  return Response.json({ ok: true });
+        \\}
+    ;
+    try std.testing.expect(!(try runFlowProperties(std.testing.allocator, initializer_sink)).no_secret_leakage);
+
+    // A secret reached through a second module-level constant.
+    const chained =
+        \\import { env } from "zttp:env";
+        \\const token = env("SECRET_KEY") ?? "";
+        \\const header = token;
+        \\function handler(req) {
+        \\  return Response.json({ k: header });
+        \\}
+    ;
+    try std.testing.expect(!(try runFlowProperties(std.testing.allocator, chained)).no_secret_leakage);
+}
+
+test "FlowChecker keeps a property for a module-level clean constant or function" {
+    // Control: a module-level constant that holds no secret keeps the property.
+    const clean =
+        \\import { env } from "zttp:env";
+        \\const region = env("REGION") ?? "";
+        \\function handler(req) {
+        \\  return Response.json({ region: region });
+        \\}
+    ;
+    try std.testing.expect((try runFlowProperties(std.testing.allocator, clean)).no_secret_leakage);
+
+    // A module-level function named in a route table is a function value, not
+    // a datum without a label: the table and the route keep the property.
+    const routed =
+        \\import { routerMatch } from "zttp:router";
+        \\function show(req) { return Response.json({ ok: true }); }
+        \\const routes = { "GET /show": show };
+        \\function handler(req) {
+        \\  const found = routerMatch(routes, req);
+        \\  if (found === undefined) return Response.json({ error: "not found" });
+        \\  return found.handler(req);
+        \\}
+    ;
+    try std.testing.expect((try runFlowProperties(std.testing.allocator, routed)).no_secret_leakage);
+
+    // A function declaration or a function-valued constant, read as a value,
+    // holds no datum that lacks a label.
+    const function_valued =
+        \\function twice(n) { return n + n; }
+        \\const thrice = (n) => n + n + n;
+        \\function handler(req) {
+        \\  const fns = [twice, thrice];
+        \\  return Response.json({ n: fns.length });
+        \\}
+    ;
+    try std.testing.expect((try runFlowProperties(std.testing.allocator, function_valued)).no_secret_leakage);
+
+    // An imported name read as a value likewise carries no unlabeled datum.
+    const imported_value =
+        \\import { env } from "zttp:env";
+        \\function handler(req) {
+        \\  const fns = [env];
+        \\  return Response.json({ n: fns.length });
+        \\}
+    ;
+    try std.testing.expect((try runFlowProperties(std.testing.allocator, imported_value)).no_secret_leakage);
+
+    // A let without an initializer starts empty.
+    const uninitialized =
+        \\let count;
+        \\function handler(req) {
+        \\  return Response.json({ n: count });
+        \\}
+    ;
+    try std.testing.expect((try runFlowProperties(std.testing.allocator, uninitialized)).no_secret_leakage);
+}
+
+test "FlowChecker carries an operand's labels through a unary operator" {
+    // `getOptValue` on a unary node reads the operator code, not the operand,
+    // so the operand's labels were dropped (and a module-level `typeof n`
+    // walked an unrelated node until the stack ran out).
+    const negated =
+        \\import { env } from "zttp:env";
+        \\function handler(req) {
+        \\  const t = !(env("SECRET_KEY") ?? "");
+        \\  return Response.json({ t: t });
+        \\}
+    ;
+    try std.testing.expect(!(try runFlowProperties(std.testing.allocator, negated)).no_secret_leakage);
+
+    const typed_at_module_level =
+        \\const n = 1;
+        \\const same = typeof n === "number";
+        \\function handler(req) {
+        \\  return Response.json({ same: same });
+        \\}
+    ;
+    try std.testing.expect((try runFlowProperties(std.testing.allocator, typed_at_module_level)).no_secret_leakage);
 }
 
 test "FlowChecker fails closed on a discarded method of a record a function returned" {

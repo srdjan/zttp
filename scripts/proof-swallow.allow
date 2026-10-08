@@ -125,6 +125,7 @@ packages/zts/src/flow_checker.zig recordContainedSecrets catch-poison
 packages/zts/src/flow_checker.zig recordValidated catch-poison
 packages/zts/src/flow_checker.zig resolveFacts catch-block
 packages/zts/src/flow_checker.zig scanFunctionDecls catch-poison
+packages/zts/src/flow_checker.zig scanImportBindings catch-poison
 packages/zts/src/flow_checker.zig scanImports catch-multiline
 packages/zts/src/flow_checker.zig scanImports catch-poison
 packages/zts/src/flow_checker.zig setFileFunctionLabels catch-poison
