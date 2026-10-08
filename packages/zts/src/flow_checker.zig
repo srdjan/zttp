@@ -329,6 +329,11 @@ pub const FlowChecker = struct {
     /// Nonzero only while a `routerMatch` dispatch unions route returns.
     /// Response summaries then follow the runtime's payload-only surface.
     route_summary_depth: u8,
+    /// Nonzero only while a `routerMatch` dispatch or a listed-tool summary
+    /// walks a function that `check` also walks as a request root. That root walk reports the
+    /// function's sinks, so `addDiagnostic` drops the dispatch walk's copies.
+    /// A dispatch target that is not a root reports in the dispatch walk.
+    root_dispatch_depth: u8 = 0,
     /// Guard provenance for validated bindings: packed(scope_id, slot) -> the
     /// validator call that set the `.validated` label. Lets a defended path
     /// name the guard ("validated by schemaCompile()"). Populated alongside
@@ -2697,6 +2702,11 @@ pub const FlowChecker = struct {
         defer self.summary_depth -= 1;
         self.route_summary_depth += 1;
         defer self.route_summary_depth -= 1;
+        const is_root = std.mem.indexOfScalar(NodeIndex, self.route_function_roots.items, fn_node) != null;
+        if (is_root) self.root_dispatch_depth += 1;
+        defer if (is_root) {
+            self.root_dispatch_depth -= 1;
+        };
 
         const body_tag = self.ir_view.getTag(function.body) orelse return .{ .unknown = true };
         if (body_tag == .block or body_tag == .program or body_tag == .return_stmt) {
@@ -2755,9 +2765,12 @@ pub const FlowChecker = struct {
         self.req_binding_key = null;
         self.req_identity_trusted = false;
         self.findHandlerParam(fn_node);
+        const is_root = std.mem.indexOfScalar(NodeIndex, self.route_function_roots.items, fn_node) != null;
+        if (is_root) self.root_dispatch_depth += 1;
         self.route_summary_depth += 1;
         const labels = self.resolvedFunctionCallLabels(fn_node, call_data);
         self.route_summary_depth -= 1;
+        if (is_root) self.root_dispatch_depth -= 1;
         self.req_binding_key = saved_req_key;
         self.req_identity_trusted = saved_identity_trusted;
         return labels;
@@ -4025,14 +4038,14 @@ pub const FlowChecker = struct {
     /// call and never depend on it adding a row, so a repeat that is dropped
     /// here still demotes its property.
     fn addDiagnostic(self: *FlowChecker, diag: Diagnostic) void {
-        // A route function reached through a `routerMatch` dispatch is also
-        // walked as a request root, and that walk reports its sinks with the
-        // request labelled as the runtime delivers it. Reporting here as well
-        // would put the same sink in the list twice, first with the dispatch
-        // path's call chain and witness, and change what a routed handler
-        // reported before sinks were checked in summaries. The properties are
-        // already updated by the caller, so this drops text and never a verdict.
-        if (self.route_summary_depth > 0) return;
+        // A route function reached through a `routerMatch` dispatch and also
+        // walked as a request root (`root_dispatch_depth`) reports its sinks in
+        // that root walk, with the request labelled as the runtime delivers it.
+        // Reporting here as well would put the same sink in the list twice,
+        // first with the dispatch path's call chain and witness. The caller
+        // already updated the properties, so this drops text and never a
+        // verdict.
+        if (self.root_dispatch_depth > 0) return;
         for (self.diagnostics.items) |existing| {
             if (existing.node == diag.node and existing.kind == diag.kind and
                 std.mem.eql(u8, existing.message, diag.message)) return;
