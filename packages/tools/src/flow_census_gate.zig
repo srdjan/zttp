@@ -9,7 +9,7 @@
 //!
 //! The observed verdict is one of four classes:
 //!   * `refused`: the claimed property is false and at least one flow sink
-//!     diagnostic (ZTS400 to ZTS407) says why;
+//!     diagnostic that witnesses that property (`witnessesProperty`) says why;
 //!   * `unproven`: the claimed property is false and no flow diagnostic says why;
 //!   * `held`: the claimed property is true;
 //!   * `no_verdict`: the probe did not reach a flow verdict. The gate reads
@@ -219,6 +219,22 @@ fn isFlowCode(code: []const u8) bool {
     return code[5] >= '0' and code[5] <= '7';
 }
 
+/// The flow codes that witness `property` (`propertyTagForKind` in
+/// flow_checker.zig). A refusal counts only when one of these says why, so a
+/// credential probe falsified through ZTS407 alone is not read as a refusal
+/// of the credential leak.
+fn witnessesProperty(code: []const u8, property: Property) bool {
+    const witnesses: []const []const u8 = switch (property) {
+        .no_secret_leakage => &.{ "ZTS400", "ZTS402", "ZTS404", "ZTS406" },
+        .no_credential_leakage => &.{ "ZTS401", "ZTS403", "ZTS405" },
+        .injection_safe => &.{"ZTS407"},
+    };
+    for (witnesses) |w| {
+        if (std.mem.eql(u8, w, code)) return true;
+    }
+    return false;
+}
+
 /// The warnings that every probe carries: an import the probe does not use,
 /// and a variable the probe does not read. Neither says anything about flow.
 fn isBenignWarning(code: []const u8) bool {
@@ -251,7 +267,7 @@ pub fn classify(a: std.mem.Allocator, result: *const precompile.CheckResult, pro
         const is_error = std.mem.eql(u8, diag.severity, "error");
         const is_warning = std.mem.eql(u8, diag.severity, "warning");
         if (isFlowCode(diag.code)) {
-            flow_codes += 1;
+            if (witnessesProperty(diag.code, property)) flow_codes += 1;
         } else if (std.mem.eql(u8, diag.code, claim_failure_code)) {
             // The claim failure names the property it could not discharge.
             if (std.mem.find(u8, diag.message, @tagName(property)) != null) claim_failures += 1;
