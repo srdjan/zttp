@@ -142,6 +142,11 @@ The package suites: `test-zts`, `test-sdk`, `test-modules`,
 malformed property nodes, caller atom resolution, and allocation cleanup.
 The type checker tests inferred schema types. `test-precompile` checks emitted
 schema bytes, raw JSON retention, dynamic inputs, and JSON binding behavior.
+`test-zts` also runs the frontend fuzz contracts in
+`packages/zts/src/tests/frontend_fuzz.zig`: each seed once through
+`std.testing.fuzz`, plus small PRNG stress loops and nesting generators. Set
+`ZTTP_FUZZ_ITERATIONS` to a positive integer to raise the stress iteration
+count for a manual run; the gate uses the defaults in that file.
 
 The audits and gates: `test-capability-audit`, `test-module-boundary`,
 `test-proof-checker-purity`, `test-kernel-safety`, `test-proof-ratchet`, `test-proof-ratchet-drift`,
