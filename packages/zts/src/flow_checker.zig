@@ -248,6 +248,10 @@ const Origin = struct {
 /// what bounds that work.
 const max_summary_params = 8;
 const max_summary_depth = 8;
+/// Bound on the passes that a recursive summary may take when its parameter
+/// labels keep widening. The labels are a fixed set of flags, so the widening
+/// ends well before this; reaching it fails closed.
+const max_fixpoint_passes = 16;
 const response_resolve_limit = 16;
 
 pub const FlowChecker = struct {
@@ -322,6 +326,18 @@ pub const FlowChecker = struct {
     /// such as a closure literal walked where it is written. The outermost
     /// real entry names where a diagnostic's chain starts.
     summary_call_sites: [max_summary_depth]NodeIndex,
+    /// The labels each parameter of a summary frame was bound with, parallel to
+    /// `summary_stack`. Only a frame that `functionCallLabels` entered records
+    /// them (`summary_rewalks`); a recursive call into the frame compares its
+    /// argument labels against these.
+    summary_bound: [max_summary_depth][max_summary_params]LabelSet,
+    /// True for a frame whose owner can walk it again, which is what lets a
+    /// recursive call widen `summary_bound`. Every other frame has no owner
+    /// that re-walks, so a recursive call that would widen it fails closed.
+    summary_rewalks: [max_summary_depth]bool,
+    /// True once a recursive call widened `summary_bound` of the frame and the
+    /// owner has not walked the body with the wider labels yet.
+    summary_widened: [max_summary_depth]bool,
     /// The function or object literal that the call site now being summarized
     /// passed for a parameter: packed parameter binding key -> node. Saved and
     /// restored around each `functionCallLabels` frame, so a binding made for
@@ -423,6 +439,9 @@ pub const FlowChecker = struct {
             .summary_returns = null,
             .summary_stack = @splat(0),
             .summary_call_sites = @splat(null_node),
+            .summary_bound = @splat(@splat(LabelSet.empty)),
+            .summary_rewalks = @splat(false),
+            .summary_widened = @splat(false),
             .param_values = .empty,
             .summary_depth = 0,
             .route_summary_depth = 0,
@@ -664,7 +683,7 @@ pub const FlowChecker = struct {
             }
         }
 
-        self.pushSummaryFrame(node);
+        self.pushSummaryFrame(node, false);
         defer self.summary_depth -= 1;
 
         const body_tag = self.ir_view.getTag(func.body) orelse return self.unresolvedCallLabels(LabelSet.empty);
@@ -680,11 +699,25 @@ pub const FlowChecker = struct {
     }
 
     /// Push a summary frame for `node`. The caller decrements `summary_depth`
-    /// when the walk ends.
-    fn pushSummaryFrame(self: *FlowChecker, node: NodeIndex) void {
+    /// when the walk ends. `rewalks` is true only for a frame whose owner
+    /// walks the body again when a recursive call widens its parameter labels.
+    fn pushSummaryFrame(self: *FlowChecker, node: NodeIndex, rewalks: bool) void {
         const frame = self.summary_depth;
         self.summary_stack[frame] = node;
         self.summary_call_sites[frame] = self.active_call_node;
+        // The labels the parameters carry as the frame opens: what the owner
+        // bound them to, which a recursive call is compared against.
+        self.summary_bound[frame] = @splat(LabelSet.empty);
+        if (self.ir_view.getFunction(node)) |func| {
+            for (0..@min(func.params_count, max_summary_params)) |i| {
+                const param_idx = self.ir_view.getListIndex(func.params_start, @intCast(i));
+                const pb = self.paramBinding(param_idx) orelse continue;
+                const key = packBindingKey(pb.scope_id, pb.slot);
+                self.summary_bound[frame][i] = self.binding_labels.get(key) orelse LabelSet.empty;
+            }
+        }
+        self.summary_rewalks[frame] = rewalks;
+        self.summary_widened[frame] = false;
         self.summary_depth += 1;
     }
 
@@ -2763,7 +2796,7 @@ pub const FlowChecker = struct {
             self.req_identity_trusted = saved_identity_trusted;
         }
 
-        self.pushSummaryFrame(fn_node);
+        self.pushSummaryFrame(fn_node, false);
         defer self.summary_depth -= 1;
         self.route_summary_depth += 1;
         defer self.route_summary_depth -= 1;
@@ -3273,10 +3306,8 @@ pub const FlowChecker = struct {
         arg_union: LabelSet,
     ) LabelSet {
         if (self.summary_depth >= max_summary_depth) return self.unresolvedCallLabels(arg_union);
-        for (self.summary_stack[0..self.summary_depth]) |active| {
-            // Recursion, and the only exit that stays with the argument union.
-            // The active frame collects all returns from this function.
-            if (active == fn_node) return arg_union;
+        for (self.summary_stack[0..self.summary_depth], 0..) |active, frame| {
+            if (active == fn_node) return self.recursiveCallLabels(frame, fn_node, call_data, arg_labels, arg_union);
         }
         const func = self.ir_view.getFunction(fn_node) orelse return self.unresolvedCallLabels(arg_union);
         // Past the parameter cap the arguments cannot be bound, so the body
@@ -3320,10 +3351,32 @@ pub const FlowChecker = struct {
             }
         }
 
-        self.pushSummaryFrame(fn_node);
+        const frame = self.summary_depth;
+        self.pushSummaryFrame(fn_node, true);
         defer self.summary_depth -= 1;
 
-        return self.summaryBodyLabels(func) orelse self.unresolvedCallLabels(arg_union);
+        var returned = self.summaryBodyLabels(func) orelse return self.unresolvedCallLabels(arg_union);
+        // A recursive call widened the labels this frame's parameters can
+        // carry, so the body is walked again with the wider labels, until no
+        // recursive call widens them further. The label set is a fixed set of
+        // flags and each pass adds one, so this ends; the bound is a guard
+        // that fails closed if the reasoning is ever wrong.
+        var passes: u8 = 0;
+        while (self.summary_widened[frame]) {
+            self.summary_widened[frame] = false;
+            passes += 1;
+            if (passes > max_fixpoint_passes) return self.unresolvedCallLabels(arg_union);
+            for (0..param_count) |i| {
+                const key = keys[i] orelse continue;
+                self.binding_labels.put(self.allocator, key, self.summary_bound[frame][i]) catch {
+                    self.markAllocationFailure();
+                    return self.unresolvedCallLabels(arg_union);
+                };
+            }
+            const again = self.summaryBodyLabels(func) orelse return self.unresolvedCallLabels(arg_union);
+            returned = LabelSet.merge(returned, again);
+        }
+        return returned;
     }
 
     /// Put each parameter's `param_values` entry back to what it was before the
@@ -3364,6 +3417,53 @@ pub const FlowChecker = struct {
         }
         // Arrow expression body: the body is the return expression.
         return self.inferLabels(func.body);
+    }
+
+    /// A call to a function that is already on the summary stack. The active
+    /// frame collects every return of the function, so the call itself
+    /// contributes its argument union. What the call can still add is a wider
+    /// label on a parameter: a secret that enters only in the recursive call's
+    /// argument reaches the base case's sink in the next recursion level. The
+    /// call widens the frame's bound labels and marks the frame, and the
+    /// frame's owner walks the body again with them.
+    fn recursiveCallLabels(
+        self: *FlowChecker,
+        frame: usize,
+        fn_node: NodeIndex,
+        call_data: Node.CallExpr,
+        arg_labels: [max_summary_params]LabelSet,
+        arg_union: LabelSet,
+    ) LabelSet {
+        const func = self.ir_view.getFunction(fn_node) orelse return self.unresolvedCallLabels(arg_union);
+        if (func.params_count > max_summary_params) return self.unresolvedCallLabels(arg_union);
+
+        var widened = false;
+        for (0..func.params_count) |i| {
+            const param_idx = self.ir_view.getListIndex(func.params_start, @intCast(i));
+            const pb = self.paramBinding(param_idx) orelse continue;
+
+            // A different function or object passed for a parameter than the
+            // frame resolved it to: the body walked for the frame would not be
+            // the body this call runs.
+            const key = packBindingKey(pb.scope_id, pb.slot);
+            const passed: ?NodeIndex = if (i < call_data.args_count)
+                self.passedValueNode(self.ir_view.getListIndex(call_data.args_start, @intCast(i)))
+            else
+                null;
+            if (passed != self.param_values.get(key)) return self.unresolvedCallLabels(arg_union);
+
+            const incoming = if (i < call_data.args_count) arg_labels[i] else LabelSet.empty;
+            const bound = self.summary_bound[frame][i];
+            const merged = LabelSet.mergeConditional(bound, incoming);
+            if (@as(u16, @bitCast(merged)) == @as(u16, @bitCast(bound))) continue;
+            // Only the owner of a `functionCallLabels` frame walks it again. A
+            // frame of any other kind has nobody to run the wider labels.
+            if (!self.summary_rewalks[frame]) return self.unresolvedCallLabels(arg_union);
+            self.summary_bound[frame][i] = merged;
+            widened = true;
+        }
+        if (widened) self.summary_widened[frame] = true;
+        return arg_union;
     }
 
     fn checkResponseSink(self: *FlowChecker, ret_val: NodeIndex) void {
@@ -6599,6 +6699,110 @@ test "FlowChecker resolves a method of a record passed as a parameter" {
     ;
     const unbound_report = try runFlowDiagnostics(std.testing.allocator, unbound, .secret_in_log, &buf);
     try std.testing.expect(!unbound_report.properties.no_secret_leakage);
+}
+
+test "FlowChecker walks a helper that is called as a bare statement" {
+    var buf: [512]u8 = undefined;
+    // The call discards its value. Only the label inference enters a called
+    // body, so the statement path has to run it for the log to be seen.
+    const leaking =
+        \\import { env } from "zttp:env";
+        \\function audit(t) { console.log(t); return 1; }
+        \\function handler(req) {
+        \\  const s = env("SECRET_KEY");
+        \\  audit(s);
+        \\  return Response.json({ ok: true });
+        \\}
+    ;
+    const leaking_report = try runFlowDiagnostics(std.testing.allocator, leaking, .secret_in_log, &buf);
+    try std.testing.expectEqual(@as(usize, 1), leaking_report.count);
+    try std.testing.expect(!leaking_report.properties.no_secret_leakage);
+
+    // Control: the same helper called with a clean literal.
+    const clean =
+        \\import { env } from "zttp:env";
+        \\function audit(t) { console.log(t); return 1; }
+        \\function handler(req) {
+        \\  audit("ok");
+        \\  return Response.json({ ok: true });
+        \\}
+    ;
+    const clean_report = try runFlowDiagnostics(std.testing.allocator, clean, .secret_in_log, &buf);
+    try std.testing.expectEqual(@as(usize, 0), clean_report.count);
+    try std.testing.expect(clean_report.properties.no_secret_leakage);
+    try std.testing.expect(clean_report.properties.deterministic);
+}
+
+test "FlowChecker widens a recursive summary until its labels stop growing" {
+    var buf: [512]u8 = undefined;
+    // The outer call passes a clean string. The secret enters only in the
+    // recursive call's argument, and the base case logs it.
+    const leaking =
+        \\import { env } from "zttp:env";
+        \\function rec(x, k) {
+        \\  if (k <= 0) {
+        \\    console.log(x);
+        \\    return 1;
+        \\  }
+        \\  const t = env("SECRET_KEY");
+        \\  return rec(t, k - 1);
+        \\}
+        \\function handler(req) {
+        \\  const n = rec("hello", 1);
+        \\  return Response.json({ ok: true });
+        \\}
+    ;
+    const leaking_report = try runFlowDiagnostics(std.testing.allocator, leaking, .secret_in_log, &buf);
+    try std.testing.expectEqual(@as(usize, 1), leaking_report.count);
+    try std.testing.expect(!leaking_report.properties.no_secret_leakage);
+
+    // Control: the same recursion with a clean argument throughout.
+    const clean =
+        \\import { env } from "zttp:env";
+        \\function rec(x, k) {
+        \\  if (k <= 0) {
+        \\    console.log(x);
+        \\    return 1;
+        \\  }
+        \\  const t = "fine";
+        \\  return rec(t, k - 1);
+        \\}
+        \\function handler(req) {
+        \\  const n = rec("hello", 1);
+        \\  return Response.json({ ok: true });
+        \\}
+    ;
+    const clean_report = try runFlowDiagnostics(std.testing.allocator, clean, .secret_in_log, &buf);
+    try std.testing.expectEqual(@as(usize, 0), clean_report.count);
+    try std.testing.expect(clean_report.properties.no_secret_leakage);
+    try std.testing.expect(clean_report.properties.deterministic);
+}
+
+test "FlowChecker widens a mutual recursion through the frame that is active" {
+    var buf: [512]u8 = undefined;
+    // `ping` calls `pong`, which calls `ping` with the secret. The hit lands on
+    // the outer `ping` frame, so the widening must come back to that frame.
+    const source =
+        \\import { env } from "zttp:env";
+        \\function ping(x, k) {
+        \\  if (k <= 0) {
+        \\    console.log(x);
+        \\    return 1;
+        \\  }
+        \\  return pong(x, k - 1);
+        \\}
+        \\function pong(y, k) {
+        \\  const t = env("SECRET_KEY");
+        \\  return ping(t, k - 1);
+        \\}
+        \\function handler(req) {
+        \\  const n = ping("hello", 2);
+        \\  return Response.json({ ok: true });
+        \\}
+    ;
+    const report = try runFlowDiagnostics(std.testing.allocator, source, .secret_in_log, &buf);
+    try std.testing.expectEqual(@as(usize, 1), report.count);
+    try std.testing.expect(!report.properties.no_secret_leakage);
 }
 
 test "FlowChecker keeps a routed sink's single report and plain help" {

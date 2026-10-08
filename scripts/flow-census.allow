@@ -67,24 +67,6 @@ user_input__log__param9 over_refusal F1b
 user_input__response__chain9 over_refusal F1b
 user_input__response__param9 over_refusal F1b
 
-# F1c: 16 row(s)
-credential__egress_headers__recursion_taint fail_open F1c
-credential__egress_opaque__recursion_taint fail_open F1c
-credential__egress_url__recursion_taint fail_open F1c
-credential__log__recursion_taint fail_open F1c
-credential__response__recursion_taint fail_open F1c
-credential__response_html__recursion_taint fail_open F1c
-secret__egress_body__recursion_taint fail_open F1c
-secret__egress_headers__recursion_taint fail_open F1c
-secret__egress_opaque__recursion_taint fail_open F1c
-secret__egress_url__recursion_taint fail_open F1c
-secret__log__recursion_taint fail_open F1c
-user_input__egress_body__recursion_taint fail_open F1c
-user_input__egress_headers__recursion_taint fail_open F1c
-user_input__egress_opaque__recursion_taint fail_open F1c
-user_input__egress_url__recursion_taint fail_open F1c
-user_input__response_html__recursion_taint fail_open F1c
-
 # F2: 62 row(s)
 credential__egress_headers__durable_run_cb fail_open F2
 credential__egress_headers__nested_arrow_capture fail_open F2
@@ -171,33 +153,40 @@ x10_helper_return_fetch_body fail_open F5
 x11_sink_nested_in_expression fail_open F5
 x20_return_path_sink_in_handler_expression fail_open F5
 
-# F6: 24 row(s)
-# The apply_cb and apply_record rows moved here from F1b. The summary now resolves
-# the call, and the callee reads the credential from the request that it was
-# passed (apply(req, f)), which has no credential label outside the handler.
+# F6: 30 row(s)
+# The apply_cb, apply_record, and recursion_taint rows moved here from F1b and F1c.
+# The summary now resolves the call, and the callee reads the credential from the
+# request that it was passed (apply(req, f), rec(req, x, k)), which has no
+# credential label outside the handler.
 credential__egress_headers__apply_cb fail_open F6
 credential__egress_headers__apply_record fail_open F6
 credential__egress_headers__export_fn fail_open F6
+credential__egress_headers__recursion_taint fail_open F6
 credential__egress_headers__top_fn_self fail_open F6
 credential__egress_opaque__apply_cb fail_open F6
 credential__egress_opaque__apply_record fail_open F6
 credential__egress_opaque__export_fn fail_open F6
+credential__egress_opaque__recursion_taint fail_open F6
 credential__egress_opaque__top_fn_self fail_open F6
 credential__egress_url__apply_cb fail_open F6
 credential__egress_url__apply_record fail_open F6
 credential__egress_url__export_fn fail_open F6
+credential__egress_url__recursion_taint fail_open F6
 credential__egress_url__top_fn_self fail_open F6
 credential__log__apply_cb fail_open F6
 credential__log__apply_record fail_open F6
 credential__log__export_fn fail_open F6
+credential__log__recursion_taint fail_open F6
 credential__log__top_fn_self fail_open F6
 credential__response__apply_cb fail_open F6
 credential__response__apply_record fail_open F6
 credential__response__export_fn fail_open F6
+credential__response__recursion_taint fail_open F6
 credential__response__top_fn_self fail_open F6
 credential__response_html__apply_cb fail_open F6
 credential__response_html__apply_record fail_open F6
 credential__response_html__export_fn fail_open F6
+credential__response_html__recursion_taint fail_open F6
 credential__response_html__top_fn_self fail_open F6
 
 # F7: 30 row(s)

@@ -144,7 +144,10 @@ packages/zts/src/flow_checker.zig scanRouteFunctionRoots catch-block
 # labels, which clear the sink properties. A failed restore records poison too,
 # and `check` rejects a checker that carries it, so no verdict leaves the
 # checker after a binding went stale.
+# The fixpoint re-walk binds the widened parameter labels the same way: a failed
+# insert records poison and returns the unresolved labels.
 packages/zts/src/flow_checker.zig functionCallLabels catch-block@2
+packages/zts/src/flow_checker.zig functionCallLabels catch-block@3
 packages/zts/src/flow_checker.zig restoreParamValues catch-poison
 
 # A witness copy or condition allocation error records poison, so no result
