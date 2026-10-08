@@ -5005,3 +5005,46 @@ test "an unclosed generic list on a function keeps its bytes" {
         try std.testing.expectEqual(src.len, result.code.len);
     }
 }
+
+// Guard: `blankSpan` and `recordDiagnosticAt` discard an out-of-memory error
+// (`catch {}`) and rely on a later allocation to report it. A strip that
+// succeeded after a failed allocation would be shorter than its source or, in
+// collect mode, would lack a refusal in `StripResult.diagnostics`, which is the
+// only signal that a file is refused. No source below does that today. This
+// test fails the day one does.
+test "an allocation failure while blanking or recording a diagnostic is not swallowed" {
+    const sources = [_][]const u8{
+        "const a: number = 1;",
+        "function f(x: string): number { return 1; }",
+        "const a = b as number;",
+        "const v: any = 1;",
+        "export default function () {}",
+        "export let x = 1;",
+    };
+    const variants = [_]StripOptions{ .{}, .{ .collect_all_diagnostics = true } };
+    var failed_runs: usize = 0;
+    for (sources) |source| {
+        for (variants) |variant| {
+            var counting = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+            if (strip(counting.allocator(), source, variant)) |stripped| {
+                var result = stripped;
+                result.deinit();
+            } else |_| {}
+
+            for (0..counting.alloc_index) |fail_index| {
+                var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_index });
+                if (strip(failing.allocator(), source, variant)) |stripped| {
+                    var result = stripped;
+                    result.deinit();
+                    // A success after a failed allocation swallowed the failure.
+                    try std.testing.expect(!failing.has_induced_failure);
+                } else |_| {
+                    // A refusal or an out-of-memory error must not leak.
+                    try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+                    failed_runs += 1;
+                }
+            }
+        }
+    }
+    try std.testing.expect(failed_runs > 0);
+}
