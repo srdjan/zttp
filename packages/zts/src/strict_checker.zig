@@ -140,6 +140,9 @@ pub const Diagnostic = struct {
     message: []const u8,
     help: ?[]const u8,
     message_owned: bool = false,
+    /// Whether `help` was built at diagnosis time. Only the first missing
+    /// `match` case is.
+    help_owned: bool = false,
     /// Typed repair primitive the agent uses to pick an apply step directly.
     /// `null` when no single canonical
     /// repair applies (e.g. implicit_unknown — needs a type annotation that
@@ -233,6 +236,9 @@ pub const StrictChecker = struct {
     pub fn deinit(self: *StrictChecker) void {
         for (self.diagnostics.items) |diagnostic| {
             if (diagnostic.message_owned) self.allocator.free(diagnostic.message);
+            if (diagnostic.help_owned) {
+                if (diagnostic.help) |help| self.allocator.free(help);
+            }
         }
         if (self.owned_facts) |*owned| owned.deinit();
         self.imported_functions.deinit(self.allocator);
@@ -290,7 +296,12 @@ pub const StrictChecker = struct {
     }
 
     fn addDiagnostic(self: *StrictChecker, diag: Diagnostic) void {
-        self.diagnostics.append(self.allocator, diag) catch self.markAllocationFailure();
+        self.diagnostics.append(self.allocator, diag) catch {
+            if (diag.help_owned) {
+                if (diag.help) |help| self.allocator.free(help);
+            }
+            self.markAllocationFailure();
+        };
     }
 
     fn checkAmbientGlobal(self: *StrictChecker, node: NodeIndex) void {
@@ -864,15 +875,22 @@ pub const StrictChecker = struct {
                 const match = self.ir_view.getMatchExpr(node) orelse return;
                 self.walkExpr(match.discriminant);
                 self.checkMatchBindingIdioms(match);
-                if (!self.matchIsCovered(match)) {
-                    self.addDiagnostic(.{
-                        .severity = .err,
-                        .kind = .non_exhaustive_profile_match,
-                        .node = node,
-                        .message = "match expression must be exhaustive in strict ZigTS",
-                        .help = "cover every finite union member or add an explicit default when the type is not finite",
-                        .repair_intent = .add_trailing_return,
-                    });
+                var coverage = self.matchCoverage(match);
+                defer coverage.deinit(self.allocator);
+                if (!coverage.exhaustive) {
+                    if (match_analysis_mod.missingCaseHelp(self.allocator, coverage)) |help| {
+                        self.addDiagnostic(.{
+                            .severity = .err,
+                            .kind = .non_exhaustive_profile_match,
+                            .node = node,
+                            .message = "match expression must be exhaustive in strict ZigTS",
+                            .help = help,
+                            .help_owned = true,
+                            .repair_intent = .add_trailing_return,
+                        });
+                    } else |_| {
+                        self.markAllocationFailure();
+                    }
                 }
                 for (0..match.arms_count) |i| {
                     const arm_idx = self.ir_view.getListIndex(match.arms_start, @intCast(i));
@@ -1949,16 +1967,14 @@ pub const StrictChecker = struct {
     /// exactly and MUST NOT include `default`; an open domain MUST include
     /// one. This rule asked only whether a `default` arm was present, so the
     /// spelling the spec requires for a closed union - every member covered,
-    /// no `default` - was the spelling it refused. Coverage is measured the
-    /// same way the handler verifier measures it, and a `default` still
+    /// no `default` - was the spelling it refused. Coverage is measured by the
+    /// type checker's analysis (`match_analysis.zig`), and a `default` still
     /// answers for a domain no analysis can enumerate.
-    fn matchIsCovered(self: *const StrictChecker, match: ir.Node.MatchExpr) bool {
-        if (self.matchHasDefault(match)) return true;
-        const tc = self.type_checker orelse return false;
-        const disc_type = tc.inferTypeWithoutDiagnostics(match.discriminant);
-        if (disc_type == null_type_idx) return false;
-        const analysis = match_analysis_mod.MatchAnalysis.init(self.allocator, self.ir_view, tc.env.pool, tc.env);
-        return analysis.isMatchExhaustive(disc_type, match);
+    fn matchCoverage(self: *const StrictChecker, match: ir.Node.MatchExpr) match_analysis_mod.Coverage {
+        if (self.matchHasDefault(match)) return .{ .exhaustive = true };
+        // With no type checker there is no type to enumerate.
+        const tc = self.type_checker orelse return .{ .incomplete = .untyped };
+        return tc.matchCoverage(match, false);
     }
 
     fn isStaticComputedKey(self: *const StrictChecker, node: NodeIndex) bool {
@@ -3292,6 +3308,24 @@ test "dropping the Bytes arm leaves that union non-exhaustive" {
     var h = try checkStripped("structural Payload = boolean | number | string | Bytes;\nfunction kindOf(value: Payload): string {\n  return match (value) {\n    when boolean: \"boolean\"\n    when number: \"number\"\n    when string: \"string\"\n  };\n}\nfunction handler(req: Request): Response {\n  return Response.json({ k: kindOf(1) });\n}\n");
     defer h.deinit();
     try expectKind(&h.checker, .non_exhaustive_profile_match);
+}
+
+test "the strict match error names the first missing case" {
+    // The message stays fixed because `edit_simulate` keys a violation on code
+    // plus message; the witness rides in the help.
+    var h = try checkStripped("structural JsonValue =\n  | null\n  | boolean\n  | number\n  | string\n  | readonly JsonValue[]\n  | Dict<string, JsonValue>;\nfunction kindOf(value: JsonValue): string {\n  return match (value) {\n    when null: \"null\"\n    when boolean: \"boolean\"\n    when number: \"number\"\n    when string: \"string\"\n    when array: \"array\"\n  };\n}\nfunction handler(req: Request): Response {\n  return Response.json({ k: kindOf(1) });\n}\n");
+    defer h.deinit();
+    var found = false;
+    for (h.checker.getDiagnostics()) |diag| {
+        if (diag.kind != .non_exhaustive_profile_match) continue;
+        found = true;
+        try testing.expectEqualStrings("match expression must be exhaustive in strict ZigTS", diag.message);
+        try testing.expectEqualStrings(
+            "missing case: when Dict. Add an arm for it, or add a 'default:' arm.",
+            diag.help.?,
+        );
+    }
+    try testing.expect(found);
 }
 
 test "the six arms cover it" {

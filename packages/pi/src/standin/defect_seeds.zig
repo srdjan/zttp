@@ -412,13 +412,20 @@ const clean_annotated_helper =
     \\
 ;
 
+// The matched value is a `number` parameter. A `const` with a literal type
+// would make the `default:` arm unreachable and draw the redundant-arm warning
+// (ZTS216), and a baseline must be veto-clean.
 const clean_match_default =
-    \\function handler(req: Request): Proof<Response, "deterministic"> {
-    \\  const n = 3;
+    \\function label(n: number): string | undefined {
     \\  const out = match (n) {
     \\    when 1: "one"
     \\    default: "other"
     \\  };
+    \\  return out;
+    \\}
+    \\
+    \\function handler(req: Request): Proof<Response, "deterministic"> {
+    \\  const out = label(3);
     \\  return Response.json({ out: out });
     \\}
     \\
@@ -1699,24 +1706,32 @@ pub const seeds = [_]DefectSeed{
         .class = .model_retry,
         .seed_source = clean_match_default,
         .bad_draft =
-        \\function handler(req: Request): Proof<Response, "deterministic"> {
-        \\  const n = 3;
+        \\function label(n: number): string | undefined {
         \\  const out = match (n) {
         \\    when 1: "one"
         \\    when 2: "two"
         \\  };
+        \\  return out;
+        \\}
+        \\
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const out = label(3);
         \\  return Response.json({ out: out });
         \\}
         \\
         ,
         .good_draft =
-        \\function handler(req: Request): Proof<Response, "deterministic"> {
-        \\  const n = 3;
+        \\function label(n: number): string | undefined {
         \\  const out = match (n) {
         \\    when 1: "one"
         \\    when 2: "two"
         \\    default: "other"
         \\  };
+        \\  return out;
+        \\}
+        \\
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const out = label(3);
         \\  return Response.json({ out: out });
         \\}
         \\

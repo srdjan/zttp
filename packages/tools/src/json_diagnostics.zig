@@ -193,6 +193,9 @@ pub fn fromCheckerDiagnostic(
 ) ?JsonDiagnostic {
     const projected = diagnostic_projection.project(source, diag, ir_view) orelse return null;
     const owned_msg = allocator.dupe(u8, projected.message) catch null;
+    // A suggestion built at diagnosis time (the first missing `match` case)
+    // dies with the checker, like the message, so it is copied the same way.
+    const owned_suggestion: ?[]u8 = if (projected.suggestion) |s| (allocator.dupe(u8, s) catch null) else null;
     return .{
         .code = projected.code,
         .severity = projected.severity.label(),
@@ -202,9 +205,10 @@ pub fn fromCheckerDiagnostic(
         .column = projected.column,
         .start_offset = projected.start_offset,
         .end_offset = projected.end_offset,
-        .suggestion = projected.suggestion,
+        .suggestion = owned_suggestion orelse projected.suggestion,
         .repair_intent = projected.repair_intent,
         .message_owned = owned_msg != null,
+        .suggestion_owned = owned_suggestion != null,
     };
 }
 

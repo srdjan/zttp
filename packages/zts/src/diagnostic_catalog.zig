@@ -232,6 +232,7 @@ pub fn typeCode(kind: type_checker.DiagnosticKind) []const u8 {
         .string_add => "ZTS105",
         .nominal_constructor_call => "ZTS214",
         .readonly_mutation => "ZTS215",
+        .redundant_match_arm => "ZTS216",
     };
 }
 

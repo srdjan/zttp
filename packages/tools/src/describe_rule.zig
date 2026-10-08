@@ -239,6 +239,7 @@ const type_checker_rules = [_]TypeCheckerRule{
             "so the line to change is the callback's own return.",
     },
     .{ .name = "non_exhaustive_match", .code = "ZTS205", .description = "A match expression does not cover every possible case of the matched value." },
+    .{ .name = "redundant_match_arm", .code = "ZTS216", .description = "A match arm that no value can reach: earlier arms already match every value it matches, the matched type excludes them, or a default arm follows full coverage of a closed type. A warning." },
     .{ .name = "unknown_virtual_module", .code = "ZTS206", .description = "An import names a zttp virtual module that the active module catalog does not publish." },
     .{ .name = "missing_virtual_module_export", .code = "ZTS207", .description = "An import names an export that the selected zttp virtual module does not publish." },
     .{ .name = "ambiguous_type_argument", .code = "ZTS208", .description = "A generic call leaves a type parameter that no argument position determines; name it at the call site." },

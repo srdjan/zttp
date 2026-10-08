@@ -209,6 +209,9 @@ pub fn resolve(
             opts.service_type_context,
         );
         errdefer tc.deinit();
+        // The strict checker reports a match that is not exhaustive as ZTS603,
+        // so the type checker leaves its ZTS205 out when strict runs.
+        tc.strict_checker_follows = opts.strict;
         _ = try tc.check(parsed.root);
         type_checker_opt = tc;
     }

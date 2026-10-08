@@ -6,7 +6,6 @@ function handler(req: Request): Proof<Response, "deterministic"> {
     const input: Outer = { a: { b: "deep" } };
     const out = match (input) {
         when { a: { b: x } }: x
-        default: "none"
     };
     return Response.text(out);
 }

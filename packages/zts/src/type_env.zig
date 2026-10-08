@@ -1191,6 +1191,15 @@ pub const TypeEnv = struct {
             if (source_tag == .t_nullable) {
                 return self.isAssignableTo(self.pool.getNullableInner(source), target_inner);
             }
+            // A union source is judged member by member against the whole
+            // nullable, so its `undefined` member is admitted. The type of a
+            // `match` that may fall through is such a union.
+            if (source_tag == .t_union) {
+                for (self.pool.getUnionMembers(source)) |member| {
+                    if (!self.isAssignableTo(member, target)) return false;
+                }
+                return true;
+            }
             return self.isAssignableTo(source, target_inner);
         }
 

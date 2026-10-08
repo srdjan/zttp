@@ -70,6 +70,7 @@ pub const DiagnosticKind = enum {
     arg_type_mismatch, // argument type doesn't match parameter
     return_type_mismatch, // return value doesn't match declared return type
     non_exhaustive_match, // match is not provably exhaustive
+    redundant_match_arm, // a match arm that no value can reach
     invalid_type_predicate, // `v is T` whose body does not verify the claim
     ambiguous_type_argument, // a type parameter no argument position determines
     type_constraint_violation, // a type argument outside its `extends` bound
@@ -89,6 +90,9 @@ pub const Diagnostic = struct {
     help: ?[]const u8,
     /// Whether the message was dynamically allocated.
     allocated: bool = false,
+    /// Whether `help` was dynamically allocated. Only a witness-bearing help
+    /// (the first missing `match` case) is built at diagnosis time.
+    help_owned: bool = false,
 };
 
 // ---------------------------------------------------------------------------
@@ -168,6 +172,11 @@ pub const TypeChecker = struct {
     /// live narrowing context. Those queries must not create compiler
     /// diagnostics, although allocation failures remain sticky.
     report_inference_diagnostics: bool = true,
+    /// Set by the pipeline before `check` when the strict checker runs after
+    /// this one. The strict checker reports a match that is not exhaustive as
+    /// ZTS603, so `check` removes ZTS205 when it found no type error: one
+    /// mistake, one diagnostic.
+    strict_checker_follows: bool = false,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -201,6 +210,9 @@ pub const TypeChecker = struct {
             if (diag.allocated) {
                 self.allocator.free(diag.message);
             }
+            if (diag.help_owned) {
+                if (diag.help) |help| self.allocator.free(help);
+            }
         }
         self.diagnostics.deinit(self.allocator);
         for (self.compiled_schemas.items) |entry| {
@@ -233,7 +245,31 @@ pub const TypeChecker = struct {
         for (self.diagnostics.items) |diag| {
             if (diag.severity == .err) error_count += 1;
         }
+        // The check pipeline stops at the type stage when it found an error
+        // (`precompile.runCheckOnlyFromSourceWithOptions`), so the strict
+        // checker reports a match that is not exhaustive only when this
+        // checker found none. Then ZTS603 answers for it and ZTS205 would be a
+        // second diagnostic for the same mistake. With a type error present,
+        // strict never reports, and ZTS205 stays: it would otherwise sit
+        // behind the type error its `| undefined` result type caused.
+        if (self.strict_checker_follows and error_count == 0) self.dropDiagnosticsOfKind(.non_exhaustive_match);
         return error_count;
+    }
+
+    fn dropDiagnosticsOfKind(self: *TypeChecker, kind: DiagnosticKind) void {
+        var kept: usize = 0;
+        for (self.diagnostics.items) |diag| {
+            if (diag.kind != kind) {
+                self.diagnostics.items[kept] = diag;
+                kept += 1;
+                continue;
+            }
+            if (diag.allocated) self.allocator.free(diag.message);
+            if (diag.help_owned) {
+                if (diag.help) |help| self.allocator.free(help);
+            }
+        }
+        self.diagnostics.items.len = kept;
     }
 
     /// Let secondary analyzers query the authoritative type session without
@@ -895,15 +931,7 @@ pub const TypeChecker = struct {
                 const me = self.ir_view.getMatchExpr(node) orelse return;
                 self.walkExpr(me.discriminant);
                 self.walkMatchWithNarrowing(me);
-                if (!self.isMatchExhaustive(me)) {
-                    self.addDiagnostic(.{
-                        .severity = .warning,
-                        .kind = .non_exhaustive_match,
-                        .node = node,
-                        .message = "match expression is not provably exhaustive",
-                        .help = "add a 'default:' arm, or cover every union variant",
-                    });
-                }
+                self.reportMatchCoverage(node, me);
             },
 
             .function_expr, .arrow_function => {
@@ -2806,6 +2834,16 @@ pub const TypeChecker = struct {
                 result = self.env.pool.addUnion(self.allocator, &.{ result, arm_type });
             }
         }
+        if (result == null_type_idx) return result;
+        // A match whose arms are not proved to cover every value evaluates to
+        // `undefined` when none of them matches (spec 5.5, codegen), so its
+        // type admits `undefined`. Without this the paths that run no strict
+        // checker would type a partial match as if it were total.
+        var coverage = self.matchCoverage(me, false);
+        defer coverage.deinit(self.allocator);
+        if (!coverage.exhaustive) {
+            result = self.env.pool.addUnion(self.allocator, &.{ result, self.env.pool.idx_undefined });
+        }
         return result;
     }
 
@@ -3052,18 +3090,69 @@ pub const TypeChecker = struct {
         return self.param_types.get(key) orelse null_type_idx;
     }
 
-    fn isMatchExhaustive(self: *const TypeChecker, me: ir.Node.MatchExpr) bool {
+    /// Coverage of a match: whether its arms are proved exhaustive, the first
+    /// missing case, and the first arm no value reaches. The strict checker asks
+    /// this same question, so both checkers answer from one analysis. The
+    /// witness is owned by the caller's `deinit`, with `self.allocator`.
+    pub fn matchCoverage(self: *const TypeChecker, me: ir.Node.MatchExpr, want_redundancy: bool) match_analysis_mod.Coverage {
         // A catch-all arm makes the match exhaustive by construction, regardless
         // of whether the discriminant type resolves.
-        if (match_analysis_mod.hasDefaultArm(self.ir_view, me)) return true;
         // General inference does not resolve a plain parameter reference; fall
         // back to the declared parameter type so a full-variant
         // `match (param)` without a default is recognized as exhaustive.
+        // The statement walk already reported anything inference found wrong
+        // with the discriminant, so this query reports nothing.
+        const mutable = @constCast(self);
+        const previous = mutable.report_inference_diagnostics;
+        mutable.report_inference_diagnostics = false;
         var disc_type = self.inferType(me.discriminant);
+        mutable.report_inference_diagnostics = previous;
         if (disc_type == null_type_idx) disc_type = self.paramDeclaredType(me.discriminant);
-        if (disc_type == null_type_idx) return false;
         const analysis = match_analysis_mod.MatchAnalysis.init(self.allocator, self.ir_view, self.env.pool, self.env);
-        return analysis.isMatchExhaustive(disc_type, me);
+        return analysis.analyze(self.allocator, disc_type, me, want_redundancy) catch {
+            mutable.markAllocationFailure();
+            return .{ .incomplete = .budget };
+        };
+    }
+
+    /// Report a match that is not provably exhaustive (ZTS205) and the first
+    /// arm that no value reaches (ZTS216). Both are warnings. `check` drops
+    /// ZTS205 again when the strict checker follows and reports ZTS603.
+    fn reportMatchCoverage(self: *TypeChecker, node: NodeIndex, me: ir.Node.MatchExpr) void {
+        var coverage = self.matchCoverage(me, true);
+        defer coverage.deinit(self.allocator);
+
+        if (!coverage.exhaustive) {
+            const help = match_analysis_mod.missingCaseHelp(self.allocator, coverage) catch {
+                self.markAllocationFailure();
+                return;
+            };
+            self.addDiagnostic(.{
+                .severity = .warning,
+                .kind = .non_exhaustive_match,
+                .node = node,
+                .message = "match expression is not provably exhaustive",
+                .help = help,
+                .help_owned = true,
+            });
+        }
+
+        if (coverage.redundant) |redundant| {
+            const arm_idx = self.ir_view.getListIndex(me.arms_start, redundant.arm);
+            self.addDiagnostic(.{
+                .severity = .warning,
+                .kind = .redundant_match_arm,
+                .node = arm_idx,
+                .message = if (redundant.is_default)
+                    "default arm is unreachable"
+                else
+                    "match arm is unreachable",
+                .help = if (redundant.is_default)
+                    "the arms above cover every value of the matched type; remove the 'default:' arm"
+                else
+                    "earlier arms already match every value this arm matches, or the matched type excludes them; remove the arm",
+            });
+        }
     }
 
     // -------------------------------------------------------------------
@@ -3898,6 +3987,9 @@ pub const TypeChecker = struct {
     fn addDiagnostic(self: *TypeChecker, diag: Diagnostic) void {
         self.diagnostics.append(self.allocator, diag) catch {
             if (diag.allocated) self.allocator.free(diag.message);
+            if (diag.help_owned) {
+                if (diag.help) |help| self.allocator.free(help);
+            }
             self.markAllocationFailure();
         };
     }
@@ -4949,11 +5041,244 @@ test "TypeChecker warns on non-exhaustive match over union" {
     , 0, 1);
 }
 
+/// What a test needs to know about one diagnostic. The help is copied, so it
+/// outlives the checker that produced it.
+const SeenDiagnostic = struct {
+    kind: DiagnosticKind,
+    severity: Severity,
+    message: []const u8,
+    help: ?[]const u8,
+};
+
+fn freeSeenDiagnostics(allocator: std.mem.Allocator, seen: []SeenDiagnostic) void {
+    for (seen) |d| {
+        allocator.free(d.message);
+        if (d.help) |h| allocator.free(h);
+    }
+    allocator.free(seen);
+}
+
+/// Type check `source` and return its diagnostics. `strict_follows` is the
+/// flag the pipeline sets when the strict checker runs after this one.
+fn typedDiagnostics(allocator: std.mem.Allocator, source: []const u8, strict_follows: bool) ![]SeenDiagnostic {
+    var strip_result = try @import("zts-engine").stripper.strip(allocator, source, .{});
+    defer strip_result.deinit();
+
+    var parser = try @import("zts-engine").parser.JsParser.init(allocator, strip_result.code);
+    defer parser.deinit();
+
+    const root = try parser.parse();
+    const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    var env = TypeEnv.init(allocator, &pool);
+    defer env.deinit();
+    @import("module_types.zig").populateModuleTypes(&env, &pool, allocator);
+    abi_types.populateHandlerAbiTypes(&env, &pool, allocator);
+    env.populateFromTypeMap(&strip_result.type_map);
+
+    var checker = TypeChecker.init(allocator, ir_view, null, &env, null);
+    defer checker.deinit();
+    checker.strict_checker_follows = strict_follows;
+    _ = try checker.check(root);
+
+    var out = std.ArrayList(SeenDiagnostic).empty;
+    errdefer {
+        for (out.items) |d| {
+            allocator.free(d.message);
+            if (d.help) |h| allocator.free(h);
+        }
+        out.deinit(allocator);
+    }
+    for (checker.getDiagnostics()) |d| {
+        const message = try allocator.dupe(u8, d.message);
+        errdefer allocator.free(message);
+        const help = if (d.help) |h| try allocator.dupe(u8, h) else null;
+        errdefer if (help) |h| allocator.free(h);
+        try out.append(allocator, .{ .kind = d.kind, .severity = d.severity, .message = message, .help = help });
+    }
+    return out.toOwnedSlice(allocator);
+}
+
+fn countKind(seen: []const SeenDiagnostic, kind: DiagnosticKind) usize {
+    var n: usize = 0;
+    for (seen) |d| {
+        if (d.kind == kind) n += 1;
+    }
+    return n;
+}
+
+test "TypeChecker: ZTS205 names the first missing case in its help" {
+    const allocator = std.testing.allocator;
+    const seen = try typedDiagnostics(allocator,
+        \\structural C = { kind: "a" } | { kind: "b" } | { kind: "c" };
+        \\function run(c: C): number {
+        \\  const out = match (c) {
+        \\    when { kind: "a" }: 1,
+        \\    when { kind: "b" }: 2,
+        \\  };
+        \\  return 0;
+        \\}
+    , false);
+    defer freeSeenDiagnostics(allocator, seen);
+    try std.testing.expectEqual(@as(usize, 1), seen.len);
+    try std.testing.expectEqual(DiagnosticKind.non_exhaustive_match, seen[0].kind);
+    try std.testing.expectEqual(Severity.warning, seen[0].severity);
+    // The message is the key `edit_simulate` hashes; it never carries the
+    // witness, so a partial fix does not turn a diagnostic into a new one.
+    try std.testing.expectEqualStrings("match expression is not provably exhaustive", seen[0].message);
+    try std.testing.expectEqualStrings(
+        "missing case: when { kind: \"c\" }. Add an arm for it, or add a 'default:' arm.",
+        seen[0].help.?,
+    );
+}
+
+test "TypeChecker: ZTS205 stays out of the way of the strict checker" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\structural C = { kind: "a" } | { kind: "b" };
+        \\function run(c: C): number {
+        \\  const out = match (c) {
+        \\    when { kind: "a" }: 1,
+        \\  };
+        \\  return 0;
+        \\}
+    ;
+    const alone = try typedDiagnostics(allocator, source, false);
+    defer freeSeenDiagnostics(allocator, alone);
+    try std.testing.expectEqual(@as(usize, 1), countKind(alone, .non_exhaustive_match));
+
+    // The strict checker follows and the match has no type error: ZTS603
+    // answers for it, so this checker reports nothing.
+    const with_strict = try typedDiagnostics(allocator, source, true);
+    defer freeSeenDiagnostics(allocator, with_strict);
+    try std.testing.expectEqual(@as(usize, 0), with_strict.len);
+}
+
+test "TypeChecker: ZTS205 stays when a type error stops the check before the strict stage" {
+    const allocator = std.testing.allocator;
+    const seen = try typedDiagnostics(allocator,
+        \\structural C = { kind: "a" } | { kind: "b" };
+        \\function run(c: C): string {
+        \\  return match (c) {
+        \\    when { kind: "a" }: "a",
+        \\  };
+        \\}
+    , true);
+    defer freeSeenDiagnostics(allocator, seen);
+    // The partial match is `string | undefined`, which a `string` return
+    // refuses (ZTS204). The check ends there, so ZTS603 never reports and
+    // ZTS205 carries the witness.
+    try std.testing.expectEqual(@as(usize, 1), countKind(seen, .return_type_mismatch));
+    try std.testing.expectEqual(@as(usize, 1), countKind(seen, .non_exhaustive_match));
+}
+
+test "TypeChecker: a match not proved exhaustive has type T or undefined" {
+    // Partial: the arms give `number`, and the missing case gives undefined.
+    try checkTypedSource(
+        \\structural C = { kind: "a" } | { kind: "b" };
+        \\function run(c: C): number {
+        \\  const out: number = match (c) {
+        \\    when { kind: "a" }: 1,
+        \\  };
+        \\  return out;
+        \\}
+    , 1, null);
+    // The honest declaration takes it: the type is `number | undefined`.
+    try checkTypedSource(
+        \\structural C = { kind: "a" } | { kind: "b" };
+        \\function run(c: C): number | undefined {
+        \\  const out: number | undefined = match (c) {
+        \\    when { kind: "a" }: 1,
+        \\  };
+        \\  return out;
+        \\}
+    , 0, 1);
+    // Total: the same declaration is fine once every case is covered.
+    try checkTypedSource(
+        \\structural C = { kind: "a" } | { kind: "b" };
+        \\function run(c: C): number {
+        \\  const out: number = match (c) {
+        \\    when { kind: "a" }: 1,
+        \\    when { kind: "b" }: 2,
+        \\  };
+        \\  return out;
+        \\}
+    , 0, 0);
+    // A default arm makes it total regardless of the discriminant type.
+    try checkTypedSource(
+        \\function run(s: string): number {
+        \\  const out: number = match (s) {
+        \\    when "a": 1,
+        \\    default: 2,
+        \\  };
+        \\  return out;
+        \\}
+    , 0, 0);
+}
+
+test "TypeChecker: a redundant arm is a ZTS216 warning at the first such arm" {
+    const allocator = std.testing.allocator;
+    const seen = try typedDiagnostics(allocator,
+        \\function run(s: "a" | "b"): number {
+        \\  const out = match (s) {
+        \\    when "a": 1,
+        \\    when "b": 2,
+        \\    when "a": 3,
+        \\    when "b": 4,
+        \\  };
+        \\  return out;
+        \\}
+    , false);
+    defer freeSeenDiagnostics(allocator, seen);
+    try std.testing.expectEqual(@as(usize, 1), seen.len);
+    try std.testing.expectEqual(DiagnosticKind.redundant_match_arm, seen[0].kind);
+    try std.testing.expectEqual(Severity.warning, seen[0].severity);
+    try std.testing.expectEqualStrings("match arm is unreachable", seen[0].message);
+}
+
+test "TypeChecker: a default arm after full coverage is a ZTS216 warning about the default" {
+    const allocator = std.testing.allocator;
+    const seen = try typedDiagnostics(allocator,
+        \\function run(s: "a" | "b"): number {
+        \\  const out = match (s) {
+        \\    when "a": 1,
+        \\    when "b": 2,
+        \\    default: 3,
+        \\  };
+        \\  return out;
+        \\}
+    , true);
+    defer freeSeenDiagnostics(allocator, seen);
+    try std.testing.expectEqual(@as(usize, 1), seen.len);
+    try std.testing.expectEqual(DiagnosticKind.redundant_match_arm, seen[0].kind);
+    try std.testing.expectEqualStrings("default arm is unreachable", seen[0].message);
+}
+
 test "TypeChecker: param-discriminant match with default arm is exhaustive (no warning)" {
     // Regression: inferType does not resolve a plain parameter's declared type,
     // so the discriminant was unknown and a `default` arm was not credited,
-    // producing a spurious non-exhaustive warning. A catch-all arm is now
-    // honored regardless of discriminant type.
+    // producing a spurious non-exhaustive warning. A catch-all arm is honored
+    // regardless of discriminant type, and it is not redundant when a member of
+    // the union (`kind: string`) is wider than the arms above it.
+    try checkTypedSource(
+        \\structural C = { kind: "echo", text: string } | { kind: "ping", text: string } | { kind: string, text: string };
+        \\function run(c: C): string {
+        \\  return match (c) {
+        \\    when { kind: "echo" }: c.text,
+        \\    when { kind: "ping" }: "pong",
+        \\    default: "u",
+        \\  };
+        \\}
+    , 0, 0);
+}
+
+test "TypeChecker: a default arm after full coverage of a closed union is redundant" {
+    // Spec 5.5: a closed union MUST NOT include `default`. A warning, not an
+    // error (owner decision T1 (a)): it reaches the expert loop as a veto
+    // violation and does not stop a build.
     try checkTypedSource(
         \\structural C = { kind: "echo", text: string } | { kind: "ping", text: string };
         \\function run(c: C): string {
@@ -4963,7 +5288,7 @@ test "TypeChecker: param-discriminant match with default arm is exhaustive (no w
         \\    default: "u",
         \\  };
         \\}
-    , 0, 0);
+    , 0, 1);
 }
 
 test "TypeChecker: typed return satisfies a marker-carrying declared return type" {
@@ -5009,7 +5334,8 @@ test "TypeChecker: full-variant param-discriminant match without a default is ex
 
 test "TypeChecker: partial param-discriminant match without a default still warns" {
     // The same parameter-type resolution must not silence REAL gaps: one of
-    // two variants covered, no default - warn.
+    // two variants covered, no default - warn. The match is returned from a
+    // `string` function, so its `string | undefined` type is also a ZTS204.
     try checkTypedSource(
         \\structural C = { kind: "echo", text: string } | { kind: "ping", text: string };
         \\function run(c: C): string {
@@ -5017,7 +5343,7 @@ test "TypeChecker: partial param-discriminant match without a default still warn
         \\    when { kind: "echo" }: c.text,
         \\  };
         \\}
-    , 0, 1);
+    , 1, 1);
 }
 
 test "TypeChecker: annotation preserves narrow inferred type" {

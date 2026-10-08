@@ -192,6 +192,14 @@ packages/zts/src/type_checker.zig walkStmt catch-poison
 # dynamic. OutOfMemory still propagates and poisons the checker.
 packages/zts/src/type_checker.zig schemaJsonToType catch-switch
 
+# Coverage analysis of a `match` allocates only scratch memory and the text of a
+# witness. When it cannot, the checker is poisoned (`ensureHealthy` fails the
+# pipeline before any result is used) and the match is reported as not
+# exhaustive with no redundancy verdict, which is the conservative answer: it
+# adds a diagnostic and a `| undefined` to the type and removes nothing.
+packages/zts/src/type_checker.zig matchCoverage catch-block
+packages/zts/src/type_checker.zig reportMatchCoverage catch-block
+
 # These catches change only the text of an error diagnostic. The same kind,
 # error severity, source node, and error count are recorded.
 packages/zts/src/type_checker.zig addArgCountMismatch catch-value

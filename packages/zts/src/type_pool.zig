@@ -1554,6 +1554,15 @@ pub const TypePool = struct {
         if (tgt_tag == .t_nullable) {
             if (src_tag == .t_undefined) return true;
             if (src_tag == .t_null) return false;
+            // A union source is judged member by member against the whole
+            // nullable, so its `undefined` member reaches the rule above. The
+            // type of a `match` that may fall through is such a union.
+            if (src_tag == .t_union) {
+                for (self.getUnionMembers(source)) |member| {
+                    if (!self.assignableIn(ctx, member, target)) return false;
+                }
+                return true;
+            }
             return self.assignableIn(ctx, source, self.getNullableInner(target));
         }
 
@@ -2948,6 +2957,29 @@ test "isAssignableTo nullable" {
     try std.testing.expect(!pool.isAssignableTo(pool.idx_null, optional_str));
     // string | undefined is NOT assignable to string (might be absent)
     try std.testing.expect(!pool.isAssignableTo(optional_str, pool.idx_string));
+}
+
+test "isAssignableTo a union with an undefined member reaches a nullable target" {
+    // The type of a `match` that may fall through is the union of its arm types
+    // and `undefined`. Judged member by member against `string`, its `undefined`
+    // member was refused, so a partial match could not be bound to the optional
+    // type it is.
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    const optional_str = pool.addNullable(allocator, pool.idx_string);
+    const one = pool.addLiteralString(allocator, "one");
+    const two = pool.addLiteralString(allocator, "two");
+    const partial = pool.addUnion(allocator, &.{ one, two, pool.idx_undefined });
+    try std.testing.expect(pool.isAssignableTo(partial, optional_str));
+    // The nullable does not name `null`, and the inner type still decides.
+    const with_null = pool.addUnion(allocator, &.{ one, pool.idx_null });
+    try std.testing.expect(!pool.isAssignableTo(with_null, optional_str));
+    const with_number = pool.addUnion(allocator, &.{ pool.idx_number, pool.idx_undefined });
+    try std.testing.expect(!pool.isAssignableTo(with_number, optional_str));
+    // And a union with an undefined member is still not a plain `string`.
+    try std.testing.expect(!pool.isAssignableTo(partial, pool.idx_string));
 }
 
 test "isAssignableTo union" {
