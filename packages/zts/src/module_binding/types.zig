@@ -157,7 +157,14 @@ pub const LabelSet = packed struct(u16) {
     /// claim that a value carries nothing: a sink that this reaches cannot
     /// prove the properties it governs, so they are cleared rather than held.
     unknown: bool = false,
-    _reserved: u7 = 0,
+    /// A fact the flow checker derives, never one a binding or a manifest
+    /// declares: the value is, or contains, an HTML response built from
+    /// unvalidated user input. It travels with the labels so that a callee's
+    /// `Response.html(userInput)` is reported only when that value reaches the
+    /// handler's response (plan unit F4), and so that every place the label walk
+    /// follows a value also follows this fact.
+    unsafe_html: bool = false,
+    _reserved: u6 = 0,
 
     pub const empty: LabelSet = .{};
 

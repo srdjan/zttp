@@ -371,6 +371,9 @@ pub const FlowChecker = struct {
     /// function's sinks, so `addDiagnostic` drops the dispatch walk's copies.
     /// A dispatch target that is not a root reports in the dispatch walk.
     root_dispatch_depth: u8 = 0,
+    /// The `Response.html` calls that built an `unsafe_html` fact while the
+    /// current response value is evaluated; see `noteHtmlProducer`.
+    html_producers: std.ArrayListUnmanaged(NodeIndex) = .empty,
     /// Guard provenance for validated bindings: packed(scope_id, slot) -> the
     /// validator call that set the `.validated` label. Lets a defended path
     /// name the guard ("validated by schemaCompile()"). Populated alongside
@@ -500,6 +503,7 @@ pub const FlowChecker = struct {
         self.user_fn_decls.deinit(self.allocator);
         self.import_bindings.deinit(self.allocator);
         self.capture_targets.deinit(self.allocator);
+        self.html_producers.deinit(self.allocator);
         self.param_values.deinit(self.allocator);
         self.route_function_roots.deinit(self.allocator);
         self.listed_tool_route_functions.deinit(self.allocator);
@@ -2368,7 +2372,6 @@ pub const FlowChecker = struct {
                 if (self.ir_view.getOptValue(node)) |ret_val| {
                     if (self.summary_returns) |acc| {
                         acc.* = LabelSet.merge(acc.*, self.inferLabels(ret_val));
-                        self.checkSummaryHtmlReturn(ret_val);
                     } else {
                         // Check if returning data via Response helpers
                         self.checkResponseSink(ret_val);
@@ -2516,7 +2519,7 @@ pub const FlowChecker = struct {
                 const saved_call = self.active_call_node;
                 self.active_call_node = node;
                 defer self.active_call_node = saved_call;
-                const labels = self.inferCallLabels(call_data);
+                const labels = self.withHtmlFact(node, call_data, self.inferCallLabels(call_data));
                 // A response or body from a declared source carries the
                 // declared labels of everything it contains (M4 T4).
                 if (self.originOf(node)) |origin| return LabelSet.merge(labels, self.declaredLabels(origin, true));
@@ -2679,7 +2682,7 @@ pub const FlowChecker = struct {
                 const saved_call = self.active_call_node;
                 self.active_call_node = node;
                 defer self.active_call_node = saved_call;
-                return self.mergeArgLabels(self.inferLabels(call_data.callee), call_data);
+                return self.withHtmlFact(node, call_data, self.mergeArgLabels(self.inferLabels(call_data.callee), call_data));
             },
 
             // A closure passed as a value carries what calling it would
@@ -3875,6 +3878,9 @@ pub const FlowChecker = struct {
     }
 
     fn checkResponseSink(self: *FlowChecker, ret_val: NodeIndex) void {
+        // The producers of an `unsafe_html` fact are those found while this
+        // return value is evaluated.
+        self.html_producers.clearRetainingCapacity();
         var visited: [response_resolve_limit]u32 = undefined;
         var visited_len: usize = 0;
         if (!self.checkResponseValue(ret_val, &visited, &visited_len)) {
@@ -3984,35 +3990,49 @@ pub const FlowChecker = struct {
         self.properties.injection_safe = false;
     }
 
-    /// XSS check on a callee's direct `Response.html(x)` return, or a ternary
-    /// of such returns. A callee's return value is summarized into labels, and
-    /// the caller's label-only response check cannot see that the value was
-    /// built as an HTML response, so the check runs where the helper is
-    /// written. Only the first argument is read, as at the handler's own
-    /// response check. A callee that builds HTML and whose caller discards it
-    /// is reported too; carrying "HTML from unvalidated input" in the summary
-    /// result (plan unit F4) is what removes that over-report.
-    fn checkSummaryHtmlReturn(self: *FlowChecker, node: NodeIndex) void {
-        const tag = self.ir_view.getTag(node) orelse return;
-        switch (tag) {
-            .ternary => {
-                const t = self.ir_view.getTernary(node) orelse return;
-                self.checkSummaryHtmlReturn(t.then_branch);
-                self.checkSummaryHtmlReturn(t.else_branch);
-            },
-            .call, .method_call => {
-                const call_data = self.ir_view.getCall(node) orelse return;
-                if (!self.isGlobalMethodCall(call_data.callee, "Response", &.{"html"})) return;
-                if (call_data.args_count == 0) return;
-                const labels = self.inferLabels(self.ir_view.getListIndex(call_data.args_start, 0));
-                if (labels.has(.user_input) and !labels.has(.validated)) self.reportUnvalidatedHtml(node);
-            },
-            // exhaustive: only a direct HTML response or a ternary of them is
-            // resolved here. Every other shape reaches the caller as labels,
-            // and the caller's response check covers the secret and credential
-            // families for it.
-            else => {},
+    /// Mark the value of a `Response.html(x)` call as an HTML response built
+    /// from unvalidated user input (plan unit F4). The mark is the
+    /// `unsafe_html` fact in the label set, so it follows the value through
+    /// every return, binding, ternary arm, argument, and field that the label
+    /// walk follows, and it is reported only where the value reaches the
+    /// handler's response (`checkSinkLabels`). A callee that builds HTML and
+    /// whose caller discards it therefore reports nothing. Only the first
+    /// argument is read, as at the handler's own response check.
+    ///
+    /// A route function that `check` also walks as a request root reports its
+    /// own response in that walk, so a dispatch copy of it records no fact.
+    fn withHtmlFact(self: *FlowChecker, node: NodeIndex, call_data: Node.CallExpr, labels: LabelSet) LabelSet {
+        if (self.root_dispatch_depth > 0) return labels;
+        if (call_data.args_count == 0) return labels;
+        if (!self.isGlobalMethodCall(call_data.callee, "Response", &.{"html"})) return labels;
+        const body = self.inferLabels(self.ir_view.getListIndex(call_data.args_start, 0));
+        if (!body.has(.user_input) or body.has(.validated)) return labels;
+        self.noteHtmlProducer(node);
+        var marked = labels;
+        marked.unsafe_html = true;
+        return marked;
+    }
+
+    /// Remember the `Response.html` call that produced an `unsafe_html` fact
+    /// during the evaluation now running, so that the response check can name
+    /// it. `checkResponseSink` empties the list before it reads a return value.
+    fn noteHtmlProducer(self: *FlowChecker, node: NodeIndex) void {
+        if (std.mem.indexOfScalar(NodeIndex, self.html_producers.items, node) != null) return;
+        self.html_producers.append(self.allocator, node) catch self.markAllocationFailure();
+    }
+
+    /// A value carrying the `unsafe_html` fact reached the response. Report at
+    /// the `Response.html` calls that built it during this evaluation. A fact
+    /// that a binding carried here from an earlier statement has no producer in
+    /// the list, so the report goes to the sink node and the verdict is the
+    /// same.
+    fn reportUnsafeHtmlAtResponse(self: *FlowChecker, sink_node: NodeIndex) void {
+        if (self.html_producers.items.len == 0) {
+            self.reportUnvalidatedHtml(sink_node);
+            return;
         }
+        // Reporting appends no producer, so the list is stable while it is read.
+        for (self.html_producers.items) |producer| self.reportUnvalidatedHtml(producer);
     }
 
     fn checkExprSinks(self: *FlowChecker, node: NodeIndex) void {
@@ -4180,6 +4200,7 @@ pub const FlowChecker = struct {
 
         switch (sink) {
             .response => {
+                if (labels.unsafe_html) self.reportUnsafeHtmlAtResponse(node);
                 if (labels.has(.secret)) {
                     self.addDiagnostic(.{
                         .severity = .err,
@@ -6903,6 +6924,88 @@ test "FlowChecker reports unvalidated input built into Response.html inside a he
     const clean_report = try runFlowDiagnostics(std.testing.allocator, clean, .unvalidated_input_in_egress, &buf);
     try std.testing.expectEqual(@as(usize, 0), clean_report.count);
     try std.testing.expect(clean_report.properties.injection_safe);
+}
+
+test "FlowChecker reports callee-built HTML only when it reaches the response (F4)" {
+    var buf: [512]u8 = undefined;
+
+    // Controls: a callee builds HTML from input and the caller discards it, or
+    // calls the helper with a literal. Nothing unvalidated reaches the response,
+    // so `injection_safe` holds and nothing is reported.
+    const discarded_map =
+        \\function handler(req) {
+        \\  const s = req.url;
+        \\  const pages = [s].map((x) => { return Response.html(x); });
+        \\  return Response.json({ ok: 1 });
+        \\}
+    ;
+    const discarded_map_report = try runFlowDiagnostics(std.testing.allocator, discarded_map, .unvalidated_input_in_egress, &buf);
+    try std.testing.expectEqual(@as(usize, 0), discarded_map_report.count);
+    try std.testing.expect(discarded_map_report.properties.injection_safe);
+
+    const discarded_call =
+        \\function page(t) { return Response.html(t); }
+        \\function handler(req) {
+        \\  const first = page(req.url);
+        \\  return page("<p>ok</p>");
+        \\}
+    ;
+    const discarded_call_report = try runFlowDiagnostics(std.testing.allocator, discarded_call, .unvalidated_input_in_egress, &buf);
+    try std.testing.expectEqual(@as(usize, 0), discarded_call_report.count);
+    try std.testing.expect(discarded_call_report.properties.injection_safe);
+
+    // A validated value built into HTML stays clean through a helper.
+    const validated =
+        \\import { escapeHtml } from "zttp:text";
+        \\function page(t) { return Response.html(escapeHtml(t)); }
+        \\function handler(req) { return page(req.url); }
+    ;
+    const validated_report = try runFlowDiagnostics(std.testing.allocator, validated, .unvalidated_input_in_egress, &buf);
+    try std.testing.expectEqual(@as(usize, 0), validated_report.count);
+    try std.testing.expect(validated_report.properties.injection_safe);
+
+    // The fact is followed through every shape a callee's result takes on its
+    // way to the response: a binding, a ternary arm, a pass-through helper, and
+    // a field of the response payload. Each is refused with the XSS message.
+    const shapes = [_][]const u8{
+        \\function page(t) { return Response.html(t); }
+        \\function handler(req) {
+        \\  const r = page(req.url);
+        \\  return r;
+        \\}
+        ,
+        \\function page(t) { return Response.html(t); }
+        \\function handler(req) {
+        \\  return req.method === "GET" ? page(req.url) : Response.json({ ok: 1 });
+        \\}
+        ,
+        \\function page(t) { return Response.html(t); }
+        \\function wrap(r) { return r; }
+        \\function handler(req) { return wrap(page(req.url)); }
+        ,
+        \\function page(t) { return Response.html(t); }
+        \\function handler(req) { return Response.json({ page: page(req.url) }); }
+        ,
+        \\function handler(req) {
+        \\  const pages = [req.url].map((x) => { return Response.html(x); });
+        \\  return Response.json({ pages: pages });
+        \\}
+        ,
+    };
+    for (shapes) |source| {
+        const report = try runFlowDiagnostics(std.testing.allocator, source, .unvalidated_input_in_egress, &buf);
+        try std.testing.expect(report.count >= 1);
+        try std.testing.expect(!report.properties.injection_safe);
+    }
+
+    // The diagnostic is reported once, at the `Response.html` call in the
+    // callee, with its message unchanged.
+    const routed =
+        \\function page(t) { return Response.html(t); }
+        \\function handler(req) { return page(req.url); }
+    ;
+    const routed_report = try runFlowDiagnostics(std.testing.allocator, routed, .unvalidated_input_in_egress, &buf);
+    try std.testing.expectEqual(@as(usize, 1), routed_report.count);
 }
 
 test "FlowChecker re-walks a callee without the labels an earlier call bound" {

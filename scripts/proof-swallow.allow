@@ -340,3 +340,10 @@ packages/zts/src/flow_checker.zig closureResultLabelsBound catch-poison
 # result reads the help string.
 packages/zts/src/flow_checker.zig helpWithCallChain catch-return
 packages/zts/src/flow_checker.zig helpWithCallChain catch-block
+
+# The producers of an unsafe-HTML fact (F4): a failed append marks allocation
+# poison. Both checker entry points reject poison before they publish a proof,
+# so the missing producer cannot leave the checker as a successful verdict. The
+# producer only chooses which node a report names; the `unsafe_html` fact that
+# decides the verdict travels in the label set.
+packages/zts/src/flow_checker.zig noteHtmlProducer catch-poison
