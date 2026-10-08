@@ -1,0 +1,2 @@
+stages: strip,parse,imports,boolean,types
+{"code":"ZTS105","severity":"error","message":"string addition is not supported","file":"check/bad/string_addition.ts","line":3,"column":22,"suggestion":"build a string array with explicit `String(...)` conversions and call `.join(\"\")`","repair_intent":null}

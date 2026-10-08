@@ -1,0 +1,2 @@
+stages: strip
+{"code":"ZTS033","severity":"error","message":"mismatched JSX closing tag","file":"parse/bad/tsx_mismatched_closing_tag.tsx","line":3,"column":31,"suggestion":"fix the TSX syntax before running core analysis","repair_intent":null}

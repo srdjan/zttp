@@ -1,0 +1,2 @@
+stages: strip
+{"code":"ZTS036","severity":"error","message":"JSX expression expected","file":"parse/bad/tsx_empty_expression.tsx","line":3,"column":31,"suggestion":"fix the TSX syntax before running core analysis","repair_intent":null}

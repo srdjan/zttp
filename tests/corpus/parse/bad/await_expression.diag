@@ -1,0 +1,2 @@
+stages: strip,parse
+{"code":"ZTS026","severity":"error","message":"'await' is not supported; handlers run synchronously - use 'fetch' from zttp:fetch, or 'parallel'/'race' from zttp:io for concurrency","file":"parse/bad/await_expression.ts","line":3,"column":15,"suggestion":null,"repair_intent":null}

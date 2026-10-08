@@ -1,0 +1,2 @@
+stages: strip,parse,imports,boolean,types,strict,verifier,flow,contract,paths,trace,spec,canonical
+{"code":"ZTS513","severity":"error","message":"the toolCatalog declaration is refused, so the handler publishes no tool","file":"check/bad/tool_catalog_missing_byte_bound.ts","line":24,"column":17,"suggestion":"tool \"ping\" (line 10): each entry needs route, description, and maxInputBytes (maxInputBytes)","repair_intent":null}

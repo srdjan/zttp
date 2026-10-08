@@ -1,0 +1,2 @@
+stages: strip,parse,imports,boolean,types
+{"code":"ZTS215","severity":"error","message":"`push` writes through a readonly array","file":"check/bad/readonly_array_push.ts","line":3,"column":15,"suggestion":"drop `readonly` from the declared type, or build a new array instead of writing to this one","repair_intent":null}

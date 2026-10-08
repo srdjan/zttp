@@ -1,0 +1,2 @@
+stages: strip
+{"code":"ZTS053","severity":"error","message":"`zttp:types` is not a module in this profile","file":"parse/bad/legacy_types_import.ts","line":2,"column":1,"suggestion":"remove this import because `Proof<T, P>` and `Effects<T, R>` are ambient type names","repair_intent":null}

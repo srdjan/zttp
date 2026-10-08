@@ -1,0 +1,2 @@
+stages: strip
+{"code":"ZTS043","severity":"error","message":"'satisfies' type assertion is not supported","file":"parse/bad/satisfies_assertion.ts","line":3,"column":27,"suggestion":"use type-safe patterns instead","repair_intent":null}

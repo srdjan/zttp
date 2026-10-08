@@ -1,0 +1,2 @@
+stages: strip
+{"code":"ZTS035","severity":"error","message":"unclosed JSX element","file":"parse/bad/tsx_unclosed_element.tsx","line":3,"column":26,"suggestion":"fix the TSX syntax before running core analysis","repair_intent":null}

@@ -1,0 +1,3 @@
+stages: strip,parse,imports,boolean,types,strict,verifier,flow,contract,paths,trace,spec,canonical
+{"code":"ZTS628","severity":"advisory","message":"a reduce over `dictEntries` is `dictFold`","file":"check/bad/dict_entries_reduce.ts","line":10,"column":40,"suggestion":"fold the dictionary directly: `dictFold(d, (acc, value, key) => ..., init)`, which walks the entries without building the array first","repair_intent":null}
+{"code":"ZTS500","severity":"error","message":"declared Proof capsule was not discharged by handler proof (failing spec: deterministic)","file":"check/bad/dict_entries_reduce.ts","line":5,"column":17,"suggestion":"remove Date.now() / Math.random() / performance.now() or move the call inside a `durable.step`.","repair_intent":null}

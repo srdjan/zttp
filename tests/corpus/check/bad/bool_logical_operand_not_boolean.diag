@@ -1,0 +1,2 @@
+stages: strip,parse,imports,boolean
+{"code":"ZTS101","severity":"error","message":"boolean context requires a value of type boolean","file":"check/bad/bool_logical_operand_not_boolean.ts","line":3,"column":14,"suggestion":"compare the value explicitly so the expression has type boolean","repair_intent":null}

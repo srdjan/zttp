@@ -1,0 +1,2 @@
+stages: strip,parse,imports,boolean,types
+{"code":"ZTS214","severity":"error","message":"`UserId` is a nominal type, not a constructor","file":"check/bad/nominal_constructor_call.ts","line":5,"column":22,"suggestion":"brand at an annotated declaration: `const x: Name = value;`","repair_intent":null}

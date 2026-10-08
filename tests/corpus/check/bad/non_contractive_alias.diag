@@ -1,0 +1,2 @@
+stages: strip,parse,imports,boolean,types
+{"code":"ZTS212","severity":"error","message":"recursive type alias 'U' has a cycle no data constructor guards","file":"check/bad/non_contractive_alias.ts","line":5,"column":5,"suggestion":"route the recursion through a record, a tuple, or an array, the way `type JsonValue = ... | readonly JsonValue[]` does; a union or intersection edge does not guard it","repair_intent":null}

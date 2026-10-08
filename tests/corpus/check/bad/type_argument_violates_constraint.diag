@@ -1,0 +1,2 @@
+stages: strip,parse,imports,boolean,types
+{"code":"ZTS209","severity":"error","message":"type argument { name: \"no id\" } for 'T' does not satisfy constraint { id: string }","file":"check/bad/type_argument_violates_constraint.ts","line":7,"column":19,"suggestion":null,"repair_intent":null}

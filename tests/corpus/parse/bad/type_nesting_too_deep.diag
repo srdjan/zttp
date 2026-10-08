@@ -1,0 +1,2 @@
+stages: strip
+{"code":"ZTS044","severity":"error","message":"type syntax nests too deeply","file":"parse/bad/type_nesting_too_deep.ts","line":2,"column":525,"suggestion":"simplify or split it (nesting limit is 512)","repair_intent":null}

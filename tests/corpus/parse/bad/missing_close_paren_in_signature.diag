@@ -1,0 +1,2 @@
+stages: strip,parse
+{"code":"ZTS003","severity":"error","message":"unexpected token","file":"parse/bad/missing_close_paren_in_signature.ts","line":5,"column":1,"suggestion":"')'","repair_intent":null}

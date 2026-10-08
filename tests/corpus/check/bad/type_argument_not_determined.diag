@@ -1,0 +1,2 @@
+stages: strip,parse,imports,boolean,types
+{"code":"ZTS208","severity":"error","message":"no argument determines type parameter 'T'","file":"check/bad/type_argument_not_determined.ts","line":7,"column":19,"suggestion":"Name the type argument at the call site.","repair_intent":null}
