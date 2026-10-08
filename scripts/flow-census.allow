@@ -57,63 +57,15 @@
 # no verdict at all (no_verdict) is never allowlisted: fix the probe.
 #
 
-# F1b: 56 row(s)
-credential__egress_headers__apply_cb fail_open F1b
-credential__egress_headers__apply_record fail_open F1b
-credential__egress_headers__chain9 fail_open F1b
-credential__egress_headers__param9 fail_open F1b
-credential__egress_opaque__apply_cb fail_open F1b
-credential__egress_opaque__apply_record fail_open F1b
-credential__egress_opaque__chain9 fail_open F1b
-credential__egress_opaque__param9 fail_open F1b
-credential__egress_url__apply_cb fail_open F1b
-credential__egress_url__apply_record fail_open F1b
-credential__egress_url__chain9 fail_open F1b
-credential__egress_url__param9 fail_open F1b
-credential__log__apply_cb fail_open F1b
-credential__log__apply_record fail_open F1b
-credential__log__chain9 fail_open F1b
-credential__log__param9 fail_open F1b
-secret__egress_body__apply_cb fail_open F1b
-secret__egress_body__apply_record fail_open F1b
-secret__egress_body__chain9 fail_open F1b
-secret__egress_body__param9 fail_open F1b
-secret__egress_headers__apply_cb fail_open F1b
-secret__egress_headers__apply_record fail_open F1b
-secret__egress_headers__chain9 fail_open F1b
-secret__egress_headers__param9 fail_open F1b
-secret__egress_opaque__apply_cb fail_open F1b
-secret__egress_opaque__apply_record fail_open F1b
-secret__egress_opaque__chain9 fail_open F1b
-secret__egress_opaque__param9 fail_open F1b
-secret__egress_url__apply_cb fail_open F1b
-secret__egress_url__apply_record fail_open F1b
-secret__egress_url__chain9 fail_open F1b
-secret__egress_url__param9 fail_open F1b
-secret__log__apply_cb fail_open F1b
-secret__log__apply_record fail_open F1b
-secret__log__chain9 fail_open F1b
-secret__log__param9 fail_open F1b
-user_input__egress_body__apply_cb fail_open F1b
-user_input__egress_body__apply_record fail_open F1b
-user_input__egress_body__chain9 fail_open F1b
-user_input__egress_body__param9 fail_open F1b
-user_input__egress_headers__apply_cb fail_open F1b
-user_input__egress_headers__apply_record fail_open F1b
-user_input__egress_headers__chain9 fail_open F1b
-user_input__egress_headers__param9 fail_open F1b
-user_input__egress_opaque__apply_cb fail_open F1b
-user_input__egress_opaque__apply_record fail_open F1b
-user_input__egress_opaque__chain9 fail_open F1b
-user_input__egress_opaque__param9 fail_open F1b
-user_input__egress_url__apply_cb fail_open F1b
-user_input__egress_url__apply_record fail_open F1b
-user_input__egress_url__chain9 fail_open F1b
-user_input__egress_url__param9 fail_open F1b
-user_input__response_html__apply_cb fail_open F1b
-user_input__response_html__apply_record fail_open F1b
-user_input__response_html__chain9 fail_open F1b
-user_input__response_html__param9 fail_open F1b
+# F1b: 4 row(s)
+# These four are the accepted cost of failing closed. A chain of nine helpers and a
+# nine-parameter helper stay unresolved by design (the summary caps), and an
+# unresolved call clears every property a sink decides, including the one that
+# the user_input probe claims. No later unit resolves them.
+user_input__log__chain9 over_refusal F1b
+user_input__log__param9 over_refusal F1b
+user_input__response__chain9 over_refusal F1b
+user_input__response__param9 over_refusal F1b
 
 # F1c: 16 row(s)
 credential__egress_headers__recursion_taint fail_open F1c
@@ -219,17 +171,32 @@ x10_helper_return_fetch_body fail_open F5
 x11_sink_nested_in_expression fail_open F5
 x20_return_path_sink_in_handler_expression fail_open F5
 
-# F6: 12 row(s)
+# F6: 24 row(s)
+# The apply_cb and apply_record rows moved here from F1b. The summary now resolves
+# the call, and the callee reads the credential from the request that it was
+# passed (apply(req, f)), which has no credential label outside the handler.
+credential__egress_headers__apply_cb fail_open F6
+credential__egress_headers__apply_record fail_open F6
 credential__egress_headers__export_fn fail_open F6
 credential__egress_headers__top_fn_self fail_open F6
+credential__egress_opaque__apply_cb fail_open F6
+credential__egress_opaque__apply_record fail_open F6
 credential__egress_opaque__export_fn fail_open F6
 credential__egress_opaque__top_fn_self fail_open F6
+credential__egress_url__apply_cb fail_open F6
+credential__egress_url__apply_record fail_open F6
 credential__egress_url__export_fn fail_open F6
 credential__egress_url__top_fn_self fail_open F6
+credential__log__apply_cb fail_open F6
+credential__log__apply_record fail_open F6
 credential__log__export_fn fail_open F6
 credential__log__top_fn_self fail_open F6
+credential__response__apply_cb fail_open F6
+credential__response__apply_record fail_open F6
 credential__response__export_fn fail_open F6
 credential__response__top_fn_self fail_open F6
+credential__response_html__apply_cb fail_open F6
+credential__response_html__apply_record fail_open F6
 credential__response_html__export_fn fail_open F6
 credential__response_html__top_fn_self fail_open F6
 
@@ -265,11 +232,10 @@ user_input__egress_url__import2 fail_open F7
 user_input__response_html__import_fn fail_open F7
 user_input__response_html__import2 fail_open F7
 
-# F10: 26 row(s)
+# F10: 24 row(s)
 credential__egress_body__apply_cb fail_open F10
 credential__egress_body__apply_record fail_open F10
 credential__egress_body__chain2 fail_open F10
-credential__egress_body__chain9 fail_open F10
 credential__egress_body__concise_arrow fail_open F10
 credential__egress_body__durable_run_cb fail_open F10
 credential__egress_body__export_fn fail_open F10
@@ -282,7 +248,6 @@ credential__egress_body__nested_arrow_param fail_open F10
 credential__egress_body__nested_fn_capture fail_open F10
 credential__egress_body__nested_fn_param fail_open F10
 credential__egress_body__parallel_cb fail_open F10
-credential__egress_body__param9 fail_open F10
 credential__egress_body__recursion fail_open F10
 credential__egress_body__recursion_taint fail_open F10
 credential__egress_body__route_direct fail_open F10

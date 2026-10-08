@@ -139,6 +139,14 @@ packages/zts/src/flow_checker.zig scanListedToolRoutes catch-block
 packages/zts/src/flow_checker.zig scanListedToolRoutes catch-poison
 packages/zts/src/flow_checker.zig scanRouteFunctionRoots catch-block
 
+# Binding a function or record to a parameter for one call site allocates a map
+# entry. A failed insert records allocation poison and returns the unresolved
+# labels, which clear the sink properties. A failed restore records poison too,
+# and `check` rejects a checker that carries it, so no verdict leaves the
+# checker after a binding went stale.
+packages/zts/src/flow_checker.zig functionCallLabels catch-block@2
+packages/zts/src/flow_checker.zig restoreParamValues catch-poison
+
 # A witness copy or condition allocation error records poison, so no result
 # that lacks the witness can leave the checker as a successful proof. The
 # module-call and diagnostic paths obey the same final poison check.

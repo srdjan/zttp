@@ -322,6 +322,12 @@ pub const FlowChecker = struct {
     /// such as a closure literal walked where it is written. The outermost
     /// real entry names where a diagnostic's chain starts.
     summary_call_sites: [max_summary_depth]NodeIndex,
+    /// The function or object literal that the call site now being summarized
+    /// passed for a parameter: packed parameter binding key -> node. Saved and
+    /// restored around each `functionCallLabels` frame, so a binding made for
+    /// one call site cannot be read by another. Lets `f(t)` inside
+    /// `apply(f, t)` resolve to the closure the caller passed.
+    param_values: std.AutoHashMapUnmanaged(u32, NodeIndex),
     /// The call expression `inferLabels` is evaluating now, so a summary frame
     /// can record the call that entered it. `null_node` outside any call.
     active_call_node: NodeIndex = null_node,
@@ -417,6 +423,7 @@ pub const FlowChecker = struct {
             .summary_returns = null,
             .summary_stack = @splat(0),
             .summary_call_sites = @splat(null_node),
+            .param_values = .empty,
             .summary_depth = 0,
             .route_summary_depth = 0,
             .defended_paths = .empty,
@@ -457,6 +464,7 @@ pub const FlowChecker = struct {
         }
         self.binding_value_nodes.deinit(self.allocator);
         self.user_fn_decls.deinit(self.allocator);
+        self.param_values.deinit(self.allocator);
         self.route_function_roots.deinit(self.allocator);
         self.listed_tool_route_functions.deinit(self.allocator);
 
@@ -641,8 +649,8 @@ pub const FlowChecker = struct {
     /// not as checker state, so no exit path can leave a stale binding source
     /// behind for the next closure.
     fn closureResultLabelsBound(self: *FlowChecker, node: NodeIndex, param_labels: ?LabelSet) LabelSet {
-        const func = self.ir_view.getFunction(node) orelse return .{ .unknown = true };
-        if (self.summary_depth >= max_summary_depth) return .{ .unknown = true };
+        const func = self.ir_view.getFunction(node) orelse return self.unresolvedCallLabels(LabelSet.empty);
+        if (self.summary_depth >= max_summary_depth) return self.unresolvedCallLabels(LabelSet.empty);
         for (self.summary_stack[0..self.summary_depth]) |active| {
             if (active == node) return LabelSet.empty;
         }
@@ -656,12 +664,10 @@ pub const FlowChecker = struct {
             }
         }
 
-        self.summary_stack[self.summary_depth] = node;
-        self.summary_call_sites[self.summary_depth] = self.active_call_node;
-        self.summary_depth += 1;
+        self.pushSummaryFrame(node);
         defer self.summary_depth -= 1;
 
-        const body_tag = self.ir_view.getTag(func.body) orelse return .{ .unknown = true };
+        const body_tag = self.ir_view.getTag(func.body) orelse return self.unresolvedCallLabels(LabelSet.empty);
         if (body_tag == .block or body_tag == .program or body_tag == .return_stmt) {
             var collected = LabelSet.empty;
             const saved = self.summary_returns;
@@ -671,6 +677,15 @@ pub const FlowChecker = struct {
             return collected;
         }
         return self.inferLabels(func.body);
+    }
+
+    /// Push a summary frame for `node`. The caller decrements `summary_depth`
+    /// when the walk ends.
+    fn pushSummaryFrame(self: *FlowChecker, node: NodeIndex) void {
+        const frame = self.summary_depth;
+        self.summary_stack[frame] = node;
+        self.summary_call_sites[frame] = self.active_call_node;
+        self.summary_depth += 1;
     }
 
     /// Record the return labels of a function imported from another file,
@@ -1302,6 +1317,13 @@ pub const FlowChecker = struct {
         if (tag == .object_literal) return node;
         if (tag != .identifier) return null;
         const binding = self.ir_view.getBinding(node) orelse return null;
+        // A parameter of the callee now being summarized: the call site passed
+        // an object literal for it, or nothing resolvable. A reassigned
+        // parameter is not the value the call site passed.
+        if (self.param_values.get(packBindingKey(binding.scope_id, binding.slot))) |passed| {
+            if (self.bindingIsMutated(binding)) return null;
+            return if (self.ir_view.getTag(passed) == .object_literal) passed else null;
+        }
         const decl = self.findBindingDecl(binding) orelse return null;
         if (self.bindingIsMutated(binding) or
             self.bindingHasAlias(binding) or
@@ -1934,6 +1956,13 @@ pub const FlowChecker = struct {
             .expr_stmt => {
                 if (self.ir_view.getOptValue(node)) |expr| {
                     self.checkExprSinks(expr);
+                    // A call written as a statement discards its value, and
+                    // only the label inference enters a called body. Without
+                    // this a helper that logs its secret argument is silent
+                    // when it is called as `audit(secret);` and checked when
+                    // it is called as `const n = audit(secret);`.
+                    const expr_tag = self.ir_view.getTag(expr) orelse .lit_undefined;
+                    if (expr_tag == .call or expr_tag == .method_call) _ = self.inferLabels(expr);
                     self.propagateMutatingMethodTaint(expr);
                     // An assignment written as a statement (`obj.field = secret;`)
                     // parses as an expr_stmt wrapping the assignment, so the
@@ -2623,9 +2652,47 @@ pub const FlowChecker = struct {
         // imported module exports, builtin globals, and primitive/array methods
         // return above or are recognized here and keep their ordinary label
         // union.
-        var labels = self.mergeArgLabels(self.inferLabels(call_data.callee), call_data);
-        if (self.isUnresolvedFunctionValueCallee(call_data.callee)) labels.unknown = true;
+        const labels = self.mergeArgLabels(self.inferLabels(call_data.callee), call_data);
+        if (self.isUnresolvedFunctionValueCallee(call_data.callee)) {
+            // A method of a parameter that no call site bound has a body the
+            // walk cannot enter, so a discarded result must clear what a sink
+            // decides as well. Other unresolved members stay `.unknown` only:
+            // a method on a value of unknown type is usually a builtin
+            // (`receipt.json()`), and clearing for each would cost every
+            // proof that touches one.
+            if (self.isUnboundParameterMethodCall(call_data.callee)) return self.unresolvedCallLabels(labels);
+            var unknown_labels = labels;
+            unknown_labels.unknown = true;
+            return unknown_labels;
+        }
         return labels;
+    }
+
+    /// True for `o.run(...)` inside a summarized callee, where `o` is a parameter
+    /// of that callee, the method is not a builtin one, and the record literal
+    /// that the call site passed was not resolved (`param_values` has no entry,
+    /// or `literalObjectMethodLabels` would have answered).
+    fn isUnboundParameterMethodCall(self: *const FlowChecker, callee: NodeIndex) bool {
+        if (self.summary_depth == 0) return false;
+        const tag = self.ir_view.getTag(callee) orelse return false;
+        if (tag != .member_access and tag != .optional_chain) return false;
+        const member = self.ir_view.getMember(callee) orelse return false;
+        const root = self.assignmentRootBinding(callee) orelse return false;
+        if (root.kind != .argument) return false;
+        const key = packBindingKey(root.scope_id, root.slot);
+        if (self.req_binding_key) |req_key| {
+            if (req_key == key) return false;
+        }
+        const method = self.resolveAtomName(member.property) orelse return true;
+        return !isBuiltinMethodName(method);
+    }
+
+    fn isBuiltinMethodName(name: []const u8) bool {
+        const extra = [_][]const u8{ "get", "has", "set", "delete", "json", "text", "keys", "values", "entries", "toString", "toFixed", "toISOString" };
+        for (extra) |method| {
+            if (std.mem.eql(u8, name, method)) return true;
+        }
+        return isStringMethod(name) or isArrayMethod(name) or isResultMethod(name) or isMathMethod(name);
     }
 
     /// Union of `callee_labels` and every argument's labels. A closure written
@@ -2680,11 +2747,11 @@ pub const FlowChecker = struct {
     /// joined separately at the call site. Response helpers contribute only
     /// their payload, matching the runtime response body surface.
     fn listedToolRouteLabels(self: *FlowChecker, fn_node: NodeIndex) LabelSet {
-        if (self.summary_depth >= max_summary_depth) return .{ .unknown = true };
+        if (self.summary_depth >= max_summary_depth) return self.unresolvedCallLabels(LabelSet.empty);
         for (self.summary_stack[0..self.summary_depth]) |active| {
             if (active == fn_node) return .{ .unknown = true };
         }
-        const function = self.ir_view.getFunction(fn_node) orelse return .{ .unknown = true };
+        const function = self.ir_view.getFunction(fn_node) orelse return self.unresolvedCallLabels(LabelSet.empty);
 
         const saved_req_key = self.req_binding_key;
         const saved_identity_trusted = self.req_identity_trusted;
@@ -2696,9 +2763,7 @@ pub const FlowChecker = struct {
             self.req_identity_trusted = saved_identity_trusted;
         }
 
-        self.summary_stack[self.summary_depth] = fn_node;
-        self.summary_call_sites[self.summary_depth] = self.active_call_node;
-        self.summary_depth += 1;
+        self.pushSummaryFrame(fn_node);
         defer self.summary_depth -= 1;
         self.route_summary_depth += 1;
         defer self.route_summary_depth -= 1;
@@ -2708,7 +2773,7 @@ pub const FlowChecker = struct {
             self.root_dispatch_depth -= 1;
         };
 
-        const body_tag = self.ir_view.getTag(function.body) orelse return .{ .unknown = true };
+        const body_tag = self.ir_view.getTag(function.body) orelse return self.unresolvedCallLabels(LabelSet.empty);
         if (body_tag == .block or body_tag == .program or body_tag == .return_stmt) {
             var collected = LabelSet.empty;
             const saved_returns = self.summary_returns;
@@ -2750,13 +2815,30 @@ pub const FlowChecker = struct {
     }
 
     fn unknownRouteCallLabels(self: *FlowChecker) LabelSet {
+        return self.unresolvedCallLabels(LabelSet.empty);
+    }
+
+    /// Clear every property that a sink decides, with no diagnostic: the
+    /// property becomes unproven, not refused. Called whenever the walk cannot
+    /// enter a call, because an unwalked body can hold a sink that the call
+    /// site never reaches when its result is discarded.
+    fn clearAllSinkProperties(self: *FlowChecker) void {
         self.properties.no_secret_leakage = false;
         self.properties.no_credential_leakage = false;
         self.properties.input_validated = false;
         self.properties.pii_contained = false;
         self.properties.injection_safe = false;
         self.properties.deterministic = false;
-        return .{ .unknown = true };
+    }
+
+    /// The labels of a call the walk could not enter: the labels of its
+    /// arguments plus `.unknown`. `.unknown` fails closed only when the value
+    /// reaches a sink, so this also clears the properties that a sink decides.
+    /// The caller passes the argument labels, or the empty set when none were
+    /// read.
+    fn unresolvedCallLabels(self: *FlowChecker, arg_labels: LabelSet) LabelSet {
+        self.clearAllSinkProperties();
+        return LabelSet.merge(arg_labels, .{ .unknown = true });
     }
 
     fn routeFunctionCallLabels(self: *FlowChecker, fn_node: NodeIndex, call_data: Node.CallExpr) LabelSet {
@@ -2781,20 +2863,20 @@ pub const FlowChecker = struct {
         const member = self.ir_view.getMember(callee) orelse return null;
         const method = self.resolveAtomName(member.property) orelse return null;
         const object_node = self.resolveLiteralObjectMethod(member.object) orelse return null;
-        const obj = self.ir_view.getObject(object_node) orelse return .{ .unknown = true };
+        const obj = self.ir_view.getObject(object_node) orelse return self.unresolvedCallLabels(LabelSet.empty);
 
         var matched: ?NodeIndex = null;
         var i: u16 = 0;
         while (i < obj.properties_count) : (i += 1) {
             const prop_idx = self.ir_view.getListIndex(obj.properties_start, i);
-            if (self.ir_view.getTag(prop_idx) != .object_property) return .{ .unknown = true };
-            const prop = self.ir_view.getProperty(prop_idx) orelse return .{ .unknown = true };
-            const key = self.getObjectPropertyKey(prop.key) orelse return .{ .unknown = true };
+            if (self.ir_view.getTag(prop_idx) != .object_property) return self.unresolvedCallLabels(LabelSet.empty);
+            const prop = self.ir_view.getProperty(prop_idx) orelse return self.unresolvedCallLabels(LabelSet.empty);
+            const key = self.getObjectPropertyKey(prop.key) orelse return self.unresolvedCallLabels(LabelSet.empty);
             if (!std.mem.eql(u8, key, method)) continue;
-            if (matched != null) return .{ .unknown = true };
-            matched = self.resolveFunctionNode(prop.value) orelse return .{ .unknown = true };
+            if (matched != null) return self.unresolvedCallLabels(LabelSet.empty);
+            matched = self.resolveFunctionNode(prop.value) orelse return self.unresolvedCallLabels(LabelSet.empty);
         }
-        const fn_node = matched orelse return .{ .unknown = true };
+        const fn_node = matched orelse return self.unresolvedCallLabels(LabelSet.empty);
         return self.resolvedFunctionCallLabels(fn_node, call_data);
     }
 
@@ -3088,8 +3170,9 @@ pub const FlowChecker = struct {
     /// Labels for a call to a user-defined function: seed the callee's
     /// parameters with the argument labels, walk its body (its expression sinks
     /// report the labels this call passes in), and union the labels of every
-    /// return value. Falls back to the union of argument labels when the body
-    /// is unavailable, recursive, or beyond the summary caps.
+    /// return value. A call the walk cannot enter returns the union of the
+    /// argument labels with `.unknown` and clears the properties that a sink
+    /// decides (`unresolvedCallLabels`).
     fn userCallLabels(self: *FlowChecker, binding: ir.BindingRef, call_data: Node.CallExpr) LabelSet {
         var arg_labels: [max_summary_params]LabelSet = @splat(LabelSet.empty);
         var arg_union = LabelSet.empty;
@@ -3101,36 +3184,44 @@ pub const FlowChecker = struct {
         }
 
         // Every exit below that does not read the callee's body returns the
-        // argument union, which for a zero-argument call is the empty set - and
-        // the empty set is the positive claim that the value carries nothing.
-        // A secret returned by a helper the walk could not enter would reach a
-        // sink unlabelled and falsely discharge no_secret_leakage, so those
-        // exits carry `.unknown` and the sink clears what it governs instead.
-        const unresolved = LabelSet.merge(arg_union, .{ .unknown = true });
-
+        // argument union plus `.unknown`, and clears what a sink decides. The
+        // argument union alone is the empty set for a zero-argument call, and
+        // the empty set is the positive claim that the value carries nothing. A
+        // secret returned by a helper the walk could not enter would reach a
+        // sink unlabelled and falsely discharge no_secret_leakage. `.unknown`
+        // covers a result that reaches a sink, and the cleared properties
+        // cover a result that is discarded, because the unwalked body can hold
+        // a sink that this call site never reaches.
         const fn_key = packBindingKey(binding.scope_id, binding.slot);
-        if (self.bindingIsMutated(binding)) return unresolved;
-        const fn_node = self.user_fn_decls.get(fn_key) orelse {
+        if (self.bindingIsMutated(binding)) return self.unresolvedCallLabels(arg_union);
+        // A parameter that the call site being summarized bound to a function
+        // resolves to that function, like a declaration.
+        const fn_node = self.user_fn_decls.get(fn_key) orelse self.param_values.get(fn_key) orelse {
             // An implicit global is a builtin - `h`, `range`, `renderToString`
             // - whose body is not in this module to walk and which launders
             // nothing on its own. Any other binding without a declaration is a
             // call through a value: a callback parameter, or an import the
             // resolver did not follow.
             if (binding.kind == .undeclared_global) {
-                const name = self.resolveAtomName(binding.name_atom) orelse return unresolved;
+                const name = self.resolveAtomName(binding.name_atom) orelse return self.unresolvedCallLabels(arg_union);
                 if (known_globals.isKnownGlobalFunction(name)) return arg_union;
-                return unresolved;
+                // `fetchSync` is the ambient egress global: a native with no
+                // body to walk, whose sink `checkEgressCall` evaluates at the
+                // call. Its value is still unknown.
+                if (std.mem.eql(u8, name, "fetchSync")) return LabelSet.merge(arg_union, .{ .unknown = true });
+                return self.unresolvedCallLabels(arg_union);
             }
             // A function imported from another file, whose return labels the
             // caller computed from that file and installed here. Unioned with
             // the arguments rather than replacing them, because those labels
-            // were computed with the parameters left unlabelled.
+            // were computed with the parameters left unlabelled. Unit F7
+            // covers the sinks inside it.
             if (self.file_fn_labels.get(binding.slot)) |imported| {
                 return LabelSet.merge(arg_union, imported);
             }
-            return unresolved;
+            return self.unresolvedCallLabels(arg_union);
         };
-        return self.functionCallLabels(fn_node, call_data, arg_labels, arg_union, unresolved);
+        return self.functionCallLabels(fn_node, call_data, arg_labels, arg_union);
     }
 
     fn resolvedFunctionCallLabels(self: *FlowChecker, fn_node: NodeIndex, call_data: Node.CallExpr) LabelSet {
@@ -3142,8 +3233,36 @@ pub const FlowChecker = struct {
             if (i < max_summary_params) arg_labels[i] = labels;
             arg_union = LabelSet.merge(arg_union, labels);
         }
-        const unresolved = LabelSet.merge(arg_union, .{ .unknown = true });
-        return self.functionCallLabels(fn_node, call_data, arg_labels, arg_union, unresolved);
+        return self.functionCallLabels(fn_node, call_data, arg_labels, arg_union);
+    }
+
+    /// The function or object literal that a call-site argument stands for, or
+    /// null when it is neither. A closure or object literal written at the call
+    /// site stands for itself. A name stands for the declaration it is bound
+    /// to, or for what the enclosing summary frame bound it to when it is a
+    /// parameter that the caller passed on.
+    fn passedValueNode(self: *const FlowChecker, arg: NodeIndex) ?NodeIndex {
+        const tag = self.ir_view.getTag(arg) orelse return null;
+        switch (tag) {
+            .function_expr, .arrow_function, .object_literal => return arg,
+            .identifier => {
+                const binding = self.ir_view.getBinding(arg) orelse return null;
+                const key = packBindingKey(binding.scope_id, binding.slot);
+                if (self.param_values.get(key)) |passed| {
+                    if (self.bindingIsMutated(binding)) return null;
+                    return passed;
+                }
+                if (self.user_fn_decls.get(key)) |declared| {
+                    if (self.bindingIsMutated(binding)) return null;
+                    return declared;
+                }
+                return self.resolveLiteralObjectMethod(arg);
+            },
+            // exhaustive: any other expression is not a statically resolved
+            // function or object value, so a parameter bound to it stays
+            // unresolved and a call through it fails closed.
+            else => return null,
+        }
     }
 
     fn functionCallLabels(
@@ -3152,36 +3271,82 @@ pub const FlowChecker = struct {
         call_data: Node.CallExpr,
         arg_labels: [max_summary_params]LabelSet,
         arg_union: LabelSet,
-        unresolved: LabelSet,
     ) LabelSet {
-        if (self.summary_depth >= max_summary_depth) return unresolved;
+        if (self.summary_depth >= max_summary_depth) return self.unresolvedCallLabels(arg_union);
         for (self.summary_stack[0..self.summary_depth]) |active| {
             // Recursion, and the only exit that stays with the argument union.
             // The active frame collects all returns from this function.
             if (active == fn_node) return arg_union;
         }
-        const func = self.ir_view.getFunction(fn_node) orelse return unresolved;
+        const func = self.ir_view.getFunction(fn_node) orelse return self.unresolvedCallLabels(arg_union);
         // Past the parameter cap the arguments cannot be bound, so the body
         // would read every parameter as unlabelled and launder its arguments.
-        if (func.params_count > max_summary_params) return unresolved;
+        if (func.params_count > max_summary_params) return self.unresolvedCallLabels(arg_union);
 
-        for (0..func.params_count) |i| {
+        // Read what the call site passes before any binding changes, because a
+        // pass-through argument is resolved against the enclosing frame's
+        // bindings.
+        const param_count: usize = func.params_count;
+        var passed: [max_summary_params]?NodeIndex = @splat(null);
+        var saved: [max_summary_params]?NodeIndex = @splat(null);
+        var keys: [max_summary_params]?u32 = @splat(null);
+        for (0..param_count) |i| {
             const param_idx = self.ir_view.getListIndex(func.params_start, @intCast(i));
             const pb = self.paramBinding(param_idx) orelse continue;
             const key = packBindingKey(pb.scope_id, pb.slot);
+            keys[i] = key;
+            saved[i] = self.param_values.get(key);
+            if (i < call_data.args_count) {
+                passed[i] = self.passedValueNode(self.ir_view.getListIndex(call_data.args_start, @intCast(i)));
+            }
+        }
+        // A binding made for this call site ends with its frame.
+        defer self.restoreParamValues(&keys, &saved);
+
+        for (0..param_count) |i| {
+            const key = keys[i] orelse continue;
             const labels = if (i < call_data.args_count) arg_labels[i] else LabelSet.empty;
             self.binding_labels.put(self.allocator, key, labels) catch {
                 self.markAllocationFailure();
-                return unresolved;
+                return self.unresolvedCallLabels(arg_union);
             };
+            if (passed[i]) |value| {
+                self.param_values.put(self.allocator, key, value) catch {
+                    self.markAllocationFailure();
+                    return self.unresolvedCallLabels(arg_union);
+                };
+            } else {
+                _ = self.param_values.remove(key);
+            }
         }
 
-        self.summary_stack[self.summary_depth] = fn_node;
-        self.summary_call_sites[self.summary_depth] = self.active_call_node;
-        self.summary_depth += 1;
+        self.pushSummaryFrame(fn_node);
         defer self.summary_depth -= 1;
 
-        const body_tag = self.ir_view.getTag(func.body) orelse return unresolved;
+        return self.summaryBodyLabels(func) orelse self.unresolvedCallLabels(arg_union);
+    }
+
+    /// Put each parameter's `param_values` entry back to what it was before the
+    /// frame bound it.
+    fn restoreParamValues(
+        self: *FlowChecker,
+        keys: *const [max_summary_params]?u32,
+        saved: *const [max_summary_params]?NodeIndex,
+    ) void {
+        for (keys, saved) |maybe_key, previous| {
+            const key = maybe_key orelse continue;
+            if (previous) |value| {
+                self.param_values.put(self.allocator, key, value) catch self.markAllocationFailure();
+            } else {
+                _ = self.param_values.remove(key);
+            }
+        }
+    }
+
+    /// Walk a function body under a summary and return the union of its return
+    /// labels. Null when the body has no recognizable shape.
+    fn summaryBodyLabels(self: *FlowChecker, func: Node.FunctionExpr) ?LabelSet {
+        const body_tag = self.ir_view.getTag(func.body) orelse return null;
         // A concise arrow body (`(x) => x`) is stored as a `.return_stmt`
         // wrapping the expression, not the bare expression, so it must go
         // through the same returns-collector as a block/program body. Routing
@@ -6194,6 +6359,246 @@ test "FlowChecker reports unvalidated input built into Response.html inside a he
     const clean_report = try runFlowDiagnostics(std.testing.allocator, clean, .unvalidated_input_in_egress, &buf);
     try std.testing.expectEqual(@as(usize, 0), clean_report.count);
     try std.testing.expect(clean_report.properties.injection_safe);
+}
+
+test "FlowChecker fails closed on a discarded call beyond the summary depth cap" {
+    var buf: [512]u8 = undefined;
+    // Nine helpers: the ninth logs, one past `max_summary_depth`. The result is
+    // discarded, so only the property can record that the walk did not reach
+    // the log.
+    const leaking =
+        \\import { env } from "zttp:env";
+        \\function h9(x) { console.log(x); return 1; }
+        \\function h8(x) { return h9(x); }
+        \\function h7(x) { return h8(x); }
+        \\function h6(x) { return h7(x); }
+        \\function h5(x) { return h6(x); }
+        \\function h4(x) { return h5(x); }
+        \\function h3(x) { return h4(x); }
+        \\function h2(x) { return h3(x); }
+        \\function h1(x) { return h2(x); }
+        \\function handler(req) {
+        \\  const s = env("SECRET_KEY");
+        \\  const n = h1(s);
+        \\  return Response.json({ ok: true });
+        \\}
+    ;
+    const leaking_report = try runFlowDiagnostics(std.testing.allocator, leaking, .secret_in_log, &buf);
+    try std.testing.expect(!leaking_report.properties.no_secret_leakage);
+
+    // Control: the same chain, one call shorter, is walked in full and the log
+    // is refused, so the cap and not the chain decides the unproven verdict.
+    const short =
+        \\import { env } from "zttp:env";
+        \\function h2(x) { console.log(x); return 1; }
+        \\function h1(x) { return h2(x); }
+        \\function handler(req) {
+        \\  const s = env("SECRET_KEY");
+        \\  const n = h1(s);
+        \\  return Response.json({ ok: true });
+        \\}
+    ;
+    const short_report = try runFlowDiagnostics(std.testing.allocator, short, .secret_in_log, &buf);
+    try std.testing.expectEqual(@as(usize, 1), short_report.count);
+    try std.testing.expect(!short_report.properties.no_secret_leakage);
+}
+
+test "FlowChecker fails closed on a discarded call past the parameter cap" {
+    var buf: [512]u8 = undefined;
+    const leaking =
+        \\import { env } from "zttp:env";
+        \\function helper(x, p2, p3, p4, p5, p6, p7, p8, p9) { console.log(x); return 1; }
+        \\function handler(req) {
+        \\  const s = env("SECRET_KEY");
+        \\  const n = helper(s, 2, 3, 4, 5, 6, 7, 8, 9);
+        \\  return Response.json({ ok: true });
+        \\}
+    ;
+    const report = try runFlowDiagnostics(std.testing.allocator, leaking, .secret_in_log, &buf);
+    try std.testing.expect(!report.properties.no_secret_leakage);
+}
+
+test "FlowChecker keeps the properties for a discarded call to a known global" {
+    var buf: [512]u8 = undefined;
+    const source =
+        \\import { env } from "zttp:env";
+        \\function handler(req) {
+        \\  const s = env("PUBLIC_NAME");
+        \\  parseInt("5");
+        \\  Number(s);
+        \\  return Response.json({ ok: true });
+        \\}
+    ;
+    const report = try runFlowDiagnostics(std.testing.allocator, source, .secret_in_log, &buf);
+    try std.testing.expectEqual(@as(usize, 0), report.count);
+    try std.testing.expect(report.properties.no_secret_leakage);
+    try std.testing.expect(report.properties.no_credential_leakage);
+    try std.testing.expect(report.properties.input_validated);
+    try std.testing.expect(report.properties.pii_contained);
+    try std.testing.expect(report.properties.injection_safe);
+    try std.testing.expect(report.properties.deterministic);
+}
+
+test "FlowChecker resolves a function passed as a parameter to the passed closure" {
+    var buf: [512]u8 = undefined;
+    const apply =
+        \\import { env } from "zttp:env";
+        \\function apply(f, t) { return f(t); }
+    ;
+
+    // The closure logs what it receives and the secret reaches it through the
+    // callee's own parameter: a refusal, not just an unproven property.
+    const leaking = apply ++
+        \\
+        \\function handler(req) {
+        \\  const s = env("SECRET_KEY");
+        \\  const n = apply((x) => { console.log(x); return 1; }, s);
+        \\  return Response.json({ ok: true });
+        \\}
+    ;
+    const leaking_report = try runFlowDiagnostics(std.testing.allocator, leaking, .secret_in_log, &buf);
+    try std.testing.expectEqual(@as(usize, 1), leaking_report.count);
+    try std.testing.expect(!leaking_report.properties.no_secret_leakage);
+
+    // Control: a clean argument through a logging closure reports nothing and
+    // keeps the property, so the call resolved instead of failing closed.
+    const clean_arg = apply ++
+        \\
+        \\function handler(req) {
+        \\  const n = apply((x) => { console.log(x); return 1; }, "ok");
+        \\  return Response.json({ ok: true });
+        \\}
+    ;
+    const clean_arg_report = try runFlowDiagnostics(std.testing.allocator, clean_arg, .secret_in_log, &buf);
+    try std.testing.expectEqual(@as(usize, 0), clean_arg_report.count);
+    try std.testing.expect(clean_arg_report.properties.no_secret_leakage);
+    try std.testing.expect(clean_arg_report.properties.deterministic);
+
+    // Control: a secret through a closure that does not sink it.
+    const quiet = apply ++
+        \\
+        \\function handler(req) {
+        \\  const s = env("SECRET_KEY");
+        \\  const n = apply((x) => { return 1; }, s);
+        \\  return Response.json({ ok: true });
+        \\}
+    ;
+    const quiet_report = try runFlowDiagnostics(std.testing.allocator, quiet, .secret_in_log, &buf);
+    try std.testing.expectEqual(@as(usize, 0), quiet_report.count);
+    try std.testing.expect(quiet_report.properties.no_secret_leakage);
+}
+
+test "FlowChecker does not carry a passed function from one call site to the next" {
+    var buf: [512]u8 = undefined;
+    // The first call passes the logging closure with a clean value. The second
+    // passes a closure that does not log, with the secret. If the first
+    // binding survived, the second call would log the secret.
+    const log_then_quiet =
+        \\import { env } from "zttp:env";
+        \\function apply(f, t) { return f(t); }
+        \\function handler(req) {
+        \\  const s = env("SECRET_KEY");
+        \\  const n1 = apply((x) => { console.log(x); return 1; }, "ok");
+        \\  const n2 = apply((y) => { return 2; }, s);
+        \\  return Response.json({ ok: true });
+        \\}
+    ;
+    const first = try runFlowDiagnostics(std.testing.allocator, log_then_quiet, .secret_in_log, &buf);
+    try std.testing.expectEqual(@as(usize, 0), first.count);
+    try std.testing.expect(first.properties.no_secret_leakage);
+
+    // The reverse order: the quiet closure first, the logging one second with
+    // the secret. The second call must still be refused.
+    const quiet_then_log =
+        \\import { env } from "zttp:env";
+        \\function apply(f, t) { return f(t); }
+        \\function handler(req) {
+        \\  const s = env("SECRET_KEY");
+        \\  const n1 = apply((y) => { return 2; }, "ok");
+        \\  const n2 = apply((x) => { console.log(x); return 1; }, s);
+        \\  return Response.json({ ok: true });
+        \\}
+    ;
+    const second = try runFlowDiagnostics(std.testing.allocator, quiet_then_log, .secret_in_log, &buf);
+    try std.testing.expectEqual(@as(usize, 1), second.count);
+    try std.testing.expect(!second.properties.no_secret_leakage);
+}
+
+test "FlowChecker fails closed on a call through a parameter nothing bound" {
+    var buf: [512]u8 = undefined;
+    // `go` is the handler's own parameter-like value from outside the file, so
+    // the call cannot be resolved and its sinks cannot be walked.
+    const source =
+        \\import { env } from "zttp:env";
+        \\function run(f, t) { f(t); return 1; }
+        \\function handler(req) {
+        \\  const s = env("SECRET_KEY");
+        \\  const n = run(req.hook, s);
+        \\  return Response.json({ ok: true });
+        \\}
+    ;
+    const report = try runFlowDiagnostics(std.testing.allocator, source, .secret_in_log, &buf);
+    try std.testing.expect(!report.properties.no_secret_leakage);
+}
+
+test "FlowChecker resolves a method of a record passed as a parameter" {
+    var buf: [512]u8 = undefined;
+    // A record literal written at the call site: its method is the one `o.run`
+    // calls, and the secret reaches that method's log.
+    const leaking =
+        \\import { env } from "zttp:env";
+        \\function useOps(o, t) { return o.run(t); }
+        \\function handler(req) {
+        \\  const s = env("SECRET_KEY");
+        \\  const n = useOps({ run: (x) => { console.log(x); return 1; } }, s);
+        \\  return Response.json({ ok: true });
+        \\}
+    ;
+    const leaking_report = try runFlowDiagnostics(std.testing.allocator, leaking, .secret_in_log, &buf);
+    try std.testing.expectEqual(@as(usize, 1), leaking_report.count);
+    try std.testing.expect(!leaking_report.properties.no_secret_leakage);
+
+    // Control: the same record with a clean argument reports nothing.
+    const clean =
+        \\import { env } from "zttp:env";
+        \\function useOps(o, t) { return o.run(t); }
+        \\function handler(req) {
+        \\  const n = useOps({ run: (x) => { console.log(x); return 1; } }, "ok");
+        \\  return Response.json({ ok: true });
+        \\}
+    ;
+    const clean_report = try runFlowDiagnostics(std.testing.allocator, clean, .secret_in_log, &buf);
+    try std.testing.expectEqual(@as(usize, 0), clean_report.count);
+    try std.testing.expect(clean_report.properties.no_secret_leakage);
+
+    // A record bound to a name that the callee calls a method on is not a
+    // stable resolution (`callKeepsArgumentLocal` refuses it), so the method
+    // stays unresolved and the property is unproven rather than refused.
+    const named =
+        \\import { env } from "zttp:env";
+        \\function useOps(o, t) { return o.run(t); }
+        \\function handler(req) {
+        \\  const s = env("SECRET_KEY");
+        \\  const ops = { run: (x) => { console.log(x); return 1; } };
+        \\  const n = useOps(ops, s);
+        \\  return Response.json({ ok: true });
+        \\}
+    ;
+    const named_report = try runFlowDiagnostics(std.testing.allocator, named, .secret_in_log, &buf);
+    try std.testing.expect(!named_report.properties.no_secret_leakage);
+
+    // A record parameter that no call site bound.
+    const unbound =
+        \\import { env } from "zttp:env";
+        \\function useOps(o, t) { o.run(t); return 1; }
+        \\function handler(req) {
+        \\  const s = env("SECRET_KEY");
+        \\  const n = useOps(req.ops, s);
+        \\  return Response.json({ ok: true });
+        \\}
+    ;
+    const unbound_report = try runFlowDiagnostics(std.testing.allocator, unbound, .secret_in_log, &buf);
+    try std.testing.expect(!unbound_report.properties.no_secret_leakage);
 }
 
 test "FlowChecker keeps a routed sink's single report and plain help" {
