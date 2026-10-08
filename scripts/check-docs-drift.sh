@@ -449,6 +449,8 @@ fi
 # TypeScript rather than every `:` and `=` in Zig, where configuration defaults
 # are ordinary host-language code. `-U` is load-bearing: multiline signatures
 # are the common place a line-only expression would miss the removed form.
+# The diagnostic corpus `bad` cases use removed forms on purpose: they pin
+# their refusal. Every census below excludes tests/corpus/*/bad/.
 parameter_surface_count="$(git ls-files -z -- '*.ts' '*.tsx' | tr -cd '\0' | wc -c | tr -d '[:space:]')"
 if (( parameter_surface_count < 50 )); then
   fail "parameter-form gate scanned only $parameter_surface_count TypeScript files"
@@ -457,7 +459,7 @@ fi
 removed_parameter_hits="$({
   git ls-files -z -- '*.ts' '*.tsx' |
     xargs -0 rg -n -U --pcre2 -- '(?s)(?:function\s+[A-Za-z_$][A-Za-z0-9_$]*(?:\s*<[^>{}]*>)?\s*\([^)]*\b[A-Za-z_$][A-Za-z0-9_$]*\s*(?:\?\s*:|:\s*[^,)=]+?\s*=)|\([^)]*\b[A-Za-z_$][A-Za-z0-9_$]*\s*(?:\?\s*:|:\s*[^,)=]+?\s*=)[^)]*\)\s*=>)' 2>/dev/null || true
-} | grep -v -E '^docs/' || true)"
+} | grep -v -E '^(docs/|tests/corpus/[a-z]+/bad/)' || true)"
 if [[ -n "${removed_parameter_hits//[[:space:]]/}" ]]; then
   printf '%s\n' "$removed_parameter_hits" >&2
   fail "tracked TypeScript still uses a default or optional parameter; use T | undefined and resolve absence in the body"
@@ -468,7 +470,7 @@ fi
 removed_module_export_hits="$({
   git ls-files -z -- '*.ts' '*.tsx' |
     xargs -0 rg -n --pcre2 -- '^\s*export\s+(?:default|let)\b' 2>/dev/null || true
-} | grep -v -E '^docs/' || true)"
+} | grep -v -E '^(docs/|tests/corpus/[a-z]+/bad/)' || true)"
 if [[ -n "${removed_module_export_hits//[[:space:]]/}" ]]; then
   printf '%s\n' "$removed_module_export_hits" >&2
   fail "tracked TypeScript still uses a default or mutable export; use a statically named export function or export const"
@@ -479,7 +481,7 @@ fi
 removed_type_spelling_hits="$({
   git ls-files -z -- '*.ts' '*.tsx' |
     xargs -0 rg -n --pcre2 -- '(?:\b(?:Array|ReadonlyArray)\s*<|\bvoid\b)' 2>/dev/null || true
-} | grep -v -E '^docs/' || true)"
+} | grep -v -E '^(docs/|tests/corpus/[a-z]+/bad/)' || true)"
 if [[ -n "${removed_type_spelling_hits//[[:space:]]/}" ]]; then
   printf '%s\n' "$removed_type_spelling_hits" >&2
   fail "tracked TypeScript still uses Array<T>, ReadonlyArray<T>, or void; use postfix arrays and undefined"
@@ -491,7 +493,7 @@ fi
 removed_statement_form_hits="$({
   git ls-files -z -- '*.ts' '*.tsx' |
     xargs -0 rg -n -U --pcre2 -- '(?m)(?:\bdebugger\s*;|\bwhen\s+_\s*:|^\s*;\s*(?://[^\n]*)?$|;;)' 2>/dev/null || true
-} | grep -v -E '^docs/' || true)"
+} | grep -v -E '^(docs/|tests/corpus/[a-z]+/bad/)' || true)"
 if [[ -n "${removed_statement_form_hits//[[:space:]]/}" ]]; then
   printf '%s\n' "$removed_statement_form_hits" >&2
   fail "tracked TypeScript still uses debugger, an empty statement, or when _; remove inert statements and use default:"
@@ -503,7 +505,7 @@ fi
 removed_declaration_destructuring_hits="$({
   git ls-files -z -- '*.ts' '*.tsx' |
     xargs -0 rg -n -U --pcre2 -- '(?s)\b(?:const|let|var)\s+(?:\{|\[)' 2>/dev/null || true
-} | grep -v -E '^(docs/|packages/pi/src/providers/testdata/codegen/|packages/pi/src/simulator/testdata/empirical/)' || true)"
+} | grep -v -E '^(docs/|packages/pi/src/providers/testdata/codegen/|packages/pi/src/simulator/testdata/empirical/|tests/corpus/[a-z]+/bad/)' || true)"
 if [[ -n "${removed_declaration_destructuring_hits//[[:space:]]/}" ]]; then
   printf '%s\n' "$removed_declaration_destructuring_hits" >&2
   fail "tracked TypeScript still uses declaration destructuring; bind one name and read members or indexed elements explicitly"
@@ -515,7 +517,7 @@ fi
 removed_record_field_hits="$({
   git ls-files -z -- '*.ts' |
     xargs -0 rg -n -U --pcre2 -- '(?s)(?:(?:=|return|\(|,)\s*\{\s*(?:\.\.\.[^,}]+,\s*)?(?:[A-Za-z_$][A-Za-z0-9_$]*\s*,\s*)*[A-Za-z_$][A-Za-z0-9_$]*\s*(?:,|\})|(?:return|Response\.json\(|=>|=)\s*\{(?:(?![{}()]).)*,\s*[A-Za-z_$][A-Za-z0-9_$]*\s*(?:,|\})|\{\s*\[[^]]+\]\s*:)' 2>/dev/null || true
-} | grep -v -E '^(docs/|packages/pi/src/providers/testdata/codegen/|packages/pi/src/simulator/testdata/empirical/)' || true)"
+} | grep -v -E '^(docs/|packages/pi/src/providers/testdata/codegen/|packages/pi/src/simulator/testdata/empirical/|tests/corpus/[a-z]+/bad/)' || true)"
 if [[ -n "${removed_record_field_hits//[[:space:]]/}" ]]; then
   printf '%s\n' "$removed_record_field_hits" >&2
   fail "tracked TypeScript still uses object shorthand or a computed record key; spell fields explicitly or use Dict"
@@ -527,7 +529,7 @@ fi
 removed_expression_form_hits="$({
   git ls-files -z -- '*.ts' '*.tsx' |
     xargs -0 rg -n -U --pcre2 -- '(?m)(?:\?\.\s*[\[(]|(?:^|[=(:,;!?{}\[])\s*\+\s*(?:[A-Za-z_$]|\()|(?:\b[A-Za-z_$][A-Za-z0-9_$]*|\)|\])\s+in\s+(?:[A-Za-z_$]|\(|\{|\[))' 2>/dev/null || true
-} | grep -v -E '^(docs/|packages/pi/src/providers/testdata/codegen/|packages/pi/src/simulator/testdata/empirical/)' | grep -v -E ':[[:space:]]*(//|\*)' || true)"
+} | grep -v -E '^(docs/|packages/pi/src/providers/testdata/codegen/|packages/pi/src/simulator/testdata/empirical/|tests/corpus/[a-z]+/bad/)' | grep -v -E ':[[:space:]]*(//|\*)' || true)"
 if [[ -n "${removed_expression_form_hits//[[:space:]]/}" ]]; then
   printf '%s\n' "$removed_expression_form_hits" >&2
   fail "tracked TypeScript still uses in, unary plus, optional call, or optional computed access; use explicit predicates, conversions, and absence branches"
