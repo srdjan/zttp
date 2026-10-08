@@ -330,6 +330,12 @@ summarized at several call sites reports once.
 
 ## 8. Decisions for the owner
 
+Answered 2026-10-08: P1 (a), P2 (a), P3 (a), P4 (a), P5 (a). The owner
+approved this plan. Per P1, the flow-checker plan for section 7 is written and
+fixed first; this plan follows. The DeepSeek re-record runs longer than two
+minutes and is paid, so the main session confirms with the owner before it
+starts.
+
 **P1 (the flow-checker fail-open in section 7).**
 Options: (a) plan and fix it first, then this plan; (b) this plan first;
 (c) one combined plan.
