@@ -318,16 +318,34 @@ exhaustive `propertyTagForKind` (`flow_checker.zig:140`). Update the documented 
 `docs/proofs-and-receipts.md:75-76`, the flow checker header
 (`flow_checker.zig:158`), `contract_types.zig:624`, and the `Sink` entry in
 `CONCEPTS.md`. Depends on F1, because the normal durable pattern puts the
-calls inside a `durable.run` callback.
+calls inside a `durable.run` callback. The current promise text does not name
+a log for secrets, but `secret_in_log` (ZTS402) refuses it; F9 adds the log
+to the documented promise.
+
+**F10: credentials in an egress body (added 2026-10-08 for Q6 (a)).** Add
+the diagnostic kind `credential_in_egress_body` with a new rule row (ZTS408),
+a `propertyTagForKind` entry (`no_credential_leakage`), a corpus case, and a
+defect seed. Refuse a credential in a `fetch` body and an opaque init, as
+ZTS406 does for a secret. Widen the credential promise in the same places as
+F9. A new code follows the reasoning of Q4: a reused code names the wrong
+sink. The rule row moves `policy_hash`, so F10 joins the batched re-record.
 
 ## 5. Order and verification
 
-Order: F0, F1, F1b, F1c, V, F3, G, F2, F4, F5, F6, F7, F8, F9. F3 lands
+Order: F0, F1, F1b, F1c, F3, G, F2, F4, F5, F6, F7, F9, then the units of the
+boolean and arity plan that keep replay, then V, F8, F10, and the
+replay-moving units of that plan, then one re-record. F3 lands
 before G and F2, because precise labels for globals and captures are only
 meaningful once stale labels are gone. G lands before F2, because a captured
-module constant needs module labels. V lands with the first unit that changes
-a verdict, so no artifact proven by the old checker survives the change. V,
-F8, and F9 move what the model sees and join the batched re-record.
+module constant needs module labels. V, F8, and F10 move what the model sees
+and join the batched re-record.
+
+Revised 2026-10-08 at dispatch: revision 2 put V with F1, so that no artifact
+proven by the old checker survives the change. That would break replay for
+every later unit of both plans, and `test-expert-app -j1` would stop being a
+check for each unit. A later V adds no exposure: before V, old artifacts are
+valid exactly as they are today. V must land before the re-record and before
+any release.
 
 Each unit: the census gate's new expected verdicts (written first, seen
 failing on the old code), unit tests for the new paths, unfiltered
@@ -340,7 +358,7 @@ failing on the old code), unit tests for the new paths, unfiltered
 Answered 2026-10-08: Q1 (a), Q2 (a), Q3 (a), Q5 (a), Q6 (a). Q4 does not
 apply, because Q3 is (a). The owner approved this plan. Sonnet subagents
 implement the units in section 5 order, one commit per unit. The boolean and
-arity plan follows. V and F8 join one batched DeepSeek re-record, which is
+arity plan follows. V, F8, and F10 join one batched DeepSeek re-record, which is
 paid, so the main session confirms with the owner before it starts.
 
 **Q1 (`durable_approval.ts` and `examples/durable/approval.ts`).** F2 makes
