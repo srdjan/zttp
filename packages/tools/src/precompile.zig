@@ -6649,6 +6649,7 @@ test "writeCapabilityPolicy emits zig-fmt stable empty allowlists" {
 test {
     _ = @import("precompile_args.zig");
     _ = @import("transpiler.zig");
+    _ = @import("pipeline_mutation_tests.zig");
 }
 
 // ---------------------------------------------------------------------------

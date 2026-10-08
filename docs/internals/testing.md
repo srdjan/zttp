@@ -147,6 +147,11 @@ schema bytes, raw JSON retention, dynamic inputs, and JSON binding behavior.
 `std.testing.fuzz`, plus small PRNG stress loops and nesting generators. Set
 `ZTTP_FUZZ_ITERATIONS` to a positive integer to raise the stress iteration
 count for a manual run; the gate uses the defaults in that file.
+`test-precompile` also mutates every `.ts` and `.tsx` file under `tests/corpus`
+and `examples` in `packages/tools/src/pipeline_mutation_tests.zig`. Each
+mutant must give a result or a listed error, diagnostic positions inside the
+mutant, and identical output on a second run. `ZTTP_FUZZ_ITERATIONS` sets the
+mutants per input there, and the default is 4.
 
 The audits and gates: `test-capability-audit`, `test-module-boundary`,
 `test-proof-checker-purity`, `test-kernel-safety`, `test-proof-ratchet`, `test-proof-ratchet-drift`,
