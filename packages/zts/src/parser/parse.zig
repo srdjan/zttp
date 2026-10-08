@@ -116,6 +116,27 @@ pub const AsiCensus = struct {
     }
 };
 
+/// Safe-build assertion that a parser loop makes progress.
+///
+/// A loop that parses a list or a block must consume at least one token each
+/// time round, or exit. One that does neither re-reads the same token forever:
+/// the hang that `parse()` and `parseBlock` already guard by hand. `iteration`
+/// goes first in the loop body and compares the parser's token counter with
+/// the value the previous iteration started at, so `continue` paths are
+/// covered and a loop that exits never trips it. Release builds compile it to
+/// nothing.
+const ProgressGuard = struct {
+    seen: u32 = 0,
+    started: bool = false,
+
+    fn iteration(self: *ProgressGuard, parser: *const Parser) void {
+        if (!std.debug.runtime_safety) return;
+        if (self.started) std.debug.assert(parser.tokens_advanced != self.seen);
+        self.started = true;
+        self.seen = parser.tokens_advanced;
+    }
+};
+
 pub const Parser = struct {
     allocator: std.mem.Allocator,
     tokenizer: Tokenizer,
@@ -176,6 +197,10 @@ pub const Parser = struct {
     // becomes the left operand of another chain.
     expression_chain_depth: u32 = 0,
     expression_frames: u32 = 0,
+
+    /// Tokens consumed so far, counted in safe builds only. `ProgressGuard`
+    /// compares it between loop iterations; a release build never reads it.
+    tokens_advanced: u32 = 0,
 
     /// Maximum recursive-descent nesting. Far above any hand-written handler
     /// (real code rarely nests past ~30) yet well under the worker-thread stack
@@ -248,7 +273,9 @@ pub const Parser = struct {
         var stmts: std.ArrayList(NodeIndex) = .empty;
         defer stmts.deinit(self.allocator);
 
+        var progress: ProgressGuard = .{};
         while (!self.check(.eof)) {
+            progress.iteration(self);
             if (self.parseStatement()) |stmt| {
                 try stmts.append(self.allocator, stmt);
             } else |err| {
@@ -601,7 +628,9 @@ pub const Parser = struct {
         var param_flags = flags;
 
         if (!self.check(.rparen)) {
+            var progress: ProgressGuard = .{};
             while (true) {
+                progress.iteration(self);
                 // Check for rest parameter
                 if (self.match(.spread)) {
                     self.errors.addErrorAt(.unsupported_feature, self.previous, "rest parameters ('...args') are not supported; accept an explicit array parameter instead");
@@ -934,7 +963,9 @@ pub const Parser = struct {
         // `MatchArm+ [DefaultArm]`: nothing may follow it.
         var default_arm: ?Token = null;
 
+        var progress: ProgressGuard = .{};
         while (!self.check(.rbrace) and !self.check(.eof)) {
+            progress.iteration(self);
             if (default_arm) |seen| {
                 if (self.check(.kw_when)) {
                     self.errors.addErrorAt(.misplaced_default_arm, seen, "a `default` arm must be the last arm of a match; move it after the `when` arms");
@@ -1209,7 +1240,9 @@ pub const Parser = struct {
         var props: [255]NodeIndex = undefined;
         var props_len: u8 = 0;
 
+        var progress: ProgressGuard = .{};
         while (!self.check(.rbrace) and !self.check(.eof)) {
+            progress.iteration(self);
             const prop_loc = self.current.location();
 
             var key_name: []const u8 = "";
@@ -1301,7 +1334,9 @@ pub const Parser = struct {
         var elements = std.ArrayList(NodeIndex).empty;
         defer elements.deinit(self.allocator);
 
+        var progress: ProgressGuard = .{};
         while (!self.check(.rbracket) and !self.check(.eof)) {
+            progress.iteration(self);
             if (self.check(.comma)) {
                 try elements.append(self.allocator, null_node);
                 self.advance();
@@ -1363,7 +1398,9 @@ pub const Parser = struct {
         var stmts = std.ArrayList(NodeIndex).empty;
         defer stmts.deinit(stmts_alloc);
 
+        var progress: ProgressGuard = .{};
         while (!self.check(.rbrace) and !self.check(.eof)) {
+            progress.iteration(self);
             if (self.parseStatement()) |stmt| {
                 try stmts.append(stmts_alloc, stmt);
             } else |err| {
@@ -1434,7 +1471,9 @@ pub const Parser = struct {
         self.advance(); // consume '{'
 
         // Parse specifier list: { name1, name2, name3 as alias }
+        var progress: ProgressGuard = .{};
         while (!self.check(.rbrace) and !self.check(.eof)) {
+            progress.iteration(self);
             const spec_loc = self.current.location();
 
             // Accept identifiers and keywords-as-identifiers (e.g., import { default as x })
@@ -1662,7 +1701,9 @@ pub const Parser = struct {
         // recursion_depth. Bound those trees before later AST walkers recurse
         // through one frame per binary, call, or member node.
         var chain_depth = self.expression_chain_depth;
+        var progress: ProgressGuard = .{};
         while (true) {
+            progress.iteration(self);
             const prec = self.getInfixPrecedence(self.current.type);
             if (@intFromEnum(prec) <= @intFromEnum(min_prec)) break;
 
@@ -2057,7 +2098,9 @@ pub const Parser = struct {
         defer args.deinit(args_alloc);
 
         if (!self.check(.rparen)) {
+            var progress: ProgressGuard = .{};
             while (true) {
+                progress.iteration(self);
                 if (self.match(.spread)) {
                     const spread_expr = try self.parseExpression(.assignment);
                     const spread_node = try self.nodes.add(.{
@@ -2386,7 +2429,9 @@ pub const Parser = struct {
         var has_spread = false;
 
         if (!self.check(.rbracket)) {
+            var progress: ProgressGuard = .{};
             while (true) {
+                progress.iteration(self);
                 if (self.check(.comma)) {
                     self.errors.addErrorAt(.unsupported_feature, self.current, "array elisions are not supported; use explicit undefined values instead");
                     return error.ParseError;
@@ -2436,7 +2481,9 @@ pub const Parser = struct {
         defer properties.deinit(properties_alloc);
 
         if (!self.check(.rbrace)) {
+            var progress: ProgressGuard = .{};
             while (true) {
+                progress.iteration(self);
                 const prop_loc = self.current.location();
 
                 // Check for spread
@@ -2650,7 +2697,9 @@ pub const Parser = struct {
             try self.expect(.lparen, "'('");
 
             if (!self.check(.rparen)) {
+                var progress: ProgressGuard = .{};
                 while (true) {
+                    progress.iteration(self);
                     if (self.match(.spread)) {
                         self.errors.addErrorAt(.unsupported_feature, self.previous, "rest parameters ('...args') are not supported; accept an explicit array parameter instead");
                         flags.has_rest_param = true;
@@ -2739,6 +2788,7 @@ pub const Parser = struct {
     // ============ Utility Functions ============
 
     fn advance(self: *Parser) void {
+        if (std.debug.runtime_safety) self.tokens_advanced +%= 1;
         self.previous = self.current;
         self.current = self.tokenizer.next();
         self.reportNonAsciiIdentifier();
@@ -3023,7 +3073,9 @@ pub const Parser = struct {
     fn synchronize(self: *Parser) void {
         self.errors.enterPanicMode();
 
+        var progress: ProgressGuard = .{};
         while (!self.check(.eof)) {
+            progress.iteration(self);
             if (self.previous.type == .semicolon) {
                 self.errors.exitPanicMode();
                 return;
