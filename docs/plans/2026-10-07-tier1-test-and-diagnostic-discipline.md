@@ -472,3 +472,33 @@ Recommendation: (a). It follows the precedent of `0ce1d45d` and `d037e696`.
 - R5: the scaling tests moved to Tier 3; the counter test now checks growth;
   the abuse test assertions match the current CLI.
 - Line references were corrected per the Codex check.
+
+## 8. Findings outside Tier 1
+
+The Tier 1 work found these. None is fixed by this plan. Each needs an owner
+decision before it gets a plan.
+
+1. **ZTS213 does not fire for a function inside a record.** Observed
+   2026-10-07: `Response.json({ f: fn })`, where `fn` is a named function, passes
+   `zts check` with exit 0 under a narrow `Proof` capsule. CLAUDE.md says
+   `Response.json` refuses a payload type that JSON cannot carry.
+2. **Call arity is not checked.** Observed: `double(1, 2)` for
+   `function double(x: number): number` passes `zts check` with exit 0.
+3. **ZTS041 is reported twice at one position** for an `any` annotation
+   (pinned in `tests/corpus/parse/bad/any_type_annotation.diag`). U4.5 may
+   remove the duplicate.
+4. **ZTS500 on an empty file** says that the handler returns no `Proof`
+   capsule, but the file has no handler.
+5. **`zts check` on a missing path or a directory, in text mode**, leaves
+   `main` through an error return and prints a raw stack trace in Debug
+   builds (U5.3 observation). JSON mode gives ZTS000.
+6. **ZTS044 says "type syntax nests too deeply"** for 600 nested
+   parenthesised expressions, which are not types.
+7. **ZTS404 and ZTS405 are unreachable on the default path**: a computed URL
+   is refused first as ZTS602 (R2 observation). The R2 code ratchet (U2.3)
+   must give them an allowlist row with this mechanism, or a case that
+   reaches them.
+8. **`const x: Missing = 1`** is reported as an assignability error (ZTS200),
+   not as an unknown type name.
+9. **The bytecode decoder accepts trailing bytes** after a valid function;
+   the later span walker refuses them (U3.2 observation).
