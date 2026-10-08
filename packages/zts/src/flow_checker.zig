@@ -309,6 +309,13 @@ pub const FlowChecker = struct {
     /// load, not on a request path, so it must not enter the witness's stub
     /// sequence (`trackModuleCallInit`).
     walking_module_level: bool = false,
+    /// The declaration each captured read names: identifier node -> the
+    /// binding of the declaration it captures. The scope analyzer keys a
+    /// captured variable by the inner function and an upvalue slot, which
+    /// names no declaration and collides with that function's own locals.
+    /// `resolveCaptures` fills this from the lexical nesting of the IR, so it
+    /// does not depend on the order in which the walk reaches a closure.
+    capture_targets: std.AutoHashMapUnmanaged(NodeIndex, ir.BindingRef) = .empty,
     /// Function bodies resolved from literal route tables passed to
     /// `routerMatch`. Each is walked as a request root after the handler.
     route_function_roots: std.ArrayListUnmanaged(NodeIndex),
@@ -492,6 +499,7 @@ pub const FlowChecker = struct {
         self.binding_value_nodes.deinit(self.allocator);
         self.user_fn_decls.deinit(self.allocator);
         self.import_bindings.deinit(self.allocator);
+        self.capture_targets.deinit(self.allocator);
         self.param_values.deinit(self.allocator);
         self.route_function_roots.deinit(self.allocator);
         self.listed_tool_route_functions.deinit(self.allocator);
@@ -514,6 +522,7 @@ pub const FlowChecker = struct {
         self.scanFunctionDecls();
         self.scanRouteFunctionRoots();
         self.scanListedToolRoutes();
+        self.resolveCaptures();
         self.walkModuleDeclarations();
         self.findHandlerParam(handler_func);
         self.walkStmt(handler_func);
@@ -644,7 +653,7 @@ pub const FlowChecker = struct {
             // closures contribute, and answering `inferLabels` for every
             // identifier would taint results that carry no argument data.
             .identifier => {
-                const binding = self.ir_view.getBinding(node) orelse return null;
+                const binding = self.bindingAt(node) orelse return null;
                 const key = packBindingKey(binding.scope_id, binding.slot);
                 const fn_node = self.user_fn_decls.get(key) orelse return null;
                 return self.closureResultLabels(fn_node);
@@ -790,6 +799,7 @@ pub const FlowChecker = struct {
     pub fn exportedReturnLabels(self: *FlowChecker, name: []const u8) !?LabelSet {
         self.scanImports();
         self.scanFunctionDecls();
+        self.resolveCaptures();
         // The imported file's own module-level constants: an exported function
         // that returns one answers with its labels, not with `.unknown`.
         self.walkModuleDeclarations();
@@ -901,7 +911,7 @@ pub const FlowChecker = struct {
         const tag = self.ir_view.getTag(node) orelse return null;
         switch (tag) {
             .identifier => {
-                const binding = self.ir_view.getBinding(node) orelse return null;
+                const binding = self.bindingAt(node) orelse return null;
                 const key = packBindingKey(binding.scope_id, binding.slot);
                 return self.result_binding_guard.get(key);
             },
@@ -912,7 +922,7 @@ pub const FlowChecker = struct {
                     if (std.mem.eql(u8, prop_name, "value")) {
                         const obj_tag = self.ir_view.getTag(member.object) orelse return null;
                         if (obj_tag == .identifier) {
-                            const binding = self.ir_view.getBinding(member.object) orelse return null;
+                            const binding = self.bindingAt(member.object) orelse return null;
                             const key = packBindingKey(binding.scope_id, binding.slot);
                             if (self.result_binding_guard.get(key)) |g| return g;
                         }
@@ -1188,6 +1198,311 @@ pub const FlowChecker = struct {
         return null;
     }
 
+    /// The binding an identifier node names. A captured read comes back as the
+    /// declaration it captures, so every key the checker builds from it
+    /// (labels, origins, function declarations, parameter values) is the
+    /// declaration's own key. A capture that `resolveCaptures` could not place
+    /// keeps kind `.upvalue` and a scope that no declaration has, so its key
+    /// cannot collide with a local or a parameter.
+    fn bindingAt(self: *const FlowChecker, node: NodeIndex) ?ir.BindingRef {
+        const binding = self.ir_view.getBinding(node) orelse return null;
+        if (binding.kind != .upvalue) return binding;
+        if (self.capture_targets.get(node)) |target| return target;
+        return .{
+            .scope_id = ir.null_scope,
+            .slot = binding.slot,
+            .name_atom = binding.name_atom,
+            .kind = .upvalue,
+        };
+    }
+
+    /// One declaration in scope at a point of the capture scan.
+    const CaptureDecl = struct { name_atom: u16, binding: ir.BindingRef };
+    const CaptureScope = std.ArrayListUnmanaged(CaptureDecl);
+    /// Nesting past which the capture scan stops descending. A capture below
+    /// the bound stays unresolved and reads as `.unknown`.
+    const max_capture_depth = 256;
+
+    /// Resolve every captured read to the declaration it names, by name,
+    /// against the declarations lexically in scope at the read: a stack that
+    /// grows at each declaration and shrinks at the end of its block, function,
+    /// loop, or match arm, as the type checker keeps its active declarations
+    /// (`boundCallableMetadata`). This is a pass over the IR and not part of the
+    /// label walk, because the label walk reaches a closure from wherever it is
+    /// called - a callee summary, a module callback - and the declarations
+    /// active there are not the ones the closure captured. A module-level
+    /// declaration is never captured: the scope analyzer reads it as `.global`.
+    fn resolveCaptures(self: *FlowChecker) void {
+        const program = self.programNode() orelse return;
+        var scope: CaptureScope = .empty;
+        defer scope.deinit(self.allocator);
+        self.captureScan(program, &scope, 0);
+    }
+
+    fn pushCaptureDecl(self: *FlowChecker, scope: *CaptureScope, binding: ir.BindingRef) void {
+        if (binding.kind == .global or binding.kind == .undeclared_global or binding.kind == .upvalue) return;
+        const decl: CaptureDecl = .{ .name_atom = binding.name_atom, .binding = binding };
+        scope.append(self.allocator, decl) catch self.markAllocationFailure();
+    }
+
+    /// Place a captured read: the innermost declaration in scope with its name.
+    fn recordCapture(self: *FlowChecker, node: NodeIndex, scope: *const CaptureScope) void {
+        const binding = self.ir_view.getBinding(node) orelse return;
+        if (binding.kind != .upvalue) return;
+        var i = scope.items.len;
+        while (i > 0) {
+            i -= 1;
+            const decl = scope.items[i];
+            if (decl.name_atom != binding.name_atom) continue;
+            self.capture_targets.put(self.allocator, node, decl.binding) catch self.markAllocationFailure();
+            return;
+        }
+    }
+
+    /// Declare the bindings of a match-arm pattern. A record pattern field that
+    /// holds an identifier is a binding; a literal, a nested pattern, or a
+    /// type test declares nothing but its nested patterns may.
+    fn captureScanPattern(self: *FlowChecker, pattern: NodeIndex, scope: *CaptureScope, depth: u16) void {
+        if (pattern == null_node or depth >= max_capture_depth) return;
+        const tag = self.ir_view.getTag(pattern) orelse return;
+        switch (tag) {
+            .match_pattern => {
+                const obj = self.ir_view.getMatchPattern(pattern) orelse return;
+                for (0..obj.props_count) |i| {
+                    const prop_idx = self.ir_view.getListIndex(obj.props_start, @intCast(i));
+                    const prop = self.ir_view.getProperty(prop_idx) orelse continue;
+                    if (prop.value == null_node) continue;
+                    if (self.ir_view.getTag(prop.value) == .identifier) {
+                        if (self.ir_view.getBinding(prop.value)) |binding| self.pushCaptureDecl(scope, binding);
+                    } else {
+                        self.captureScanPattern(prop.value, scope, depth + 1);
+                    }
+                }
+            },
+            .array_pattern => {
+                const arr = self.ir_view.getArray(pattern) orelse return;
+                for (0..arr.elements_count) |i| {
+                    self.captureScanPattern(self.ir_view.getListIndex(arr.elements_start, @intCast(i)), scope, depth + 1);
+                }
+            },
+            // exhaustive: only an object or an array pattern holds nested
+            // patterns. Every other node is a literal, a type test, or a tag
+            // the parser does not put in a pattern, and declares no binding.
+            else => {},
+        }
+    }
+
+    fn captureScanList(self: *FlowChecker, start: NodeIndex, count: usize, scope: *CaptureScope, depth: u16) void {
+        for (0..count) |i| {
+            self.captureScan(self.ir_view.getListIndex(start, @intCast(i)), scope, depth);
+        }
+    }
+
+    fn captureScan(self: *FlowChecker, node: NodeIndex, scope: *CaptureScope, depth: u16) void {
+        if (node == null_node or depth >= max_capture_depth) return;
+        const tag = self.ir_view.getTag(node) orelse return;
+        const next = depth + 1;
+        switch (tag) {
+            .identifier => self.recordCapture(node, scope),
+
+            .program, .block => {
+                const block = self.ir_view.getBlock(node) orelse return;
+                const mark = scope.items.len;
+                defer scope.shrinkRetainingCapacity(mark);
+                self.captureScanList(block.stmts_start, block.stmts_count, scope, next);
+            },
+
+            // The binding is declared before the initializer is parsed, so an
+            // initializer that names its own declaration captures it.
+            .var_decl, .function_decl => {
+                const vd = self.ir_view.getVarDecl(node) orelse return;
+                self.pushCaptureDecl(scope, vd.binding);
+                self.captureScan(vd.init, scope, next);
+            },
+
+            .export_decl => {
+                const export_decl = self.ir_view.getExportDecl(node) orelse return;
+                self.captureScan(export_decl.declaration, scope, next);
+            },
+
+            .export_default, .expr_stmt, .return_stmt, .spread, .object_spread => {
+                if (self.ir_view.getOptValue(node)) |value| self.captureScan(value, scope, next);
+            },
+
+            .if_stmt => {
+                const if_s = self.ir_view.getIfStmt(node) orelse return;
+                self.captureScan(if_s.condition, scope, next);
+                const mark = scope.items.len;
+                self.captureScan(if_s.then_branch, scope, next);
+                scope.shrinkRetainingCapacity(mark);
+                self.captureScan(if_s.else_branch, scope, next);
+                scope.shrinkRetainingCapacity(mark);
+            },
+
+            .for_of_stmt, .for_in_stmt => {
+                const fi = self.ir_view.getForIter(node) orelse return;
+                const mark = scope.items.len;
+                defer scope.shrinkRetainingCapacity(mark);
+                self.pushCaptureDecl(scope, fi.binding);
+                self.captureScan(fi.iterable, scope, next);
+                self.captureScan(fi.body, scope, next);
+            },
+
+            .for_stmt, .while_stmt, .do_while_stmt => {
+                const loop = self.ir_view.getLoop(node) orelse return;
+                const mark = scope.items.len;
+                defer scope.shrinkRetainingCapacity(mark);
+                self.captureScan(loop.init, scope, next);
+                self.captureScan(loop.condition, scope, next);
+                self.captureScan(loop.update, scope, next);
+                self.captureScan(loop.body, scope, next);
+            },
+
+            .switch_stmt => {
+                const sw = self.ir_view.getSwitchStmt(node) orelse return;
+                const mark = scope.items.len;
+                defer scope.shrinkRetainingCapacity(mark);
+                self.captureScan(sw.discriminant, scope, next);
+                self.captureScanList(sw.cases_start, sw.cases_count, scope, next);
+            },
+
+            .case_clause => {
+                const cc = self.ir_view.getCaseClause(node) orelse return;
+                self.captureScan(cc.test_expr, scope, next);
+                self.captureScanList(cc.body_start, cc.body_count, scope, next);
+            },
+
+            .assert_stmt => {
+                const assert = self.ir_view.getAssertStmt(node) orelse return;
+                self.captureScan(assert.condition, scope, next);
+                self.captureScan(assert.error_expr, scope, next);
+            },
+
+            .binary_op => {
+                const bin = self.ir_view.getBinary(node) orelse return;
+                self.captureScan(bin.left, scope, next);
+                self.captureScan(bin.right, scope, next);
+            },
+
+            .unary_op => {
+                const unary = self.ir_view.getUnary(node) orelse return;
+                self.captureScan(unary.operand, scope, next);
+            },
+
+            .ternary => {
+                const t = self.ir_view.getTernary(node) orelse return;
+                self.captureScan(t.condition, scope, next);
+                self.captureScan(t.then_branch, scope, next);
+                self.captureScan(t.else_branch, scope, next);
+            },
+
+            .call, .method_call => {
+                const call = self.ir_view.getCall(node) orelse return;
+                self.captureScan(call.callee, scope, next);
+                self.captureScanList(call.args_start, call.args_count, scope, next);
+            },
+
+            .member_access, .optional_chain, .computed_access => {
+                const member = self.ir_view.getMember(node) orelse return;
+                self.captureScan(member.object, scope, next);
+                self.captureScan(member.computed, scope, next);
+            },
+
+            .assignment => {
+                const asgn = self.ir_view.getAssignment(node) orelse return;
+                self.captureScan(asgn.target, scope, next);
+                self.captureScan(asgn.value, scope, next);
+            },
+
+            .array_literal => {
+                const arr = self.ir_view.getArray(node) orelse return;
+                self.captureScanList(arr.elements_start, arr.elements_count, scope, next);
+            },
+
+            .object_literal => {
+                const obj = self.ir_view.getObject(node) orelse return;
+                self.captureScanList(obj.properties_start, obj.properties_count, scope, next);
+            },
+
+            .object_property => {
+                const prop = self.ir_view.getProperty(node) orelse return;
+                self.captureScan(prop.value, scope, next);
+            },
+
+            .function_expr, .arrow_function => {
+                const func = self.ir_view.getFunction(node) orelse return;
+                const mark = scope.items.len;
+                defer scope.shrinkRetainingCapacity(mark);
+                for (0..func.params_count) |i| {
+                    const param_idx = self.ir_view.getListIndex(func.params_start, @intCast(i));
+                    if (self.paramBinding(param_idx)) |binding| self.pushCaptureDecl(scope, binding);
+                }
+                self.captureScan(func.body, scope, next);
+            },
+
+            .match_expr => {
+                const match_expr = self.ir_view.getMatchExpr(node) orelse return;
+                self.captureScan(match_expr.discriminant, scope, next);
+                for (0..match_expr.arms_count) |i| {
+                    const arm_idx = self.ir_view.getListIndex(match_expr.arms_start, @intCast(i));
+                    const arm = self.ir_view.getMatchArm(arm_idx) orelse continue;
+                    const mark = scope.items.len;
+                    self.captureScanPattern(arm.pattern, scope, next);
+                    self.captureScan(arm.body, scope, next);
+                    scope.shrinkRetainingCapacity(mark);
+                }
+            },
+
+            .match_type_test => {
+                const test_data = self.ir_view.getMatchTypeTest(node) orelse return;
+                self.captureScan(test_data.predicate, scope, next);
+            },
+
+            // exhaustive: no child holds a function or a read that this pass
+            // must place. Literals and jumps have no children. Imports and the
+            // remaining module forms bind no captured name. The forms the
+            // parser refuses (`await`, `yield`, sequences, `try`, `throw`,
+            // labels, object methods) never reach the checker, and a capture
+            // inside one would stay unresolved and read as `.unknown`.
+            // Arms, patterns, and parameter nodes are reached through their
+            // parents above.
+            .lit_int,
+            .lit_float,
+            .lit_string,
+            .lit_bool,
+            .lit_null,
+            .lit_undefined,
+            .object_method,
+            .object_getter,
+            .object_setter,
+            .await_expr,
+            .yield_expr,
+            .sequence_expr,
+            .comma_expr,
+            .match_arm,
+            .match_pattern,
+            .throw_stmt,
+            .break_stmt,
+            .continue_stmt,
+            .try_stmt,
+            .labeled_stmt,
+            .array_pattern,
+            .pattern_element,
+            .pattern_rest,
+            .pattern_default,
+            .import_decl,
+            .import_specifier,
+            .import_default,
+            .import_namespace,
+            .export_specifier,
+            .export_all,
+            .param_list,
+            .arg_list,
+            .stmt_list,
+            => {},
+        }
+    }
+
     /// Walk the module-level data declarations in source order, so a read of a
     /// `.global` binding finds the labels of its initializer and the sinks in
     /// an initializer run once, as they do at load time. A function
@@ -1255,7 +1570,7 @@ pub const FlowChecker = struct {
             if (self.ir_view.getTag(idx) != .call) continue;
             const call = self.ir_view.getCall(idx) orelse continue;
             if (self.ir_view.getTag(call.callee) != .identifier) continue;
-            const binding = self.ir_view.getBinding(call.callee) orelse continue;
+            const binding = self.bindingAt(call.callee) orelse continue;
             if (binding.slot != catalog_slot) continue;
             if (catalog_call != null) {
                 self.listed_tool_routes_unresolved = true;
@@ -1366,7 +1681,7 @@ pub const FlowChecker = struct {
         const tag = self.ir_view.getTag(node) orelse return null;
         if (tag == .object_literal) return node;
         if (tag != .identifier) return null;
-        const binding = self.ir_view.getBinding(node) orelse return null;
+        const binding = self.bindingAt(node) orelse return null;
         const binding_decl = self.findBindingDecl(binding) orelse return null;
         if (self.bindingIsMutated(binding) or self.bindingHasAlias(binding)) return null;
         return if (self.ir_view.getTag(binding_decl.init) == .object_literal) binding_decl.init else null;
@@ -1417,7 +1732,7 @@ pub const FlowChecker = struct {
         const tag = self.ir_view.getTag(node) orelse return null;
         if (tag == .object_literal) return node;
         if (tag != .identifier) return null;
-        const binding = self.ir_view.getBinding(node) orelse return null;
+        const binding = self.bindingAt(node) orelse return null;
         // A parameter of the callee now being summarized: the call site passed
         // an object literal for it, or nothing resolvable. A reassigned
         // parameter is not the value the call site passed.
@@ -1468,12 +1783,12 @@ pub const FlowChecker = struct {
             if (tag == .var_decl) {
                 const decl = self.ir_view.getVarDecl(idx) orelse continue;
                 if (self.ir_view.getTag(decl.init) != .identifier) continue;
-                const source = self.ir_view.getBinding(decl.init) orelse continue;
+                const source = self.bindingAt(decl.init) orelse continue;
                 if (packBindingKey(source.scope_id, source.slot) == key) return true;
             } else if (tag == .assignment) {
                 const asgn = self.ir_view.getAssignment(idx) orelse continue;
                 if (self.ir_view.getTag(asgn.value) != .identifier) continue;
-                const source = self.ir_view.getBinding(asgn.value) orelse continue;
+                const source = self.bindingAt(asgn.value) orelse continue;
                 if (packBindingKey(source.scope_id, source.slot) == key) return true;
             }
         }
@@ -1540,7 +1855,7 @@ pub const FlowChecker = struct {
         // without retaining or changing the argument.
         if (arg_index == 0 and self.isGlobalMethodCall(call.callee, "Array", &.{"isArray"})) {
             const member = self.ir_view.getMember(call.callee) orelse return false;
-            const array_binding = self.ir_view.getBinding(member.object) orelse return false;
+            const array_binding = self.bindingAt(member.object) orelse return false;
             return !self.bindingIsMutated(array_binding) and
                 !self.bindingHasAlias(array_binding) and
                 !self.bindingEscapesStableResolutionDepth(array_binding, depth);
@@ -1566,7 +1881,7 @@ pub const FlowChecker = struct {
 
     fn nodeIsBinding(self: *const FlowChecker, node: NodeIndex, key: u64) bool {
         if (self.ir_view.getTag(node) != .identifier) return false;
-        const found = self.ir_view.getBinding(node) orelse return false;
+        const found = self.bindingAt(node) orelse return false;
         return packBindingKey(found.scope_id, found.slot) == key;
     }
 
@@ -1711,7 +2026,7 @@ pub const FlowChecker = struct {
                 break :blk if (decl.init != null_node) decl.init else null;
             },
             .identifier => blk: {
-                const binding = self.ir_view.getBinding(node) orelse break :blk null;
+                const binding = self.bindingAt(node) orelse break :blk null;
                 const decl = self.findBindingDecl(binding) orelse break :blk null;
                 if (self.bindingIsMutated(binding)) break :blk null;
                 const init_tag = self.ir_view.getTag(decl.init) orelse break :blk null;
@@ -1762,7 +2077,7 @@ pub const FlowChecker = struct {
             const target_tag = self.ir_view.getTag(asgn.target) orelse return true;
             switch (target_tag) {
                 .identifier => {
-                    const binding = self.ir_view.getBinding(asgn.target) orelse return true;
+                    const binding = self.bindingAt(asgn.target) orelse return true;
                     if (packBindingKey(binding.scope_id, binding.slot) == req_key) return true;
                 },
                 .member_access, .optional_chain => {
@@ -1819,14 +2134,14 @@ pub const FlowChecker = struct {
 
     fn isBindingKey(self: *const FlowChecker, node: NodeIndex, key: u32) bool {
         if (node == null_node or self.ir_view.getTag(node) != .identifier) return false;
-        const binding = self.ir_view.getBinding(node) orelse return false;
+        const binding = self.bindingAt(node) orelse return false;
         return packBindingKey(binding.scope_id, binding.slot) == key;
     }
 
     /// A built-in module export or a function declared in this file.
     fn calleeCannotWriteRequest(self: *const FlowChecker, callee: NodeIndex) bool {
         if (self.ir_view.getTag(callee) != .identifier) return false;
-        const binding = self.ir_view.getBinding(callee) orelse return false;
+        const binding = self.bindingAt(callee) orelse return false;
         if (self.module_fn_meta.contains(binding.slot)) return true;
         return self.user_fn_decls.contains(packBindingKey(binding.scope_id, binding.slot));
     }
@@ -1853,7 +2168,7 @@ pub const FlowChecker = struct {
 
     fn isReqBinding(self: *const FlowChecker, node: NodeIndex) bool {
         if (self.ir_view.getTag(node) != .identifier) return false;
-        const binding = self.ir_view.getBinding(node) orelse return false;
+        const binding = self.bindingAt(node) orelse return false;
         const req_key = self.req_binding_key orelse return false;
         return packBindingKey(binding.scope_id, binding.slot) == req_key;
     }
@@ -1876,7 +2191,7 @@ pub const FlowChecker = struct {
         const labels = self.inferLabels(asgn.value);
         const target_tag = self.ir_view.getTag(asgn.target) orelse return;
         if (target_tag == .identifier) {
-            const binding = self.ir_view.getBinding(asgn.target) orelse return;
+            const binding = self.bindingAt(asgn.target) orelse return;
             const key = packBindingKey(binding.scope_id, binding.slot);
             // Only a const holds an origin, but a written name never keeps one.
             _ = self.binding_origins.remove(key);
@@ -1909,7 +2224,7 @@ pub const FlowChecker = struct {
         while (true) {
             const tag = self.ir_view.getTag(node) orelse return null;
             switch (tag) {
-                .identifier => return self.ir_view.getBinding(node),
+                .identifier => return self.bindingAt(node),
                 .member_access, .optional_chain, .computed_access => {
                     const member = self.ir_view.getMember(node) orelse return null;
                     node = member.object;
@@ -1941,7 +2256,7 @@ pub const FlowChecker = struct {
         if (!mutating) return;
         // Receiver must be a plain identifier binding.
         if (self.ir_view.getTag(member.object) != .identifier) return;
-        const binding = self.ir_view.getBinding(member.object) orelse return;
+        const binding = self.bindingAt(member.object) orelse return;
         var arg_labels = LabelSet.empty;
         for (0..call_data.args_count) |i| {
             const arg = self.ir_view.getListIndex(call_data.args_start, @intCast(i));
@@ -2144,6 +2459,9 @@ pub const FlowChecker = struct {
     /// clean. It carries `.unknown`, which clears what a sink decides. A
     /// function or an import holds no datum, so it stays empty.
     fn unrecordedBindingLabels(self: *const FlowChecker, binding: ir.BindingRef, key: u32) LabelSet {
+        // A capture that no declaration in scope matched: the empty set would
+        // claim a value clean that the walk could not trace.
+        if (binding.kind == .upvalue) return .{ .unknown = true };
         if (binding.kind != .global) return LabelSet.empty;
         if (self.user_fn_decls.contains(key) or self.import_bindings.contains(key)) return LabelSet.empty;
         return .{ .unknown = true };
@@ -2183,7 +2501,7 @@ pub const FlowChecker = struct {
             .lit_int, .lit_float, .lit_string, .lit_bool, .lit_undefined => return LabelSet.empty,
 
             .identifier => {
-                const binding = self.ir_view.getBinding(node) orelse return LabelSet.empty;
+                const binding = self.bindingAt(node) orelse return LabelSet.empty;
                 const key = packBindingKey(binding.scope_id, binding.slot);
                 // A use of a name with an origin is where an aggregate is
                 // forwarded or a field is read (P8). Its labels are already on
@@ -2254,7 +2572,7 @@ pub const FlowChecker = struct {
                 if (std.mem.eql(u8, prop_name, "value")) {
                     const obj_tag = self.ir_view.getTag(member.object) orelse return labels;
                     if (obj_tag == .identifier) {
-                        const binding = self.ir_view.getBinding(member.object) orelse return labels;
+                        const binding = self.bindingAt(member.object) orelse return labels;
                         const key = packBindingKey(binding.scope_id, binding.slot);
                         if (self.result_binding_labels.get(key)) |result_labels| {
                             labels = LabelSet.merge(labels, result_labels);
@@ -2511,7 +2829,7 @@ pub const FlowChecker = struct {
         const tag = self.ir_view.getTag(node) orelse return null;
         switch (tag) {
             .identifier => {
-                const binding = self.ir_view.getBinding(node) orelse return null;
+                const binding = self.bindingAt(node) orelse return null;
                 return self.binding_origins.get(packBindingKey(binding.scope_id, binding.slot));
             },
             .call, .method_call => {
@@ -2542,7 +2860,7 @@ pub const FlowChecker = struct {
     fn callOrigin(self: *FlowChecker, call_data: Node.CallExpr) ?Origin {
         const callee_tag = self.ir_view.getTag(call_data.callee) orelse return null;
         if (callee_tag == .identifier) {
-            const binding = self.ir_view.getBinding(call_data.callee) orelse return null;
+            const binding = self.bindingAt(call_data.callee) orelse return null;
             const meta = self.module_fn_meta.get(binding.slot) orelse return null;
             if (std.mem.eql(u8, meta.module, "fetch") and
                 (std.mem.eql(u8, meta.func, "fetch") or std.mem.eql(u8, meta.func, "fetchWithRetry")))
@@ -2657,7 +2975,7 @@ pub const FlowChecker = struct {
         }
 
         if (callee_tag == .identifier) {
-            const binding = self.ir_view.getBinding(call_data.callee) orelse return LabelSet.empty;
+            const binding = self.bindingAt(call_data.callee) orelse return LabelSet.empty;
 
             // `callTool` has a catalog-directed rule. Its ok value carries the
             // pending argument JSON and the union of every tool the agent may
@@ -3007,7 +3325,7 @@ pub const FlowChecker = struct {
         const tag = self.ir_view.getTag(node) orelse return null;
         return switch (tag) {
             .identifier => blk: {
-                const binding = self.ir_view.getBinding(node) orelse break :blk null;
+                const binding = self.bindingAt(node) orelse break :blk null;
                 break :blk self.resolveAtomName(binding.name_atom);
             },
             .lit_string => blk: {
@@ -3068,7 +3386,7 @@ pub const FlowChecker = struct {
             .lit_string => return .string,
             .array_literal => return .array,
             .identifier => {
-                const binding = self.ir_view.getBinding(node) orelse return null;
+                const binding = self.bindingAt(node) orelse return null;
                 if (binding.kind == .undeclared_global) {
                     const name = self.resolveAtomName(binding.name_atom) orelse return null;
                     return globalReceiverKind(name);
@@ -3096,7 +3414,7 @@ pub const FlowChecker = struct {
             .call, .method_call => {
                 const call = self.ir_view.getCall(node) orelse return null;
                 if (self.ir_view.getTag(call.callee) == .identifier) {
-                    const binding = self.ir_view.getBinding(call.callee) orelse return null;
+                    const binding = self.bindingAt(call.callee) orelse return null;
                     if (binding.kind == .undeclared_global) {
                         const name = self.resolveAtomName(binding.name_atom) orelse return null;
                         if (std.mem.eql(u8, name, "String")) return .string;
@@ -3369,7 +3687,7 @@ pub const FlowChecker = struct {
         switch (tag) {
             .function_expr, .arrow_function, .object_literal => return arg,
             .identifier => {
-                const binding = self.ir_view.getBinding(arg) orelse return null;
+                const binding = self.bindingAt(arg) orelse return null;
                 const key = packBindingKey(binding.scope_id, binding.slot);
                 if (self.param_values.get(key)) |passed| {
                     if (self.bindingIsMutated(binding)) return null;
@@ -3626,7 +3944,7 @@ pub const FlowChecker = struct {
             },
 
             .identifier => {
-                const binding = self.ir_view.getBinding(node) orelse return false;
+                const binding = self.bindingAt(node) orelse return false;
                 const key = packBindingKey(binding.scope_id, binding.slot);
                 for (visited[0..visited_len.*]) |seen| {
                     if (seen == key) return true;
@@ -3758,7 +4076,7 @@ pub const FlowChecker = struct {
     fn isLogModuleCall(self: *const FlowChecker, callee: NodeIndex) bool {
         const callee_tag = self.ir_view.getTag(callee) orelse return false;
         if (callee_tag != .identifier) return false;
-        const binding = self.ir_view.getBinding(callee) orelse return false;
+        const binding = self.bindingAt(callee) orelse return false;
         const meta = self.module_fn_meta.get(binding.slot) orelse return false;
         if (!std.mem.eql(u8, meta.module, "log")) return false;
         return std.mem.eql(u8, meta.func, "logDebug") or
@@ -3772,7 +4090,7 @@ pub const FlowChecker = struct {
     fn egressModuleFunc(self: *const FlowChecker, callee: NodeIndex) ?EgressKind {
         const callee_tag = self.ir_view.getTag(callee) orelse return null;
         if (callee_tag != .identifier) return null;
-        const binding = self.ir_view.getBinding(callee) orelse return null;
+        const binding = self.bindingAt(callee) orelse return null;
         const meta = self.module_fn_meta.get(binding.slot) orelse return null;
         if (std.mem.eql(u8, meta.func, "fetch")) return .fetch;
         if (std.mem.eql(u8, meta.func, "serviceCall")) return .service_call;
@@ -4145,7 +4463,7 @@ pub const FlowChecker = struct {
 
         const obj_tag = self.ir_view.getTag(member.object) orelse return false;
         if (obj_tag != .identifier) return false;
-        const binding = self.ir_view.getBinding(member.object) orelse return false;
+        const binding = self.bindingAt(member.object) orelse return false;
         if (binding.kind != .undeclared_global) return false;
         const obj_name = self.resolveAtomName(binding.name_atom) orelse return false;
         if (!std.mem.eql(u8, obj_name, object_name)) return false;
@@ -4168,7 +4486,7 @@ pub const FlowChecker = struct {
     fn isFetchSyncCall(self: *const FlowChecker, callee: NodeIndex) bool {
         const tag = self.ir_view.getTag(callee) orelse return false;
         if (tag != .identifier) return false;
-        const binding = self.ir_view.getBinding(callee) orelse return false;
+        const binding = self.bindingAt(callee) orelse return false;
         if (binding.kind != .undeclared_global) return false;
         const name = self.resolveAtomName(binding.name_atom) orelse return false;
         return std.mem.eql(u8, name, "fetchSync");
@@ -4179,7 +4497,7 @@ pub const FlowChecker = struct {
     fn isRenderToStringCall(self: *const FlowChecker, callee: NodeIndex) bool {
         const tag = self.ir_view.getTag(callee) orelse return false;
         if (tag != .identifier) return false;
-        const binding = self.ir_view.getBinding(callee) orelse return false;
+        const binding = self.bindingAt(callee) orelse return false;
         if (binding.kind != .undeclared_global) return false;
         const name = self.resolveAtomName(binding.name_atom) orelse return false;
         return std.mem.eql(u8, name, "renderToString");
@@ -4196,7 +4514,7 @@ pub const FlowChecker = struct {
     fn isVaryingGlobalRead(self: *const FlowChecker, callee: NodeIndex) bool {
         const member = self.ir_view.getMember(callee) orelse return false;
         if (self.ir_view.getTag(member.object) != .identifier) return false;
-        const binding = self.ir_view.getBinding(member.object) orelse return false;
+        const binding = self.bindingAt(member.object) orelse return false;
         if (binding.kind != .undeclared_global) return false;
         const object_name = self.resolveAtomName(binding.name_atom) orelse return false;
         const property_name = self.resolveAtomName(member.property) orelse return false;
@@ -4211,7 +4529,7 @@ pub const FlowChecker = struct {
         // Check if object is the request binding
         const obj_tag = self.ir_view.getTag(member.object) orelse return false;
         if (obj_tag != .identifier) return false;
-        const binding = self.ir_view.getBinding(member.object) orelse return false;
+        const binding = self.bindingAt(member.object) orelse return false;
         const key = packBindingKey(binding.scope_id, binding.slot);
         if (self.req_binding_key == null or key != self.req_binding_key.?) return false;
 
@@ -4287,7 +4605,7 @@ pub const FlowChecker = struct {
     fn getPropertyKeyName(self: *const FlowChecker, key_idx: NodeIndex) ?[]const u8 {
         const tag = self.ir_view.getTag(key_idx) orelse return null;
         if (tag == .identifier) {
-            const binding = self.ir_view.getBinding(key_idx) orelse return null;
+            const binding = self.bindingAt(key_idx) orelse return null;
             return self.resolveAtomName(binding.name_atom);
         } else if (tag == .lit_string) {
             const str_idx = self.ir_view.getStringIdx(key_idx) orelse return null;
@@ -4307,7 +4625,7 @@ pub const FlowChecker = struct {
         const callee_tag = self.ir_view.getTag(call_data.callee) orelse return;
         if (callee_tag != .identifier) return;
 
-        const callee_binding = self.ir_view.getBinding(call_data.callee) orelse return;
+        const callee_binding = self.bindingAt(call_data.callee) orelse return;
         const return_labels = self.module_fn_labels.get(callee_binding.slot) orelse return;
 
         // Only track if the function returns labels worth propagating (e.g., validated)
@@ -4497,7 +4815,7 @@ pub const FlowChecker = struct {
         const call = self.ir_view.getCall(vd.init) orelse return;
         const callee_tag = self.ir_view.getTag(call.callee) orelse return;
         if (callee_tag != .identifier) return;
-        const binding = self.ir_view.getBinding(call.callee) orelse return;
+        const binding = self.bindingAt(call.callee) orelse return;
         const meta = self.module_fn_meta.get(binding.slot) orelse return;
         const call_index = self.working_io_calls.items.len;
         self.working_io_calls.append(self.allocator, .{
@@ -4550,7 +4868,7 @@ pub const FlowChecker = struct {
         const tag = self.ir_view.getTag(cond) orelse return null;
         switch (tag) {
             .identifier => {
-                const binding = self.ir_view.getBinding(cond) orelse return null;
+                const binding = self.bindingAt(cond) orelse return null;
                 const key = packBindingKey(binding.scope_id, binding.slot);
                 const meta = self.binding_origin.get(key) orelse return null;
                 if (meta.returns != .boolean) return null;
@@ -4625,7 +4943,7 @@ pub const FlowChecker = struct {
         {
             return null;
         }
-        const binding = self.ir_view.getBinding(value_node) orelse return null;
+        const binding = self.bindingAt(value_node) orelse return null;
         const key = packBindingKey(binding.scope_id, binding.slot);
         const meta = self.binding_origin.get(key) orelse return null;
         switch (meta.returns) {
@@ -4661,7 +4979,7 @@ pub const FlowChecker = struct {
 
         const obj_tag = self.ir_view.getTag(member.object) orelse return null;
         if (obj_tag != .identifier) return null;
-        const binding = self.ir_view.getBinding(member.object) orelse return null;
+        const binding = self.bindingAt(member.object) orelse return null;
         const key = packBindingKey(binding.scope_id, binding.slot);
         const meta = self.binding_origin.get(key) orelse return null;
         if (meta.returns != .result) return null;
@@ -6750,6 +7068,172 @@ test "FlowChecker keeps a property for a module-level clean constant or function
         \\}
     ;
     try std.testing.expect((try runFlowProperties(std.testing.allocator, uninitialized)).no_secret_leakage);
+}
+
+test "FlowChecker resolves a captured value to the declaration it names" {
+    var buf: [512]u8 = undefined;
+
+    // A closure builds a response from a captured secret.
+    const returned =
+        \\import { env } from "zttp:env";
+        \\function handler(req) {
+        \\  const token = env("SECRET_KEY") ?? "";
+        \\  const inner = () => {
+        \\    return Response.json({ k: token });
+        \\  };
+        \\  return inner();
+        \\}
+    ;
+    try std.testing.expect(!(try runFlowProperties(std.testing.allocator, returned)).no_secret_leakage);
+
+    // A nested arrow logs a captured secret.
+    const logged =
+        \\import { env } from "zttp:env";
+        \\function handler(req) {
+        \\  const token = env("SECRET_KEY") ?? "";
+        \\  const note = () => {
+        \\    console.log(token);
+        \\    return 1;
+        \\  };
+        \\  const n = note();
+        \\  return Response.json({ n: n });
+        \\}
+    ;
+    const logged_report = try runFlowDiagnostics(std.testing.allocator, logged, .secret_in_log, &buf);
+    try std.testing.expectEqual(@as(usize, 1), logged_report.count);
+    try std.testing.expect(!logged_report.properties.no_secret_leakage);
+
+    // A nested function declaration reads a parameter of its enclosing function.
+    const param_capture =
+        \\import { env } from "zttp:env";
+        \\function relay(token) {
+        \\  function inner() {
+        \\    console.log(token);
+        \\    return 1;
+        \\  }
+        \\  return inner();
+        \\}
+        \\function handler(req) {
+        \\  const n = relay(env("SECRET_KEY") ?? "");
+        \\  return Response.json({ n: n });
+        \\}
+    ;
+    try std.testing.expect(!(try runFlowProperties(std.testing.allocator, param_capture)).no_secret_leakage);
+
+    // Two levels of nesting reach the same declaration.
+    const two_levels =
+        \\import { env } from "zttp:env";
+        \\function handler(req) {
+        \\  const token = env("SECRET_KEY") ?? "";
+        \\  const outer = () => {
+        \\    const inner = () => {
+        \\      console.log(token);
+        \\      return 1;
+        \\    };
+        \\    return inner();
+        \\  };
+        \\  const n = outer();
+        \\  return Response.json({ n: n });
+        \\}
+    ;
+    try std.testing.expect(!(try runFlowProperties(std.testing.allocator, two_levels)).no_secret_leakage);
+
+    // A closure that a module calls later still reads what it captured.
+    const parallel_callback =
+        \\import { env } from "zttp:env";
+        \\import { parallel } from "zttp:io";
+        \\function handler(req) {
+        \\  const token = env("SECRET_KEY") ?? "";
+        \\  const out = parallel([() => { console.log(token); return 1; }]);
+        \\  return Response.json({ ok: 1 });
+        \\}
+    ;
+    try std.testing.expect(!(try runFlowProperties(std.testing.allocator, parallel_callback)).no_secret_leakage);
+
+    // A captured module-level secret resolves through its global declaration.
+    const module_level =
+        \\import { env } from "zttp:env";
+        \\const token = env("SECRET_KEY") ?? "";
+        \\function handler(req) {
+        \\  const inner = () => {
+        \\    return Response.json({ k: token });
+        \\  };
+        \\  return inner();
+        \\}
+    ;
+    try std.testing.expect(!(try runFlowProperties(std.testing.allocator, module_level)).no_secret_leakage);
+}
+
+test "FlowChecker keeps a property for a captured value that holds no secret" {
+    // Control: the captured value is clean.
+    const clean =
+        \\import { env } from "zttp:env";
+        \\function handler(req) {
+        \\  const region = env("REGION") ?? "";
+        \\  const inner = () => {
+        \\    console.log(region);
+        \\    return Response.json({ r: region });
+        \\  };
+        \\  return inner();
+        \\}
+    ;
+    try std.testing.expect((try runFlowProperties(std.testing.allocator, clean)).no_secret_leakage);
+
+    // Name collision: the helper logs its own clean x, and the handler's secret
+    // x is only measured. A union by name would refuse this.
+    const collision =
+        \\import { env } from "zttp:env";
+        \\function helperA() {
+        \\  const x = "clean";
+        \\  const inner = () => {
+        \\    console.log(x);
+        \\    return 1;
+        \\  };
+        \\  return inner();
+        \\}
+        \\function handler(req) {
+        \\  const x = env("SECRET_KEY") ?? "";
+        \\  const n = helperA();
+        \\  const m = x.length;
+        \\  return Response.json({ ok: 1 });
+        \\}
+    ;
+    try std.testing.expect((try runFlowProperties(std.testing.allocator, collision)).no_secret_leakage);
+
+    // Shadowing: the closure captures the function-level x, not the x of a
+    // block that has ended.
+    const shadowed =
+        \\import { env } from "zttp:env";
+        \\function handler(req) {
+        \\  if (req.method === "GET") {
+        \\    const x = env("SECRET_KEY") ?? "";
+        \\    const m = x.length;
+        \\  }
+        \\  const x = "clean";
+        \\  const show = () => {
+        \\    return Response.json({ k: x });
+        \\  };
+        \\  return show();
+        \\}
+    ;
+    try std.testing.expect((try runFlowProperties(std.testing.allocator, shadowed)).no_secret_leakage);
+
+    // The closure is declared where a parameter of the same name is clean.
+    const param_clean =
+        \\import { env } from "zttp:env";
+        \\function show(token) {
+        \\  const inner = () => {
+        \\    return Response.json({ k: token });
+        \\  };
+        \\  return inner();
+        \\}
+        \\function handler(req) {
+        \\  const token = env("SECRET_KEY") ?? "";
+        \\  const m = token.length;
+        \\  return show("clean");
+        \\}
+    ;
+    try std.testing.expect((try runFlowProperties(std.testing.allocator, param_clean)).no_secret_leakage);
 }
 
 test "FlowChecker carries an operand's labels through a unary operator" {

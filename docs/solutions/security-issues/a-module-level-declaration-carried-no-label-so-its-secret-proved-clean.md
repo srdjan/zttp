@@ -63,3 +63,9 @@ The new walk also reached a second defect that had been hidden. `inferLabels` re
 **Probe the exemptions as well as the fallback.** A fail-closed default for `.global` costs a clean program every property when it also catches a function name or an import. The control tests above and the 61-example comparison of `zts check --json` before and after the change show that cost is zero.
 
 **Treat a new walk as new input.** A walk that starts to reach code it never reached can expose a bug in code that the old walk never ran. Run the mutation test (`pipeline_mutation_tests.zig`), which found the unary defect.
+
+## A captured read had the same defect
+
+A closure that reads a variable of its enclosing function has the same shape. The scope analyzer keys a captured variable by the inner function and an upvalue slot, not by its declaration. The flow checker read that key as an ordinary binding, so a captured secret returned an empty set, or the labels of an unrelated parameter of the inner function that held the same key. `resolveCaptures` now places each captured read against the declarations lexically in scope at the read, by name, in one pass over the IR, and `bindingAt` hands every label lookup the declaration's own binding. A capture that no declaration matches carries `.unknown`. The scan does not run during the label walk, because that walk reaches a closure from the place that calls it and not from the place that declares it.
+
+The tests are `FlowChecker resolves a captured value to the declaration it names` and `FlowChecker keeps a property for a captured value that holds no secret`. The second holds the controls that a union by name would break: a helper that logs its own clean `x` while the handler has a secret `x`, and a closure that captures the function-level `x` after a block with a secret `x` has ended.

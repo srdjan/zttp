@@ -119,8 +119,10 @@ packages/zts/src/flow_checker.zig appendRouteFunctionRoot catch-poison
 packages/zts/src/flow_checker.zig applyAssignmentLabels catch-poison
 packages/zts/src/flow_checker.zig findHandlerParam catch-poison
 packages/zts/src/flow_checker.zig propagateMutatingMethodTaint catch-poison
+packages/zts/src/flow_checker.zig pushCaptureDecl catch-poison
 packages/zts/src/flow_checker.zig recordBindingValue catch-block
 packages/zts/src/flow_checker.zig recordBindingValue catch-poison
+packages/zts/src/flow_checker.zig recordCapture catch-poison
 packages/zts/src/flow_checker.zig recordContainedSecrets catch-poison
 packages/zts/src/flow_checker.zig recordValidated catch-poison
 packages/zts/src/flow_checker.zig resolveFacts catch-block
