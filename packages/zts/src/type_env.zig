@@ -1161,7 +1161,7 @@ pub const TypeEnv = struct {
     /// type, chasing chains (`structural A = B; structural B = {...}` stores A as t_ref(B))
     /// up to a small depth with a self-reference guard. Non-ref types and
     /// unresolved refs pass through unchanged.
-    fn resolveRef(self: *const TypeEnv, idx: TypeIndex) TypeIndex {
+    pub fn resolveRef(self: *const TypeEnv, idx: TypeIndex) TypeIndex {
         var cur = idx;
         var depth: u8 = 0;
         while (depth < 8) : (depth += 1) {

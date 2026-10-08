@@ -23,7 +23,6 @@ const type_env_mod = @import("type_env.zig");
 const type_pool_mod = @import("type_pool.zig");
 const type_checker_mod = @import("type_checker.zig");
 const bool_checker_mod = @import("bool_checker.zig");
-const match_analysis_mod = @import("match_analysis.zig");
 const route_resolution = @import("route_resolution.zig");
 const repair_intent_mod = @import("repair_intent.zig");
 
@@ -1308,34 +1307,6 @@ pub const HandlerVerifier = struct {
         if (self.findResultBinding(binding)) |rb| {
             rb.ok_checked = checked;
         }
-    }
-
-    fn isMatchExhaustive(self: *const HandlerVerifier, me: ir.Node.MatchExpr) bool {
-        if (match_analysis_mod.hasDefaultArm(self.ir_view, me)) return true;
-
-        const disc_type = self.resolveMatchDiscriminantType(me.discriminant);
-        if (disc_type == null_type_idx) return false;
-
-        const env = self.type_env orelse return false;
-        const analysis = match_analysis_mod.MatchAnalysis.init(self.allocator, self.ir_view, env.pool);
-        return analysis.isMatchExhaustive(disc_type, me);
-    }
-
-    fn resolveMatchDiscriminantType(self: *const HandlerVerifier, node: NodeIndex) TypeIndex {
-        if (self.type_checker) |tc| {
-            const inferred = tc.inferTypeWithoutDiagnostics(node);
-            if (inferred != null_type_idx) return inferred;
-        }
-
-        const env = self.type_env orelse return null_type_idx;
-        const tag = self.ir_view.getTag(node) orelse return null_type_idx;
-        if (tag != .identifier) return null_type_idx;
-
-        const binding = self.ir_view.getBinding(node) orelse return null_type_idx;
-        if (env.getVarTypeByBinding(binding.scope_id, binding.name_atom)) |type_idx| return type_idx;
-        if (binding.kind != .global and binding.kind != .undeclared_global) return null_type_idx;
-        const name = self.resolveAtomName(binding.name_atom) orelse return null_type_idx;
-        return env.getVarTypeByName(name) orelse null_type_idx;
     }
 
     /// Increment reference count for a binding (scope-aware).

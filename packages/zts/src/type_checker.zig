@@ -3018,7 +3018,7 @@ pub const TypeChecker = struct {
     }
 
     fn findUnionMemberForPattern(self: *const TypeChecker, union_type: TypeIndex, pattern: ir.NodeIndex) TypeIndex {
-        const analysis = match_analysis_mod.MatchAnalysis.init(self.allocator, self.ir_view, self.env.pool);
+        const analysis = match_analysis_mod.MatchAnalysis.init(self.allocator, self.ir_view, self.env.pool, self.env);
         return analysis.narrowTypeForPattern(union_type, pattern);
     }
 
@@ -3062,7 +3062,7 @@ pub const TypeChecker = struct {
         var disc_type = self.inferType(me.discriminant);
         if (disc_type == null_type_idx) disc_type = self.paramDeclaredType(me.discriminant);
         if (disc_type == null_type_idx) return false;
-        const analysis = match_analysis_mod.MatchAnalysis.init(self.allocator, self.ir_view, self.env.pool);
+        const analysis = match_analysis_mod.MatchAnalysis.init(self.allocator, self.ir_view, self.env.pool, self.env);
         return analysis.isMatchExhaustive(disc_type, me);
     }
 

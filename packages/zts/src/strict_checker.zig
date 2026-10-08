@@ -1957,7 +1957,7 @@ pub const StrictChecker = struct {
         const tc = self.type_checker orelse return false;
         const disc_type = tc.inferTypeWithoutDiagnostics(match.discriminant);
         if (disc_type == null_type_idx) return false;
-        const analysis = match_analysis_mod.MatchAnalysis.init(self.allocator, self.ir_view, tc.env.pool);
+        const analysis = match_analysis_mod.MatchAnalysis.init(self.allocator, self.ir_view, tc.env.pool, tc.env);
         return analysis.isMatchExhaustive(disc_type, match);
     }
 
