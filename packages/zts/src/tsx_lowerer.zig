@@ -282,6 +282,10 @@ const Renderer = struct {
     output: std.ArrayListUnmanaged(u8) = .empty,
     edits: std.ArrayListUnmanaged(stripper.SpanEdit) = .empty,
     parser: *Parser,
+    /// How many `lowerRange` calls are open. Every element found inside a `{...}`
+    /// expression is parsed at element depth 0, so `max_depth` alone does not
+    /// bound `<a>{<a>{...}</a>}</a>`; this does.
+    range_depth: u8 = 0,
 
     fn deinit(self: *Renderer) void {
         self.output.deinit(self.allocator);
@@ -289,6 +293,9 @@ const Renderer = struct {
     }
 
     fn lowerRange(self: *Renderer, start: usize, end: usize) Error!void {
+        if (self.range_depth >= max_depth) return self.parser.fail(.unclosed_element, start);
+        self.range_depth += 1;
+        defer self.range_depth -= 1;
         var pos = start;
         var copy_start = start;
         while (pos < end) {
@@ -589,6 +596,39 @@ test "reports a mismatched closing tag at the authored location" {
     try std.testing.expectEqual(DiagnosticKind.mismatched_tag, diagnostic.?.kind);
     try std.testing.expectEqual(@as(u32, 2), diagnostic.?.line);
     try std.testing.expectEqual(@as(u32, 16), diagnostic.?.column);
+}
+
+// Regression: `lowerRange` starts every element it finds at depth 0, so a
+// chain of elements nested through `{...}` expressions was bounded by nothing.
+// The renderer recursed once per level and a 20000-level source overflowed the
+// native stack. Found by the nesting generators in tests/frontend_fuzz.zig.
+test "refuses elements nested through expressions past the depth limit" {
+    const allocator = std.testing.allocator;
+    const shapes = [_]struct { open: []const u8, close: []const u8 }{
+        .{ .open = "<a>{", .close = "}</a>" },
+        .{ .open = "<a b={", .close = "}/>" },
+        .{ .open = "<a>{f(", .close = ")}</a>" },
+    };
+    for (shapes) |shape| {
+        var source: std.ArrayListUnmanaged(u8) = .empty;
+        defer source.deinit(allocator);
+        for (0..20_000) |_| try source.appendSlice(allocator, shape.open);
+        try source.appendSlice(allocator, "x");
+        for (0..20_000) |_| try source.appendSlice(allocator, shape.close);
+
+        var diagnostic: ?Diagnostic = null;
+        try std.testing.expectError(error.InvalidTsx, lower(allocator, source.items, &diagnostic));
+        try std.testing.expectEqual(DiagnosticKind.unclosed_element, diagnostic.?.kind);
+    }
+
+    // Ordinary nesting through expressions still lowers.
+    var shallow: std.ArrayListUnmanaged(u8) = .empty;
+    defer shallow.deinit(allocator);
+    for (0..10) |_| try shallow.appendSlice(allocator, "<a>{");
+    try shallow.appendSlice(allocator, "x");
+    for (0..10) |_| try shallow.appendSlice(allocator, "}</a>");
+    var result = try lower(allocator, shallow.items, null);
+    result.deinit();
 }
 
 test "closes every lowering allocation failure" {
