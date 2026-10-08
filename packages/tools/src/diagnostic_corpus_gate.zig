@@ -25,7 +25,25 @@
 //!     an empty or placeholder reason, and a catalog below `minimum_universe`.
 //!     The ratchet matches the `code` field of each diagnostic, never a
 //!     substring, and its universe is the diagnostic catalog, not
-//!     `rule_registry`.
+//!     `rule_registry`;
+//!   * a case whose check costs more retired instructions than its budget
+//!     (U5.2), a counter that reads nothing, and a budget override for a case
+//!     that does not exist. See "The cost budget" below.
+//!
+//! The cost budget (U5.2). Each case's in-process check call is bracketed by
+//! two readings of `instruction_counter.Counter`. On an instruction source
+//! (`instructions_darwin`, `instructions_linux_perf`) a case above its budget
+//! fails as `over_budget`. On the CPU-time fallback the gate reports the
+//! numbers and fails nothing: a nanosecond count is not an instruction count,
+//! and the GitHub runners' counter source has not been read yet (decision T3).
+//! The gate prints the source on every run, so a CI log shows which one ran.
+//!
+//! The measurement is the whole process's count on macOS (`proc_pid_rusage`)
+//! and the calling thread's on Linux (`perf_event_open` with pid 0, cpu -1).
+//! The gate runs every case on its main thread and the check starts no thread,
+//! so on macOS no other thread adds to the delta. The budget holds for the
+//! build mode that compiled the gate, Debug by default; a release build
+//! retires fewer instructions, so it only loosens the check.
 //!
 //! The floor, the stage requirement, and the filter rule exist because a gate
 //! that finds nothing reports the same success as a gate that found
@@ -39,6 +57,7 @@
 
 const std = @import("std");
 const precompile = @import("precompile.zig");
+const instruction_counter = @import("instruction_counter.zig");
 const zts = @import("zts");
 
 /// The number of cases committed under `tests/corpus`. The gate fails below
@@ -84,6 +103,10 @@ pub const FailureKind = enum {
     duplicate_row,
     empty_reason,
     weak_reason,
+    // The cost budget (U5.2).
+    over_budget,
+    counter_failed,
+    bad_budget_row,
 };
 
 pub const Failure = struct {
@@ -121,10 +144,71 @@ const allow_path = "scripts/corpus-uncovered.allow";
 /// was written. The catalog may grow; it may not silently shrink to nothing.
 pub const minimum_universe: usize = 140;
 
+/// The cost budget (U5.2), in retired instructions of one case's in-process
+/// check, for a Debug build of the gate. The most expensive case retired
+/// 423,121,401 instructions at most over seven runs on macOS arm64, and this
+/// is 3.07 times that, rounded up. `tests/corpus/README.md` holds the
+/// measurement table. Raise it only with a new table in the same commit.
+pub const case_budget: u64 = 1_300_000_000;
+
+/// A case that needs more than `case_budget`. Each row names its case and
+/// states why that case costs more, so one expensive case does not raise the
+/// budget of the other cases. A row for a path that is not a case fails.
+pub const BudgetOverride = struct {
+    /// Source path relative to the corpus root, e.g. `check/bad/x.ts`.
+    path: []const u8,
+    instructions: u64,
+    reason: []const u8,
+};
+
+pub const case_budget_overrides = [_]BudgetOverride{};
+
+pub const Budget = struct {
+    per_case: u64,
+    overrides: []const BudgetOverride = &.{},
+
+    fn forPath(self: Budget, path: []const u8) u64 {
+        for (self.overrides) |row| {
+            if (std.mem.eql(u8, row.path, path)) return row.instructions;
+        }
+        return self.per_case;
+    }
+};
+
+/// A reader of the cost counter. Tests replace it with a fake that names an
+/// instruction source, so the budget probes do not depend on the host's
+/// counter. `counterMeter` wraps the real counter.
+pub const Meter = struct {
+    source: instruction_counter.Source,
+    context: *anyopaque,
+    readFn: *const fn (context: *anyopaque) u64,
+
+    fn read(self: Meter) instruction_counter.Reading {
+        return .{ .source = self.source, .value = self.readFn(self.context) };
+    }
+};
+
+fn readCounter(context: *anyopaque) u64 {
+    const counter: *const instruction_counter.Counter = @ptrCast(@alignCast(context));
+    return counter.read().value;
+}
+
+pub fn counterMeter(counter: *const instruction_counter.Counter) Meter {
+    return .{ .source = counter.source, .context = @constCast(counter), .readFn = readCounter };
+}
+
 pub const Options = struct {
     /// The check to run. Tests replace it to reach a crash the real check
     /// does not produce on demand.
     check: CheckFn = defaultCheck,
+    /// The cost counter. Null leaves the budget off, which only the gate's
+    /// own tests do. A golden write run does not measure either.
+    meter: ?Meter = null,
+    /// The cost budget. It applies only when `meter` names an instruction
+    /// source; on the CPU-time source the gate reports and fails nothing.
+    budget: Budget = .{ .per_case = case_budget, .overrides = &case_budget_overrides },
+    /// Print the cost of every case, most expensive first.
+    report_costs: bool = false,
     /// The code ratchet. Null leaves it off, which only the gate's own tests
     /// do. A filtered run skips it, because a filtered run covers a subset.
     ratchet: ?Ratchet = null,
@@ -146,9 +230,19 @@ const Case = struct {
     golden_path: []const u8,
 };
 
+pub const Cost = struct {
+    path: []const u8,
+    /// Retired instructions, or nanoseconds on the CPU-time source.
+    count: u64,
+    budget: u64,
+};
+
 pub const Report = struct {
     arena: std.heap.ArenaAllocator,
     failures: std.ArrayList(Failure) = .empty,
+    /// The counter source that measured the cases; null when none did.
+    meter_source: ?instruction_counter.Source = null,
+    costs: std.ArrayList(Cost) = .empty,
     cases_found: usize = 0,
     cases_run: usize = 0,
     /// Every `code` field that a `bad` case's diagnostics carried.
@@ -310,6 +404,35 @@ fn latestStageIndex(stages: precompile.StageSet) ?usize {
     return latest;
 }
 
+/// Record one case's cost and, on an instruction source, fail it above its
+/// budget. A counter that reads nothing fails too: a zero delta around a real
+/// check means the read failed, and a gate that measures nothing would pass.
+fn recordCost(
+    report: *Report,
+    budget: Budget,
+    meter: Meter,
+    before: instruction_counter.Reading,
+    after: instruction_counter.Reading,
+    path: []const u8,
+) !void {
+    const a = report.arena.allocator();
+    report.meter_source = meter.source;
+    const count = instruction_counter.delta(before, after) catch |err| {
+        if (meter.source.countsInstructions()) {
+            try report.add(.counter_failed, path, "the counter gave no usable delta: {s} (readings {d} then {d})", .{ @errorName(err), before.value, after.value });
+        }
+        return;
+    };
+    const limit = budget.forPath(path);
+    try report.costs.append(a, .{ .path = path, .count = count, .budget = limit });
+    if (!meter.source.countsInstructions()) return;
+    if (count == 0) {
+        try report.add(.counter_failed, path, "the counter read 0 instructions around a real check; the {s} source gave no signal", .{@tagName(meter.source)});
+    } else if (count > limit) {
+        try report.add(.over_budget, path, "the check retired {d} instructions, the budget is {d} ({d}x); see the cost budget in tests/corpus/README.md", .{ count, limit, count / @max(limit, 1) });
+    }
+}
+
 fn runCase(
     gpa: std.mem.Allocator,
     io: std.Io,
@@ -325,12 +448,17 @@ fn runCase(
     };
     defer gpa.free(source);
 
+    // Two readings bracket the check call and nothing else: the file reads and
+    // the golden comparison are outside the cost.
+    const meter: ?Meter = if (options.write) null else options.meter;
+    const before = if (meter) |m| m.read() else null;
     var result = options.check(gpa, source, case.source_path) catch |err| {
         try report.add(.check_crashed, case.source_path, "the check returned error.{s}", .{@errorName(err)});
         return;
     };
     defer result.deinit(gpa);
     report.cases_run += 1;
+    if (meter) |m| try recordCost(report, options.budget, m, before.?, m.read(), case.source_path);
 
     const diagnostics = result.json_diagnostics.items;
     switch (case.kind) {
@@ -563,6 +691,22 @@ pub fn runCorpus(gpa: std.mem.Allocator, io: std.Io, root: std.Io.Dir, options: 
         if (!has_source) try report.add(.orphan_golden, golden.path, "no NAME.ts or NAME.tsx beside this golden", .{});
     }
 
+    // A budget row for a path that is not a case, or one without a stated
+    // reason, is a row that no check reads. A filtered run sees a subset.
+    if (options.meter != null and options.filter == null) {
+        for (options.budget.overrides) |row| {
+            var has_case = false;
+            for (cases.items) |case| {
+                if (std.mem.eql(u8, case.source_path, row.path)) has_case = true;
+            }
+            if (!has_case) {
+                try report.add(.bad_budget_row, row.path, "a budget override names no case; delete the row or fix the path", .{});
+            } else if (isWeakReason(row.reason)) {
+                try report.add(.bad_budget_row, row.path, "a budget override must state why this case costs more: {s}", .{row.reason});
+            }
+        }
+    }
+
     var selected: usize = 0;
     for (cases.items) |case| {
         if (options.filter) |text| {
@@ -585,6 +729,47 @@ pub fn runCorpus(gpa: std.mem.Allocator, io: std.Io, root: std.Io.Dir, options: 
     return report;
 }
 
+fn costGreater(_: void, lhs: Cost, rhs: Cost) bool {
+    if (lhs.count != rhs.count) return lhs.count > rhs.count;
+    return std.mem.lessThan(u8, lhs.path, rhs.path);
+}
+
+/// The cost lines. The summary names the source, the largest case count, and
+/// the budget, so a regression shows in a CI log. `--report-costs` adds one
+/// line per case, most expensive first.
+fn printCosts(report: *const Report, options: Options) void {
+    const source = report.meter_source orelse return;
+    const costs = report.costs.items;
+    var max_count: u64 = 0;
+    var max_path: []const u8 = "none";
+    var over: usize = 0;
+    for (costs) |cost| {
+        if (cost.count >= max_count) {
+            max_count = cost.count;
+            max_path = cost.path;
+        }
+        if (cost.count > cost.budget) over += 1;
+    }
+    if (source.countsInstructions()) {
+        std.debug.print(
+            "diagnostic corpus: cost budget: source {s}, {d} case(s) measured, max {d} instructions ({s}), budget {d} per case, {d} over budget\n",
+            .{ @tagName(source), costs.len, max_count, max_path, options.budget.per_case, over },
+        );
+    } else {
+        std.debug.print(
+            "diagnostic corpus: cost budget: source {s} counts nanoseconds, not instructions, so the budget of {d} instructions is NOT enforced (report only, decision T3); {d} case(s) measured, max {d} ns ({s})\n",
+            .{ @tagName(source), options.budget.per_case, costs.len, max_count, max_path },
+        );
+    }
+    if (!options.report_costs) return;
+    const sorted = std.heap.page_allocator.dupe(Cost, costs) catch return;
+    defer std.heap.page_allocator.free(sorted);
+    std.mem.sort(Cost, sorted, {}, costGreater);
+    for (sorted) |cost| {
+        std.debug.print("cost {d} {s}\n", .{ cost.count, cost.path });
+    }
+}
+
 fn printReport(report: *const Report, options: Options) void {
     for (report.failures.items) |failure| {
         std.debug.print("FAIL [{s}] {s}: {s}\n", .{ @tagName(failure.kind), failure.path, failure.detail });
@@ -599,6 +784,7 @@ fn printReport(report: *const Report, options: Options) void {
             .{ report.universe_size, report.codes_covered, report.codes_allowlisted, report.codes_defect, report.codes_uncovered, options.ratchet.?.universe_floor },
         );
     }
+    printCosts(report, options);
     if (options.filter) |text| {
         std.debug.print("diagnostic corpus: FILTERED run for \"{s}\": {d} of {d} case(s), not a verdict on the corpus\n", .{ text, report.cases_run, report.cases_found });
     }
@@ -606,9 +792,11 @@ fn printReport(report: *const Report, options: Options) void {
 
 fn usage() error{InvalidArguments} {
     std.debug.print(
-        \\usage: diagnostic-corpus-gate [--write] [--root DIR] [FILTER]
+        \\usage: diagnostic-corpus-gate [--write] [--report-costs] [--cpu-time] [--root DIR] [FILTER]
         \\
         \\  --write      rewrite the golden of each selected case, then check the rules
+        \\  --report-costs  print the cost of every case, most expensive first
+        \\  --cpu-time   measure CPU time instead of instructions: report only, no budget
         \\  --root DIR   corpus root (default tests/corpus)
         \\  FILTER       run only cases whose path contains FILTER; a filter that
         \\               matches no case fails
@@ -635,9 +823,14 @@ fn run(init: std.process.Init) !void {
     _ = args.next();
     var options: Options = .{ .floor = minimum_cases };
     var root_path: []const u8 = corpus_root;
+    var force_cpu_time = false;
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--write")) {
             options.write = true;
+        } else if (std.mem.eql(u8, arg, "--report-costs")) {
+            options.report_costs = true;
+        } else if (std.mem.eql(u8, arg, "--cpu-time")) {
+            force_cpu_time = true;
         } else if (std.mem.eql(u8, arg, "--root")) {
             root_path = args.next() orelse return usage();
         } else if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
@@ -663,6 +856,12 @@ fn run(init: std.process.Init) !void {
     const universe = try catalogUniverse(gpa);
     defer gpa.free(universe);
     options.ratchet = .{ .universe = universe, .allow_text = allow_text, .universe_floor = minimum_universe };
+
+    // The counter opens on this thread, which runs every case. A fallback to
+    // CPU time is named in the summary line and does not gate.
+    var counter = if (force_cpu_time) instruction_counter.Counter{ .source = .cpu_time_ns } else instruction_counter.Counter.open();
+    defer counter.close();
+    options.meter = counterMeter(&counter);
 
     var report = try runCorpus(gpa, io, root, options);
     defer report.deinit();
@@ -744,6 +943,27 @@ fn goldenText(dir: std.Io.Dir, path: []const u8) ![]u8 {
     return dir.readFileAlloc(testing.io, path, testing.allocator, .limited(max_file_bytes));
 }
 
+/// A counter that moves by `step` on every read, so a case's cost is exactly
+/// `step`. It names an instruction source, so a budget probe does not depend
+/// on what the host's real counter offers.
+const FakeMeter = struct {
+    value: u64 = 1_000,
+    step: u64,
+    source: instruction_counter.Source = .instructions_darwin,
+
+    fn read(context: *anyopaque) u64 {
+        const self: *FakeMeter = @ptrCast(@alignCast(context));
+        self.value += self.step;
+        return self.value;
+    }
+
+    fn meter(self: *FakeMeter) Meter {
+        return .{ .source = self.source, .context = self, .readFn = read };
+    }
+};
+
+const scratch_case = "check/bad/c.ts";
+
 /// Apply one mutation to a fresh, passing scratch corpus and require the gate
 /// to name the failure it should. Every `FailureKind` is a case of the switch,
 /// so a new kind does not compile until it has a probe.
@@ -754,6 +974,12 @@ fn probe(kind: FailureKind) !void {
     try seedScratch(dir);
     const base: Options = .{ .floor = 4 };
     const ratcheted: Options = .{ .floor = 4, .ratchet = scratchRatchet(scratch_allow) };
+    // Each case costs 100 on the fake counter, and the budget is 100: a case
+    // at its budget passes, and the probes below move one side of the limit.
+    var at_budget = FakeMeter{ .step = 100 };
+    var over = FakeMeter{ .step = 101 };
+    var dead = FakeMeter{ .step = 0 };
+    const metered: Options = .{ .floor = 4, .meter = at_budget.meter(), .budget = .{ .per_case = 100 } };
 
     // The unmutated corpus passes, so a failure below comes from the mutation.
     // It passes with the ratchet on too: two covered codes and one allowlisted.
@@ -768,6 +994,12 @@ fn probe(kind: FailureKind) !void {
             std.debug.print("clean ratchet failure [{s}] {s}: {s}\n", .{ @tagName(failure.kind), failure.path, failure.detail });
         }
         try testing.expectEqual(@as(usize, 0), clean_ratchet.failures.items.len);
+        // A case that costs exactly its budget is not over it.
+        var clean_metered = try runCorpus(testing.allocator, testing.io, dir, metered);
+        defer clean_metered.deinit();
+        try testing.expectEqual(@as(usize, 0), clean_metered.failures.items.len);
+        try testing.expectEqual(@as(usize, 4), clean_metered.costs.items.len);
+        for (clean_metered.costs.items) |cost| try testing.expectEqual(@as(u64, 100), cost.count);
     }
 
     switch (kind) {
@@ -865,6 +1097,21 @@ fn probe(kind: FailureKind) !void {
         },
         .weak_reason => {
             try expectFailureAt(dir, .{ .floor = 4, .ratchet = scratchRatchet(scratch_phony_code ++ " not written yet\n") }, kind, scratch_phony_code);
+        },
+        // The cost budget probes (U5.2). Each runs a fake instruction source.
+        .over_budget => {
+            // One instruction over the budget fails, and it names the case.
+            try expectFailureAt(dir, .{ .floor = 4, .meter = over.meter(), .budget = .{ .per_case = 100 } }, kind, scratch_case);
+        },
+        .counter_failed => {
+            // A counter that never moves reads 0 around every check.
+            try expectFailureAt(dir, .{ .floor = 4, .meter = dead.meter(), .budget = .{ .per_case = 100 } }, kind, scratch_case);
+        },
+        .bad_budget_row => {
+            const missing = [_]BudgetOverride{.{ .path = "check/bad/no-such-case.ts", .instructions = 5, .reason = "a case that does not exist" }};
+            try expectFailureAt(dir, .{ .floor = 4, .meter = at_budget.meter(), .budget = .{ .per_case = 100, .overrides = &missing } }, kind, "check/bad/no-such-case.ts");
+            const weak = [_]BudgetOverride{.{ .path = scratch_case, .instructions = 500, .reason = "todo" }};
+            try expectFailureAt(dir, .{ .floor = 4, .meter = at_budget.meter(), .budget = .{ .per_case = 100, .overrides = &weak } }, kind, scratch_case);
         },
     }
 }
@@ -1098,4 +1345,70 @@ test "a check run leaves no witness corpus in the working tree" {
     const corpus_dir = try zts.witness_corpus.corpusDir(testing.allocator, handler_path);
     defer testing.allocator.free(corpus_dir);
     try testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(testing.io, corpus_dir, .{}));
+}
+
+test "on the CPU-time source the gate reports a cost and fails nothing" {
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try seedScratch(tmp.dir);
+    // A cost of a million units against a budget of 1 would fail on an
+    // instruction source. Nanoseconds are not instructions, so it must not.
+    var fake = FakeMeter{ .step = 1_000_000, .source = .cpu_time_ns };
+    var report = try runCorpus(testing.allocator, testing.io, tmp.dir, .{ .floor = 4, .meter = fake.meter(), .budget = .{ .per_case = 1 } });
+    defer report.deinit();
+    try testing.expectEqual(@as(usize, 0), report.failures.items.len);
+    try testing.expectEqual(instruction_counter.Source.cpu_time_ns, report.meter_source.?);
+    try testing.expectEqual(@as(usize, 4), report.costs.items.len);
+    for (report.costs.items) |cost| try testing.expectEqual(@as(u64, 1_000_000), cost.count);
+}
+
+test "a budget override lifts one case and no other" {
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try seedScratch(tmp.dir);
+    var fake = FakeMeter{ .step = 500 };
+    const rows = [_]BudgetOverride{.{ .path = scratch_case, .instructions = 500, .reason = "the scratch case is the expensive one" }};
+    var report = try runCorpus(testing.allocator, testing.io, tmp.dir, .{ .floor = 4, .meter = fake.meter(), .budget = .{ .per_case = 100, .overrides = &rows } });
+    defer report.deinit();
+    // The other three cases cost 500 against a budget of 100.
+    try testing.expectEqual(@as(usize, 3), report.failures.items.len);
+    for (report.failures.items) |failure| {
+        try testing.expectEqual(FailureKind.over_budget, failure.kind);
+        try testing.expect(!std.mem.eql(u8, failure.path, scratch_case));
+    }
+}
+
+test "a golden write run and a run without a meter measure nothing" {
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try seedScratch(tmp.dir);
+    var fake = FakeMeter{ .step = 500 };
+    var written = try runCorpus(testing.allocator, testing.io, tmp.dir, .{ .floor = 4, .write = true, .meter = fake.meter(), .budget = .{ .per_case = 1 } });
+    defer written.deinit();
+    try testing.expectEqual(@as(usize, 0), written.failures.items.len);
+    try testing.expectEqual(@as(usize, 0), written.costs.items.len);
+    try testing.expect(written.meter_source == null);
+    var plain = try runCorpus(testing.allocator, testing.io, tmp.dir, .{ .floor = 4 });
+    defer plain.deinit();
+    try testing.expect(plain.meter_source == null);
+}
+
+test "the real counter measures every scratch case with a nonzero cost" {
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try seedScratch(tmp.dir);
+    var counter = instruction_counter.Counter.open();
+    defer counter.close();
+    var report = try runCorpus(testing.allocator, testing.io, tmp.dir, .{
+        .floor = 4,
+        .meter = counterMeter(&counter),
+        .budget = .{ .per_case = std.math.maxInt(u64) },
+    });
+    defer report.deinit();
+    try testing.expectEqual(@as(usize, 0), report.failures.items.len);
+    try testing.expectEqual(counter.source, report.meter_source.?);
+    try testing.expectEqual(@as(usize, 4), report.costs.items.len);
+    if (counter.source.countsInstructions()) {
+        for (report.costs.items) |cost| try testing.expect(cost.count > 0);
+    }
 }

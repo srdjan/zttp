@@ -67,6 +67,94 @@ The check runs with no policy, no declaration, no SQL schema, and no system
 file, so the POL rules and the declaration rules are outside this corpus. It
 reads neither `zttp.json` nor `.zttp/witnesses`, and it writes no witness.
 
+## The cost budget
+
+The gate reads `instruction_counter` (`packages/tools/src/instruction_counter.zig`)
+before and after each case's in-process check call, and nothing else sits
+between the two readings. A case above its budget fails as `over_budget`. The
+budget is one number for every case, `case_budget` in the gate.
+
+The summary line names the source, the largest case, and the budget:
+
+```
+cost budget: source instructions_darwin, 161 case(s) measured, max 423000870 instructions (check/bad/tool_catalog_missing_byte_bound.ts), budget 1300000000 per case, 0 over budget
+```
+
+| Source | Host | Effect |
+|---|---|---|
+| `instructions_darwin` | macOS, `proc_pid_rusage` | a case above budget fails |
+| `instructions_linux_perf` | Linux, `perf_event_open` | a case above budget fails |
+| `cpu_time_ns` | any host that gives neither counter | the gate prints the numbers and fails nothing |
+
+The `cpu_time_ns` source counts nanoseconds, so it cannot meet a budget in
+instructions. The GitHub runners (`macos-latest`, `ubuntu-latest`) have not been
+read yet, so the owner must read the `cost budget: source ...` line in a CI log
+(decision T3). Until then CI may report only. `--cpu-time` forces the fallback
+on any host, to see what that run prints. `--report-costs` prints one line per
+case, most expensive first.
+
+The budget holds for the build mode that compiled the gate. That is Debug unless
+the build passes `-Doptimize`. A release build retires fewer instructions and
+only loosens the check, so do not read a release run as a measurement.
+
+### What the count includes
+
+On macOS the counter is the whole process, not one thread. The gate runs every
+case on its main thread and the check starts no thread, so no other thread adds
+to a case's count. If the check ever starts a thread on macOS, its work is
+inside the count. On Linux the counter opens with pid 0 and cpu -1, which counts
+only the calling thread, so a thread that the check starts is outside it. The
+count includes the check's own writes to stderr, because the check prints its
+errors in process. The count does not include reading the source or the golden.
+
+### The measurement
+
+Seven runs on macOS arm64 (Darwin 25.6.0), Debug build, 161 cases, every case
+read in every run. The 10 most expensive cases, in retired instructions:
+
+| Case | Min over 7 runs | Max over 7 runs |
+|---|---:|---:|
+| `check/bad/tool_catalog_missing_byte_bound.ts` | 422,959,615 | 423,121,401 |
+| `check/good/match_nested_discriminants.ts` | 371,480,016 | 371,590,617 |
+| `check/bad/dict_entry_round_trip.ts` | 324,728,025 | 324,778,308 |
+| `check/bad/dict_entries_reduce.ts` | 323,289,692 | 323,344,413 |
+| `check/bad/optional_object_access.ts` | 319,750,325 | 319,936,577 |
+| `check/good/checked_result.ts` | 318,928,456 | 319,302,481 |
+| `check/good/match_tuple_element_wildcard.ts` | 312,010,464 | 312,051,081 |
+| `check/good/validated_json_with_result_check.ts` | 308,441,627 | 308,547,306 |
+| `check/bad/match_missing_nested_case.ts` | 305,432,016 | 305,500,237 |
+| `check/bad/secret_in_log.ts` | 302,388,949 | 302,528,542 |
+
+The median case costs 188,883,403 at most, and the cheapest (a parse refusal)
+1,715,157. The largest case is 2.2 times the median, so no case is an outlier
+and `case_budget_overrides` is empty. The run-to-run spread is under 0.1 percent
+for the top 10 and under 9 percent for the cheapest cases.
+
+The budget is `1_300_000_000`, which is 3.07 times the largest maximum, rounded
+up. The headroom covers a different host: the counts above are for one CPU
+architecture, and a Linux runner on another architecture will retire a
+different number. If the CI log shows a source that counts instructions and a
+case near the budget, measure again on that host before changing the number.
+
+### What the budget catches
+
+The cheapest `check` case costs 168 million instructions, and a 7-line source
+adds little to that, so most of a `check` case is a fixed cost of the check. The
+budget is therefore a guard on that fixed cost and a coarse guard on one case. A case fails when it costs more than the budget, which is a
+growth of 4.1 times for `check/good/checked_result.ts` (319 million), 7.7 times
+for the cheapest check case (168 million), and far more for a parse case. A probe
+that copied `checked_result.ts`'s handler 230 times made the case cost
+3,216,224,935 instructions, which is 10.07 times its normal cost, and the gate
+failed it as `over_budget`. A regression of 3 times in the fixed cost of the
+check, which moves every case, fails the heaviest case first.
+
+To raise the budget, run the gate at least five times with `--report-costs`,
+record the new table here, and change `case_budget` and its comment in the same
+commit. To give one case more, add a row to `case_budget_overrides` with the
+reason; a row for a path that is not a case, or without a reason, fails as
+`bad_budget_row`. A counter that reads 0 around a check fails as
+`counter_failed`, because a gate that measures nothing would pass.
+
 ## The code ratchet
 
 The gate also iterates every distinct code in the diagnostic catalog

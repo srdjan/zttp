@@ -4,6 +4,11 @@
 //! unit tests. `diagnostic-corpus-write` rewrites the goldens and is a human
 //! action, listed in scripts/manual-steps.allow. Arguments after `--` filter
 //! both by path substring; a filter that matches no case fails the gate.
+//!
+//! The gate also reads `instruction_counter.zig` (same module root, so no
+//! import wiring is needed) and fails a case above its instruction budget;
+//! `-- --report-costs` lists every case's cost, `-- --cpu-time` forces the
+//! report-only fallback source. Both are gate flags, not filters.
 
 const std = @import("std");
 const Context = @import("Context.zig");

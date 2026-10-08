@@ -179,6 +179,15 @@ or placeholder reason all fail, and so does a catalog smaller than
 should. The universe is the catalog, not `rule_registry`. The ratchet pins
 exact output and does not replace `test-standin`, which checks veto outcomes.
 
+The gate also measures the instructions that each case's check call retires, and
+fails a case above `case_budget` as `over_budget`. This holds only on an
+instruction source (`instructions_darwin`, `instructions_linux_perf`). On the
+CPU-time fallback the gate prints the numbers and fails nothing, because the
+GitHub runners' counter source has not been read yet. Every run prints one line
+that names the source. The budget is for a Debug build of the gate. The
+measurement table, the headroom, and the thread caveat are in
+`tests/corpus/README.md`.
+
 The docs drift and link gates run here and only here. Neither Run step is
 cached, so `zig build test` always executes both scripts, and `verify.sh` and
 CI deliberately do not invoke them a second time.
