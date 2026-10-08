@@ -41,7 +41,7 @@ Every code path through the handler must return a Response. The verifier recursi
 **Triggers when:** the handler body does not always return on every code path.
 
 ```
-verify error: not all code paths return a Response
+verify error[ZTS302]: not all code paths return a Response
   --> handler.ts:2:17
    |
   2 | function handler(req) {
@@ -70,7 +70,7 @@ function handler(req) {
 ```
 
 ```
-verify error: result.value accessed without checking result.ok first
+verify error[ZTS303]: result.value accessed without checking result.ok first
   --> handler.ts:7:28
    |
   7 |     return Response.json(result.unwrap());
@@ -92,7 +92,7 @@ verify error: result.value accessed without checking result.ok first
 Statements after an unconditional return in a block. Severity: warning.
 
 ```
-verify warning: unreachable code after return statement
+verify warning[ZTS304]: unreachable code after return statement
   --> handler.ts:4:5
    |
   4 |     const x = 42;
@@ -107,7 +107,7 @@ Declared variables that are never referenced. Severity: warning. Suppress by pre
 The check is scope-aware: a variable used only in a nested scope that shadows an outer declaration does not count as a use of the outer binding.
 
 ```
-verify warning: unused variable 'temp'
+verify warning[ZTS305]: unused variable 'temp'
   --> handler.ts:3:11
    |
   3 |     const temp = computeValue();
@@ -120,7 +120,7 @@ verify warning: unused variable 'temp'
 Match expressions without a `default` arm are rejected by strict ZigTS (ZTS603) unless the type checker can prove that the arms cover every value of the matched type. A closed type is covered by arms alone, and several arms may split one case. An open type such as `string`, `number`, `unknown`, or `T[]` needs a `default` arm. The help text names the first missing case.
 
 ```
-strict error: match expression must be exhaustive in strict ZigTS
+strict error[ZTS603]: match expression must be exhaustive in strict ZigTS
   --> handler.ts:5:12
    |
   5 |     return match (command) {
@@ -156,7 +156,7 @@ function handler(req) {
 ```
 
 ```
-verify error: optional value used without checking for undefined
+verify error[ZTS308]: optional value used without checking for undefined
   --> handler.ts:6:30
    |
   6 |     return Response.json({ app: appName });
@@ -168,7 +168,7 @@ verify error: optional value used without checking for undefined
 Property access on an un-narrowed `optional_object` (from `routerMatch`) is also an error:
 
 ```
-verify error: property access on optional value without checking for undefined
+verify error[ZTS309]: property access on optional value without checking for undefined
 ```
 
 **Recognized narrowing patterns:**

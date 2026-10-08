@@ -1152,18 +1152,7 @@ pub const HandlerInstance = struct {
         defer p.deinit();
 
         const bytecode_data = p.parse() catch |err| {
-            // Print parse errors
-            const errors = p.js_parser.getErrors();
-            if (errors.len > 0) {
-                for (errors) |parse_error| {
-                    std.log.err("Parse error at {s}:{}:{}: {s}", .{
-                        filename,
-                        parse_error.location.line,
-                        parse_error.location.column,
-                        parse_error.message,
-                    });
-                }
-            }
+            logParseErrors(self.allocator, diag_view, p.js_parser.getErrors());
             return err;
         };
 
@@ -2216,6 +2205,61 @@ pub const HandlerInstance = struct {
         self.last_request_body_len = 0;
     }
 };
+
+/// Render parse errors for a person: the ZTS code, `file:line:column`, the
+/// source line, and an underline, translated into the file the author wrote.
+/// Caller owns the result.
+fn renderParseErrors(
+    allocator: std.mem.Allocator,
+    view: zq.SourceView,
+    errors: []const zq.ParseError,
+) ![]u8 {
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    errdefer aw.deinit();
+    try zq.DiagnosticProjection.writeParseErrors(view, errors, &aw.writer);
+    return aw.toOwnedSlice();
+}
+
+/// Log the rendered parse errors. A rendering failure falls back to the
+/// position and message, so a parse failure is never logged as nothing.
+fn logParseErrors(allocator: std.mem.Allocator, view: zq.SourceView, errors: []const zq.ParseError) void {
+    if (renderParseErrors(allocator, view, errors)) |text| {
+        defer allocator.free(text);
+        std.log.err("parse error\n{s}", .{text});
+    } else |_| {
+        for (errors) |parse_error| {
+            std.log.err("Parse error at {s}:{d}:{d}: {s}", .{
+                view.name orelse "<source>",
+                parse_error.location.line,
+                parse_error.location.column,
+                parse_error.message,
+            });
+        }
+    }
+}
+
+test "a load parse failure renders its code, file, source line, and underline" {
+    const allocator = std.testing.allocator;
+    const source = "const a = 1;\nconst b = while;\n";
+    var prepared = try zq.PreparedSource.init(allocator, source, "bad.ts", .{});
+    defer prepared.deinit();
+
+    var strings = zq.StringTable.init(allocator);
+    defer strings.deinit();
+    var atoms = zq.AtomTable.init(allocator);
+    defer atoms.deinit();
+    var p = try zq.Parser.init(allocator, prepared.parserInput(), &strings, &atoms);
+    defer p.deinit();
+    if (p.parse()) |_| return error.TestExpectedParseFailure else |_| {}
+
+    const text = try renderParseErrors(allocator, prepared.sourceView(), p.js_parser.getErrors());
+    defer allocator.free(text);
+    try std.testing.expect(std.mem.indexOf(u8, text, "error[ZTS") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "  --> bad.ts:2:") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "  2 | const b = while;\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "   | ") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "^") != null);
+}
 
 const CallToolTag = enum {
     unknown_tool,

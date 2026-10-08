@@ -266,6 +266,8 @@ pub const SourceView = struct {
     parsed_text: ?[]const u8 = null,
     /// Map from `parsed_text` into `strip.code`.
     transform_edits: []const SpanEdit = &.{},
+    /// The path the author gave, shown in the `-->` line when it is set.
+    name: ?[]const u8 = null,
 
     /// A view whose text is what was parsed. The identity mapping.
     pub fn of(text: []const u8) SourceView {
@@ -300,20 +302,62 @@ pub const SourceView = struct {
         return positionOfOffset(self.text, result.sourceOffset(stripped_offset));
     }
 
-    /// Write the `--> line:column` header, the source line, and the caret under
-    /// it, for a position the parse reported. Five checkers rendered this block
-    /// from their own copies of it; sharing one is what makes the translation
-    /// impossible to apply to four of them and forget the fifth.
-    pub fn writeLocation(self: SourceView, line: u32, column: u32, writer: anytype) !void {
-        const at = self.position(line, column);
-        try writer.print("  --> {d}:{d}\n", .{ at.line, at.column });
-        const text = self.lineText(at.line) orelse return;
-        try writer.print("   |\n", .{});
-        try writer.print("{d: >3} | {s}\n", .{ at.line, text });
-        try writer.print("   | ", .{});
-        var col: u32 = 1;
-        while (col < at.column) : (col += 1) try writer.writeByte(' ');
-        try writer.writeAll("^\n");
+    /// Map a byte offset in the parsed text back to the offset it came from in
+    /// `text`. The identity when the view has nothing to translate.
+    pub fn sourceOffset(self: SourceView, parsed_offset: u32) u32 {
+        const result = self.strip orelse return parsed_offset;
+        return result.sourceOffset(sourceOffsetForEdits(self.transform_edits, parsed_offset));
+    }
+
+    /// Write one diagnostic for a human: the header with the ZTS code, the
+    /// `--> file:line:column` pointer, the source line, and an underline under
+    /// the span the diagnostic names. Every checker and every parse-error path
+    /// renders through this one function, so the translation out of the
+    /// stripped text and the clamping of the underline are written once.
+    ///
+    /// The underline covers the byte span `[start_offset, end_offset)` in the
+    /// parsed text, clamped to the line, and counts code points so a line with
+    /// multi-byte characters stays aligned. A span with no width, or one that
+    /// starts at or past the line end, gets a single caret. The count is
+    /// code points, not terminal cells: a double-width character is one caret.
+    pub fn writeDiagnostic(self: SourceView, d: HumanDiagnostic, writer: anytype) !void {
+        const at = self.position(d.line, d.column);
+        try writer.print("{s}{s}", .{ d.scope, d.severity });
+        if (d.code) |code| try writer.print("[{s}]", .{code});
+        try writer.print(": {s}\n", .{d.message});
+        if (self.name) |name| {
+            try writer.print("  --> {s}:{d}:{d}\n", .{ name, at.line, at.column });
+        } else {
+            try writer.print("  --> {d}:{d}\n", .{ at.line, at.column });
+        }
+        if (self.lineText(at.line)) |raw| {
+            const text = std.mem.trimEnd(u8, raw, "\r");
+            const start_in_line = alignToCodePoint(text, @min(@as(usize, at.column -| 1), text.len));
+            var width: usize = 1;
+            if (d.end_offset > d.start_offset) {
+                const mapped_start = self.sourceOffset(d.start_offset);
+                const mapped_end = self.sourceOffset(d.end_offset);
+                if (mapped_end > mapped_start) {
+                    const end_in_line = @min(start_in_line + (mapped_end - mapped_start), text.len);
+                    width = @max(1, countCodePoints(text[start_in_line..end_in_line]));
+                }
+            }
+            try writer.print("   |\n", .{});
+            try writer.print("{d: >3} | {s}\n", .{ at.line, text });
+            try writer.print("   | ", .{});
+            var cursor: usize = 0;
+            while (cursor < start_in_line) {
+                const step = codePointLength(text, cursor);
+                try writer.writeByte(if (text[cursor] == '\t') '\t' else ' ');
+                cursor += step;
+            }
+            for (0..width) |_| try writer.writeByte('^');
+            try writer.writeByte('\n');
+        }
+        if (d.expected) |expected| try writer.print("   = expected: {s}\n", .{expected});
+        if (d.found) |found| try writer.print("   = found: '{s}'\n", .{found});
+        if (d.help) |help| try writer.print("   = help: {s}\n", .{help});
+        try writer.writeByte('\n');
     }
 
     /// The 1-based `number`th line of `text`, without its newline.
@@ -329,6 +373,47 @@ pub const SourceView = struct {
         return remaining[0..end];
     }
 };
+
+/// One diagnostic as `SourceView.writeDiagnostic` renders it.
+pub const HumanDiagnostic = struct {
+    /// The checker that reported it, with a trailing space (`type `), or empty.
+    scope: []const u8 = "",
+    /// `error`, `warning`, or `advisory`.
+    severity: []const u8,
+    code: ?[]const u8 = null,
+    message: []const u8,
+    /// 1-based position in the parsed text, before translation.
+    line: u32,
+    column: u32,
+    /// Half-open byte span in the parsed text. Equal values mean a point.
+    start_offset: u32 = 0,
+    end_offset: u32 = 0,
+    /// What the parser expected and what it found, for a parse error.
+    expected: ?[]const u8 = null,
+    found: ?[]const u8 = null,
+    help: ?[]const u8 = null,
+};
+
+/// Byte length of the UTF-8 sequence that starts at `text[index]`, clamped to
+/// the text. A byte that starts no valid sequence counts as one.
+fn codePointLength(text: []const u8, index: usize) usize {
+    const length = std.unicode.utf8ByteSequenceLength(text[index]) catch return 1;
+    return @min(@as(usize, length), text.len - index);
+}
+
+/// Move `index` back to the first byte of the sequence that holds it.
+fn alignToCodePoint(text: []const u8, index: usize) usize {
+    var at = index;
+    while (at > 0 and at < text.len and text[at] & 0xC0 == 0x80) at -= 1;
+    return at;
+}
+
+fn countCodePoints(text: []const u8) usize {
+    var count: usize = 0;
+    var cursor: usize = 0;
+    while (cursor < text.len) : (count += 1) cursor += codePointLength(text, cursor);
+    return count;
+}
 
 /// Byte offset of a 1-based line and column, clamped to the end of `text`.
 fn offsetOfPosition(text: []const u8, line: u32, column: u32) u32 {
@@ -5103,4 +5188,125 @@ test "a backslash before a newline inside a string still counts the line" {
         try std.testing.expectEqual(case.line, diag.?.line);
         try std.testing.expectEqual(case.column, diag.?.column);
     }
+}
+
+fn renderForTest(view: SourceView, d: HumanDiagnostic) ![]u8 {
+    var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    errdefer aw.deinit();
+    try view.writeDiagnostic(d, &aw.writer);
+    return aw.toOwnedSlice();
+}
+
+test "writeDiagnostic names the code and file and underlines the span" {
+    const source = "let a = 1;\nlet b = oops + 2;\n";
+    const start = std.mem.indexOf(u8, source, "oops").?;
+    var view = SourceView.of(source);
+    view.name = "demo.ts";
+    const text = try renderForTest(view, .{
+        .scope = "type ",
+        .severity = "error",
+        .code = "ZTS105",
+        .message = "bad operand",
+        .line = 2,
+        .column = 9,
+        .start_offset = @intCast(start),
+        .end_offset = @intCast(start + 4),
+        .help = "use a number",
+    });
+    defer std.testing.allocator.free(text);
+    try std.testing.expectEqualStrings(
+        "type error[ZTS105]: bad operand\n" ++
+            "  --> demo.ts:2:9\n" ++
+            "   |\n" ++
+            "  2 | let b = oops + 2;\n" ++
+            "   |         ^^^^\n" ++
+            "   = help: use a number\n\n",
+        text,
+    );
+}
+
+test "writeDiagnostic keeps the underline aligned on a multi-byte line" {
+    // "héllo" holds a two-byte character and "✓" a three-byte one, so the
+    // byte column of `oops` is larger than the number of characters before it.
+    const source = "const s = \"héllo ✓\"; oops;\n";
+    const start = std.mem.indexOf(u8, source, "oops").?;
+    const text = try renderForTest(SourceView.of(source), .{
+        .severity = "error",
+        .message = "m",
+        .line = 1,
+        .column = @intCast(start + 1),
+        .start_offset = @intCast(start),
+        .end_offset = @intCast(start + 4),
+    });
+    defer std.testing.allocator.free(text);
+    // 21 characters precede `oops`.
+    try std.testing.expect(std.mem.indexOf(u8, text, "   | " ++ " " ** 21 ++ "^^^^\n") != null);
+}
+
+test "writeDiagnostic counts a multi-byte span in characters" {
+    const source = "x = \"日本語\";\n";
+    const start = std.mem.indexOf(u8, source, "日").?;
+    const text = try renderForTest(SourceView.of(source), .{
+        .severity = "error",
+        .message = "m",
+        .line = 1,
+        .column = @intCast(start + 1),
+        .start_offset = @intCast(start),
+        .end_offset = @intCast(start + 9),
+    });
+    defer std.testing.allocator.free(text);
+    try std.testing.expect(std.mem.indexOf(u8, text, "   | " ++ " " ** 5 ++ "^^^\n") != null);
+}
+
+test "writeDiagnostic clamps a span that crosses a line end" {
+    const source = "abcdef\nghijkl\n";
+    const text = try renderForTest(SourceView.of(source), .{
+        .severity = "error",
+        .message = "m",
+        .line = 1,
+        .column = 4,
+        .start_offset = 3,
+        .end_offset = 11,
+    });
+    defer std.testing.allocator.free(text);
+    try std.testing.expect(std.mem.indexOf(u8, text, "   | " ++ " " ** 3 ++ "^^^\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "^^^^") == null);
+}
+
+test "writeDiagnostic draws one caret for a zero-width span" {
+    const source = "abcdef\n";
+    const text = try renderForTest(SourceView.of(source), .{
+        .severity = "warning",
+        .message = "m",
+        .line = 1,
+        .column = 3,
+        .start_offset = 2,
+        .end_offset = 2,
+    });
+    defer std.testing.allocator.free(text);
+    try std.testing.expect(std.mem.indexOf(u8, text, "   | " ++ " " ** 2 ++ "^\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "^^") == null);
+}
+
+test "writeDiagnostic draws a caret for a position past the line end" {
+    const text = try renderForTest(SourceView.of("ab\n"), .{
+        .severity = "error",
+        .message = "m",
+        .line = 1,
+        .column = 40,
+    });
+    defer std.testing.allocator.free(text);
+    try std.testing.expect(std.mem.indexOf(u8, text, "   | " ++ " " ** 2 ++ "^\n") != null);
+}
+
+test "writeDiagnostic with no source line still names the position" {
+    const text = try renderForTest(SourceView.of(""), .{
+        .severity = "error",
+        .code = "ZTS999",
+        .message = "m",
+        .line = 3,
+        .column = 2,
+    });
+    defer std.testing.allocator.free(text);
+    try std.testing.expectEqualStrings("error[ZTS999]: m\n  --> 3:2\n\n", text);
 }

@@ -16,6 +16,7 @@
 
 const std = @import("std");
 const stripper = @import("zts-engine").stripper;
+const diagnostic_catalog = @import("diagnostic_catalog.zig");
 const source_frontend = @import("zts-engine").source_frontend;
 const ir = @import("zts-engine").parser.ir;
 const object = @import("zts-engine").object;
@@ -918,10 +919,17 @@ pub const FlowChecker = struct {
     pub fn formatDiagnostics(self: *const FlowChecker, source: stripper.SourceView, writer: anytype) !void {
         for (self.diagnostics.items) |diag| {
             const loc = self.ir_view.getLoc(diag.node) orelse continue;
-            try writer.print("{s}: {s}\n", .{ diag.severity.label(), diag.message });
-            try source.writeLocation(loc.line, loc.column, writer);
-            if (diag.help) |help| try writer.print("   = help: {s}\n", .{help});
-            try writer.writeByte('\n');
+            const span = loc.span();
+            try source.writeDiagnostic(.{
+                .severity = diag.severity.label(),
+                .code = diagnostic_catalog.flowCode(diag.kind),
+                .message = diag.message,
+                .line = loc.line,
+                .column = loc.column,
+                .start_offset = span.start,
+                .end_offset = span.end,
+                .help = diag.help,
+            }, writer);
         }
     }
 

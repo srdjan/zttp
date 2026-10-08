@@ -128,7 +128,15 @@ pub const PreparedSource = struct {
         return if (self.strip_result) |result| result.diagnostics else &.{};
     }
 
+    /// The view a diagnostic is rendered against. It carries the path the
+    /// author gave, so a rendered diagnostic names its file.
     pub fn sourceView(self: *const PreparedSource) stripper.SourceView {
+        var view = self.untitledSourceView();
+        view.name = self.path;
+        return view;
+    }
+
+    fn untitledSourceView(self: *const PreparedSource) stripper.SourceView {
         if (self.lower_result) |*lowered| {
             return stripper.SourceView.transformed(
                 self.original_source,

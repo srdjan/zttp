@@ -16,6 +16,7 @@
 
 const std = @import("std");
 const stripper = @import("zts-engine").stripper;
+const diagnostic_catalog = @import("diagnostic_catalog.zig");
 const ir = @import("zts-engine").parser.ir;
 const json_utils = @import("zts-base").json_utils;
 const object = @import("zts-engine").object;
@@ -303,10 +304,18 @@ pub const TypeChecker = struct {
     pub fn formatDiagnostics(self: *const TypeChecker, source: stripper.SourceView, writer: anytype) !void {
         for (self.diagnostics.items) |diag| {
             const loc = self.ir_view.getLoc(diag.node) orelse continue;
-            try writer.print("type {s}: {s}\n", .{ diag.severity.label(), diag.message });
-            try source.writeLocation(loc.line, loc.column, writer);
-            if (diag.help) |help| try writer.print("   = help: {s}\n", .{help});
-            try writer.writeByte('\n');
+            const span = loc.span();
+            try source.writeDiagnostic(.{
+                .scope = "type ",
+                .severity = diag.severity.label(),
+                .code = diagnostic_catalog.typeCode(diag.kind),
+                .message = diag.message,
+                .line = loc.line,
+                .column = loc.column,
+                .start_offset = span.start,
+                .end_offset = span.end,
+                .help = diag.help,
+            }, writer);
         }
     }
 

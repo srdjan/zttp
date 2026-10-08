@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const stripper = @import("zts-engine").stripper;
+const diagnostic_catalog = @import("diagnostic_catalog.zig");
 const ir = @import("zts-engine").parser.ir;
 const object = @import("zts-engine").object;
 const context = @import("zts-engine").context;
@@ -288,10 +289,18 @@ pub const StrictChecker = struct {
     pub fn formatDiagnostics(self: *const StrictChecker, source: stripper.SourceView, writer: anytype) !void {
         for (self.diagnostics.items) |diag| {
             const loc = self.ir_view.getLoc(diag.node) orelse continue;
-            try writer.print("strict {s}: {s}\n", .{ diag.severity.label(), diag.message });
-            try source.writeLocation(loc.line, loc.column, writer);
-            if (diag.help) |help| try writer.print("   = help: {s}\n", .{help});
-            try writer.writeByte('\n');
+            const span = loc.span();
+            try source.writeDiagnostic(.{
+                .scope = "strict ",
+                .severity = diag.severity.label(),
+                .code = diagnostic_catalog.strictCode(diag.kind),
+                .message = diag.message,
+                .line = loc.line,
+                .column = loc.column,
+                .start_offset = span.start,
+                .end_offset = span.end,
+                .help = diag.help,
+            }, writer);
         }
     }
 

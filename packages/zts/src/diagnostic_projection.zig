@@ -14,6 +14,8 @@ const strict_checker = @import("strict_checker.zig");
 const type_checker = @import("type_checker.zig");
 const RepairIntent = @import("repair_intent.zig").RepairIntent;
 const SourceLocation = @import("zts-engine").parser.SourceLocation;
+const ParseError = @import("zts-engine").parser.ParseError;
+const SourceView = @import("zts-engine").stripper.SourceView;
 
 pub const Source = enum {
     boolean,
@@ -138,6 +140,31 @@ pub fn projectFlowWitness(diagnostic: anytype, ir_view: anytype) ?FlowWitness {
         .constraints = constraints,
         .io_calls = io_calls,
     };
+}
+
+/// Render one parse error for a human through the same renderer the checkers
+/// use: the ZTS code, `file:line:column`, the source line, and an underline
+/// under the token the parser stopped at. `view` is the prepared source's
+/// `sourceView()`, so the position is the author's file and not the stripped
+/// text that was parsed.
+pub fn writeParseError(view: SourceView, parse_error: ParseError, writer: anytype) !void {
+    const span = parse_error.location.span();
+    try view.writeDiagnostic(.{
+        .severity = "error",
+        .code = diagnostic_catalog.parserCode(parse_error.kind),
+        .message = parse_error.message,
+        .line = parse_error.location.line,
+        .column = parse_error.location.column,
+        .start_offset = span.start,
+        .end_offset = span.end,
+        .expected = parse_error.expected,
+        .found = parse_error.token_text,
+    }, writer);
+}
+
+/// Render every parse error in `errors`, in the order the parser recorded them.
+pub fn writeParseErrors(view: SourceView, errors: []const ParseError, writer: anytype) !void {
+    for (errors) |parse_error| try writeParseError(view, parse_error, writer);
 }
 
 fn booleanCode(kind: bool_checker.DiagnosticKind) []const u8 {

@@ -75,6 +75,42 @@ fn debugPrint(comptime fmt: []const u8, args: anytype) void {
 /// Print a TypeScript strip failure with `file:line:column` and a remediation
 /// message when the stripper supplied a structured diagnostic, falling back to
 /// the bare error name when it did not (OOM and other location-free failures).
+/// Render parse errors for a person: the ZTS code, `file:line:column`, the
+/// source line, and an underline. Positions are translated out of the stripped
+/// text into the file the author wrote. Caller owns the result.
+fn renderParseErrors(
+    allocator: std.mem.Allocator,
+    view: zts.SourceView,
+    errors: []const zts.ParseError,
+) ![]u8 {
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    errdefer aw.deinit();
+    try zts.DiagnosticProjection.writeParseErrors(view, errors, &aw.writer);
+    return aw.toOwnedSlice();
+}
+
+/// Print `renderParseErrors` to stderr. A rendering failure falls back to the
+/// position and message, so a parse failure is never reported as nothing.
+fn printParseErrors(
+    allocator: std.mem.Allocator,
+    view: zts.SourceView,
+    errors: []const zts.ParseError,
+) void {
+    if (renderParseErrors(allocator, view, errors)) |text| {
+        defer allocator.free(text);
+        debugPrint("{s}", .{text});
+    } else |_| {
+        for (errors) |parse_error| {
+            debugPrint("{s}:{d}:{d}: {s}\n", .{
+                view.name orelse "<source>",
+                parse_error.location.line,
+                parse_error.location.column,
+                parse_error.message,
+            });
+        }
+    }
+}
+
 fn debugPrintStripError(path: []const u8, err: anyerror, diag: ?zts.StripDiagnostic) void {
     if (diag) |d| {
         debugPrint("{s}:{d}:{d}: {s}\n", .{ path, d.line, d.column, d.kind.message() });
@@ -1535,14 +1571,7 @@ fn runCheckOnPreparedSource(
                 result.json_diagnostics.append(allocator, json_diag.fromParseError(parse_error, handler_path)) catch {};
             }
         } else if (!builtin.is_test) {
-            for (errors) |parse_error| {
-                debugPrint("{s}:{}:{}: {s}\n", .{
-                    handler_path,
-                    parse_error.location.line,
-                    parse_error.location.column,
-                    parse_error.message,
-                });
-            }
+            printParseErrors(allocator, diag_view, errors);
         }
         result.parse_errors = @intCast(errors.len);
         return result;
@@ -2000,15 +2029,7 @@ pub fn runGenTests(
     defer js_parser.deinit();
     js_parser.setAtomTable(&atoms);
     const root = js_parser.parse() catch {
-        const errors = js_parser.errors.getErrors();
-        for (errors) |parse_error| {
-            debugPrint("{s}:{}:{}: {s}\n", .{
-                handler_path,
-                parse_error.location.line,
-                parse_error.location.column,
-                parse_error.message,
-            });
-        }
+        printParseErrors(allocator, prepared.sourceView(), js_parser.errors.getErrors());
         return error.ParseError;
     };
 
@@ -2168,17 +2189,7 @@ pub fn compileHandler(
 
     const root = js_parser.parse() catch |err| {
         // Print parse errors
-        const errors = js_parser.errors.getErrors();
-        if (errors.len > 0) {
-            for (errors) |parse_error| {
-                debugPrint("Parse error at {s}:{}:{}: {s}\n", .{
-                    filename,
-                    parse_error.location.line,
-                    parse_error.location.column,
-                    parse_error.message,
-                });
-            }
-        }
+        printParseErrors(allocator, diag_view, js_parser.errors.getErrors());
         return err;
     };
 
@@ -7529,4 +7540,47 @@ test "router public checks prove clean routes and fail closed on unresolved disp
             return error.UnresolvedRoutePropertyProven;
         }
     }
+}
+
+fn parseFailureText(allocator: std.mem.Allocator, source: []const u8, path: []const u8) ![]u8 {
+    var prepared = try zts.PreparedSource.init(allocator, source, path, .{});
+    defer prepared.deinit();
+    var atoms = zts.AtomTable.init(allocator);
+    defer atoms.deinit();
+    var js_parser = try zts.parser.JsParser.init(allocator, prepared.parserInput());
+    defer js_parser.deinit();
+    js_parser.setAtomTable(&atoms);
+    if (js_parser.parse()) |_| return error.TestExpectedParseFailure else |_| {}
+    return renderParseErrors(allocator, prepared.sourceView(), js_parser.errors.getErrors());
+}
+
+test "parse failure text names the code, file, line, and underline" {
+    // These are the paths that printed `file:line:col: message` alone:
+    // `check`, `gen-tests`, and compile all render through printParseErrors.
+    const allocator = std.testing.allocator;
+    const text = try parseFailureText(allocator, "const a = 1;\nconst b = while;\n", "demo.ts");
+    defer allocator.free(text);
+    try std.testing.expect(std.mem.indexOf(u8, text, "error[ZTS") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "  --> demo.ts:2:") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "  2 | const b = while;\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "^") != null);
+}
+
+test "parse failure text underlines the unsupported keyword and keeps its suggestion" {
+    const allocator = std.testing.allocator;
+    const text = try parseFailureText(allocator, "let n = 0;\nwhile (n < 3) { n = n + 1; }\n", "loop.ts");
+    defer allocator.free(text);
+    try std.testing.expect(std.mem.indexOf(u8, text, "error[ZTS001]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "  --> loop.ts:2:1\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "  2 | while (n < 3) { n = n + 1; }\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "   | ^^^^^\n") != null);
+}
+
+test "parse failure text counts characters on a multi-byte line" {
+    const allocator = std.testing.allocator;
+    const text = try parseFailureText(allocator, "const s = \"é✓\"; while (s) {}\n", "wide.ts");
+    defer allocator.free(text);
+    // Sixteen characters precede `while`, though the line holds twenty bytes
+    // before it.
+    try std.testing.expect(std.mem.indexOf(u8, text, "   | " ++ " " ** 16 ++ "^^^^^\n") != null);
 }

@@ -16,6 +16,7 @@
 
 const std = @import("std");
 const stripper = @import("zts-engine").stripper;
+const diagnostic_catalog = @import("diagnostic_catalog.zig");
 const ir = @import("zts-engine").parser.ir;
 const object = @import("zts-engine").object;
 const context = @import("zts-engine").context;
@@ -576,10 +577,18 @@ pub const HandlerVerifier = struct {
     pub fn formatDiagnostics(self: *const HandlerVerifier, source: stripper.SourceView, writer: anytype) !void {
         for (self.diagnostics.items) |diag| {
             const loc = self.ir_view.getLoc(diag.node) orelse continue;
-            try writer.print("verify {s}: {s}\n", .{ diag.severity.label(), diag.message });
-            try source.writeLocation(loc.line, loc.column, writer);
-            if (diag.help) |help| try writer.print("   = help: {s}\n", .{help});
-            try writer.writeByte('\n');
+            const span = loc.span();
+            try source.writeDiagnostic(.{
+                .scope = "verify ",
+                .severity = diag.severity.label(),
+                .code = diagnostic_catalog.verifierCode(diag.kind),
+                .message = diag.message,
+                .line = loc.line,
+                .column = loc.column,
+                .start_offset = span.start,
+                .end_offset = span.end,
+                .help = diag.help,
+            }, writer);
         }
     }
 
@@ -1754,7 +1763,7 @@ test "diagnostic formatting" {
     try verifier.formatDiagnostics(stripper.SourceView.of(source), &aw.writer);
     output_buf = aw.toArrayList();
     try std.testing.expect(output_buf.items.len > 0);
-    try std.testing.expect(std.mem.indexOf(u8, output_buf.items, "verify error") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output_buf.items, "verify error[ZTS302]") != null);
 }
 
 test "HandlerVerifier fails closed when a diagnostic cannot allocate" {

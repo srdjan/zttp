@@ -236,6 +236,9 @@ pub const ComptimeEnv = stripper.ComptimeEnv;
 /// position to a human or to a repair needs this, not the stripped text.
 pub const SourceView = stripper.SourceView;
 pub const SourcePosition = stripper.Position;
+/// One syntax error the parser recorded. `DiagnosticProjection.writeParseErrors`
+/// renders a list of them for a human.
+pub const ParseError = parser.ParseError;
 pub const strip = stripper.strip;
 pub const SourceKind = engine.source_frontend.SourceKind;
 pub const PrepareSourceError = engine.source_frontend.PrepareError;
