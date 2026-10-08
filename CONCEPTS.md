@@ -215,7 +215,12 @@ Contractivity is what makes recursion admissible rather than an infinite type: t
 ### Type-test pattern
 A `match` arm that selects on a value's kind rather than on its contents, covering the closed set of core value kinds.
 
-Each test lowers to the corresponding admitted Narrowing test, so a type test adds no evidence the compiler could not already re-derive, and it narrows the scrutinee for its arm the same way. Together with literal patterns it is what lets a heterogeneous union be taken apart exhaustively without a catch-all arm, which a closed union is required to do without.
+Each test lowers to the corresponding admitted Narrowing test, so a type test adds no evidence the compiler could not already re-derive, and it narrows the scrutinee for its arm the same way. Together with literal patterns it is what lets a heterogeneous union be taken apart exhaustively without a catch-all arm, which a closed union is required to do without. A type test exists only at the top level of an arm; below it, a type-test name in a renamed field or an array element is refused rather than read as a Pattern binding, because a binding by that name would match every value. The shorthand form, which names a field that is literally called by that name, stays a binding.
+
+### Record pattern
+A `match` pattern that matches a value only when the value is a record and each of its fields satisfies the pattern's field tests.
+
+The record check comes first, at every depth, so a pattern with no field tests still refuses a string, an array, or a missing value. A field holds a literal discriminant test, a Pattern binding, a field `_`, which tests only that the field is present, or a nested record or array pattern with the same rules one level down. A binding tests nothing, so a field the value lacks still matches a binding. Exhaustiveness is decided on these same rules, which is why the runtime and the coverage check must agree on each of them.
 
 ### Pattern binding
 A `match` record-pattern field that names the field instead of testing it, introducing an arm-scoped constant of that field's narrowed type.
