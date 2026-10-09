@@ -365,25 +365,22 @@ pub const BoolChecker = struct {
             },
 
             .function_decl => {
-                const func = self.ir_view.getFunction(node) orelse return;
+                // A function_decl holds var_decl data: the binding and the
+                // function expression as `init`. Read it through the decl
+                // accessors, never `getFunction`/`getBinding` on the decl.
+                const decl = self.ir_view.getVarDecl(node) orelse return;
                 // Track function return type for named declarations.
                 // Use the binding's scope+slot as the key, not the raw name atom.
                 // Two functions in different scopes with the same name share the same
                 // name_atom but have different (scope_id, slot) pairs.
                 const ret_type = self.inferFunctionReturnType(node);
                 if (ret_type != .unknown) {
-                    if (self.ir_view.getBinding(node)) |binding| {
-                        const key = packBindingKey(binding.scope_id, binding.slot);
-                        self.fn_return_types.put(self.allocator, key, ret_type) catch self.markAllocationFailure();
-                        self.const_types.put(self.allocator, key, .function) catch self.markAllocationFailure();
-                    } else if (func.name_atom != 0) {
-                        // Fallback: top-level declarations with no binding info use name atom.
-                        const key = @as(u32, func.name_atom);
-                        self.fn_return_types.put(self.allocator, key, ret_type) catch self.markAllocationFailure();
-                        self.const_types.put(self.allocator, key, .function) catch self.markAllocationFailure();
-                    }
+                    const key = bindingKey(decl.binding);
+                    self.fn_return_types.put(self.allocator, key, ret_type) catch self.markAllocationFailure();
+                    self.const_types.put(self.allocator, key, .function) catch self.markAllocationFailure();
                 }
-                self.walkStmt(func.body);
+                // The body is not walked here: boolean checks inside a declared
+                // function are not enforced yet.
             },
 
             .function_expr, .arrow_function => {
@@ -751,7 +748,10 @@ pub const BoolChecker = struct {
         const tag = self.ir_view.getTag(node) orelse return .unknown;
         if (tag != .arrow_function and tag != .function_expr and tag != .function_decl) return .unknown;
 
-        const func = self.ir_view.getFunction(node) orelse return .unknown;
+        const func = (if (tag == .function_decl)
+            self.ir_view.getFunctionOfDecl(node)
+        else
+            self.ir_view.getFunction(node)) orelse return .unknown;
         if (func.body == null_node) return .unknown;
 
         const body_tag = self.ir_view.getTag(func.body) orelse return .unknown;
@@ -1777,6 +1777,24 @@ test "sound: block function with mixed return types fails closed" {
         \\  return 0;
         \\};
         \\if (mixed(1)) { let y = 1; }
+    , 1);
+}
+
+test "sound: declared function returning boolean passes in if" {
+    try checkSource(
+        \\function ok(x) {
+        \\  return x > 0;
+        \\}
+        \\if (ok(1)) { let y = 1; }
+    , 0);
+}
+
+test "sound: declared function returning number fails in if" {
+    try checkSource(
+        \\function double(n) {
+        \\  return n * 2;
+        \\}
+        \\if (double(5)) { let x = 1; }
     , 1);
 }
 

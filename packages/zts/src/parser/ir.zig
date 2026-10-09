@@ -1919,8 +1919,12 @@ pub const IrView = struct {
         };
     }
 
-    /// Get function expression data
+    /// Get function expression data of a `function_expr` or `arrow_function`.
+    /// A `function_decl` holds `var_decl` data (a binding and the function
+    /// expression as `init`), not function data, so this returns null for it
+    /// on both implementations. Read a declaration with `getFunctionOfDecl`.
     pub fn getFunction(self: IrView, idx: NodeIndex) ?Node.FunctionExpr {
+        if (self.getTag(idx) == .function_decl) return null;
         return switch (self.impl) {
             .node_list => |nl| if (nl.get(idx)) |node| node.data.function else null,
             .ir_store => |ir| blk: {
@@ -1940,6 +1944,14 @@ pub const IrView = struct {
                 };
             },
         };
+    }
+
+    /// Get the function data of a `function_decl`, read from the `init` of
+    /// its `var_decl` data. Returns null for any other node tag.
+    pub fn getFunctionOfDecl(self: IrView, idx: NodeIndex) ?Node.FunctionExpr {
+        if (self.getTag(idx) != .function_decl) return null;
+        const decl = self.getVarDecl(idx) orelse return null;
+        return self.getFunction(decl.init);
     }
 
     // ============ Statement Accessors ============
@@ -2371,6 +2383,76 @@ test "IrView IRStore basic operations" {
     // Test validity
     try std.testing.expect(view.isValid(int_idx));
     try std.testing.expect(!view.isValid(null_node));
+}
+
+/// A `function_decl` holds `var_decl` data: a binding and the function
+/// expression as its `init`. `getFunction` must not read it as a function.
+fn buildDeclFixture(comptime Store: type, store: *Store) !struct { decl: NodeIndex, func: NodeIndex, body: NodeIndex } {
+    const loc = SourceLocation{ .line = 1, .column = 1, .offset = 0 };
+    const body = try store.add(.{ .tag = .block, .loc = loc, .data = .{ .block = .{
+        .stmts_start = 0,
+        .stmts_count = 0,
+        .scope_id = null_scope,
+    } } });
+    const func = try store.add(.{ .tag = .function_expr, .loc = loc, .data = .{ .function = .{
+        .scope_id = 3,
+        .name_atom = 9,
+        .params_start = 0,
+        .params_count = 0,
+        .body = body,
+        .flags = .{},
+    } } });
+    const decl = try store.add(.{ .tag = .function_decl, .loc = loc, .data = .{ .var_decl = .{
+        .binding = .{ .scope_id = 1, .slot = 2, .name_atom = 9, .kind = .local },
+        .init = func,
+        .kind = .let,
+    } } });
+    // A second function after the declaration: on the IRStore the misread
+    // of the declaration then finds enough extra slots to return garbage.
+    _ = try store.add(.{ .tag = .function_expr, .loc = loc, .data = .{ .function = .{
+        .scope_id = 4,
+        .name_atom = 10,
+        .params_start = 0,
+        .params_count = 0,
+        .body = body,
+        .flags = .{},
+    } } });
+    return .{ .decl = decl, .func = func, .body = body };
+}
+
+test "IrView reads a function_decl through getFunctionOfDecl on the IRStore" {
+    const allocator = std.testing.allocator;
+    var store = IRStore.init(allocator);
+    defer store.deinit();
+    var constants = ConstantPool.init(allocator);
+    defer constants.deinit();
+    const fx = try buildDeclFixture(IRStore, &store);
+    const view = IrView.fromIRStore(&store, &constants);
+
+    try std.testing.expect(view.getFunction(fx.decl) == null);
+    const func = view.getFunctionOfDecl(fx.decl) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(ScopeId, 3), func.scope_id);
+    try std.testing.expectEqual(fx.body, func.body);
+    try std.testing.expect(view.getFunction(fx.func) != null);
+    try std.testing.expect(view.getFunctionOfDecl(fx.func) == null);
+    try std.testing.expect(view.getFunctionOfDecl(fx.body) == null);
+}
+
+test "IrView reads a function_decl through getFunctionOfDecl on the NodeList" {
+    const allocator = std.testing.allocator;
+    var nodes = NodeList.init(allocator);
+    defer nodes.deinit();
+    var constants = ConstantPool.init(allocator);
+    defer constants.deinit();
+    const fx = try buildDeclFixture(NodeList, &nodes);
+    const view = IrView.fromNodeList(&nodes, &constants);
+
+    try std.testing.expect(view.getFunction(fx.decl) == null);
+    const func = view.getFunctionOfDecl(fx.decl) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(ScopeId, 3), func.scope_id);
+    try std.testing.expectEqual(fx.body, func.body);
+    try std.testing.expect(view.getFunction(fx.func) != null);
+    try std.testing.expect(view.getFunctionOfDecl(fx.func) == null);
 }
 
 test "ConstantPool refuses the 65537th distinct constant and keeps deduplicating" {

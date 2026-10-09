@@ -3171,7 +3171,10 @@ pub const ContractBuilder = struct {
                 return self.subtreeContains(prop.key, target) or self.subtreeContains(prop.value, target);
             },
             .function_decl, .function_expr, .arrow_function => {
-                const func = self.ir_view.getFunction(root) orelse return false;
+                const func = (if (tag == .function_decl)
+                    self.ir_view.getFunctionOfDecl(root)
+                else
+                    self.ir_view.getFunction(root)) orelse return false;
                 return self.subtreeContains(func.body, target);
             },
             .match_expr => {

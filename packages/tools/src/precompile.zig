@@ -5222,6 +5222,34 @@ test "holes: a binding with no annotation is reported as unknown" {
     try std.testing.expectEqualStrings("unknown", in_scope[0].type_name);
 }
 
+test "holes: a hole inside a nested function declaration is attributed to the enclosing function" {
+    const allocator = std.testing.allocator;
+    // A function declaration holds its function as the `init` of var_decl
+    // data. Reading it as function data left the hole with no owner.
+    const source =
+        \\function handler(req: Request): Response {
+        \\  const outer: string = "a";
+        \\  function inner(): string {
+        \\    const local: string = "b";
+        \\    return hole();
+        \\  }
+        \\  return Response.json({ v: inner() });
+        \\}
+    ;
+    var result = try runCheckOnlyFromSource(allocator, source, "holes.ts", null, true, null, false);
+    defer result.deinit(allocator);
+
+    const contract = if (result.contract) |*c| c else return error.MissingContract;
+    try std.testing.expectEqual(@as(usize, 1), contract.holes.items.len);
+    try std.testing.expectEqualStrings("handler", contract.holes.items[0].function);
+
+    const in_scope = contract.holes.items[0].in_scope.items;
+    try std.testing.expectEqual(@as(usize, 3), in_scope.len);
+    try std.testing.expectEqualStrings("req", in_scope[0].name);
+    try std.testing.expectEqualStrings("outer", in_scope[1].name);
+    try std.testing.expectEqualStrings("local", in_scope[2].name);
+}
+
 test "holes: a finished program reports none" {
     const allocator = std.testing.allocator;
     const source =

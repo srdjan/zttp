@@ -2927,7 +2927,15 @@ pub const FlowChecker = struct {
                 }
             },
 
-            .function_decl, .function_expr, .arrow_function => {
+            // A nested `function` declaration holds var_decl data, not function
+            // data. This arm used to read it with `getFunction`, which read
+            // unrelated slots. Walking the body as a statement would count its
+            // `return` as a return of the enclosing function (census probe
+            // x09_nested_decl_returns_secret_len becomes a false ZTS400), so
+            // the declaration is not walked here.
+            .function_decl => {},
+
+            .function_expr, .arrow_function => {
                 // While summarizing a callee, a nested function's returns are
                 // not the callee's returns; skip its body.
                 if (self.summary_returns != null) return;
