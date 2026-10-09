@@ -384,6 +384,15 @@ implement the units in section 5 order, one commit per unit. The boolean and
 arity plan follows. V, F8, and F10 join one batched DeepSeek re-record, which is
 paid, so the main session confirms with the owner before it starts.
 
+Answered 2026-10-09 during F8: E1, remove `deterministic`, `no_secret_leakage`,
+and `no_credential_leakage` from the capsules of
+`examples/workflow/dsl-orchestrator.ts`, `examples/workflow/entry-orchestrator.ts`,
+the workflow handler in `expert_codegen_eval.zig`, and the corpus case
+`saga_step_without_compensate.ts`, because a sub-handler's result comes from
+another execution (the reasoning of Q1). E2, add `saga` to `cross_call_reads`,
+so every export with an `.unknown` result is refused in tool and agent routes
+with no exception.
+
 **Q1 (`durable_approval.ts` and `examples/durable/approval.ts`).** F2 makes
 the `.unknown` label of `waitSignal`, read through a closure, reach the
 response, so both lose `deterministic`, `idempotent`, and
