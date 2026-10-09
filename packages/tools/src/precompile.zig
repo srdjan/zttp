@@ -1725,6 +1725,9 @@ fn runCheckOnPreparedSource(
         },
     );
     defer resolved.deinit();
+    // One message per node: a boolean or strict diagnostic under a node that
+    // has a type error repeats it.
+    resolved.dropRepeatsOfTypeErrors();
     result.stages_run.insert(.boolean);
 
     {
@@ -1747,10 +1750,11 @@ fn runCheckOnPreparedSource(
                 if (!builtin.is_test and buf.items.len > 0) debugPrint("{s}", .{buf.items});
             }
         }
-        if (result.bool_errors > 0) {
-            return result;
+        // No return on errors: the type and strict stages already ran inside
+        // `resolve`, and an error in one must not hide the others.
+        if (result.bool_errors == 0) {
+            result.bool_specializations = resolved.bool_checker.node_types.count();
         }
-        result.bool_specializations = resolved.bool_checker.node_types.count();
     }
 
     if (type_env_storage.envPtr() != null) {
@@ -1772,9 +1776,6 @@ fn runCheckOnPreparedSource(
                 buf = aw.toArrayList();
                 if (!builtin.is_test and buf.items.len > 0) debugPrint("{s}", .{buf.items});
             }
-        }
-        if (result.type_errors > 0) {
-            return result;
         }
     }
 
@@ -1814,9 +1815,12 @@ fn runCheckOnPreparedSource(
                 if (!builtin.is_test and buf.items.len > 0) debugPrint("{s}", .{buf.items});
             }
         }
-        if (result.strict_errors > 0) {
-            return result;
-        }
+    }
+
+    // All three computed stages are reported above. Any error in them stops
+    // the check before the verifier and flow stages, as before.
+    if (result.bool_errors > 0 or result.type_errors > 0 or result.strict_errors > 0) {
+        return result;
     }
 
     if (skip_contract) return result;
@@ -5602,6 +5606,84 @@ test "zts check --types path rejects exported handler local mismatch" {
 
     try std.testing.expectEqual(@as(u32, 1), result.type_errors);
     try std.testing.expect(result.totalErrors() >= 1);
+}
+
+test "check reports a boolean error and a type error on different nodes" {
+    // The type stage and the boolean stage each find a different mistake. The
+    // check used to stop at the first stage with errors and show one of them.
+    const source =
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const n: number = 1;
+        \\  const m: number = n + "y";
+        \\  if (5) {
+        \\    return Response.text("a");
+        \\  }
+        \\  return Response.text(String(m));
+        \\}
+    ;
+    var result = try runCheckOnlyFromSource(std.testing.allocator, source, "two-stages.ts", null, true, null, false);
+    defer result.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(u32, 1), result.bool_errors);
+    try std.testing.expectEqual(@as(u32, 1), result.type_errors);
+    try std.testing.expectEqual(@as(usize, 2), result.json_diagnostics.items.len);
+    try std.testing.expectEqualStrings("ZTS100", result.json_diagnostics.items[0].code);
+    try std.testing.expectEqualStrings("ZTS105", result.json_diagnostics.items[1].code);
+}
+
+test "check reports one message for a condition that is a refused operator" {
+    // `n + "y"` is the type error and also the condition. The boolean checker
+    // would add ZTS100 for the same expression.
+    const source =
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const n: number = 1;
+        \\  if (n + "y") {
+        \\    return Response.text("a");
+        \\  }
+        \\  return Response.text("b");
+        \\}
+    ;
+    var result = try runCheckOnlyFromSource(std.testing.allocator, source, "one-node.ts", null, true, null, false);
+    defer result.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(u32, 0), result.bool_errors);
+    try std.testing.expectEqual(@as(u32, 1), result.type_errors);
+    try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
+    try std.testing.expectEqualStrings("ZTS105", result.json_diagnostics.items[0].code);
+}
+
+test "check reports a strict error beside a type error" {
+    // An unannotated handler is ZTS601, and the refused sum is ZTS105.
+    const source =
+        \\function handler(req: Request) {
+        \\  const n: number = 1;
+        \\  const m: number = n + "y";
+        \\  return Response.text(String(m));
+        \\}
+    ;
+    var result = try runCheckOnlyFromSource(std.testing.allocator, source, "strict-beside.ts", null, true, null, false);
+    defer result.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(u32, 1), result.type_errors);
+    try std.testing.expectEqual(@as(u32, 1), result.strict_errors);
+    try std.testing.expectEqual(@as(usize, 2), result.json_diagnostics.items.len);
+}
+
+test "check still stops before the verifier when a computed stage has an error" {
+    const source =
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const n: number = 1;
+        \\  if (n + "y") {
+        \\    return Response.text("a");
+        \\  }
+        \\  return Response.text("b");
+        \\}
+    ;
+    var result = try runCheckOnlyFromSource(std.testing.allocator, source, "stops.ts", null, true, null, false);
+    defer result.deinit(std.testing.allocator);
+
+    try std.testing.expect(result.totalErrors() > 0);
+    try std.testing.expect(!result.verify_ran);
 }
 
 test "runCheckOnlyFromSource accepts annotated TSX handler after JSX block" {

@@ -1,2 +1,2 @@
-stages: strip,parse,imports,boolean
+stages: strip,parse,imports,boolean,types,strict
 {"code":"ZTS106","severity":"error","message":"'boolean' operand in '+' operator","file":"check/bad/bool_add_on_boolean.ts","line":2,"column":13,"suggestion":"use explicit conversion: (b ? 1 : 0) for numeric addition, or [String(b)].join(\"\") for text","repair_intent":null}

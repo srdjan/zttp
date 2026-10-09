@@ -1,2 +1,2 @@
-stages: strip,parse,imports,boolean,types
+stages: strip,parse,imports,boolean,types,strict
 {"code":"ZTS200","severity":"error","message":"type '\"a\"[]' is not assignable to type 'number[]'","file":"check/bad/array_element_type_mismatch.ts","line":3,"column":5,"suggestion":null,"repair_intent":null}

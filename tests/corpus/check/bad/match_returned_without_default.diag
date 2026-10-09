@@ -1,3 +1,3 @@
-stages: strip,parse,imports,boolean,types
+stages: strip,parse,imports,boolean,types,strict
 {"code":"ZTS205","severity":"warning","message":"match expression is not provably exhaustive","file":"check/bad/match_returned_without_default.ts","line":3,"column":12,"suggestion":"missing case: default. The matched type has values that no arm lists, so add a 'default:' arm.","repair_intent":null}
 {"code":"ZTS204","severity":"error","message":"return type does not match declared return type","file":"check/bad/match_returned_without_default.ts","line":3,"column":5,"suggestion":"the enclosing function's declared return type is what this value must match; when it comes back from a virtual-module call, wrap it rather than returning it directly","repair_intent":null}

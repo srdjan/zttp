@@ -169,6 +169,45 @@ pub const ResolvedModule = struct {
         return error_count;
     }
 
+    /// Remove each boolean and strict diagnostic whose node is, or lies under, a
+    /// node that already has a type error. The type error says what is wrong
+    /// with that expression, and a second message about the same expression or
+    /// about a part of it only repeats it. The check still fails on the type
+    /// error, so no refusal is lost; the removed message returns once the type
+    /// error is fixed, if it still applies. `resolve` keeps these diagnostics,
+    /// because the containment tests above read them there: only a caller that
+    /// reports to a person calls this.
+    pub fn dropRepeatsOfTypeErrors(self: *ResolvedModule) void {
+        const tc = if (self.type_checker) |*checker| checker else return;
+        var has_error = false;
+        for (tc.getDiagnostics()) |diagnostic| {
+            if (diagnostic.severity == .err) has_error = true;
+        }
+        if (!has_error) return;
+
+        const Covered = struct {
+            view: IrView,
+            type_diagnostics: []const type_checker_mod.Diagnostic,
+
+            fn covers(self_: @This(), node: NodeIndex) bool {
+                if (node == ir_mod.null_node) return false;
+                for (self_.type_diagnostics) |diagnostic| {
+                    if (diagnostic.severity != .err) continue;
+                    if (self_.view.subtreeContains(diagnostic.node, node)) return true;
+                }
+                return false;
+            }
+        };
+        const covered: Covered = .{
+            .view = self.parsed.ir_view,
+            .type_diagnostics = tc.getDiagnostics(),
+        };
+        self.bool_error_count = self.bool_checker.dropDiagnostics(covered, Covered.covers);
+        if (self.strict_checker) |*sc| {
+            self.strict_error_count = sc.dropDiagnostics(covered, Covered.covers);
+        }
+    }
+
     pub fn formatBoolDiagnostics(
         self: *const ResolvedModule,
         source: stripper_mod.SourceView,
@@ -1538,6 +1577,78 @@ test "a refused payload is a dynamic response schema in the contract, not an inf
             defer contract.deinit(session.allocator);
             const route = contract.api.routes.items[0];
             try testing.expect(route.responses.items[0].schema == .inline_json);
+        }
+    }.run);
+}
+
+// ---------------------------------------------------------------------------
+// One message per node when `check` reports every computed stage
+// ---------------------------------------------------------------------------
+
+test "dropRepeatsOfTypeErrors removes a boolean diagnostic on the node a type error names" {
+    try withSession(testing.allocator, "const n: number = 1;\nif (n + \"y\") { const k = 1; }", struct {
+        fn run(session: Session) anyerror!void {
+            const resolved = session.resolved;
+            // Both stages report the same expression before the drop.
+            try testing.expectEqual(@as(usize, 1), resolved.typeDiagnostics().len);
+            try testing.expectEqual(@as(u32, 1), resolved.bool_error_count);
+            resolved.dropRepeatsOfTypeErrors();
+            try testing.expectEqual(@as(usize, 1), resolved.typeDiagnostics().len);
+            try testing.expectEqual(@as(usize, 0), resolved.boolDiagnostics().len);
+            try testing.expectEqual(@as(u32, 0), resolved.bool_error_count);
+        }
+    }.run);
+}
+
+test "dropRepeatsOfTypeErrors keeps a boolean diagnostic on a different node" {
+    const source =
+        \\const n: number = 1;
+        \\const m: number = n + "y";
+        \\if (5) { const k = 1; }
+    ;
+    try withSession(testing.allocator, source, struct {
+        fn run(session: Session) anyerror!void {
+            const resolved = session.resolved;
+            resolved.dropRepeatsOfTypeErrors();
+            try testing.expectEqual(@as(usize, 1), resolved.typeDiagnostics().len);
+            try testing.expectEqual(@as(u32, 1), resolved.bool_error_count);
+        }
+    }.run);
+}
+
+test "dropRepeatsOfTypeErrors removes a strict diagnostic below a type error and keeps one beside it" {
+    // The first call has too many arguments (a type error on the call node), and
+    // its second argument is a partly annotated arrow (ZTS601 below that node).
+    // The second statement holds the same arrow outside any type error.
+    const source =
+        \\function one(a: number): number {
+        \\  return a;
+        \\}
+        \\function handler(req: Request): Response {
+        \\  const x: number = one(1, (a: number, b) => a);
+        \\  const y = (a: number, b) => a;
+        \\  return Response.text(String(x));
+        \\}
+    ;
+    try withSession(testing.allocator, source, struct {
+        fn run(session: Session) anyerror!void {
+            const resolved = session.resolved;
+            try testing.expect(resolved.typeErrorCount() > 0);
+            const before = countKind(resolved.strictDiagnostics(), strict_checker_mod.DiagnosticKind.missing_public_annotation);
+            resolved.dropRepeatsOfTypeErrors();
+            const after = countKind(resolved.strictDiagnostics(), strict_checker_mod.DiagnosticKind.missing_public_annotation);
+            try testing.expect(before > after);
+            try testing.expect(after > 0);
+        }
+    }.run);
+}
+
+test "dropRepeatsOfTypeErrors does nothing without a type error" {
+    try withSession(testing.allocator, "const n: number = 1;\nif (5) { const k = 1; }", struct {
+        fn run(session: Session) anyerror!void {
+            const resolved = session.resolved;
+            resolved.dropRepeatsOfTypeErrors();
+            try testing.expectEqual(@as(u32, 1), resolved.bool_error_count);
         }
     }.run);
 }

@@ -1,2 +1,2 @@
-stages: strip,parse,imports,boolean
+stages: strip,parse,imports,boolean,types,strict
 {"code":"ZTS100","severity":"error","message":"boolean context requires a value of type boolean","file":"check/bad/bool_condition_in_function_declaration.ts","line":3,"column":9,"suggestion":"compare the value explicitly so the expression has type boolean","repair_intent":null}

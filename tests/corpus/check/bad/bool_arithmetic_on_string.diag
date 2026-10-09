@@ -1,2 +1,2 @@
-stages: strip,parse,imports,boolean
+stages: strip,parse,imports,boolean,types,strict
 {"code":"ZTS104","severity":"error","message":"'string' operand in '-' operator; arithmetic requires numbers","file":"check/bad/bool_arithmetic_on_string.ts","line":3,"column":14,"suggestion":"use parseInt() or parseFloat() to convert","repair_intent":null}

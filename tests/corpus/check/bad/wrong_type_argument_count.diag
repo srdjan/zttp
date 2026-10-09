@@ -1,2 +1,2 @@
-stages: strip,parse,imports,boolean,types
+stages: strip,parse,imports,boolean,types,strict
 {"code":"ZTS210","severity":"error","message":"wrong number of type arguments: expected 1, got 2","file":"check/bad/wrong_type_argument_count.ts","line":7,"column":39,"suggestion":"Give one type argument for each declared type parameter.","repair_intent":null}

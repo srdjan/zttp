@@ -1,2 +1,2 @@
-stages: strip,parse,imports,boolean,types
+stages: strip,parse,imports,boolean,types,strict
 {"code":"ZTS201","severity":"error","message":"property does not exist on type","file":"check/bad/record_unknown_property_read.ts","line":6,"column":16,"suggestion":null,"repair_intent":null}

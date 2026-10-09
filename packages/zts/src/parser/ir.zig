@@ -1672,6 +1672,113 @@ pub const IrView = struct {
         }
     }
 
+    /// Whether `target` is `root` or lies below it. Descends through statements
+    /// and expressions, including the bodies of nested functions. A tag this
+    /// descent does not name is treated as a leaf, so the answer is `false` for a
+    /// target inside it: callers that suppress a message on a positive answer
+    /// fail toward showing the message.
+    pub fn subtreeContains(self: IrView, root: NodeIndex, target: NodeIndex) bool {
+        if (root == null_node) return false;
+        if (root == target) return true;
+        const tag = self.getTag(root) orelse return false;
+        switch (tag) {
+            .program, .block => {
+                const block = self.getBlock(root) orelse return false;
+                for (0..block.stmts_count) |i| {
+                    if (self.subtreeContains(self.getListIndex(block.stmts_start, @intCast(i)), target)) return true;
+                }
+            },
+            .return_stmt, .expr_stmt => {
+                if (self.getOptValue(root)) |value| return self.subtreeContains(value, target);
+            },
+            .var_decl => {
+                const decl = self.getVarDecl(root) orelse return false;
+                return self.subtreeContains(decl.init, target);
+            },
+            .if_stmt => {
+                const stmt = self.getIfStmt(root) orelse return false;
+                return self.subtreeContains(stmt.condition, target) or
+                    self.subtreeContains(stmt.then_branch, target) or
+                    self.subtreeContains(stmt.else_branch, target);
+            },
+            .for_of_stmt => {
+                const stmt = self.getForIter(root) orelse return false;
+                return self.subtreeContains(stmt.iterable, target) or
+                    self.subtreeContains(stmt.body, target);
+            },
+            .binary_op => {
+                const expr = self.getBinary(root) orelse return false;
+                return self.subtreeContains(expr.left, target) or self.subtreeContains(expr.right, target);
+            },
+            .unary_op, .spread => {
+                const expr = self.getUnary(root) orelse return false;
+                return self.subtreeContains(expr.operand, target);
+            },
+            .ternary => {
+                const expr = self.getTernary(root) orelse return false;
+                return self.subtreeContains(expr.condition, target) or
+                    self.subtreeContains(expr.then_branch, target) or
+                    self.subtreeContains(expr.else_branch, target);
+            },
+            .call, .method_call => {
+                const call = self.getCall(root) orelse return false;
+                if (self.subtreeContains(call.callee, target)) return true;
+                for (0..call.args_count) |i| {
+                    if (self.subtreeContains(self.getListIndex(call.args_start, @intCast(i)), target)) return true;
+                }
+            },
+            .member_access, .optional_chain, .computed_access => {
+                const member = self.getMember(root) orelse return false;
+                return self.subtreeContains(member.object, target) or self.subtreeContains(member.computed, target);
+            },
+            .assignment => {
+                const assign = self.getAssignment(root) orelse return false;
+                return self.subtreeContains(assign.target, target) or self.subtreeContains(assign.value, target);
+            },
+            .array_literal => {
+                const arr = self.getArray(root) orelse return false;
+                for (0..arr.elements_count) |i| {
+                    if (self.subtreeContains(self.getListIndex(arr.elements_start, @intCast(i)), target)) return true;
+                }
+            },
+            .object_literal => {
+                const obj = self.getObject(root) orelse return false;
+                for (0..obj.properties_count) |i| {
+                    const prop_idx = self.getListIndex(obj.properties_start, @intCast(i));
+                    if (self.subtreeContains(prop_idx, target)) return true;
+                }
+            },
+            .object_property => {
+                const prop = self.getProperty(root) orelse return false;
+                return self.subtreeContains(prop.key, target) or self.subtreeContains(prop.value, target);
+            },
+            .function_decl, .function_expr, .arrow_function => {
+                const func = (if (tag == .function_decl)
+                    self.getFunctionOfDecl(root)
+                else
+                    self.getFunction(root)) orelse return false;
+                return self.subtreeContains(func.body, target);
+            },
+            .match_expr => {
+                const match = self.getMatchExpr(root) orelse return false;
+                if (self.subtreeContains(match.discriminant, target)) return true;
+                for (0..match.arms_count) |i| {
+                    if (self.subtreeContains(self.getListIndex(match.arms_start, @intCast(i)), target)) return true;
+                }
+            },
+            .match_arm => {
+                const arm = self.getMatchArm(root) orelse return false;
+                return self.subtreeContains(arm.pattern, target) or self.subtreeContains(arm.body, target);
+            },
+            // exhaustive: falling through reaches `return false` - the target was
+            // not found in this subtree. The arms above cover every node with
+            // children to search; the rest are leaves that can only be the
+            // target itself, which the identity check at the top already made.
+            else => {},
+        }
+        return false;
+    }
+
     /// Get node source location
     pub fn getLoc(self: IrView, idx: NodeIndex) ?SourceLocation {
         return switch (self.impl) {

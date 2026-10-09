@@ -1,0 +1,2 @@
+stages: strip,parse,imports,boolean,types,strict
+{"code":"ZTS202","severity":"error","message":"wrong number of arguments: expected 1, got 2","file":"check/bad/type_error_covers_strict_error_below.ts","line":7,"column":26,"suggestion":null,"repair_intent":null}

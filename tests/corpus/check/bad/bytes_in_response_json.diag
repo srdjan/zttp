@@ -1,2 +1,2 @@
-stages: strip,parse,imports,boolean,types
+stages: strip,parse,imports,boolean,types,strict
 {"code":"ZTS213","severity":"error","message":"Response.json cannot encode this payload: Bytes is not a JSON value","file":"check/bad/bytes_in_response_json.ts","line":3,"column":26,"suggestion":"JSON carries scalars, arrays, tuples, records, and string-keyed Dict values. Encode a Bytes with encodeBase64, and call a function rather than sending it.","repair_intent":null}

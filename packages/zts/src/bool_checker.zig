@@ -223,6 +223,28 @@ pub const BoolChecker = struct {
         return error_count;
     }
 
+    /// Remove every diagnostic whose node `drop` accepts, and free what each
+    /// owns. Returns the error count of the diagnostics that remain.
+    pub fn dropDiagnostics(
+        self: *BoolChecker,
+        ctx: anytype,
+        comptime drop: fn (@TypeOf(ctx), NodeIndex) bool,
+    ) u32 {
+        var kept: usize = 0;
+        var error_count: u32 = 0;
+        for (self.diagnostics.items) |diag| {
+            if (drop(ctx, diag.node)) {
+                if (diag.allocated) self.allocator.free(diag.message);
+                continue;
+            }
+            if (diag.severity == .err) error_count += 1;
+            self.diagnostics.items[kept] = diag;
+            kept += 1;
+        }
+        self.diagnostics.shrinkRetainingCapacity(kept);
+        return error_count;
+    }
+
     pub fn getDiagnostics(self: *const BoolChecker) []const Diagnostic {
         return self.diagnostics.items;
     }
