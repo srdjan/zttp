@@ -569,12 +569,56 @@ fn buildTrace(
                         );
                     } else if (fc.total_failable == 0) {
                         trace.summary = "No failable I/O sites in this handler yet.";
+                    } else if (fc.covered == fc.total_failable and fc.warnings == 0 and !paths_exhaustive) {
+                        // Every counted site has a failure path, but the path
+                        // set is a summary (a loop walked once, recursion, a
+                        // limit), so a site on a path never emitted is unseen.
+                        trace.summary = try std.fmt.allocPrint(
+                            arena,
+                            "All {d} counted failable I/O site(s) have a failure path, but the enumerated paths are not exhaustive, so the property is not proven.",
+                            .{fc.total_failable},
+                        );
                     } else {
                         trace.summary = try std.fmt.allocPrint(
                             arena,
                             "{d} of {d} failable I/O site(s) have no explicit failure path.",
                             .{ fc.total_failable -| fc.covered, fc.total_failable },
                         );
+                    }
+                    // A failable call on no enumerated path is neither counted
+                    // nor covered, so it blocks the property whatever the
+                    // counts say. Name the first such call.
+                    if (!holds and fc.unseen_calls > 0) {
+                        const counted: []const u8 = if (fc.total_failable == 0)
+                            ""
+                        else if (fc.covered == fc.total_failable)
+                            try std.fmt.allocPrint(
+                                arena,
+                                "All {d} counted failable I/O site(s) have a failure path. ",
+                                .{fc.total_failable},
+                            )
+                        else
+                            try std.fmt.allocPrint(arena, "{s} ", .{trace.summary});
+                        if (contract.property_provenance.causeFor("fault_covered")) |cause| {
+                            trace.summary = try std.fmt.allocPrint(
+                                arena,
+                                "{s}{d} failable call(s) sit on no enumerated path, so no failure path covers them. The first is `{s}`.",
+                                .{ counted, fc.unseen_calls, cause.snippet },
+                            );
+                            trace.counterexample = .{
+                                .kind = .offending_node,
+                                .line = cause.line,
+                                .column = cause.column,
+                                .snippet = cause.snippet,
+                                .fix = "bind the call to a const in the handler body and branch on its failure before the value is used.",
+                            };
+                        } else {
+                            trace.summary = try std.fmt.allocPrint(
+                                arena,
+                                "{s}{d} failable call(s) sit on no enumerated path, so no failure path covers them.",
+                                .{ counted, fc.unseen_calls },
+                            );
+                        }
                     }
                 }
             } else if (!holds and eql(name, "cost_bounded")) {

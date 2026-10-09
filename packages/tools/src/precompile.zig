@@ -1386,6 +1386,9 @@ const PathAnalysis = struct {
     behaviors: std.ArrayList(handler_contract.BehaviorPath),
     fault_coverage: handler_contract.FaultCoverageInfo,
     fault_clean: bool,
+    /// Where the first unseen failable call sits, when there is one. The
+    /// snippet is the export name, a static string from the module binding.
+    fault_unseen_cause: ?handler_contract.PropertyCause,
 
     fn deinit(self: *PathAnalysis, allocator: std.mem.Allocator) void {
         if (self.cost_envelope) |*envelope| envelope.deinit(allocator);
@@ -1421,6 +1424,7 @@ fn analyzeHandlerPaths(
         .behaviors = .empty,
         .fault_coverage = .{ .total_failable = 0, .covered = 0, .warnings = 0 },
         .fault_clean = false,
+        .fault_unseen_cause = null,
     };
     errdefer analysis.deinit(output_allocator);
 
@@ -1443,12 +1447,22 @@ fn analyzeHandlerPaths(
     defer checker.deinit();
     try checker.analyze();
     const report = checker.getReport();
+    const unseen = generator.unseenFailableCalls();
     analysis.fault_coverage = .{
         .total_failable = report.total_failable,
         .covered = report.covered,
         .warnings = report.warning_count,
+        .unseen_calls = @intCast(unseen.len),
     };
-    analysis.fault_clean = report.isClean() and generator.routeDispatchesResolved();
+    analysis.fault_clean = report.isClean() and generator.faultAnalysisComplete();
+    if (unseen.len > 0) {
+        const loc = ir_view.getLoc(unseen[0].node);
+        analysis.fault_unseen_cause = .{
+            .line = if (loc) |l| l.line else 0,
+            .column = if (loc) |l| l.column else 0,
+            .snippet = unseen[0].func,
+        };
+    }
     return analysis;
 }
 
@@ -2022,6 +2036,7 @@ fn runCheckOnPreparedSource(
                     props.cost_bounded = path_analysis.cost_bounded;
                     props.fault_covered = path_analysis.fault_clean;
                 }
+                c.property_provenance.fault_covered = path_analysis.fault_unseen_cause;
                 if (path_analysis.cost_envelope) |envelope| {
                     c.cost_envelope = envelope;
                     path_analysis.cost_envelope = null;
@@ -2785,10 +2800,10 @@ pub fn compileHandler(
             try fc.analyze();
             const fc_report = fc.getReport();
 
-            if (fc_report.total_failable > 0 or !gen.routeDispatchesResolved()) {
+            if (fc_report.total_failable > 0 or !gen.faultAnalysisComplete()) {
                 if (contract) |*c| {
                     if (c.properties) |*props| {
-                        props.fault_covered = fc_report.isClean() and gen.routeDispatchesResolved();
+                        props.fault_covered = fc_report.isClean() and gen.faultAnalysisComplete();
                     }
                 }
             }
@@ -2799,6 +2814,7 @@ pub fn compileHandler(
                         .total_failable = fc_report.total_failable,
                         .covered = fc_report.covered,
                         .warnings = fc_report.warning_count,
+                        .unseen_calls = @intCast(gen.unseenFailableCalls().len),
                     };
                 }
 

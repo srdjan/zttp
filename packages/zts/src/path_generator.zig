@@ -69,6 +69,10 @@ pub const IoStub = struct {
     func: []const u8,
     result_json: []const u8,
     call_site: NodeIndex = null_node,
+    /// True when the call is the left operand of `??` and its export returns an
+    /// optional. The fallback is the explicit failure path for the absent
+    /// value, so fault coverage counts the site as covered.
+    absent_handled: bool = false,
     /// Canonical arg signature (pipe-delimited), owned when non-null.
     /// See `handler_contract.PathIoCall.arg_signature` for the format.
     arg_signature: ?[]const u8 = null,
@@ -199,13 +203,26 @@ pub const PathGenerator = struct {
     route_dispatch_count: u32,
     /// Set when the handler does not return one routed response directly.
     route_composition_unmodeled: bool,
+    /// Calls to exports with a failure severity that no emitted path holds as
+    /// an I/O stub and that no `??` answers. Fault coverage can neither count
+    /// nor cover these, so it must not claim the handler is covered. Computed
+    /// at the end of `generate`.
+    unseen_failable_calls: std.ArrayList(UnseenCall),
 
     pub const MAX_PATHS = 1024;
+
+    /// A call to a failable export that the walk never recorded on a path.
+    pub const UnseenCall = struct {
+        node: NodeIndex,
+        module: []const u8,
+        func: []const u8,
+    };
 
     const FnMeta = struct {
         module: []const u8,
         func: []const u8,
         returns: mb.ReturnKind,
+        severity: mb.FailureSeverity,
     };
 
     const IoCall = struct {
@@ -219,6 +236,9 @@ pub const PathGenerator = struct {
         /// canonicalizer. null when the call was tracked through a wrapper
         /// (e.g. nullish-coalesce) and the original node is unavailable.
         call_node: ?NodeIndex,
+        /// The call is the left operand of `??` and returns an optional, so
+        /// the fallback answers its absent value.
+        absent_handled: bool = false,
     };
 
     const LoopFrame = struct {
@@ -291,6 +311,7 @@ pub const PathGenerator = struct {
             .unresolved_route_dispatch = false,
             .route_dispatch_count = 0,
             .route_composition_unmodeled = false,
+            .unseen_failable_calls = .empty,
         };
     }
 
@@ -321,6 +342,7 @@ pub const PathGenerator = struct {
             if (t.constraints.len > 0) self.allocator.free(t.constraints);
         }
         self.tests.deinit(self.allocator);
+        self.unseen_failable_calls.deinit(self.allocator);
     }
 
     /// Generate test cases for the given handler function.
@@ -347,6 +369,112 @@ pub const PathGenerator = struct {
             if (route_function == handler_func) continue;
             try self.generateRoot(route_function, true);
         }
+        try self.scanUnseenFailableCalls();
+    }
+
+    /// Find every call to a failable export that no emitted path holds as an
+    /// I/O stub. The walk records a call only when it is the initializer of a
+    /// `const`, or a bare statement, on a path that reaches a `return`. A call
+    /// in a nested function, a helper, an expression, an argument, a `match`
+    /// scrutinee, or a branch that does not return is never recorded, so
+    /// fault coverage would neither count nor cover it. This scan reads the
+    /// whole IR, so it does not depend on what the walk saw, and it names each
+    /// call the walk missed. A call that is the left operand of `??` on an
+    /// optional-returning export is answered by its fallback and is not listed.
+    fn scanUnseenFailableCalls(self: *PathGenerator) error{ OutOfMemory, InvalidIR }!void {
+        self.unseen_failable_calls.clearRetainingCapacity();
+
+        var seen: std.AutoHashMapUnmanaged(NodeIndex, void) = .empty;
+        defer seen.deinit(self.allocator);
+        for (self.tests.items) |test_case| {
+            for (test_case.io_stubs.items) |stub| {
+                if (stub.call_site == null_node) continue;
+                try seen.put(self.allocator, stub.call_site, {});
+            }
+        }
+
+        var absent_answered: std.AutoHashMapUnmanaged(NodeIndex, void) = .empty;
+        defer absent_answered.deinit(self.allocator);
+        for (0..self.ir_view.nodeCount()) |idx_usize| {
+            const idx: NodeIndex = @intCast(idx_usize);
+            if (self.ir_view.getTag(idx) != .binary_op) continue;
+            const bin = self.ir_view.getBinary(idx) orelse return error.InvalidIR;
+            if (bin.op == .nullish) try absent_answered.put(self.allocator, bin.left, {});
+        }
+
+        var callees: std.AutoHashMapUnmanaged(NodeIndex, void) = .empty;
+        defer callees.deinit(self.allocator);
+
+        for (0..self.ir_view.nodeCount()) |idx_usize| {
+            const idx: NodeIndex = @intCast(idx_usize);
+            const tag = self.ir_view.getTag(idx) orelse continue;
+            if (tag != .call and tag != .method_call) continue;
+            const call = self.ir_view.getCall(idx) orelse return error.InvalidIR;
+            try callees.put(self.allocator, call.callee, {});
+            const meta = self.getCalleeMeta(call.callee) orelse continue;
+            if (meta.severity == .none) continue;
+            if (seen.contains(idx)) continue;
+            if (isOptionalReturn(meta.returns) and absent_answered.contains(idx)) continue;
+            try self.unseen_failable_calls.append(self.allocator, .{
+                .node = idx,
+                .module = meta.module,
+                .func = meta.func,
+            });
+        }
+
+        // A failable import used as a value, not called: `const f = jwtVerify`,
+        // or `parallel([jwtVerify])`. The call it makes later has a callee the
+        // walk cannot resolve to the module, so no path records it. Imports are
+        // globals, so a local or a parameter never matches.
+        for (0..self.ir_view.nodeCount()) |idx_usize| {
+            const idx: NodeIndex = @intCast(idx_usize);
+            if (self.ir_view.getTag(idx) != .identifier) continue;
+            if (callees.contains(idx)) continue;
+            const binding = self.ir_view.getBinding(idx) orelse continue;
+            if (binding.kind != .global) continue;
+            const meta = self.module_fn_bindings.get(binding.slot) orelse continue;
+            if (meta.severity == .none) continue;
+            try self.unseen_failable_calls.append(self.allocator, .{
+                .node = idx,
+                .module = meta.module,
+                .func = meta.func,
+            });
+        }
+    }
+
+    fn isOptionalReturn(returns: mb.ReturnKind) bool {
+        return switch (returns) {
+            .optional_string, .optional_object, .optional_number => true,
+            .boolean,
+            .number,
+            .string,
+            .object,
+            .undefined,
+            .unknown,
+            .result,
+            .dict,
+            .bytes,
+            => false,
+        };
+    }
+
+    /// The failable calls the walk never recorded. See `scanUnseenFailableCalls`.
+    pub fn unseenFailableCalls(self: *const PathGenerator) []const UnseenCall {
+        return self.unseen_failable_calls.items;
+    }
+
+    /// Whether fault coverage may claim the handler is covered. The coverage
+    /// report counts only the calls the walk recorded, so it proves nothing
+    /// about a call the walk missed or about a path set that is a summary. This
+    /// is false when a failable call is on no path, when the path set is not
+    /// exhaustive (a summarized loop, recursion, truncation), and when a
+    /// `routerMatch` dispatch is unresolved. Callers combine it with
+    /// `FaultCoverageReport.isClean`, which still needs one failable site: a
+    /// handler with no site at all proves nothing either.
+    pub fn faultAnalysisComplete(self: *const PathGenerator) bool {
+        return self.routeDispatchesResolved() and
+            self.pathsExhaustive() and
+            self.unseen_failable_calls.items.len == 0;
     }
 
     fn generateRoot(self: *PathGenerator, function: NodeIndex, route_root: bool) !void {
@@ -794,6 +922,7 @@ pub const PathGenerator = struct {
                 .module = entry.binding.name,
                 .func = entry.func.name,
                 .returns = entry.func.returns,
+                .severity = entry.func.failure_severity,
             });
         }
     }
@@ -1218,6 +1347,17 @@ pub const PathGenerator = struct {
     // -------------------------------------------------------------------
 
     fn trackModuleCall(self: *PathGenerator, node: NodeIndex, binding_key: ?u32) error{OutOfMemory}!void {
+        return self.trackModuleCallUnder(node, binding_key, false);
+    }
+
+    /// `under_nullish` is true when `node` is the left operand of `??`. The
+    /// fallback then answers an absent value from an optional-returning export.
+    fn trackModuleCallUnder(
+        self: *PathGenerator,
+        node: NodeIndex,
+        binding_key: ?u32,
+        under_nullish: bool,
+    ) error{OutOfMemory}!void {
         const tag = self.ir_view.getTag(node) orelse return;
 
         if (tag == .call) {
@@ -1230,6 +1370,7 @@ pub const PathGenerator = struct {
                     .binding_key = binding_key,
                     .mult = self.currentMultiplicity(),
                     .call_node = node,
+                    .absent_handled = under_nullish and isOptionalReturn(meta.returns),
                 });
             }
             return;
@@ -1239,7 +1380,7 @@ pub const PathGenerator = struct {
         if (tag == .binary_op) {
             const bin = self.ir_view.getBinary(node) orelse return;
             if (bin.op == .nullish) {
-                try self.trackModuleCall(bin.left, binding_key);
+                try self.trackModuleCallUnder(bin.left, binding_key, true);
                 return;
             }
         }
@@ -1440,8 +1581,10 @@ pub const PathGenerator = struct {
         }
         var seq: u32 = 0;
 
-        // First pass: gather stub requirements from constraints
-        var stub_overrides = std.StringHashMapUnmanaged([]const u8).empty;
+        // First pass: gather stub requirements from constraints. An override is
+        // keyed by the call site, not the function name: a path that checks
+        // two calls to one function must stub each call by its own constraint.
+        var stub_overrides = std.AutoHashMapUnmanaged(NodeIndex, []const u8).empty;
         defer stub_overrides.deinit(self.allocator);
 
         for (self.constraints.items) |c| {
@@ -1449,24 +1592,24 @@ pub const PathGenerator = struct {
                 .req_method => |m| method = m,
                 .req_url => |u| url = u,
                 .stub_truthy => |info| {
-                    try stub_overrides.put(self.allocator, info.func, stubValueForType(info.returns, true));
+                    try stub_overrides.put(self.allocator, info.call_site, stubValueForType(info.returns, true));
                     if (std.mem.eql(u8, info.func, "parseBearer")) has_auth = true;
                 },
                 .stub_falsy => |info| {
-                    try stub_overrides.put(self.allocator, info.func, stubValueForType(info.returns, false));
+                    try stub_overrides.put(self.allocator, info.call_site, stubValueForType(info.returns, false));
                 },
                 .result_ok => |info| {
-                    try stub_overrides.put(self.allocator, info.func, "{\"ok\":true,\"value\":{}}");
+                    try stub_overrides.put(self.allocator, info.call_site, "{\"ok\":true,\"value\":{}}");
                 },
                 .result_not_ok => |info| {
-                    try stub_overrides.put(self.allocator, info.func, "{\"ok\":false,\"error\":\"test-error\"}");
+                    try stub_overrides.put(self.allocator, info.call_site, "{\"ok\":false,\"error\":\"test-error\"}");
                 },
             }
         }
 
         // Second pass: emit I/O stubs for tracked calls on this path
         for (self.io_seq.items) |io_call| {
-            const result_json = stub_overrides.get(io_call.func) orelse
+            const result_json = stub_overrides.get(io_call.call_node orelse null_node) orelse
                 stubValueForType(io_call.returns, true);
 
             {
@@ -1482,6 +1625,7 @@ pub const PathGenerator = struct {
                     .func = io_call.func,
                     .result_json = result_json,
                     .call_site = io_call.call_node orelse null_node,
+                    .absent_handled = io_call.absent_handled,
                     .arg_signature = arg_sig,
                 });
             }
@@ -2984,4 +3128,130 @@ test "this generator skips imports from unresolved modules" {
     try std.testing.expectEqual(@as(u32, 1), gen.module_fn_bindings.count());
     var it = gen.module_fn_bindings.iterator();
     try std.testing.expectEqualStrings("env", it.next().?.value_ptr.func);
+}
+
+test "a path that checks two calls to one function stubs each call by its own constraint" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { jwtVerify } from "zttp:auth";
+        \\function handler(req) {
+        \\  const a = jwtVerify("t1", "secret");
+        \\  if (!a.ok) return Response.text("a failed", { status: 401 });
+        \\  const b = jwtVerify("t2", "secret");
+        \\  if (!b.ok) return Response.text("b failed", { status: 403 });
+        \\  return Response.text("ok");
+        \\}
+    ;
+
+    var fixture = try generateFixture(allocator, source);
+    defer fixture.deinit();
+
+    const tests = fixture.generator.getTests();
+    try std.testing.expectEqual(@as(usize, 3), tests.len);
+
+    var checked_first_fail: usize = 0;
+    var checked_second_fail: usize = 0;
+    var checked_both_ok: usize = 0;
+    for (tests) |test_case| {
+        try std.testing.expect(test_case.io_stubs.items.len >= 1);
+        const first_ok = std.mem.indexOf(u8, test_case.io_stubs.items[0].result_json, "\"ok\":true") != null;
+        switch (test_case.expected_status) {
+            401 => {
+                // The first call fails. The second call is never reached.
+                try std.testing.expect(!first_ok);
+                checked_first_fail += 1;
+            },
+            403 => {
+                // The first call succeeds and only the second call fails.
+                try std.testing.expectEqual(@as(usize, 2), test_case.io_stubs.items.len);
+                try std.testing.expect(first_ok);
+                try std.testing.expect(std.mem.indexOf(u8, test_case.io_stubs.items[1].result_json, "\"ok\":false") != null);
+                checked_second_fail += 1;
+            },
+            200 => {
+                try std.testing.expectEqual(@as(usize, 2), test_case.io_stubs.items.len);
+                try std.testing.expect(first_ok);
+                try std.testing.expect(std.mem.indexOf(u8, test_case.io_stubs.items[1].result_json, "\"ok\":true") != null);
+                checked_both_ok += 1;
+            },
+            else => return error.UnexpectedStatus,
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 1), checked_first_fail);
+    try std.testing.expectEqual(@as(usize, 1), checked_second_fail);
+    try std.testing.expectEqual(@as(usize, 1), checked_both_ok);
+}
+
+test "the scan names a failable call the walk never recorded" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { jwtVerify } from "zttp:auth";
+        \\function handler(req) {
+        \\  return Response.text(jwtVerify("t", "secret").error);
+        \\}
+    ;
+
+    var fixture = try generateFixture(allocator, source);
+    defer fixture.deinit();
+
+    const unseen = fixture.generator.unseenFailableCalls();
+    try std.testing.expectEqual(@as(usize, 1), unseen.len);
+    try std.testing.expectEqualStrings("jwtVerify", unseen[0].func);
+    try std.testing.expectEqualStrings("auth", unseen[0].module);
+    try std.testing.expect(!fixture.generator.faultAnalysisComplete());
+}
+
+test "the scan lists nothing for a recorded call or a call answered by ??" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { jwtVerify } from "zttp:auth";
+        \\import { env } from "zttp:env";
+        \\function handler(req) {
+        \\  const a = jwtVerify("t", "secret");
+        \\  if (!a.ok) return Response.text("unauthorized", { status: 401 });
+        \\  return Response.text(env("NAME") ?? "anon");
+        \\}
+    ;
+
+    var fixture = try generateFixture(allocator, source);
+    defer fixture.deinit();
+
+    try std.testing.expectEqual(@as(usize, 0), fixture.generator.unseenFailableCalls().len);
+    try std.testing.expect(fixture.generator.faultAnalysisComplete());
+}
+
+test "a call to an export with no failure severity is never listed" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { sha256 } from "zttp:crypto";
+        \\function handler(req) {
+        \\  return Response.text(sha256("x"));
+        \\}
+    ;
+
+    var fixture = try generateFixture(allocator, source);
+    defer fixture.deinit();
+
+    try std.testing.expectEqual(@as(usize, 0), fixture.generator.unseenFailableCalls().len);
+}
+
+test "a summarized path set is not a complete fault analysis" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { jwtVerify } from "zttp:auth";
+        \\function handler(req) {
+        \\  for (const i of range(2)) {
+        \\    const a = jwtVerify("t", "secret");
+        \\    if (!a.ok) return Response.text("unauthorized", { status: 401 });
+        \\  }
+        \\  return Response.text("ok");
+        \\}
+    ;
+
+    var fixture = try generateFixture(allocator, source);
+    defer fixture.deinit();
+
+    try std.testing.expectEqual(@as(usize, 0), fixture.generator.unseenFailableCalls().len);
+    try std.testing.expect(!fixture.generator.pathsExhaustive());
+    try std.testing.expect(!fixture.generator.faultAnalysisComplete());
 }

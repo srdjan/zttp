@@ -597,9 +597,14 @@ pub const FaultCoverageInfo = struct {
     total_failable: u32,
     covered: u32,
     warnings: u32,
+    /// Failable calls the path walk never recorded on any path. Such a call is
+    /// neither counted nor covered, so one of them blocks `isCovered`. Not
+    /// serialized: a decoded contract reports zero, and the property bit the
+    /// build stamped is what a consumer reads.
+    unseen_calls: u32 = 0,
 
     pub fn isCovered(self: FaultCoverageInfo) bool {
-        return self.covered == self.total_failable and self.total_failable > 0;
+        return self.covered == self.total_failable and self.total_failable > 0 and self.unseen_calls == 0;
     }
 };
 
@@ -847,12 +852,16 @@ pub const PropertyCause = struct {
 /// proof HUD's regression line).
 pub const PropertyProvenance = struct {
     deterministic: ?PropertyCause = null,
+    /// The first failable call the path walk never recorded. The snippet is the
+    /// export name, a static string from the module binding.
+    fault_covered: ?PropertyCause = null,
 
     /// Single dispatch over the field set so the live HUD and the
     /// counterexample pipeline never drift on which provenance fields exist.
     /// Returns null for fields the verifier does not yet record causes for.
     pub fn causeFor(self: *const PropertyProvenance, field: []const u8) ?PropertyCause {
         if (std.mem.eql(u8, field, "deterministic")) return self.deterministic;
+        if (std.mem.eql(u8, field, "fault_covered")) return self.fault_covered;
         return null;
     }
 };

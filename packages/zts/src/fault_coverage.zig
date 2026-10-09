@@ -244,21 +244,26 @@ pub const FaultCoverageChecker = struct {
             // Determine external severity override for this test case's route
             const ext_override = self.lookupExternalOverride(test_case);
 
-            // Route-root paths are new inputs to this analysis. Seed every
-            // failable site on those paths, including calls whose result the
-            // route never branches on. A constraint below can prove that this
-            // exact site has a failure path. Another call to the same module
-            // function cannot lend it coverage. Handler-root behavior stays
-            // unchanged for sources that do not use routerMatch.
-            if (test_case.route_root) {
-                for (test_case.io_stubs.items) |stub| {
-                    _ = try self.getOrPutEntry(
-                        &seen_funcs,
-                        stub.module,
-                        stub.func,
-                        routedCallSiteId(test_case, stub.call_site, stub.seq),
-                        ext_override,
-                    );
+            // Seed every failable site on every emitted path, on the handler
+            // root as on route roots, including calls whose result the path
+            // never branches on. A constraint below can prove that this exact
+            // site has a failure path. Another call to the same module
+            // function cannot lend it coverage, so every entry is keyed by its
+            // call site.
+            for (test_case.io_stubs.items) |stub| {
+                const seeded = try self.getOrPutEntry(
+                    &seen_funcs,
+                    stub.module,
+                    stub.func,
+                    routedCallSiteId(test_case, stub.call_site, stub.seq),
+                    ext_override,
+                ) orelse continue;
+                // `export() ?? fallback`: the fallback is the explicit failure
+                // path for an absent value. The site is covered, and the
+                // path's status is not a failure status, so nothing is flagged.
+                if (stub.absent_handled) {
+                    seeded.has_failure_path = true;
+                    seeded.failure_status = test_case.expected_status;
                 }
             }
 
@@ -277,10 +282,7 @@ pub const FaultCoverageChecker = struct {
                     &seen_funcs,
                     info.module,
                     info.func,
-                    if (test_case.route_root)
-                        routedCallSiteId(test_case, info.call_site, 0)
-                    else
-                        0,
+                    routedCallSiteId(test_case, info.call_site, 0),
                     ext_override,
                 ) orelse continue;
 
@@ -525,6 +527,8 @@ fn lookupSeverity(module_name: []const u8, func_name: []const u8) mb.FailureSeve
 const SourceFaultCoverage = struct {
     clean: bool,
     total_failable: u32,
+    covered: u32,
+    unseen_calls: usize,
     paths_exhaustive: bool,
 };
 
@@ -549,8 +553,10 @@ fn analyzeSourceFaultCoverage(allocator: std.mem.Allocator, source: []const u8) 
     try checker.analyze();
     const report = checker.getReport();
     return .{
-        .clean = report.isClean() and generator.routeDispatchesResolved(),
+        .clean = report.isClean() and generator.faultAnalysisComplete(),
         .total_failable = report.total_failable,
+        .covered = report.covered,
+        .unseen_calls = generator.unseenFailableCalls().len,
         .paths_exhaustive = generator.pathsExhaustive(),
     };
 }
@@ -667,7 +673,7 @@ test "fault coverage fails closed when the handler discards a route response" {
     try std.testing.expect(!coverage.paths_exhaustive);
 }
 
-test "non-routed unbranched calls keep their prior fault coverage behavior" {
+test "an unbranched handler call is an uncovered site" {
     const source =
         \\import { jwtVerify } from "zttp:auth";
         \\function handler(req) {
@@ -677,7 +683,186 @@ test "non-routed unbranched calls keep their prior fault coverage behavior" {
     ;
 
     const coverage = try analyzeSourceFaultCoverage(std.testing.allocator, source);
-    try std.testing.expectEqual(@as(u32, 0), coverage.total_failable);
+    try std.testing.expectEqual(@as(u32, 1), coverage.total_failable);
+    try std.testing.expectEqual(@as(u32, 0), coverage.covered);
+    try std.testing.expect(!coverage.clean);
+}
+
+/// One probe of the handler root: a handler body and the verdict it must get.
+/// Every probe holds one checked `jwtVerify` beside a second failable call in
+/// one position, so a hidden position is the only difference between a probe
+/// and the `one checked call` control.
+const FaultProbe = struct {
+    name: []const u8,
+    source: []const u8,
+    clean: bool,
+};
+
+const probe_prefix =
+    \\import { jwtVerify } from "zttp:auth";
+    \\import { parallel } from "zttp:io";
+    \\import { env } from "zttp:env";
+    \\import { logInfo } from "zttp:log";
+    \\function wrap(r) {
+    \\  return r;
+    \\}
+    \\
+;
+
+const fault_probes = [_]FaultProbe{
+    // Controls: these hold before and after the second call is added.
+    .{ .name = "one checked call", .clean = true, .source = probe_prefix ++
+        \\function handler(req) {
+        \\  const a = jwtVerify("t1", "secret");
+        \\  if (!a.ok) return Response.text("unauthorized", { status: 401 });
+        \\  return Response.text("ok");
+        \\}
+    },
+    .{ .name = "two calls, both checked", .clean = true, .source = probe_prefix ++
+        \\function handler(req) {
+        \\  const a = jwtVerify("t1", "secret");
+        \\  if (!a.ok) return Response.text("unauthorized", { status: 401 });
+        \\  const b = jwtVerify("t2", "secret");
+        \\  if (!b.ok) return Response.text("forbidden", { status: 403 });
+        \\  return Response.text("ok");
+        \\}
+    },
+    .{ .name = "optional read answered by ??", .clean = true, .source = probe_prefix ++
+        \\function handler(req) {
+        \\  const a = jwtVerify("t1", "secret");
+        \\  if (!a.ok) return Response.text("unauthorized", { status: 401 });
+        \\  const name = env("NAME") ?? "anon";
+        \\  return Response.text(name);
+        \\}
+    },
+    // Wrong trues today: the second call is real and nothing counts it.
+    .{ .name = "second call unchecked (p8)", .clean = false, .source = probe_prefix ++
+        \\function handler(req) {
+        \\  const a = jwtVerify("t1", "secret");
+        \\  const b = jwtVerify("t2", "secret");
+        \\  if (!a.ok) return Response.text("unauthorized", { status: 401 });
+        \\  return Response.text("ok");
+        \\}
+    },
+    .{ .name = "second call in a nested function (f1)", .clean = false, .source = probe_prefix ++
+        \\function handler(req) {
+        \\  const a = jwtVerify("t1", "secret");
+        \\  if (!a.ok) return Response.text("unauthorized", { status: 401 });
+        \\  function check() {
+        \\    return jwtVerify("t2", "secret");
+        \\  }
+        \\  const rows = parallel([check]);
+        \\  return Response.json({ rows: rows });
+        \\}
+    },
+    .{ .name = "second call inline (f2)", .clean = false, .source = probe_prefix ++
+        \\function handler(req) {
+        \\  const a = jwtVerify("t1", "secret");
+        \\  if (!a.ok) return Response.text("unauthorized", { status: 401 });
+        \\  return Response.text(jwtVerify("t2", "secret").error);
+        \\}
+    },
+    .{ .name = "second call in a helper (f3)", .clean = false, .source = probe_prefix ++
+        \\function load() {
+        \\  const r = jwtVerify("t2", "secret");
+        \\  return r;
+        \\}
+        \\function handler(req) {
+        \\  const a = jwtVerify("t1", "secret");
+        \\  if (!a.ok) return Response.text("unauthorized", { status: 401 });
+        \\  const b = load();
+        \\  return Response.json({ b: b });
+        \\}
+    },
+    .{ .name = "second call as a match scrutinee (f6)", .clean = false, .source = probe_prefix ++
+        \\function handler(req) {
+        \\  const a = jwtVerify("t1", "secret");
+        \\  if (!a.ok) return Response.text("unauthorized", { status: 401 });
+        \\  return match (jwtVerify("t2", "secret").ok) {
+        \\    when true: Response.text("ok")
+        \\    when false: Response.text("forbidden", { status: 403 })
+        \\  };
+        \\}
+    },
+    .{ .name = "second call as an argument (f12)", .clean = false, .source = probe_prefix ++
+        \\function handler(req) {
+        \\  const a = jwtVerify("t1", "secret");
+        \\  if (!a.ok) return Response.text("unauthorized", { status: 401 });
+        \\  const b = wrap(jwtVerify("t2", "secret"));
+        \\  return Response.json({ b: b });
+        \\}
+    },
+    .{ .name = "second call in a branch that does not return (f14)", .clean = false, .source = probe_prefix ++
+        \\function handler(req) {
+        \\  const a = jwtVerify("t1", "secret");
+        \\  if (!a.ok) return Response.text("unauthorized", { status: 401 });
+        \\  if (req.method === "POST") {
+        \\    const b = jwtVerify("t2", "secret");
+        \\    logInfo(b.error, {});
+        \\  }
+        \\  return Response.text("ok");
+        \\}
+    },
+    .{ .name = "failable export held in a const and called later", .clean = false, .source = probe_prefix ++
+        \\function handler(req) {
+        \\  const a = jwtVerify("t1", "secret");
+        \\  if (!a.ok) return Response.text("unauthorized", { status: 401 });
+        \\  const verify = jwtVerify;
+        \\  const b = verify("t2", "secret");
+        \\  return Response.json({ b: b });
+        \\}
+    },
+    .{ .name = "failable export passed as a callback", .clean = false, .source = probe_prefix ++
+        \\function handler(req) {
+        \\  const a = jwtVerify("t1", "secret");
+        \\  if (!a.ok) return Response.text("unauthorized", { status: 401 });
+        \\  const rows = parallel([jwtVerify]);
+        \\  return Response.json({ rows: rows });
+        \\}
+    },
+    .{ .name = "checked call in a summarized loop (f7)", .clean = false, .source = probe_prefix ++
+        \\function handler(req) {
+        \\  for (const i of range(2)) {
+        \\    const a = jwtVerify("t1", "secret");
+        \\    if (!a.ok) return Response.text("unauthorized", { status: 401 });
+        \\  }
+        \\  return Response.text("ok");
+        \\}
+    },
+    // Already false today. U1 must not make these true.
+    .{ .name = "alias of a checked result (f4)", .clean = false, .source = probe_prefix ++
+        \\function handler(req) {
+        \\  const r = jwtVerify("t1", "secret");
+        \\  const r2 = r;
+        \\  if (!r2.ok) return Response.text("unauthorized", { status: 401 });
+        \\  return Response.text("ok");
+        \\}
+    },
+    .{ .name = "result never checked (p3)", .clean = false, .source = probe_prefix ++
+        \\function handler(req) {
+        \\  const a = jwtVerify("t1", "secret");
+        \\  return Response.text("ok");
+        \\}
+    },
+};
+
+test "a failable call in a position the walk cannot see blocks fault coverage" {
+    // The census must run every probe: a loop that skipped them would pass.
+    try std.testing.expectEqual(@as(usize, 15), fault_probes.len);
+    var held: usize = 0;
+    var blocked: usize = 0;
+    var mismatched: usize = 0;
+    for (fault_probes) |probe| {
+        const coverage = try analyzeSourceFaultCoverage(std.testing.allocator, probe.source);
+        if (probe.clean != coverage.clean) {
+            std.debug.print("fault probe '{s}': expected clean={}, got clean={}\n", .{ probe.name, probe.clean, coverage.clean });
+            mismatched += 1;
+        }
+        if (probe.clean) held += 1 else blocked += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 0), mismatched);
+    try std.testing.expectEqual(@as(usize, 3), held);
+    try std.testing.expectEqual(@as(usize, 12), blocked);
 }
 
 test "empty test list produces empty report" {
@@ -1055,4 +1240,70 @@ test "external severity with {id} matches :id route" {
     // External override should match despite :id vs {id} difference
     try std.testing.expectEqual(@as(u32, 1), report.warning_count);
     try std.testing.expectEqualStrings("Sensitive update", report.diagnostics[0].message);
+}
+
+test "a handler whose only failable call is unseen is not covered" {
+    // One failable call, on no emitted path. The report counts zero sites, so
+    // the report alone would say nothing. The verdict must still be false.
+    const source =
+        \\import { jwtVerify } from "zttp:auth";
+        \\function handler(req) {
+        \\  return Response.text(jwtVerify("t", "secret").error);
+        \\}
+    ;
+
+    const coverage = try analyzeSourceFaultCoverage(std.testing.allocator, source);
+    try std.testing.expectEqual(@as(u32, 0), coverage.total_failable);
+    try std.testing.expectEqual(@as(usize, 1), coverage.unseen_calls);
+    try std.testing.expect(!coverage.clean);
+}
+
+test "a handler root counts each call to one function as its own site" {
+    const source =
+        \\import { jwtVerify } from "zttp:auth";
+        \\function handler(req) {
+        \\  const a = jwtVerify("t1", "secret");
+        \\  if (!a.ok) return Response.text("unauthorized", { status: 401 });
+        \\  const b = jwtVerify("t2", "secret");
+        \\  if (!b.ok) return Response.text("forbidden", { status: 403 });
+        \\  return Response.text("ok");
+        \\}
+    ;
+
+    const coverage = try analyzeSourceFaultCoverage(std.testing.allocator, source);
+    try std.testing.expectEqual(@as(u32, 2), coverage.total_failable);
+    try std.testing.expectEqual(@as(u32, 2), coverage.covered);
+    try std.testing.expect(coverage.clean);
+}
+
+test "a ?? fallback on an optional export covers the site without a diagnostic" {
+    const source =
+        \\import { env } from "zttp:env";
+        \\function handler(req) {
+        \\  const name = env("NAME") ?? "anon";
+        \\  return Response.text(name);
+        \\}
+    ;
+
+    const coverage = try analyzeSourceFaultCoverage(std.testing.allocator, source);
+    try std.testing.expectEqual(@as(u32, 1), coverage.total_failable);
+    try std.testing.expectEqual(@as(u32, 1), coverage.covered);
+    try std.testing.expect(coverage.clean);
+}
+
+test "a ?? fallback does not cover a Result export" {
+    // `??` answers an absent value. A Result never is absent, so the fallback
+    // is not its failure path.
+    const source =
+        \\import { jwtVerify } from "zttp:auth";
+        \\function handler(req) {
+        \\  const a = jwtVerify("t", "secret") ?? "x";
+        \\  return Response.text("ok");
+        \\}
+    ;
+
+    const coverage = try analyzeSourceFaultCoverage(std.testing.allocator, source);
+    try std.testing.expectEqual(@as(u32, 1), coverage.total_failable);
+    try std.testing.expectEqual(@as(u32, 0), coverage.covered);
+    try std.testing.expect(!coverage.clean);
 }
