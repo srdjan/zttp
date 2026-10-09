@@ -334,8 +334,8 @@ sink. The rule row moves `policy_hash`, so F10 joins the batched re-record.
 F0 observed that `fetch(..., { body: mask(req.url, 4) })` proves
 `injection_safe`: `mask` drops the `user_input` label as well as the secret
 label, so unchecked request text reaches an egress call. Make `mask`
-declassify only `secret`, and keep `user_input` and every other label of its
-input. Add the census probe that F0 removed, expected refuse, and see it fail
+declassify only `secret` and `credential` (owner decision D2, 2026-10-08), and
+keep `user_input` and every other label of its input. Add the census probe that F0 removed, expected refuse, and see it fail
 first. Apply the AGENTS.md probe method: a declassifier must not launder a
 label it was not asked to discharge. If the binding change moves the
 binding catalog or `policy_hash`, F11 joins the batched re-record; otherwise
