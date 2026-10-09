@@ -1,6 +1,6 @@
 # Plan: flow-checker sinks in callees, captured values, and stores
 
-Status: accepted 2026-10-08, revision 2. Source: section 7 of the
+Status: complete 2026-10-09 (section 9), revision 2. Source: section 7 of the
 [boolean and arity plan](2026-10-08-boolean-and-arity-checks.md), decision
 P1 (a): this plan is written and fixed before that plan. Code references are
 to local `main` at `f63415a8`. The owner approved implementation on 2026-10-08 (section 6).
@@ -481,3 +481,43 @@ an egress sink; the history of `666b8a18`; route-function sink tests; the
 ZTS405 and ZTS406 meanings; the label each sanitizer control discharges; the
 metadata pins that V updates; F7's diagnostic ownership; `propertyTagForKind`
 for new kinds; and ZTS305 as a separate handler-verifier defect.
+
+## 9. Result
+
+Completed 2026-10-09. Every unit is on local `main`; nothing is pushed.
+
+- Census (`test-flow-census`): 776 probes, 776 match, 0 fail-open, 0
+  over-refusal, 0 weak, 0 no verdict. It started at 771 probes with 396
+  fail-open. `scripts/flow-census.allow` is empty of rows.
+- F0 to F7, F9, F11: sinks fire in callees, unresolved calls fail closed
+  (also when discarded, and for a method of a record a function returned),
+  recursion widens to a fixpoint, declarations overwrite labels, module-level
+  declarations and captured values carry labels, unvalidated HTML is a summary
+  fact, return-path and nested sinks are checked, credential reads follow any
+  request binding, imported helpers apply their sinks at each call site, the
+  promise names what it excludes, and `mask` declassifies only `secret` and
+  `credential` (D1, D2).
+- V, F8, F10: `flow_analyzer_version` 2 is in `policyHash`, so a certificate
+  from the old checker is refused; workflow results carry `.unknown` and
+  `saga` joined `cross_call_reads` (E1, E2); ZTS408 refuses a credential in an
+  egress body.
+- Fixes found during review, each with a census probe or test: dispatch
+  diagnostics dropped only for a walked root (`2020a992`); a discarded method
+  of a returned record fails closed (`40a8bee9`); a function passed by name to
+  an array method is walked (`0f696a6d`); an import lookup matches only the
+  import binding, which closed a parameter-slot collision (F7).
+- Correction: F1's "keep the structural walk" kept a walk that never ran
+  (see the note under F1).
+- Re-record: one DeepSeek run on 2026-10-09 (`f40395d8`), replay 19 of 19,
+  raw first-draft pass 12/19 (was 18/19). An offline analysis found no false
+  positive: six first-draft failures are model errors that the pre-plan binary
+  also refuses, and `parallel-secret` is B3's predicted refusal. ZTS400 left
+  the coverage baseline. Two report-only cohorts measured 15/19 and 13/19, each
+  reaching green in 19/19 (`docs/convergence.md`).
+- Final gate: `bash scripts/verify.sh` exit 0 on 2026-10-09 at `fa36edbd`.
+
+Follow-up (owner decision R3, 2026-10-09): `fault_covered` cannot be proven
+for a handler whose only I/O is a `fetch` to a fixed URL, because
+`fault_coverage.zig` counts that call as 0 failable sites. It predates this
+plan. It probably led the `egress-options` recording to add a made-up input
+validation, which failed its intent check. It needs its own research and plan.

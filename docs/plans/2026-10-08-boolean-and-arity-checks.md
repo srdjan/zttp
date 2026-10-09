@@ -1,6 +1,6 @@
 # Plan: boolean checks in function bodies and call arity
 
-Status: draft for owner approval, 2026-10-08, revision 2. Source: findings 2 and 10 of the
+Status: complete 2026-10-09 (section 10), revision 2. Source: findings 2 and 10 of the
 [Tier 1 plan](2026-10-07-tier1-test-and-diagnostic-discipline.md), section 8.
 Code references are to local `main` at `f4553b0a`. This plan does not
 authorize implementation.
@@ -390,3 +390,30 @@ flow sink, and the runtime serializes that payload
 (`runtime/src/durable_executor.zig:468`) with no encodability check in the
 binding, which A2 adds as a `param_types` entry if the binding vocabulary
 supports it.
+
+## 10. Result
+
+Completed 2026-10-09. Every unit is on local `main`; nothing is pushed.
+
+- B0 to B5: one accessor for `function` declarations; boolean contexts typed
+  during the walk, with `&&` and `||` guards; five false-positive sources
+  removed; `function` and `export function` bodies walked; every computed
+  check stage reported once per node; parameters typed for ZTS103, 104, 106,
+  and 107.
+- A0 to A3: signatures keyed by source offset (this closed a fail-open: an
+  unannotated function beside an annotated arrow on one line passed ZTS601);
+  ZTS202 refuses surplus arguments to source callees and to module exports;
+  `signalAt` declares its payload; the documents say so.
+- Example rewrites per P4 and P5, each with its capsule unchanged:
+  `parallel.ts`, `parallel-simple.ts`, `nominal-brand.ts`, `handler-full.tsx`,
+  `gateway-static.ts`.
+- Found after B3 by the full gate: five runtime test fixtures that the walk
+  now checks (`6964f0e1`, `fa36edbd`). Observed: the runtime load path builds a
+  type environment only for annotated source, so an unannotated handler reads
+  `fetch` and tool results as unknown and fails the boolean check at load,
+  while `zts check` refuses it earlier with ZTS601. Shipped handlers are
+  annotated; no example changed.
+- B0 corrected the flow-checker plan's F1 premise: the flow walk never
+  entered a nested `function` declaration.
+- Re-record (P2 (a)): shared with the flow-checker plan, see its section 9.
+- Final gate: `bash scripts/verify.sh` exit 0 on 2026-10-09 at `fa36edbd`.
