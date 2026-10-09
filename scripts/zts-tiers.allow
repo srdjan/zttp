@@ -216,6 +216,7 @@ zts-compiler semantics_check.zig
 zts-compiler semantics_corpus.zig
 zts-compiler semantics_render.zig
 zts-compiler semantics_smt.zig
+zts-compiler severity_census.zig
 zts-compiler source_identity.zig
 zts-compiler spec_discharge.zig
 zts-compiler sql_analysis.zig
