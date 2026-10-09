@@ -60,6 +60,22 @@ pub const Severity = enum {
     }
 };
 
+/// The version of the flow analyzer, hashed into `policyHash`.
+///
+/// The acceptance kernel takes `no_secret_leakage` and the other flow
+/// properties on the producer's word, and rule metadata does not move when the
+/// checker learns to prove less. Any change to what the flow checker can prove
+/// or refuse (a new sink path, a new label rule, a binding label change that
+/// alters a verdict) MUST bump this number. The bump moves `policy_hash`, so an
+/// artifact or a certificate built by an older checker no longer matches the
+/// policy and is rebuilt instead of trusted.
+///
+/// 1 is the implicit version before this constant existed: no flow version was
+/// hashed. 2 is the checker after sinks in callees, captured values, module
+/// constants, unresolved calls, recursion, cross-file helpers, and credential
+/// reads through a passed request were fixed.
+pub const flow_analyzer_version: u32 = 2;
+
 pub const DiagnosticKind = enum {
     secret_in_response, // {secret} data in Response body/headers
     credential_in_response, // {credential} data in Response body

@@ -861,6 +861,10 @@ pub fn policyHash() [64]u8 {
 }
 
 fn computePolicyHash() [64]u8 {
+    return computePolicyHashFor(flow_checker.flow_analyzer_version);
+}
+
+fn computePolicyHashFor(flow_version: u32) [64]u8 {
     var hasher = std.crypto.hash.sha2.Sha256.init(.{});
 
     for (&all_rules) |*rule| {
@@ -888,6 +892,15 @@ fn computePolicyHash() [64]u8 {
         hasher.update("\x01");
     }
 
+    // The flow analyzer version. Rule metadata does not move when the checker
+    // learns to prove less, so the version is hashed beside it. See
+    // `flow_checker.flow_analyzer_version` for when it must change.
+    var version_buf: [16]u8 = undefined;
+    const version_text = std.fmt.bufPrint(&version_buf, "{d}", .{flow_version}) catch unreachable;
+    hasher.update("flow-analyzer-version\x00");
+    hasher.update(version_text);
+    hasher.update("\x01");
+
     const digest = hasher.finalResult();
     return std.fmt.bytesToHex(digest, .lower);
 }
@@ -895,6 +908,13 @@ fn computePolicyHash() [64]u8 {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+test "policy hash covers the flow analyzer version" {
+    const current = computePolicyHashFor(flow_checker.flow_analyzer_version);
+    try std.testing.expectEqualStrings(&current, &policyHash());
+    const older = computePolicyHashFor(flow_checker.flow_analyzer_version - 1);
+    try std.testing.expect(!std.mem.eql(u8, &current, &older));
+}
 
 test "all_rules has expected count" {
     try std.testing.expectEqual(total_count, all_rules.len);

@@ -47,8 +47,12 @@ fi
 # for M4 T7: a validation call that names a schema zttp:validate cannot compile.
 # Moved 2026-09-28: ZTS513 names the new refusal for an agent-listed tool
 # route with a path parameter (M5 A4).
+# Moved 2026-10-09: the flow analyzer version (flow_checker.flow_analyzer_version)
+# joins the policy hash, so a certificate built before the flow checker fixes no
+# longer matches the policy. Bump the version whenever the checker can prove
+# less or more.
 EXPECTED_PROFILE="zts-model-1"
-EXPECTED_POLICY_HASH="84e3ba342bad0a0e05e19410829c382248d2d1d8e9e362cde5f934df749c5bb1"
+EXPECTED_POLICY_HASH="7a606a7c28ffa8faa24373d5e2a8875e4d175332b5498db02be303de749e45cd"
 # TSX is separately identified, and its hash binds the core grammar it lowers
 # into, so the declaration cut moves both hashes even though TSX syntax did not.
 EXPECTED_GRAMMAR_HASH="8c555c6dfe5afb98cf73d034a548dd5f18db5a6b540f334a43f0ac871f4d73be"

@@ -320,7 +320,7 @@
     "semantics_epoch": 1,
     "handler_contract_version": 24,
     "agent_protocol_schema": 2,
-    "policy_hash": "84e3ba342bad0a0e05e19410829c382248d2d1d8e9e362cde5f934df749c5bb1",
+    "policy_hash": "7a606a7c28ffa8faa24373d5e2a8875e4d175332b5498db02be303de749e45cd",
     "module_registry_hash": "c4098fd57cb0b4b2f3a646899ca41f55dadbfc525df4413b0c258a2b9f9d7394"
   }
 }
