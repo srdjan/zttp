@@ -4,7 +4,7 @@
 
 Range version: `step-6-v2`
 
-Range hash: `a7ca90815d0fa11c6da9f35a1e9a232905d0889a684d3766e0c1f020a92c68e4`
+Range hash: `9fcc8fe3af9c6e99e2181f46ac2abad8ba570efa7e363f80fb5969e7b3961764`
 
 The deterministic playbook server supports the entries below. Use `zig build zttp-standin -- --range` to print this document.
 
@@ -148,6 +148,7 @@ Drafts the stand-in emits expecting the veto to reject them, so the rejection ha
 | `effect-row-lower-bound` | `ZTS512` | model_retry |
 | `secret-in-egress-headers` | `ZTS404` | model_retry |
 | `credential-in-egress-headers` | `ZTS405` | model_retry |
+| `credential-in-egress-body` | `ZTS408` | model_retry |
 | `unvalidated-input-in-html` | `ZTS407` | model_retry |
 | `workflow-call-in-step` | `ZTS509` | model_retry |
 | `saga-step-no-compensate` | `ZTS510` | model_retry |

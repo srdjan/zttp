@@ -241,7 +241,7 @@ test "checker diagnostic codes are globally unique" {
     // The count is here so a projection that silently stops enumerating a
     // checker cannot pass the uniqueness loop below over a shorter list; it
     // moves whenever a checker's kind set does.
-    try std.testing.expectEqual(@as(usize, 64), allCodes().len);
+    try std.testing.expectEqual(@as(usize, 65), allCodes().len);
 
     var seen: std.StringHashMapUnmanaged(CodeEntry) = .empty;
     defer seen.deinit(std.testing.allocator);

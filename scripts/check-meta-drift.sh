@@ -51,8 +51,11 @@ fi
 # joins the policy hash, so a certificate built before the flow checker fixes no
 # longer matches the policy. Bump the version whenever the checker can prove
 # less or more.
+# Moved 2026-10-09: ZTS408 (credential_in_egress_body) joins the policy
+# registry: a credential in a fetch body or an opaque init is refused, as ZTS406
+# refuses a secret.
 EXPECTED_PROFILE="zts-model-1"
-EXPECTED_POLICY_HASH="7a606a7c28ffa8faa24373d5e2a8875e4d175332b5498db02be303de749e45cd"
+EXPECTED_POLICY_HASH="baa218ec7b025b993a2d48194553b4a0fa7c3d704ff68c740d891a70c7dfe108"
 # TSX is separately identified, and its hash binds the core grammar it lowers
 # into, so the declaration cut moves both hashes even though TSX syntax did not.
 EXPECTED_GRAMMAR_HASH="8c555c6dfe5afb98cf73d034a548dd5f18db5a6b540f334a43f0ac871f4d73be"

@@ -38,7 +38,7 @@ pub const ViolationKind = enum {
     injection_unsafe,
     /// Secret env var data flows to a response body, log, or egress URL.
     secret_leakage,
-    /// Credential data (auth token, JWT) flows to a response body or log.
+    /// Credential data (auth token, JWT) flows to a response body, log, or egress call.
     credential_leakage,
     /// result.value accessed without checking result.ok first.
     result_unsafe,
@@ -150,6 +150,7 @@ pub fn collectFlowViolations(
             .credential_in_response,
             .credential_in_log,
             .credential_in_egress_url,
+            .credential_in_egress_body,
             => .credential_leakage,
         };
 

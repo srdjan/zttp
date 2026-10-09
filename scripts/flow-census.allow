@@ -57,28 +57,3 @@
 # no verdict at all (no_verdict) is never allowlisted: fix the probe.
 
 
-# F10: 24 row(s)
-credential__egress_body__apply_cb fail_open F10
-credential__egress_body__apply_record fail_open F10
-credential__egress_body__chain2 fail_open F10
-credential__egress_body__concise_arrow fail_open F10
-credential__egress_body__durable_run_cb fail_open F10
-credential__egress_body__export_fn fail_open F10
-credential__egress_body__handler fail_open F10
-credential__egress_body__hof_callback fail_open F10
-credential__egress_body__import_fn fail_open F10
-credential__egress_body__import2 fail_open F10
-credential__egress_body__nested_arrow_capture fail_open F10
-credential__egress_body__nested_arrow_param fail_open F10
-credential__egress_body__nested_fn_capture fail_open F10
-credential__egress_body__nested_fn_param fail_open F10
-credential__egress_body__parallel_cb fail_open F10
-credential__egress_body__recursion fail_open F10
-credential__egress_body__recursion_taint fail_open F10
-credential__egress_body__route_direct fail_open F10
-credential__egress_body__route_helper fail_open F10
-credential__egress_body__top_arrow fail_open F10
-credential__egress_body__top_fn fail_open F10
-credential__egress_body__top_fn_self fail_open F10
-credential__egress_body__twice_clean_first fail_open F10
-credential__egress_body__twice_secret_first fail_open F10

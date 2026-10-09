@@ -207,7 +207,7 @@ const property_info = [_]PropertyInfo{
         .name = "no_credential_leakage",
         .family = .flow,
         .flow_tag = .no_credential_leakage,
-        .passing = "No credential-labelled value reaches a response body or log.",
+        .passing = "No credential-labelled value reaches a response body, header, log, or egress call.",
         .failing = generic_failing,
     },
     .{
@@ -428,7 +428,7 @@ fn sinkLabel(kind: flow_checker.DiagnosticKind) []const u8 {
         .secret_in_response, .credential_in_response => "the response body",
         .secret_in_log, .credential_in_log => "a log line",
         .secret_in_egress_url, .credential_in_egress_url => "an egress URL",
-        .secret_in_egress_body => "an egress request body",
+        .secret_in_egress_body, .credential_in_egress_body => "an egress request body",
         .unvalidated_input_in_egress => "an egress call",
     };
 }

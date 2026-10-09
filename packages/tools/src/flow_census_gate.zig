@@ -216,7 +216,7 @@ pub const Verdict = struct {
 
 fn isFlowCode(code: []const u8) bool {
     if (code.len != 6 or !std.mem.startsWith(u8, code, "ZTS40")) return false;
-    return code[5] >= '0' and code[5] <= '7';
+    return code[5] >= '0' and code[5] <= '8';
 }
 
 /// The flow codes that witness `property` (`propertyTagForKind` in
@@ -226,7 +226,7 @@ fn isFlowCode(code: []const u8) bool {
 fn witnessesProperty(code: []const u8, property: Property) bool {
     const witnesses: []const []const u8 = switch (property) {
         .no_secret_leakage => &.{ "ZTS400", "ZTS402", "ZTS404", "ZTS406" },
-        .no_credential_leakage => &.{ "ZTS401", "ZTS403", "ZTS405" },
+        .no_credential_leakage => &.{ "ZTS401", "ZTS403", "ZTS405", "ZTS408" },
         .injection_safe => &.{"ZTS407"},
     };
     for (witnesses) |w| {

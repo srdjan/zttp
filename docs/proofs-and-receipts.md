@@ -73,7 +73,7 @@ a pill: `[+]` proven, `[-]` not proven. They are grouped.
 |---|---|
 | `injection_safe` | no unvalidated user input reaches a SQL or HTML sink |
 | `no_secret_leakage` | no secret-labelled value reaches a response body or header, a log, or an egress call (URL, headers, or body) |
-| `no_credential_leak` | no credential-labelled value reaches a response body or log |
+| `no_credential_leak` | no credential-labelled value reaches a response body or header, a log, or an egress call (URL, headers, or body) |
 | `input_validated` | all user input passes a validation step before any egress call |
 
 A write that stays inside the platform is not a sink for these chips: the

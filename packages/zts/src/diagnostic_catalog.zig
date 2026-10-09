@@ -265,6 +265,7 @@ pub fn flowCode(kind: flow_checker.DiagnosticKind) []const u8 {
         .secret_in_egress_url => "ZTS404",
         .credential_in_egress_url => "ZTS405",
         .secret_in_egress_body => "ZTS406",
+        .credential_in_egress_body => "ZTS408",
         .unvalidated_input_in_egress => "ZTS407",
     };
 }

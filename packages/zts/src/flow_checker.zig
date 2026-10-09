@@ -3,7 +3,7 @@
 //! Tracks where data comes from (sources with labels) and where it goes
 //! (sinks with policies), proving security properties at compile time:
 //!   - Secrets (env vars with sensitive names) never reach response bodies
-//!   - Credentials (auth tokens, JWTs) never appear in logs
+//!   - Credentials (auth tokens, JWTs) never appear in logs, responses, or egress
 //!   - User input is validated before use in external egress
 //!
 //! This is possible because zttp's JS subset has no eval, no exceptions,
@@ -84,6 +84,7 @@ pub const DiagnosticKind = enum {
     secret_in_egress_url, // {secret} data in fetchSync URL
     credential_in_egress_url, // {credential} data in fetchSync URL
     secret_in_egress_body, // {secret} data in fetchSync body
+    credential_in_egress_body, // {credential} data in fetchSync body or an opaque init
     unvalidated_input_in_egress, // {user_input} without {validated} in fetchSync
 };
 
@@ -163,6 +164,7 @@ pub fn propertyTagForKind(kind: DiagnosticKind) ?counterexample.PropertyTag {
         .credential_in_response,
         .credential_in_log,
         .credential_in_egress_url,
+        .credential_in_egress_body,
         => .no_credential_leakage,
         .unvalidated_input_in_egress => .injection_safe,
     };
@@ -174,7 +176,9 @@ pub const FlowProperties = struct {
     /// egress. A write to the durable store, a queue, the cache, SQL, or another
     /// handler is not a sink: the readers of stored data carry {unknown}.
     no_secret_leakage: bool = true,
-    /// No {credential} data reaches response bodies or logs.
+    /// No {credential} data reaches response bodies or headers, logs, or
+    /// external egress (URL, headers, or body). The same exclusion as
+    /// `no_secret_leakage` applies to stores, queues, and other handlers.
     no_credential_leakage: bool = true,
     /// All {user_input} data passes through validation before external egress.
     input_validated: bool = true,
@@ -5002,6 +5006,16 @@ pub const FlowChecker = struct {
                     });
                     self.properties.no_secret_leakage = false;
                 }
+                if (labels.has(.credential)) {
+                    self.addDiagnostic(.{
+                        .severity = .warning,
+                        .kind = .credential_in_egress_body,
+                        .node = node,
+                        .message = self.messageWithReason("credential data flows into fetchSync request body", .credential),
+                        .help = "forwarding a caller's auth token to a third party can leak it; scope credentials per service",
+                    });
+                    self.properties.no_credential_leakage = false;
+                }
                 // Check for unvalidated user input in egress
                 if (labels.has(.user_input) and !labels.has(.validated)) {
                     self.addDiagnostic(.{
@@ -5063,9 +5077,9 @@ pub const FlowChecker = struct {
                 // Same properties as the URL and header arms, which check the
                 // same set; the messages differ only in naming the options
                 // object rather than a field, because which field this lands
-                // in is exactly what could not be determined. The diagnostic
-                // kinds are the existing egress ones, so no new rule reaches
-                // the policy hash.
+                // in is exactly what could not be determined. The kinds are
+                // the egress-body ones: the object can carry a body, and a
+                // secret here already reports ZTS406.
                 if (labels.has(.secret)) {
                     self.addDiagnostic(.{
                         .severity = .err,
@@ -5079,7 +5093,7 @@ pub const FlowChecker = struct {
                 if (labels.has(.credential)) {
                     self.addDiagnostic(.{
                         .severity = .warning,
-                        .kind = .credential_in_egress_url,
+                        .kind = .credential_in_egress_body,
                         .node = node,
                         .message = self.messageWithReason("credential data flows into a fetch options object", .credential),
                         .help = "forwarding a caller's auth token to a third party can leak it; scope credentials per service",
@@ -5127,6 +5141,7 @@ pub const FlowChecker = struct {
             },
             .egress_body => {
                 self.properties.no_secret_leakage = false;
+                self.properties.no_credential_leakage = false;
                 self.properties.input_validated = false;
                 self.properties.injection_safe = false;
                 self.properties.pii_contained = false;
@@ -6762,6 +6777,10 @@ test "propertyTagForKind: every DiagnosticKind maps to the expected PropertyTag"
         propertyTagForKind(.credential_in_egress_url),
     );
     try std.testing.expectEqual(
+        @as(?counterexample.PropertyTag, .no_credential_leakage),
+        propertyTagForKind(.credential_in_egress_body),
+    );
+    try std.testing.expectEqual(
         @as(?counterexample.PropertyTag, .injection_safe),
         propertyTagForKind(.unvalidated_input_in_egress),
     );
@@ -7697,6 +7716,67 @@ test "FlowChecker reports a credential response built inside a helper and discar
     const report = try runFlowDiagnostics(std.testing.allocator, source, .credential_in_response, &buf);
     try std.testing.expect(report.count >= 1);
     try std.testing.expect(!report.properties.no_credential_leakage);
+}
+
+test "FlowChecker reports a credential in a fetch body, directly and inside a helper" {
+    // The probe method of AGENTS.md: the labelled value goes straight to the
+    // sink (refused), then through a helper (still refused).
+    var buf: [512]u8 = undefined;
+    const direct =
+        \\import { fetch } from "zttp:fetch";
+        \\function handler(req) {
+        \\  const r = fetch("https://api.example.com/v1", { method: "POST", body: req.headers.authorization });
+        \\  return Response.json({ s: r.status });
+        \\}
+    ;
+    const direct_report = try runFlowDiagnostics(std.testing.allocator, direct, .credential_in_egress_body, &buf);
+    try std.testing.expectEqual(@as(usize, 1), direct_report.count);
+    try std.testing.expect(!direct_report.properties.no_credential_leakage);
+
+    var helper_buf: [512]u8 = undefined;
+    const helper =
+        \\import { fetch } from "zttp:fetch";
+        \\function forward(t) {
+        \\  const r = fetch("https://api.example.com/v1", { method: "POST", body: t });
+        \\  return r.status;
+        \\}
+        \\function handler(req) {
+        \\  const n = forward(req.headers.authorization);
+        \\  return Response.json({ n: n });
+        \\}
+    ;
+    const helper_report = try runFlowDiagnostics(std.testing.allocator, helper, .credential_in_egress_body, &helper_buf);
+    try std.testing.expectEqual(@as(usize, 1), helper_report.count);
+    try std.testing.expect(!helper_report.properties.no_credential_leakage);
+}
+
+test "FlowChecker reports a credential in an opaque fetch init as an egress body" {
+    var buf: [512]u8 = undefined;
+    const source =
+        \\import { fetch } from "zttp:fetch";
+        \\function handler(req) {
+        \\  const init = { method: "POST", body: req.headers.authorization };
+        \\  const r = fetch("https://api.example.com/v1", init);
+        \\  return Response.json({ s: r.status });
+        \\}
+    ;
+    const report = try runFlowDiagnostics(std.testing.allocator, source, .credential_in_egress_body, &buf);
+    try std.testing.expect(report.count >= 1);
+    try std.testing.expect(!report.properties.no_credential_leakage);
+}
+
+test "FlowChecker keeps no_credential_leakage when a fetch body holds no credential" {
+    var buf: [512]u8 = undefined;
+    const source =
+        \\import { fetch } from "zttp:fetch";
+        \\function handler(req) {
+        \\  const r = fetch("https://api.example.com/v1", { method: "POST", body: "static" });
+        \\  return Response.json({ s: r.status });
+        \\}
+    ;
+    const report = try runFlowDiagnostics(std.testing.allocator, source, .credential_in_egress_body, &buf);
+    try std.testing.expectEqual(@as(usize, 0), report.count);
+    try std.testing.expect(report.properties.no_credential_leakage);
 }
 
 test "FlowChecker reports a secret logged by an array method callback" {
@@ -11090,6 +11170,13 @@ const repair_intent_probe_corpus = [_][]const u8{
     \\import { fetch } from "zttp:fetch";
     \\function handler(req) {
     \\  fetch("https://api.example.com/v1", { body: env("SECRET_KEY") });
+    \\  return Response.json({ ok: true });
+    \\}
+    ,
+    // credential_in_egress_body
+    \\import { fetch } from "zttp:fetch";
+    \\function handler(req) {
+    \\  fetch("https://api.example.com/v1", { body: req.headers.authorization });
     \\  return Response.json({ ok: true });
     \\}
     ,

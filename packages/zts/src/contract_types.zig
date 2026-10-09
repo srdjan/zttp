@@ -624,7 +624,9 @@ pub const HandlerProperties = struct {
     /// egress. A write to the durable store, a queue, the cache, SQL, or another
     /// handler is not a sink: the readers of stored data carry {unknown}.
     no_secret_leakage: bool = true,
-    /// No {credential} data reaches response bodies or logs.
+    /// No {credential} data reaches response bodies or headers, logs, or external
+    /// egress (URL, headers, or body). The exclusion for stores, queues, and other
+    /// handlers is the same as for `no_secret_leakage`.
     no_credential_leakage: bool = true,
     /// All {user_input} data passes through validation before external egress.
     input_validated: bool = true,

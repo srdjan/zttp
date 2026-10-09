@@ -150,13 +150,13 @@ pub fn cellFor(label: Label, sink: Sink) Cell {
             .response_html => "a secret in an HTML response is refused by ZTS400",
         } },
         // Owner decision Q6 (a): the credential promise covers every egress
-        // form. The checker does not refuse a body or an opaque init yet.
+        // form: URL (ZTS405), headers (ZTS405), body and opaque init (ZTS408).
         .credential => .{ .expect = .refuse, .reason = switch (sink) {
             .log => "a credential in a log is refused (docs/proofs-and-receipts.md:76)",
             .egress_url => "a credential in an egress URL is refused by ZTS405",
-            .egress_body => "owner decision Q6 (a): a credential in an egress body is a leak, plan unit F10",
+            .egress_body => "a credential in an egress body is refused by ZTS408 (owner decision Q6 (a))",
             .egress_headers => "a credential in an egress header is refused",
-            .egress_opaque => "owner decision Q6 (a): a credential in an opaque fetch init is a leak, plan unit F10",
+            .egress_opaque => "a credential in an opaque fetch init is refused by ZTS408 (owner decision Q6 (a))",
             .response => "a credential in a response body is refused (docs/proofs-and-receipts.md:76)",
             .response_html => "a credential in an HTML response is refused (docs/proofs-and-receipts.md:76)",
         } },

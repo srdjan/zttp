@@ -2404,6 +2404,34 @@ pub const seeds = [_]DefectSeed{
         .ask = "Fix the ZTS405 compiler error in handler.ts",
     },
     .{
+        .id = "credential-in-egress-body",
+        .code = "ZTS408",
+        .class = .model_retry,
+        .seed_source = clean_credential_and_headers,
+        .bad_draft =
+        \\import { fetch } from "zttp:fetch";
+        \\
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const auth = req.headers.authorization ?? "";
+        \\  const r = fetch("https://api.example.com/v1", { method: "POST", body: auth });
+        \\  return Response.json({ s: r.status });
+        \\}
+        \\
+        ,
+        .good_draft =
+        \\import { fetch } from "zttp:fetch";
+        \\
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const auth = req.headers.authorization ?? "";
+        \\  const r = fetch("https://api.example.com/v1", { method: "POST", body: "scoped" });
+        \\  if (auth === "") { return Response.json({ ok: 0 }); }
+        \\  return Response.json({ s: r.status });
+        \\}
+        \\
+        ,
+        .ask = "Fix the ZTS408 compiler error in handler.ts",
+    },
+    .{
         .id = "unvalidated-input-in-html",
         .code = "ZTS407",
         .class = .model_retry,

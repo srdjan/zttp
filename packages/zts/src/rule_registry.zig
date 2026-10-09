@@ -655,6 +655,14 @@ const flow_meta = [_]struct {
         .help = "Pass user input through validateJson / schemaCompile or strip it before egress.",
         .repair = null,
     },
+    .{
+        .kind = .credential_in_egress_body,
+        .code = "ZTS408",
+        .description = "A value labeled {credential} reaches a fetch request body.",
+        .example = "fetchSync('https://api/echo', { method: 'POST', body: JSON.stringify({ token: authToken }) });",
+        .help = "Do not forward a caller's credential to a third party in a request body; scope credentials per service.",
+        .repair = null,
+    },
 };
 
 comptime {
