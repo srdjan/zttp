@@ -2114,7 +2114,7 @@ test "ledger function escapes are refused even beside a directly observed call" 
         \\import { post } from "zttp:ledger";
         \\export function handler(req) {
         \\  const fn = post;
-        \\  if (req.url) { const marker = "branch"; }
+        \\  if (req.url !== "") { const marker = "branch"; }
         \\  return fn({ ledger: "main", currency: "USD", idempotencyKey: req.url, entries: [] });
         \\}
         ,

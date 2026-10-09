@@ -5673,7 +5673,7 @@ const grant_probe_handler =
     \\import { sha256 } from "zttp:crypto";
     \\function handler(req) {
     \\  const digest = sha256("probe");
-    \\  return Response.json({ ok: digest !== undefined });
+    \\  return Response.json({ ok: digest.length > 0 });
     \\}
 ;
 
