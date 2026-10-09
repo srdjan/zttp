@@ -1821,3 +1821,140 @@ test "the element variable of for-of over an array takes the element type" {
         \\}
     , 1);
 }
+
+// ---------------------------------------------------------------------------
+// Declared parameter types in the boolean checker's diagnostics
+// ---------------------------------------------------------------------------
+
+/// Whether the boolean checker reported a diagnostic of `kind` over one source.
+fn expectBoolKind(source: []const u8, comptime kind: bool_checker_mod.DiagnosticKind, comptime expected: bool) !void {
+    const Probe = struct {
+        fn run(session: Session) anyerror!void {
+            var seen = false;
+            for (session.resolved.boolDiagnostics()) |diagnostic| {
+                if (diagnostic.kind == kind) seen = true;
+            }
+            try testing.expectEqual(expected, seen);
+        }
+    };
+    try withSession(testing.allocator, source, Probe.run);
+}
+
+test "arithmetic on a parameter declared string is refused" {
+    try expectBoolKind(
+        "const f = (s: string): number => s - 1;",
+        .arithmetic_on_non_numeric,
+        true,
+    );
+    try expectBoolKind(
+        "const f = (b: boolean): number => b * 2;",
+        .arithmetic_on_non_numeric,
+        true,
+    );
+    try expectBoolKind(
+        "const f = (xs: number[]): number => 2 / xs;",
+        .arithmetic_on_non_numeric,
+        true,
+    );
+    // An optional string is not a number either.
+    try expectBoolKind(
+        "const f = (s: string | undefined): number => s - 1;",
+        .arithmetic_on_non_numeric,
+        true,
+    );
+    // A union of string literals is a string.
+    try expectBoolKind(
+        "const f = (m: \"GET\" | \"POST\"): number => m - 1;",
+        .arithmetic_on_non_numeric,
+        true,
+    );
+}
+
+test "arithmetic on a parameter declared number is accepted" {
+    try expectBoolKind(
+        "const f = (n: number, m: number): number => n - m * 2;",
+        .arithmetic_on_non_numeric,
+        false,
+    );
+    // The lattice has no optional number, so this stays undecided.
+    try expectBoolKind(
+        "const f = (n: number | undefined): number => n - 1;",
+        .arithmetic_on_non_numeric,
+        false,
+    );
+    // Unknown and generic parameters stay undecided.
+    try expectBoolKind(
+        "const f = (v: unknown): number => v - 1;",
+        .arithmetic_on_non_numeric,
+        false,
+    );
+}
+
+test "plus on a parameter declared boolean or object is refused" {
+    try expectBoolKind(
+        "const f = (b: boolean): number => b + 1;",
+        .add_on_non_addable,
+        true,
+    );
+    try expectBoolKind(
+        "const f = (xs: number[]): number => 1 + xs;",
+        .add_on_non_addable,
+        true,
+    );
+    try expectBoolKind(
+        "const f = (a: number, b: number): number => a + b;",
+        .add_on_non_addable,
+        false,
+    );
+}
+
+test "a fallback on a parameter that cannot be undefined is reported" {
+    try expectBoolKind(
+        "const f = (s: string): string => s ?? \"x\";",
+        .nullish_on_non_nullable,
+        true,
+    );
+    try expectBoolKind(
+        "const f = (s: string | undefined): string => s ?? \"x\";",
+        .nullish_on_non_nullable,
+        false,
+    );
+    try expectBoolKind(
+        "const f = (n: number | undefined): number => n ?? 1;",
+        .nullish_on_non_nullable,
+        false,
+    );
+}
+
+test "a comparison with undefined or typeof on a parameter with a known type is reported" {
+    try expectBoolKind(
+        "const f = (s: string): boolean => s === undefined;",
+        .tautological_comparison,
+        true,
+    );
+    try expectBoolKind(
+        "const f = (s: string): boolean => typeof s === \"string\";",
+        .tautological_comparison,
+        true,
+    );
+    try expectBoolKind(
+        "const f = (s: string | undefined): boolean => s === undefined;",
+        .tautological_comparison,
+        false,
+    );
+    try expectBoolKind(
+        "const f = (v: unknown): boolean => typeof v === \"string\";",
+        .tautological_comparison,
+        false,
+    );
+}
+
+test "a typed parameter does not change the bytecode annotations" {
+    // The declared type feeds the diagnostics only. Specializing an operator
+    // on a declared parameter type would move precompiled bytecode.
+    try withSession(testing.allocator, "const f = (a: number, b: number): number => a + b;", struct {
+        fn run(session: Session) anyerror!void {
+            try testing.expectEqual(@as(u32, 0), session.resolved.bool_checker.node_types.count());
+        }
+    }.run);
+}

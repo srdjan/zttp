@@ -156,6 +156,12 @@ pub const BoolChecker = struct {
     /// Direct checker tests may omit it, in which case the smaller local
     /// lattice still fails closed rather than admitting an unknown value.
     authoritative_type_checker: ?*type_checker_mod.TypeChecker = null,
+    /// While set, `inferType` answers a function parameter from the type it was
+    /// declared with. Set only around the questions that produce a diagnostic
+    /// (see `inferForDiagnostic`): the answer must not reach `node_types`, which
+    /// drives opcode specialization, or the bytecode of every function with a
+    /// typed parameter would change.
+    declared_params: bool = false,
     /// Sticky failure for proof-relevant maps and diagnostic storage. The
     /// walkers are intentionally void-returning; `check` converts any failed
     /// state update into OutOfMemory before exposing counts. Formatting-only
@@ -430,7 +436,7 @@ pub const BoolChecker = struct {
                     },
                     // S4: ?? LHS warning for non-nullable
                     .nullish => {
-                        const lhs_type = self.inferType(bin.left);
+                        const lhs_type = self.inferForDiagnostic(bin.left);
                         if (lhs_type.isNonNullable()) {
                             self.addDiagnostic(.{
                                 .severity = .warning,
@@ -456,8 +462,8 @@ pub const BoolChecker = struct {
                     },
                     // S6: + is numeric only; text construction uses join.
                     .add => {
-                        const left_type = self.inferType(bin.left);
-                        const right_type = self.inferType(bin.right);
+                        const left_type = self.inferForDiagnostic(bin.left);
+                        const right_type = self.inferForDiagnostic(bin.right);
                         if (left_type != .string and right_type != .string) {
                             // Unknown is handled by strict-mode inference; every
                             // known operand that reaches `+` must be numeric.
@@ -643,6 +649,15 @@ pub const BoolChecker = struct {
                 if (binding.kind == .local or binding.kind == .global) {
                     if (self.const_types.get(key)) |t| return t;
                 }
+                // A parameter's declared type, for diagnostics only. An
+                // upvalue is a captured outer binding, whose key is not the
+                // parameter's own, so it is left undecided.
+                if (self.declared_params and binding.kind == .argument) {
+                    if (self.authoritative_type_checker) |checker| {
+                        const declared = checker.declaredParameterType(binding);
+                        if (declared != type_pool_mod.null_type_idx) return exprTypeOfDeclared(checker, declared);
+                    }
+                }
                 return .unknown;
             },
 
@@ -659,6 +674,46 @@ pub const BoolChecker = struct {
             .spread,
             => .unknown,
 
+            else => .unknown,
+        };
+    }
+
+    /// `inferType` for a question whose answer becomes a diagnostic. A function
+    /// parameter reads as the type it was declared with, which the local lattice
+    /// cannot learn on its own. The two answers agree wherever the lattice
+    /// already knew the type.
+    fn inferForDiagnostic(self: *BoolChecker, node: NodeIndex) ExprType {
+        const saved = self.declared_params;
+        defer self.declared_params = saved;
+        self.declared_params = self.authoritative_type_checker != null;
+        return self.inferType(node);
+    }
+
+    /// The lattice's reading of a declared parameter type. A type it has no
+    /// member for stays `unknown`, which defers to the runtime and refuses
+    /// nothing: only a scalar, an array or record, a function, or a union that
+    /// agrees on one of those is named.
+    fn exprTypeOfDeclared(checker: *const type_checker_mod.TypeChecker, idx: type_pool_mod.TypeIndex) ExprType {
+        const pool = checker.env.pool;
+        const tag = pool.getTag(idx) orelse return .unknown;
+        return switch (tag) {
+            .t_number, .t_literal_number => .number,
+            .t_string, .t_literal_string => .string,
+            .t_boolean, .t_literal_bool => .boolean,
+            .t_array, .t_tuple, .t_record => .object,
+            .t_function => .function,
+            .t_undefined => .undefined,
+            .t_nullable => makeNullable(exprTypeOfDeclared(checker, pool.getNullableInner(idx))),
+            .t_union => blk: {
+                var joined: ?ExprType = null;
+                for (pool.getUnionMembers(idx)) |member| {
+                    const member_type = exprTypeOfDeclared(checker, member);
+                    if (member_type == .unknown) break :blk .unknown;
+                    joined = if (joined) |so_far| unifyTypes(so_far, member_type) else member_type;
+                    if (joined.? == .unknown) break :blk .unknown;
+                }
+                break :blk joined orelse .unknown;
+            },
             else => .unknown,
         };
     }
@@ -941,7 +996,7 @@ pub const BoolChecker = struct {
     // -----------------------------------------------------------------------
 
     fn requireNumeric(self: *BoolChecker, node: NodeIndex, op_name: []const u8) void {
-        const inferred = self.inferType(node);
+        const inferred = self.inferForDiagnostic(node);
         switch (inferred) {
             .number, .unknown => return, // number is valid, unknown defers to runtime
             .boolean => {
@@ -1135,7 +1190,7 @@ pub const BoolChecker = struct {
         if (unary.op != .typeof_op) return null;
 
         // Infer the type of the operand
-        const operand_type = self.inferType(unary.operand);
+        const operand_type = self.inferForDiagnostic(unary.operand);
         if (operand_type == .unknown) return null;
 
         // Get the string literal value
@@ -1176,7 +1231,7 @@ pub const BoolChecker = struct {
         }
 
         // Get the type of the non-undefined side
-        const value_type = self.inferType(value_node);
+        const value_type = self.inferForDiagnostic(value_node);
         if (value_type.isNonNullable()) {
             return true;
         }

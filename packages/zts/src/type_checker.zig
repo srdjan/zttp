@@ -294,6 +294,15 @@ pub const TypeChecker = struct {
         self.context_types.put(self.allocator, node, self.inferType(node)) catch self.markAllocationFailure();
     }
 
+    /// The type a function parameter was declared with, or `null_type_idx` for
+    /// a binding that is not a parameter or whose parameter carries no
+    /// annotation. Read after the walk: the table is filled as each function is
+    /// entered and never narrowed, so this is the declared type, not the type
+    /// a guard has since established.
+    pub fn declaredParameterType(self: *const TypeChecker, binding: ir.BindingRef) TypeIndex {
+        return self.param_types.get(bindingKey(binding)) orelse null_type_idx;
+    }
+
     /// The type `recordContextType` saw for `node`, or null when the walk did
     /// not record one. The error type is hidden as in `inferTypeWithoutDiagnostics`.
     pub fn contextTypeOf(self: *TypeChecker, node: NodeIndex) ?TypeIndex {
