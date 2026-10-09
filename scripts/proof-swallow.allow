@@ -112,9 +112,9 @@ packages/zts/src/contract_builder.zig appendQueryParamsFromSchema catch-block
 packages/zts/src/fault_coverage.zig parseExternalSeverities catch-multiline
 packages/zts/src/fault_coverage.zig getOrPutEntry catch-block
 
-# FlowChecker.check and exportedReturnLabels both reject allocation poison.
+# FlowChecker.check, exportedReturnLabels and exportedSummary reject allocation poison.
 # These sites record that poison before returning a partial local value. The
-# cross-file summary entry point checks the flag before publishing labels.
+# cross-file summary entry points check the flag before publishing labels.
 packages/zts/src/flow_checker.zig appendRouteFunctionRoot catch-poison
 packages/zts/src/flow_checker.zig applyAssignmentLabels catch-poison
 packages/zts/src/flow_checker.zig findHandlerParam catch-poison
@@ -130,13 +130,11 @@ packages/zts/src/flow_checker.zig scanFunctionDecls catch-poison
 packages/zts/src/flow_checker.zig scanImportBindings catch-poison
 packages/zts/src/flow_checker.zig scanImports catch-multiline
 packages/zts/src/flow_checker.zig scanImports catch-poison
-packages/zts/src/flow_checker.zig setFileFunctionLabels catch-poison
 packages/zts/src/flow_checker.zig trackResultBinding catch-poison
 packages/zts/src/flow_checker.zig walkStmt catch-poison
 
 # Route resolution errors set allocation poison or return unknown-route
 # labels; a clean route cannot be inferred from the partial target list.
-packages/zts/src/flow_checker.zig functionCallLabels catch-block
 packages/zts/src/flow_checker.zig routerDispatchLabels catch-block
 packages/zts/src/flow_checker.zig scanListedToolRoutes catch-block
 packages/zts/src/flow_checker.zig scanListedToolRoutes catch-poison
@@ -149,9 +147,22 @@ packages/zts/src/flow_checker.zig scanRouteFunctionRoots catch-block
 # checker after a binding went stale.
 # The fixpoint re-walk binds the widened parameter labels the same way: a failed
 # insert records poison and returns the unresolved labels.
-packages/zts/src/flow_checker.zig functionCallLabels catch-block@2
-packages/zts/src/flow_checker.zig functionCallLabels catch-block@3
+packages/zts/src/flow_checker.zig enterFunctionFrame catch-block
+packages/zts/src/flow_checker.zig enterFunctionFrame catch-block@2
+packages/zts/src/flow_checker.zig enterFunctionFrame catch-block@3
 packages/zts/src/flow_checker.zig restoreParamValues catch-poison
+
+# Installing and applying a cross-file sink summary allocates a copy of the
+# summary, an entry in the slot map, and the help text that names the imported
+# file. A failed copy or insert records allocation poison and installs nothing,
+# so the call stays unresolved and clears the sink properties, and `check`
+# rejects a checker that carries poison. A failed help text keeps the sink's
+# own help and records poison: the diagnostic and the cleared property still
+# stand, only the pointer into the imported file is lost.
+packages/zts/src/flow_checker.zig importedSinkHelp catch-block
+packages/zts/src/flow_checker.zig importedSinkHelp catch-block@2
+packages/zts/src/flow_checker.zig setFileFunctionSummary catch-block
+packages/zts/src/flow_checker.zig setFileFunctionSummary catch-block@2
 
 # A witness copy or condition allocation error records poison, so no result
 # that lacks the witness can leave the checker as a successful proof. The

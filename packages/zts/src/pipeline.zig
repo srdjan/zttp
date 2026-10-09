@@ -287,12 +287,16 @@ pub const CheckedModule = struct {
     }
 };
 
-/// Return labels of a function imported from another file, paired with the
+/// The sink summary of a function imported from another file (plan unit F7).
+pub const ImportedSummary = flow_checker_mod.ImportedSummary;
+
+/// The sink summary of a function imported from another file, paired with the
 /// local binding slot the import produced. The pipeline does no file I/O, so
-/// the caller reads and walks those files and hands the answers in.
-pub const ImportedFnLabels = struct {
+/// the caller reads and walks those files and hands the answers in. The flow
+/// checker copies each summary, so the caller keeps ownership of its own.
+pub const ImportedFnSummary = struct {
     slot: u16,
-    labels: @import("zts-engine").module_binding.LabelSet,
+    summary: ImportedSummary,
 };
 
 pub const CheckOptions = struct {
@@ -300,9 +304,9 @@ pub const CheckOptions = struct {
     /// `ResolveOptions.module_facts`. An options struct rather than a fourth
     /// positional parameter so the next addition does not churn every call site.
     module_facts: ?*const ModuleFacts = null,
-    /// Cross-file helper return labels. Empty means every such call is treated
+    /// Cross-file helper sink summaries. Empty means every such call is treated
     /// as untraceable, which is the conservative direction, not the neutral one.
-    imported_fn_labels: []const ImportedFnLabels = &.{},
+    imported_fn_summaries: []const ImportedFnSummary = &.{},
     /// The consumer's declared classifications (M4 T4). Borrowed: it must
     /// outlive the returned `CheckedModule`, whose flow checker reads it.
     declaration: ?*const @import("zts-base").declaration.Declaration = null,
@@ -337,8 +341,8 @@ pub fn check(
     flow.facts = opts.module_facts;
     if (tc_ptr) |tc| flow.setTypeChecker(tc);
     errdefer flow.deinit();
-    for (opts.imported_fn_labels) |entry| {
-        flow.setFileFunctionLabels(entry.slot, entry.labels);
+    for (opts.imported_fn_summaries) |*entry| {
+        flow.setFileFunctionSummary(entry.slot, &entry.summary);
     }
     if (opts.declaration) |decl| try flow.setDeclaration(decl);
     const flow_errors = try flow.check(handler_func);

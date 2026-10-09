@@ -498,32 +498,53 @@ fn dupJsonValue(
     return try allocator.dupe(u8, value.string);
 }
 
-/// Return labels for every function imported from a sibling file, keyed by the
-/// local binding slot. Each imported module is read and walked on its own, one
-/// level deep: a call it makes into a module *it* imports stays untraceable, so
-/// the answer never claims more evidence than one file provides.
+/// Deepest chain of imports that the cross-file walk follows: the handler's
+/// helper, the helper's own helper, and so on. A chain past this stays
+/// unresolved, which fails closed.
+const max_import_depth = 8;
+
+/// The files being summarized, outermost first. A file that imports itself,
+/// directly or through others, finds its own path here and stays unresolved.
+const ImportStack = struct {
+    paths: [max_import_depth][]const u8 = undefined,
+    len: usize = 0,
+
+    fn contains(self: *const ImportStack, path: []const u8) bool {
+        for (self.paths[0..self.len]) |open| {
+            if (std.mem.eql(u8, open, path)) return true;
+        }
+        return false;
+    }
+};
+
+/// Sink summaries for every function imported from a sibling file, keyed by the
+/// local binding slot (plan unit F7). Each imported module is read and walked on
+/// its own, and the modules it imports in turn are summarized first, so a sink
+/// two files deep reaches the handler's call.
 ///
 /// Every failure here - a specifier that is not relative, a file that will not
-/// read, strip, or parse, an export that is not a function - drops the entry
-/// rather than the build. A missing entry means the flow checker falls back to
-/// treating the call as untraceable, which is the conservative direction.
-fn collectImportedFnLabels(
+/// read, strip, or parse, an export that is not a function, an import cycle, a
+/// chain past `max_import_depth` - drops the entry rather than the build. A
+/// missing entry means the flow checker treats the call as unresolved, which
+/// clears every property a sink decides: the conservative direction.
+fn collectImportedFnSummaries(
     allocator: std.mem.Allocator,
     facts: *const zts.pipeline.ModuleFacts,
-    handler_path: []const u8,
+    importer_path: []const u8,
     /// The consumer declaration (M4 T4). Installed in each helper walk, so a
     /// declared field a helper reads and returns keeps its label.
     declaration: ?*const zts.declaration.Declaration,
     /// One status per classification, raised to what any helper walk saw.
     seen: []handler_contract.ClassificationStatus,
-) std.ArrayList(zts.pipeline.ImportedFnLabels) {
-    var out: std.ArrayList(zts.pipeline.ImportedFnLabels) = .empty;
+    stack: *ImportStack,
+) std.ArrayList(zts.pipeline.ImportedFnSummary) {
+    var out: std.ArrayList(zts.pipeline.ImportedFnSummary) = .empty;
     // Browser analysis receives one source buffer and has no filesystem. Keep
     // the conservative empty answer while compiling the POSIX reader entirely
     // out of the freestanding build.
     if (comptime builtin.target.os.tag == .freestanding) return out;
 
-    const base_dir = std.fs.path.dirname(handler_path) orelse ".";
+    const base_dir = std.fs.path.dirname(importer_path) orelse ".";
 
     for (facts.imports.items) |rec| {
         if (rec.resolution != .unresolved) continue;
@@ -533,21 +554,45 @@ fn collectImportedFnLabels(
         const path = std.fs.path.resolve(allocator, &.{ base_dir, rec.module_specifier }) catch continue;
         defer allocator.free(path);
 
-        const labels = importedFunctionLabels(allocator, path, rec.imported_name, declaration, seen) orelse continue;
-        out.append(allocator, .{ .slot = rec.slot, .labels = labels }) catch return out;
+        var summary = importedFunctionSummary(
+            allocator,
+            path,
+            rec.module_specifier,
+            rec.imported_name,
+            declaration,
+            seen,
+            stack,
+        ) orelse continue;
+        out.append(allocator, .{ .slot = rec.slot, .summary = summary }) catch {
+            summary.deinit(allocator);
+            return out;
+        };
     }
     return out;
 }
 
-/// Walk one imported file and answer the return labels of `name`, or null when
+fn deinitImportedSummaries(allocator: std.mem.Allocator, list: *std.ArrayList(zts.pipeline.ImportedFnSummary)) void {
+    for (list.items) |*entry| entry.summary.deinit(allocator);
+    list.deinit(allocator);
+}
+
+/// Walk one imported file and answer the sink summary of `name`, or null when
 /// the file cannot be read, stripped, parsed, or carries no such function.
-fn importedFunctionLabels(
+/// `specifier` is how the importer wrote the path, for the report's help text.
+fn importedFunctionSummary(
     allocator: std.mem.Allocator,
     path: []const u8,
+    specifier: []const u8,
     name: []const u8,
     declaration: ?*const zts.declaration.Declaration,
     seen: []handler_contract.ClassificationStatus,
-) ?zts.module_binding.LabelSet {
+    stack: *ImportStack,
+) ?zts.pipeline.ImportedSummary {
+    if (stack.len >= max_import_depth or stack.contains(path)) return null;
+    stack.paths[stack.len] = path;
+    stack.len += 1;
+    defer stack.len -= 1;
+
     const source = readFilePosix(allocator, path, 10 * 1024 * 1024) catch return null;
     defer allocator.free(source);
 
@@ -578,15 +623,33 @@ fn importedFunctionLabels(
         if (type_errors != 0) return null;
     }
 
+    var module_facts = zts.pipeline.buildModuleFacts(
+        allocator,
+        zts.pipeline.ParsedModule.fromExisting(view, root, &atoms),
+        null,
+    ) catch return null;
+    defer module_facts.deinit();
+
     var flow = zts.FlowChecker.init(allocator, view, &atoms);
     defer flow.deinit();
+    flow.facts = &module_facts;
     if (type_checker) |*checker| flow.setTypeChecker(checker);
     // Without the declaration a helper that reads a declared field would hand
     // the handler a value carrying none of its declared labels. A failed
-    // install drops the entry, which leaves the call untraceable.
+    // install drops the entry, which leaves the call unresolved.
     if (declaration) |decl| flow.setDeclaration(decl) catch return null;
-    const labels = flow.exportedReturnLabels(name) catch return null;
-    if (type_checker) |*checker| checker.ensureHealthy() catch return null;
+
+    // The helpers of this helper come first, so a call into one of them applies
+    // that file's sinks to this file's parameters.
+    var nested = collectImportedFnSummaries(allocator, &module_facts, path, declaration, seen, stack);
+    defer deinitImportedSummaries(allocator, &nested);
+    for (nested.items) |*entry| flow.setFileFunctionSummary(entry.slot, &entry.summary);
+
+    var summary = (flow.exportedSummary(specifier, name) catch return null) orelse return null;
+    if (type_checker) |*checker| checker.ensureHealthy() catch {
+        summary.deinit(allocator);
+        return null;
+    };
     if (declaration) |decl| {
         const statuses = flow.classificationStatuses();
         if (statuses.len == decl.classifications.len and seen.len == statuses.len) {
@@ -600,7 +663,7 @@ fn importedFunctionLabels(
             }
         }
     }
-    return labels;
+    return summary;
 }
 
 /// The stronger of two P8 statuses: matched over indeterminate over absent.
@@ -1771,16 +1834,24 @@ fn runCheckOnPreparedSource(
     defer allocator.free(imported_seen);
     @memset(imported_seen, .absent);
     if (zts.findHandlerFunction(ir_view, root)) |hf| {
-        // Return labels for helpers imported from sibling files. Without them
+        // Sink summaries for helpers imported from sibling files. Without them
         // the flow checker has no body to walk for such a call and has to
         // treat its value as untraceable, which costs every property the
-        // value's sink decides.
-        var imported_labels = collectImportedFnLabels(allocator, &module_facts, handler_path, opts.declaration, imported_seen);
-        defer imported_labels.deinit(allocator);
+        // value's sink decides. With them the importer applies its own
+        // argument labels to the sinks inside each helper.
+        var import_stack: ImportStack = .{};
+        const handler_resolved = std.fs.path.resolve(allocator, &.{handler_path}) catch null;
+        defer if (handler_resolved) |p| allocator.free(p);
+        if (handler_resolved) |p| {
+            import_stack.paths[0] = p;
+            import_stack.len = 1;
+        }
+        var imported_summaries = collectImportedFnSummaries(allocator, &module_facts, handler_path, opts.declaration, imported_seen, &import_stack);
+        defer deinitImportedSummaries(allocator, &imported_summaries);
 
         var checked = try zts.pipeline.check(allocator, &resolved, hf, .{
             .module_facts = &module_facts,
-            .imported_fn_labels = imported_labels.items,
+            .imported_fn_summaries = imported_summaries.items,
             .declaration = opts.declaration,
         });
         result.verify_ran = true;
@@ -7348,6 +7419,290 @@ test "check keeps typed imported builtin methods deterministic" {
     try std.testing.expect(properties.idempotent);
     try std.testing.expect(properties.no_secret_leakage);
     try std.testing.expect(properties.no_credential_leakage);
+}
+
+/// A handler file with sibling modules in one temporary directory, for the
+/// cross-file flow tests. `check` runs the analyzer the way `zttp check` does.
+const SiblingFixture = struct {
+    tmp: std.testing.TmpDir,
+    handler_path: [:0]u8,
+
+    fn init(handler_source: []const u8) !SiblingFixture {
+        const allocator = std.testing.allocator;
+        var tmp = std.testing.tmpDir(.{});
+        errdefer tmp.cleanup();
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "handler.ts", .data = handler_source });
+        const handler_path = try tmp.dir.realPathFileAlloc(std.testing.io, "handler.ts", allocator);
+        return .{ .tmp = tmp, .handler_path = handler_path };
+    }
+
+    fn deinit(self: *SiblingFixture) void {
+        std.testing.allocator.free(self.handler_path);
+        self.tmp.cleanup();
+    }
+
+    fn add(self: *SiblingFixture, name: []const u8, source: []const u8) !void {
+        try self.tmp.dir.writeFile(std.testing.io, .{ .sub_path = name, .data = source });
+    }
+
+    fn check(self: *SiblingFixture) !CheckResult {
+        return runCheckOnlyWithOptions(std.testing.allocator, self.handler_path, .{ .json_mode = true });
+    }
+};
+
+fn hasDiagnosticCode(result: *const CheckResult, code: []const u8) bool {
+    for (result.json_diagnostics.items) |d| {
+        if (std.mem.eql(u8, d.code, code)) return true;
+    }
+    return false;
+}
+
+/// The first diagnostic with `code`, or null.
+fn diagnosticWithCode(result: *const CheckResult, code: []const u8) ?json_diag.JsonDiagnostic {
+    for (result.json_diagnostics.items) |d| {
+        if (std.mem.eql(u8, d.code, code)) return d;
+    }
+    return null;
+}
+
+const logs_param_helper =
+    \\import { logInfo } from "zttp:log";
+    \\export function logIt(x: string): number {
+    \\  logInfo(x, { n: 1 });
+    \\  return 1;
+    \\}
+    \\
+;
+
+test "an imported helper that logs its secret parameter refuses the call that passes one" {
+    var fixture = try SiblingFixture.init(
+        \\import { env } from "zttp:env";
+        \\import { logIt } from "./dep.ts";
+        \\function handler(req: Request): Response {
+        \\  const s = env("API_TOKEN") ?? "";
+        \\  const n = logIt(s);
+        \\  return Response.json({ ok: n });
+        \\}
+        \\
+    );
+    defer fixture.deinit();
+    try fixture.add("dep.ts", logs_param_helper);
+    var result = try fixture.check();
+    defer result.deinit(std.testing.allocator);
+
+    try std.testing.expect(!result.contract.?.properties.?.no_secret_leakage);
+    const diag = diagnosticWithCode(&result, "ZTS402") orelse return error.TestExpectedEqual;
+    // The report names the importer's call, the same text a direct sink has,
+    // and says where in the imported file the sink is.
+    try std.testing.expectEqualStrings("secret data flows into console output", diag.message);
+    try std.testing.expectEqual(@as(u32, 5), diag.line);
+    try std.testing.expect(std.mem.indexOf(u8, diag.suggestion orelse "", "./dep.ts") != null);
+}
+
+test "an imported helper called with a clean literal keeps no_secret_leakage" {
+    var fixture = try SiblingFixture.init(
+        \\import { logIt } from "./dep.ts";
+        \\function handler(req: Request): Response {
+        \\  const n = logIt("hello");
+        \\  return Response.json({ ok: n });
+        \\}
+        \\
+    );
+    defer fixture.deinit();
+    try fixture.add("dep.ts", logs_param_helper);
+    var result = try fixture.check();
+    defer result.deinit(std.testing.allocator);
+
+    try std.testing.expect(result.contract.?.properties.?.no_secret_leakage);
+    try std.testing.expect(!hasDiagnosticCode(&result, "ZTS402"));
+}
+
+test "an imported helper that logs its own secret refuses every call" {
+    var fixture = try SiblingFixture.init(
+        \\import { logOwn } from "./dep.ts";
+        \\function handler(req: Request): Response {
+        \\  const n = logOwn();
+        \\  return Response.json({ ok: n });
+        \\}
+        \\
+    );
+    defer fixture.deinit();
+    try fixture.add("dep.ts",
+        \\import { env } from "zttp:env";
+        \\import { logInfo } from "zttp:log";
+        \\export function logOwn(): number {
+        \\  logInfo(env("API_TOKEN") ?? "", { n: 1 });
+        \\  return 1;
+        \\}
+        \\
+    );
+    var result = try fixture.check();
+    defer result.deinit(std.testing.allocator);
+
+    try std.testing.expect(!result.contract.?.properties.?.no_secret_leakage);
+    try std.testing.expect(hasDiagnosticCode(&result, "ZTS402"));
+}
+
+test "an imported helper that returns its parameter in a response refuses a secret" {
+    var fixture = try SiblingFixture.init(
+        \\import { env } from "zttp:env";
+        \\import { wrap } from "./dep.ts";
+        \\function handler(req: Request): Response {
+        \\  const s = env("API_TOKEN") ?? "";
+        \\  return wrap(s);
+        \\}
+        \\
+    );
+    defer fixture.deinit();
+    try fixture.add("dep.ts",
+        \\export function wrap(x: string): Response {
+        \\  return Response.json({ v: x });
+        \\}
+        \\
+    );
+    var result = try fixture.check();
+    defer result.deinit(std.testing.allocator);
+
+    try std.testing.expect(!result.contract.?.properties.?.no_secret_leakage);
+}
+
+test "a sink two imports deep reports at the handler's call" {
+    const handler =
+        \\import { env } from "zttp:env";
+        \\import { relay } from "./a.ts";
+        \\function handler(req: Request): Response {
+        \\  const s = env("API_TOKEN") ?? "";
+        \\  const n = relay(s);
+        \\  return Response.json({ ok: n });
+        \\}
+        \\
+    ;
+    var fixture = try SiblingFixture.init(handler);
+    defer fixture.deinit();
+    try fixture.add("a.ts",
+        \\import { logIt } from "./dep.ts";
+        \\export function relay(x: string): number {
+        \\  return logIt(x);
+        \\}
+        \\
+    );
+    try fixture.add("dep.ts", logs_param_helper);
+    var result = try fixture.check();
+    defer result.deinit(std.testing.allocator);
+    try std.testing.expect(!result.contract.?.properties.?.no_secret_leakage);
+    try std.testing.expect(hasDiagnosticCode(&result, "ZTS402"));
+
+    // Control: the same chain called with a literal leaks nothing.
+    var clean = try SiblingFixture.init(
+        \\import { relay } from "./a.ts";
+        \\function handler(req: Request): Response {
+        \\  const n = relay("hello");
+        \\  return Response.json({ ok: n });
+        \\}
+        \\
+    );
+    defer clean.deinit();
+    try clean.add("a.ts",
+        \\import { logIt } from "./dep.ts";
+        \\export function relay(x: string): number {
+        \\  return logIt(x);
+        \\}
+        \\
+    );
+    try clean.add("dep.ts", logs_param_helper);
+    var clean_result = try clean.check();
+    defer clean_result.deinit(std.testing.allocator);
+    try std.testing.expect(clean_result.contract.?.properties.?.no_secret_leakage);
+}
+
+test "an imported helper whose file will not parse leaves the secret unproven" {
+    var fixture = try SiblingFixture.init(
+        \\import { env } from "zttp:env";
+        \\import { logIt } from "./dep.ts";
+        \\function handler(req: Request): Response {
+        \\  const n = logIt(env("API_TOKEN") ?? "");
+        \\  return Response.json({ ok: n });
+        \\}
+        \\
+    );
+    defer fixture.deinit();
+    try fixture.add("dep.ts", "export function logIt(x: string): number {{{\n");
+    var result = try fixture.check();
+    defer result.deinit(std.testing.allocator);
+    try std.testing.expect(!result.contract.?.properties.?.no_secret_leakage);
+}
+
+test "an imported helper with more parameters than the summary cap leaves the secret unproven" {
+    var fixture = try SiblingFixture.init(
+        \\import { env } from "zttp:env";
+        \\import { many } from "./dep.ts";
+        \\function handler(req: Request): Response {
+        \\  const s = env("API_TOKEN") ?? "";
+        \\  const n = many("a", "b", "c", "d", "e", "f", "g", "h", s);
+        \\  return Response.json({ ok: n });
+        \\}
+        \\
+    );
+    defer fixture.deinit();
+    try fixture.add("dep.ts",
+        \\import { logInfo } from "zttp:log";
+        \\export function many(a: string, b: string, c: string, d: string, e: string, f: string, g: string, h: string, i: string): number {
+        \\  logInfo(i, { n: 1 });
+        \\  return 1;
+        \\}
+        \\
+    );
+    var result = try fixture.check();
+    defer result.deinit(std.testing.allocator);
+    try std.testing.expect(!result.contract.?.properties.?.no_secret_leakage);
+}
+
+test "an imported helper that sends its user input to a host demotes the importer's egress properties" {
+    var fixture = try SiblingFixture.init(
+        \\import { postIt } from "./dep.ts";
+        \\function handler(req: Request): Response {
+        \\  const n = postIt(req.url);
+        \\  return Response.json({ ok: n });
+        \\}
+        \\
+    );
+    defer fixture.deinit();
+    try fixture.add("dep.ts",
+        \\import { fetch } from "zttp:fetch";
+        \\export function postIt(x: string): number {
+        \\  const r = fetch("https://api.example.com/x", { method: "POST", body: x });
+        \\  return 1;
+        \\}
+        \\
+    );
+    var result = try fixture.check();
+    defer result.deinit(std.testing.allocator);
+    const properties = result.contract.?.properties.?;
+    try std.testing.expect(!properties.injection_safe);
+    try std.testing.expect(!properties.input_validated);
+}
+
+test "an imported helper reads the authorization header of the request it is passed" {
+    var fixture = try SiblingFixture.init(
+        \\import { audit } from "./dep.ts";
+        \\function handler(req: Request): Response {
+        \\  const n = audit(req);
+        \\  return Response.json({ ok: n });
+        \\}
+        \\
+    );
+    defer fixture.deinit();
+    try fixture.add("dep.ts",
+        \\import { logInfo } from "zttp:log";
+        \\export function audit(req: Request): number {
+        \\  logInfo(req.headers["authorization"] ?? "", { n: 1 });
+        \\  return 1;
+        \\}
+        \\
+    );
+    var result = try fixture.check();
+    defer result.deinit(std.testing.allocator);
+    try std.testing.expect(!result.contract.?.properties.?.no_credential_leakage);
 }
 
 test "a declaration cannot ride the multi-module build path, which runs no flow check" {

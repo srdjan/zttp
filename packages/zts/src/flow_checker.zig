@@ -174,6 +174,123 @@ pub const FlowProperties = struct {
 };
 
 // ---------------------------------------------------------------------------
+// Cross-file summaries (plan unit F7)
+// ---------------------------------------------------------------------------
+
+/// The kinds of argument that an imported function is walked with, once per
+/// parameter. A call site picks the families its argument belongs to and
+/// applies what each walk recorded. Every label the sinks tell apart has a
+/// family: `secret`, `credential`, and `unknown` each decide a sink on their own,
+/// `user_input` decides it differently with and without `validated`, and a
+/// request or its headers earn a `credential` label inside the helper.
+pub const ImportedFamily = enum(u3) {
+    secret,
+    credential,
+    user_input,
+    user_input_validated,
+    unknown,
+    request,
+    headers,
+};
+
+pub const imported_family_count = @typeInfo(ImportedFamily).@"enum".fields.len;
+
+/// One sink that a walk of an imported function reached.
+pub const ImportedSink = struct {
+    severity: Severity,
+    kind: DiagnosticKind,
+    /// The text a direct sink of this kind reports, so the importer's report
+    /// matches what the same sink in its own file would say.
+    message: []const u8,
+    help: ?[]const u8,
+    /// Line of the sink in the imported file.
+    line: u32,
+};
+
+/// What one walk of an imported function did: the sinks it reached, the flow
+/// properties it cleared, and the labels it returned.
+pub const ImportedWalk = struct {
+    properties: FlowProperties = .{},
+    returns: LabelSet = LabelSet.empty,
+    sinks: []const ImportedSink = &.{},
+
+    fn deinit(self: *ImportedWalk, allocator: std.mem.Allocator) void {
+        for (self.sinks) |sink| {
+            allocator.free(sink.message);
+            if (sink.help) |help| allocator.free(help);
+        }
+        if (self.sinks.len > 0) allocator.free(self.sinks);
+        self.* = .{};
+    }
+
+    fn clone(self: ImportedWalk, allocator: std.mem.Allocator) !ImportedWalk {
+        var out: ImportedWalk = .{ .properties = self.properties, .returns = self.returns };
+        if (self.sinks.len == 0) return out;
+        const sinks = try allocator.alloc(ImportedSink, self.sinks.len);
+        var made: usize = 0;
+        errdefer {
+            for (sinks[0..made]) |sink| {
+                allocator.free(sink.message);
+                if (sink.help) |help| allocator.free(help);
+            }
+            allocator.free(sinks);
+        }
+        for (self.sinks, 0..) |sink, i| {
+            const message = try allocator.dupe(u8, sink.message);
+            errdefer allocator.free(message);
+            const help: ?[]const u8 = if (sink.help) |h| try allocator.dupe(u8, h) else null;
+            sinks[i] = .{ .severity = sink.severity, .kind = sink.kind, .message = message, .help = help, .line = sink.line };
+            made = i + 1;
+        }
+        out.sinks = sinks;
+        return out;
+    }
+};
+
+/// The sink summary of one imported function (plan unit F7), computed once in
+/// the imported file's own walk and applied at each call site with the
+/// importer's argument labels.
+///
+/// `clean` is the walk with every parameter unlabelled: the sinks the function
+/// reaches on its own, such as a secret it reads and logs, which apply at every
+/// call whatever the arguments. `walks[i][f]` is the walk with parameter `i`
+/// carrying family `f`. A call site applies the family walks of the labels its
+/// argument carries, which assumes that the effect of a label set is the union
+/// of the effects of its members.
+///
+/// `resolved` false is the summary of a function the walk could not enter, and
+/// the call site then treats the call as unresolved. Owned by the allocator of
+/// the checker that made it; release with `deinit`.
+pub const ImportedSummary = struct {
+    /// How the importer names the file in a report: the specifier as written.
+    file: []const u8 = "",
+    resolved: bool = false,
+    param_count: u8 = 0,
+    clean: ImportedWalk = .{},
+    walks: [max_summary_params][imported_family_count]ImportedWalk = @splat(@splat(.{})),
+
+    pub fn deinit(self: *ImportedSummary, allocator: std.mem.Allocator) void {
+        if (self.file.len > 0) allocator.free(self.file);
+        self.clean.deinit(allocator);
+        for (&self.walks) |*row| {
+            for (row) |*walk| walk.deinit(allocator);
+        }
+        self.* = .{};
+    }
+
+    pub fn clone(self: *const ImportedSummary, allocator: std.mem.Allocator) !ImportedSummary {
+        var out: ImportedSummary = .{ .resolved = self.resolved, .param_count = self.param_count };
+        errdefer out.deinit(allocator);
+        out.file = if (self.file.len > 0) try allocator.dupe(u8, self.file) else "";
+        out.clean = try self.clean.clone(allocator);
+        for (self.walks, 0..) |row, i| {
+            for (row, 0..) |walk, f| out.walks[i][f] = try walk.clone(allocator);
+        }
+        return out;
+    }
+};
+
+// ---------------------------------------------------------------------------
 // Declared classifications (M4 T4, producer obligations P8 and P9)
 // ---------------------------------------------------------------------------
 
@@ -282,12 +399,14 @@ pub const FlowChecker = struct {
     /// `visible` bytes, so a runtime `visible` puts the magnitude of the
     /// declassification in whatever computes it.
     module_fn_declassify_bound: std.AutoHashMapUnmanaged(u16, u8),
-    /// Return labels for functions imported from another file, local slot ->
-    /// labels. The checker has no file access, so the caller computes these
-    /// with `exportedReturnLabels` over the imported module and installs them
-    /// before `check`. Without them a cross-file call is untraceable and costs
-    /// every property its value's sink decides.
-    file_fn_labels: std.AutoHashMapUnmanaged(u16, LabelSet),
+    /// Sink summaries for functions imported from another file, local slot ->
+    /// summary. The checker has no file access, so the caller computes these
+    /// with `exportedSummary` over the imported module and installs them before
+    /// `check`. Without one a cross-file call is unresolved and fails closed.
+    /// A lookup also requires that the binding be an import's own
+    /// (`importedSummaryFor`), because a slot alone is an atom index for a
+    /// global and a frame index for a local or a parameter.
+    file_fn_summaries: std.AutoHashMapUnmanaged(u16, ImportedSummary),
     /// Per-binding origin: packed(scope_id, slot) -> metadata for the module
     /// call that initialised this binding. Lets the constraint extractor emit
     /// per-call stub constraints on `if (binding)` patterns.
@@ -451,7 +570,7 @@ pub const FlowChecker = struct {
             .module_fn_meta = .empty,
             .module_fn_arg_derived = .empty,
             .module_fn_declassify_bound = .empty,
-            .file_fn_labels = .empty,
+            .file_fn_summaries = .empty,
             .binding_origin = .empty,
             .result_binding_labels = .empty,
             .result_binding_guard = .empty,
@@ -495,7 +614,9 @@ pub const FlowChecker = struct {
         self.module_fn_meta.deinit(self.allocator);
         self.module_fn_arg_derived.deinit(self.allocator);
         self.module_fn_declassify_bound.deinit(self.allocator);
-        self.file_fn_labels.deinit(self.allocator);
+        var summary_iter = self.file_fn_summaries.valueIterator();
+        while (summary_iter.next()) |summary| summary.deinit(self.allocator);
+        self.file_fn_summaries.deinit(self.allocator);
         self.binding_origin.deinit(self.allocator);
         self.working_constraints.deinit(self.allocator);
         self.working_io_calls.deinit(self.allocator);
@@ -761,13 +882,6 @@ pub const FlowChecker = struct {
         self.summary_depth += 1;
     }
 
-    /// Record the return labels of a function imported from another file,
-    /// keyed by the local binding slot the import produced. Call before
-    /// `check`; the labels come from `exportedReturnLabels` run over that file.
-    pub fn setFileFunctionLabels(self: *FlowChecker, slot: u16, labels: LabelSet) void {
-        self.file_fn_labels.put(self.allocator, slot, labels) catch self.markAllocationFailure();
-    }
-
     /// Install the agent-to-tool mapping from the catalog that contract
     /// extraction accepted. Production precompile uses this path, so runtime
     /// lowering and flow inference consume the same names and route strings.
@@ -816,14 +930,11 @@ pub const FlowChecker = struct {
     /// Only the named function's body is walked. Its own calls into modules
     /// this checker cannot resolve stay `unknown`, so the answer never claims
     /// more than one file's worth of evidence. Allocation failure is returned
-    /// rather than letting a partial label set look complete.
+    /// rather than letting a partial label set look complete. Production uses
+    /// `exportedSummary`, which also records the sinks; this answers the labels
+    /// alone.
     pub fn exportedReturnLabels(self: *FlowChecker, name: []const u8) !?LabelSet {
-        self.scanImports();
-        self.scanFunctionDecls();
-        self.resolveCaptures();
-        // The imported file's own module-level constants: an exported function
-        // that returns one answers with its labels, not with `.unknown`.
-        self.walkModuleDeclarations();
+        self.prepareExportedModule();
         if (self.allocation_failed) return error.OutOfMemory;
 
         const fn_node = self.findFunctionByName(name) orelse return null;
@@ -840,6 +951,305 @@ pub const FlowChecker = struct {
         } else self.exprBodyLabels(func.body);
         if (self.allocation_failed) return error.OutOfMemory;
         return labels;
+    }
+
+    /// The walks that precede any read of an imported module's functions.
+    fn prepareExportedModule(self: *FlowChecker) void {
+        self.scanImports();
+        self.scanFunctionDecls();
+        self.resolveCaptures();
+        // The imported file's own module-level constants: an exported function
+        // that returns one answers with its labels, not with `.unknown`.
+        self.walkModuleDeclarations();
+    }
+
+    /// The labels that family `f` gives to a parameter in its walk. A request
+    /// or its headers carry what the handler's own request parameter carries.
+    fn familyLabels(family: ImportedFamily) LabelSet {
+        return switch (family) {
+            .secret => .{ .secret = true },
+            .credential => .{ .credential = true },
+            .user_input, .request, .headers => .{ .user_input = true },
+            .user_input_validated => .{ .user_input = true, .validated = true },
+            .unknown => .{ .unknown = true },
+        };
+    }
+
+    /// Free the witness arrays of the diagnostics from `len` on and drop them.
+    fn truncateDiagnostics(self: *FlowChecker, len: usize) void {
+        if (len >= self.diagnostics.items.len) return;
+        for (self.diagnostics.items[len..]) |d| {
+            if (d.witness) |w| {
+                if (w.path_constraints.len > 0) self.allocator.free(w.path_constraints);
+                if (w.io_calls.len > 0) self.allocator.free(w.io_calls);
+            }
+        }
+        self.diagnostics.shrinkRetainingCapacity(len);
+    }
+
+    /// Walk `fn_node` once with the given parameter bindings and record what
+    /// the walk did: the diagnostics from index `from` on, the properties it
+    /// left (starting from `start_properties`), and the labels it returned.
+    /// The diagnostics from `keep` on are dropped afterwards, so the next walk
+    /// reports its sinks afresh instead of being deduplicated against this one.
+    fn recordWalk(
+        self: *FlowChecker,
+        fn_node: NodeIndex,
+        func: Node.FunctionExpr,
+        passed: PassedArgs,
+        labels: [max_summary_params]LabelSet,
+        start_properties: FlowProperties,
+        from: usize,
+        keep: usize,
+    ) !ImportedWalk {
+        var arg_union = LabelSet.empty;
+        for (labels) |l| arg_union = LabelSet.merge(arg_union, l);
+        self.properties = start_properties;
+        const returns = self.enterFunctionFrame(fn_node, func, passed, labels, arg_union);
+        if (self.allocation_failed) return error.OutOfMemory;
+
+        var walk: ImportedWalk = .{ .properties = self.properties, .returns = returns };
+        errdefer walk.deinit(self.allocator);
+        const recorded = self.diagnostics.items[from..];
+        if (recorded.len > 0) {
+            const sinks = try self.allocator.alloc(ImportedSink, recorded.len);
+            var made: usize = 0;
+            errdefer {
+                for (sinks[0..made]) |sink| {
+                    self.allocator.free(sink.message);
+                    if (sink.help) |help| self.allocator.free(help);
+                }
+                self.allocator.free(sinks);
+            }
+            for (recorded, 0..) |d, i| {
+                const message = try self.allocator.dupe(u8, d.message);
+                errdefer self.allocator.free(message);
+                const help: ?[]const u8 = if (d.help) |h| try self.allocator.dupe(u8, h) else null;
+                const line: u32 = if (self.ir_view.getLoc(d.node)) |loc| loc.line else 0;
+                sinks[i] = .{ .severity = d.severity, .kind = d.kind, .message = message, .help = help, .line = line };
+                made = i + 1;
+            }
+            walk.sinks = sinks;
+        }
+        self.truncateDiagnostics(keep);
+        return walk;
+    }
+
+    /// The sink summary of the exported function named `name`, for a caller in
+    /// another module (plan unit F7). Null when the module exports no such
+    /// function. `file` is how the caller names this module in a report.
+    ///
+    /// One walk with every parameter unlabelled records the sinks the function
+    /// reaches on its own; then one walk per parameter and per label family
+    /// records what that label does inside the function. A function that the
+    /// walk cannot bind (past the parameter cap, or a parameter with no
+    /// binding) comes back with `resolved` false, and its call sites fail
+    /// closed. Allocation failure is returned rather than letting a partial
+    /// summary look complete.
+    pub fn exportedSummary(self: *FlowChecker, file: []const u8, name: []const u8) !?ImportedSummary {
+        self.prepareExportedModule();
+        if (self.allocation_failed) return error.OutOfMemory;
+
+        const fn_node = self.findFunctionByName(name) orelse return null;
+        const func = self.ir_view.getFunction(fn_node) orelse return null;
+
+        var summary: ImportedSummary = .{};
+        errdefer summary.deinit(self.allocator);
+        summary.file = try self.allocator.dupe(u8, file);
+
+        if (func.params_count > max_summary_params) return summary;
+        for (0..func.params_count) |i| {
+            const param_idx = self.ir_view.getListIndex(func.params_start, @intCast(i));
+            if (self.paramBinding(param_idx) == null) return summary;
+        }
+        const param_count: usize = func.params_count;
+        summary.param_count = @intCast(param_count);
+
+        // What the module-level walk already cleared and reported belongs to
+        // the clean walk: it happens on load, whatever a caller passes.
+        const base_properties = self.properties;
+        const base_diagnostics = self.diagnostics.items.len;
+        const no_labels: [max_summary_params]LabelSet = @splat(LabelSet.empty);
+
+        summary.clean = try self.recordWalk(
+            fn_node,
+            func,
+            .{ .count = param_count },
+            no_labels,
+            base_properties,
+            0,
+            base_diagnostics,
+        );
+        for (0..param_count) |i| {
+            for (std.enums.values(ImportedFamily)) |family| {
+                var labels = no_labels;
+                labels[i] = familyLabels(family);
+                var passed: PassedArgs = .{ .count = param_count };
+                passed.carriers[i] = switch (family) {
+                    .request => .request,
+                    .headers => .headers,
+                    .secret, .credential, .user_input, .user_input_validated, .unknown => null,
+                };
+                summary.walks[i][@intFromEnum(family)] = try self.recordWalk(
+                    fn_node,
+                    func,
+                    passed,
+                    labels,
+                    .{},
+                    base_diagnostics,
+                    base_diagnostics,
+                );
+            }
+        }
+        self.properties = base_properties;
+        summary.resolved = true;
+        return summary;
+    }
+
+    /// Install the sink summary of a function imported from another file,
+    /// keyed by the local binding slot the import produced. The checker keeps
+    /// its own copy. Call before `check`; the summary comes from
+    /// `exportedSummary` run over that file.
+    pub fn setFileFunctionSummary(self: *FlowChecker, slot: u16, summary: *const ImportedSummary) void {
+        var owned = summary.clone(self.allocator) catch {
+            self.markAllocationFailure();
+            return;
+        };
+        const previous = self.file_fn_summaries.fetchPut(self.allocator, slot, owned) catch {
+            owned.deinit(self.allocator);
+            self.markAllocationFailure();
+            return;
+        };
+        if (previous) |old| {
+            var stale = old.value;
+            stale.deinit(self.allocator);
+        }
+    }
+
+    /// True when `binding` is an import's own binding. The maps keyed by a
+    /// slot (`module_fn_*`, `file_fn_summaries`) are keyed by the import's slot,
+    /// which for a global is an atom index. A local or a parameter has a frame
+    /// index in the same type, so a slot alone does not tell an import from a
+    /// callable parameter that happens to share the number.
+    fn isImportBinding(self: *const FlowChecker, binding: ir.BindingRef) bool {
+        return self.import_bindings.contains(packBindingKey(binding.scope_id, binding.slot));
+    }
+
+    fn moduleMeta(self: *const FlowChecker, binding: ir.BindingRef) ?counterexample.StubInfo {
+        if (!self.isImportBinding(binding)) return null;
+        return self.module_fn_meta.get(binding.slot);
+    }
+
+    fn moduleLabels(self: *const FlowChecker, binding: ir.BindingRef) ?LabelSet {
+        if (!self.isImportBinding(binding)) return null;
+        return self.module_fn_labels.get(binding.slot);
+    }
+
+    fn moduleArgDerived(self: *const FlowChecker, binding: ir.BindingRef) bool {
+        if (!self.isImportBinding(binding)) return false;
+        return self.module_fn_arg_derived.contains(binding.slot);
+    }
+
+    /// The summary installed for `binding`, only when the binding is the
+    /// import itself. A slot alone does not name one: a global's slot is an atom
+    /// index and a local's or a parameter's is a frame index, so a parameter
+    /// whose frame index equals an import's atom index would otherwise read the
+    /// import's summary.
+    fn importedSummaryFor(self: *const FlowChecker, binding: ir.BindingRef) ?*const ImportedSummary {
+        if (!self.isImportBinding(binding)) return null;
+        return self.file_fn_summaries.getPtr(binding.slot);
+    }
+
+    /// Apply one walk recorded in an imported file at the importer's call
+    /// `site`: clear the properties the walk cleared and report the sinks it
+    /// reached, with the text a direct sink of that kind has. The help names
+    /// the imported file and line, because the importer's report cannot point
+    /// into that file.
+    fn applyImportedWalk(self: *FlowChecker, summary: *const ImportedSummary, walk: *const ImportedWalk, site: NodeIndex) void {
+        const p = &self.properties;
+        const w = walk.properties;
+        p.no_secret_leakage = p.no_secret_leakage and w.no_secret_leakage;
+        p.no_credential_leakage = p.no_credential_leakage and w.no_credential_leakage;
+        p.input_validated = p.input_validated and w.input_validated;
+        p.pii_contained = p.pii_contained and w.pii_contained;
+        p.injection_safe = p.injection_safe and w.injection_safe;
+        p.deterministic = p.deterministic and w.deterministic;
+        for (walk.sinks) |sink| {
+            self.addDiagnostic(.{
+                .severity = sink.severity,
+                .kind = sink.kind,
+                .node = site,
+                .message = sink.message,
+                .help = self.importedSinkHelp(summary.file, sink),
+            });
+        }
+    }
+
+    fn importedSinkHelp(self: *FlowChecker, file: []const u8, sink: ImportedSink) ?[]const u8 {
+        const formatted = if (sink.help) |base|
+            std.fmt.allocPrint(self.allocator, "{s} (the sink is in the helper imported from {s}, line {d})", .{ base, file, sink.line })
+        else
+            std.fmt.allocPrint(self.allocator, "the sink is in the helper imported from {s}, line {d}", .{ file, sink.line });
+        const text = formatted catch {
+            self.markAllocationFailure();
+            return sink.help;
+        };
+        self.allocated_messages.append(self.allocator, text) catch {
+            self.allocator.free(text);
+            self.markAllocationFailure();
+            return sink.help;
+        };
+        return text;
+    }
+
+    /// The labels of a call to an imported function, with the sinks inside it
+    /// applied to this call's arguments. The clean walk applies whatever the
+    /// arguments are. Each argument then applies the walks of the families its
+    /// labels belong to, and the call returns what those walks returned plus
+    /// the labels of the argument that no family covers (`config`, `internal`,
+    /// `external`, `nondeterministic`, `unsafe_html`), which pass through as
+    /// they always did.
+    fn importedCallLabels(
+        self: *FlowChecker,
+        summary: *const ImportedSummary,
+        call_data: Node.CallExpr,
+        arg_labels: [max_summary_params]LabelSet,
+        arg_union: LabelSet,
+    ) LabelSet {
+        if (!summary.resolved) return self.unresolvedCallLabels(arg_union);
+        const site = self.active_call_node;
+        self.applyImportedWalk(summary, &summary.clean, site);
+        var returned = summary.clean.returns;
+
+        const count = @min(call_data.args_count, summary.param_count);
+        for (0..count) |i| {
+            const labels = arg_labels[i];
+            const arg = self.ir_view.getListIndex(call_data.args_start, @intCast(i));
+            const carrier = self.carrierKind(arg);
+            const picks = [imported_family_count]bool{
+                labels.secret,
+                labels.credential,
+                labels.user_input and !labels.validated,
+                labels.user_input and labels.validated,
+                labels.unknown,
+                carrier == .request,
+                carrier == .headers,
+            };
+            for (picks, 0..) |picked, f| {
+                if (!picked) continue;
+                const walk = &summary.walks[i][f];
+                self.applyImportedWalk(summary, walk, site);
+                returned = LabelSet.merge(returned, walk.returns);
+            }
+            var rest = labels;
+            rest.secret = false;
+            rest.credential = false;
+            rest.user_input = false;
+            rest.unknown = false;
+            if (labels.user_input) rest.validated = false;
+            returned = LabelSet.merge(returned, rest);
+        }
+        return returned;
     }
 
     /// The function declaration bound to `name` at module scope, or null.
@@ -2169,7 +2579,7 @@ pub const FlowChecker = struct {
     fn calleeCannotWriteRequest(self: *const FlowChecker, callee: NodeIndex) bool {
         if (self.ir_view.getTag(callee) != .identifier) return false;
         const binding = self.bindingAt(callee) orelse return false;
-        if (self.module_fn_meta.contains(binding.slot)) return true;
+        if (self.moduleMeta(binding) != null) return true;
         return self.user_fn_decls.contains(packBindingKey(binding.scope_id, binding.slot));
     }
 
@@ -2949,7 +3359,7 @@ pub const FlowChecker = struct {
         const callee_tag = self.ir_view.getTag(call_data.callee) orelse return null;
         if (callee_tag == .identifier) {
             const binding = self.bindingAt(call_data.callee) orelse return null;
-            const meta = self.module_fn_meta.get(binding.slot) orelse return null;
+            const meta = self.moduleMeta(binding) orelse return null;
             if (std.mem.eql(u8, meta.module, "fetch") and
                 (std.mem.eql(u8, meta.func, "fetch") or std.mem.eql(u8, meta.func, "fetchWithRetry")))
             {
@@ -3069,15 +3479,15 @@ pub const FlowChecker = struct {
             // pending argument JSON and the union of every tool the agent may
             // select. `callId` and `name` do not carry into the value. This
             // must precede the export's generic `derives_from_args` rule.
-            if (self.isCallToolSlot(binding.slot)) return self.callToolLabels(call_data);
+            if (self.moduleMeta(binding) != null and self.isCallToolSlot(binding.slot)) return self.callToolLabels(call_data);
 
-            if (self.module_fn_labels.get(binding.slot)) |base_labels| {
+            if (self.moduleLabels(binding)) |base_labels| {
                 if (self.env_fn_slot != null and binding.slot == self.env_fn_slot.? and call_data.args_count > 0) {
                     const arg = self.ir_view.getListIndex(call_data.args_start, 0);
                     return self.refineEnvLabels(arg, base_labels);
                 }
                 if (base_labels.validated) return self.parsedResultLabels(base_labels, call_data);
-                if (self.module_fn_arg_derived.contains(binding.slot)) {
+                if (self.moduleArgDerived(binding)) {
                     return self.argDerivedLabels(base_labels, call_data);
                 }
                 // A declassifier whose magnitude is not a compile-time literal
@@ -3096,7 +3506,7 @@ pub const FlowChecker = struct {
             // Declared no labels of its own, but its result carries whatever
             // its arguments did. Must precede the meta branch below, which
             // answers with the closure labels alone.
-            if (self.module_fn_arg_derived.contains(binding.slot)) {
+            if (self.moduleArgDerived(binding)) {
                 return self.argDerivedLabels(LabelSet.empty, call_data);
             }
 
@@ -3111,7 +3521,7 @@ pub const FlowChecker = struct {
             // so without this a secret read inside its callback would arrive
             // unlabelled while the same read inside `parallel`'s callback,
             // which does declare labels, would not.
-            if (self.module_fn_meta.contains(binding.slot)) {
+            if (self.moduleMeta(binding) != null) {
                 return self.closureArgLabels(binding.slot, call_data);
             }
 
@@ -3509,7 +3919,7 @@ pub const FlowChecker = struct {
                         if (std.mem.eql(u8, name, "Array") or std.mem.eql(u8, name, "range")) return .array;
                         return null;
                     }
-                    if (self.module_fn_meta.get(binding.slot)) |meta| {
+                    if (self.moduleMeta(binding)) |meta| {
                         if (meta.returns == .string or meta.returns == .optional_string) return .string;
                         if (meta.returns == .result) return .result;
                         if ((std.mem.eql(u8, meta.module, "fetch") and
@@ -3740,13 +4150,12 @@ pub const FlowChecker = struct {
                 if (std.mem.eql(u8, name, "fetchSync")) return LabelSet.merge(arg_union, .{ .unknown = true });
                 return self.unresolvedCallLabels(arg_union);
             }
-            // A function imported from another file, whose return labels the
-            // caller computed from that file and installed here. Unioned with
-            // the arguments rather than replacing them, because those labels
-            // were computed with the parameters left unlabelled. Unit F7
-            // covers the sinks inside it.
-            if (self.file_fn_labels.get(binding.slot)) |imported| {
-                return LabelSet.merge(arg_union, imported);
+            // A function imported from another file, whose sink summary the
+            // caller computed from that file and installed here: its sinks
+            // apply to this call's arguments, and its return labels replace the
+            // argument union for the labels the summary walked.
+            if (self.importedSummaryFor(binding)) |summary| {
+                return self.importedCallLabels(summary, call_data, arg_labels, arg_union);
             }
             return self.unresolvedCallLabels(arg_union);
         };
@@ -3812,15 +4221,46 @@ pub const FlowChecker = struct {
 
         // Read what the call site passes before any binding changes, because a
         // pass-through argument is resolved against the enclosing frame's
-        // bindings.
+        // bindings. Whether each argument is the request or its headers is
+        // read with the same pass-through rule: a parameter that the call site
+        // bound to the request makes the callee's reads of `authorization`
+        // credentials.
+        var passed: PassedArgs = .{ .count = call_data.args_count };
+        for (0..func.params_count) |i| {
+            if (i >= call_data.args_count) break;
+            const param_idx = self.ir_view.getListIndex(func.params_start, @intCast(i));
+            if (self.paramBinding(param_idx) == null) continue;
+            const arg = self.ir_view.getListIndex(call_data.args_start, @intCast(i));
+            passed.values[i] = self.passedValueNode(arg);
+            passed.carriers[i] = self.carrierKind(arg);
+        }
+        return self.enterFunctionFrame(fn_node, func, passed, arg_labels, arg_union);
+    }
+
+    /// What a call site passes for each parameter of the callee: the function
+    /// or object literal the argument stands for, and whether it is the request
+    /// or its headers. `count` is the number of arguments written.
+    const PassedArgs = struct {
+        count: usize,
+        values: [max_summary_params]?NodeIndex = @splat(null),
+        carriers: [max_summary_params]?CarrierKind = @splat(null),
+    };
+
+    /// Bind the parameters of `fn_node` to what a call passes, walk the body in
+    /// a summary frame, and answer the union of its return labels. Shared by a
+    /// call in this file and by the walk of an exported function that
+    /// `exportedSummary` runs with synthetic arguments.
+    fn enterFunctionFrame(
+        self: *FlowChecker,
+        fn_node: NodeIndex,
+        func: Node.FunctionExpr,
+        passed: PassedArgs,
+        arg_labels: [max_summary_params]LabelSet,
+        arg_union: LabelSet,
+    ) LabelSet {
         const param_count: usize = func.params_count;
-        var passed: [max_summary_params]?NodeIndex = @splat(null);
         var saved: [max_summary_params]?NodeIndex = @splat(null);
         var keys: [max_summary_params]?u32 = @splat(null);
-        // Whether each argument is the request or its headers, read with the
-        // same pass-through rule: a parameter that the call site bound to the
-        // request makes the callee's reads of `authorization` credentials.
-        var carriers: [max_summary_params]?CarrierKind = @splat(null);
         var saved_carriers: [max_summary_params]?CarrierKind = @splat(null);
         for (0..param_count) |i| {
             const param_idx = self.ir_view.getListIndex(func.params_start, @intCast(i));
@@ -3829,11 +4269,6 @@ pub const FlowChecker = struct {
             keys[i] = key;
             saved[i] = self.param_values.get(key);
             saved_carriers[i] = self.request_carriers.get(key);
-            if (i < call_data.args_count) {
-                const arg = self.ir_view.getListIndex(call_data.args_start, @intCast(i));
-                passed[i] = self.passedValueNode(arg);
-                carriers[i] = self.carrierKind(arg);
-            }
         }
         // A binding made for this call site ends with its frame.
         defer self.restoreParamValues(&keys, &saved);
@@ -3841,12 +4276,12 @@ pub const FlowChecker = struct {
 
         for (0..param_count) |i| {
             const key = keys[i] orelse continue;
-            const labels = if (i < call_data.args_count) arg_labels[i] else LabelSet.empty;
+            const labels = if (i < passed.count) arg_labels[i] else LabelSet.empty;
             self.binding_labels.put(self.allocator, key, labels) catch {
                 self.markAllocationFailure();
                 return self.unresolvedCallLabels(arg_union);
             };
-            if (passed[i]) |value| {
+            if (passed.values[i]) |value| {
                 self.param_values.put(self.allocator, key, value) catch {
                     self.markAllocationFailure();
                     return self.unresolvedCallLabels(arg_union);
@@ -3854,7 +4289,7 @@ pub const FlowChecker = struct {
             } else {
                 _ = self.param_values.remove(key);
             }
-            self.setCarrier(key, carriers[i]);
+            self.setCarrier(key, passed.carriers[i]);
         }
 
         const frame = self.summary_depth;
@@ -4303,7 +4738,7 @@ pub const FlowChecker = struct {
         const callee_tag = self.ir_view.getTag(callee) orelse return false;
         if (callee_tag != .identifier) return false;
         const binding = self.bindingAt(callee) orelse return false;
-        const meta = self.module_fn_meta.get(binding.slot) orelse return false;
+        const meta = self.moduleMeta(binding) orelse return false;
         if (!std.mem.eql(u8, meta.module, "log")) return false;
         return std.mem.eql(u8, meta.func, "logDebug") or
             std.mem.eql(u8, meta.func, "logInfo") or
@@ -4317,7 +4752,7 @@ pub const FlowChecker = struct {
         const callee_tag = self.ir_view.getTag(callee) orelse return null;
         if (callee_tag != .identifier) return null;
         const binding = self.bindingAt(callee) orelse return null;
-        const meta = self.module_fn_meta.get(binding.slot) orelse return null;
+        const meta = self.moduleMeta(binding) orelse return null;
         if (std.mem.eql(u8, meta.func, "fetch")) return .fetch;
         if (std.mem.eql(u8, meta.func, "serviceCall")) return .service_call;
         return null;
@@ -4853,7 +5288,7 @@ pub const FlowChecker = struct {
         if (callee_tag != .identifier) return;
 
         const callee_binding = self.bindingAt(call_data.callee) orelse return;
-        const return_labels = self.module_fn_labels.get(callee_binding.slot) orelse return;
+        const return_labels = self.moduleLabels(callee_binding) orelse return;
 
         // Only track if the function returns labels worth propagating (e.g., validated)
         if (return_labels.has(.validated)) {
@@ -4866,7 +5301,7 @@ pub const FlowChecker = struct {
             self.result_binding_labels.put(self.allocator, key, refined) catch self.markAllocationFailure();
             // Remember the validator that cleared the taint so a defended path
             // can name it. `func` is borrowed from the module metadata table.
-            if (self.module_fn_meta.get(callee_binding.slot)) |meta| {
+            if (self.moduleMeta(callee_binding)) |meta| {
                 self.result_binding_guard.put(self.allocator, key, .{
                     .func = meta.func,
                     .node = vd.init,
@@ -5043,7 +5478,7 @@ pub const FlowChecker = struct {
         const callee_tag = self.ir_view.getTag(call.callee) orelse return;
         if (callee_tag != .identifier) return;
         const binding = self.bindingAt(call.callee) orelse return;
-        const meta = self.module_fn_meta.get(binding.slot) orelse return;
+        const meta = self.moduleMeta(binding) orelse return;
         const call_index = self.working_io_calls.items.len;
         self.working_io_calls.append(self.allocator, .{
             .module = meta.module,
@@ -6514,7 +6949,7 @@ test "FlowChecker keeps validated label through a wrapper returning a validator 
     try std.testing.expect(checker.getProperties().injection_safe);
 }
 
-/// Shared harness for the cross-file path: run `exportedReturnLabels` over
+/// Shared harness for the cross-file path: run `exportedSummary` over
 /// `imported_source` for `name`, install the result on a checker built over
 /// `source`, and report whether no_secret_leakage was proven. Mirrors what the
 /// caller does with a real file, without touching the filesystem.
@@ -6548,8 +6983,9 @@ fn runWithImportedFunction(
     var imported_checker = FlowChecker.init(allocator, imported_view, &imported_atoms);
     defer imported_checker.deinit();
     if (type_checker) |*checker| imported_checker.setTypeChecker(checker);
-    const imported_labels = (try imported_checker.exportedReturnLabels(name)) orelse
+    var imported_summary = (try imported_checker.exportedSummary("./utils.ts", name)) orelse
         return error.ExportNotFound;
+    defer imported_summary.deinit(allocator);
     if (type_checker) |*checker| try checker.ensureHealthy();
 
     var parser = try @import("zts-engine").parser.JsParser.init(allocator, source);
@@ -6575,7 +7011,7 @@ fn runWithImportedFunction(
     defer facts.deinit();
     for (facts.imports.items) |rec| {
         if (std.mem.eql(u8, rec.imported_name, name)) {
-            checker.setFileFunctionLabels(rec.slot, imported_labels);
+            checker.setFileFunctionSummary(rec.slot, &imported_summary);
         }
     }
     _ = try checker.check(handler_fn);
@@ -6632,6 +7068,88 @@ test "an imported function that returns a module-level secret reaches the respon
         clean_imported,
         "readRegion",
     ));
+}
+
+test "an imported function that logs its parameter reports at each call that passes a secret" {
+    const imported =
+        \\import { logInfo } from "zttp:log";
+        \\export function logIt(x) { logInfo(x, { n: 1 }); return 1; }
+    ;
+    const secret_source =
+        \\import { env } from "zttp:env";
+        \\import { logIt } from "./utils.ts";
+        \\function handler(req) { return Response.json({ v: logIt(env("SECRET_KEY")) }); }
+    ;
+    try std.testing.expect(!try runWithImportedFunction(std.testing.allocator, secret_source, imported, "logIt"));
+
+    // Control: the same helper called with a literal reaches no secret.
+    const literal_source =
+        \\import { logIt } from "./utils.ts";
+        \\function handler(req) { return Response.json({ v: logIt("hello") }); }
+    ;
+    try std.testing.expect(try runWithImportedFunction(std.testing.allocator, literal_source, imported, "logIt"));
+}
+
+test "an imported function that logs its own secret fails every call, whatever the arguments" {
+    const imported =
+        \\import { env } from "zttp:env";
+        \\import { logInfo } from "zttp:log";
+        \\export function logOwn() { logInfo(env("SECRET_KEY") ?? "", { n: 1 }); return 1; }
+    ;
+    const source =
+        \\import { logOwn } from "./utils.ts";
+        \\function handler(req) { return Response.json({ v: logOwn() }); }
+    ;
+    try std.testing.expect(!try runWithImportedFunction(std.testing.allocator, source, imported, "logOwn"));
+}
+
+test "a parameter cannot read the summary of an import that shares its slot" {
+    // `name` is a predefined atom, so the import's slot is a small atom index,
+    // and the tenth parameter of the handler has the same number as a frame
+    // slot. A lookup by slot alone would answer the call `f(...)` with the
+    // import's summary, which returns a constant and so launders the secret.
+    const imported =
+        \\export function name(x) { return 1; }
+    ;
+    const collision =
+        \\import { env } from "zttp:env";
+        \\import { name } from "./utils.ts";
+        \\function handler(req, a1, a2, a3, a4, a5, a6, a7, a8, f) {
+        \\  return Response.json({ v: f(env("SECRET_KEY")) });
+        \\}
+    ;
+    try std.testing.expect(!try runWithImportedFunction(std.testing.allocator, collision, imported, "name"));
+
+    // Control: the import itself still reads its summary.
+    const direct =
+        \\import { env } from "zttp:env";
+        \\import { name } from "./utils.ts";
+        \\function handler(req) {
+        \\  return Response.json({ v: name(env("SECRET_KEY")) });
+        \\}
+    ;
+    try std.testing.expect(try runWithImportedFunction(std.testing.allocator, direct, imported, "name"));
+}
+
+test "a parameter cannot read the labels of a module import that shares its slot" {
+    // `call` is a predefined atom (92), so the import's slot is 92, and the
+    // ninety-third parameter has the same number as a frame slot. A lookup by
+    // slot alone reads the call `f(...)` as a call to the module export, which
+    // carries only what its callbacks return, and the secret passed to an
+    // unresolved callee is lost.
+    const allocator = std.testing.allocator;
+    var params: std.ArrayList(u8) = .empty;
+    defer params.deinit(allocator);
+    for (1..92) |i| try params.print(allocator, "a{d}, ", .{i});
+    const source = try std.fmt.allocPrint(allocator,
+        \\import {{ env }} from "zttp:env";
+        \\import {{ call }} from "zttp:workflow";
+        \\function handler(req, {s}f) {{
+        \\  return Response.json({{ v: f(env("SECRET_KEY")) }});
+        \\}}
+    , .{params.items});
+    defer allocator.free(source);
+    try std.testing.expect(!try runNoSecretLeakage(allocator, source));
 }
 
 test "an imported function carrying nothing keeps the property" {
