@@ -66,7 +66,9 @@ pub const binding = mb.ModuleBinding{
             .{ .category = .durable_producer_key },
             .{ .arg_position = 1, .category = .durable_signal },
         }, .contract_flags = .{ .sets_durable_used = true } },
-        .{ .name = "signalAt", .func = signalAtNative, .arg_count = 3, .effect = .write, .returns = .boolean, .param_types = &.{ .string, .string, .number }, .param_names = &.{ "key", "name", "atMs" }, .contract_extractions = &.{
+        // `signalAtNative` reads `args[3]` as the payload, as `signal` does, and
+        // the shipped orchestrator example passes it. The payload is optional.
+        .{ .name = "signalAt", .func = signalAtNative, .arg_count = 4, .required_arg_count = 3, .effect = .write, .returns = .boolean, .param_types = &.{ .string, .string, .number, .unknown }, .param_names = &.{ "key", "name", "atMs", "payload" }, .contract_extractions = &.{
             .{ .category = .durable_producer_key },
             .{ .arg_position = 1, .category = .durable_signal },
         }, .contract_flags = .{ .sets_durable_used = true, .sets_durable_timers = true } },

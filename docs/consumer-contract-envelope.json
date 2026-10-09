@@ -250,7 +250,7 @@
       { "name": "zttp:ledger", "binding_digest": "0d6fc456e087f20ae11af059a720278d9130fc5380776e378fc29044be4d7bd6" },
       { "name": "zttp:io", "binding_digest": "3b08bd3349d54f56e7f2b958e8d6949b3b1efc67c0aaf8f3a586b43661ef28ad" },
       { "name": "zttp:scope", "binding_digest": "4598b2db9920c9fe9bea72ead5a781264742023538f261a5a89a9cb173ceaaf3" },
-      { "name": "zttp:durable", "binding_digest": "4d7cbab61b63f3a70534520c86484e70eb752514b144fb505ecf208eb7e814f0" },
+      { "name": "zttp:durable", "binding_digest": "6ad8654b0057722e268947a511d92dbcb414d57c7a263c404ed65129a212f682" },
       { "name": "zttp:workflow", "binding_digest": "9a6039bfd6c1df6d4f3115f3ae9f379ff2eecc031d37c548cba0e8ef3587f979" },
       { "name": "zttp:queue", "binding_digest": "fb1ccff592e37ba9c6a05be2ce0aa83bcc9f7755876c61e27a713450a80dff99" },
       { "name": "zttp:url", "binding_digest": "aa8771b062bcc9a49ed1e067f7cdd0ed50048441975b80e19e793634a4f673ab" },
@@ -281,7 +281,7 @@
       { "name": "zttp:ledger", "binding_digest": "0d6fc456e087f20ae11af059a720278d9130fc5380776e378fc29044be4d7bd6" },
       { "name": "zttp:io", "binding_digest": "3b08bd3349d54f56e7f2b958e8d6949b3b1efc67c0aaf8f3a586b43661ef28ad" },
       { "name": "zttp:scope", "binding_digest": "4598b2db9920c9fe9bea72ead5a781264742023538f261a5a89a9cb173ceaaf3" },
-      { "name": "zttp:durable", "binding_digest": "4d7cbab61b63f3a70534520c86484e70eb752514b144fb505ecf208eb7e814f0" },
+      { "name": "zttp:durable", "binding_digest": "6ad8654b0057722e268947a511d92dbcb414d57c7a263c404ed65129a212f682" },
       { "name": "zttp:workflow", "binding_digest": "9a6039bfd6c1df6d4f3115f3ae9f379ff2eecc031d37c548cba0e8ef3587f979" },
       { "name": "zttp:queue", "binding_digest": "fb1ccff592e37ba9c6a05be2ce0aa83bcc9f7755876c61e27a713450a80dff99" },
       { "name": "zttp:url", "binding_digest": "aa8771b062bcc9a49ed1e067f7cdd0ed50048441975b80e19e793634a4f673ab" },
@@ -321,6 +321,6 @@
     "handler_contract_version": 24,
     "agent_protocol_schema": 2,
     "policy_hash": "baa218ec7b025b993a2d48194553b4a0fa7c3d704ff68c740d891a70c7dfe108",
-    "module_registry_hash": "c4098fd57cb0b4b2f3a646899ca41f55dadbfc525df4413b0c258a2b9f9d7394"
+    "module_registry_hash": "c75cb499e42c133dc1050d14b14caffc14d9ca9a08f8d499dc5838ea55d4b047"
   }
 }

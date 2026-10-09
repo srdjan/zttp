@@ -4142,6 +4142,20 @@ pub const TypeChecker = struct {
             }
         };
 
+        // A `zttp:*` export is identified by the import that names it, not by
+        // its local name, so an alias and a same-named export of another module
+        // each answer to their own declared parameter count. Every call supplies
+        // every declared argument (spec: fixed arity), so a surplus is a defect
+        // whatever the types are. The lower bound is checked below.
+        if (bound_metadata == null) {
+            if (self.resolveImportedExport(binding)) |entry| {
+                if (call.args_count > entry.func.arg_count) {
+                    self.addArgCountMismatch(node, entry.func.arg_count, @intCast(call.args_count));
+                    return;
+                }
+            }
+        }
+
         const sig = if (bound_metadata) |metadata|
             switch (metadata) {
                 .unavailable => return,
@@ -5865,6 +5879,61 @@ test "TypeChecker: surplus arguments to a function with no annotation are refuse
         \\  return Response.json({});
         \\}
     , 2, "expected 2, got 3");
+}
+
+test "TypeChecker: surplus arguments to a module export are refused" {
+    try checkTypedSourceSaying(
+        \\import { sha256 } from "zttp:crypto";
+        \\function handler(req: Request): Response {
+        \\  return Response.text(sha256("a", "b"));
+        \\}
+    , 1, "expected 1, got 2");
+}
+
+test "TypeChecker: a module export called under another name is still bounded" {
+    try checkTypedSourceSaying(
+        \\import { sha256 as digest } from "zttp:crypto";
+        \\function handler(req: Request): Response {
+        \\  return Response.text(digest("a", "b", "c"));
+        \\}
+    , 1, "expected 1, got 3");
+}
+
+test "TypeChecker: a module export is called with its declared arguments" {
+    try checkTypedSource(
+        \\import { sha256 } from "zttp:crypto";
+        \\import { jwtVerify } from "zttp:auth";
+        \\function handler(req: Request): Response {
+        \\  const a = jwtVerify("t", "s");
+        \\  const b = jwtVerify("t", "s", "HS256");
+        \\  return Response.text(sha256("a"));
+        \\}
+    , 0, 0);
+}
+
+test "TypeChecker: signalAt takes the payload its native reads" {
+    // The native reads `args[3]` as a payload and the shipped example passes
+    // four arguments, so the declaration has four parameters, three required.
+    try checkTypedSource(
+        \\import { signalAt } from "zttp:durable";
+        \\function handler(req: Request): Response {
+        \\  const a = signalAt("k", "n", 1);
+        \\  const b = signalAt("k", "n", 1, { ok: true });
+        \\  return Response.json({ a: a, b: b });
+        \\}
+    , 0, 0);
+    try checkTypedSourceSaying(
+        \\import { signalAt } from "zttp:durable";
+        \\function handler(req: Request): Response {
+        \\  return Response.json({ a: signalAt("k", "n", 1, {}, 5) });
+        \\}
+    , 1, "expected 4, got 5");
+    try checkTypedSourceSaying(
+        \\import { signalAt } from "zttp:durable";
+        \\function handler(req: Request): Response {
+        \\  return Response.json({ a: signalAt("k", "n") });
+        \\}
+    , 1, "expected 3, got 2");
 }
 
 test "TypeChecker: a call with exactly the declared arguments is accepted" {

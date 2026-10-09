@@ -81,7 +81,9 @@ EXPECTED_RESTRICTION_HASH="3409f9e0490c698e67dcd1e7a6e3465f0d14c50e0a611bbe96520
 # Moved 2026-09-27: zttp:tool adds agentPrompt and callTool (M5 A1 U2).
 # Moved 2026-09-28: A4 updates zttp:fetch and zttp:tool, and A3 registers
 # zttp:sse. These surfaces share one generated module registry hash.
-EXPECTED_BUILTIN_HASH="c4098fd57cb0b4b2f3a646899ca41f55dadbfc525df4413b0c258a2b9f9d7394"
+# Moved 2026-10-09: zttp:durable signalAt declares its fourth argument, the
+# payload that signalAtNative already read (A2).
+EXPECTED_BUILTIN_HASH="c75cb499e42c133dc1050d14b14caffc14d9ca9a08f8d499dc5838ea55d4b047"
 
 fail() {
   printf 'meta drift: %s\n' "$1" >&2
