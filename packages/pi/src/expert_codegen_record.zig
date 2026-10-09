@@ -3823,8 +3823,15 @@ const anthropic_coverage_legacy_corpus_version = "83c9c0c040e8e6f1f659ddc7d853f9
 /// the probe that produced it narrowed this list, ran the replay, and took the
 /// tripped set the generator printed. No code appeared that was not already
 /// here.
+///
+/// ZTS400 left on 2026-10-09 with the re-record after the boolean and arity
+/// plan. Only `parallel-secret` ever tripped it, and every draft in the new
+/// recording that reaches the leak also reads `.ok` on the array `parallel()`
+/// returns. Unit B3 now walks function bodies and refuses that read (ZTS102),
+/// and a boolean error stops `check` before the flow stage, so the leak is
+/// never reached. ZTS400 itself still fires once a draft gets past the boolean
+/// stage; the corpus no longer stands on it.
 const deepseek_coverage_baseline = [_][]const u8{
-    "ZTS400",
     "ZTS500",
 };
 // Moved again when a full audit of all 19 cases found three more assertions
