@@ -36,6 +36,13 @@ function describePort(p: Port): string {
   return ["port:", String(p)].join("");
 }
 
+// `typeof` reads the runtime value. The parameter is `unknown`, so the checker
+// does not fold the comparison to a constant, as it does for a `UserId` read
+// directly.
+function isRuntimeString(value: unknown): boolean {
+  return typeof value === "string";
+}
+
 structural Branded<T> = Proof<T,
     | "deterministic"
     | "read_only"
@@ -64,6 +71,6 @@ function handler(req: Request): Branded<Response> {
     user: describeUser(id),
     order: describeOrder(ref),
     port: describePort(port),
-    erased: typeof id === "string",
+    erased: isRuntimeString(id),
   });
 }

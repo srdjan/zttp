@@ -71,7 +71,7 @@ function handler(req: Request): Response {
         }
 
         const result = JSON.tryParse(body);
-        if (result.isErr()) {
+        if (result.isErr() === true) {
             return Response.json({ error: result.unwrapErr() }, { status: 400 });
         }
         const data = result.unwrap();

@@ -5250,6 +5250,36 @@ test "holes: a hole inside a nested function declaration is attributed to the en
     try std.testing.expectEqualStrings("local", in_scope[2].name);
 }
 
+test "holes: a hole inside a nested function declaration expects the nested function's return type" {
+    const allocator = std.testing.allocator;
+    // The hole is attributed to the enclosing function, which keeps its scope,
+    // but the expression it stands for returns from the nested function, so
+    // the expected type is the nested declaration's, not the handler's. The
+    // innermost declaration wins.
+    const source =
+        \\function handler(req: Request): Response {
+        \\  function inner(): string {
+        \\    return hole();
+        \\  }
+        \\  function outer(): string {
+        \\    function deep(): number {
+        \\      return hole();
+        \\    }
+        \\    return String(deep());
+        \\  }
+        \\  return Response.json({ v: inner(), w: outer() });
+        \\}
+    ;
+    var result = try runCheckOnlyFromSource(allocator, source, "holes.ts", null, true, null, false);
+    defer result.deinit(allocator);
+
+    const contract = if (result.contract) |*c| c else return error.MissingContract;
+    try std.testing.expectEqual(@as(usize, 2), contract.holes.items.len);
+    for (contract.holes.items) |h| try std.testing.expectEqualStrings("handler", h.function);
+    try std.testing.expectEqualStrings("string", contract.holes.items[0].expected_type);
+    try std.testing.expectEqualStrings("number", contract.holes.items[1].expected_type);
+}
+
 test "holes: a finished program reports none" {
     const allocator = std.testing.allocator;
     const source =

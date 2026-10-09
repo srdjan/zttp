@@ -45,15 +45,15 @@ function handler(req: Request): Guardrails<Response> {
   const recommendations = results[2];
 
   let userPayload: unknown = undefined;
-  if (user.ok) {
+  if (user.ok === true) {
     userPayload = user.json();
   }
   let ordersPayload: unknown = { items: [] };
-  if (orders.ok) {
+  if (orders.ok === true) {
     ordersPayload = orders.json();
   }
   let recommendationsPayload: unknown = [];
-  if (recommendations.ok) {
+  if (recommendations.ok === true) {
     recommendationsPayload = recommendations.json();
   }
 

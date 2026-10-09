@@ -385,8 +385,15 @@ pub const BoolChecker = struct {
                     self.fn_return_types.put(self.allocator, key, ret_type) catch self.markAllocationFailure();
                     self.const_types.put(self.allocator, key, .function) catch self.markAllocationFailure();
                 }
-                // The body is not walked here: boolean checks inside a declared
-                // function are not enforced yet.
+                // Walk the body so `handler`, helpers, and the arrows inside
+                // them get the same boolean checks as module-scope code.
+                const func = self.ir_view.getFunctionOfDecl(node) orelse return;
+                self.walkStmt(func.body);
+            },
+
+            .export_decl => {
+                const export_decl = self.ir_view.getExportDecl(node) orelse return;
+                self.walkStmt(export_decl.declaration);
             },
 
             .function_expr, .arrow_function => {
@@ -2280,6 +2287,44 @@ test "sound: optional from function fails in boolean context" {
         \\const r = find([1]);
         \\if (r) { let x = r; }
     , 1);
+}
+
+// B3: bodies of declared functions are walked.
+
+test "sound: if (5) in a function declaration fails" {
+    try checkSource("function f() { if (5) { let x = 1; } }", 1);
+}
+
+test "sound: if (5) in an export function fails" {
+    try checkSource("export function f() { if (5) { let x = 1; } }", 1);
+}
+
+test "sound: if (5) in a function nested in a function fails" {
+    try checkSource(
+        \\function outer() {
+        \\  function inner() { if (5) { let x = 1; } }
+        \\  return inner;
+        \\}
+    , 1);
+}
+
+test "sound: if (5) in an arrow inside a function declaration fails" {
+    try checkSource(
+        \\function handler() {
+        \\  const f = () => { if (5) { let x = 1; } };
+        \\  return f;
+        \\}
+    , 1);
+}
+
+test "sound: a clean function declaration body passes" {
+    try checkSource(
+        \\function f(n) {
+        \\  if (n === 1) { return 1; }
+        \\  return 2;
+        \\}
+        \\export function g(n) { return n; }
+    , 0);
 }
 
 // =========================================================================

@@ -14,13 +14,13 @@ function handler(req: Request): Guardrails<Response> {
 
   // Named internal call - linked directly to users service
   const health = serviceCall("users", "GET /api/users", {});
-  if (!health.ok) {
+  if (health.status !== 200) {
     return Response.json({ error: "users service down" }, { status: 502 });
   }
 
   // Named internal call - linked directly to orders service
   const orders = serviceCall("orders", "GET /api/orders", {});
-  if (!orders.ok) {
+  if (orders.status !== 200) {
     return Response.json({ error: "orders service down" }, { status: 502 });
   }
 

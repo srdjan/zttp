@@ -32,15 +32,15 @@ function handler(_req: Request): Guardrails<Response> {
   const inventory = results[2];
 
   let userPayload: unknown = undefined;
-  if (user.ok) {
+  if (user.ok === true) {
     userPayload = user.json();
   }
   let ordersPayload: unknown = { items: [] };
-  if (orders.ok) {
+  if (orders.ok === true) {
     ordersPayload = orders.json();
   }
   let inventoryPayload: unknown = [];
-  if (inventory.ok) {
+  if (inventory.ok === true) {
     inventoryPayload = inventory.json();
   }
 

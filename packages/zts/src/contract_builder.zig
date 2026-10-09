@@ -952,7 +952,13 @@ pub const ContractBuilder = struct {
             const loc = self.ir_view.getLoc(call.callee) orelse ir.SourceLocation{ .line = 0, .column = 0, .offset = 0 };
 
             var type_buf: [256]u8 = undefined;
-            const expected = self.expectedTypeForHole(owner, &type_buf);
+            // A hole inside a nested function declaration stands for an
+            // expression that returns from that declaration, so its expected
+            // type is the declaration's, not the enclosing function's.
+            const expected = if (self.innermostNestedDecl(analyzer, idx)) |decl|
+                self.expectedTypeForDecl(decl, &type_buf)
+            else
+                self.expectedTypeForHole(owner, &type_buf);
 
             var summary = contract_types.HoleSummary{
                 .function = try self.allocator.dupe(u8, owner),
@@ -1117,6 +1123,55 @@ pub const ContractBuilder = struct {
             .name = try self.allocator.dupe(u8, name),
             .type_name = try self.allocator.dupe(u8, rendered),
         });
+    }
+
+    /// The innermost function declaration nested inside an analyzed function
+    /// whose body contains `hole_node`, or null when the hole sits directly in
+    /// the analyzed function. The analyzer lists top-level functions only, so a
+    /// declaration that is not in its list is a nested one.
+    fn innermostNestedDecl(
+        self: *ContractBuilder,
+        analyzer: *const effect_inference.Analyzer,
+        hole_node: NodeIndex,
+    ) ?NodeIndex {
+        const functions = analyzer.all();
+        const owner: *const effect_inference.FunctionEffect = blk: {
+            for (functions) |*fe| {
+                if (self.subtreeContains(fe.body_node, hole_node)) break :blk fe;
+            }
+            return null;
+        };
+        var best: ?NodeIndex = null;
+        var best_body: NodeIndex = null_node;
+        var idx: NodeIndex = 0;
+        while (idx < self.ir_view.nodeCount()) : (idx += 1) {
+            if (self.ir_view.getTag(idx) != .function_decl) continue;
+            if (idx == owner.decl_node) continue;
+            const func = self.ir_view.getFunctionOfDecl(idx) orelse continue;
+            if (!self.subtreeContains(func.body, hole_node)) continue;
+            if (!self.subtreeContains(owner.body_node, idx)) continue;
+            // Every candidate contains the hole, so candidates nest in a
+            // chain: keep the one that sits inside the others.
+            if (best == null or self.subtreeContains(best_body, idx)) {
+                best = idx;
+                best_body = func.body;
+            }
+        }
+        return best;
+    }
+
+    /// The return type a nested function declaration promises, or "unknown"
+    /// when it carries no annotation. Never the enclosing function's type.
+    fn expectedTypeForDecl(
+        self: *const ContractBuilder,
+        decl: NodeIndex,
+        buf: []u8,
+    ) []const u8 {
+        const env = self.type_env orelse return "unknown";
+        const offset = self.ir_view.signatureOffset(decl) orelse return "unknown";
+        const sig = env.getFnSigAt(offset) orelse return "unknown";
+        if (sig.return_type == type_pool_mod.null_type_idx) return "unknown";
+        return env.pool.formatType(env.stripProofMarkers(sig.return_type), buf);
     }
 
     fn expectedTypeForHole(

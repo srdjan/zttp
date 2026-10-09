@@ -1,0 +1,3 @@
+stages: strip,parse,imports,boolean
+{"code":"ZTS100","severity":"error","message":"boolean context requires a value of type boolean","file":"check/bad/bool_condition_in_nested_function.ts","line":4,"column":13,"suggestion":"compare the value explicitly so the expression has type boolean","repair_intent":null}
+{"code":"ZTS100","severity":"error","message":"boolean context requires a value of type boolean","file":"check/bad/bool_condition_in_nested_function.ts","line":10,"column":13,"suggestion":"compare the value explicitly so the expression has type boolean","repair_intent":null}

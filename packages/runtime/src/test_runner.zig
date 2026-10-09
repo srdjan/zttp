@@ -1867,7 +1867,7 @@ test "run: actor queue flag installs queue runtime for declarative tests" {
         \\  const inbox = receive("worker");
         \\  if (!inbox.ok) return Response.text(inbox.error, { status: 500 });
         \\  const done = ack(inbox.value.id);
-        \\  return Response.text(done.ok && inbox.value.payload.ok ? "queued" : "bad");
+        \\  return Response.text(done.ok && inbox.value.payload.ok === true ? "queued" : "bad");
         \\}
     ;
 
