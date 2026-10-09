@@ -154,7 +154,9 @@ pub fn propertyTagForKind(kind: DiagnosticKind) ?counterexample.PropertyTag {
 
 /// Proven data flow properties for a handler.
 pub const FlowProperties = struct {
-    /// No {secret} data reaches response bodies, headers, or external egress.
+    /// No {secret} data reaches response bodies or headers, logs, or external
+    /// egress. A write to the durable store, a queue, the cache, SQL, or another
+    /// handler is not a sink: the readers of stored data carry {unknown}.
     no_secret_leakage: bool = true,
     /// No {credential} data reaches response bodies or logs.
     no_credential_leakage: bool = true,

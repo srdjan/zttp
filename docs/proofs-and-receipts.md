@@ -72,9 +72,16 @@ a pill: `[+]` proven, `[-]` not proven. They are grouped.
 | Chip | Proven when |
 |---|---|
 | `injection_safe` | no unvalidated user input reaches a SQL or HTML sink |
-| `no_secret_leakage` | no secret-labelled value reaches a response, header, or egress call |
+| `no_secret_leakage` | no secret-labelled value reaches a response body or header, a log, or an egress call (URL, headers, or body) |
 | `no_credential_leak` | no credential-labelled value reaches a response body or log |
 | `input_validated` | all user input passes a validation step before any egress call |
+
+A write that stays inside the platform is not a sink for these chips: the
+durable store, a queue, the cache, SQL, and a call to another handler through
+`zttp:workflow`. The read side defends them instead. Each reader of stored
+data (`waitSignal`, `receive`, `cacheGet`, `sqlOne`, `sqlMany`) carries the
+label that means "could not follow", so a handler that returns a stored value
+is not proven.
 
 A `[-]` pill is not an error. It means the compiler could not prove that
 property for this handler, often because the handler legitimately does the
