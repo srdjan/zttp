@@ -241,6 +241,17 @@ unlabelled parameters (reports a sink only for labels it can see) or stops it
 and relies on call-site summaries. The census decides which. Callbacks a module
 invokes are checked through the closures they pass.
 
+Correction, 2026-10-08 (found by B0 of the boolean and arity plan): the
+handler walk never entered a nested `function` declaration. Its
+`getFunction` read misread the declaration and mostly returned null, so
+F1's choice to "keep the structural walk" kept a walk that did nothing. A
+correct structural walk counts the nested body's `return` as the handler's
+(census probe `x09` became an over-refusal), so B0 made the arm return. A
+nested declaration is now checked only through its calls: by name, through
+`param_values`, or as a named array-method callback (`0f696a6d`, census probe
+`x25`). A nested declaration that nothing calls is dead code, like a
+top-level one (`x14`).
+
 **F1b: an unresolved call fails closed even when discarded.** Every summary
 exit that returns an unresolved result (`userCallLabels`,
 `functionCallLabels`, `closureResultLabels`) also clears the sink-decided
