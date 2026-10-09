@@ -457,6 +457,39 @@ that accepts whatever it is compared against.
 Coverage moved with the rate: [coverage.md](coverage.md) goes from five of the
 compiler's seventy-two advertised rules tripped to seven.
 
+## The 2026-10-09 row: two plans tightened the checker
+
+63% (12/19) over corpus `e6801afae099`, at the new policy hash `baa218ec7b02`.
+The row above it measured 94% (18/19) over the same prompts. The flow-checker
+and boolean-checker plans of 2026-10-08 moved the policy hash, so 16 of 19
+cassettes had to be recorded again.
+
+The drop is mostly the model, not the compiler. The first request of every case
+is byte-identical to the previous recording, yet the first tool calls differ in
+all seven cases that failed. An offline analysis ran each failing first draft
+through a binary from before both plans: six of the seven fail there too
+(no capsule, a wrong import, `export default`, and claims the handler cannot
+discharge). The seventh, `parallel-secret`, reads `.ok` on the array that
+`parallel()` returns; the boolean checker now walks function bodies and
+refuses it, as the plan predicted. No false positive was found.
+
+Two report-only cohorts at commit `28cc9cb6`, which promoted nothing, measure
+the spread:
+
+| Run | Raw first-draft pass | First-attempt green | Reached green | Median round-trips | Intent pass |
+|---|---|---|---|---|---|
+| Published recording | 12/19 | 12/19 | 18/19 | 5 | 17/18 |
+| Cohort 1 | 15/19 | 15/19 | 19/19 | 4 | 18/18 |
+| Cohort 2 | 13/19 | 13/19 | 19/19 | 5 | 18/18 |
+
+The published row is the low value of a spread of three cases. Read it as
+12 to 15, not as a loss of six cases.
+
+Coverage lost ZTS400. Only `parallel-secret` ever tripped it, and in the
+published recording every draft that reached the leak also tripped ZTS102,
+which stops `check` before the flow stage. Both cohorts trip ZTS400 again in
+`parallel-secret`, so whether the corpus stands on it is a matter of the draw.
+
 ## The frozen pre-cutover baseline
 
 The last row is the one phase 7's paired comparison measures against, and it is
