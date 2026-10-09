@@ -104,6 +104,9 @@ pub const TypeChecker = struct {
     const CallableMetadata = union(enum) {
         unavailable,
         signature: type_env_mod.FunctionSig,
+        /// A source function with no annotation at all: nothing is known of its
+        /// types, but its parameter list says how many arguments a call may supply.
+        arity: u8,
     };
 
     const CompiledSchemaType = struct {
@@ -589,7 +592,7 @@ pub const TypeChecker = struct {
                 if (vd.init != null_node) {
                     self.walkExpr(vd.init);
                     const inferred = self.inferType(vd.init);
-                    self.bindCallableMetadata(vd.binding, self.callableMetadataForExpression(vd.init, inferred));
+                    self.bindCallableMetadata(vd.binding, self.callableMetadataForExpression(vd.init, inferred, vd.kind == .@"const"));
 
                     // Check: does the initializer type match the declared type?
                     const binding = vd.binding;
@@ -808,10 +811,7 @@ pub const TypeChecker = struct {
                 // function's does. A name does not identify it: nested functions
                 // repeat names, and the later one used to win for both.
                 const sig = if (self.ir_view.getLoc(decl.init)) |l| self.env.getFnSigAt(l.offset) else null;
-                self.bindCallableMetadata(
-                    decl.binding,
-                    if (sig) |s| .{ .signature = s } else .unavailable,
-                );
+                self.bindCallableMetadata(decl.binding, sourceFunctionMetadata(func, sig));
                 const active_start = self.active_declared_types.items.len;
                 defer self.active_declared_types.items.len = active_start;
                 // Named declarations resolve signatures by binding identity.
@@ -2922,7 +2922,7 @@ pub const TypeChecker = struct {
         const binding = self.ir_view.getBinding(call.callee) orelse return null_type_idx;
         if (self.boundCallableMetadata(binding)) |metadata| {
             return switch (metadata) {
-                .unavailable => null_type_idx,
+                .unavailable, .arity => null_type_idx,
                 .signature => |sig| self.instantiatedReturnType(node, sig, call),
             };
         }
@@ -3080,7 +3080,7 @@ pub const TypeChecker = struct {
     fn callableSignatureForBinding(self: *const TypeChecker, binding: ir.BindingRef) ?type_env_mod.FunctionSig {
         if (self.boundCallableMetadata(binding)) |metadata| {
             return switch (metadata) {
-                .unavailable => null,
+                .unavailable, .arity => null,
                 .signature => |sig| sig,
             };
         }
@@ -3089,18 +3089,45 @@ pub const TypeChecker = struct {
         return self.env.getFnSigByName(name);
     }
 
-    fn callableMetadataForExpression(self: *const TypeChecker, node: NodeIndex, inferred: TypeIndex) CallableMetadata {
+    /// What a call may rely on for the callee a `const` or declaration binds.
+    ///
+    /// The parameter nodes of a source function are the authority on how many
+    /// arguments it takes. The annotation-built signature can hold fewer
+    /// entries (a parameter left unannotated adds none), so the count comes
+    /// from the function and rides on the signature as `max_arg_count`. A
+    /// function with no annotation at all still has a count, and keeps it.
+    fn sourceFunctionMetadata(func: ir.Node.FunctionExpr, sig: ?type_env_mod.FunctionSig) CallableMetadata {
+        var with_count = sig orelse return .{ .arity = func.params_count };
+        with_count.max_arg_count = func.params_count;
+        return .{ .signature = with_count };
+    }
+
+    /// `exact_arity` says the binding cannot be reassigned, so the parameter
+    /// count of the function it was first given still holds at every call. A
+    /// `let` keeps the older, weaker reading.
+    fn callableMetadataForExpression(
+        self: *const TypeChecker,
+        node: NodeIndex,
+        inferred: TypeIndex,
+        exact_arity: bool,
+    ) CallableMetadata {
         const tag = self.ir_view.getTag(node) orelse return .unavailable;
         return switch (tag) {
             .identifier => blk: {
                 const binding = self.ir_view.getBinding(node) orelse break :blk .unavailable;
+                // An alias of a bound callable keeps everything known of it,
+                // including a bare parameter count.
+                if (self.boundCallableMetadata(binding)) |bound| break :blk bound;
                 const sig = self.callableSignatureForBinding(binding) orelse break :blk .unavailable;
                 break :blk .{ .signature = sig };
             },
             .function_expr, .arrow_function => blk: {
                 const loc = self.ir_view.getLoc(node) orelse break :blk .unavailable;
-                const sig = self.env.getFnSigAt(loc.offset) orelse break :blk .unavailable;
-                break :blk .{ .signature = sig };
+                const sig = self.env.getFnSigAt(loc.offset);
+                if (exact_arity) {
+                    if (self.ir_view.getFunction(node)) |func| break :blk sourceFunctionMetadata(func, sig);
+                }
+                break :blk .{ .signature = sig orelse break :blk .unavailable };
             },
             else => self.callableMetadataFromType(inferred),
         };
@@ -3235,7 +3262,17 @@ pub const TypeChecker = struct {
             const binding = self.ir_view.paramBinding(param_idx) orelse continue;
             const param_type = if (i < sig.param_count) sig.param_types[i] else null_type_idx;
             self.pushActiveDeclared(binding.name_atom, param_type);
-            self.bindCallableMetadata(binding, self.callableMetadataFromType(param_type));
+            // A parameter typed `(x: number) => number` has exactly the
+            // parameters its annotation lists, so the annotation bounds the
+            // arguments of a call to it. A function type inferred from an
+            // expression is not trusted this way: an arrow written at a call
+            // site is typed with an empty parameter list.
+            var callable = self.callableMetadataFromType(param_type);
+            switch (callable) {
+                .signature => |*declared| declared.max_arg_count = declared.param_count,
+                .unavailable, .arity => {},
+            }
+            self.bindCallableMetadata(binding, callable);
             if (param_type == null_type_idx) continue;
             const key = bindingKey(binding);
             self.param_types.put(self.allocator, key, param_type) catch self.markAllocationFailure();
@@ -4099,6 +4136,15 @@ pub const TypeChecker = struct {
         const sig = if (bound_metadata) |metadata|
             switch (metadata) {
                 .unavailable => return,
+                .arity => |declared| {
+                    // Only the parameter list is known. Every call supplies
+                    // every declared argument (spec: fixed arity), so a
+                    // surplus is a defect whatever the types are.
+                    if (call.args_count > declared) {
+                        self.addArgCountMismatch(node, declared, @intCast(call.args_count));
+                    }
+                    return;
+                },
                 .signature => |signature| signature,
             }
         else
@@ -4109,6 +4155,16 @@ pub const TypeChecker = struct {
         if (call.args_count < required_param_count) {
             self.addArgCountMismatch(node, required_param_count, @intCast(call.args_count));
             return;
+        }
+        // The upper bound, where the callee's own parameter list is known. A
+        // signature without that list (a module export, a global) is checked
+        // against its own table elsewhere. A source function has no optional
+        // parameter (the stripper refuses `?:`), so the bound is one count.
+        if (sig.max_arg_count) |max_arg_count| {
+            if (call.args_count > max_arg_count) {
+                self.addArgCountMismatch(node, max_arg_count, @intCast(call.args_count));
+                return;
+            }
         }
 
         // Bind the type parameters before the arguments are compared, so every
@@ -5712,6 +5768,130 @@ test "TypeChecker: each nested function of one name is still checked against its
         \\  return inner(1);
         \\}
     , 1, "expected 2, got 1");
+}
+
+test "TypeChecker: surplus arguments to a declaration are refused" {
+    try checkTypedSourceSaying(
+        \\function double(x: number): number { return x * 2; }
+        \\function handler(req: Request): Response {
+        \\  const n = double(1, 2);
+        \\  return Response.json({ n: n });
+        \\}
+    , 1, "expected 1, got 2");
+}
+
+test "TypeChecker: surplus arguments to a zero-parameter function are refused" {
+    try checkTypedSourceSaying(
+        \\function one(): number { return 1; }
+        \\function handler(req: Request): Response {
+        \\  return Response.json({ n: one(5) });
+        \\}
+    , 1, "expected 0, got 1");
+}
+
+test "TypeChecker: surplus arguments to a const arrow are refused" {
+    try checkTypedSourceSaying(
+        \\const inc = (x: number): number => x + 1;
+        \\function handler(req: Request): Response {
+        \\  return Response.json({ n: inc(1, 2) });
+        \\}
+    , 1, "expected 1, got 2");
+}
+
+test "TypeChecker: surplus arguments to a nested function are refused" {
+    try checkTypedSourceSaying(
+        \\function handler(req: Request): Response {
+        \\  function square(x: number): number { return x * x; }
+        \\  return Response.json({ n: square(2, 3) });
+        \\}
+    , 1, "expected 1, got 2");
+}
+
+test "TypeChecker: surplus arguments to a generic function are refused" {
+    try checkTypedSourceSaying(
+        \\function same<T>(x: T): T { return x; }
+        \\function handler(req: Request): Response {
+        \\  return Response.json({ n: same(1, 2) });
+        \\}
+    , 1, "expected 1, got 2");
+}
+
+test "TypeChecker: surplus arguments to a recursive call are refused" {
+    try checkTypedSourceSaying(
+        \\function fact(n: number): number { return n <= 1 ? 1 : n * fact(n - 1, 0); }
+        \\function handler(req: Request): Response {
+        \\  return Response.json({ n: fact(3) });
+        \\}
+    , 1, "expected 1, got 2");
+}
+
+test "TypeChecker: surplus arguments to a function-typed parameter are refused" {
+    try checkTypedSourceSaying(
+        \\function apply(f: (x: number) => number, v: number): number { return f(v, v); }
+        \\function handler(req: Request): Response {
+        \\  return Response.json({ n: apply((x: number): number => x, 3) });
+        \\}
+    , 1, "expected 1, got 2");
+}
+
+test "TypeChecker: surplus arguments are counted against the parameter list, not the annotations" {
+    // `(a: number, b)` annotates one of its two parameters. The signature
+    // built from the annotations holds one entry, so counting against it
+    // accepted `first(1, 2)` and `first(1, 2, 3)` alike.
+    try checkTypedSourceSaying(
+        \\const first = (a: number, b): number => a;
+        \\function handler(req: Request): Response {
+        \\  return Response.json({ n: first(1, 2, 3) });
+        \\}
+    , 1, "expected 2, got 3");
+}
+
+test "TypeChecker: surplus arguments to a function with no annotation are refused" {
+    try checkTypedSourceSaying(
+        \\function pick(a, b) { return a; }
+        \\const wrap = (a, b) => a;
+        \\function handler(req: Request): Response {
+        \\  pick(1, 2, 3);
+        \\  wrap(1, 2, 3);
+        \\  return Response.json({});
+        \\}
+    , 2, "expected 2, got 3");
+}
+
+test "TypeChecker: a call with exactly the declared arguments is accepted" {
+    try checkTypedSource(
+        \\function add(x: number, y: number): number { return x + y; }
+        \\const inc = (x: number): number => x + 1;
+        \\function apply(f: (x: number) => number, v: number): number { return f(v); }
+        \\function handler(req: Request): Response {
+        \\  const doubled = [1, 2].map((x: number): number => x * 2);
+        \\  const total = doubled.reduce((acc: number, x: number): number => acc + x, 0);
+        \\  return Response.json({ a: add(1, 2), b: inc(1), c: apply(inc, 3), d: total });
+        \\}
+    , 0, 0);
+}
+
+test "TypeChecker: a function passed by name to an array method is not a call" {
+    // The array method supplies more arguments than `dbl` declares. That is
+    // the method's contract, not a call written in the source.
+    try checkTypedSource(
+        \\function dbl(x: number): number { return x * 2; }
+        \\function handler(req: Request): Response {
+        \\  return Response.json({ ys: [1, 2].map(dbl) });
+        \\}
+    , 0, 0);
+}
+
+test "TypeChecker: a reassignable arrow keeps the weaker reading" {
+    // A `let` can be given another function, so the parameter count of the
+    // first one does not bound later calls. This is the stated limit of the
+    // upper bound, not an endorsement.
+    try checkTypedSource(
+        \\function handler(req: Request): Response {
+        \\  let f = (a: number): number => a;
+        \\  return Response.json({ n: f(1, 2) });
+        \\}
+    , 0, 0);
 }
 
 test "TypeChecker: logical and produces boolean" {

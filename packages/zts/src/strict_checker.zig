@@ -1546,9 +1546,16 @@ pub const StrictChecker = struct {
 
         // Anonymous callbacks passed to proof-relevant helpers must also be
         // annotated. v1 detects those at the call site via implicit_unknown.
+        //
+        // An anonymous function may carry no annotation at all, but one that
+        // annotates some of its parameters has made a claim about its
+        // signature, and the claim must be whole. `(a: number, b): number`
+        // reads as fully typed, while a call to it is checked against the one
+        // parameter that was annotated.
+        const env = self.type_env orelse return false;
         const loc = self.ir_view.getLoc(node) orelse return false;
-        _ = loc;
-        return false;
+        const sig = env.getFnSigAt(loc.offset) orelse return false;
+        return sig.param_count < func.params_count;
     }
 
     fn hasCompleteFunctionAnnotation(self: *const StrictChecker, func: ir.Node.FunctionExpr, signature_offset: u32) bool {
@@ -2638,6 +2645,40 @@ test "an annotated function sharing a line with an arrow is fully annotated" {
     var h = try checkStripped(
         "function bump(xs: number[]): number[] { return xs.map((x: number): number => x + 1); }\n" ++
             "function handler(req: Request): Response { return Response.json({}); }\n",
+    );
+    defer h.deinit();
+    try expectNoKind(&h.checker, .missing_public_annotation);
+}
+
+test "an anonymous arrow with some parameters annotated is refused" {
+    var h = try checkStripped(
+        "function handler(req: Request): Response { return Response.json({}); }\n" ++
+            "const first = (a: number, b): number => a;\n",
+    );
+    defer h.deinit();
+    try expectKind(&h.checker, .missing_public_annotation);
+}
+
+test "an anonymous arrow annotating only its return type is refused" {
+    var h = try checkStripped(
+        "function handler(req: Request): Response { return Response.json({}); }\n" ++
+            "const first = (a): number => 1;\n",
+    );
+    defer h.deinit();
+    try expectKind(&h.checker, .missing_public_annotation);
+}
+
+test "an anonymous arrow with every parameter annotated needs no return type" {
+    var h = try checkStripped(
+        "function handler(req: Request): Response { return Response.json({ ys: [1].map((x: number) => x) }); }\n",
+    );
+    defer h.deinit();
+    try expectNoKind(&h.checker, .missing_public_annotation);
+}
+
+test "an anonymous arrow with no annotation at all is still a plain callback" {
+    var h = try checkStripped(
+        "function handler(req: Request): Response { return Response.json({ ys: [1].map((x) => x) }); }\n",
     );
     defer h.deinit();
     try expectNoKind(&h.checker, .missing_public_annotation);

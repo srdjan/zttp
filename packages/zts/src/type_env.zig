@@ -165,6 +165,12 @@ pub const FunctionSig = struct {
     param_types: [16]TypeIndex = undefined,
     param_count: u8 = 0,
     required_param_count: ?u8 = null,
+    /// The most arguments a call may supply, set only when the callee's own
+    /// parameter list is known: the parameter nodes of a source function, or the
+    /// declared function type of a parameter. A signature built from annotations
+    /// alone can hold fewer entries than the function has parameters, and a
+    /// module export's table is checked elsewhere, so both leave it null.
+    max_arg_count: ?u8 = null,
     return_type: TypeIndex = null_type_idx,
     /// Type parameters declared by this signature, in declaration order. Empty
     /// for a monomorphic function. A call to a signature that has these is

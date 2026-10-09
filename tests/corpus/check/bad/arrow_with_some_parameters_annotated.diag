@@ -1,0 +1,2 @@
+stages: strip,parse,imports,boolean,types,strict
+{"code":"ZTS601","severity":"error","message":"strict ZigTS requires explicit function parameter and return types","file":"check/bad/arrow_with_some_parameters_annotated.ts","line":2,"column":15,"suggestion":"annotate each parameter and the return type, for example `function handler(req: Request): Response`","repair_intent":null}

@@ -1,0 +1,2 @@
+stages: strip,parse,imports,boolean,types
+{"code":"ZTS202","severity":"error","message":"wrong number of arguments: expected 2, got 3","file":"check/bad/call_to_partly_annotated_arrow_with_too_many_arguments.ts","line":5,"column":20,"suggestion":null,"repair_intent":null}
