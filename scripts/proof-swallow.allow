@@ -194,6 +194,7 @@ packages/zts/src/type_checker.zig addAllocatedDiagnostic catch-block
 packages/zts/src/type_checker.zig addDiagnostic catch-block
 packages/zts/src/type_checker.zig admitOneTypePredicate catch-poison
 packages/zts/src/type_checker.zig bindCallableMetadata catch-block
+packages/zts/src/type_checker.zig bindForOfElement catch-poison
 packages/zts/src/type_checker.zig bindPatternBindings catch-poison
 packages/zts/src/type_checker.zig bindVarDeclaration catch-block
 packages/zts/src/type_checker.zig bindVarDeclaration catch-poison

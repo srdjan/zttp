@@ -124,6 +124,7 @@ pub fn populateHandlerAbiTypes(env: *TypeEnv, pool: *TypePool, allocator: std.me
 
     populateRequestType(env, pool, allocator);
     populateRequestReaders(env, pool, allocator);
+    populateIntrinsicGuards(env, pool);
 }
 
 /// `Request` was a `known_globals` name resolving to a bare `t_ref`, so every
@@ -225,15 +226,26 @@ fn populateRequestReaders(env: *TypeEnv, pool: *TypePool, allocator: std.mem.All
     });
     if (result_record == null_type_idx) return;
 
-    registerReader(env, "requestBody", request, pool.idx_bytes);
-    registerReader(env, "requestText", request, result_record);
-    registerReader(env, "requestJson", request, result_record);
+    registerGlobalFn(env, "requestBody", request, pool.idx_bytes);
+    registerGlobalFn(env, "requestText", request, result_record);
+    registerGlobalFn(env, "requestJson", request, result_record);
 }
 
-fn registerReader(env: *TypeEnv, name: []const u8, request: TypeIndex, returns: TypeIndex) void {
+/// `isDict(x)` and `isBytes(x)` are the intrinsic type guards of spec 5.7 and
+/// 6.3. Each takes any value and answers a boolean. Without a signature the
+/// call had no type, so a guard in an `if`, a ternary, or the operand of `!`,
+/// `&&` or `||` was refused as a non-boolean condition. The narrowing a guard
+/// installs does not read this signature; it matches the call by name.
+fn populateIntrinsicGuards(env: *TypeEnv, pool: *TypePool) void {
+    registerGlobalFn(env, "isDict", pool.idx_unknown, pool.idx_boolean);
+    registerGlobalFn(env, "isBytes", pool.idx_unknown, pool.idx_boolean);
+}
+
+/// Register a one-parameter global in the map module exports use.
+fn registerGlobalFn(env: *TypeEnv, name: []const u8, param: TypeIndex, returns: TypeIndex) void {
     var sig = type_env_mod.FunctionSig{};
     sig.param_count = 1;
-    sig.param_types[0] = request;
+    sig.param_types[0] = param;
     sig.return_type = returns;
     env.fn_sigs_by_name.put(env.allocator, env.internName(name), sig) catch env.markAllocationFailure();
 }
@@ -509,7 +521,7 @@ test "a request reader the environment could not hold leaves it unhealthy" {
         if (!failing.failed) break;
         const healthy = !std.meta.isError(env.ensureHealthy()) and !std.meta.isError(pool.ensureHealthy());
         if (!healthy) continue;
-        for ([_][]const u8{ "requestBody", "requestText", "requestJson" }) |name| {
+        for ([_][]const u8{ "requestBody", "requestText", "requestJson", "isDict", "isBytes" }) |name| {
             try std.testing.expect(env.getFnSigByName(name) != null);
         }
     } else return error.TestUnexpectedResult;

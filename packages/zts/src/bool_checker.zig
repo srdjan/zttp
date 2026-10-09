@@ -861,7 +861,9 @@ pub const BoolChecker = struct {
     fn resultPropertyType(self: *const BoolChecker, prop_atom: u16) ExprType {
         const name = self.resolveAtomName(prop_atom) orelse return .unknown;
         if (std.mem.eql(u8, name, "ok")) return .boolean;
-        if (std.mem.eql(u8, name, "error")) return .string;
+        // Absent on success: `result.error ?? fallback` is a real test, not a
+        // pointless one.
+        if (std.mem.eql(u8, name, "error")) return .optional_string;
         if (std.mem.eql(u8, name, "errors")) return .unknown;
         if (std.mem.eql(u8, name, "value")) return .unknown;
         return .unknown;
@@ -2025,6 +2027,24 @@ test "sound: non-optional with ?? still warns" {
         \\import { sha256 } from "zttp:crypto";
         \\const val = sha256("data") ?? "";
     , 0, 1); // no errors, 1 warning
+}
+
+test "sound: result.error may be absent, so ?? on it does not warn" {
+    // The error field is absent on success; the fallback is a real test.
+    try checkSourceFull(
+        \\import { validateJson } from "zttp:validate";
+        \\const result = validateJson("schema", "data");
+        \\const reason = result.error ?? "none";
+    , 0, 0);
+}
+
+test "sound: result.ok with ?? still warns" {
+    // Control: ok is always present, so the same shape on it is pointless.
+    try checkSourceFull(
+        \\import { validateJson } from "zttp:validate";
+        \\const result = validateJson("schema", "data");
+        \\const fallback = result.ok ?? false;
+    , 0, 1);
 }
 
 test "sound: optional cacheGet fails in boolean context" {

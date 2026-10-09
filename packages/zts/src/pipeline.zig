@@ -1669,3 +1669,155 @@ test "the walk records a boolean-context operand's type inside a function declar
         }
     }.run);
 }
+
+// ---------------------------------------------------------------------------
+// Boolean-context false positives: intrinsic guards, nested members, typeof
+// over unknown, and for-of element variables
+// ---------------------------------------------------------------------------
+
+/// Fail unless the type checker recorded a boolean type for each of the
+/// `expected` boolean-context operands of `source`: the conditions of `if` and
+/// ternary, and the operands of `!`, `&&` and `||`. The boolean checker walks
+/// only arrows and module code today, so a `function` declaration is read here
+/// through the types the type checker recorded, which are the ones the boolean
+/// checker will read once it walks those bodies.
+fn expectEveryContextBoolean(source: []const u8, comptime expected: usize) !void {
+    const Probe = struct {
+        fn operand(checker: *type_checker_mod.TypeChecker, node: NodeIndex) !void {
+            const recorded = checker.contextTypeOf(node) orelse return error.OperandNotRecorded;
+            try testing.expect(checker.env.isAssignableTo(recorded, checker.env.pool.idx_boolean));
+        }
+        fn run(session: Session) anyerror!void {
+            const checker = &session.resolved.type_checker.?;
+            const view = session.parsed.ir_view;
+            var seen: usize = 0;
+            var idx: NodeIndex = 0;
+            while (idx < view.nodeCount()) : (idx += 1) {
+                switch (view.getTag(idx) orelse continue) {
+                    .if_stmt => {
+                        try operand(checker, (view.getIfStmt(idx) orelse continue).condition);
+                        seen += 1;
+                    },
+                    .ternary => {
+                        try operand(checker, (view.getTernary(idx) orelse continue).condition);
+                        seen += 1;
+                    },
+                    .unary_op => {
+                        const un = view.getUnary(idx) orelse continue;
+                        if (un.op != .not) continue;
+                        try operand(checker, un.operand);
+                        seen += 1;
+                    },
+                    .binary_op => {
+                        const bin = view.getBinary(idx) orelse continue;
+                        if (bin.op != .and_op and bin.op != .or_op) continue;
+                        try operand(checker, bin.left);
+                        try operand(checker, bin.right);
+                        seen += 2;
+                    },
+                    else => {},
+                }
+            }
+            try testing.expectEqual(expected, seen);
+        }
+    };
+    try withSession(testing.allocator, source, Probe.run);
+}
+
+test "isDict and isBytes are booleans in every boolean context" {
+    try expectBoolErrors(
+        "const f = (d: unknown): number => { if (isDict(d)) { return 1; } return 0; };",
+        0,
+    );
+    try expectBoolErrors(
+        "const f = (d: unknown): boolean => !isDict(d) || (isBytes(d) && true);",
+        0,
+    );
+    try expectBoolErrors(
+        "const f = (d: unknown): number => isBytes(d) ? 1 : 0;",
+        0,
+    );
+    // Control: an unknown value itself is still not a boolean.
+    try expectBoolErrors(
+        "const f = (d: unknown): number => { if (d) { return 1; } return 0; };",
+        1,
+    );
+    try expectEveryContextBoolean(
+        \\function classify(doc: unknown): number {
+        \\  if (isDict(doc)) { return 1; }
+        \\  return !isBytes(doc) ? 2 : 3;
+        \\}
+    , 3);
+}
+
+test "a member read through a record parameter's named field is typed" {
+    const todo = "structural Todo = { text: string, done: boolean };\n";
+    try expectBoolErrors(
+        todo ++ "const f = (p: { todo: Todo }): number => p.todo.done ? 1 : 0;",
+        0,
+    );
+    try expectBoolErrors(
+        todo ++ "const f = (p: { todo: Todo }): boolean => !p.todo.done && p.todo.done;",
+        0,
+    );
+    // Control: the field read resolves to its declared type, which is a string.
+    try expectBoolErrors(
+        todo ++ "const f = (p: { todo: Todo }): number => p.todo.text ? 1 : 0;",
+        1,
+    );
+    try expectEveryContextBoolean(todo ++
+        \\function progress(props: { todo: Todo }): number {
+        \\  return props.todo.done ? 1 : 0;
+        \\}
+    , 1);
+}
+
+test "typeof over an unknown value refines it to the named primitive" {
+    try expectBoolErrors(
+        "const f = (v: unknown): number => { if (typeof v === \"boolean\") { if (v) { return 1; } } return 0; };",
+        0,
+    );
+    // The negated form refines the other branch.
+    try expectBoolErrors(
+        "const f = (v: unknown): number => { if (typeof v !== \"boolean\") { return 0; } return v ? 1 : 0; };",
+        0,
+    );
+    // Control: a refinement to a string is not a boolean.
+    try expectBoolErrors(
+        "const f = (v: unknown): number => { if (typeof v === \"string\") { if (v) { return 1; } } return 0; };",
+        1,
+    );
+    // Control: the refinement ends with the branch.
+    try expectBoolErrors(
+        "const f = (v: unknown): number => { if (typeof v === \"boolean\") { return 1; } return v ? 1 : 0; };",
+        1,
+    );
+    try expectEveryContextBoolean(
+        \\function flagOf(v: unknown): number {
+        \\  if (typeof v === "boolean") {
+        \\    if (v) { return 1; }
+        \\  }
+        \\  return 0;
+        \\}
+    , 2);
+}
+
+test "the element variable of for-of over an array takes the element type" {
+    try expectBoolErrors(
+        "const f = (flags: boolean[]): number => { for (const flag of flags) { if (flag) { return 1; } } return 0; };",
+        0,
+    );
+    // Control: a string element is not a boolean.
+    try expectBoolErrors(
+        "const f = (names: string[]): number => { for (const name of names) { if (name) { return 1; } } return 0; };",
+        1,
+    );
+    try expectEveryContextBoolean(
+        \\function firstSet(flags: boolean[]): number {
+        \\  for (const flag of flags) {
+        \\    if (flag) { return 1; }
+        \\  }
+        \\  return 0;
+        \\}
+    , 1);
+}

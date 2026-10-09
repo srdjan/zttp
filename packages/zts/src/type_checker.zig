@@ -547,6 +547,18 @@ pub const TypeChecker = struct {
         }
     }
 
+    /// Record the type of a for-of element variable when the iterable is an
+    /// array. Any other iterable leaves the variable untyped, as before.
+    fn bindForOfElement(self: *TypeChecker, fi: Node.ForIterStmt) void {
+        const iterable = self.env.resolveRef(self.inferType(fi.iterable));
+        if (iterable == null_type_idx) return;
+        const array = self.env.pool.unwrapNominal(iterable);
+        if (self.env.pool.getTag(array) != .t_array) return;
+        const element = self.env.pool.getArrayElement(array);
+        if (element == null_type_idx) return;
+        self.binding_types.put(self.allocator, bindingKey(fi.binding), element) catch self.markAllocationFailure();
+    }
+
     fn walkStmt(self: *TypeChecker, node: NodeIndex) void {
         if (self.allocation_failed) return;
         self.env.pool.ensureHealthy() catch return;
@@ -751,6 +763,10 @@ pub const TypeChecker = struct {
             .for_of_stmt, .for_in_stmt => {
                 const fi = self.ir_view.getForIter(node) orelse return;
                 self.walkExpr(fi.iterable);
+                // The element variable of `for (const x of xs)` takes the element
+                // type of an array iterable. Without it the variable had no type
+                // and a boolean read of it was refused.
+                if (tag == .for_of_stmt) self.bindForOfElement(fi);
                 // Kill rule 4. A narrowing established before the loop is only
                 // valid inside it if the body never reassigns the binding, and
                 // a narrowing established inside the body does not survive the
@@ -1793,6 +1809,28 @@ pub const TypeChecker = struct {
         const wanted = self.getLiteralString(literal_node) orelse return null;
         const pool = self.env.pool;
 
+        // An unknown value has no members to partition, so the test refines it
+        // to the primitive it names in the branch where the test held. The
+        // other branch learns nothing: an unknown value that is not a string
+        // is still unknown.
+        if (pool.getTag(current) == .t_unknown_type) {
+            const refined = if (std.mem.eql(u8, wanted, "string"))
+                pool.idx_string
+            else if (std.mem.eql(u8, wanted, "number"))
+                pool.idx_number
+            else if (std.mem.eql(u8, wanted, "boolean"))
+                pool.idx_boolean
+            else if (std.mem.eql(u8, wanted, "undefined"))
+                pool.idx_undefined
+            else
+                return null;
+            return .{
+                .key = key,
+                .narrowed_type = refined,
+                .negated = bin.op == .strict_neq,
+            };
+        }
+
         // Heap, not a sixteen-slot scratch buffer: a union wider than that is
         // representable and routine, and bailing out left it unnarrowable.
         var matched: std.ArrayListUnmanaged(TypeIndex) = .empty;
@@ -2692,8 +2730,12 @@ pub const TypeChecker = struct {
         const raw_obj_type = self.inferType(member.object);
         if (raw_obj_type == null_type_idx) return null_type_idx;
 
+        // A field of a record type keeps a named type as a reference: the
+        // `todo` of `{ todo: Todo }` is a `Todo` ref, not the record it names.
+        // Resolve it, or a second member read (`props.todo.done`) finds no
+        // type and the read is refused as not boolean.
         // Unwrap nominal types for member access (operations work on the base type)
-        const obj_type = self.env.pool.unwrapNominal(raw_obj_type);
+        const obj_type = self.env.pool.unwrapNominal(self.env.resolveRef(raw_obj_type));
 
         const prop_name = self.resolveAtomName(member.property) orelse return null_type_idx;
 
