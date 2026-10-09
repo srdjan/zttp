@@ -1,9 +1,9 @@
 # Plan: fault coverage for upstream calls
 
-Status: draft for owner approval, 2026-10-09, revision 2. Source: follow-up R3
+Status: accepted 2026-10-09, revision 2. Source: follow-up R3
 of the [flow-checker plan](2026-10-08-flow-checker-sinks-in-callees.md),
-section 9. Code references are to local `main` at `423cb4b8`. This plan does
-not authorize implementation.
+section 9. Code references are to local `main` at `423cb4b8`. The owner
+approved implementation on 2026-10-09 (section 6).
 
 ## 1. Summary
 
@@ -230,6 +230,11 @@ Each unit: a test seen failing first; unfiltered `test-zts`,
 explained.
 
 ## 6. Decisions for the owner
+
+Answered 2026-10-09: Q1 to Q7 all (a). The owner approved this plan. Sonnet
+subagents implement U0 to U4 in section 5 order, one commit per unit. U5 is a
+paid DeepSeek re-record, so the main session confirms with the owner before it
+starts.
 
 **Q1 (scope of the upstream severity).** Options: (a) `fetch` and
 `fetchWithRetry` now, the rest of the audit as listed follow-ups; (b) also
