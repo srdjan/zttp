@@ -3855,7 +3855,7 @@ const weather_handler_src =
     \\    headers: { "Accept": "application/json" },
     \\    maxResponseBytes: 65536,
     \\  });
-    \\  if (!upstream.ok) {
+    \\  if (upstream.ok !== true) {
     \\    return Response.json({ error: "weather_unavailable", upstreamStatus: upstream.status }, { status: 502 });
     \\  }
     \\  const forecast = upstream.json();
@@ -6778,12 +6778,12 @@ test "callTool dispatches each listed tool to its own route function" {
         \\    firstValue: first.ok ? first.value.echoed : first.error,
         \\    firstSubject: first.ok ? first.value.subject : first.error,
         \\    firstTenant: first.ok ? first.value.tenant : first.error,
-        \\    firstIsolated: first.ok && first.value.headerMissing && first.value.queryMissing && first.value.promptMissing,
+        \\    firstIsolated: first.ok && first.value.headerMissing === true && first.value.queryMissing === true && first.value.promptMissing === true,
         \\    secondRoute: second.ok ? second.value.route : second.error,
         \\    secondValue: second.ok ? second.value.echoed : second.error,
         \\    secondSubject: second.ok ? second.value.subject : second.error,
         \\    secondTenant: second.ok ? second.value.tenant : second.error,
-        \\    secondIsolated: second.ok && second.value.headerMissing && second.value.queryMissing && second.value.promptMissing,
+        \\    secondIsolated: second.ok && second.value.headerMissing === true && second.value.queryMissing === true && second.value.promptMissing === true,
         \\    alphaCalls: alphaCalls,
         \\    betaCalls: betaCalls
         \\  });
