@@ -163,6 +163,13 @@ pub const TypeChecker = struct {
     narrow_journal: std.ArrayListUnmanaged(NarrowJournalEntry),
     /// How many branch scopes are open. Nothing is journalled at zero.
     narrow_scopes: u32 = 0,
+    /// The type of each boolean-context operand (an `if`, `assert` or ternary
+    /// condition, an operand of `!`, `&&` or `||`), read while the walk's
+    /// narrowing overlay was live. The overlay is closed by the time another
+    /// checker asks, so a later `inferType` of the same node would forget the
+    /// guards that held where the operand was written. Keyed by node: each
+    /// node is walked once.
+    context_types: std.AutoHashMapUnmanaged(NodeIndex, TypeIndex) = .empty,
     /// Track current function's declared return type for return statement checking
     current_return_type: TypeIndex = null_type_idx,
     /// Sticky failure for proof-relevant type, narrowing, schema, parameter,
@@ -226,6 +233,7 @@ pub const TypeChecker = struct {
         self.var_name_ordinals.deinit(self.allocator);
         self.active_declared_types.deinit(self.allocator);
         self.narrowed.deinit(self.allocator);
+        self.context_types.deinit(self.allocator);
         self.narrow_journal.deinit(self.allocator);
         self.admitted_predicates.deinit(self.allocator);
     }
@@ -271,6 +279,23 @@ pub const TypeChecker = struct {
             }
         }
         self.diagnostics.items.len = kept;
+    }
+
+    /// Record the type of a boolean-context operand while the walk's narrowing
+    /// overlay describes the path that reaches it.
+    fn recordContextType(self: *TypeChecker, node: NodeIndex) void {
+        if (node == null_node) return;
+        const previous = self.report_inference_diagnostics;
+        self.report_inference_diagnostics = false;
+        defer self.report_inference_diagnostics = previous;
+        self.context_types.put(self.allocator, node, self.inferType(node)) catch self.markAllocationFailure();
+    }
+
+    /// The type `recordContextType` saw for `node`, or null when the walk did
+    /// not record one. The error type is hidden as in `inferTypeWithoutDiagnostics`.
+    pub fn contextTypeOf(self: *TypeChecker, node: NodeIndex) ?TypeIndex {
+        const recorded = self.context_types.get(node) orelse return null;
+        return self.hideError(recorded);
     }
 
     /// Let secondary analyzers query the authoritative type session without
@@ -614,6 +639,7 @@ pub const TypeChecker = struct {
             .if_stmt => {
                 const if_s = self.ir_view.getIfStmt(node) orelse return;
                 self.walkExpr(if_s.condition);
+                self.recordContextType(if_s.condition);
 
                 // Narrow in both branches when the condition is an admitted
                 // guard: if (x), if (!x), if (x !== undefined), a discriminant
@@ -704,6 +730,7 @@ pub const TypeChecker = struct {
                 // it as permanent forward narrowing (no restore after).
                 const assert = self.ir_view.getAssertStmt(node) orelse return;
                 self.walkExpr(assert.condition);
+                self.recordContextType(assert.condition);
                 if (assert.error_expr != null_node) {
                     self.walkExpr(assert.error_expr);
                 }
@@ -867,7 +894,18 @@ pub const TypeChecker = struct {
             .binary_op => {
                 const bin = self.ir_view.getBinary(node) orelse return;
                 self.walkExpr(bin.left);
-                self.walkExpr(bin.right);
+                if (bin.op == .and_op or bin.op == .or_op) {
+                    // The right operand runs only when the left one was true
+                    // (`&&`) or false (`||`), so it is typed under that guard.
+                    self.recordContextType(bin.left);
+                    const mark = self.beginNarrowScope();
+                    self.installBranchNarrowing(bin.left, bin.op == .and_op);
+                    self.walkExpr(bin.right);
+                    self.recordContextType(bin.right);
+                    self.endNarrowScope(mark);
+                } else {
+                    self.walkExpr(bin.right);
+                }
                 if (bin.op == .add and
                     (self.typeMayBeString(self.inferType(bin.left)) or
                         self.typeMayBeString(self.inferType(bin.right))))
@@ -885,11 +923,13 @@ pub const TypeChecker = struct {
             .unary_op => {
                 const un = self.ir_view.getUnary(node) orelse return;
                 self.walkExpr(un.operand);
+                if (un.op == .not) self.recordContextType(un.operand);
             },
 
             .ternary => {
                 const t = self.ir_view.getTernary(node) orelse return;
                 self.walkExpr(t.condition);
+                self.recordContextType(t.condition);
                 self.walkExpr(t.then_branch);
                 self.walkExpr(t.else_branch);
             },
@@ -1695,6 +1735,37 @@ pub const TypeChecker = struct {
         }
 
         return .{};
+    }
+
+    /// Install the narrowing that holds where `condition` evaluated to `sense`.
+    /// The caller opens a narrow scope first and closes it after the code the
+    /// narrowing covers, so nothing installed here outlives that code.
+    ///
+    /// A conjunction that is true holds both sides, and a disjunction that is
+    /// false fails both sides. A conjunction that is false, or a disjunction
+    /// that is true, says only that one side did, so it installs nothing. Any
+    /// other condition installs what its guard says for that sense: the
+    /// narrowed type when the guard describes the true branch, the else type
+    /// when it describes the false branch.
+    fn installBranchNarrowing(self: *TypeChecker, condition: NodeIndex, sense: bool) void {
+        const tag = self.ir_view.getTag(condition) orelse return;
+        if (tag == .binary_op) {
+            const bin = self.ir_view.getBinary(condition) orelse return;
+            if ((bin.op == .and_op and sense) or (bin.op == .or_op and !sense)) {
+                self.installBranchNarrowing(bin.left, sense);
+                // The right side is only reached once the left side held.
+                self.installBranchNarrowing(bin.right, sense);
+                return;
+            }
+        }
+        const guard = self.extractNarrowingGuard(condition);
+        const key = guard.key orelse return;
+        const narrowed = if (sense)
+            (if (guard.negated) null_type_idx else guard.narrowed_type)
+        else
+            (if (guard.negated) guard.narrowed_type else guard.else_type);
+        if (narrowed == null_type_idx) return;
+        self.putNarrowed(key, narrowed);
     }
 
     /// `typeof x === "string"` and its `!==` form, over a binding whose type is

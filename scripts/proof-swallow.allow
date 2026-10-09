@@ -203,6 +203,7 @@ packages/zts/src/type_checker.zig extractServiceObjectKeys catch-poison
 packages/zts/src/type_checker.zig inferObjectLiteralType catch-block
 packages/zts/src/type_checker.zig pushActiveDeclared catch-poison
 packages/zts/src/type_checker.zig putNarrowed catch-poison
+packages/zts/src/type_checker.zig recordContextType catch-poison
 packages/zts/src/type_checker.zig recordNarrowChange catch-poison
 packages/zts/src/type_checker.zig registerParamTypes catch-poison
 packages/zts/src/type_checker.zig schemaValueToType catch-block

@@ -892,7 +892,9 @@ pub const BoolChecker = struct {
 
     fn requireBoolean(self: *BoolChecker, node: NodeIndex, context_name: []const u8) void {
         const is_boolean = if (self.authoritative_type_checker) |checker| blk: {
-            const inferred = checker.inferTypeWithoutDiagnostics(node);
+            // Prefer the type the walk saw while its narrowing was live; the
+            // fallback covers a node the type checker never walked.
+            const inferred = checker.contextTypeOf(node) orelse checker.inferTypeWithoutDiagnostics(node);
             if (inferred == type_pool_mod.null_type_idx) break :blk false;
             break :blk checker.env.isAssignableTo(inferred, checker.env.pool.idx_boolean);
         } else self.inferType(node) == .boolean;

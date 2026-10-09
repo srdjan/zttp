@@ -1541,3 +1541,131 @@ test "a refused payload is a dynamic response schema in the contract, not an inf
         }
     }.run);
 }
+
+// ---------------------------------------------------------------------------
+// Boolean-context operands typed under the guards of `&&` and `||`
+// ---------------------------------------------------------------------------
+
+/// The boolean checker's error count over one source that passes the type
+/// checker, read through the real phases.
+fn expectBoolErrors(source: []const u8, comptime expected: u32) !void {
+    try withSession(testing.allocator, source, struct {
+        fn run(session: Session) anyerror!void {
+            try testing.expectEqual(expected, session.resolved.bool_error_count);
+        }
+    }.run);
+}
+
+const guard_union_decl = "structural Ev = { kind: \"a\", flag: boolean } | { kind: \"b\", n: number };\n";
+
+test "the right operand of && is typed under the left operand's guard" {
+    // An optional boolean read after an undefined test.
+    try expectBoolErrors(
+        "const f = (v: boolean | undefined): boolean => v !== undefined && v;",
+        0,
+    );
+    // A discriminant test selects the member that has the field.
+    try expectBoolErrors(
+        guard_union_decl ++ "const f = (e: Ev): boolean => e.kind === \"a\" && e.flag;",
+        0,
+    );
+    // A chain of tests: each guard reaches every operand to its right.
+    try expectBoolErrors(
+        "const f = (a: boolean | undefined, b: boolean | undefined): boolean =>" ++
+            " a !== undefined && b !== undefined && a && b;",
+        0,
+    );
+    // A condition that is itself a conjunction, in `if` and in a ternary.
+    try expectBoolErrors(
+        "const f = (v: boolean | undefined): number => { if (v !== undefined && v) { return 1; } return 0; };",
+        0,
+    );
+    try expectBoolErrors(
+        "const f = (v: boolean | undefined): number => v !== undefined && v ? 1 : 0;",
+        0,
+    );
+}
+
+test "the right operand of || is typed under the negated left guard" {
+    try expectBoolErrors(
+        "const f = (v: boolean | undefined): boolean => v === undefined || !v;",
+        0,
+    );
+    try expectBoolErrors(
+        "const f = (v: boolean | undefined): boolean => v === undefined || v;",
+        0,
+    );
+    // The disjunction of two tests is false only when both failed.
+    try expectBoolErrors(
+        "const f = (a: boolean | undefined, b: boolean | undefined): boolean =>" ++
+            " a === undefined || b === undefined || a || b;",
+        0,
+    );
+}
+
+test "a guard does not reach an operand the left side does not decide" {
+    // `||` runs its right side when the left one was false, so a test that
+    // narrows the true branch narrows nothing there.
+    try expectBoolErrors(
+        "const f = (v: boolean | undefined): boolean => v !== undefined || v;",
+        1,
+    );
+    // `&&` runs its right side when the left one was true.
+    try expectBoolErrors(
+        "const f = (v: boolean | undefined): boolean => v === undefined && v;",
+        1,
+    );
+    // The false side of a conjunction decides neither of its operands.
+    try expectBoolErrors(
+        "const f = (v: boolean | undefined): boolean => (v !== undefined && v) || v;",
+        1,
+    );
+    // An operand with no guard keeps its declared type.
+    try expectBoolErrors(
+        "const f = (v: boolean | undefined): boolean => v && true;",
+        1,
+    );
+}
+
+test "a guard of && ends with the expression it guards" {
+    try expectBoolErrors(
+        "const f = (v: boolean | undefined): number => {\n" ++
+            "  const both = v !== undefined && v;\n" ++
+            "  return v ? 1 : 0;\n" ++
+            "};",
+        1,
+    );
+}
+
+test "the walk records a boolean-context operand's type inside a function declaration" {
+    // The boolean checker does not walk a `function` declaration body, so a
+    // corpus case cannot see these types yet. The type checker does walk it,
+    // and the recorded types are what the boolean checker will read.
+    const source =
+        \\function f(v: boolean | undefined): boolean {
+        \\  return v !== undefined && v;
+        \\}
+        \\function g(v: boolean | undefined): boolean {
+        \\  return v === undefined || !v;
+        \\}
+    ;
+    try withSession(testing.allocator, source, struct {
+        fn run(session: Session) anyerror!void {
+            const checker = &session.resolved.type_checker.?;
+            const view = session.parsed.ir_view;
+            var operands: usize = 0;
+            var idx: NodeIndex = 0;
+            while (idx < view.nodeCount()) : (idx += 1) {
+                if (view.getTag(idx) != .binary_op) continue;
+                const bin = view.getBinary(idx) orelse continue;
+                if (bin.op != .and_op and bin.op != .or_op) continue;
+                for ([_]NodeIndex{ bin.left, bin.right }) |operand| {
+                    const recorded = checker.contextTypeOf(operand) orelse return error.OperandNotRecorded;
+                    try testing.expect(checker.env.isAssignableTo(recorded, checker.env.pool.idx_boolean));
+                    operands += 1;
+                }
+            }
+            try testing.expectEqual(@as(usize, 4), operands);
+        }
+    }.run);
+}
