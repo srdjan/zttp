@@ -497,9 +497,10 @@ Completed 2026-10-09. Every unit is on local `main`; nothing is pushed.
   request binding, imported helpers apply their sinks at each call site, the
   promise names what it excludes, and `mask` declassifies only `secret` and
   `credential` (D1, D2).
-- V, F8, F10: `flow_analyzer_version` 2 is in `policyHash`, so a certificate
-  from the old checker is refused; workflow results carry `.unknown` and
-  `saga` joined `cross_call_reads` (E1, E2); ZTS408 refuses a credential in an
+- V, F8, F10: `flow_analyzer_version` 2 is in `policyHash`, so a contract
+  stamped by the old checker is refused where the runtime validates the policy
+  hash (a certificate carries no policy hash; corrected 2026-10-09);
+  workflow results carry `.unknown` and `saga` joined `cross_call_reads` (E1, E2); ZTS408 refuses a credential in an
   egress body.
 - Fixes found during review, each with a census probe or test: dispatch
   diagnostics dropped only for a walked root (`2020a992`); a discarded method
