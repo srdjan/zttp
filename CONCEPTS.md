@@ -173,7 +173,7 @@ A position where a value leaves the program, such as a response body, a log, or 
 
 A Sink is judged only inside a function the analysis walks. A Sink in a function that no Analysis root reaches costs nothing, so the Property it should have cost is reported as held.
 
-A write that stays inside the platform - the durable store, a queue, the cache, SQL, or another handler - is not a Sink. Its readers carry the label that means "could not follow" instead, so a stored value that comes back cannot help prove a Property.
+A write that stays inside the platform - the durable store, a queue, the cache, SQL, or another handler - is not a Sink. Its readers, and the results of a call to another handler, carry the label that means "could not follow" instead, so a stored or returned value that comes back cannot help prove a Property.
 
 ### Analysis root
 A function that a property analysis walks from its first statement as a place where request data enters user code: the Handler, and every function the Handler can dispatch to indirectly, such as each route of a literal routing table.

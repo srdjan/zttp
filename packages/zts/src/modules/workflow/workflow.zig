@@ -46,6 +46,13 @@ pub const binding = mb.ModuleBinding{
     .stateful = true,
     .self_managed_io = true,
     .exports = &.{
+        // Every export here declares `.unknown` beside `.external` in its
+        // `return_labels`. The result is a value another handler produced, and
+        // that handler receives the caller's `init` (body, headers), so it can
+        // echo a secret back; the call holds no reference to what it returns.
+        // `.external` alone let the echo reach the response with
+        // `no_secret_leakage` proven.
+        //
         // The return type is `Response`, spelled structurally because module
         // types populate before the ABI aliases and the name would not resolve
         // - the same reason `zttp:fetch` spells it out. It is not an
@@ -62,16 +69,16 @@ pub const binding = mb.ModuleBinding{
         .{ .name = "call", .func = callNative, .arg_count = 2, .effect = .write, .returns = .object, .signature = .{
             .params = &.{ "string", "unknown" },
             .returns = "{ ok: boolean; status: number; statusText: string; body: string; headers: { get: (name: string) => string | undefined; has: (name: string) => boolean }; json: () => unknown; text: () => string }",
-        }, .param_types = &.{ .string, .unknown }, .param_names = &.{ "name", "init" }, .return_labels = .{ .external = true }, .contract_extractions = &.{.{ .category = .workflow_call }} },
-        .{ .name = "saga", .func = sagaNative, .arg_count = 1, .effect = .write, .returns = .object, .param_types = &.{.unknown}, .param_names = &.{"steps"}, .return_labels = .{ .external = true } },
+        }, .param_types = &.{ .string, .unknown }, .param_names = &.{ "name", "init" }, .return_labels = .{ .external = true, .unknown = true }, .contract_extractions = &.{.{ .category = .workflow_call }} },
+        .{ .name = "saga", .func = sagaNative, .arg_count = 1, .effect = .write, .returns = .object, .param_types = &.{.unknown}, .param_names = &.{"steps"}, .return_labels = .{ .external = true, .unknown = true } },
         // Named `fanout`, not `parallel`: module exports share one flat global
         // name namespace (resolver registers each via ctx.setGlobal by name), so
         // `parallel` would collide with and clobber zttp:io's `parallel`.
-        .{ .name = "fanout", .func = fanoutNative, .arg_count = 1, .effect = .write, .returns = .object, .param_types = &.{.unknown}, .param_names = &.{"calls"}, .return_labels = .{ .external = true } },
+        .{ .name = "fanout", .func = fanoutNative, .arg_count = 1, .effect = .write, .returns = .object, .param_types = &.{.unknown}, .param_names = &.{"calls"}, .return_labels = .{ .external = true, .unknown = true } },
         // follow(resource, rel, init?) - HATEOAS: resolve affordance `rel` on a
         // structured resource() to a bundle route and dispatch in-process. The
         // trailing `init` (body/headers) is optional, so required_arg_count = 2.
-        .{ .name = "follow", .func = followNative, .arg_count = 3, .required_arg_count = 2, .effect = .write, .returns = .object, .param_types = &.{ .unknown, .string, .unknown }, .param_names = &.{ "resource", "rel", "init" }, .return_labels = .{ .external = true } },
+        .{ .name = "follow", .func = followNative, .arg_count = 3, .required_arg_count = 2, .effect = .write, .returns = .object, .param_types = &.{ .unknown, .string, .unknown }, .param_names = &.{ "resource", "rel", "init" }, .return_labels = .{ .external = true, .unknown = true } },
     },
 };
 

@@ -10753,6 +10753,60 @@ test "a durable signal payload is not proven clean" {
     try std.testing.expect(!try runNoSecretLeakage(std.testing.allocator, source));
 }
 
+test "a workflow call echo is not proven clean" {
+    // `call` declared its result `.external`, which is neither `.unknown` nor
+    // derived from the arguments, so a sub-handler that echoes its input
+    // laundered the label: a secret passed to `call` and returned reached the
+    // response with `no_secret_leakage` proven. The result is a value another
+    // execution produced, the same shape as the store reads.
+    const source =
+        \\import { env } from "zttp:env";
+        \\import { call } from "zttp:workflow";
+        \\function handler(req) {
+        \\  const res = call("echo", { method: "POST", path: "/echo", body: env("API_SECRET") });
+        \\  return Response.json({ v: res.text() });
+        \\}
+    ;
+    try std.testing.expect(!try runNoSecretLeakage(std.testing.allocator, source));
+}
+
+test "a workflow saga, fanout, and follow result is not proven clean" {
+    const saga =
+        \\import { saga } from "zttp:workflow";
+        \\function handler(req) {
+        \\  return Response.json({ v: saga([]) });
+        \\}
+    ;
+    try std.testing.expect(!try runNoSecretLeakage(std.testing.allocator, saga));
+    const fanout =
+        \\import { fanout } from "zttp:workflow";
+        \\function handler(req) {
+        \\  return Response.json({ v: fanout([]) });
+        \\}
+    ;
+    try std.testing.expect(!try runNoSecretLeakage(std.testing.allocator, fanout));
+    const follow =
+        \\import { follow } from "zttp:workflow";
+        \\function handler(req) {
+        \\  return Response.json({ v: follow(req, "next") });
+        \\}
+    ;
+    try std.testing.expect(!try runNoSecretLeakage(std.testing.allocator, follow));
+}
+
+test "a workflow call whose result is discarded is still proven clean" {
+    // The control: the result never reaches a sink, so the label of the result
+    // costs nothing.
+    const source =
+        \\import { call } from "zttp:workflow";
+        \\function handler(req) {
+        \\  const res = call("echo", { method: "GET", path: "/echo" });
+        \\  return Response.json({ ok: 1 });
+        \\}
+    ;
+    try std.testing.expect(try runNoSecretLeakage(std.testing.allocator, source));
+}
+
 test "a rate-limit counter is still proven clean" {
     // The control that keeps the sweep honest. `rateCheck` declares
     // `.internal` in the same shape as the five store reads, and is correctly

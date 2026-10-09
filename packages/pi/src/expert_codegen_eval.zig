@@ -697,7 +697,7 @@ test "runCase scores a clean workflow first draft as a veto pass" {
         \\import { run } from "zttp:durable";
         \\import { call } from "zttp:workflow";
         \\
-        \\function handler(req: Request): Proof<Response, "deterministic" | "state_isolated" | "result_safe" | "optional_safe" | "no_secret_leakage" | "no_credential_leakage" | "input_validated" | "pii_contained" | "injection_safe" | "canonical"> {
+        \\function handler(req: Request): Proof<Response, "state_isolated" | "result_safe" | "optional_safe" | "input_validated" | "pii_contained" | "injection_safe" | "canonical"> {
         \\  const key = req.headers.get("idempotency-key") ?? "workflow-demo";
         \\  return run(key, () => {
         \\    const res = call("greet", { method: "GET", path: "/workflow" });

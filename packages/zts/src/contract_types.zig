@@ -1614,7 +1614,8 @@ pub const ToolCatalogRefusal = enum {
     scope_field_invalid,
     /// The route reaches an export that reads state a separate call wrote
     /// (decision 6): a `zttp:cache` read, any `zttp:sql` export,
-    /// `queue.receive`, or `durable.waitSignal`.
+    /// `queue.receive`, `durable.waitSignal`, or `workflow.saga` (whose steps
+    /// produce a value the flow analysis cannot trace).
     cross_call_read,
     /// An agent route reaches an export that reads state a separate call wrote.
     agent_cross_call_read,
@@ -1712,8 +1713,8 @@ pub const ToolCatalogRefusal = enum {
             .scope_not_literal => "scope must be an object literal with tenant, subject, or both, each a string literal naming an input field",
             .scope_unknown_key => "scope may hold only tenant and subject",
             .scope_field_invalid => "a scope value must name a required top-level string property of the input schema",
-            .cross_call_read => "a tool route may not reach an export that reads state a separate call wrote: zttp:cache reads, zttp:sql, queue.receive, or durable.waitSignal",
-            .agent_cross_call_read => "an agent route may not reach an export that reads state a separate call wrote: zttp:cache reads, zttp:sql, queue.receive, or durable.waitSignal",
+            .cross_call_read => "a tool route may not reach an export that reads state a separate call wrote or returns a value another execution produced: zttp:cache reads, zttp:sql, queue.receive, durable.waitSignal, or workflow.saga",
+            .agent_cross_call_read => "an agent route may not reach an export that reads state a separate call wrote or returns a value another execution produced: zttp:cache reads, zttp:sql, queue.receive, durable.waitSignal, or workflow.saga",
             .indirect_dispatch => "a tool or agent route may not reach workflow.call, workflow.fanout, or workflow.follow because the dispatched handler runs outside the route grant",
             .agent_egress => "an agent route may use plain zttp:fetch.fetch only; every other egress sender is refused",
             .agent_queue_send => "an agent route may not reach queue.send",

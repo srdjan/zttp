@@ -1272,6 +1272,20 @@ const hand_written = [_]Hand{
         \\}
         ,
     },
+    .{
+        .name = "x26_workflow_call_echo_returned",
+        .property = .no_secret_leakage,
+        .expect = .refuse_or_unprove,
+        .reason = "a secret passed to a sub-handler through workflow.call can come back in the result; the result is another execution's value, so the walk can only fail closed",
+        .body =
+        \\import { call } from "zttp:workflow";
+        \\function handler(req: Request): Claim<Response> {
+        \\  const t = env("API_TOKEN") ?? "";
+        \\  const res = call("echo", { method: "POST", path: "/echo", body: t });
+        \\  return Response.json({ k: res.text() });
+        \\}
+        ,
+    },
 };
 
 /// Every probe of the census, in a fixed order. All memory comes from `a`.
@@ -1325,7 +1339,7 @@ pub fn generate(a: std.mem.Allocator) ![]Probe {
 /// Never lower one to make a deletion pass.
 pub const minimum_matrix: usize = 504;
 pub const minimum_extended: usize = 246;
-pub const minimum_hand: usize = 25;
+pub const minimum_hand: usize = 26;
 /// The fewest probes a (label, sink) column holds: the 18 research kinds.
 pub const minimum_per_column: usize = 18;
 

@@ -17,7 +17,7 @@
 import { routerMatch } from "zttp:router";
 import { call } from "zttp:workflow";
 
-structural Guardrails<T> = Proof<T, "deterministic" | "no_secret_leakage" | "no_credential_leakage" | "injection_safe" | "input_validated" | "pii_contained">;
+structural Guardrails<T> = Proof<T, "injection_safe" | "input_validated" | "pii_contained">;
 
 function createOrder(req: Request): Response {
   const reserved = call("inventory", { method: "GET", path: "/reserve" });

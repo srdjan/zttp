@@ -12,12 +12,9 @@ import { run } from "zttp:durable";
 import { call } from "zttp:workflow";
 
 structural WorkflowDslGuarantees<T> = Proof<T,
-    | "deterministic"
     | "state_isolated"
     | "result_safe"
     | "optional_safe"
-    | "no_secret_leakage"
-    | "no_credential_leakage"
     | "input_validated"
     | "pii_contained"
     | "injection_safe"

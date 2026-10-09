@@ -2312,6 +2312,10 @@ pub const ContractBuilder = struct {
         .{ .module = "zttp:sql", .names = null },
         .{ .module = "zttp:queue", .names = &.{"receive"} },
         .{ .module = "zttp:durable", .names = &.{"waitSignal"} },
+        // Every workflow result declares `.unknown`: another execution (a sub-handler,
+        // or the steps of a `saga`) produced it. `call`, `fanout`, and `follow` are refused first
+        // as indirect dispatch, so only `saga` is newly refused by this row.
+        .{ .module = "zttp:workflow", .names = &.{ "call", "saga", "fanout", "follow" } },
     };
 
     const ClosedExport = struct { module: []const u8, name: []const u8 };

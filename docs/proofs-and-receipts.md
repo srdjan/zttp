@@ -81,7 +81,9 @@ durable store, a queue, the cache, SQL, and a call to another handler through
 `zttp:workflow`. The read side defends them instead. Each reader of stored
 data (`waitSignal`, `receive`, `cacheGet`, `sqlOne`, `sqlMany`) carries the
 label that means "could not follow", so a handler that returns a stored value
-is not proven.
+is not proven. The results of `zttp:workflow` `call`, `saga`, `fanout`, and
+`follow` carry the same label, because another handler produced them and can
+echo what it received.
 
 A `[-]` pill is not an error. It means the compiler could not prove that
 property for this handler, often because the handler legitimately does the
