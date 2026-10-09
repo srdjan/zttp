@@ -953,14 +953,14 @@ pub const StrictChecker = struct {
         // signature; do not guess which parameter an entry belonged to.
         if (sig.param_count == func.params_count) {
             for (0..func.params_count) |i| {
-                const annotation = env.getSourceFnParamAnnotation(source_sig.line, @intCast(i)) orelse continue;
+                const annotation = env.getSourceFnParamAnnotation(source_sig.key, @intCast(i)) orelse continue;
                 const raw = rawBoundaryBase(env, annotation) orelse continue;
                 const param = self.ir_view.getListIndex(func.params_start, @intCast(i));
                 self.addRawBoundaryDiagnostic(param, "parameter", annotation, raw);
             }
         }
 
-        if (env.getSourceFnReturnAnnotation(source_sig.line)) |annotation| {
+        if (env.getSourceFnReturnAnnotation(source_sig.key)) |annotation| {
             if (rawBoundaryBase(env, annotation)) |raw| {
                 self.addRawBoundaryDiagnostic(node, "return", annotation, raw);
             }
@@ -969,7 +969,7 @@ pub const StrictChecker = struct {
 
     const SourceFunctionSig = struct {
         sig: FunctionSig,
-        line: u32,
+        key: u32,
     };
 
     fn functionSignature(
@@ -977,14 +977,11 @@ pub const StrictChecker = struct {
         node: NodeIndex,
         func: ir.Node.FunctionExpr,
     ) ?SourceFunctionSig {
+        _ = func;
         const env = self.type_env orelse return null;
         const loc = self.ir_view.getLoc(node) orelse return null;
-        if (env.getFnSigByLoc(loc.line)) |sig| return .{ .sig = sig, .line = loc.line };
-        if (func.name_atom == 0) return null;
-        const name = self.resolveAtomName(func.name_atom) orelse return null;
-        const sig = env.getSourceFnSigByName(name) orelse return null;
-        const line = env.getSourceFnLineByName(name) orelse return null;
-        return .{ .sig = sig, .line = line };
+        const sig = env.getFnSigAt(loc.offset) orelse return null;
+        return .{ .sig = sig, .key = env.signatureKeyAt(loc.offset) };
     }
 
     fn addRawBoundaryDiagnostic(
@@ -1022,7 +1019,7 @@ pub const StrictChecker = struct {
         if (!self.functionNeedsAnnotation(node, func)) return;
 
         const loc = self.ir_view.getLoc(node) orelse return;
-        if (!self.hasCompleteFunctionAnnotation(func, loc.line)) {
+        if (!self.hasCompleteFunctionAnnotation(func, loc.offset)) {
             self.addDiagnostic(.{
                 .severity = .err,
                 .kind = .missing_public_annotation,
@@ -1554,12 +1551,9 @@ pub const StrictChecker = struct {
         return false;
     }
 
-    fn hasCompleteFunctionAnnotation(self: *const StrictChecker, func: ir.Node.FunctionExpr, line: u32) bool {
+    fn hasCompleteFunctionAnnotation(self: *const StrictChecker, func: ir.Node.FunctionExpr, signature_offset: u32) bool {
         const env = self.type_env orelse return false;
-        if (functionSigCovers(env.getFnSigByLoc(line), func.params_count)) return true;
-        if (func.name_atom == 0) return false;
-        const name = self.resolveAtomName(func.name_atom) orelse return false;
-        return functionSigCovers(env.getFnSigByName(name), func.params_count);
+        return functionSigCovers(env.getFnSigAt(signature_offset), func.params_count);
     }
 
     fn checkCall(self: *StrictChecker, node: NodeIndex) void {
@@ -1713,7 +1707,7 @@ pub const StrictChecker = struct {
     fn functionHasAnnotation(self: *const StrictChecker, node: NodeIndex) bool {
         const func = self.ir_view.getFunction(node) orelse return false;
         const loc = self.ir_view.getLoc(node) orelse return false;
-        const sig = if (self.type_env) |env| env.getFnSigByLoc(loc.line) else null;
+        const sig = if (self.type_env) |env| env.getFnSigAt(loc.offset) else null;
         return if (sig) |s|
             s.return_type != null_type_idx and s.param_count >= func.params_count
         else
@@ -2626,6 +2620,27 @@ test "a multi-line signature missing the return type still fails" {
     );
     defer h.deinit();
     try expectKind(&h.checker, .missing_public_annotation);
+}
+
+test "a function and an arrow on one line are annotation-checked separately" {
+    // Both annotations used to land in the one bucket the line named. The
+    // arrow's annotations then stood in for a function that had none, so
+    // `plain` was reported fully annotated.
+    var h = try checkStripped(
+        "function handler(req: Request): Response { return Response.json({}); }\n" ++
+            "function plain(x) { return [1].map((y: number): number => y); }\n",
+    );
+    defer h.deinit();
+    try expectKind(&h.checker, .missing_public_annotation);
+}
+
+test "an annotated function sharing a line with an arrow is fully annotated" {
+    var h = try checkStripped(
+        "function bump(xs: number[]): number[] { return xs.map((x: number): number => x + 1); }\n" ++
+            "function handler(req: Request): Response { return Response.json({}); }\n",
+    );
+    defer h.deinit();
+    try expectNoKind(&h.checker, .missing_public_annotation);
 }
 
 test "raw exported boundary types are refused in every specified shape" {

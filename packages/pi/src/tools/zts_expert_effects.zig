@@ -181,9 +181,8 @@ fn writeFunction(
     {
         var declared: std.ArrayListUnmanaged([]const u8) = .empty;
         defer declared.deinit(ctx.allocator);
-        const line: u32 = if (ctx.ir_view.getLoc(fe.decl_node)) |loc| loc.line else 0;
-        if (line != 0) {
-            if (ctx.env.getFnSigByLoc(line)) |sig| {
+        if (ctx.ir_view.signatureOffset(fe.decl_node)) |offset| {
+            if (ctx.env.getFnSigAt(offset)) |sig| {
                 const extraction = try ctx.env.extractEffectMembers(sig.return_type, &declared);
                 declared_unreadable = extraction.non_literal;
             }

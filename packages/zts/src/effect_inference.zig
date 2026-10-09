@@ -811,14 +811,13 @@ pub const Analyzer = struct {
     ) ?type_pool_mod.TypeIndex {
         if (owner >= self.functions.items.len) return null;
         const decl_node = self.functions.items[owner].decl_node;
-        const line = (self.ir_view.getLoc(decl_node) orelse return null).line;
-        const sig = env.getFnSigByLoc(line) orelse return null;
 
         const fn_node = blk: {
             const tag = self.ir_view.getTag(decl_node) orelse return null;
             if (tag == .function_expr or tag == .arrow_function) break :blk decl_node;
             break :blk (self.ir_view.getVarDecl(decl_node) orelse return null).init;
         };
+        const sig = env.getFnSigAt(self.ir_view.signatureOffset(fn_node) orelse return null) orelse return null;
         const func = self.ir_view.getFunction(fn_node) orelse return null;
 
         for (0..func.params_count) |i| {

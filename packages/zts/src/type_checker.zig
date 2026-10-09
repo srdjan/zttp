@@ -804,8 +804,10 @@ pub const TypeChecker = struct {
                 const decl = self.ir_view.getVarDecl(node) orelse return;
                 const func = self.ir_view.getFunction(decl.init) orelse return;
                 self.pushActiveDeclared(decl.binding.name_atom, null_type_idx);
-                const fn_name = self.resolveAtomName(decl.binding.name_atom);
-                const sig = if (fn_name) |name| self.env.getSourceFnSigByName(name) else null;
+                // The signature is the one whose parameter list opens where this
+                // function's does. A name does not identify it: nested functions
+                // repeat names, and the later one used to win for both.
+                const sig = if (self.ir_view.getLoc(decl.init)) |l| self.env.getFnSigAt(l.offset) else null;
                 self.bindCallableMetadata(
                     decl.binding,
                     if (sig) |s| .{ .signature = s } else .unavailable,
@@ -836,7 +838,7 @@ pub const TypeChecker = struct {
                 const active_start = self.active_declared_types.items.len;
                 defer self.active_declared_types.items.len = active_start;
                 const loc = self.ir_view.getLoc(node);
-                const sig = if (loc) |l| self.env.getFnSigByLoc(l.line) else null;
+                const sig = if (loc) |l| self.env.getFnSigAt(l.offset) else null;
                 const saved_return = self.current_return_type;
                 // A nested function has its own return contract. Leaving the
                 // enclosing one in place checked an inner `return` against an
@@ -1038,7 +1040,7 @@ pub const TypeChecker = struct {
                 const active_start = self.active_declared_types.items.len;
                 defer self.active_declared_types.items.len = active_start;
                 const loc = self.ir_view.getLoc(node);
-                const sig = if (loc) |l| self.env.getFnSigByLoc(l.line) else null;
+                const sig = if (loc) |l| self.env.getFnSigAt(l.offset) else null;
                 const saved_return = self.current_return_type;
                 // A nested function has its own return contract. Leaving the
                 // enclosing one in place checked an inner `return` against an
@@ -3097,7 +3099,7 @@ pub const TypeChecker = struct {
             },
             .function_expr, .arrow_function => blk: {
                 const loc = self.ir_view.getLoc(node) orelse break :blk .unavailable;
-                const sig = self.env.getFnSigByLoc(loc.line) orelse break :blk .unavailable;
+                const sig = self.env.getFnSigAt(loc.offset) orelse break :blk .unavailable;
                 break :blk .{ .signature = sig };
             },
             else => self.callableMetadataFromType(inferred),
@@ -3451,7 +3453,7 @@ pub const TypeChecker = struct {
     fn functionExprType(self: *const TypeChecker, node: NodeIndex) TypeIndex {
         const func = self.ir_view.getFunction(node) orelse return null_type_idx;
         const declared: ?type_env_mod.FunctionSig = if (self.ir_view.getLoc(node)) |loc|
-            self.env.getFnSigByLoc(loc.line)
+            self.env.getFnSigAt(loc.offset)
         else
             null;
         if (declared) |sig| {
@@ -5658,6 +5660,58 @@ test "TypeChecker: genuine module calls retain module argument checking" {
         \\request("worker", {});
         \\request("worker");
     , 1, 0);
+}
+
+test "TypeChecker: a function and an arrow on one line keep separate signatures" {
+    // Annotations were filed under the line they sit on, so the arrow's
+    // parameter merged into `bump`'s signature and `bump([1, 2])` was refused
+    // for passing one argument to a function of two.
+    try checkTypedSource(
+        \\function bump(xs: number[]): number[] { return xs.map((x: number): number => x + 1); }
+        \\function handler(req: Request): Response {
+        \\  const ys = bump([1, 2]);
+        \\  return Response.json({ ys: ys });
+        \\}
+    , 0, 0);
+}
+
+test "TypeChecker: nested functions that share a name keep their own signatures" {
+    // The later declaration used to win the name for both, in either order.
+    try checkTypedSource(
+        \\function first(): number {
+        \\  function inner(x: number): number { return x; }
+        \\  return inner(1);
+        \\}
+        \\function second(): number {
+        \\  function inner(x: number, y: number): number { return x + y; }
+        \\  return inner(1, 2);
+        \\}
+    , 0, 0);
+    try checkTypedSource(
+        \\function second(): number {
+        \\  function inner(x: number, y: number): number { return x + y; }
+        \\  return inner(1, 2);
+        \\}
+        \\function first(): number {
+        \\  function inner(x: number): number { return x; }
+        \\  return inner(1);
+        \\}
+    , 0, 0);
+}
+
+test "TypeChecker: each nested function of one name is still checked against its own signature" {
+    // Sharing a name must not loosen the check: the call that is wrong for its
+    // own function is still refused, and only that one.
+    try checkTypedSourceSaying(
+        \\function first(): number {
+        \\  function inner(x: number): number { return x; }
+        \\  return inner(1);
+        \\}
+        \\function second(): number {
+        \\  function inner(x: number, y: number): number { return x + y; }
+        \\  return inner(1);
+        \\}
+    , 1, "expected 2, got 1");
 }
 
 test "TypeChecker: logical and produces boolean" {

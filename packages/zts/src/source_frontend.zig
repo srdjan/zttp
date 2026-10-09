@@ -104,6 +104,16 @@ pub const PreparedSource = struct {
                 result.deinit();
                 return err;
             };
+            // The parser reads the lowered text, so its offsets drift from the
+            // ones the stripper recorded for each signature. The type map
+            // keeps the edits that undo the drift.
+            result.strip_result.?.type_map.setParserEdits(
+                allocator,
+                result.lower_result.?.span_edits,
+            ) catch |err| {
+                result.deinit();
+                return err;
+            };
         }
         return result;
     }

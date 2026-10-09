@@ -21,6 +21,7 @@ const parseTypeExpr = type_pool_mod.parseTypeExpr;
 const TypeMap = type_map_mod.TypeMap;
 const TypeMapKind = type_map_mod.TypeMapKind;
 const TypeMapEntry = type_map_mod.TypeMapEntry;
+const SpanEdit = type_map_mod.SpanEdit;
 
 /// The field name used to mark a record as the proof payload of an instantiated
 /// `Proof<T, P>` capsule. The verifier looks for records bearing this field
@@ -358,10 +359,11 @@ pub const TypeEnv = struct {
     generic_aliases: std.StringHashMapUnmanaged(GenericAlias),
     /// Variable types: packed(context_line, context_col) -> TypeIndex
     var_types: std.AutoHashMapUnmanaged(u32, TypeIndex),
-    /// Function signatures: packed(context_line, context_col) -> FunctionSig
+    /// Function signatures keyed by signature offset, the stripped-source offset
+    /// of the `(` that opens the parameter list. Read through `getFnSigAt`.
     fn_signatures: std.AutoHashMapUnmanaged(u32, FunctionSig),
-    /// Source spellings used by declaration-shape rules, keyed by function
-    /// line and parameter position. Keeping them outside `FunctionSig` avoids
+    /// Source spellings used by declaration-shape rules, keyed by signature
+    /// offset and parameter position. Keeping them outside `FunctionSig` avoids
     /// copying sixteen slices through every name and location signature map.
     source_fn_annotations: std.AutoHashMapUnmanaged(u64, []const u8),
     /// Variable name -> declared type (for name-based lookup)
@@ -376,14 +378,15 @@ pub const TypeEnv = struct {
     /// exports so a colliding module name cannot masquerade as a user's
     /// function declaration while binding-local metadata is established.
     source_fn_sigs_by_name: std.StringHashMapUnmanaged(FunctionSig),
-    /// Source line paired with `source_fn_sigs_by_name`, used when the parser's
-    /// function node is located at a later-line opening brace.
-    source_fn_lines_by_name: std.StringHashMapUnmanaged(u32),
     /// Generic scope stack
     generic_scopes: std.ArrayListUnmanaged(GenericScope),
     /// Explicit call-site type arguments, keyed by the byte offset of the
     /// call's `(` in the stripped source.
     call_type_args: std.AutoHashMapUnmanaged(u32, CallTypeArgs),
+    /// How the parser's offsets map back to the stripped source the signature
+    /// offsets were recorded in. Empty unless TSX lowering changed the text
+    /// between the two. Owned.
+    parser_edits: []const SpanEdit = &.{},
 
     /// Alias names whose definition contains a cycle that no data constructor
     /// guards (spec 5.7). Filled once, after the type-namespace pass; read by
@@ -422,7 +425,6 @@ pub const TypeEnv = struct {
             .var_types_by_binding = .empty,
             .fn_sigs_by_name = .empty,
             .source_fn_sigs_by_name = .empty,
-            .source_fn_lines_by_name = .empty,
             .generic_scopes = .empty,
             .call_type_args = .empty,
             .non_contractive_aliases = .empty,
@@ -501,9 +503,9 @@ pub const TypeEnv = struct {
         self.var_types_by_binding.deinit(self.allocator);
         self.fn_sigs_by_name.deinit(self.allocator);
         self.source_fn_sigs_by_name.deinit(self.allocator);
-        self.source_fn_lines_by_name.deinit(self.allocator);
         self.generic_scopes.deinit(self.allocator);
         self.call_type_args.deinit(self.allocator);
+        if (self.parser_edits.len > 0) self.allocator.free(self.parser_edits);
         for (self.name_storage.items) |name| {
             self.allocator.free(name);
         }
@@ -518,6 +520,8 @@ pub const TypeEnv = struct {
     /// Processes entries in order: type aliases first, then interfaces,
     /// then variable/param/return annotations.
     pub fn populateFromTypeMap(self: *TypeEnv, tm: *const TypeMap) void {
+        self.adoptParserEdits(tm.parser_edits);
+
         // First pass: type aliases and interfaces (defines the type namespace)
         // Collect generic_params entries keyed by (name_start, name_end) for alias lookup.
         var generic_params_map: std.AutoHashMapUnmanaged(u64, TypeMapEntry) = .empty;
@@ -546,19 +550,20 @@ pub const TypeEnv = struct {
         // is resolved against these names.
         self.findNonContractiveAliases();
 
-        // Type parameters declared by a signature, keyed by the line the
-        // signature starts on - the same key its parameter and return
+        // Type parameters declared by a signature, keyed by the offset of its
+        // opening `(` - the same key its parameter and return
         // annotations carry. Built before the annotations are resolved,
         // because `xs: T[]` only resolves `T` to a type parameter while that
         // parameter is in scope; without this the name falls through to an
         // unresolved reference and nothing can be inferred from it later.
-        var fn_generics_by_line: std.AutoHashMapUnmanaged(u32, DeclaredGenerics) = .empty;
-        defer fn_generics_by_line.deinit(self.allocator);
+        var fn_generics_by_signature: std.AutoHashMapUnmanaged(u32, DeclaredGenerics) = .empty;
+        defer fn_generics_by_signature.deinit(self.allocator);
         for (tm.entries.items) |entry| {
             if (entry.kind != .generic_params) continue;
+            const sig_key = entry.signature_offset orelse continue;
             const declared = self.declareGenerics(tm.getTypeText(entry));
             if (declared.count == 0) continue;
-            fn_generics_by_line.put(self.allocator, entry.context_line, declared) catch self.markAllocationFailure();
+            fn_generics_by_signature.put(self.allocator, sig_key, declared) catch self.markAllocationFailure();
         }
 
         // Explicit type arguments at call sites. Keyed by the byte offset of
@@ -583,22 +588,23 @@ pub const TypeEnv = struct {
         }
 
         // Second pass: variable and function annotations
-        // Group param and return annotations by context line to build function sigs
-        var fn_params_by_line: std.AutoHashMapUnmanaged(u32, FunctionSig) = .empty;
-        defer fn_params_by_line.deinit(self.allocator);
-        var fn_names_by_line: std.AutoHashMapUnmanaged(u32, []const u8) = .empty;
-        defer fn_names_by_line.deinit(self.allocator);
+        // Group param and return annotations by signature to build function sigs
+        var fn_params_by_signature: std.AutoHashMapUnmanaged(u32, FunctionSig) = .empty;
+        defer fn_params_by_signature.deinit(self.allocator);
+        var fn_names_by_signature: std.AutoHashMapUnmanaged(u32, []const u8) = .empty;
+        defer fn_names_by_signature.deinit(self.allocator);
         // Parameter names in declaration order, so a type predicate can say
         // which parameter `v is string` names. Only the predicate reads these,
         // so they stay local rather than growing `FunctionSig`.
-        var fn_param_names_by_line: std.AutoHashMapUnmanaged(u32, ParamNames) = .empty;
-        defer fn_param_names_by_line.deinit(self.allocator);
+        var fn_param_names_by_signature: std.AutoHashMapUnmanaged(u32, ParamNames) = .empty;
+        defer fn_param_names_by_signature.deinit(self.allocator);
 
         for (tm.entries.items) |entry| {
             switch (entry.kind) {
                 .var_annotation => self.processVarAnnotation(tm, entry),
                 .param_annotation => {
-                    const gop = fn_params_by_line.getOrPut(self.allocator, entry.context_line) catch {
+                    const sig_key = entry.signature_offset orelse continue;
+                    const gop = fn_params_by_signature.getOrPut(self.allocator, sig_key) catch {
                         self.markAllocationFailure();
                         continue;
                     };
@@ -606,7 +612,7 @@ pub const TypeEnv = struct {
                         gop.value_ptr.* = .{};
                     }
                     const type_text = tm.getTypeText(entry);
-                    const generics = fn_generics_by_line.get(entry.context_line);
+                    const generics = fn_generics_by_signature.get(sig_key);
                     const type_idx = self.resolveTypeInGenerics(type_text, generics);
                     if (gop.value_ptr.param_count < 16) {
                         const param_index = gop.value_ptr.param_count;
@@ -614,13 +620,13 @@ pub const TypeEnv = struct {
                         const annotation = self.internName(type_text);
                         self.source_fn_annotations.put(
                             self.allocator,
-                            sourceFnAnnotationKey(entry.context_line, param_index),
+                            sourceFnAnnotationKey(sig_key, param_index),
                             annotation,
                         ) catch self.markAllocationFailure();
                         gop.value_ptr.param_count += 1;
                     }
                     if (tm.getNameText(entry)) |param_name| {
-                        const names = fn_param_names_by_line.getOrPut(self.allocator, entry.context_line) catch {
+                        const names = fn_param_names_by_signature.getOrPut(self.allocator, sig_key) catch {
                             self.markAllocationFailure();
                             continue;
                         };
@@ -629,10 +635,11 @@ pub const TypeEnv = struct {
                     }
                 },
                 .return_annotation => {
+                    const sig_key = entry.signature_offset orelse continue;
                     const type_text = tm.getTypeText(entry);
-                    const generics = fn_generics_by_line.get(entry.context_line);
+                    const generics = fn_generics_by_signature.get(sig_key);
                     const type_idx = self.resolveTypeInGenerics(type_text, generics);
-                    const gop = fn_params_by_line.getOrPut(self.allocator, entry.context_line) catch {
+                    const gop = fn_params_by_signature.getOrPut(self.allocator, sig_key) catch {
                         self.markAllocationFailure();
                         continue;
                     };
@@ -643,20 +650,21 @@ pub const TypeEnv = struct {
                     const annotation = self.internName(type_text);
                     self.source_fn_annotations.put(
                         self.allocator,
-                        sourceFnAnnotationKey(entry.context_line, return_annotation_slot),
+                        sourceFnAnnotationKey(sig_key, return_annotation_slot),
                         annotation,
                     ) catch self.markAllocationFailure();
                     if (tm.getNameText(entry)) |name| {
                         const owned_name = self.internName(name);
-                        fn_names_by_line.put(self.allocator, entry.context_line, owned_name) catch self.markAllocationFailure();
+                        fn_names_by_signature.put(self.allocator, sig_key, owned_name) catch self.markAllocationFailure();
                     }
                 },
                 .type_guard_annotation => {
+                    const sig_key = entry.signature_offset orelse continue;
                     // `v is string` is a return annotation that also declares a
                     // narrowing. The function returns a boolean; the predicate
                     // is recorded next to the signature and admitted later,
                     // once the checker has read the body that claims it.
-                    const gop = fn_params_by_line.getOrPut(self.allocator, entry.context_line) catch {
+                    const gop = fn_params_by_signature.getOrPut(self.allocator, sig_key) catch {
                         self.markAllocationFailure();
                         continue;
                     };
@@ -666,12 +674,12 @@ pub const TypeEnv = struct {
                     gop.value_ptr.return_type = self.pool.idx_boolean;
                     if (tm.getNameText(entry)) |name| {
                         const owned_name = self.internName(name);
-                        fn_names_by_line.put(self.allocator, entry.context_line, owned_name) catch self.markAllocationFailure();
+                        fn_names_by_signature.put(self.allocator, sig_key, owned_name) catch self.markAllocationFailure();
                     }
                     const parsed = parseTypePredicate(tm.getTypeText(entry)) orelse continue;
-                    const names = fn_param_names_by_line.get(entry.context_line) orelse continue;
+                    const names = fn_param_names_by_signature.get(sig_key) orelse continue;
                     const index = names.indexOf(parsed.param_name) orelse continue;
-                    const generics = fn_generics_by_line.get(entry.context_line);
+                    const generics = fn_generics_by_signature.get(sig_key);
                     const narrowed = self.resolveTypeInGenerics(parsed.type_text, generics);
                     if (narrowed == null_type_idx) continue;
                     gop.value_ptr.type_predicate = .{ .param_index = index, .narrowed = narrowed };
@@ -683,17 +691,16 @@ pub const TypeEnv = struct {
         }
 
         // Merge function signatures
-        var iter = fn_params_by_line.iterator();
+        var iter = fn_params_by_signature.iterator();
         while (iter.next()) |kv| {
-            if (fn_generics_by_line.get(kv.key_ptr.*)) |declared| {
+            if (fn_generics_by_signature.get(kv.key_ptr.*)) |declared| {
                 kv.value_ptr.type_params = declared.params;
                 kv.value_ptr.type_param_count = declared.count;
             }
             self.fn_signatures.put(self.allocator, kv.key_ptr.*, kv.value_ptr.*) catch self.markAllocationFailure();
-            if (fn_names_by_line.get(kv.key_ptr.*)) |name| {
+            if (fn_names_by_signature.get(kv.key_ptr.*)) |name| {
                 self.fn_sigs_by_name.put(self.allocator, name, kv.value_ptr.*) catch self.markAllocationFailure();
                 self.source_fn_sigs_by_name.put(self.allocator, name, kv.value_ptr.*) catch self.markAllocationFailure();
-                self.source_fn_lines_by_name.put(self.allocator, name, kv.key_ptr.*) catch self.markAllocationFailure();
             }
         }
     }
@@ -1299,11 +1306,6 @@ pub const TypeEnv = struct {
         return self.source_fn_sigs_by_name.get(name);
     }
 
-    /// Signature source line for a source-declared function name.
-    pub fn getSourceFnLineByName(self: *const TypeEnv, name: []const u8) ?u32 {
-        return self.source_fn_lines_by_name.get(name);
-    }
-
     /// Look up a type alias by name.
     pub fn getTypeAlias(self: *const TypeEnv, name: []const u8) ?TypeIndex {
         return self.type_aliases.get(name);
@@ -1317,19 +1319,42 @@ pub const TypeEnv = struct {
         self.type_aliases.put(self.allocator, owned_name, type_idx) catch self.markAllocationFailure();
     }
 
-    /// Look up a function signature by source location.
-    pub fn getFnSigByLoc(self: *const TypeEnv, line: u32) ?FunctionSig {
-        return self.fn_signatures.get(line);
+    /// Keep a copy of the edits that map the parser's offsets back to the
+    /// stripped source. Replaces any earlier copy.
+    fn adoptParserEdits(self: *TypeEnv, edits: []const SpanEdit) void {
+        if (self.parser_edits.len > 0) self.allocator.free(self.parser_edits);
+        self.parser_edits = &.{};
+        if (edits.len == 0) return;
+        self.parser_edits = self.allocator.dupe(SpanEdit, edits) catch {
+            self.markAllocationFailure();
+            return;
+        };
     }
 
-    /// Exact source spelling of one declared parameter annotation.
-    pub fn getSourceFnParamAnnotation(self: *const TypeEnv, line: u32, index: u8) ?[]const u8 {
-        return self.source_fn_annotations.get(sourceFnAnnotationKey(line, index));
+    /// The key of the signature whose parameter list opens at `parser_offset`,
+    /// an offset in the text the parser read. This is the offset of the same
+    /// `(` in the stripped source, where the stripper recorded the signature.
+    /// Two functions never share a key, whatever line or name they have.
+    pub fn signatureKeyAt(self: *const TypeEnv, parser_offset: u32) u32 {
+        return type_map_mod.offsetThroughEdits(self.parser_edits, parser_offset);
     }
 
-    /// Exact source spelling of a declared return annotation.
-    pub fn getSourceFnReturnAnnotation(self: *const TypeEnv, line: u32) ?[]const u8 {
-        return self.source_fn_annotations.get(sourceFnAnnotationKey(line, return_annotation_slot));
+    /// Look up the signature whose parameter list opens at `parser_offset`.
+    /// Absent when that function carries no annotation at all.
+    pub fn getFnSigAt(self: *const TypeEnv, parser_offset: u32) ?FunctionSig {
+        return self.fn_signatures.get(self.signatureKeyAt(parser_offset));
+    }
+
+    /// Exact source spelling of one declared parameter annotation of the
+    /// signature `key` names (see `signatureKeyAt`).
+    pub fn getSourceFnParamAnnotation(self: *const TypeEnv, key: u32, index: u8) ?[]const u8 {
+        return self.source_fn_annotations.get(sourceFnAnnotationKey(key, index));
+    }
+
+    /// Exact source spelling of the return annotation of the signature `key`
+    /// names (see `signatureKeyAt`).
+    pub fn getSourceFnReturnAnnotation(self: *const TypeEnv, key: u32) ?[]const u8 {
+        return self.source_fn_annotations.get(sourceFnAnnotationKey(key, return_annotation_slot));
     }
 
     /// Refuse consumers that would otherwise interpret allocation-dropped
@@ -1621,8 +1646,8 @@ fn packLocationKey(line: u32, col: u32) u32 {
 
 const return_annotation_slot = std.math.maxInt(u8);
 
-fn sourceFnAnnotationKey(line: u32, slot: u8) u64 {
-    return (@as(u64, line) << 8) | slot;
+fn sourceFnAnnotationKey(key: u32, slot: u8) u64 {
+    return (@as(u64, key) << 8) | slot;
 }
 
 fn packBindingNameKey(scope_id: u16, name_atom: u16) u32 {
@@ -1813,6 +1838,7 @@ test "TypeEnv function signature from params and return" {
         .source_start = 16, // "number"
         .source_end = 22,
         .context_line = 1,
+        .signature_offset = 1,
         .context_col = 1,
         .name_start = 13, // "a"
         .name_end = 14,
@@ -1823,6 +1849,7 @@ test "TypeEnv function signature from params and return" {
         .source_start = 27, // "number"
         .source_end = 33,
         .context_line = 1,
+        .signature_offset = 1,
         .context_col = 1,
         .name_start = 24, // "b"
         .name_end = 25,
@@ -1833,6 +1860,7 @@ test "TypeEnv function signature from params and return" {
         .source_start = 36, // "number"
         .source_end = 42,
         .context_line = 1,
+        .signature_offset = 1,
         .context_col = 1,
         .name_start = 0,
         .name_end = 0,
@@ -1840,7 +1868,7 @@ test "TypeEnv function signature from params and return" {
 
     env.populateFromTypeMap(&tm);
 
-    const sig = env.getFnSigByLoc(1);
+    const sig = env.getFnSigAt(1);
     try std.testing.expect(sig != null);
     try std.testing.expectEqual(@as(u8, 2), sig.?.param_count);
     try std.testing.expectEqual(pool.idx_number, sig.?.param_types[0]);
@@ -2220,6 +2248,7 @@ test "TypeEnv return-type intersection X & Y" {
         .source_start = 14, // "X & Y"
         .source_end = 19,
         .context_line = 7,
+        .signature_offset = 7,
         .context_col = 1,
         .name_start = 0,
         .name_end = 0,
@@ -2227,7 +2256,7 @@ test "TypeEnv return-type intersection X & Y" {
 
     env.populateFromTypeMap(&tm);
 
-    const sig = env.getFnSigByLoc(7);
+    const sig = env.getFnSigAt(7);
     try std.testing.expect(sig != null);
     try std.testing.expectEqual(type_pool_mod.TypeTag.t_intersection, pool.getTag(sig.?.return_type).?);
 }
@@ -2435,6 +2464,7 @@ test "extractProofMembers walks a generic Proof alias to its literal union" {
         .source_start = ret_span.start,
         .source_end = ret_span.end,
         .context_line = 7,
+        .signature_offset = 7,
         .context_col = 1,
         .name_start = 0,
         .name_end = 0,
@@ -2442,7 +2472,7 @@ test "extractProofMembers walks a generic Proof alias to its literal union" {
 
     env.populateFromTypeMap(&tm);
 
-    const sig = env.getFnSigByLoc(7) orelse return error.MissingSig;
+    const sig = env.getFnSigAt(7) orelse return error.MissingSig;
 
     var names: std.ArrayListUnmanaged([]const u8) = .empty;
     defer names.deinit(allocator);
@@ -2470,6 +2500,7 @@ test "extractProofMembers handles an inline Proof return capsule" {
         .source_start = testSpan(source, "Proof<Response, \"idempotent\">").start,
         .source_end = testSpan(source, "Proof<Response, \"idempotent\">").end,
         .context_line = 3,
+        .signature_offset = 3,
         .context_col = 1,
         .name_start = 0,
         .name_end = 0,
@@ -2477,7 +2508,7 @@ test "extractProofMembers handles an inline Proof return capsule" {
 
     env.populateFromTypeMap(&tm);
 
-    const sig = env.getFnSigByLoc(3) orelse return error.MissingSig;
+    const sig = env.getFnSigAt(3) orelse return error.MissingSig;
 
     var names: std.ArrayListUnmanaged([]const u8) = .empty;
     defer names.deinit(allocator);
@@ -2504,6 +2535,7 @@ test "extractProofMembers returns empty when no Proof marker" {
         .source_start = 20,
         .source_end = 28,
         .context_line = 5,
+        .signature_offset = 5,
         .context_col = 1,
         .name_start = 0,
         .name_end = 0,
@@ -2511,7 +2543,7 @@ test "extractProofMembers returns empty when no Proof marker" {
 
     env.populateFromTypeMap(&tm);
 
-    const sig = env.getFnSigByLoc(5) orelse return error.MissingSig;
+    const sig = env.getFnSigAt(5) orelse return error.MissingSig;
 
     var names: std.ArrayListUnmanaged([]const u8) = .empty;
     defer names.deinit(allocator);
@@ -2576,6 +2608,7 @@ test "extractProofMembers handles inline return type Proof<T, \"name\">" {
         .source_start = 17,
         .source_end = 43,
         .context_line = 4,
+        .signature_offset = 4,
         .context_col = 1,
         .name_start = 0,
         .name_end = 0,
@@ -2583,7 +2616,7 @@ test "extractProofMembers handles inline return type Proof<T, \"name\">" {
 
     env.populateFromTypeMap(&tm);
 
-    const sig = env.getFnSigByLoc(4) orelse return error.MissingSig;
+    const sig = env.getFnSigAt(4) orelse return error.MissingSig;
 
     var names: std.ArrayListUnmanaged([]const u8) = .empty;
     defer names.deinit(allocator);
@@ -2961,4 +2994,69 @@ test "readonly on an array alias survives to the resolved type" {
     try std.testing.expect(pool.isReadonlyArray(resolved));
     // The control: without the modifier the same alias stays mutable.
     try std.testing.expect(!pool.isReadonlyArray(env.resolveType("Items")));
+}
+
+test "a signature stays reachable by the parser's offset after TSX lowering" {
+    // Lowering `<ul>` into `h("ul", null, ` pushes the arrow's `(` to the right,
+    // so the offset the parser reports is not the offset the stripper recorded.
+    // The edits the type map keeps must undo that, or an annotated arrow that
+    // follows an element on its line loses its signature.
+    const allocator = std.testing.allocator;
+    const source = "const list = <ul>{xs.map((x: number): number => x)}</ul>;";
+    const engine = @import("zts-engine");
+    var prepared = try engine.source_frontend.PreparedSource.init(allocator, source, "view.tsx", .{});
+    defer prepared.deinit();
+
+    var parser = try engine.parser.JsParser.init(allocator, prepared.parserInput());
+    defer parser.deinit();
+    _ = try parser.parse();
+
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+    var env = TypeEnv.init(allocator, &pool);
+    defer env.deinit();
+    env.populateFromTypeMap(prepared.typeMap().?);
+
+    var arrow_offset: ?u32 = null;
+    for (parser.nodes.tags.items, 0..) |tag, idx| {
+        if (tag == .arrow_function) arrow_offset = parser.nodes.locs.items[idx].offset;
+    }
+    const offset = arrow_offset orelse return error.TestUnexpectedResult;
+    // The lowering really did move it.
+    try std.testing.expect(offset != std.mem.indexOf(u8, source, "(x:").?);
+    const sig = env.getFnSigAt(offset) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u8, 1), sig.param_count);
+    try std.testing.expect(sig.return_type != null_type_idx);
+}
+
+test "functions on one line and nested functions of one name keep separate signatures" {
+    const allocator = std.testing.allocator;
+    const source = "function a(x: number): number { function h(p: number): number { return p; } return h(x); }\n" ++
+        "function b(): number { function h(p: number, q: number): number { return p + q; } return h(1, 2); }\n";
+    const engine = @import("zts-engine");
+    var strip_result = try engine.stripper.strip(allocator, source, .{});
+    defer strip_result.deinit();
+    var parser = try engine.parser.JsParser.init(allocator, strip_result.code);
+    defer parser.deinit();
+    _ = try parser.parse();
+
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+    var env = TypeEnv.init(allocator, &pool);
+    defer env.deinit();
+    env.populateFromTypeMap(&strip_result.type_map);
+
+    // Every function node finds its own signature: `a` and its `h` share a
+    // line, and the two `h` share a name.
+    var counts: [8]u8 = undefined;
+    var seen: usize = 0;
+    for (parser.nodes.tags.items, 0..) |tag, idx| {
+        if (tag != .function_expr) continue;
+        const sig = env.getFnSigAt(parser.nodes.locs.items[idx].offset) orelse return error.TestUnexpectedResult;
+        counts[seen] = sig.param_count;
+        seen += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 4), seen);
+    // Parse order is inner-first: a's h, a, b's h, b.
+    try std.testing.expectEqualSlices(u8, &.{ 1, 1, 2, 0 }, counts[0..seen]);
 }

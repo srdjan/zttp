@@ -112,7 +112,7 @@ fn handlerSignature(
     if (env.getSourceFnSigByName("handler")) |sig| return sig;
     const loc = handler_loc orelse return null;
     if (loc.line == 0) return null;
-    return env.getFnSigByLoc(loc.line);
+    return env.getFnSigAt(loc.offset);
 }
 
 fn currentPolicyHashRaw() [32]u8 {

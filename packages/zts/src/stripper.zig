@@ -177,30 +177,15 @@ pub const Position = struct {
 ///
 /// Each entry records both ends of one such fold, in both coordinate systems,
 /// so `StripResult.sourceOffset` can undo the shift.
-pub const SpanEdit = struct {
-    /// Offset in the stripped code where the folded value starts.
-    stripped_start: u32,
-    /// Offset in the stripped code just past the folded value and its padding.
-    stripped_end: u32,
-    /// Offset in the source where the `comptime` keyword starts.
-    source_start: u32,
-    /// Offset in the source just past the `comptime(...)` closing paren.
-    source_end: u32,
-};
+///
+/// The type is defined beside `TypeMap`, which carries the lowering edits that
+/// a signature lookup needs; this is the same type under its original name.
+pub const SpanEdit = type_map_mod.SpanEdit;
 
 /// Map an offset through an ordered set of non-overlapping replacement spans.
 /// Both TypeScript folding and TSX lowering use this representation, so their
 /// maps compose without either frontend knowing about the other.
-pub fn sourceOffsetForEdits(edits: []const SpanEdit, output_offset: u32) u32 {
-    var shift: i64 = 0;
-    for (edits) |edit| {
-        if (output_offset < edit.stripped_start) break;
-        if (output_offset < edit.stripped_end) return edit.source_start;
-        shift = @as(i64, edit.source_end) - @as(i64, edit.stripped_end);
-    }
-    const mapped = @as(i64, output_offset) + shift;
-    return @intCast(std.math.clamp(mapped, 0, std.math.maxInt(u32)));
-}
+pub const sourceOffsetForEdits = type_map_mod.offsetThroughEdits;
 
 pub const StripResult = struct {
     code: []const u8,
@@ -518,10 +503,13 @@ const Stripper = struct {
     // State
     line: u32,
     col: u32,
-    /// Line the function signature currently being scanned starts on, or null
-    /// outside one. Parameter and return annotations are stamped with it so a
-    /// signature split across lines stays one unit downstream.
-    signature_line: ?u32 = null,
+    /// Output offset of the `(` that opens the parameter list of the signature
+    /// being scanned, or null outside one. Parameter, return, and type-parameter
+    /// annotations are stamped with it, so a signature split across lines stays
+    /// one unit downstream and two signatures on one line stay two. The stripper
+    /// keeps every offset it does not fold, so this is the offset the parser
+    /// reports for the same `(`.
+    signature_offset: ?u32 = null,
 
     // Context tracking for smart colon handling
     // When true, colons are for expressions (object literals), not types
@@ -826,7 +814,11 @@ const Stripper = struct {
                     const generic_start = self.pos;
                     if (try self.skipBalancedAngles()) {
                         try self.rejectRemovedTypeFormInType(generic_start + 1, self.pos - 1);
-                        // Record generic params (content inside angle brackets)
+                        // Record generic params (content inside angle brackets),
+                        // stamped with the offset of the `(` that follows.
+                        const saved_signature_offset = self.signature_offset;
+                        defer self.signature_offset = saved_signature_offset;
+                        self.signature_offset = self.parenOffsetAfter(self.pos, self.output.items.len + (self.pos - generic_start));
                         self.recordTypeAnnotation(.generic_params, generic_start + 1, self.pos - 1, 0, 0);
                         self.blankSpan(generic_start, self.pos);
                         // Copy whitespace after generics
@@ -924,19 +916,19 @@ const Stripper = struct {
         // We've already output "function"
         // Now handle: [name]<generics>(params): returnType { ... }
 
-        // Stamp every annotation in this signature with the line the signature
-        // starts on. Without it each annotation carries the line it sits on, so
-        // a signature split across lines lands in separate buckets in
-        // `TypeEnv.populateFromTypeMap` - parameters under one, the return type
-        // under another - and no bucket holds a complete signature. The strict
-        // checker then reports a fully annotated function as missing its
-        // annotations.
+        // Stamp every annotation in this signature with the offset of the `(`
+        // that opens its parameter list. A line does not identify a signature:
+        // annotations sit on the line they are typed on, so a signature split
+        // across lines lands in separate buckets in
+        // `TypeEnv.populateFromTypeMap`, and two signatures on one line merge
+        // into one. The offset is shared by every annotation of one signature
+        // and by nothing else.
         //
         // Saved and restored so a nested function does not leave the enclosing
-        // signature stamped with the inner line.
-        const saved_signature_line = self.signature_line;
-        self.signature_line = self.line;
-        defer self.signature_line = saved_signature_line;
+        // signature stamped with the inner offset.
+        const saved_signature_offset = self.signature_offset;
+        defer self.signature_offset = saved_signature_offset;
+        self.signature_offset = null;
 
         // Copy whitespace
         const ws_start = self.pos;
@@ -960,6 +952,10 @@ const Stripper = struct {
             const generic_col = self.col;
             if (try self.skipBalancedAngles()) {
                 try self.rejectRemovedTypeFormInType(generic_start + 1, self.pos - 1);
+                // The type parameters are recorded before the `(` is reached,
+                // so their signature offset is read ahead: blanking keeps the
+                // width, and only whitespace separates `>` from `(`.
+                self.signature_offset = self.parenOffsetAfter(self.pos, self.output.items.len + (self.pos - generic_start));
                 // Record generic params in TypeMap (inside the angle brackets)
                 self.recordTypeAnnotation(.generic_params, generic_start + 1, self.pos - 1, fn_name_start, fn_name_end);
                 // Blank the generic params
@@ -981,6 +977,7 @@ const Stripper = struct {
         self.output.appendSlice(self.allocator, self.source[ws2_start..self.pos]) catch return StripError.OutOfMemory;
 
         if (self.pos < self.source.len and self.source[self.pos] == '(') {
+            self.signature_offset = @intCast(self.output.items.len);
             try self.handleFunctionParams();
         }
 
@@ -1206,6 +1203,13 @@ const Stripper = struct {
     fn handleArrowFunction(self: *Self) StripError!void {
         // We're at '(' after '='
         // Handle: (params): ReturnType => body
+        //
+        // Every annotation of this arrow carries the offset of its `(`, the
+        // same identity a `function` signature has. Saved and restored so an
+        // arrow inside a signature leaves the enclosing one intact.
+        const saved_signature_offset = self.signature_offset;
+        defer self.signature_offset = saved_signature_offset;
+        self.signature_offset = @intCast(self.output.items.len);
         try self.handleFunctionParams();
 
         // Handle optional return type annotation
@@ -2244,6 +2248,12 @@ const Stripper = struct {
                     .call_type_arguments
                 else
                     .generic_params;
+                // Type parameters of an arrow belong to the signature whose
+                // `(` follows them. Blanking keeps the width, so that `(` is
+                // `self.pos - start` bytes past the end of the output so far.
+                const saved_signature_offset = self.signature_offset;
+                defer self.signature_offset = saved_signature_offset;
+                self.signature_offset = if (next == '(') @as(u32, @intCast(self.output.items.len + (self.pos - start))) else null;
                 self.recordTypeAnnotation(kind, start + 1, self.pos - 1, 0, 0);
                 // Looks like generic function - blank the params
                 self.blankSpan(start, self.pos);
@@ -2694,21 +2704,43 @@ const Stripper = struct {
             .kind = kind,
             .source_start = @intCast(type_start),
             .source_end = @intCast(type_end),
-            // Parameters, return types, and the type-parameter list belong to
-            // their signature, not to the line they were typed on; every other
-            // kind is positional. A list wrapped across lines is recorded after
-            // `skipBalancedAngles` moved the counter to the closing `>`, so
-            // keying it on that line filed the signature's generics under a key
-            // none of its annotations shared, and the signature read as
-            // monomorphic.
-            .context_line = switch (kind) {
-                .param_annotation, .return_annotation, .generic_params => self.signature_line orelse self.line,
-                else => self.line,
-            },
+            .context_line = self.line,
             .context_col = self.col,
             .name_start = @intCast(name_start),
             .name_end = @intCast(name_end),
+            // Parameters, return types, and the type-parameter list belong to
+            // their signature, not to the line they were typed on. The line
+            // cannot name a signature: a list wrapped across lines would split
+            // it, and two signatures on one line would merge. Every other kind
+            // is positional and carries none.
+            .signature_offset = switch (kind) {
+                .param_annotation,
+                .return_annotation,
+                .type_guard_annotation,
+                .generic_params,
+                => self.signature_offset,
+                .type_alias,
+                .distinct_type,
+                .var_annotation,
+                .call_type_arguments,
+                => null,
+            },
         }) catch {};
+    }
+
+    /// The output offset of the `(` that follows `src_from` across whitespace,
+    /// given that `out_from` is the output offset `src_from` will have once the
+    /// bytes before it are written. Null when the next token is not `(`.
+    fn parenOffsetAfter(self: *const Self, src_from: usize, out_from: usize) ?u32 {
+        var at = src_from;
+        while (at < self.source.len) : (at += 1) {
+            switch (self.source[at]) {
+                ' ', '\t', '\n', '\r' => {},
+                '(' => return @intCast(out_from + (at - src_from)),
+                else => return null,
+            }
+        }
+        return null;
     }
 
     fn recordVarTypeAnnotation(
@@ -4583,6 +4615,54 @@ test "a refused interface records no type-map entry" {
     }
     const trimmed = std.mem.trim(u8, result.code, " \n\r\t");
     try std.testing.expectEqual(@as(usize, 0), trimmed.len);
+}
+
+test "a signature is identified by the offset of its opening paren" {
+    // A function and an arrow on one line share a line and no `(`. Each
+    // annotation carries the offset of the `(` that opens the list it belongs
+    // to, and the stripped text has that `(` at that offset, which is where
+    // the parser reports it.
+    const source = "function f(xs: number[]): number[] { return xs.map((x: number): number => x); }";
+    var result = try strip(std.testing.allocator, source, .{});
+    defer result.deinit();
+
+    const function_paren = std.mem.indexOf(u8, source, "(xs").?;
+    const arrow_paren = std.mem.indexOf(u8, source, "(x:").?;
+    var function_entries: usize = 0;
+    var arrow_entries: usize = 0;
+    for (result.type_map.entries.items) |entry| {
+        if (entry.kind != .param_annotation and entry.kind != .return_annotation) continue;
+        const offset = entry.signature_offset.?;
+        try std.testing.expectEqual(@as(u8, '('), result.code[offset]);
+        if (offset == function_paren) function_entries += 1;
+        if (offset == arrow_paren) arrow_entries += 1;
+    }
+    // One parameter and one return type each.
+    try std.testing.expectEqual(@as(usize, 2), function_entries);
+    try std.testing.expectEqual(@as(usize, 2), arrow_entries);
+}
+
+test "type parameters carry the offset of the paren that follows them" {
+    const source = "function first<T>(xs: T[]): T { return xs[0]; }\nconst id = <U>(x: U): U => x;";
+    var result = try strip(std.testing.allocator, source, .{});
+    defer result.deinit();
+
+    var seen: usize = 0;
+    for (result.type_map.entries.items) |entry| {
+        if (entry.kind != .generic_params) continue;
+        const offset = entry.signature_offset.?;
+        try std.testing.expectEqual(@as(u8, '('), result.code[offset]);
+        seen += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 2), seen);
+}
+
+test "an annotation that belongs to no signature carries no offset" {
+    var result = try strip(std.testing.allocator, "structural Box<T> = { value: T };\nconst x: number = 1;", .{});
+    defer result.deinit();
+    for (result.type_map.entries.items) |entry| {
+        try std.testing.expect(entry.signature_offset == null);
+    }
 }
 
 test "TypeMap records function return type" {

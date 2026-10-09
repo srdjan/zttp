@@ -118,6 +118,7 @@ pub fn discharge(
         if (std.mem.eql(u8, fe.name, handler_fn_name)) continue;
 
         const line: u32 = if (ir_view.getLoc(fe.decl_node)) |loc| loc.line else 0;
+        const signature_offset = ir_view.signatureOffset(fe.decl_node);
 
         const facts: CapsuleFacts = .{
             .total = handler_verifier.functionAlwaysReturns(ir_view, fe.body_node),
@@ -133,7 +134,7 @@ pub fn discharge(
             for (declared.items) |s| allocator.free(s);
             declared.deinit(allocator);
         }
-        _ = try collectDeclared(allocator, env, line, &declared, false);
+        _ = try collectDeclared(allocator, env, signature_offset, &declared, false);
 
         var diagnostics = try spec_discharge.dischargeCapsule(allocator, declared.items, facts);
         errdefer {
@@ -146,7 +147,7 @@ pub fn discharge(
             for (effect_declared.items) |s| allocator.free(s);
             effect_declared.deinit(allocator);
         }
-        const effect_extraction = try collectDeclared(allocator, env, line, &effect_declared, true);
+        const effect_extraction = try collectDeclared(allocator, env, signature_offset, &effect_declared, true);
 
         var effect_diagnostics = try spec_discharge.dischargeEffects(
             allocator,
@@ -188,13 +189,13 @@ pub fn discharge(
 fn collectDeclared(
     allocator: std.mem.Allocator,
     env: ?*const TypeEnv,
-    line: u32,
+    signature_offset: ?u32,
     out: *std.ArrayList([]const u8),
     comptime effects: bool,
 ) !type_env_mod.MarkerExtraction {
     const e = env orelse return .{};
-    if (line == 0) return .{};
-    const sig = e.getFnSigByLoc(line) orelse return .{};
+    const offset = signature_offset orelse return .{};
+    const sig = e.getFnSigAt(offset) orelse return .{};
     if (sig.return_type == type_pool_mod.null_type_idx) return .{};
 
     var raw: std.ArrayListUnmanaged([]const u8) = .empty;

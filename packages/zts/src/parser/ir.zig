@@ -1954,6 +1954,22 @@ pub const IrView = struct {
         return self.getFunction(decl.init);
     }
 
+    /// The offset the parser reports for the `(` that opens the parameter list
+    /// of the function `idx` names: a `function_expr`, an `arrow_function`, or
+    /// the function inside a `function_decl`. A signature is identified by
+    /// this offset (see `TypeEnv.getFnSigAt`). The location of a
+    /// `function_decl` node is its `function` keyword, which is not this
+    /// offset, so a declaration is read through its function. Null for any
+    /// other node, and for a single-identifier arrow, which has no `(`.
+    pub fn signatureOffset(self: IrView, idx: NodeIndex) ?u32 {
+        const fn_node = switch (self.getTag(idx) orelse return null) {
+            .function_expr, .arrow_function => idx,
+            .function_decl => (self.getVarDecl(idx) orelse return null).init,
+            else => return null,
+        };
+        return (self.getLoc(fn_node) orelse return null).offset;
+    }
+
     // ============ Statement Accessors ============
 
     /// Get variable declaration data

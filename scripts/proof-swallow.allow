@@ -241,6 +241,7 @@ packages/zts/src/type_checker.zig reportIfUnencodable catch-value
 
 # TypeEnv.ensureHealthy and TypePool.ensureHealthy reject their recorded
 # allocation failure before their types can support a verdict.
+packages/zts/src/type_env.zig adoptParserEdits catch-block
 packages/zts/src/type_env.zig findNonContractiveAliases catch-poison
 packages/zts/src/type_env.zig instantiateCompositeMembers catch-block
 packages/zts/src/type_env.zig internName catch-block
@@ -336,7 +337,6 @@ packages/zts/src/type_env.zig populateFromTypeMap catch-poison@7
 packages/zts/src/type_env.zig populateFromTypeMap catch-poison@8
 packages/zts/src/type_env.zig populateFromTypeMap catch-poison@9
 packages/zts/src/type_env.zig populateFromTypeMap catch-poison@10
-packages/zts/src/type_env.zig populateFromTypeMap catch-poison@11
 packages/zts/src/type_env.zig processTypeAlias catch-poison@2
 packages/zts/src/type_env.zig processVarAnnotation catch-poison@2
 packages/zts/src/type_env.zig processVarAnnotation catch-poison@3
