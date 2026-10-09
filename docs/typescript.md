@@ -211,7 +211,8 @@ The type checker (`packages/zts/src/type_checker.zig`) validates type annotation
 - Function argument types match declared parameter types
 - Return values match declared return types
 - Property access on known record types (including `readonly` enforcement)
-- Virtual module function signatures (argument count and types)
+- Argument count of a call to a function you declare (ZTS202): too few or too many, counted against the declared parameter list
+- Virtual module function signatures (argument types, and a call with too few arguments; a call with too many arguments is not yet refused)
 - Discriminated union narrowing in `match` expressions and `if` conditions
 - Nominal type safety for `nominal` declarations
 - Template literal type pattern matching

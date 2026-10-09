@@ -1137,8 +1137,8 @@ arrow callback MAY infer them from a fully typed callback position, and MAY
 declare any leading prefix of the callback type's parameter list (for
 example a two-parameter arrow in a three-parameter `reduce` position). This
 prefix rule is the only arity flexibility in the profile; named function
-declarations and ordinary calls remain fixed-arity except for trailing
-defaults.
+declarations and ordinary calls remain fixed-arity: a call supplies every
+declared argument and no more, and a surplus argument is refused (ZTS202).
 
 Generic functions are sound and erased:
 
