@@ -1255,6 +1255,23 @@ const hand_written = [_]Hand{
         \\}
         ,
     },
+    .{
+        .name = "x25_named_function_array_callback",
+        .property = .no_secret_leakage,
+        .expect = .refuse,
+        .reason = "a nested function passed by name to map logs each element, and the receiver holds the secret (ZTS402)",
+        .body =
+        \\function handler(req: Request): Claim<Response> {
+        \\  function leak(s: string): number {
+        \\    logInfo(s, { n: 1 });
+        \\    return 1;
+        \\  }
+        \\  const t = env("API_TOKEN") ?? "";
+        \\  const n = [t].map(leak);
+        \\  return Response.json({ ok: 1 });
+        \\}
+        ,
+    },
 };
 
 /// Every probe of the census, in a fixed order. All memory comes from `a`.
@@ -1308,7 +1325,7 @@ pub fn generate(a: std.mem.Allocator) ![]Probe {
 /// Never lower one to make a deletion pass.
 pub const minimum_matrix: usize = 504;
 pub const minimum_extended: usize = 246;
-pub const minimum_hand: usize = 24;
+pub const minimum_hand: usize = 25;
 /// The fewest probes a (label, sink) column holds: the 18 research kinds.
 pub const minimum_per_column: usize = 18;
 

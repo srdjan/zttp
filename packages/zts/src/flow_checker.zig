@@ -3667,7 +3667,9 @@ pub const FlowChecker = struct {
     /// directly as an argument of a method call (`[s].map((x) => ...)`,
     /// `forEach`, `filter`) receives the receiver's elements, so it is walked
     /// with its parameters bound to `callee_labels`, the receiver's labels.
-    /// Any other argument is read as before.
+    /// A function passed by name (`[s].map(leak)`) resolves through
+    /// `passedValueNode` and is walked the same way. Any other argument is
+    /// read as before.
     fn mergeArgLabels(self: *FlowChecker, callee_labels: LabelSet, call_data: Node.CallExpr) LabelSet {
         const is_method = self.ir_view.getTag(call_data.callee) == .member_access;
         var labels = callee_labels;
@@ -3676,6 +3678,12 @@ pub const FlowChecker = struct {
             const arg_tag = self.ir_view.getTag(arg) orelse .lit_undefined;
             if (is_method and (arg_tag == .arrow_function or arg_tag == .function_expr)) {
                 labels = LabelSet.merge(labels, self.closureResultLabelsBound(arg, callee_labels));
+            } else if (is_method and arg_tag == .identifier) {
+                const arg_labels = if (self.namedFunctionArg(arg)) |fn_node|
+                    self.closureResultLabelsBound(fn_node, callee_labels)
+                else
+                    self.inferLabels(arg);
+                labels = LabelSet.merge(labels, arg_labels);
             } else {
                 labels = LabelSet.merge(labels, self.inferLabels(arg));
             }
@@ -4208,6 +4216,14 @@ pub const FlowChecker = struct {
     /// site stands for itself. A name stands for the declaration it is bound
     /// to, or for what the enclosing summary frame bound it to when it is a
     /// parameter that the caller passed on.
+    /// The function an identifier argument names, when `passedValueNode`
+    /// resolves it to a function and not to a record.
+    fn namedFunctionArg(self: *const FlowChecker, arg: NodeIndex) ?NodeIndex {
+        const node = self.passedValueNode(arg) orelse return null;
+        if (self.ir_view.getFunction(node) == null) return null;
+        return node;
+    }
+
     fn passedValueNode(self: *const FlowChecker, arg: NodeIndex) ?NodeIndex {
         const tag = self.ir_view.getTag(arg) orelse return null;
         switch (tag) {
@@ -8124,6 +8140,49 @@ test "FlowChecker labels credential reads on any binding that carries the reques
         const properties = try runFlowProperties(std.testing.allocator, case.source);
         try std.testing.expect(properties.no_credential_leakage);
     }
+}
+
+test "FlowChecker walks a function passed by name to an array method" {
+    // A callback literal is walked with the receiver's labels already; the
+    // same callback passed by name must be too, nested or top-level.
+    const top_level =
+        \\import { env } from "zttp:env";
+        \\function leak(s) {
+        \\  console.log(s);
+        \\  return 1;
+        \\}
+        \\function handler(req) {
+        \\  const n = [env("SECRET_KEY")].map(leak);
+        \\  return Response.json({ n: n.length });
+        \\}
+    ;
+    try std.testing.expect(!(try runFlowProperties(std.testing.allocator, top_level)).no_secret_leakage);
+
+    const nested =
+        \\import { env } from "zttp:env";
+        \\function handler(req) {
+        \\  function leak(s) {
+        \\    console.log(s);
+        \\    return 1;
+        \\  }
+        \\  const n = [env("SECRET_KEY")].map(leak);
+        \\  return Response.json({ n: n.length });
+        \\}
+    ;
+    try std.testing.expect(!(try runFlowProperties(std.testing.allocator, nested)).no_secret_leakage);
+
+    // The control: a clean receiver keeps the property.
+    const clean =
+        \\function leak(s) {
+        \\  console.log(s);
+        \\  return 1;
+        \\}
+        \\function handler(req) {
+        \\  const n = ["a"].map(leak);
+        \\  return Response.json({ n: n.length });
+        \\}
+    ;
+    try std.testing.expect((try runFlowProperties(std.testing.allocator, clean)).no_secret_leakage);
 }
 
 test "FlowChecker re-walks a callee without the labels an earlier call bound" {
