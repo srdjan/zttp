@@ -158,6 +158,17 @@ fn adaptFunctionBinding(
             .unknown = binding.return_labels.unknown,
         },
         .declassify_bound_arg = binding.declassify_bound_arg,
+        .declassifies = .{
+            .secret = binding.declassifies.secret,
+            .credential = binding.declassifies.credential,
+            .user_input = binding.declassifies.user_input,
+            .config = binding.declassifies.config,
+            .internal = binding.declassifies.internal,
+            .external = binding.declassifies.external,
+            .validated = binding.declassifies.validated,
+            .nondeterministic = binding.declassifies.nondeterministic,
+            .unknown = binding.declassifies.unknown,
+        },
         .failure_severity = @enumFromInt(@intFromEnum(binding.failure_severity)),
         .laws = &laws,
     };

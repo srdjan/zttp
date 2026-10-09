@@ -175,6 +175,13 @@ pub const LabelSet = packed struct(u16) {
         return @bitCast(ai | bi);
     }
 
+    /// The labels of `self` that `cleared` does not name: bitwise AND NOT.
+    pub fn without(self: LabelSet, cleared: LabelSet) LabelSet {
+        const si: u16 = @bitCast(self);
+        const ci: u16 = @bitCast(cleared);
+        return @bitCast(si & ~ci);
+    }
+
     /// Merge for conditional branches (ternary/if-else): taint labels use OR
     /// (either branch can taint), but `validated` uses AND (a value is only
     /// considered validated when ALL branches that produce it are validated;
@@ -475,6 +482,11 @@ pub const FunctionBinding = struct {
     /// literal. See the SDK field of the same name for the reasoning.
     declassify_bound_arg: ?u8 = null,
 
+    /// The labels this export discharges from its input, and only these; the
+    /// result carries every other input label plus `return_labels`. Needs
+    /// `declassify_bound_arg`. See the SDK field of the same name.
+    declassifies: LabelSet = .{},
+
     /// Set when the return value can contain data that arrived as an argument,
     /// and the export validates nothing. The flow checker then unions every
     /// argument's labels into the call's result instead of answering the
@@ -719,11 +731,13 @@ pub fn validateBindings(comptime bindings: []const ModuleBinding) void {
                 }
             }
             // A declassification bound must name an argument that exists, and
-            // it only means something on an export that declassifies: one
-            // whose declared labels replace its input's rather than joining
-            // them. An export declaring `derives_from_args` already keeps
-            // every input label, so a bound there would be a second answer to
-            // a question already settled.
+            // it only means something beside a `declassifies` set: the labels
+            // the export discharges. The two travel together. A bound with no
+            // set has nothing to bound, and a set with no bound would let a
+            // runtime argument choose how much is discharged. An export
+            // declaring `derives_from_args` already keeps every input label,
+            // so a set there would be a second answer to a question already
+            // settled.
             if (f.declassify_bound_arg) |bound| {
                 if (bound >= f.arg_count) {
                     @compileError(std.fmt.comptimePrint(
@@ -731,11 +745,19 @@ pub fn validateBindings(comptime bindings: []const ModuleBinding) void {
                         .{ b.specifier, f.name, bound, f.arg_count },
                     ));
                 }
-                if (f.return_labels.isEmpty()) {
-                    @compileError(b.specifier ++ "." ++ f.name ++ " bounds a declassification but declares no `return_labels`; only an export whose declared labels replace its input's declassifies anything");
+                if (f.declassifies.isEmpty()) {
+                    @compileError(b.specifier ++ "." ++ f.name ++ " bounds a declassification but declares no `declassifies` labels; a bound with nothing to discharge names nothing");
+                }
+            }
+            if (!f.declassifies.isEmpty()) {
+                if (f.declassify_bound_arg == null) {
+                    @compileError(b.specifier ++ "." ++ f.name ++ " declares `declassifies` but no `declassify_bound_arg`; the discharge holds only while a bounding argument is a compile-time literal");
                 }
                 if (f.derives_from_args) {
-                    @compileError(b.specifier ++ "." ++ f.name ++ " declares both `derives_from_args` and `declassify_bound_arg`; an export that keeps every input label declassifies nothing to bound");
+                    @compileError(b.specifier ++ "." ++ f.name ++ " declares both `derives_from_args` and `declassifies`; an export that keeps every input label discharges nothing");
+                }
+                if (f.declassifies.has(.validated) or f.declassifies.has(.unknown) or f.declassifies.has(.nondeterministic)) {
+                    @compileError(b.specifier ++ "." ++ f.name ++ " declassifies `validated`, `unknown` or `nondeterministic`; those are facts about the value's history or about the checker, not labels an export may discharge");
                 }
             }
             if (f.laws.len > 0) {

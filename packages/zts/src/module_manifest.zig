@@ -337,6 +337,15 @@ const BindingHasher = struct {
         std.mem.writeInt(u16, &labels, @bitCast(exp.return_labels), .little);
         self.hasher.update(&labels);
         self.boolean(exp.derives_from_args);
+        // A declassifier changes what the flow checker proves, so its bound and
+        // its discharged labels are authority-bearing. They are folded only
+        // when declared, so that an export which declassifies nothing keeps the
+        // digest it had before the fields existed.
+        if (exp.declassify_bound_arg != null or !exp.declassifies.isEmpty()) {
+            self.optionalByte(exp.declassify_bound_arg);
+            std.mem.writeInt(u16, &labels, @bitCast(exp.declassifies), .little);
+            self.hasher.update(&labels);
+        }
         self.tag(exp.failure_severity);
         self.count(exp.laws.len);
         for (exp.laws) |law| self.foldLaw(law);
@@ -457,6 +466,18 @@ test "binding digest covers the complete authority surface" {
         var changed = baseline_binding;
         changed.exports = &changed_exports;
         try std.testing.expect(!std.mem.eql(u8, &baseline, &bindingDigest(changed)));
+    }
+    {
+        var changed_exports = exports;
+        changed_exports[0].declassify_bound_arg = 0;
+        changed_exports[0].declassifies = .{ .secret = true };
+        var changed = baseline_binding;
+        changed.exports = &changed_exports;
+        const declassifying = bindingDigest(changed);
+        try std.testing.expect(!std.mem.eql(u8, &baseline, &declassifying));
+        // The discharged set is part of the identity, not only its presence.
+        changed_exports[0].declassifies = .{ .secret = true, .credential = true };
+        try std.testing.expect(!std.mem.eql(u8, &declassifying, &bindingDigest(changed)));
     }
     {
         var changed = baseline_binding;

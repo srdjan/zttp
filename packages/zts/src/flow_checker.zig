@@ -327,6 +327,13 @@ fn findSource(sources: []const DeclaredSource, kind: declaration.SourceKind, nam
     return null;
 }
 
+/// What an imported declassifier discharges and which argument bounds it,
+/// copied from the export's `declassifies` and `declassify_bound_arg`.
+const DeclassifyRule = struct {
+    bound_arg: u8,
+    clears: LabelSet,
+};
+
 const Origin = struct {
     /// Index of the source among `origin_sources`, or null for a fetch whose
     /// URL is not a literal: every fetch entry then applies by path.
@@ -395,12 +402,14 @@ pub const FlowChecker = struct {
     /// of the arguments' rather than the declared set alone.
     module_fn_arg_derived: std.AutoHashMapUnmanaged(u16, void),
     /// Slots of imported exports that declare `declassify_bound_arg`, mapped to
-    /// that argument index. The export's declared labels replace its input's -
-    /// that is what makes it a declassifier - but only while the named argument
-    /// is a compile-time literal. `mask(text, visible)` reveals the trailing
-    /// `visible` bytes, so a runtime `visible` puts the magnitude of the
-    /// declassification in whatever computes it.
-    module_fn_declassify_bound: std.AutoHashMapUnmanaged(u16, u8),
+    /// that argument index and to the labels the export discharges
+    /// (`declassifies`). The result keeps every other input label - that is
+    /// what makes it a declassifier of those labels and not of all of them -
+    /// and the discharge holds only while the named argument is a compile-time
+    /// literal. `mask(text, visible)` reveals the trailing `visible` bytes, so
+    /// a runtime `visible` puts the magnitude of the declassification in
+    /// whatever computes it.
+    module_fn_declassify_bound: std.AutoHashMapUnmanaged(u16, DeclassifyRule),
     /// Sink summaries for functions imported from another file, local slot ->
     /// summary. The checker has no file access, so the caller computes these
     /// with `exportedSummary` over the imported module and installs them before
@@ -1575,7 +1584,8 @@ pub const FlowChecker = struct {
                     self.markAllocationFailure();
             }
             if (entry.func.declassify_bound_arg) |bound| {
-                self.module_fn_declassify_bound.put(self.allocator, rec.slot, bound) catch
+                const rule: DeclassifyRule = .{ .bound_arg = bound, .clears = entry.func.declassifies };
+                self.module_fn_declassify_bound.put(self.allocator, rec.slot, rule) catch
                     self.markAllocationFailure();
             }
             // Matched on the imported name, not the local alias, exactly as
@@ -3303,7 +3313,8 @@ pub const FlowChecker = struct {
         slot: u16,
         call_data: Node.CallExpr,
     ) bool {
-        const bound = self.module_fn_declassify_bound.get(slot) orelse return true;
+        const rule = self.module_fn_declassify_bound.get(slot) orelse return true;
+        const bound = rule.bound_arg;
         // Argument omitted: the export's own default is the bound, and a
         // default is fixed at compile time.
         if (bound >= call_data.args_count) return true;
@@ -3502,7 +3513,15 @@ pub const FlowChecker = struct {
                 if (!self.declassificationBoundIsLiteral(binding.slot, call_data)) {
                     return self.argDerivedLabels(base_labels, call_data);
                 }
-                return LabelSet.merge(base_labels, self.closureArgLabels(binding.slot, call_data));
+                var result = LabelSet.merge(base_labels, self.closureArgLabels(binding.slot, call_data));
+                // A declassifier discharges the labels it names and keeps the
+                // rest of what its arguments carried. `mask(req.url, 4)` is
+                // still request text, so `user_input` survives it.
+                if (self.module_fn_declassify_bound.get(binding.slot)) |rule| {
+                    const kept = self.argDerivedLabels(LabelSet.empty, call_data).without(rule.clears);
+                    result = LabelSet.merge(result, kept);
+                }
+                return result;
             }
 
             // Declared no labels of its own, but its result carries whatever
@@ -10708,6 +10727,64 @@ test "mask with its default bound still declassifies" {
         \\}
     ;
     try std.testing.expect(try runNoSecretLeakage(std.testing.allocator, source));
+}
+
+test "mask with a literal bound on a secret into a log holds no_secret_leakage" {
+    const source =
+        \\import { env } from "zttp:env";
+        \\import { logInfo } from "zttp:log";
+        \\import { mask } from "zttp:text";
+        \\function handler(req) {
+        \\  logInfo(mask(env("API_TOKEN") ?? "", 4), { n: 1 });
+        \\  return Response.json({ ok: 1 });
+        \\}
+    ;
+    const properties = try runFlowProperties(std.testing.allocator, source);
+    try std.testing.expect(properties.no_secret_leakage);
+}
+
+test "mask with a literal bound on a credential into a log holds no_credential_leakage" {
+    const source =
+        \\import { logInfo } from "zttp:log";
+        \\import { mask } from "zttp:text";
+        \\function handler(req) {
+        \\  logInfo(mask(req.headers["authorization"] ?? "", 4), { n: 1 });
+        \\  return Response.json({ ok: 1 });
+        \\}
+    ;
+    try std.testing.expect(try runNoCredentialLeakage(std.testing.allocator, source));
+}
+
+test "mask keeps user_input: request text through it into an egress body is refused" {
+    // `mask` discharges secret and credential and nothing else. Masked request
+    // text is still request text, so it reaches the egress body unvalidated.
+    const source =
+        \\import { fetch } from "zttp:fetch";
+        \\import { mask } from "zttp:text";
+        \\function handler(req) {
+        \\  const r = fetch("https://api.example.com/x", { method: "POST", body: mask(req.url, 4) });
+        \\  return Response.json({ ok: 1 });
+        \\}
+    ;
+    var buf: [256]u8 = undefined;
+    const report = try runFlowDiagnostics(std.testing.allocator, source, .unvalidated_input_in_egress, &buf);
+    try std.testing.expect(report.count >= 1);
+    try std.testing.expect(!report.properties.injection_safe);
+}
+
+test "mask with a runtime bound on a secret into a log is refused" {
+    const source =
+        \\import { env } from "zttp:env";
+        \\import { logInfo } from "zttp:log";
+        \\import { mask } from "zttp:text";
+        \\function handler(req) {
+        \\  const t = env("API_TOKEN") ?? "";
+        \\  logInfo(mask(t, t.length), { n: 1 });
+        \\  return Response.json({ ok: 1 });
+        \\}
+    ;
+    const properties = try runFlowProperties(std.testing.allocator, source);
+    try std.testing.expect(!properties.no_secret_leakage);
 }
 
 test "ordinary text through the same exports still proves clean" {

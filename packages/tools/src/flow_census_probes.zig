@@ -1230,6 +1230,31 @@ const hand_written = [_]Hand{
         \\}
         ,
     },
+    .{
+        .name = "x23_mask_keeps_user_input_in_egress",
+        .property = .injection_safe,
+        .expect = .refuse,
+        .reason = "mask declassifies secret and credential only, so request text through it still reaches the egress body (ZTS407)",
+        .body =
+        \\function handler(req: Request): Claim<Response> {
+        \\  const r = fetch("https://api.example.com/x", { method: "POST", body: mask(req.url, 4) });
+        \\  return Response.json({ ok: 1 });
+        \\}
+        ,
+    },
+    .{
+        .name = "x24_mask_declassifies_credential_log",
+        .property = .no_credential_leakage,
+        .expect = .hold,
+        .reason = "mask with a literal bound declassifies a credential, so the log receives no credential",
+        .body =
+        \\function handler(req: Request): Claim<Response> {
+        \\  const t = req.headers["authorization"] ?? "";
+        \\  logInfo(mask(t, 4), { n: 1 });
+        \\  return Response.json({ ok: 1 });
+        \\}
+        ,
+    },
 };
 
 /// Every probe of the census, in a fixed order. All memory comes from `a`.
@@ -1283,7 +1308,7 @@ pub fn generate(a: std.mem.Allocator) ![]Probe {
 /// Never lower one to make a deletion pass.
 pub const minimum_matrix: usize = 504;
 pub const minimum_extended: usize = 246;
-pub const minimum_hand: usize = 22;
+pub const minimum_hand: usize = 24;
 /// The fewest probes a (label, sink) column holds: the 18 research kinds.
 pub const minimum_per_column: usize = 18;
 

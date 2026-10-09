@@ -246,8 +246,7 @@ pub const FunctionBinding = struct {
 
     /// The argument that bounds how much this export declassifies. Set only on
     /// an export whose purpose is to make a labelled value publishable, and
-    /// whose declared labels therefore replace its input's instead of joining
-    /// them.
+    /// that names the labels it discharges in `declassifies`.
     ///
     /// The declassification holds only while that argument is a compile-time
     /// literal. `mask(text, visible)` reveals the trailing `visible` bytes, so
@@ -257,6 +256,16 @@ pub const FunctionBinding = struct {
     /// analyzer keeps the input's labels, and the ordinary sink diagnostic
     /// reports the secret reaching the response.
     declassify_bound_arg: ?u8 = null,
+    /// The labels this export discharges from its input, and only these. The
+    /// result carries every other label of its input, plus `return_labels`.
+    ///
+    /// `mask(text, visible)` names `secret` and `credential`: making a secret
+    /// printable is what it is for, and it leaves `user_input` on the result,
+    /// because masked request text is still request text. Declaring
+    /// `return_labels` alone would replace the input's labels and discharge all
+    /// of them. The set needs `declassify_bound_arg`, and the discharge holds
+    /// only while that argument is a compile-time literal.
+    declassifies: LabelSet = .{},
     /// The return value can contain data that arrived as an argument, and this
     /// export validates nothing. The flow checker then unions every argument's
     /// labels into the call's result instead of answering `return_labels`

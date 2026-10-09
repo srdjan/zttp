@@ -8,9 +8,12 @@ const sdk = @import("zttp-sdk");
 //
 // `escapeHtml` declares `validated`, which already unions its argument's
 // labels and clears only `user_input` - escaping defends against injection and
-// does not make a secret public. `mask` declares `internal`, and it is the one
-// export here whose whole purpose is to make a secret printable; unioning its
-// input back in would defeat it.
+// does not make a secret public. `mask` is the one export here whose whole
+// purpose is to make a secret printable. It declares `declassifies` for
+// `secret` and `credential` and nothing else, so its result keeps `user_input`
+// and every other label of its input: masked request text is still request
+// text, and `fetch(url, { body: mask(req.url, 4) })` must not prove
+// `injection_safe`. The result is also `internal`.
 //
 // The other three transform text and hand it back. `slugify` of a secret is a
 // slug of a secret.
@@ -22,7 +25,7 @@ pub const binding = sdk.ModuleBinding{
         .{ .name = "unescapeHtml", .derives_from_args = true, .module_func = unescapeHtmlImpl, .arg_count = 1, .effect = .none, .returns = .string, .param_types = &.{.string}, .param_names = &.{"text"}, .laws = &.{.pure} },
         .{ .name = "slugify", .derives_from_args = true, .module_func = slugifyImpl, .arg_count = 1, .effect = .none, .returns = .string, .param_types = &.{.string}, .param_names = &.{"text"}, .laws = &.{.pure} },
         .{ .name = "truncate", .derives_from_args = true, .module_func = truncateImpl, .arg_count = 3, .effect = .none, .returns = .string, .param_types = &.{ .string, .number, .string }, .param_names = &.{ "text", "maxLength", "suffix" }, .required_arg_count = 2, .laws = &.{.pure} },
-        .{ .name = "mask", .module_func = maskImpl, .arg_count = 2, .effect = .none, .returns = .string, .param_types = &.{ .string, .number }, .param_names = &.{ "text", "visible" }, .required_arg_count = 1, .return_labels = .{ .internal = true }, .declassify_bound_arg = 1, .laws = &.{.pure} },
+        .{ .name = "mask", .module_func = maskImpl, .arg_count = 2, .effect = .none, .returns = .string, .param_types = &.{ .string, .number }, .param_names = &.{ "text", "visible" }, .required_arg_count = 1, .return_labels = .{ .internal = true }, .declassify_bound_arg = 1, .declassifies = .{ .secret = true, .credential = true }, .laws = &.{.pure} },
     },
 };
 

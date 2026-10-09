@@ -645,7 +645,7 @@ const label_abstain_rows = [_]LabelAbstainRow{
     .{ .specifier = "zttp:log", .export_name = "logInfo", .reason = "a sink; the return carries nothing back to the caller" },
     .{ .specifier = "zttp:log", .export_name = "logWarn", .reason = "a sink; the return carries nothing back to the caller" },
     .{ .specifier = "zttp:log", .export_name = "logError", .reason = "a sink; the return carries nothing back to the caller" },
-    .{ .specifier = "zttp:text", .export_name = "mask", .reason = "deliberate declassifier: it exists to make a secret printable, and unioning the input back in would defeat it" },
+    .{ .specifier = "zttp:text", .export_name = "mask", .reason = "deliberate declassifier: it exists to make a secret printable, so it declares `declassifies` for secret and credential and keeps every other input label" },
 };
 
 fn labelAbstainReason(specifier: ?[]const u8, export_name: []const u8) ?[]const u8 {
