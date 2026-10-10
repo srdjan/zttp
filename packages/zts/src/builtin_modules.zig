@@ -347,9 +347,13 @@ test "failure_severity annotations on failable functions" {
 
     // None: functions that always succeed
     try std.testing.expectEqual(mb.FailureSeverity.none, findFunction("sha256").?.func.failure_severity);
-    try std.testing.expectEqual(mb.FailureSeverity.none, findFunction("cacheSet").?.func.failure_severity);
     try std.testing.expectEqual(mb.FailureSeverity.none, findFunction("urlParse").?.func.failure_severity);
     try std.testing.expectEqual(mb.FailureSeverity.none, findFunction("urlEncode").?.func.failure_severity);
+
+    // None, but not total: cacheSet returns false on capacity exceeded, bad
+    // arguments, or a clock error. The severity is an open decision, recorded
+    // by the `cache.cacheSet#reverse_probe` row in severity_census.zig.
+    try std.testing.expectEqual(mb.FailureSeverity.none, findFunction("cacheSet").?.func.failure_severity);
 }
 
 fn bindingHasCapability(binding: *const ModuleBinding, capability: mb.ModuleCapability) bool {

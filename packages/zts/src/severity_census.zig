@@ -246,7 +246,7 @@ const allowed_rows = [_]AllowedRow{
         .key = "cache.cacheSet#reverse_probe",
         .verdict = .fork_without_severity,
         .mechanism = .severity_decision,
-        .reason = "false on capacity exceeded, bad arguments, or a clock error (cache.zig:397-409); builtin_modules.zig pins `.none` as `always succeeds`, so a severity needs that test edited",
+        .reason = "false on capacity exceeded, bad arguments, or a clock error (cache.zig:397-409); the builtin_modules.zig severity test pins `.none` and names this row",
     },
     .{
         .key = "durable.signal#reverse_probe",
