@@ -137,83 +137,6 @@ pub fn collectFromSource(
     return result;
 }
 
-/// Propose the `;` every statement that relies on automatic semicolon
-/// insertion is missing.
-///
-/// WITHDRAWN, and not called. A review of the pipeline found it unsound in
-/// every stage, and each fault produced a wrong edit that the wire reported as
-/// a success:
-///
-/// - The line numbers come from a parse of the STRIPPED code and are used
-///   against the original source with no `sourcePosition` translation, so a
-///   `comptime(...)` fold - which the stripper documents as its one
-///   offset-breaking operation - shifts every later repair onto the wrong line.
-/// - The replacement is built from `trimEnd(line, " \t\r")`, so a line ending
-///   in a `//` comment gets the `;` written inside the comment, and a CRLF file
-///   loses its `\r`.
-/// - TSX is outside this line-based repair until source positions are composed
-///   through the frontend lowering map.
-///
-/// The corpus needs zero of these repairs, so withdrawing costs nothing a user
-/// can feel, while leaving it in place let the former `apply_repair` operation
-/// write edits that changed a program's meaning and publish them as proven
-/// equivalences. It
-/// comes back when the line mapping goes through `sourcePosition`, the
-/// replacement is built from a span rather than a trimmed line, and M2 compares
-/// against the grammar this compiler actually ships.
-///
-/// Not diagnostic-driven, because there is no diagnostic yet: spec 5.5 mandates
-/// no ASI and the parser still accepts it, so this reads the parse's own census
-/// of where it inserted. The repair lands before the refusal on purpose - a
-/// program the refusal will reject has a mechanical exit the moment the
-/// refusal arrives, rather than after it.
-fn buildSemicolonRepairs(
-    allocator: std.mem.Allocator,
-    source: []const u8,
-    virtual_path: []const u8,
-    result: *Result,
-) !void {
-    var prepared = zts.PreparedSource.init(allocator, source, virtual_path, .{
-        .enable_comptime = true,
-        .comptime_env = .{},
-    }) catch return;
-    defer prepared.deinit();
-
-    var parser = zts.parser.JsParser.init(allocator, prepared.parserInput()) catch return;
-    defer parser.deinit();
-    // The source this reads is one the refusing parser rejects - that is why it
-    // needs a repair. Finding where the `;` belongs means parsing it the way
-    // the old acceptance did.
-    parser.allow_asi = true;
-    _ = parser.parse() catch return;
-
-    for (parser.asi.recordedLines()) |line_no| {
-        const line = sourceLine(source, line_no) orelse continue;
-        const trimmed = std.mem.trimEnd(u8, line, " \t\r");
-        // Stripping leaves the source offset-aligned, so the line the parse
-        // reported is the line the author wrote. A line that already ends in a
-        // `;` is one the census cannot have reported, and re-checking it here
-        // costs nothing next to appending a repair that changes no byte.
-        if (trimmed.len == 0 or trimmed[trimmed.len - 1] == ';') continue;
-
-        const replacement = try std.fmt.allocPrint(allocator, "{s};", .{trimmed});
-        errdefer allocator.free(replacement);
-        const original = try allocator.dupe(u8, line);
-        errdefer allocator.free(original);
-        const message = try allocator.dupe(u8, "statement relies on automatic semicolon insertion, which this profile does not have");
-        errdefer allocator.free(message);
-
-        try appendRepairUnique(allocator, source, result, .{
-            .intent = .insert_semicolon,
-            .line = line_no,
-            .column = 1,
-            .message = message,
-            .replacement = replacement,
-            .original = original,
-        });
-    }
-}
-
 /// Translate the diagnostics from one analysis pass into concrete refactors.
 /// Shared by `collectFromSource` and the fixed-point `normalizeSource` loop so
 /// both read refactors from the same diagnostic set.
@@ -1470,54 +1393,6 @@ fn delimitersBalanced(text: []const u8) bool {
         }
     }
     return depth == 0;
-}
-
-fn lineEndOffset(source: []const u8, pos: usize) usize {
-    return std.mem.indexOfScalarPos(u8, source, pos, '\n') orelse source.len;
-}
-
-fn scanIdentEnd(source: []const u8, start: usize, end: usize) ?usize {
-    if (start >= end or !isIdentStart(source[start])) return null;
-    var i = start + 1;
-    while (i < end and isIdentContinue(source[i])) i += 1;
-    return i;
-}
-
-fn isSimpleIdentifier(s: []const u8) bool {
-    if (s.len == 0 or !isIdentStart(s[0])) return false;
-    for (s[1..]) |c| {
-        if (!isIdentContinue(c)) return false;
-    }
-    return true;
-}
-
-fn findTopLevelChar(source: []const u8, start: usize, end: usize, target: u8) ?usize {
-    var i = start;
-    var depth: i32 = 0;
-    while (i < end) {
-        const c = source[i];
-        switch (c) {
-            '(', '[', '{' => {
-                depth += 1;
-                i += 1;
-            },
-            ')', ']', '}' => {
-                if (depth == 0) return null;
-                depth -= 1;
-                i += 1;
-            },
-            '"', '\'', '`' => {
-                const after = scanStringForward(source, i, c) orelse return null;
-                if (after > end) return null;
-                i = after;
-            },
-            else => {
-                if (depth == 0 and c == target) return i;
-                i += 1;
-            },
-        }
-    }
-    return null;
 }
 
 fn appendSpanRepairUnique(
