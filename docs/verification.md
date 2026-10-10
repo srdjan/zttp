@@ -628,7 +628,7 @@ The `-Dgenerate-tests=true` build option enables compile-time exhaustive path en
 
 The `PathGenerator` (`packages/zts/src/path_generator.zig`) walks the handler's IR tree, forking at every branch point (`if`/`match`) and I/O success/failure boundary. Each fork produces a test case representing one complete execution path through the handler. This exploits the same property that makes verification tractable: the IR tree IS the control flow graph (no back-edges).
 
-For Result-producing calls (`jwtVerify`, `validateJson`, `decodeJson`, etc.), the generator forks into both the `ok: true` and `ok: false` paths. For optional-producing calls (`env`, `cacheGet`, etc.), it forks into defined and `undefined` paths.
+For Result-producing calls (`jwtVerify`, `validateJson`, `decodeJson`, etc.), the generator forks into both the `ok: true` and `ok: false` paths. For optional-producing calls (`env`, `cacheGet`, etc.), it forks into defined and `undefined` paths. For `fetch` and `fetchWithRetry`, `res.ok` forks the same way: the generator reads the export's declared return type, and a record with a required `ok: boolean` field, on an export that has a failure severity, makes `res.ok` a success or failure fork. The generated test stubs the failing fetch with a 503 response and the succeeding fetch with a 200. A check on `res.status` is an ordinary branch and is not a fork.
 
 ### Fault Coverage Analysis
 
@@ -638,8 +638,22 @@ The `FaultCoverageChecker` (`packages/zts/src/fault_coverage.zig`) analyzes the 
 |----------|-----------|---------|
 | `critical` | `jwtVerify`, `validateJson`, `validateObject`, `coerceJson`, `decodeJson`, `decodeForm`, `decodeQuery`, `decodeFormMultipart` | Auth/validation failures must not produce 2xx |
 | `expected` | `cacheGet`, `env` | Cache misses and missing env vars are normal degradation |
+| `upstream` | `fetch`, `fetchWithRetry` | An external service failure. A 2xx answer on the failure path may be an intended fallback, so the checker does not warn: the site stays covered, and the trace fact `upstreamFallbackSites` counts these sites. |
 
 The checker warns when a critical I/O failure path (e.g., `jwtVerify` returning `{ok: false}`) produces a 2xx response. This is a structural pattern overwhelmingly correlated with bugs. Cache misses returning 200 are correctly classified as graceful degradation and do not trigger warnings.
+
+A function with severity `none` is not counted. That is not a claim that it cannot fail: several `none` exports return `false` or `undefined` on failure, and `severity_census.zig` lists each one with its reason.
+
+Every call to a failable function counts as its own site, keyed by call site. Two calls to `jwtVerify` are two sites, and a failure path for one does not cover the other. `fault_covered` is proven only when all of these hold:
+
+- every counted site has a failure path (a branch on its failure, or a `??` fallback on an optional export);
+- no failable call sits where the walk cannot see it: inside a nested function or callback, inside a helper, inline in an expression, as a call argument, as a `match` scrutinee, or in a branch that does not return. The analysis fails closed on such a call: the property is unproven, and the trace names the first call;
+- the enumerated paths are exhaustive (a loop walked once, recursion, or a path limit makes them a summary, which blocks the property);
+- no critical failure path returns 2xx.
+
+A 2xx fallback on an upstream failure does not block the property. It is reported in `upstreamFallbackSites` and the proof trace summary.
+
+A handler that proved `fault_covered` under an earlier analysis can lose it here, for example when a `fetch` sits in a callback passed to `parallel()`. The upgrade verifier (`upgrade_verifier.zig`) classifies a lost `fault_covered` as a critical regression. The path analysis version (`path_generator.path_analyzer_version`) is part of the policy hash, so a contract stamped by an earlier analysis no longer matches and is rebuilt.
 
 Results appear in:
 - `contract.json` under the `faultCoverage` section

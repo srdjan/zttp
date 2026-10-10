@@ -902,7 +902,7 @@ pub fn writeDeployReport(w: anytype, facts: *const ProvenFacts, provider: []cons
     try writeProvenLine(w, facts.pii_contained, "PII contained (no user input in egress)");
 
     try w.writeAll("\nFAULT COVERAGE:\n");
-    try writeProvenLine(w, facts.fault_covered, "all I/O failure modes handled correctly");
+    try writeProvenLine(w, facts.fault_covered, "every failable I/O call has an explicit failure path");
 
     if (facts.durable_workflow_used or facts.durable_workflow_proof_level != .none) {
         try w.writeAll("\nDURABLE WORKFLOW:\n");

@@ -134,7 +134,7 @@ pub fn suggestionFor(name: []const u8) ?[]const u8 {
         return "move module-scope mutations into the handler body or behind zttp:cache.";
     }
     if (std.mem.eql(u8, name, "fault_covered")) {
-        return "add an explicit failure path for every critical I/O call site.";
+        return "add an explicit failure path for every failable I/O call: bind the call to a const in the handler body and branch on its failure before its value is used.";
     }
     if (std.mem.eql(u8, name, "pure")) {
         return "remove side effects (virtual-module calls, Date.now, Math.random) from the handler body.";
