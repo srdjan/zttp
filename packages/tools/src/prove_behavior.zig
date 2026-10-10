@@ -103,9 +103,15 @@ pub fn runWithArgs(allocator: std.mem.Allocator, argv: []const []const u8) !void
     };
     defer allocator.free(after_src);
 
-    var before_result = try precompile.runCheckOnlyFromSource(allocator, before_src, before, sql_schema_path, true, null, false);
+    var before_result = try precompile.runCheckOnlyFromSourceWithOptions(allocator, before_src, before, .{
+        .sql_schema_path = sql_schema_path,
+        .json_mode = true,
+    });
     defer before_result.deinit(allocator);
-    var after_result = try precompile.runCheckOnlyFromSource(allocator, after_src, after, sql_schema_path, true, null, false);
+    var after_result = try precompile.runCheckOnlyFromSourceWithOptions(allocator, after_src, after, .{
+        .sql_schema_path = sql_schema_path,
+        .json_mode = true,
+    });
     defer after_result.deinit(allocator);
 
     const before_contract = if (before_result.contract) |*c| c else {

@@ -96,7 +96,9 @@ fn runLink(allocator: std.mem.Allocator, system_path: []const u8, output_dir: []
     for (config.handlers, 0..) |entry, idx| {
         std.debug.print("  [{d}/{d}] Checking {s}...", .{ idx + 1, config.handlers.len, entry.path });
 
-        var result = precompile.runCheckOnly(allocator, entry.path, null, false, system_path) catch |err| {
+        var result = precompile.runCheckOnlyWithOptions(allocator, entry.path, .{
+            .system_path = system_path,
+        }) catch |err| {
             std.debug.print(" FAILED ({s})\n", .{@errorName(err)});
             total_errors += 1;
             // Initialize a minimal contract so we can continue

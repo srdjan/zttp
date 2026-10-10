@@ -37,7 +37,9 @@ pub fn loadCompiledSystem(
     }
 
     for (config.handlers, 0..) |entry, idx| {
-        var result = try precompile.runCheckOnly(allocator, entry.path, null, false, system_path);
+        var result = try precompile.runCheckOnlyWithOptions(allocator, entry.path, .{
+            .system_path = system_path,
+        });
         defer result.deinit(allocator);
 
         if (result.totalErrors() > 0) {

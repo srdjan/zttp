@@ -282,15 +282,9 @@ fn expectCapabilityBudget(
 }
 
 fn runProbe(allocator: std.mem.Allocator, probe: Probe) !void {
-    var result = try zts_cli.precompile.runCheckOnlyFromSource(
-        allocator,
-        probe.source,
-        "security-probe.ts",
-        null,
-        true,
-        null,
-        false,
-    );
+    var result = try zts_cli.precompile.runCheckOnlyFromSourceWithOptions(allocator, probe.source, "security-probe.ts", .{
+        .json_mode = true,
+    });
     defer result.deinit(allocator);
 
     const Report = struct {

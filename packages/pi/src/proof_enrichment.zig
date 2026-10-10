@@ -266,15 +266,11 @@ fn loadPropertiesSnapshot(
     sql_schema_path: ?[]const u8,
 ) !?ui_payload.PropertiesSnapshot {
     const content = source orelse return null;
-    var result = try precompile.runCheckOnlyFromSource(
-        allocator,
-        content,
-        absolute_path,
-        sql_schema_path,
-        true,
-        system_path,
-        false,
-    );
+    var result = try precompile.runCheckOnlyFromSourceWithOptions(allocator, content, absolute_path, .{
+        .sql_schema_path = sql_schema_path,
+        .json_mode = true,
+        .system_path = system_path,
+    });
     defer result.deinit(allocator);
 
     if (result.properties) |properties| {
@@ -306,26 +302,18 @@ fn computeProveSummary(
 ) !?ui_payload.ProveSummary {
     const before_source = before orelse return null;
 
-    var before_result = try precompile.runCheckOnlyFromSource(
-        allocator,
-        before_source,
-        absolute_path,
-        sql_schema_path,
-        true,
-        system_path,
-        false,
-    );
+    var before_result = try precompile.runCheckOnlyFromSourceWithOptions(allocator, before_source, absolute_path, .{
+        .sql_schema_path = sql_schema_path,
+        .json_mode = true,
+        .system_path = system_path,
+    });
     defer before_result.deinit(allocator);
 
-    var after_result = try precompile.runCheckOnlyFromSource(
-        allocator,
-        after,
-        absolute_path,
-        sql_schema_path,
-        true,
-        system_path,
-        false,
-    );
+    var after_result = try precompile.runCheckOnlyFromSourceWithOptions(allocator, after, absolute_path, .{
+        .sql_schema_path = sql_schema_path,
+        .json_mode = true,
+        .system_path = system_path,
+    });
     defer after_result.deinit(allocator);
 
     if (before_result.contract) |*before_contract| {

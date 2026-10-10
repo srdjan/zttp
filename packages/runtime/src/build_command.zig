@@ -2173,15 +2173,9 @@ test "ledger operations do not erase secret labels" {
     };
 
     for (sources) |source| {
-        var checked = try precompile.runCheckOnlyFromSource(
-            allocator,
-            source,
-            "handler.ts",
-            null,
-            true,
-            null,
-            false,
-        );
+        var checked = try precompile.runCheckOnlyFromSourceWithOptions(allocator, source, "handler.ts", .{
+            .json_mode = true,
+        });
         defer checked.deinit(allocator);
         try std.testing.expect(checked.flow_errors > 0);
         var saw_secret_diagnostic = false;

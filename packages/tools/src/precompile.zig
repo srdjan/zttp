@@ -4867,7 +4867,9 @@ test "runCheckOnlyFromSource: helper reaching outside its Effects ceiling gets Z
         \\  return Response.text(digest("x"));
         \\}
     ;
-    var result = try runCheckOnlyFromSource(allocator, source, "ceiling.ts", null, true, null, false);
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "ceiling.ts", .{
+        .json_mode = true,
+    });
     defer result.deinit(allocator);
 
     const contract = result.contract orelse return error.TestUnexpectedResult;
@@ -4896,7 +4898,9 @@ test "runCheckOnlyFromSource: helper exceeding handler Effects budget gets ZTS60
         \\  return Response.text(digest("x"));
         \\}
     ;
-    var result = try runCheckOnlyFromSource(allocator, source, "budget.ts", null, true, null, false);
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "budget.ts", .{
+        .json_mode = true,
+    });
     defer result.deinit(allocator);
 
     const contract = result.contract orelse return error.TestUnexpectedResult;
@@ -5272,7 +5276,9 @@ test "runCheckOnlyFromSource: composed Spec and Effects preserves handler budget
         \\  return Response.text(sha256("x"));
         \\}
     ;
-    var result = try runCheckOnlyFromSource(allocator, source, "composed-budget.ts", null, true, null, false);
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "composed-budget.ts", .{
+        .json_mode = true,
+    });
     defer result.deinit(allocator);
 
     const contract = result.contract orelse return error.TestUnexpectedResult;
@@ -5302,7 +5308,9 @@ test "runCheckOnlyFromSource: missing capsule ignores unreachable helpers" {
         \\  return Response.text("ok");
         \\}
     ;
-    var result = try runCheckOnlyFromSource(allocator, source, "unreachable-capsule.ts", null, true, null, false);
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "unreachable-capsule.ts", .{
+        .json_mode = true,
+    });
     defer result.deinit(allocator);
 
     const contract = result.contract orelse return error.TestUnexpectedResult;
@@ -5320,7 +5328,9 @@ test "runCheckOnlyFromSource: handler Effects budget covering reached capabiliti
         \\  return Response.text(sha256("x"));
         \\}
     ;
-    var result = try runCheckOnlyFromSource(allocator, source, "ok.ts", null, true, null, false);
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "ok.ts", .{
+        .json_mode = true,
+    });
     defer result.deinit(allocator);
 
     const contract = result.contract orelse return error.TestUnexpectedResult;
@@ -5346,7 +5356,9 @@ test "runCheckOnlyFromSource: a helper with no Effects ceiling is never flagged"
         \\  return Response.text(digest("x"));
         \\}
     ;
-    var result = try runCheckOnlyFromSource(allocator, source, "noceiling.ts", null, true, null, false);
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "noceiling.ts", .{
+        .json_mode = true,
+    });
     defer result.deinit(allocator);
 
     const contract = result.contract orelse return error.TestUnexpectedResult;
@@ -5377,7 +5389,9 @@ test "holes: each site reports its expected type and the unspent budget" {
         \\  return hole();
         \\}
     ;
-    var result = try runCheckOnlyFromSource(allocator, source, "holes.ts", null, true, null, false);
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "holes.ts", .{
+        .json_mode = true,
+    });
     defer result.deinit(allocator);
 
     const contract = if (result.contract) |*c| c else return error.MissingContract;
@@ -5424,7 +5438,9 @@ test "holes: each site reports the properties its own function has not discharge
         \\  return hole();
         \\}
     ;
-    var result = try runCheckOnlyFromSource(allocator, source, "holes.ts", null, true, null, false);
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "holes.ts", .{
+        .json_mode = true,
+    });
     defer result.deinit(allocator);
 
     const contract = if (result.contract) |*c| c else return error.MissingContract;
@@ -5465,7 +5481,9 @@ test "holes: each site reports the bindings it can be filled from" {
         \\  return Response.json({ filled: filled, later: later });
         \\}
     ;
-    var result = try runCheckOnlyFromSource(allocator, source, "holes.ts", null, true, null, false);
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "holes.ts", .{
+        .json_mode = true,
+    });
     defer result.deinit(allocator);
 
     const contract = if (result.contract) |*c| c else return error.MissingContract;
@@ -5494,7 +5512,9 @@ test "holes: a binding with no annotation is reported as unknown" {
         \\  return Response.json({ id: mint() });
         \\}
     ;
-    var result = try runCheckOnlyFromSource(allocator, source, "holes.ts", null, true, null, false);
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "holes.ts", .{
+        .json_mode = true,
+    });
     defer result.deinit(allocator);
 
     const contract = if (result.contract) |*c| c else return error.MissingContract;
@@ -5520,7 +5540,9 @@ test "holes: a hole inside a nested function declaration is attributed to the en
         \\  return Response.json({ v: inner() });
         \\}
     ;
-    var result = try runCheckOnlyFromSource(allocator, source, "holes.ts", null, true, null, false);
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "holes.ts", .{
+        .json_mode = true,
+    });
     defer result.deinit(allocator);
 
     const contract = if (result.contract) |*c| c else return error.MissingContract;
@@ -5554,7 +5576,9 @@ test "holes: a hole inside a nested function declaration expects the nested func
         \\  return Response.json({ v: inner(), w: outer() });
         \\}
     ;
-    var result = try runCheckOnlyFromSource(allocator, source, "holes.ts", null, true, null, false);
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "holes.ts", .{
+        .json_mode = true,
+    });
     defer result.deinit(allocator);
 
     const contract = if (result.contract) |*c| c else return error.MissingContract;
@@ -5571,7 +5595,9 @@ test "holes: a finished program reports none" {
         \\  return Response.json({ ok: true });
         \\}
     ;
-    var result = try runCheckOnlyFromSource(allocator, source, "done.ts", null, true, null, false);
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "done.ts", .{
+        .json_mode = true,
+    });
     defer result.deinit(allocator);
 
     const contract = if (result.contract) |*c| c else return error.MissingContract;
@@ -5596,7 +5622,9 @@ test "ZTS623: a module-internal helper may not declare an Effects ceiling" {
         \\  return Response.text(digest("zttp"));
         \\}
     ;
-    var result = try runCheckOnlyFromSource(allocator, source, "internal.ts", null, true, null, false);
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "internal.ts", .{
+        .json_mode = true,
+    });
     defer result.deinit(allocator);
 
     var saw_623 = false;
@@ -5622,7 +5650,9 @@ test "ZTS623: dropping the internal ceiling satisfies the placement rule" {
         \\  return Response.text(digest("zttp"));
         \\}
     ;
-    var result = try runCheckOnlyFromSource(allocator, source, "internal.ts", null, true, null, false);
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "internal.ts", .{
+        .json_mode = true,
+    });
     defer result.deinit(allocator);
 
     for (result.json_diagnostics.items) |d| {
@@ -5651,7 +5681,9 @@ test "appendExportCapsuleDiagnostics: the docs mode asks only for a Proof capsul
         \\  return Response.text(region());
         \\}
     ;
-    var result = try runCheckOnlyFromSource(allocator, source, "docs.ts", null, true, null, false);
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "docs.ts", .{
+        .json_mode = true,
+    });
     defer result.deinit(allocator);
 
     appendExportCapsuleDiagnostics(allocator, &result, "docs.ts");
@@ -5741,7 +5773,9 @@ test "runCheckOnly keeps mirrored properties aligned with finalized fault covera
         \\}
     ;
 
-    var result = try runCheckOnlyFromSource(std.testing.allocator, source, "handler.ts", null, true, null, false);
+    var result = try runCheckOnlyFromSourceWithOptions(std.testing.allocator, source, "handler.ts", .{
+        .json_mode = true,
+    });
     defer result.deinit(std.testing.allocator);
 
     try std.testing.expectEqual(@as(u32, 0), result.totalErrors());
@@ -5770,7 +5804,7 @@ test "runCheckOnlyFromSource keeps diagnostics off stderr in test mode" {
     ;
 
     // json_mode = false routes diagnostics through the std.debug.print path.
-    var result = try runCheckOnlyFromSource(std.testing.allocator, source, "handler.ts", null, false, null, false);
+    var result = try runCheckOnlyFromSourceWithOptions(std.testing.allocator, source, "handler.ts", .{});
     defer result.deinit(std.testing.allocator);
 
     // Strict mode (default) rejects the implicit-unknown fetchSync result.
@@ -5796,7 +5830,9 @@ test "runCheckOnlyFromSource: ZTS202 arg-count message survives json capture wit
         \\  return Response.text(digest());
         \\}
     ;
-    var result = try runCheckOnlyFromSource(allocator, source, "argcount.ts", null, true, null, false);
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "argcount.ts", .{
+        .json_mode = true,
+    });
     defer result.deinit(allocator);
 
     var saw_202 = false;
@@ -5827,7 +5863,9 @@ test "a pure-typed callback parameter contributes the empty row" {
         \\  return Response.text("ok");
         \\}
     ;
-    var result = try runCheckOnlyFromSource(allocator, source, "pure-callback.ts", null, true, null, false);
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "pure-callback.ts", .{
+        .json_mode = true,
+    });
     defer result.deinit(allocator);
 
     var saw_512 = false;
@@ -5860,7 +5898,9 @@ test "an unreached exported helper with a nonempty row reports ZTS610" {
         \\  return Response.text("ok");
         \\}
     ;
-    var result = try runCheckOnlyFromSource(allocator, source, "unreached-helper.ts", null, true, null, false);
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "unreached-helper.ts", .{
+        .json_mode = true,
+    });
     defer result.deinit(allocator);
 
     var repair: ?[]const u8 = null;
@@ -5881,7 +5921,9 @@ test "zts check --types path rejects exported handler local mismatch" {
         \\}
     ;
 
-    var result = try runCheckOnlyFromSource(std.testing.allocator, source, "exported-local.ts", null, true, null, false);
+    var result = try runCheckOnlyFromSourceWithOptions(std.testing.allocator, source, "exported-local.ts", .{
+        .json_mode = true,
+    });
     defer result.deinit(std.testing.allocator);
 
     try std.testing.expectEqual(@as(u32, 1), result.type_errors);
@@ -5901,7 +5943,9 @@ test "check reports a boolean error and a type error on different nodes" {
         \\  return Response.text(String(m));
         \\}
     ;
-    var result = try runCheckOnlyFromSource(std.testing.allocator, source, "two-stages.ts", null, true, null, false);
+    var result = try runCheckOnlyFromSourceWithOptions(std.testing.allocator, source, "two-stages.ts", .{
+        .json_mode = true,
+    });
     defer result.deinit(std.testing.allocator);
 
     try std.testing.expectEqual(@as(u32, 1), result.bool_errors);
@@ -5923,7 +5967,9 @@ test "check reports one message for a condition that is a refused operator" {
         \\  return Response.text("b");
         \\}
     ;
-    var result = try runCheckOnlyFromSource(std.testing.allocator, source, "one-node.ts", null, true, null, false);
+    var result = try runCheckOnlyFromSourceWithOptions(std.testing.allocator, source, "one-node.ts", .{
+        .json_mode = true,
+    });
     defer result.deinit(std.testing.allocator);
 
     try std.testing.expectEqual(@as(u32, 0), result.bool_errors);
@@ -5941,7 +5987,9 @@ test "check reports a strict error beside a type error" {
         \\  return Response.text(String(m));
         \\}
     ;
-    var result = try runCheckOnlyFromSource(std.testing.allocator, source, "strict-beside.ts", null, true, null, false);
+    var result = try runCheckOnlyFromSourceWithOptions(std.testing.allocator, source, "strict-beside.ts", .{
+        .json_mode = true,
+    });
     defer result.deinit(std.testing.allocator);
 
     try std.testing.expectEqual(@as(u32, 1), result.type_errors);
@@ -5959,7 +6007,9 @@ test "check still stops before the verifier when a computed stage has an error" 
         \\  return Response.text("b");
         \\}
     ;
-    var result = try runCheckOnlyFromSource(std.testing.allocator, source, "stops.ts", null, true, null, false);
+    var result = try runCheckOnlyFromSourceWithOptions(std.testing.allocator, source, "stops.ts", .{
+        .json_mode = true,
+    });
     defer result.deinit(std.testing.allocator);
 
     try std.testing.expect(result.totalErrors() > 0);
@@ -5980,7 +6030,9 @@ test "runCheckOnlyFromSource accepts annotated TSX handler after JSX block" {
         \\}
     ;
 
-    var result = try runCheckOnlyFromSource(std.testing.allocator, source, "handler.tsx", null, true, null, false);
+    var result = try runCheckOnlyFromSourceWithOptions(std.testing.allocator, source, "handler.tsx", .{
+        .json_mode = true,
+    });
     defer result.deinit(std.testing.allocator);
 
     try std.testing.expectEqual(@as(u32, 0), result.strict_errors);
@@ -5993,7 +6045,9 @@ test "runCheckOnlyFromSource reports malformed TSX at the authored tag" {
         \\    return <main><h1>zttp</h1></section>;
         \\}
     ;
-    var result = try runCheckOnlyFromSource(std.testing.allocator, source, "view.tsx", null, true, null, false);
+    var result = try runCheckOnlyFromSourceWithOptions(std.testing.allocator, source, "view.tsx", .{
+        .json_mode = true,
+    });
     defer result.deinit(std.testing.allocator);
 
     try std.testing.expectEqual(@as(u32, 1), result.parse_errors);
@@ -6012,7 +6066,9 @@ test "runCheckOnlyFromSource: no Spec activates all supported specs for TS" {
         \\  return Response.json({ ok: true });
         \\}
     ;
-    var result = try runCheckOnlyFromSource(allocator, source, "default-specs.ts", null, true, null, false);
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "default-specs.ts", .{
+        .json_mode = true,
+    });
     defer result.deinit(allocator);
 
     const contract = result.contract orelse return error.TestUnexpectedResult;
@@ -6030,7 +6086,9 @@ test "runCheckOnlyFromSource refuses JavaScript extensions with ZTS052" {
         \\  return Response.json({ ok: true });
         \\}
     ;
-    var result = try runCheckOnlyFromSource(allocator, source, "handler.js", null, true, null, false);
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "handler.js", .{
+        .json_mode = true,
+    });
     defer result.deinit(allocator);
 
     try std.testing.expectEqual(@as(u32, 1), result.parse_errors);
@@ -6048,7 +6106,9 @@ test "runCheckOnlyFromSource refuses legacy zttp types import with ZTS053" {
         \\  return Response.json({ ok: true });
         \\}
     ;
-    var result = try runCheckOnlyFromSource(allocator, source, "handler.ts", null, true, null, false);
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "handler.ts", .{
+        .json_mode = true,
+    });
     defer result.deinit(allocator);
 
     try std.testing.expectEqual(@as(u32, 1), result.parse_errors);
@@ -6070,7 +6130,9 @@ test "runCheckOnlyFromSource refuses default parameters with ZTS054" {
         \\  return prefix;
         \\}
     ;
-    var result = try runCheckOnlyFromSource(allocator, source, "handler.ts", null, true, null, false);
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "handler.ts", .{
+        .json_mode = true,
+    });
     defer result.deinit(allocator);
 
     try std.testing.expectEqual(@as(u32, 1), result.parse_errors);
@@ -6092,7 +6154,9 @@ test "runCheckOnlyFromSource refuses optional parameter shorthand with ZTS055" {
         \\  return prefix ?? "item";
         \\}
     ;
-    var result = try runCheckOnlyFromSource(allocator, source, "handler.ts", null, true, null, false);
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "handler.ts", .{
+        .json_mode = true,
+    });
     defer result.deinit(allocator);
 
     try std.testing.expectEqual(@as(u32, 1), result.parse_errors);
@@ -6114,7 +6178,9 @@ test "runCheckOnlyFromSource refuses default exports with ZTS056" {
         \\  return Response.json({ ok: true });
         \\}
     ;
-    var result = try runCheckOnlyFromSource(allocator, source, "handler.ts", null, true, null, false);
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "handler.ts", .{
+        .json_mode = true,
+    });
     defer result.deinit(allocator);
 
     try std.testing.expectEqual(@as(u32, 1), result.parse_errors);
@@ -6137,7 +6203,9 @@ test "runCheckOnlyFromSource refuses mutable exports with ZTS057" {
         \\  return Response.json({ version: version });
         \\}
     ;
-    var result = try runCheckOnlyFromSource(allocator, source, "handler.ts", null, true, null, false);
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "handler.ts", .{
+        .json_mode = true,
+    });
     defer result.deinit(allocator);
 
     try std.testing.expectEqual(@as(u32, 1), result.parse_errors);
@@ -6159,7 +6227,9 @@ test "runCheckOnlyFromSource refuses Array generic spelling with ZTS058" {
         \\  return items[0];
         \\}
     ;
-    var result = try runCheckOnlyFromSource(allocator, source, "handler.ts", null, true, null, false);
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "handler.ts", .{
+        .json_mode = true,
+    });
     defer result.deinit(allocator);
 
     try std.testing.expectEqual(@as(u32, 1), result.parse_errors);
@@ -6177,7 +6247,9 @@ test "runCheckOnlyFromSource refuses ReadonlyArray generic spelling with ZTS059"
         \\  return items[0];
         \\}
     ;
-    var result = try runCheckOnlyFromSource(allocator, source, "handler.ts", null, true, null, false);
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "handler.ts", .{
+        .json_mode = true,
+    });
     defer result.deinit(allocator);
 
     try std.testing.expectEqual(@as(u32, 1), result.parse_errors);
@@ -6194,7 +6266,9 @@ test "runCheckOnlyFromSource refuses void type spelling with ZTS060" {
         \\function ignore(value: string): void {
         \\}
     ;
-    var result = try runCheckOnlyFromSource(allocator, source, "handler.ts", null, true, null, false);
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "handler.ts", .{
+        .json_mode = true,
+    });
     defer result.deinit(allocator);
 
     try std.testing.expectEqual(@as(u32, 1), result.parse_errors);
@@ -6215,7 +6289,9 @@ test "runCheckOnlyFromSource reports ZTS061 for a raw exported boundary" {
         \\  return Response.text(expose("ok"));
         \\}
     ;
-    var result = try runCheckOnlyFromSource(allocator, source, "handler.ts", null, true, null, false);
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "handler.ts", .{
+        .json_mode = true,
+    });
     defer result.deinit(allocator);
 
     var zts061_count: usize = 0;
@@ -6233,7 +6309,9 @@ test "runCheckOnlyFromSource explicitly refuses unary void" {
     const source =
         \\const ignored = void 0;
     ;
-    var result = try runCheckOnlyFromSource(allocator, source, "handler.ts", null, true, null, false);
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "handler.ts", .{
+        .json_mode = true,
+    });
     defer result.deinit(allocator);
 
     try std.testing.expectEqual(@as(u32, 1), result.parse_errors);
@@ -6252,7 +6330,9 @@ test "runCheckOnlyFromSource refuses debugger statements" {
         \\  return Response.json({ ok: true });
         \\}
     ;
-    var result = try runCheckOnlyFromSource(allocator, source, "handler.ts", null, true, null, false);
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "handler.ts", .{
+        .json_mode = true,
+    });
     defer result.deinit(allocator);
 
     try std.testing.expectEqual(@as(u32, 1), result.parse_errors);
@@ -6271,7 +6351,9 @@ test "runCheckOnlyFromSource refuses empty statements" {
         \\  return Response.json({ ok: true });
         \\}
     ;
-    var result = try runCheckOnlyFromSource(allocator, source, "handler.ts", null, true, null, false);
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "handler.ts", .{
+        .json_mode = true,
+    });
     defer result.deinit(allocator);
 
     try std.testing.expectEqual(@as(u32, 1), result.parse_errors);
@@ -6292,7 +6374,9 @@ test "runCheckOnlyFromSource refuses when wildcard arms" {
         \\  return Response.json({ status: status });
         \\}
     ;
-    var result = try runCheckOnlyFromSource(allocator, source, "handler.ts", null, true, null, false);
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "handler.ts", .{
+        .json_mode = true,
+    });
     defer result.deinit(allocator);
 
     try std.testing.expectEqual(@as(u32, 1), result.parse_errors);
@@ -6311,7 +6395,9 @@ test "runCheckOnlyFromSource refuses object declaration destructuring" {
         \\  return Response.json({ method: method, url: url });
         \\}
     ;
-    var result = try runCheckOnlyFromSource(allocator, source, "handler.ts", null, true, null, false);
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "handler.ts", .{
+        .json_mode = true,
+    });
     defer result.deinit(allocator);
 
     try std.testing.expectEqual(@as(u32, 1), result.parse_errors);
@@ -6330,7 +6416,9 @@ test "runCheckOnlyFromSource refuses destructuring renames" {
         \\  return Response.json({ method: requestMethod });
         \\}
     ;
-    var result = try runCheckOnlyFromSource(allocator, source, "handler.ts", null, true, null, false);
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "handler.ts", .{
+        .json_mode = true,
+    });
     defer result.deinit(allocator);
 
     try std.testing.expectEqual(@as(u32, 1), result.parse_errors);
@@ -6349,7 +6437,9 @@ test "runCheckOnlyFromSource refuses array declaration destructuring" {
         \\  return name + String(count);
         \\}
     ;
-    var result = try runCheckOnlyFromSource(allocator, source, "handler.ts", null, true, null, false);
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "handler.ts", .{
+        .json_mode = true,
+    });
     defer result.deinit(allocator);
 
     try std.testing.expectEqual(@as(u32, 1), result.parse_errors);
@@ -6368,7 +6458,9 @@ test "runCheckOnlyFromSource refuses object literal shorthand" {
         \\  return Response.json({ value });
         \\}
     ;
-    var result = try runCheckOnlyFromSource(allocator, source, "handler.ts", null, true, null, false);
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "handler.ts", .{
+        .json_mode = true,
+    });
     defer result.deinit(allocator);
 
     try std.testing.expectEqual(@as(u32, 1), result.parse_errors);
@@ -6387,7 +6479,9 @@ test "runCheckOnlyFromSource refuses computed record keys" {
         \\  return Response.json({ [key]: "value" });
         \\}
     ;
-    var result = try runCheckOnlyFromSource(allocator, source, "handler.ts", null, true, null, false);
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "handler.ts", .{
+        .json_mode = true,
+    });
     defer result.deinit(allocator);
 
     try std.testing.expectEqual(@as(u32, 1), result.parse_errors);
@@ -6406,7 +6500,9 @@ test "runCheckOnlyFromSource refuses the in operator" {
         \\  return Response.json({ present: present });
         \\}
     ;
-    var result = try runCheckOnlyFromSource(allocator, source, "handler.ts", null, true, null, false);
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "handler.ts", .{
+        .json_mode = true,
+    });
     defer result.deinit(allocator);
 
     try std.testing.expectEqual(@as(u32, 1), result.parse_errors);
@@ -6425,7 +6521,9 @@ test "runCheckOnlyFromSource refuses unary plus" {
         \\  return Response.json({ value: value });
         \\}
     ;
-    var result = try runCheckOnlyFromSource(allocator, source, "handler.ts", null, true, null, false);
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "handler.ts", .{
+        .json_mode = true,
+    });
     defer result.deinit(allocator);
 
     try std.testing.expectEqual(@as(u32, 1), result.parse_errors);
@@ -6444,7 +6542,9 @@ test "runCheckOnlyFromSource refuses optional calls" {
         \\  return Response.json({ value: value });
         \\}
     ;
-    var result = try runCheckOnlyFromSource(allocator, source, "handler.ts", null, true, null, false);
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "handler.ts", .{
+        .json_mode = true,
+    });
     defer result.deinit(allocator);
 
     try std.testing.expectEqual(@as(u32, 1), result.parse_errors);
@@ -6463,7 +6563,9 @@ test "runCheckOnlyFromSource refuses optional computed access" {
         \\  return Response.json({ value: value });
         \\}
     ;
-    var result = try runCheckOnlyFromSource(allocator, source, "handler.ts", null, true, null, false);
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "handler.ts", .{
+        .json_mode = true,
+    });
     defer result.deinit(allocator);
 
     try std.testing.expectEqual(@as(u32, 1), result.parse_errors);
@@ -6482,7 +6584,9 @@ test "runCheckOnlyFromSource refuses template interpolation" {
         \\  return Response.text(message);
         \\}
     ;
-    var result = try runCheckOnlyFromSource(allocator, source, "handler.ts", null, true, null, false);
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "handler.ts", .{
+        .json_mode = true,
+    });
     defer result.deinit(allocator);
 
     try std.testing.expectEqual(@as(u32, 1), result.parse_errors);
@@ -6503,7 +6607,10 @@ test "runCheckOnlyFromSource refuses string addition" {
         \\  return Response.text(concatText("hello ", "world"));
         \\}
     ;
-    var result = try runCheckOnlyFromSource(allocator, source, "handler.ts", null, true, null, true);
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "handler.ts", .{
+        .json_mode = true,
+        .skip_contract = true,
+    });
     defer result.deinit(allocator);
 
     try std.testing.expectEqual(@as(u32, 0), result.parse_errors);
@@ -6522,7 +6629,10 @@ test "runCheckOnlyFromSource keeps numeric addition" {
         \\  return Response.json({ total: total });
         \\}
     ;
-    var result = try runCheckOnlyFromSource(allocator, source, "handler.ts", null, true, null, true);
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "handler.ts", .{
+        .json_mode = true,
+        .skip_contract = true,
+    });
     defer result.deinit(allocator);
 
     try std.testing.expectEqual(@as(u32, 0), result.parse_errors);
@@ -6538,7 +6648,9 @@ test "runCheckOnlyFromSource refuses an unpublished ambient global" {
         \\  return Response.json({ authenticated: secret !== undefined });
         \\}
     ;
-    var result = try runCheckOnlyFromSource(allocator, source, "handler.ts", null, true, null, false);
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "handler.ts", .{
+        .json_mode = true,
+    });
     defer result.deinit(allocator);
 
     try std.testing.expectEqual(@as(u32, 1), result.strict_errors);
@@ -6557,7 +6669,9 @@ test "runCheckOnlyFromSource repairs raw fetchSync through zttp fetch" {
         \\}
     ;
 
-    var result = try runCheckOnlyFromSource(std.testing.allocator, source, "handler.ts", null, true, null, false);
+    var result = try runCheckOnlyFromSourceWithOptions(std.testing.allocator, source, "handler.ts", .{
+        .json_mode = true,
+    });
     defer result.deinit(std.testing.allocator);
 
     const diagnostic = for (result.json_diagnostics.items) |candidate| {
@@ -6586,7 +6700,9 @@ test "runCheckOnlyFromSource composes zttp fetch through durable steps" {
         \\}
     ;
 
-    var result = try runCheckOnlyFromSource(std.testing.allocator, source, "handler.ts", null, true, null, false);
+    var result = try runCheckOnlyFromSourceWithOptions(std.testing.allocator, source, "handler.ts", .{
+        .json_mode = true,
+    });
     defer result.deinit(std.testing.allocator);
 
     try std.testing.expectEqual(@as(u32, 0), result.totalErrors());
@@ -6600,7 +6716,9 @@ test "runCheckOnlyFromSource: explicit Spec narrows active spec set" {
         \\  return Response.json({ ok: true });
         \\}
     ;
-    var result = try runCheckOnlyFromSource(allocator, source, "declared-only.ts", null, true, null, false);
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "declared-only.ts", .{
+        .json_mode = true,
+    });
     defer result.deinit(allocator);
 
     const contract = result.contract orelse return error.TestUnexpectedResult;
@@ -6624,7 +6742,9 @@ test "runCheckOnlyFromSource: TSX lowering preserves a handler Proof alias" {
         \\  return Response.html(renderToString(<Page />));
         \\}
     ;
-    var result = try runCheckOnlyFromSource(allocator, source, "declared-only.tsx", null, true, null, false);
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "declared-only.tsx", .{
+        .json_mode = true,
+    });
     defer result.deinit(allocator);
 
     const contract = result.contract orelse return error.TestUnexpectedResult;
@@ -6641,7 +6761,9 @@ test "runCheckOnlyFromSource: explicit unknown Spec suppresses defaults and emit
         \\  return Response.json({ ok: true });
         \\}
     ;
-    var result = try runCheckOnlyFromSource(allocator, source, "unknown-only.ts", null, true, null, false);
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "unknown-only.ts", .{
+        .json_mode = true,
+    });
     defer result.deinit(allocator);
 
     const contract = result.contract orelse return error.TestUnexpectedResult;
@@ -7345,7 +7467,9 @@ test "zts check rejects a value that violates only the seventeenth intersection 
     const source = try std.mem.concat(allocator, u8, &.{ wide_intersection_members, wide_intersection_violated });
     defer allocator.free(source);
 
-    var check = try runCheckOnlyFromSource(allocator, source, "handler.ts", null, true, null, false);
+    var check = try runCheckOnlyFromSourceWithOptions(allocator, source, "handler.ts", .{
+        .json_mode = true,
+    });
     defer check.deinit(allocator);
 
     // The exact count, not "more than zero": a second type error would mean the
@@ -7359,7 +7483,9 @@ test "zts check accepts the same value once the seventeenth member is satisfied"
     const source = try std.mem.concat(allocator, u8, &.{ wide_intersection_members, wide_intersection_satisfied });
     defer allocator.free(source);
 
-    var check = try runCheckOnlyFromSource(allocator, source, "handler.ts", null, true, null, false);
+    var check = try runCheckOnlyFromSourceWithOptions(allocator, source, "handler.ts", .{
+        .json_mode = true,
+    });
     defer check.deinit(allocator);
 
     try std.testing.expectEqual(@as(u32, 0), check.type_errors);
@@ -7404,9 +7530,13 @@ const inline_intersection_members =
 test "a named intersection member is checked, like the inline spelling" {
     const allocator = std.testing.allocator;
 
-    var named = try runCheckOnlyFromSource(allocator, named_intersection_members, "handler.ts", null, true, null, false);
+    var named = try runCheckOnlyFromSourceWithOptions(allocator, named_intersection_members, "handler.ts", .{
+        .json_mode = true,
+    });
     defer named.deinit(allocator);
-    var inlined = try runCheckOnlyFromSource(allocator, inline_intersection_members, "handler.ts", null, true, null, false);
+    var inlined = try runCheckOnlyFromSourceWithOptions(allocator, inline_intersection_members, "handler.ts", .{
+        .json_mode = true,
+    });
     defer inlined.deinit(allocator);
 
     // Neither source may fail to parse, or both counts below are zero for a

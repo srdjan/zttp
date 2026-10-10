@@ -1821,7 +1821,9 @@ fn runVerify(
     const digest = agent_identity.sourceDigest(source);
 
     var result = (if (supplied != null)
-        precompile.runCheckOnlyFromSource(allocator, source, abs, null, true, null, false)
+        precompile.runCheckOnlyFromSourceWithOptions(allocator, source, abs, .{
+            .json_mode = true,
+        })
     else
         precompile.runCheckOnlyWithOptions(allocator, abs, .{
             .json_mode = true,
@@ -5009,7 +5011,9 @@ test "every published example checks clean, at every severity" {
     // that checks with a warning is one an agent would copy into a warning.
     const a = testing.allocator;
     for (&example_registry.examples) |entry| {
-        var result = try precompile.runCheckOnlyFromSource(a, entry.source, "example.ts", null, true, null, false);
+        var result = try precompile.runCheckOnlyFromSourceWithOptions(a, entry.source, "example.ts", .{
+            .json_mode = true,
+        });
         defer result.deinit(a);
         for (result.json_diagnostics.items) |diag| {
             std.debug.print(
@@ -5036,7 +5040,9 @@ test "every published module example checks clean and names live modules" {
             }
         }
 
-        var result = try precompile.runCheckOnlyFromSource(a, entry.source, "module-example.ts", null, true, null, false);
+        var result = try precompile.runCheckOnlyFromSourceWithOptions(a, entry.source, "module-example.ts", .{
+            .json_mode = true,
+        });
         defer result.deinit(a);
         for (result.json_diagnostics.items) |diag| {
             std.debug.print(

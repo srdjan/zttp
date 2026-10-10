@@ -104,14 +104,20 @@ fn runAnalysis(a: std.mem.Allocator, source: []const u8, is_tsx: bool, w: *std.I
     // The handler path is synthetic; only its extension matters - the pipeline
     // keys JSX parsing off a `.tsx` suffix.
     const handler_path: []const u8 = if (is_tsx) "handler.tsx" else "handler.ts";
-    var result = try precompile.runCheckOnlyFromSource(
+    var result = try precompile.runCheckOnlyFromSourceWithOptions(
         a,
         source,
         handler_path,
-        null, // sql_schema_path: no cross-handler SQL schema in the browser
-        true, // json_mode: collect structured diagnostics
-        null, // system_path: single-handler analysis only
-        false, // skip_contract: run the full contract + proof pipeline
+        .{
+            // No cross-handler SQL schema exists in the browser.
+            .sql_schema_path = null,
+            // Collect structured diagnostics.
+            .json_mode = true,
+            // Analyze one handler only.
+            .system_path = null,
+            // Run the full contract and proof pipeline.
+            .skip_contract = false,
+        },
     );
     const contract_ptr: ?*const zts.HandlerContract =
         if (result.contract) |*c| c else null;

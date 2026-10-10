@@ -127,7 +127,9 @@ pub fn collectFromSource(
     source: []const u8,
     virtual_path: []const u8,
 ) !Result {
-    var check = try precompile.runCheckOnlyFromSource(allocator, source, virtual_path, null, true, null, false);
+    var check = try precompile.runCheckOnlyFromSourceWithOptions(allocator, source, virtual_path, .{
+        .json_mode = true,
+    });
     defer check.deinit(allocator);
 
     var result = Result{ .file = virtual_path };
@@ -968,7 +970,9 @@ pub fn applyStatementIntent(
     intent: RepairIntent,
     line: u32,
 ) ![]u8 {
-    var check = try precompile.runCheckOnlyFromSource(allocator, source, virtual_path, null, true, null, false);
+    var check = try precompile.runCheckOnlyFromSourceWithOptions(allocator, source, virtual_path, .{
+        .json_mode = true,
+    });
     defer check.deinit(allocator);
 
     var stmt_result = Result{ .file = "" };
@@ -1691,7 +1695,10 @@ pub fn normalizeSourceWithOptions(
     var iterations: u32 = 0;
     var converged = false;
     while (iterations < max_normalize_iterations) {
-        var check = try precompile.runCheckOnlyFromSource(allocator, current, virtual_path, sql_schema_path, true, null, false);
+        var check = try precompile.runCheckOnlyFromSourceWithOptions(allocator, current, virtual_path, .{
+            .sql_schema_path = sql_schema_path,
+            .json_mode = true,
+        });
         defer check.deinit(allocator);
         const cur_band = countBand(check.json_diagnostics.items);
 
@@ -1761,7 +1768,10 @@ pub fn normalizeSourceWithOptions(
         // unmasks are deliberately ignored: they are latent properties of the
         // handler, not introduced by the rewrite, and removing the masking
         // strict error is exactly the canonicalization we want.
-        var next_check = try precompile.runCheckOnlyFromSource(allocator, next, virtual_path, sql_schema_path, true, null, false);
+        var next_check = try precompile.runCheckOnlyFromSourceWithOptions(allocator, next, virtual_path, .{
+            .sql_schema_path = sql_schema_path,
+            .json_mode = true,
+        });
         const hard_errors = next_check.parse_errors + next_check.type_errors + next_check.bool_errors;
         const next_band = countBand(next_check.json_diagnostics.items);
         next_check.deinit(allocator);
@@ -1855,7 +1865,10 @@ fn collectCanonicalResidualDiagnostics(
     virtual_path: []const u8,
     sql_schema_path: ?[]const u8,
 ) !std.ArrayListUnmanaged(ResidualDiagnostic) {
-    var check = try precompile.runCheckOnlyFromSource(allocator, source, virtual_path, sql_schema_path, true, null, false);
+    var check = try precompile.runCheckOnlyFromSourceWithOptions(allocator, source, virtual_path, .{
+        .sql_schema_path = sql_schema_path,
+        .json_mode = true,
+    });
     defer check.deinit(allocator);
 
     var out: std.ArrayListUnmanaged(ResidualDiagnostic) = .empty;
@@ -2430,7 +2443,9 @@ test "every graded rewrite this rewriter emits discharges against its law" {
         // `buildLineRepairs` alone, so driving this test off it would have left
         // every span-keyed rewrite - which is every multi-line one - collecting
         // nothing and reporting a pass over the rows it did reach.
-        var check = try precompile.runCheckOnlyFromSource(allocator, fixture.source, "handler.ts", null, true, null, false);
+        var check = try precompile.runCheckOnlyFromSourceWithOptions(allocator, fixture.source, "handler.ts", .{
+            .json_mode = true,
+        });
         defer check.deinit(allocator);
         var result = Result{ .file = "handler.ts" };
         defer result.deinit(allocator);
@@ -3018,9 +3033,13 @@ test "redundant-bool-compare rewrite is behavior-equivalent (contract diff)" {
     defer nr.deinit(std.testing.allocator);
     try std.testing.expect(nr.fully_canonical);
 
-    var lhs = try precompile.runCheckOnlyFromSource(std.testing.allocator, nr.canonical_source, "handler.ts", null, true, null, false);
+    var lhs = try precompile.runCheckOnlyFromSourceWithOptions(std.testing.allocator, nr.canonical_source, "handler.ts", .{
+        .json_mode = true,
+    });
     defer lhs.deinit(std.testing.allocator);
-    var rhs = try precompile.runCheckOnlyFromSource(std.testing.allocator, reference, "handler.ts", null, true, null, false);
+    var rhs = try precompile.runCheckOnlyFromSourceWithOptions(std.testing.allocator, reference, "handler.ts", .{
+        .json_mode = true,
+    });
     defer rhs.deinit(std.testing.allocator);
 
     const lhs_contract = lhs.contract orelse return error.NoContractFromCanonicalOutput;
@@ -3303,9 +3322,13 @@ test "normalizeSource ternary rewrite is behavior-equivalent (contract diff)" {
     defer nr.deinit(std.testing.allocator);
     try std.testing.expect(nr.fully_canonical);
 
-    var lhs = try precompile.runCheckOnlyFromSource(std.testing.allocator, nr.canonical_source, "handler.ts", null, true, null, false);
+    var lhs = try precompile.runCheckOnlyFromSourceWithOptions(std.testing.allocator, nr.canonical_source, "handler.ts", .{
+        .json_mode = true,
+    });
     defer lhs.deinit(std.testing.allocator);
-    var rhs = try precompile.runCheckOnlyFromSource(std.testing.allocator, reference, "handler.ts", null, true, null, false);
+    var rhs = try precompile.runCheckOnlyFromSourceWithOptions(std.testing.allocator, reference, "handler.ts", .{
+        .json_mode = true,
+    });
     defer rhs.deinit(std.testing.allocator);
 
     const lhs_contract = lhs.contract orelse return error.NoContractFromCanonicalOutput;
@@ -3653,7 +3676,9 @@ fn normalizeOnlyIntent(
     var pass: u32 = 0;
     while (pass < max_normalize_iterations) : (pass += 1) {
         // Run both builders so every enabled row participates in the pair.
-        var check = precompile.runCheckOnlyFromSource(allocator, current, virtual_path, null, true, null, false) catch break;
+        var check = precompile.runCheckOnlyFromSourceWithOptions(allocator, current, virtual_path, .{
+            .json_mode = true,
+        }) catch break;
         defer check.deinit(allocator);
         var result = Result{ .file = virtual_path };
         defer result.deinit(allocator);

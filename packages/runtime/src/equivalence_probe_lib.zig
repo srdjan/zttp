@@ -62,9 +62,13 @@ pub fn recordEquivalenceReceiptWithKey(
     applied_at_unix_ms: i64,
     key_pair: Ed25519.KeyPair,
 ) anyerror!void {
-    var before_result = precompile.runCheckOnlyFromSource(allocator, before_bytes, handler_path, null, true, null, false) catch return;
+    var before_result = precompile.runCheckOnlyFromSourceWithOptions(allocator, before_bytes, handler_path, .{
+        .json_mode = true,
+    }) catch return;
     defer before_result.deinit(allocator);
-    var after_result = precompile.runCheckOnlyFromSource(allocator, after_bytes, handler_path, null, true, null, false) catch return;
+    var after_result = precompile.runCheckOnlyFromSourceWithOptions(allocator, after_bytes, handler_path, .{
+        .json_mode = true,
+    }) catch return;
     defer after_result.deinit(allocator);
 
     const before_contract = if (before_result.contract) |*c| c else return;

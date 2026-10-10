@@ -738,7 +738,9 @@ const SourceKind = enum { handler, non_handler };
 /// mistaken for a library module because that would make a deleted handler look
 /// safe to the gate.
 fn classifySource(gpa: std.mem.Allocator, src: []const u8, path: []const u8) !SourceKind {
-    var result = zts_cli.precompile.runCheckOnlyFromSource(gpa, src, path, null, true, null, false) catch |err| switch (err) {
+    var result = zts_cli.precompile.runCheckOnlyFromSourceWithOptions(gpa, src, path, .{
+        .json_mode = true,
+    }) catch |err| switch (err) {
         error.OutOfMemory => return err,
         else => return error.UnanalysableSource,
     };
@@ -777,9 +779,13 @@ fn analyzeHandler(
     after_src: []const u8,
     sign: bool,
 ) !?HandlerResult {
-    var before_result = try zts_cli.precompile.runCheckOnlyFromSource(gpa, before_src, path, null, true, null, false);
+    var before_result = try zts_cli.precompile.runCheckOnlyFromSourceWithOptions(gpa, before_src, path, .{
+        .json_mode = true,
+    });
     defer before_result.deinit(gpa);
-    var after_result = try zts_cli.precompile.runCheckOnlyFromSource(gpa, after_src, path, null, true, null, false);
+    var after_result = try zts_cli.precompile.runCheckOnlyFromSourceWithOptions(gpa, after_src, path, .{
+        .json_mode = true,
+    });
     defer after_result.deinit(gpa);
 
     if (hasAnalysisErrors(&before_result) or hasAnalysisErrors(&after_result)) {

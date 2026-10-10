@@ -412,15 +412,10 @@ fn markReachableChanges(
     }
     const source = try zts.file_io.readFile(allocator, root_path, change_set.max_file_bytes);
     defer allocator.free(source);
-    var front_end = try zts_cli.precompile.runCheckOnlyFromSource(
-        allocator,
-        source,
-        root_path,
-        null,
-        true,
-        null,
-        true,
-    );
+    var front_end = try zts_cli.precompile.runCheckOnlyFromSourceWithOptions(allocator, source, root_path, .{
+        .json_mode = true,
+        .skip_contract = true,
+    });
     defer front_end.deinit(allocator);
     if (front_end.parse_errors > 0) return;
     const module_paths = try zts_cli.precompile.discoverModulePaths(allocator, source, root_path);
