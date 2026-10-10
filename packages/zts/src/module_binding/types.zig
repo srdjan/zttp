@@ -110,17 +110,19 @@ pub const DeclaredSignature = struct {
 ///   - none: the checker does not count the function as failable
 ///
 /// Every export with a severity other than `none` is a site that fault coverage
-/// counts, and a call to it that no enumerated path holds blocks `fault_covered`.
+/// counts, and a call to it that no enumerated path holds blocks `fault_covered`,
+/// whether it sits in the handler file or in a file the handler imports.
 /// `none` is not a claim that the function cannot fail: the severity census
 /// (`severity_census.zig`) lists the `none` exports that return `false` or
-/// `undefined` on failure (`setCookie`, `base64Decode`, and others),
-/// each with the reason it has no severity yet.
+/// `undefined` on failure (`setCookie`, `base64Decode`, `schemaCompile`, and
+/// others), each with the reason it has no severity.
 pub const FailureSeverity = enum {
     /// Auth or validation failure - 2xx on failure path is a warning.
     critical,
     /// Cache miss, missing env, route not matched - 2xx is fine.
     expected,
-    /// External service failure (`zttp:fetch`) - 2xx is informational: the
+    /// External service or tool failure (`fetch`, `serviceCall`, `workflow.call`,
+    /// `callTool`) - 2xx is informational: the
     /// site stays covered and the trace reports it in `upstreamFallbackSites`.
     upstream,
     /// The checker does not count this function. Some `none` exports can still

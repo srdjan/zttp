@@ -270,6 +270,13 @@ not need to be rediscovered next session. See
 [Witness Corpus](proofs-and-receipts.md#witness-corpus)
 for layout, CLI (`zttp witnesses`), and agent tool (`pi_witnesses`).
 
+A witness drives each `fetch`, `serviceCall`, or `workflow.call` that a
+branch tests to the response the branch needs: status 503 behind `!res.ok`
+or `res.status !== 200`, status 200 on the success side, and a status that
+takes the branch for any other status comparison. A witness written before
+this rule keeps its old stub, because the corpus does not rewrite a known
+witness. Delete its entry to record it again.
+
 ### 10. Capability Capsules
 
 `Effects<T, "...">` is the capability dual of `Proof<T, "...">`. Where a
@@ -636,19 +643,21 @@ The `FaultCoverageChecker` (`packages/zts/src/fault_coverage.zig`) analyzes the 
 
 | Severity | Functions | Meaning |
 |----------|-----------|---------|
-| `critical` | `jwtVerify`, `validateJson`, `validateObject`, `coerceJson`, `decodeJson`, `decodeForm`, `decodeQuery`, `decodeFormMultipart` | Auth/validation failures must not produce 2xx |
-| `expected` | `cacheGet`, `env` | Cache misses and missing env vars are normal degradation |
-| `upstream` | `fetch`, `fetchWithRetry` | An external service failure. A 2xx answer on the failure path may be an intended fallback, so the checker does not warn: the site stays covered, and the trace fact `upstreamFallbackSites` counts these sites. |
+| `critical` | `jwtVerify`, `validateJson`, `validateObject`, `coerceJson`, `decodeJson`, `decodeForm`, `decodeQuery`, `decodeFormMultipart`, `verifyWebhookSignature`, `rateCheck` | Auth, validation, signature, and rate-limit failures must not produce 2xx |
+| `expected` | `cacheGet`, `env`, `cacheSet`, `signal`, `signalAt` | Cache misses and missing env vars are normal degradation. A failed `cacheSet` (capacity, a clock error) can leave an earlier value in place, and `signal` fails when the target run does not exist |
+| `upstream` | `fetch`, `fetchWithRetry`, `serviceCall`, `workflow.call`, `callTool` | An external service or tool failure. `serviceCall` and `workflow.call` return the `fetch` response record, so `res.ok` and the status fork cover them. An agent handler reports a `callTool` failure inside a 2xx stream. A 2xx answer on the failure path may be an intended fallback, so the checker does not warn: the site stays covered, and the trace fact `upstreamFallbackSites` counts these sites. |
 
 The checker warns when a critical I/O failure path (e.g., `jwtVerify` returning `{ok: false}`) produces a 2xx response. This is a structural pattern overwhelmingly correlated with bugs. Cache misses returning 200 are correctly classified as graceful degradation and do not trigger warnings.
 
-A function with severity `none` is not counted. That is not a claim that it cannot fail: several `none` exports return `false` or `undefined` on failure, and `severity_census.zig` lists each one with its reason.
+A function with severity `none` is not counted. That is not a claim that it cannot fail: several `none` exports return `false` or `undefined` on failure, and `severity_census.zig` lists each one with its reason. `schemaCompile` is one: a schema that did not compile makes `validateJson`, `validateObject`, and `coerceJson` answer `schema not found`, and those are critical, so its failure is counted where the schema is used. `parallel`, `race`, `follow`, `saga`, and `fanout` need a fork of their own before they can declare a severity.
 
 Every call to a failable function counts as its own site, keyed by call site. Two calls to `jwtVerify` are two sites, and a failure path for one does not cover the other. `fault_covered` is proven only when all of these hold:
 
 - every counted site has a failure path (a branch on its failure, or a `??` fallback on an optional export);
 - no failable call sits where the walk cannot see it: inside a nested function or callback, inside a helper, inline in an expression, as a call argument, as a `match` scrutinee, or in a branch that does not return. The analysis fails closed on such a call: the property is unproven, and the trace names the first call;
+- every import that is not a builtin module was scanned and holds no failable call. A sibling file imported with `./` or `../` is scanned whole, with its own imports in turn. An unreadable or unparsable file, a chain deeper than eight files, a bare package specifier, and a partner module each block the property, because no failure model reaches them. The browser analyzer has no filesystem, so any relative import blocks there. The trace names the import line and the file;
 - the enumerated paths are exhaustive (a loop walked once, recursion, or a path limit makes them a summary, which blocks the property);
+- an `&&` condition counts every way it can be false. `if (!auth.ok && req.method === "POST") return 401;` falls through when the check fails on a GET too, so that path is enumerated, and a 2xx on it is a critical warning. A failable call tested by a later conjunct can have failed even when short-circuit evaluation skips the test, so that case is enumerated as well;
 - no critical failure path returns 2xx.
 
 A 2xx fallback on an upstream failure does not block the property. It is reported in `upstreamFallbackSites` and the proof trace summary.
