@@ -265,7 +265,8 @@ fn finalize(
     verdict: AutoloopVerdict,
     iterations: u32,
 ) !Outcome {
-    const props = session_state.currentProperties(transcript, options.file);
+    const receipt = session_state.latestChangeSet(transcript, options.file);
+    const props = if (receipt) |value| value.primary_properties else null;
     var met_buf: std.ArrayList([]const u8) = .empty;
     defer met_buf.deinit(allocator);
     var unmet_buf: std.ArrayList([]const u8) = .empty;
@@ -280,7 +281,7 @@ fn finalize(
         }
     }
 
-    const final_hash = session_state.lastChangeSetHash(transcript, options.file);
+    const final_hash = if (receipt) |value| session_state.changeSetHash(value) else null;
 
     if (options.journal_writer != null or options.events_path != null) {
         try appendEvent(allocator, options, .{ .autoloop_outcome = .{

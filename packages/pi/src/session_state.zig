@@ -40,19 +40,28 @@ pub fn changeSetPayloadIfMatching(
     return null;
 }
 
+/// The payload borrows transcript storage. Refresh it after transcript mutation.
+pub fn latestChangeSet(
+    transcript: *const transcript_mod.Transcript,
+    file: []const u8,
+) ?ui_payload.VerifiedChangeSetPayload {
+    var i = transcript.len();
+    while (i > 0) {
+        i -= 1;
+        if (changeSetPayloadIfMatching(transcript.at(i), file)) |receipt| {
+            return receipt;
+        }
+    }
+    return null;
+}
+
 /// Return the primary-root properties of the latest receipt touching `file`.
 pub fn currentProperties(
     transcript: *const transcript_mod.Transcript,
     file: []const u8,
 ) ?ui_payload.PropertiesSnapshot {
-    var i = transcript.len();
-    while (i > 0) {
-        i -= 1;
-        if (changeSetPayloadIfMatching(transcript.at(i), file)) |receipt| {
-            return receipt.primary_properties;
-        }
-    }
-    return null;
+    const receipt = latestChangeSet(transcript, file) orelse return null;
+    return receipt.primary_properties;
 }
 
 /// Return the binary aggregate proof id of the latest receipt touching `file`.
@@ -60,17 +69,14 @@ pub fn lastChangeSetHash(
     transcript: *const transcript_mod.Transcript,
     file: []const u8,
 ) ?[32]u8 {
-    var i = transcript.len();
-    while (i > 0) {
-        i -= 1;
-        if (changeSetPayloadIfMatching(transcript.at(i), file)) |receipt| {
-            if (receipt.transaction_id.len != 64) return null;
-            var digest: [32]u8 = undefined;
-            _ = std.fmt.hexToBytes(&digest, receipt.transaction_id) catch return null;
-            return digest;
-        }
-    }
-    return null;
+    return changeSetHash(latestChangeSet(transcript, file) orelse return null);
+}
+
+pub fn changeSetHash(receipt: ui_payload.VerifiedChangeSetPayload) ?[32]u8 {
+    if (receipt.transaction_id.len != 64) return null;
+    var digest: [32]u8 = undefined;
+    _ = std.fmt.hexToBytes(&digest, receipt.transaction_id) catch return null;
+    return digest;
 }
 
 /// Read a PropertiesSnapshot field by its string name. Returns false for
@@ -250,7 +256,11 @@ test "lastChangeSetHash returns null for a malformed transaction identity" {
     var tr: transcript_mod.Transcript = .{};
     defer tr.deinit(testing.allocator);
 
-    try appendChangeSet(testing.allocator, &tr, "handler.ts", null, zeroProps());
+    try appendChangeSet(testing.allocator, &tr, "handler.ts", .{1} ** 32, zeroProps());
+    var latest_props = zeroProps();
+    latest_props.retry_safe = true;
+    try appendChangeSet(testing.allocator, &tr, "handler.ts", null, latest_props);
 
     try testing.expect(lastChangeSetHash(&tr, "handler.ts") == null);
+    try testing.expect(currentProperties(&tr, "handler.ts").?.retry_safe);
 }
