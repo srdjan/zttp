@@ -109,14 +109,7 @@ fn runAnalysis(a: std.mem.Allocator, source: []const u8, is_tsx: bool, w: *std.I
         source,
         handler_path,
         .{
-            // No cross-handler SQL schema exists in the browser.
-            .sql_schema_path = null,
-            // Collect structured diagnostics.
             .json_mode = true,
-            // Analyze one handler only.
-            .system_path = null,
-            // Run the full contract and proof pipeline.
-            .skip_contract = false,
         },
     );
     const contract_ptr: ?*const zts.HandlerContract =

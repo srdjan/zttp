@@ -81,7 +81,6 @@ pub fn renderFromSource(
             .sql_schema_path = sql_schema_path,
             .json_mode = true,
             .system_path = system_path,
-            .skip_contract = false,
         },
     ) catch |err| {
         return registry_mod.ToolResult.errFmt(
