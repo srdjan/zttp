@@ -1214,11 +1214,11 @@ pub const PathGenerator = struct {
         const func = self.ir_view.getFunction(handler_func) orelse return;
         if (func.params_count == 0) return;
 
-        // First parameter is the request
+        // First parameter is the request. The parser wraps a parameter in a
+        // `.pattern_element`, so read its binding through `paramBinding`, which
+        // accepts both shapes.
         const param_idx = self.ir_view.getListIndex(func.params_start, 0);
-        const param_tag = self.ir_view.getTag(param_idx) orelse return;
-        if (param_tag == .identifier) {
-            const binding = self.ir_view.getBinding(param_idx) orelse return;
+        if (self.ir_view.paramBinding(param_idx)) |binding| {
             self.req_binding_key = packBindingKey(binding.scope_id, binding.slot);
         }
 
@@ -1623,14 +1623,18 @@ pub const PathGenerator = struct {
     }
 
     fn extractLiteralComparison(self: *PathGenerator, id_node: NodeIndex, lit_node: NodeIndex) ?Constraint {
-        const id_tag = self.ir_view.getTag(id_node) orelse return null;
-        if (id_tag != .identifier) return null;
-
         const lit_tag = self.ir_view.getTag(lit_node) orelse return null;
         if (lit_tag != .lit_string) return null;
 
         const str_idx = self.ir_view.getStringIdx(lit_node) orelse return null;
         const value = self.ir_view.getString(str_idx) orelse return null;
+
+        // A direct `req.method === "POST"` or `req.url === "/x"`.
+        if (self.isReqMemberAccess(id_node, "method")) return .{ .req_method = value };
+        if (self.isReqMemberAccess(id_node, "url") or self.isReqMemberAccess(id_node, "path")) return .{ .req_url = value };
+
+        const id_tag = self.ir_view.getTag(id_node) orelse return null;
+        if (id_tag != .identifier) return null;
 
         const binding = self.ir_view.getBinding(id_node) orelse return null;
         const key = packBindingKey(binding.scope_id, binding.slot);
@@ -4748,4 +4752,75 @@ test "the canonical stubs for status 200 and 503 are the ok-record stubs" {
     try std.testing.expect(std.mem.indexOf(u8, statusStub(404), "\"statusText\":\"Not Found\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, statusStub(302), "\"headers\":{}") != null);
     try std.testing.expect(std.mem.indexOf(u8, statusStub(599), "\"status\":599") != null);
+}
+
+test "a direct req.method comparison constrains the request method" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\function handler(req) {
+        \\  if (req.method === "POST") return Response.text("created", { status: 201 });
+        \\  return Response.text("ok");
+        \\}
+    ;
+    var fixture = try generateFixture(allocator, source);
+    defer fixture.deinit();
+
+    const tests = fixture.generator.getTests();
+    try std.testing.expectEqual(@as(usize, 2), tests.len);
+    for (tests) |t| {
+        if (t.expected_status == 201) {
+            try std.testing.expectEqualStrings("POST", t.method);
+        } else {
+            try std.testing.expect(!std.mem.eql(u8, t.method, "POST"));
+        }
+    }
+}
+
+test "a method read into a const constrains the request method" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\function handler(req) {
+        \\  const m = req.method;
+        \\  if (m === "DELETE") return Response.text("gone", { status: 204 });
+        \\  return Response.text("ok");
+        \\}
+    ;
+    var fixture = try generateFixture(allocator, source);
+    defer fixture.deinit();
+
+    var saw_delete = false;
+    for (fixture.generator.getTests()) |t| {
+        if (t.expected_status == 204) {
+            try std.testing.expectEqualStrings("DELETE", t.method);
+            saw_delete = true;
+        }
+    }
+    try std.testing.expect(saw_delete);
+}
+
+test "a failed check behind a method conjunct sends that method on its failure path" {
+    const allocator = std.testing.allocator;
+    // The 401 needs both a failed token check and a POST. Before the request
+    // parameter was recognized, the generated test sent a GET and could not
+    // reach the 401.
+    const source =
+        \\import { jwtVerify } from "zttp:auth";
+        \\function handler(req) {
+        \\  const auth = jwtVerify("t", "secret");
+        \\  if (!auth.ok && req.method === "POST") {
+        \\    return Response.json({ error: "unauthorized" }, { status: 401 });
+        \\  }
+        \\  return Response.json({ data: "private" });
+        \\}
+    ;
+    var fixture = try generateFixture(allocator, source);
+    defer fixture.deinit();
+
+    var saw_401 = false;
+    for (fixture.generator.getTests()) |t| {
+        if (t.expected_status != 401) continue;
+        try std.testing.expectEqualStrings("POST", t.method);
+        saw_401 = true;
+    }
+    try std.testing.expect(saw_401);
 }

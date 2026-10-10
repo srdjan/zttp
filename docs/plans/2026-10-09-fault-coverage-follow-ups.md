@@ -345,14 +345,13 @@ Bare unresolved specifiers block under both options.
 - Contradictory constraints on one call site are not pruned
   (`p_two_checks.ts`); no wrong true follows today.
 - R3's side observation on `has_egress`.
-- Found in F1: request-binding recognition never fires.
-  `findHandlerBindings` sets `req_binding_key` only when the first parameter
-  node is `.identifier`, and the parser emits `.pattern_element`. So no
-  `req_method` or `req_url` constraint is ever produced. Generated tests for a
-  then-path that needs a POST therefore send a GET. A one-line fix
-  (`ir_view.paramBinding`) was measured to change one example snapshot
-  (`handler-full.tsx`). It still misses a direct `req.method === "X"`, and it
-  moves path names and contracts, so it needs its own unit.
+- Done 2026-10-10 after R4: request-binding recognition. The generator
+  now reads the request parameter through `ir_view.paramBinding`, and a direct
+  `req.method === "X"` or `req.url === "/x"` is a request constraint. A
+  generated test for a POST-only branch now sends a POST. No verdict moved:
+  only `handler-full.tsx` changed, from 9 to 23 enumerated paths, and replay
+  stayed 19/19, so `path_analyzer_version` did not move. `req.method !== "X"`
+  still yields no constraint, because a request constraint has no negation.
 - `proof_trace.zig:595` prints "0 of N failable I/O site(s) have no explicit
   failure path" for a handler that is not covered only because of a critical
   2xx warning. F1 makes this reachable for `&&` conditions.
