@@ -413,55 +413,7 @@ pub const HandlerPool = struct {
 
     /// Execute handler with a request (acquire, run, release)
     pub fn executeHandler(self: *Self, request: HttpRequestView) !HttpResponse {
-        const request_id = self.nextRequestId();
-        const base_rt = try self.acquireForRequest();
-        var exec_timer: ?compat.Timer = null;
-        if (collect_pool_metrics) {
-            exec_timer = compat.Timer.start() catch null;
-        }
-        defer if (collect_pool_metrics) {
-            if (exec_timer) |*t| self.recordExec(t.read());
-        };
-
-        var slot_disposed = false;
-        defer if (!slot_disposed) self.releaseForRequest(base_rt);
-        var attempt: u8 = 0;
-        var last_err: ?anyerror = null;
-        while (attempt < 2) : (attempt += 1) {
-            const rt = try self.ensureRuntime(base_rt);
-            var result = self.callHandlerGuarded(rt, request, request_id, false) catch |err| {
-                if (err == error.HandlerPanicked) {
-                    slot_disposed = true;
-                    self.quarantineSlot(base_rt);
-                    return err;
-                }
-                if (err == error.RequestTimeout) {
-                    _ = self.timeouts.fetchAdd(1, .monotonic);
-                    std.log.warn("Handler timed out after {d}ms, invalidating runtime", .{self.config.request_timeout_ms});
-                    slot_disposed = true;
-                    self.recycleSlot(base_rt);
-                    return err;
-                }
-                if (isHandlerInvalid(err)) {
-                    std.log.warn("Handler invalid, rebuilding runtime (err={})", .{err});
-                    self.invalidateRuntime(base_rt);
-                    last_err = err;
-                    continue;
-                }
-                return err;
-            };
-            if (!rt.owns_resources) {
-                result.assertDetachedFromRuntime();
-            }
-            // The response bytes come from the runtime's lifetime arena, and the
-            // deferred release above may destroy that arena (recycle policy,
-            // failed arena audit, timeout). The caller deinits the response
-            // after this function returns, so re-home it on the pool allocator
-            // first: it outlives every slot.
-            defer result.deinit();
-            return try result.cloneDetached(self.allocator);
-        }
-        return last_err orelse error.HandlerNotCallable;
+        return self.invokeHandler(false, request, null);
     }
 
     /// Execute handler and return a response handle that borrows JS strings.
@@ -479,10 +431,19 @@ pub const HandlerPool = struct {
         request: HttpRequestView,
         fault_out: ?*?zq.bytecode.LineEntry,
     ) !ResponseHandle {
+        return self.invokeHandler(true, request, fault_out);
+    }
+
+    fn invokeHandler(
+        self: *Self,
+        comptime borrowed: bool,
+        request: HttpRequestView,
+        fault_out: ?*?zq.bytecode.LineEntry,
+    ) anyerror!(if (borrowed) ResponseHandle else HttpResponse) {
         const request_id = self.nextRequestId();
         const base_rt = try self.acquireForRequest();
         var slot_disposed = false;
-        errdefer if (!slot_disposed) self.releaseForRequest(base_rt);
+        errdefer if (borrowed and !slot_disposed) self.releaseForRequest(base_rt);
         var exec_timer: ?compat.Timer = null;
         if (collect_pool_metrics) {
             exec_timer = compat.Timer.start() catch null;
@@ -490,12 +451,13 @@ pub const HandlerPool = struct {
         defer if (collect_pool_metrics) {
             if (exec_timer) |*t| self.recordExec(t.read());
         };
+        defer if (!borrowed and !slot_disposed) self.releaseForRequest(base_rt);
 
         var attempt: u8 = 0;
         var last_err: ?anyerror = null;
         while (attempt < 2) : (attempt += 1) {
             const rt = try self.ensureRuntime(base_rt);
-            const response = self.callHandlerGuarded(rt, request, request_id, true) catch |err| {
+            var response = self.callHandlerGuarded(rt, request, request_id, borrowed) catch |err| {
                 if (fault_out) |out| out.* = rt.last_fault_location;
                 if (err == error.HandlerPanicked) {
                     slot_disposed = true;
@@ -517,12 +479,19 @@ pub const HandlerPool = struct {
                 }
                 return err;
             };
-            return .{
-                .response = response,
-                .runtime = rt,
-                .base_rt = base_rt,
-                .pool = self,
-            };
+            if (borrowed) {
+                return .{
+                    .response = response,
+                    .runtime = rt,
+                    .base_rt = base_rt,
+                    .pool = self,
+                };
+            } else {
+                if (!rt.owns_resources) response.assertDetachedFromRuntime();
+                // Clone before releasing the slot, which can destroy its arena.
+                defer response.deinit();
+                return try response.cloneDetached(self.allocator);
+            }
         }
         return last_err orelse error.HandlerNotCallable;
     }
