@@ -1393,10 +1393,79 @@ const fetch_probes = [_]FaultProbe{
         \\  return Response.text("ok");
         \\}
     },
-    .{ .name = "p7 a status comparison is not a fork", .clean = false, .source = fetch_prefix ++
+    .{ .name = "p7 !== 200 is the complement of ok", .clean = true, .source = fetch_prefix ++
         \\function handler(req) {
         \\  const res = fetch("https://api.example.com/data");
         \\  if (res.status !== 200) return Response.text("upstream failed", { status: 502 });
+        \\  return Response.text("ok");
+        \\}
+    },
+    .{ .name = "p7b === 200 with the success branch first", .clean = true, .source = fetch_prefix ++
+        \\function handler(req) {
+        \\  const res = fetch("https://api.example.com/data");
+        \\  if (res.status === 200) return Response.text("ok");
+        \\  return Response.text("upstream failed", { status: 502 });
+        \\}
+    },
+    .{ .name = "p7c a literal on the left", .clean = true, .source = fetch_prefix ++
+        \\function handler(req) {
+        \\  const res = fetch("https://api.example.com/data");
+        \\  if (200 !== res.status) return Response.text("upstream failed", { status: 502 });
+        \\  return Response.text("ok");
+        \\}
+    },
+    .{ .name = "p7d >= 300 leaves 1xx on the success side", .clean = false, .source = fetch_prefix ++
+        \\function handler(req) {
+        \\  const res = fetch("https://api.example.com/data");
+        \\  if (res.status >= 300) return Response.text("upstream failed", { status: 502 });
+        \\  return Response.text("ok");
+        \\}
+    },
+    .{ .name = "p7e >= 400 leaves 3xx on the success side", .clean = false, .source = fetch_prefix ++
+        \\function handler(req) {
+        \\  const res = fetch("https://api.example.com/data");
+        \\  if (res.status >= 400) return Response.text("upstream failed", { status: 502 });
+        \\  return Response.text("ok");
+        \\}
+    },
+    .{ .name = "p7f === 404 alone is not a fork", .clean = false, .source = fetch_prefix ++
+        \\function handler(req) {
+        \\  const res = fetch("https://api.example.com/data");
+        \\  if (res.status === 404) return Response.text("missing", { status: 404 });
+        \\  return Response.text("ok");
+        \\}
+    },
+    .{ .name = "p7g === 404 then !res.ok", .clean = true, .source = fetch_prefix ++
+        \\function handler(req) {
+        \\  const res = fetch("https://api.example.com/data");
+        \\  if (res.status === 404) return Response.text("missing", { status: 404 });
+        \\  if (!res.ok) return Response.text("upstream failed", { status: 502 });
+        \\  return Response.text("ok");
+        \\}
+    },
+    .{ .name = "p7h a status read into a const", .clean = false, .source = fetch_prefix ++
+        \\function handler(req) {
+        \\  const res = fetch("https://api.example.com/data");
+        \\  const s = res.status;
+        \\  if (s !== 200) return Response.text("upstream failed", { status: 502 });
+        \\  return Response.text("ok");
+        \\}
+    },
+    .{ .name = "p7i a shadowed res keeps the outer fork", .clean = true, .source = fetch_prefix ++
+        \\function handler(req) {
+        \\  const res = fetch("https://api.example.com/data");
+        \\  if (req.method === "POST") {
+        \\    const res = "shadow";
+        \\    return Response.text(res);
+        \\  }
+        \\  if (res.status !== 200) return Response.text("upstream failed", { status: 502 });
+        \\  return Response.text("ok");
+        \\}
+    },
+    .{ .name = "p7j a status test on a Result export", .clean = false, .source = and_prefix ++
+        \\function handler(req) {
+        \\  const auth = jwtVerify("t", "secret");
+        \\  if (auth.status !== 200) return Response.text("unauthorized", { status: 401 });
         \\  return Response.text("ok");
         \\}
     },
@@ -1487,7 +1556,7 @@ const fetch_probes = [_]FaultProbe{
 
 test "a hidden or unchecked fetch never makes fault coverage true" {
     // The census must run every probe: a loop that skipped them would pass.
-    try std.testing.expectEqual(@as(usize, 16), fetch_probes.len);
+    try std.testing.expectEqual(@as(usize, 25), fetch_probes.len);
     var held: usize = 0;
     var blocked: usize = 0;
     var mismatched: usize = 0;
@@ -1507,8 +1576,8 @@ test "a hidden or unchecked fetch never makes fault coverage true" {
         if (probe.clean) held += 1 else blocked += 1;
     }
     try std.testing.expectEqual(@as(usize, 0), mismatched);
-    try std.testing.expectEqual(@as(usize, 5), held);
-    try std.testing.expectEqual(@as(usize, 11), blocked);
+    try std.testing.expectEqual(@as(usize, 10), held);
+    try std.testing.expectEqual(@as(usize, 15), blocked);
 }
 
 test "a 2xx fallback on an upstream failure is covered and counted" {
@@ -1521,6 +1590,23 @@ test "a 2xx fallback on an upstream failure is covered and counted" {
     // p1 answers with a 502: no fallback.
     try std.testing.expect(refused.clean);
     try std.testing.expectEqual(@as(u32, 0), refused.upstream_fallback_sites);
+}
+
+test "a status test behind an && with an opaque conjunct can answer 2xx" {
+    // A failed fetch with a false header test falls through to the 200. The
+    // status test forks like `!res.ok`, so the report counts the fallback.
+    const source = fetch_prefix ++
+        \\function handler(req) {
+        \\  const res = fetch("https://api.example.com/data");
+        \\  if (res.status !== 200 && req.headers["x"] === "y") {
+        \\    return Response.text("upstream failed", { status: 502 });
+        \\  }
+        \\  return Response.text("ok");
+        \\}
+    ;
+    const coverage = try analyzeSourceFaultCoverage(std.testing.allocator, source);
+    try std.testing.expect(coverage.clean);
+    try std.testing.expectEqual(@as(u32, 1), coverage.upstream_fallback_sites);
 }
 
 test "a critical failure with 2xx is a warning, not an upstream fallback" {

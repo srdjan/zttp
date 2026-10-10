@@ -40,6 +40,7 @@ pub const module_spec_render = @import("module_spec_render.zig");
 pub const path_generator = @import("path_generator.zig");
 pub const counterexample = @import("counterexample.zig");
 pub const fault_coverage = @import("fault_coverage.zig");
+pub const status_check = @import("status_check.zig");
 pub const severity_census = @import("severity_census.zig");
 pub const behavior_canonical = @import("behavior_canonical.zig");
 pub const proof_trace = @import("proof_trace.zig");

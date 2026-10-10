@@ -24,6 +24,7 @@ const mb = @import("zts-engine").module_binding;
 const bool_checker_mod = @import("bool_checker.zig");
 const type_pool_mod = @import("type_pool.zig");
 const type_env_mod = @import("type_env.zig");
+const status_check = @import("status_check.zig");
 const handler_contract = @import("zts-contracts").handler_contract;
 const contract_types = @import("zts-contracts").contract_types;
 
@@ -44,6 +45,10 @@ pub const Constraint = union(enum) {
     stub_falsy: StubInfo,
     result_ok: StubInfo,
     result_not_ok: StubInfo,
+    /// A status test on an `ok`-record call that is not the complement of
+    /// `ok`. It is not a failure path and no coverage counts it: it only
+    /// fixes the status that the call's stub carries on this path.
+    status_is: StatusIs,
 
     /// Whether this constraint represents an I/O failure condition.
     pub fn isFailure(self: Constraint) bool {
@@ -59,6 +64,13 @@ pub const StubInfo = struct {
     func: []const u8,
     returns: mb.ReturnKind,
     call_site: NodeIndex = null_node,
+};
+
+/// The call's `status` comparison must take the value `expect` on this path.
+pub const StatusIs = struct {
+    stub: StubInfo,
+    comparison: status_check.Comparison,
+    expect: bool,
 };
 
 // ---------------------------------------------------------------------------
@@ -108,14 +120,22 @@ fn constraintEql(a: Constraint, b: Constraint) bool {
         .stub_falsy => |x| b == .stub_falsy and stubInfoEql(x, b.stub_falsy),
         .result_ok => |x| b == .result_ok and stubInfoEql(x, b.result_ok),
         .result_not_ok => |x| b == .result_not_ok and stubInfoEql(x, b.result_not_ok),
+        .status_is => |x| b == .status_is and stubInfoEql(x.stub, b.status_is.stub) and
+            x.expect == b.status_is.expect and
+            x.comparison.op == b.status_is.comparison.op and
+            x.comparison.literal_left == b.status_is.comparison.literal_left and
+            x.comparison.literal == b.status_is.comparison.literal,
     };
 }
 
+/// The contract condition for a constraint, or null for one the contract does
+/// not record (a status test that is not a failure path).
 fn dupePathCondition(
     allocator: std.mem.Allocator,
     constraint: Constraint,
-) !handler_contract.PathCondition {
+) !?handler_contract.PathCondition {
     return switch (constraint) {
+        .status_is => null,
         .req_method => |value| .{
             .kind = .req_method,
             .value = try allocator.dupe(u8, value),
@@ -1102,7 +1122,7 @@ pub const PathGenerator = struct {
             for (test_case.constraints) |constraint| {
                 if (constraint.isFailure()) is_failure = true;
 
-                var cond = try dupePathCondition(allocator, constraint);
+                var cond = (try dupePathCondition(allocator, constraint)) orelse continue;
                 errdefer cond.deinit(allocator);
                 try conditions.append(allocator, cond);
             }
@@ -1545,6 +1565,8 @@ pub const PathGenerator = struct {
             .binary_op => {
                 const bin = self.ir_view.getBinary(cond) orelse return null;
 
+                if (self.extractStatusComparison(bin)) |c| return c;
+
                 if (bin.op == .strict_eq or bin.op == .strict_neq) {
                     // Check pattern: identifier === "literal"
                     if (self.extractLiteralComparison(bin.left, bin.right)) |c| {
@@ -1692,6 +1714,90 @@ pub const PathGenerator = struct {
         return .{ .stub_falsy = .{ .module = meta.module, .func = meta.func, .returns = meta.returns, .call_site = init_node } };
     }
 
+    /// `x.status OP n` or `n OP x.status`, where `x` is bound to a call of an
+    /// `ok`-record export and `n` is a numeric literal. When the comparison is
+    /// the complement of `ok` it forks like `x.ok`: the side that holds on the
+    /// failure status gets `result_not_ok`, the other `result_ok`. Any other
+    /// comparison that splits the statuses gets a `status_is` constraint.
+    /// The returned constraint holds where the comparison is true.
+    fn extractStatusComparison(self: *PathGenerator, bin: Node.BinaryExpr) ?Constraint {
+        const op: status_check.Op = switch (bin.op) {
+            .strict_eq => .eq,
+            .strict_neq => .neq,
+            .lt => .lt,
+            .lte => .lte,
+            .gt => .gt,
+            .gte => .gte,
+            else => return null,
+        };
+        var literal_left = false;
+        var call_site: NodeIndex = undefined;
+        var literal: f64 = undefined;
+        if (self.statusMemberCall(bin.left)) |site| {
+            literal = self.numericLiteral(bin.right) orelse return null;
+            call_site = site;
+        } else if (self.statusMemberCall(bin.right)) |site| {
+            literal = self.numericLiteral(bin.left) orelse return null;
+            call_site = site;
+            literal_left = true;
+        } else return null;
+
+        const call = self.ir_view.getCall(call_site) orelse return null;
+        const meta = self.getCalleeMeta(call.callee) orelse return null;
+        const info: StubInfo = .{
+            .module = meta.module,
+            .func = meta.func,
+            .returns = meta.returns,
+            .call_site = call_site,
+        };
+        const comparison: status_check.Comparison = .{ .op = op, .literal = literal, .literal_left = literal_left };
+        return switch (status_check.classify(comparison)) {
+            .constant => null,
+            .plain => .{ .status_is = .{ .stub = info, .comparison = comparison, .expect = true } },
+            .fork => |failure_side| if (failure_side) .{ .result_not_ok = info } else .{ .result_ok = info },
+        };
+    }
+
+    /// The call site when `node` is `x.status` and `x` is an identifier bound
+    /// to a call of an `ok`-record export.
+    fn statusMemberCall(self: *PathGenerator, node: NodeIndex) ?NodeIndex {
+        if (self.ir_view.getTag(node) != .member_access) return null;
+        const member = self.ir_view.getMember(node) orelse return null;
+        const prop_name = self.resolveAtomName(member.property) orelse return null;
+        if (!std.mem.eql(u8, prop_name, "status")) return null;
+        if (self.ir_view.getTag(member.object) != .identifier) return null;
+        const binding = self.ir_view.getBinding(member.object) orelse return null;
+        const init_node = self.var_inits.get(packBindingKey(binding.scope_id, binding.slot)) orelse return null;
+        if (self.ir_view.getTag(init_node) != .call) return null;
+        const call = self.ir_view.getCall(init_node) orelse return null;
+        const meta = self.getCalleeMeta(call.callee) orelse return null;
+        if (!meta.ok_record) return null;
+        return init_node;
+    }
+
+    /// The value of an integer or float literal, or of a unary minus over
+    /// one. `NaN` and `Infinity` are identifiers, so they are not literals.
+    fn numericLiteral(self: *const PathGenerator, node: NodeIndex) ?f64 {
+        switch (self.ir_view.getTag(node) orelse return null) {
+            .lit_int => {
+                const value = self.ir_view.getIntValue(node) orelse return null;
+                return @floatFromInt(value);
+            },
+            .lit_float => {
+                const idx = self.ir_view.getFloatIdx(node) orelse return null;
+                return self.ir_view.getFloat(idx);
+            },
+            .unary_op => {
+                const unary = self.ir_view.getUnary(node) orelse return null;
+                if (unary.op != .neg) return null;
+                const operand = self.ir_view.getTag(unary.operand) orelse return null;
+                if (operand != .lit_int and operand != .lit_float) return null;
+                return -(self.numericLiteral(unary.operand) orelse return null);
+            },
+            else => return null,
+        }
+    }
+
     fn extractResultOkConstraint(self: *PathGenerator, member_node: NodeIndex) ?Constraint {
         const member = self.ir_view.getMember(member_node) orelse return null;
         const prop_name = self.resolveAtomName(member.property) orelse return null;
@@ -1725,6 +1831,7 @@ pub const PathGenerator = struct {
             .stub_falsy => |info| .{ .stub_truthy = info },
             .result_ok => |info| .{ .result_not_ok = info },
             .result_not_ok => |info| .{ .result_ok = info },
+            .status_is => |s| .{ .status_is = .{ .stub = s.stub, .comparison = s.comparison, .expect = !s.expect } },
         };
     }
 
@@ -1941,6 +2048,7 @@ pub const PathGenerator = struct {
                 .stub_falsy => "!falsy",
                 .result_ok => "result.ok",
                 .result_not_ok => "!result.ok",
+                .status_is => "status",
             };
             if (desc.len > 0 and name_len + 2 + desc.len < name_buf.len) {
                 name_buf[name_len] = ' ';
@@ -1991,8 +2099,10 @@ pub const PathGenerator = struct {
                 .result_not_ok => |info| {
                     try stub_overrides.put(self.allocator, info.call_site, resultOrOkRecordStub(info.returns, false));
                 },
+                .status_is => {},
             }
         }
+        try self.applyStatusTests(&stub_overrides);
 
         // Second pass: emit I/O stubs for tracked calls on this path
         for (self.io_seq.items) |io_call| {
@@ -2035,6 +2145,50 @@ pub const PathGenerator = struct {
             .route_root = self.walking_route_root,
             .root_function = self.walking_root_function,
         });
+    }
+
+    /// Give every call that a `status_is` constraint names the stub whose
+    /// status satisfies all of its status tests and agrees with its `ok`
+    /// fork, when the path has one. A path that no status satisfies keeps the
+    /// stub it had: it cannot occur, and any stub is as good as another.
+    fn applyStatusTests(
+        self: *PathGenerator,
+        stub_overrides: *std.AutoHashMapUnmanaged(NodeIndex, []const u8),
+    ) error{OutOfMemory}!void {
+        var requirements: std.ArrayList(status_check.Requirement) = .empty;
+        defer requirements.deinit(self.allocator);
+        for (self.constraints.items, 0..) |c, i| {
+            const first = switch (c) {
+                .status_is => |s| s,
+                else => continue,
+            };
+            // Handle each call once, at its first status test.
+            const site = first.stub.call_site;
+            var seen_before = false;
+            for (self.constraints.items[0..i]) |earlier| {
+                if (earlier == .status_is and earlier.status_is.stub.call_site == site) seen_before = true;
+            }
+            if (seen_before) continue;
+
+            requirements.clearRetainingCapacity();
+            var ok_state: ?bool = null;
+            for (self.constraints.items) |other| {
+                switch (other) {
+                    .status_is => |s| if (s.stub.call_site == site) {
+                        try requirements.append(self.allocator, .{ .comparison = s.comparison, .expect = s.expect });
+                    },
+                    .result_ok => |info| if (info.call_site == site) {
+                        ok_state = true;
+                    },
+                    .result_not_ok => |info| if (info.call_site == site) {
+                        ok_state = false;
+                    },
+                    else => {},
+                }
+            }
+            const status = status_check.chooseStatus(ok_state, requirements.items) orelse continue;
+            try stub_overrides.put(self.allocator, site, statusStub(status));
+        }
     }
 
     fn snapshotPathCost(self: *PathGenerator) !void {
@@ -2567,6 +2721,29 @@ const ok_record_stub_failed =
 
 fn okRecordStub(ok: bool) []const u8 {
     return if (ok) ok_record_stub_ok else ok_record_stub_failed;
+}
+
+/// One `ok`-record stub for each status from 100 to 599, in the shape of
+/// `ok_record_stub_ok`. The runtime reads `status` and derives `ok` from it.
+const status_stubs = blk: {
+    @setEvalBranchQuota(4_000_000);
+    const count = status_check.max_status - status_check.min_status + 1;
+    var table: [count][]const u8 = undefined;
+    for (&table, 0..) |*slot, i| {
+        const status: u16 = status_check.min_status + @as(u16, @intCast(i));
+        const phrase = std.http.Status.phrase(@enumFromInt(status)) orelse "Unknown";
+        const body = if (status_check.isOkStatus(status)) "{\\\"id\\\":\\\"1\\\"}" else "{}";
+        slot.* = std.fmt.comptimePrint(
+            "{{\"status\":{d},\"statusText\":\"{s}\",\"headers\":{{}},\"body\":\"{s}\"}}",
+            .{ status, phrase, body },
+        );
+    }
+    break :blk table;
+};
+
+/// The `ok`-record stub for a response with this status (100 to 599).
+fn statusStub(status: u16) []const u8 {
+    return status_stubs[status - status_check.min_status];
 }
 
 fn stubValueForType(returns: mb.ReturnKind, truthy: bool) []const u8 {
@@ -4303,4 +4480,295 @@ test "generate cleans every fatal allocation failure through short-circuit cases
         generateWithAllocator,
         .{ ir_view, &atoms, handler_fn },
     );
+}
+
+// ---------------------------------------------------------------------------
+// Status comparisons on an ok-record call (R4 F3)
+// ---------------------------------------------------------------------------
+
+const status_prefix =
+    \\import { fetch } from "zttp:fetch";
+    \\import { jwtVerify } from "zttp:auth";
+    \\
+;
+
+/// The `status` that a recorded fetch stub carries.
+fn stubStatus(result_json: []const u8) !u16 {
+    const key = "\"status\":";
+    const at = std.mem.indexOf(u8, result_json, key) orelse return error.NoStatus;
+    var end = at + key.len;
+    while (end < result_json.len and std.ascii.isDigit(result_json[end])) end += 1;
+    return std.fmt.parseInt(u16, result_json[at + key.len .. end], 10);
+}
+
+fn hasFailureConstraint(t: GeneratedTest) bool {
+    for (t.constraints) |c| {
+        if (c.isFailure()) return true;
+    }
+    return false;
+}
+
+test "a status !== 200 test forks the fetch like !res.ok" {
+    const source = status_prefix ++
+        \\function handler(req) {
+        \\  const res = fetch("https://api.example.com/a");
+        \\  if (res.status !== 200) return Response.json({ error: "upstream" }, { status: 502 });
+        \\  return Response.json({ a: res.body });
+        \\}
+    ;
+    var fixture = try generateFixture(std.testing.allocator, source);
+    defer fixture.deinit();
+
+    const tests = fixture.generator.getTests();
+    try std.testing.expectEqual(@as(usize, 2), tests.len);
+    try std.testing.expectEqual(@as(usize, 1), countPaths(tests, 502, &.{.result_not_ok}));
+    try std.testing.expectEqual(@as(usize, 1), countPaths(tests, 200, &.{.result_ok}));
+    for (tests) |t| {
+        const failed = t.expected_status == 502;
+        try std.testing.expectEqual(if (failed) @as(u16, 503) else @as(u16, 200), try stubStatus(t.io_stubs.items[0].result_json));
+    }
+}
+
+test "a status === 200 test forks the fetch with the success branch first" {
+    const source = status_prefix ++
+        \\function handler(req) {
+        \\  const res = fetch("https://api.example.com/a");
+        \\  if (res.status === 200) return Response.json({ a: res.body });
+        \\  return Response.json({ error: "upstream" }, { status: 502 });
+        \\}
+    ;
+    var fixture = try generateFixture(std.testing.allocator, source);
+    defer fixture.deinit();
+
+    const tests = fixture.generator.getTests();
+    try std.testing.expectEqual(@as(usize, 2), tests.len);
+    try std.testing.expectEqual(@as(usize, 1), countPaths(tests, 200, &.{.result_ok}));
+    try std.testing.expectEqual(@as(usize, 1), countPaths(tests, 502, &.{.result_not_ok}));
+}
+
+test "a literal on the left and a negation fork the same way" {
+    const sources = [_][]const u8{
+        status_prefix ++
+            \\function handler(req) {
+            \\  const res = fetch("https://api.example.com/a");
+            \\  if (200 !== res.status) return Response.text("up", { status: 502 });
+            \\  return Response.text("ok");
+            \\}
+        ,
+        status_prefix ++
+            \\function handler(req) {
+            \\  const res = fetch("https://api.example.com/a");
+            \\  if (!(res.status === 200)) return Response.text("up", { status: 502 });
+            \\  return Response.text("ok");
+            \\}
+        ,
+        status_prefix ++
+            \\function handler(req) {
+            \\  const res = fetch("https://api.example.com/a");
+            \\  if (res.status !== 200.0) return Response.text("up", { status: 502 });
+            \\  return Response.text("ok");
+            \\}
+        ,
+    };
+    for (sources) |source| {
+        var fixture = try generateFixture(std.testing.allocator, source);
+        defer fixture.deinit();
+        const tests = fixture.generator.getTests();
+        try std.testing.expectEqual(@as(usize, 2), tests.len);
+        try std.testing.expectEqual(@as(usize, 1), countPaths(tests, 502, &.{.result_not_ok}));
+        try std.testing.expectEqual(@as(usize, 1), countPaths(tests, 200, &.{.result_ok}));
+    }
+}
+
+test "a status test that is not the complement of ok records no fork and takes its branch" {
+    const Row = struct { expr: []const u8, cmp: status_check.Comparison };
+    const rows = [_]Row{
+        .{ .expr = "res.status >= 300", .cmp = .{ .op = .gte, .literal = 300, .literal_left = false } },
+        .{ .expr = "res.status > 299", .cmp = .{ .op = .gt, .literal = 299, .literal_left = false } },
+        .{ .expr = "res.status < 300", .cmp = .{ .op = .lt, .literal = 300, .literal_left = false } },
+        .{ .expr = "res.status >= 400", .cmp = .{ .op = .gte, .literal = 400, .literal_left = false } },
+        .{ .expr = "res.status === 404", .cmp = .{ .op = .eq, .literal = 404, .literal_left = false } },
+        .{ .expr = "404 === res.status", .cmp = .{ .op = .eq, .literal = 404, .literal_left = true } },
+        .{ .expr = "res.status !== 404", .cmp = .{ .op = .neq, .literal = 404, .literal_left = false } },
+        .{ .expr = "!(res.status >= 400)", .cmp = .{ .op = .lt, .literal = 400, .literal_left = false } },
+        .{ .expr = "500 <= res.status", .cmp = .{ .op = .lte, .literal = 500, .literal_left = true } },
+    };
+    for (rows) |row| {
+        const source = try std.mem.concat(std.testing.allocator, u8, &.{
+            status_prefix,
+            "function handler(req) {\n  const res = fetch(\"https://api.example.com/a\");\n  if (",
+            row.expr,
+            ") return Response.text(\"taken\", { status: 502 });\n  return Response.text(\"ok\");\n}\n",
+        });
+        defer std.testing.allocator.free(source);
+        var fixture = try generateFixture(std.testing.allocator, source);
+        defer fixture.deinit();
+
+        const tests = fixture.generator.getTests();
+        try std.testing.expectEqual(@as(usize, 2), tests.len);
+        for (tests) |t| {
+            // No coverage constraint: the fetch has no failure path here.
+            try std.testing.expect(!hasFailureConstraint(t));
+            const status = try stubStatus(t.io_stubs.items[0].result_json);
+            // The 502 path is the one where the test is true.
+            try std.testing.expectEqual(t.expected_status == 502, status_check.holds(row.cmp, status));
+            // The stub's status decides `ok`; it must be a real status.
+            try std.testing.expect(status >= 100 and status <= 599);
+        }
+    }
+}
+
+test "a status test before an ok test stubs each branch with a status that takes it" {
+    const source = status_prefix ++
+        \\function handler(req) {
+        \\  const res = fetch("https://api.example.com/a");
+        \\  if (res.status === 404) return Response.json({ error: "missing" }, { status: 404 });
+        \\  if (!res.ok) return Response.json({ error: "upstream" }, { status: 502 });
+        \\  return Response.json({ a: res.body });
+        \\}
+    ;
+    var fixture = try generateFixture(std.testing.allocator, source);
+    defer fixture.deinit();
+
+    const tests = fixture.generator.getTests();
+    try std.testing.expectEqual(@as(usize, 3), tests.len);
+    var seen: usize = 0;
+    for (tests) |t| {
+        const status = try stubStatus(t.io_stubs.items[0].result_json);
+        switch (t.expected_status) {
+            404 => try std.testing.expectEqual(@as(u16, 404), status),
+            502 => {
+                try std.testing.expect(status != 404);
+                try std.testing.expect(!status_check.isOkStatus(status));
+                try std.testing.expect(hasFailureConstraint(t));
+            },
+            200 => {
+                try std.testing.expect(status != 404);
+                try std.testing.expect(status_check.isOkStatus(status));
+            },
+            else => return error.UnexpectedStatus,
+        }
+        seen += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 3), seen);
+}
+
+test "a status test under a forked status test picks a status in the failed range" {
+    const source = status_prefix ++
+        \\function handler(req) {
+        \\  const res = fetch("https://api.example.com/a");
+        \\  if (res.status !== 200) {
+        \\    if (res.status === 404) return Response.json({ error: "missing" }, { status: 404 });
+        \\    return Response.json({ error: "upstream" }, { status: 502 });
+        \\  }
+        \\  return Response.json({ a: res.body });
+        \\}
+    ;
+    var fixture = try generateFixture(std.testing.allocator, source);
+    defer fixture.deinit();
+
+    const tests = fixture.generator.getTests();
+    try std.testing.expectEqual(@as(usize, 3), tests.len);
+    for (tests) |t| {
+        const status = try stubStatus(t.io_stubs.items[0].result_json);
+        switch (t.expected_status) {
+            404 => try std.testing.expectEqual(@as(u16, 404), status),
+            502 => try std.testing.expectEqual(@as(u16, 503), status),
+            200 => try std.testing.expectEqual(@as(u16, 200), status),
+            else => return error.UnexpectedStatus,
+        }
+    }
+}
+
+test "a status read into a const is not a status test" {
+    const source = status_prefix ++
+        \\function handler(req) {
+        \\  const res = fetch("https://api.example.com/a");
+        \\  const s = res.status;
+        \\  if (s !== 200) return Response.text("up", { status: 502 });
+        \\  return Response.text("ok");
+        \\}
+    ;
+    var fixture = try generateFixture(std.testing.allocator, source);
+    defer fixture.deinit();
+
+    const tests = fixture.generator.getTests();
+    try std.testing.expectEqual(@as(usize, 2), tests.len);
+    for (tests) |t| {
+        try std.testing.expectEqual(@as(usize, 0), t.constraints.len);
+        try std.testing.expectEqual(@as(u16, 200), try stubStatus(t.io_stubs.items[0].result_json));
+    }
+}
+
+test "a status test on a call that is not an ok-record export adds no constraint" {
+    const source = status_prefix ++
+        \\function handler(req) {
+        \\  const auth = jwtVerify("t", "secret");
+        \\  const plain = { status: 1 };
+        \\  if (auth.status !== 200) return Response.text("a", { status: 401 });
+        \\  if (plain.status !== 200) return Response.text("b", { status: 402 });
+        \\  return Response.text("ok");
+        \\}
+    ;
+    var fixture = try generateFixture(std.testing.allocator, source);
+    defer fixture.deinit();
+
+    for (fixture.generator.getTests()) |t| {
+        try std.testing.expectEqual(@as(usize, 0), t.constraints.len);
+    }
+}
+
+test "a status test is a conjunct that composes with the short-circuit cases" {
+    const source = status_prefix ++
+        \\function handler(req) {
+        \\  const res = fetch("https://api.example.com/a");
+        \\  if (res.status !== 200 && req.headers["x"] === "y") {
+        \\    return Response.json({ error: "upstream" }, { status: 502 });
+        \\  }
+        \\  return Response.json({ a: res.body });
+        \\}
+    ;
+    var fixture = try generateFixture(std.testing.allocator, source);
+    defer fixture.deinit();
+
+    const tests = fixture.generator.getTests();
+    try std.testing.expectEqual(@as(usize, 3), tests.len);
+    try std.testing.expectEqual(@as(usize, 1), countPaths(tests, 502, &.{.result_not_ok}));
+    try std.testing.expectEqual(@as(usize, 1), countPaths(tests, 200, &.{.result_ok}));
+    try std.testing.expectEqual(@as(usize, 1), countPaths(tests, 200, &.{.result_not_ok}));
+}
+
+test "a shadowed res keeps the status fork of the outer fetch" {
+    const source = status_prefix ++
+        \\import { cacheGet } from "zttp:cache";
+        \\function handler(req) {
+        \\  const res = fetch("https://api.example.com/a");
+        \\  if (req.method === "POST") {
+        \\    const res = cacheGet("ns", "k") ?? "none";
+        \\    return Response.json({ cached: res });
+        \\  }
+        \\  if (res.status !== 200) return Response.json({ error: "upstream" }, { status: 502 });
+        \\  return Response.json({ a: res.body });
+        \\}
+    ;
+    var fixture = try generateFixture(std.testing.allocator, source);
+    defer fixture.deinit();
+
+    var forked: usize = 0;
+    for (fixture.generator.getTests()) |t| {
+        if (t.expected_status == 502) {
+            try std.testing.expect(hasFailureConstraint(t));
+            forked += 1;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 1), forked);
+}
+
+test "the canonical stubs for status 200 and 503 are the ok-record stubs" {
+    try std.testing.expectEqualStrings(okRecordStub(true), statusStub(200));
+    try std.testing.expectEqualStrings(okRecordStub(false), statusStub(503));
+    try std.testing.expectEqual(@as(u16, 404), try stubStatus(statusStub(404)));
+    try std.testing.expect(std.mem.indexOf(u8, statusStub(404), "\"statusText\":\"Not Found\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, statusStub(302), "\"headers\":{}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, statusStub(599), "\"status\":599") != null);
 }
