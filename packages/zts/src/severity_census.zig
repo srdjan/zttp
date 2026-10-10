@@ -190,9 +190,9 @@ pub fn classifySentinelProbe(obs: Observation) Verdict {
 pub const SentinelExport = struct { module: []const u8, func: []const u8 };
 
 /// `parseIso` is not listed: it declares a severity, so its `severity_probe` row
-/// already asks the same question.
+/// already asks the same question. `rateCheck` left the list in R4 F6: every
+/// failure it has is now an error Result, which its `severity_probe` row forks.
 pub const sentinel_exports = [_]SentinelExport{
-    .{ .module = "ratelimit", .func = "rateCheck" },
     .{ .module = "cache", .func = "cacheIncr" },
     .{ .module = "http", .func = "setCookie" },
     .{ .module = "crypto", .func = "base64Decode" },
@@ -238,12 +238,6 @@ const allowed_rows = [_]AllowedRow{
         .verdict = .no_fork,
         .mechanism = .sentinel_fork,
         .reason = "declares `expected`, but its failure is `undefined` from a plain `number` (time.zig:93-96); the generator forks `=== undefined` only on an optional return, so the failure is never a path",
-    },
-    .{
-        .key = "ratelimit.rateCheck#sentinel_probe",
-        .verdict = .no_fork,
-        .mechanism = .sentinel_fork,
-        .reason = "its Result failures fork (the severity_probe row is ok); bad arguments, a non-finite window, and clock, store, or allocation errors return plain `undefined` (ratelimit.zig:210-224; a representative list, not a full one), which no fork represents",
     },
     .{
         .key = "cache.cacheIncr#sentinel_probe",
@@ -501,10 +495,10 @@ pub const Floors = struct {
 /// The committed floors. A change to the registry that moves a row between
 /// verdicts edits `allowed_rows`; one that adds or drops an export edits these.
 const floors = Floors{
-    .total = 71,
+    .total = 70,
     .severity_rows = 37,
     .forkable_rows = 62,
-    .sentinel_rows = 4,
+    .sentinel_rows = 3,
     .object_rows = 5,
     .ok_rows = 36,
 };

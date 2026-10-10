@@ -4,7 +4,10 @@
 //!   rateCheck(key: string, limit: number, windowSec: number) -> Result
 //!     Fixed-window per-key counter. Returns
 //!     { ok: true, value: { remaining, resetAt } } or
-//!     { ok: false, error: { tag: "rate_exceeded", retryAfter } }.
+//!     { ok: false, error: { tag: "rate_exceeded", retryAfter } }. Other
+//!     failures are error Results too: `invalid_arguments`,
+//!     `rate_store_capacity`, and `rate_store_unavailable` (a clock, store,
+//!     or allocation failure).
 //!
 //!   rateReset(key: string) -> boolean
 //!     Clears the counter for the given key. Returns true if present.
@@ -207,25 +210,27 @@ fn getOrCreateStore(handle: *sdk.ModuleHandle) !*RateStore {
 }
 
 fn rateCheckImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const sdk.JSValue) anyerror!sdk.JSValue {
-    if (args.len < 3) return sdk.JSValue.undefined_val;
-    const key = sdk.extractString(args[0]) orelse return sdk.JSValue.undefined_val;
-    const limit_i = sdk.extractInt(args[1]) orelse return sdk.JSValue.undefined_val;
-    if (limit_i < 1) return sdk.JSValue.undefined_val;
+    // Every failure is an error Result, never a plain `undefined`: the path
+    // generator forks a Result on `.ok`, and no fork represents `undefined`.
+    if (args.len < 3) return rateErrorResult(handle, "invalid_arguments");
+    const key = sdk.extractString(args[0]) orelse return rateErrorResult(handle, "invalid_arguments");
+    const limit_i = sdk.extractInt(args[1]) orelse return rateErrorResult(handle, "invalid_arguments");
+    if (limit_i < 1) return rateErrorResult(handle, "invalid_arguments");
     const limit: u32 = @intCast(limit_i);
-    const window_f = sdk.extractFloat(args[2]) orelse return sdk.JSValue.undefined_val;
+    const window_f = sdk.extractFloat(args[2]) orelse return rateErrorResult(handle, "invalid_arguments");
     // NaN < 1 is false, so guard non-finite explicitly before the cast; an
     // out-of-range @intFromFloat would otherwise be illegal behavior. lossyCast
     // saturates the in-range conversion.
-    if (!std.math.isFinite(window_f) or window_f < 1) return sdk.JSValue.undefined_val;
+    if (!std.math.isFinite(window_f) or window_f < 1) return rateErrorResult(handle, "invalid_arguments");
     const window_sec: i64 = std.math.lossyCast(i64, window_f);
 
-    const now_ms = sdk.nowMs(handle) catch return sdk.JSValue.undefined_val;
+    const now_ms = sdk.nowMs(handle) catch return rateErrorResult(handle, "rate_store_unavailable");
     const now_s = @divTrunc(now_ms, 1000);
 
-    const store = getOrCreateStore(handle) catch return sdk.JSValue.undefined_val;
+    const store = getOrCreateStore(handle) catch return rateErrorResult(handle, "rate_store_unavailable");
     const result = store.check(key, limit, window_sec, now_s) catch |err| return switch (err) {
-        error.RateStoreCapacityExceeded => rateStoreCapacityResult(handle),
-        error.OutOfMemory => sdk.JSValue.undefined_val,
+        error.RateStoreCapacityExceeded => rateErrorResult(handle, "rate_store_capacity"),
+        error.OutOfMemory => rateErrorResult(handle, "rate_store_unavailable"),
     };
 
     if (result.allowed) {
@@ -245,9 +250,10 @@ fn rateCheckImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const sdk.JS
     return sdk.resultErrValue(handle, err_obj);
 }
 
-fn rateStoreCapacityResult(handle: *sdk.ModuleHandle) !sdk.JSValue {
+/// An error Result whose error is `{ tag }`.
+fn rateErrorResult(handle: *sdk.ModuleHandle, tag: []const u8) !sdk.JSValue {
     const err_obj = try sdk.createObject(handle);
-    const tag_str = try sdk.createString(handle, "rate_store_capacity");
+    const tag_str = try sdk.createString(handle, tag);
     try sdk.objectSet(handle, err_obj, "tag", tag_str);
     return sdk.resultErrValue(handle, err_obj);
 }

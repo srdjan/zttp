@@ -3461,6 +3461,34 @@ test "a denied cache namespace never creates the store" {
     }
 }
 
+test "rateCheck answers bad arguments with an error Result, not undefined" {
+    const allocator = std.testing.allocator;
+    const rt = try HandlerInstance.init(allocator, .{});
+    defer rt.deinit();
+
+    // A limit below 1 and a window below 1 second are refused. The census
+    // forks a Result on `.ok`, so a plain `undefined` here was a failure no
+    // path represented (R4 F6).
+    const handler_code =
+        \\import { rateCheck } from "zttp:ratelimit";
+        \\function handler(req) {
+        \\  const limit = rateCheck("k", 0, 60);
+        \\  const window = rateCheck("k", 5, 0);
+        \\  return Response.json({ limitOk: limit.ok, limitTag: limit.error.tag, windowOk: window.ok, windowTag: window.error.tag });
+        \\}
+    ;
+    try rt.loadHandler(handler_code, "<ratecheck-invalid>");
+
+    var request = try makeTestRequest(allocator, "GET", "/", null);
+    defer request.deinit(allocator);
+    var response = try rt.executeHandler(request.asView());
+    defer response.deinit();
+
+    try std.testing.expectEqual(@as(u16, 200), response.status);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"limitOk\":false,\"limitTag\":\"invalid_arguments\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "\"windowOk\":false,\"windowTag\":\"invalid_arguments\"") != null);
+}
+
 test "a denied sql write never reaches the database" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
