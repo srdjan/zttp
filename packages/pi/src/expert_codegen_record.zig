@@ -608,10 +608,6 @@ fn replayCorpusTurn(
     return .{ .result = result, .transcript = transcript };
 }
 
-fn setSessionCapture(session: *agent.AgentSession, sink: ?*capture_sink.CaptureSink) !void {
-    return session.setCaptureSink(sink);
-}
-
 /// Borrowed env-var read (no allocation), mirroring agent.zig's `envVar`:
 /// std.process env helpers are not the 0.16 path; std.c.getenv is.
 fn envValue(name_z: [:0]const u8) ?[]const u8 {
@@ -3191,8 +3187,8 @@ fn recordLiveCase(
     defer std.Io.Threaded.chdir(saved_cwd) catch {};
 
     var sink = recorder.captureSink();
-    try setSessionCapture(context.session, &sink);
-    defer setSessionCapture(context.session, null) catch {};
+    try context.session.setCaptureSink(&sink);
+    defer context.session.setCaptureSink(null) catch {};
 
     var transcript: transcript_mod.Transcript = .{};
     defer transcript.deinit(allocator);
@@ -3222,7 +3218,7 @@ fn recordLiveCase(
         );
         return err;
     };
-    try setSessionCapture(context.session, null);
+    try context.session.setCaptureSink(null);
 
     if (result.end_reason == .budget_timeout) {
         std.debug.print(
