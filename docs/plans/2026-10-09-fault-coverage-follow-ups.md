@@ -1,6 +1,6 @@
 # Plan: fault coverage follow-ups (R4)
 
-Status: draft, revision 2, not approved. Source: the follow-ups of the
+Status: approved 2026-10-10, revision 2. Source: the follow-ups of the
 [R3 plan](2026-10-09-fault-coverage-for-upstream-calls.md), section 7 and
 section 9. Code references are to local `main` at `1d821395`. Revision 1 was
 reviewed by Fable and Codex astra (section 8).
@@ -264,6 +264,9 @@ after; the example diff with every change explained (61 tracked `.ts` and
 F1 to F8, one commit per unit.
 
 ## 6. Decisions for the owner
+
+Answered 2026-10-10: D1 to D7 all as recommended. The owner approved this
+plan, including one paid DeepSeek re-record (F9) after F8 and the full verify.
 
 **D1 (extent of the imported scan).** (a) The whole imported file,
 transitively, as the same-file scan does; (b) only the functions that the
