@@ -1142,8 +1142,7 @@ test "rpc: model.set preserves invalid-params and session state on provider mism
     const allocator = testing.allocator;
     var session = try agent.AgentSession.initAnthropic(allocator, "k", "p", null);
     defer session.deinit(allocator);
-    const previous_model = session.backend.anthropic.config.model;
-    const previous_budget = session.backend.anthropic.config.max_tokens;
+    const previous_config = try session.requestConfig();
 
     var buf = TextBuffer.init(allocator);
     defer buf.deinit();
@@ -1155,8 +1154,9 @@ test "rpc: model.set preserves invalid-params and session state on provider mism
         &buf,
     );
     try testing.expect(std.mem.indexOf(u8, buf.written(), "\"code\":-32602") != null);
-    try testing.expectEqualStrings(previous_model, session.backend.anthropic.config.model);
-    try testing.expectEqual(previous_budget, session.backend.anthropic.config.max_tokens);
+    const current_config = try session.requestConfig();
+    try testing.expectEqualStrings(previous_config.model, current_config.model);
+    try testing.expectEqual(previous_config.max_output_tokens, current_config.max_output_tokens);
 }
 
 test "rpc: model.set accepts an active-provider model and updates its request policy" {
@@ -1174,8 +1174,9 @@ test "rpc: model.set accepts an active-provider model and updates its request po
         &buf,
     );
     try testing.expect(std.mem.indexOf(u8, buf.written(), "\"result\":\"claude-haiku-4-5-20251001\"") != null);
-    try testing.expectEqualStrings("claude-haiku-4-5-20251001", session.backend.anthropic.config.model);
-    try testing.expectEqual(@as(u32, 8_192), session.backend.anthropic.config.max_tokens);
+    const config = try session.requestConfig();
+    try testing.expectEqualStrings("claude-haiku-4-5-20251001", config.model);
+    try testing.expectEqual(@as(u32, 8_192), config.max_output_tokens);
 }
 
 test "rpc: skills.list and templates.list return catalog metadata" {

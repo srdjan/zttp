@@ -1,6 +1,6 @@
 //! Expert session wrapper around `loop.runTurn`. Launch identity is resolved
-//! before any backend is constructed, then the provider-specific client stays
-//! behind one tagged union for the lifetime of the process.
+//! before the backend owns one provider-neutral request configuration.
+//! Each request materializes its provider client on the stack.
 //!
 //! The session owns a long-lived `Transcript` that grows across turns
 //! plus allocator-owned provider configuration whose bytes must outlive a
@@ -22,6 +22,8 @@ const tools_schema = @import("providers/anthropic/tools_schema.zig");
 const openai_client = @import("providers/openai/client.zig");
 const local_client = @import("providers/local/client.zig");
 const deepseek_client = @import("providers/deepseek/client.zig");
+const provider_backend = @import("providers/backend.zig");
+const capture_sink = @import("providers/capture_sink.zig");
 const model_request = @import("providers/model_request.zig");
 const compaction = @import("compaction.zig");
 const settings_mod = @import("settings.zig");
@@ -132,27 +134,8 @@ const StubClient = struct {
 
 const Backend = union(enum) {
     stub: StubClient,
-    local: local_client.Client,
-    anthropic: anthropic_client.Client,
-    openai: openai_client.Client,
-    deepseek: deepseek_client.Client,
+    provider: provider_backend.ProviderBackend,
 };
-
-fn configWithModel(config: anytype, model: *const models_registry.Model) @TypeOf(config) {
-    var next = config;
-    next.model = model.id;
-    next.max_tokens = model.request_policy.max_output_tokens;
-    return next;
-}
-
-fn modelConfigMatches(
-    model_id: []const u8,
-    max_tokens: u32,
-    model: *const models_registry.Model,
-) bool {
-    return std.mem.eql(u8, model_id, model.id) and
-        max_tokens == model.request_policy.max_output_tokens;
-}
 
 /// Running per-session metrics, folded one turn at a time and emitted as a
 /// `session_summary` event at session close. Keyed on `verified_change_set`
@@ -285,13 +268,15 @@ pub const Destination = union(enum) {
 pub fn destinationForSession(session: *const AgentSession) Destination {
     return switch (session.backend) {
         .stub => .offline,
-        .local => |client| .{ .local = client.config.base_url },
-        .anthropic => .anthropic,
-        .openai => |client| if (std.mem.eql(u8, client.config.base_url, openai_client.default_base_url))
-            .openai_hosted
-        else
-            .{ .openai_custom = client.config.base_url },
-        .deepseek => |client| .{ .deepseek = client.config.base_url },
+        .provider => |backend| switch (backend.requestConfig().provider) {
+            .local => .{ .local = backend.endpoint() },
+            .anthropic => .anthropic,
+            .openai => if (std.mem.eql(u8, backend.endpoint(), openai_client.default_base_url))
+                .openai_hosted
+            else
+                .{ .openai_custom = backend.endpoint() },
+            .deepseek => .{ .deepseek = backend.endpoint() },
+        },
     };
 }
 
@@ -309,14 +294,6 @@ pub const AgentSession = struct {
     /// request seam. The per-turn arena cannot own context that survives the
     /// current request or turn.
     session_allocator: ?std.mem.Allocator = null,
-    /// Allocator-owned copy of the system prompt bytes backing the
-    /// Anthropic client's Config. Null for the stub path.
-    system_prompt_owned: ?[]u8 = null,
-    tools_json_owned: ?[]u8 = null,
-    /// Set only when `initOpenAI` was given an endpoint override; the client's
-    /// Config borrows these, so the session outlives the caller's buffers the
-    /// same way it does for the prompt.
-    base_url_owned: ?[]u8 = null,
     /// Resolved launch identity. This is authoritative for UI and persistence,
     /// including test sessions that inject a model client separately.
     resolved_provider: ?Provider = null,
@@ -390,36 +367,22 @@ pub const AgentSession = struct {
         return session;
     }
 
-    /// Constructs a session whose backend is a real Anthropic client.
-    /// Dupes the system prompt so the caller's buffer can be freed
-    /// independently. Dupes the API key for the same reason.
+    /// Constructs an Anthropic session with owned request buffers.
     pub fn initAnthropic(
         allocator: std.mem.Allocator,
         api_key: []const u8,
         system_prompt: []const u8,
         tools_json: ?[]const u8,
     ) !AgentSession {
-        const prompt_owned = try allocator.dupe(u8, system_prompt);
-        errdefer allocator.free(prompt_owned);
-        const key_owned = try allocator.dupe(u8, api_key);
-        errdefer allocator.free(key_owned);
-        const tools_owned = if (tools_json) |json|
-            try allocator.dupe(u8, json)
-        else
-            null;
-        errdefer if (tools_owned) |json| allocator.free(json);
         const model = models_registry.defaultForProvider(.anthropic);
         return .{
             .session_allocator = allocator,
-            .backend = .{ .anthropic = anthropic_client.Client.init(.{
-                .api_key = key_owned,
-                .system_prompt = prompt_owned,
-                .tools_json = tools_owned,
-                .model = model.id,
-                .max_tokens = model.request_policy.max_output_tokens,
+            .backend = .{ .provider = try provider_backend.ProviderBackend.init(allocator, .{
+                .provider = .anthropic,
+                .auth = api_key,
+                .system_prompt = system_prompt,
+                .tools_json = tools_json,
             }) },
-            .system_prompt_owned = prompt_owned,
-            .tools_json_owned = tools_owned,
             .resolved_provider = .anthropic,
             .resolved_model = model,
         };
@@ -431,34 +394,22 @@ pub const AgentSession = struct {
         tools_json: ?[]const u8,
         base_url: []const u8,
     ) !AgentSession {
-        const prompt_owned = try allocator.dupe(u8, system_prompt);
-        errdefer allocator.free(prompt_owned);
-        const tools_owned = if (tools_json) |json| try allocator.dupe(u8, json) else null;
-        errdefer if (tools_owned) |json| allocator.free(json);
-        const base_owned = try allocator.dupe(u8, base_url);
-        errdefer allocator.free(base_owned);
         const model = models_registry.defaultForProvider(.local);
         return .{
             .session_allocator = allocator,
-            .backend = .{ .local = local_client.Client.init(.{
-                .system_prompt = prompt_owned,
-                .tools_json = tools_owned,
-                .base_url = base_owned,
-                .model = model.id,
-                .max_tokens = model.request_policy.max_output_tokens,
+            .backend = .{ .provider = try provider_backend.ProviderBackend.init(allocator, .{
+                .provider = .local,
+                .system_prompt = system_prompt,
+                .tools_json = tools_json,
+                .endpoint = base_url,
             }) },
-            .system_prompt_owned = prompt_owned,
-            .tools_json_owned = tools_owned,
-            .base_url_owned = base_owned,
             .resolved_provider = .local,
             .resolved_model = model,
         };
     }
 
-    /// Constructs a session whose backend is a real OpenAI Responses-API
-    /// streaming client. Same ownership contract as `initAnthropic`:
-    /// api_key, system prompt, and tools_json are all duped so the caller's
-    /// buffers can be freed independently. `tools_json` is the
+    /// Constructs an OpenAI Responses API session. The backend copies the API
+    /// key, system prompt, tools, and optional endpoint. `tools_json` is the
     /// Responses-API tools array produced by `openai_client.writeToolsArray`.
     /// An endpoint override changes only the Responses API destination. The
     /// active provider's registry-selected model remains authoritative.
@@ -469,48 +420,23 @@ pub const AgentSession = struct {
         tools_json: ?[]const u8,
         override: ?OpenAiEndpoint,
     ) !AgentSession {
-        const prompt_owned = try allocator.dupe(u8, system_prompt);
-        errdefer allocator.free(prompt_owned);
-        const key_owned = try allocator.dupe(u8, api_key);
-        errdefer allocator.free(key_owned);
-        const tools_owned = if (tools_json) |json|
-            try allocator.dupe(u8, json)
-        else
-            null;
-        errdefer if (tools_owned) |json| allocator.free(json);
-
         const model = models_registry.defaultForProvider(.openai);
-        var config = openai_client.Config{
-            .api_key = key_owned,
-            .system_prompt = prompt_owned,
-            .tools_json = tools_owned,
-            .model = model.id,
-            .max_tokens = model.request_policy.max_output_tokens,
-        };
-
-        var base_url_owned: ?[]u8 = null;
-        errdefer if (base_url_owned) |s| allocator.free(s);
-        if (override) |ep| {
-            const owned = try allocator.dupe(u8, ep.base_url);
-            base_url_owned = owned;
-            config.base_url = owned;
-        }
-
         return .{
             .session_allocator = allocator,
-            .backend = .{ .openai = openai_client.Client.init(config) },
-            .system_prompt_owned = prompt_owned,
-            .tools_json_owned = tools_owned,
-            .base_url_owned = base_url_owned,
+            .backend = .{ .provider = try provider_backend.ProviderBackend.init(allocator, .{
+                .provider = .openai,
+                .auth = api_key,
+                .system_prompt = system_prompt,
+                .tools_json = tools_json,
+                .endpoint = if (override) |endpoint| endpoint.base_url else null,
+            }) },
             .resolved_provider = .openai,
             .resolved_model = model,
         };
     }
 
-    /// Constructs a session whose backend is a real DeepSeek Chat Completions
-    /// client. Same ownership contract as `initAnthropic`, plus the base URL:
-    /// an override is duped so the client's Config never borrows a caller
-    /// buffer that could be freed first. `tools_json` is the OpenAI
+    /// Constructs a DeepSeek Chat Completions session with owned request
+    /// buffers. `tools_json` is the OpenAI
     /// function-calling array produced by `deepseek_client.writeToolsArray`.
     pub fn initDeepSeek(
         allocator: std.mem.Allocator,
@@ -519,32 +445,16 @@ pub const AgentSession = struct {
         tools_json: ?[]const u8,
         base_url: []const u8,
     ) !AgentSession {
-        const prompt_owned = try allocator.dupe(u8, system_prompt);
-        errdefer allocator.free(prompt_owned);
-        const key_owned = try allocator.dupe(u8, api_key);
-        errdefer allocator.free(key_owned);
-        const tools_owned = if (tools_json) |json|
-            try allocator.dupe(u8, json)
-        else
-            null;
-        errdefer if (tools_owned) |json| allocator.free(json);
-        const base_owned = try allocator.dupe(u8, base_url);
-        errdefer allocator.free(base_owned);
-
         const model = models_registry.defaultForProvider(.deepseek);
         return .{
             .session_allocator = allocator,
-            .backend = .{ .deepseek = deepseek_client.Client.init(.{
-                .api_key = key_owned,
-                .system_prompt = prompt_owned,
-                .tools_json = tools_owned,
-                .base_url = base_owned,
-                .model = model.id,
-                .max_tokens = model.request_policy.max_output_tokens,
+            .backend = .{ .provider = try provider_backend.ProviderBackend.init(allocator, .{
+                .provider = .deepseek,
+                .auth = api_key,
+                .system_prompt = system_prompt,
+                .tools_json = tools_json,
+                .endpoint = base_url,
             }) },
-            .system_prompt_owned = prompt_owned,
-            .tools_json_owned = tools_owned,
-            .base_url_owned = base_owned,
             .resolved_provider = .deepseek,
             .resolved_model = model,
         };
@@ -553,19 +463,13 @@ pub const AgentSession = struct {
     pub fn deinit(self: *AgentSession, allocator: std.mem.Allocator) void {
         if (self.journal_writer) |*writer| writer.deinit();
         self.transcript.deinit(allocator);
-        if (self.system_prompt_owned) |s| allocator.free(s);
-        if (self.tools_json_owned) |json| allocator.free(json);
-        if (self.base_url_owned) |s| allocator.free(s);
         if (self.session_id) |s| allocator.free(s);
         if (self.session_dir) |s| allocator.free(s);
         if (self.events_path) |s| allocator.free(s);
         if (self.meta_path) |s| allocator.free(s);
         switch (self.backend) {
             .stub => {},
-            .local => {},
-            .anthropic => |*c| allocator.free(c.config.api_key),
-            .openai => |*c| allocator.free(c.config.api_key),
-            .deepseek => |*c| allocator.free(c.config.api_key),
+            .provider => |*backend| backend.deinit(allocator),
         }
     }
 
@@ -581,10 +485,7 @@ pub const AgentSession = struct {
     fn rawModelClient(self: *AgentSession) loop.ModelClient {
         return switch (self.backend) {
             .stub => (&self.backend.stub).asClient(),
-            .local => (&self.backend.local).asModelClient(),
-            .anthropic => (&self.backend.anthropic).asModelClient(),
-            .openai => (&self.backend.openai).asModelClient(),
-            .deepseek => (&self.backend.deepseek).asModelClient(),
+            .provider => (&self.backend.provider).asModelClient(),
         };
     }
 
@@ -613,7 +514,7 @@ pub const AgentSession = struct {
     }
 
     fn prepareProviderCall(self: *AgentSession) !void {
-        // The client config outlives the turn, so a call made with no deadline
+        // The backend timeout outlives the turn, so a call made with no deadline
         // must clear the previous turn's remaining budget rather than inherit
         // it. `/compact` is the caller that has no deadline of its own, and it
         // was being issued with whatever milliseconds the last turn had left.
@@ -636,18 +537,15 @@ pub const AgentSession = struct {
     /// budget to protect.
     pub fn setProviderStallTimeout(self: *AgentSession, timeout_ms: ?u64) void {
         switch (self.backend) {
-            .deepseek => |*client| client.config.stall_timeout_ms = timeout_ms,
-            .stub, .local, .anthropic, .openai => {},
+            .stub => {},
+            .provider => |*backend| backend.setStallTimeout(timeout_ms),
         }
     }
 
     fn setProviderRequestTimeout(self: *AgentSession, timeout_ms: ?u64) void {
         switch (self.backend) {
             .stub => {},
-            .local => |*client| client.config.request_timeout_ms = timeout_ms,
-            .anthropic => |*client| client.config.request_timeout_ms = timeout_ms,
-            .openai => |*client| client.config.request_timeout_ms = timeout_ms,
-            .deepseek => |*client| client.config.request_timeout_ms = timeout_ms,
+            .provider => |*backend| backend.setRequestTimeout(timeout_ms),
         }
     }
 
@@ -666,45 +564,17 @@ pub const AgentSession = struct {
         defer summary_transcript.deinit(arena);
         try summary_transcript.append(arena, .{ .user_text = request.user_prompt });
 
-        const result = switch (self.backend) {
+        const backend = switch (self.backend) {
             .stub => return error.CompactionUnavailable,
-            .local => |client| blk: {
-                var summary_client = client;
-                summary_client.config.system_prompt = request.system_prompt;
-                summary_client.config.tools_json = null;
-                summary_client.config.max_tokens = request.max_output_tokens;
-                summary_client.config.purpose = .summarization;
-                summary_client.config.cache_policy = .disabled;
-                break :blk try summary_client.sendTurn(arena, &summary_transcript, null);
-            },
-            .anthropic => |client| blk: {
-                var summary_client = client;
-                summary_client.config.system_prompt = request.system_prompt;
-                summary_client.config.tools_json = null;
-                summary_client.config.max_tokens = request.max_output_tokens;
-                summary_client.config.purpose = .summarization;
-                summary_client.config.cache_policy = .disabled;
-                break :blk try summary_client.sendTurn(arena, &summary_transcript, null);
-            },
-            .openai => |client| blk: {
-                var summary_client = client;
-                summary_client.config.system_prompt = request.system_prompt;
-                summary_client.config.tools_json = null;
-                summary_client.config.max_tokens = request.max_output_tokens;
-                summary_client.config.purpose = .summarization;
-                summary_client.config.cache_policy = .disabled;
-                break :blk try summary_client.sendTurn(arena, &summary_transcript, null);
-            },
-            .deepseek => |client| blk: {
-                var summary_client = client;
-                summary_client.config.system_prompt = request.system_prompt;
-                summary_client.config.tools_json = null;
-                summary_client.config.max_tokens = request.max_output_tokens;
-                summary_client.config.purpose = .summarization;
-                summary_client.config.cache_policy = .disabled;
-                break :blk try summary_client.sendTurn(arena, &summary_transcript, null);
-            },
+            .provider => |*active| active,
         };
+        var config = backend.requestConfig();
+        config.system_prompt = request.system_prompt;
+        config.tools_json = null;
+        config.max_output_tokens = request.max_output_tokens;
+        config.purpose = .summarization;
+        config.cache_policy = .disabled;
+        const result = try backend.sendWithConfig(arena, config, &summary_transcript, null);
         return .{ .response = result.reply.response, .usage = result.usage };
     }
 
@@ -722,10 +592,27 @@ pub const AgentSession = struct {
         const provider_label = if (self.activeProvider()) |provider| provider.publicName() else "stub";
         const auth_label: []const u8 = switch (self.backend) {
             .stub => "stub",
-            .local => "none",
-            .anthropic, .openai, .deepseek => "api-key",
+            .provider => |backend| backend.authLabel(),
         };
         return .{ .auth_label = auth_label, .provider_label = provider_label };
+    }
+
+    pub fn requestConfig(self: *const AgentSession) !model_request.Config {
+        if (self.request_config_override) |config| return config;
+        return switch (self.backend) {
+            .stub => error.CompactionUnavailable,
+            .provider => |backend| backend.requestConfig(),
+        };
+    }
+
+    pub fn setCaptureSink(
+        self: *AgentSession,
+        sink: ?*capture_sink.CaptureSink,
+    ) !void {
+        switch (self.backend) {
+            .stub => return error.UnsupportedRecordingProvider,
+            .provider => |*backend| backend.setCaptureSink(sink),
+        }
     }
 
     /// Select an exact registry model for the active provider. Validation
@@ -752,10 +639,10 @@ pub const AgentSession = struct {
             .reserve_tokens = self.compaction_settings.reserve_tokens,
             .keep_recent_tokens = self.compaction_settings.keep_recent_tokens,
         }, model);
-        switch (self.backend) {
-            .stub => {},
-            else => {
-                var next_request_config = try normalRequestConfig(self);
+        const backend_matches = switch (self.backend) {
+            .stub => false,
+            .provider => |backend| blk: {
+                var next_request_config = backend.requestConfig();
                 next_request_config.model = model.id;
                 next_request_config.max_output_tokens = model.request_policy.max_output_tokens;
                 try validateCompactionCapacityForConfig(
@@ -764,14 +651,10 @@ pub const AgentSession = struct {
                     model,
                     next_request_config,
                 );
+                const current_request_config = backend.requestConfig();
+                break :blk std.mem.eql(u8, current_request_config.model, model.id) and
+                    current_request_config.max_output_tokens == model.request_policy.max_output_tokens;
             },
-        }
-        const backend_matches = switch (self.backend) {
-            .local => |client| modelConfigMatches(client.config.model, client.config.max_tokens, model),
-            .anthropic => |client| modelConfigMatches(client.config.model, client.config.max_tokens, model),
-            .openai => |client| modelConfigMatches(client.config.model, client.config.max_tokens, model),
-            .deepseek => |client| modelConfigMatches(client.config.model, client.config.max_tokens, model),
-            .stub => false,
         };
         if (backend_matches) {
             self.resolved_model = model;
@@ -782,11 +665,11 @@ pub const AgentSession = struct {
         // on the previous model.
         try restamp_fn(allocator, self, provider, model.id);
         switch (self.backend) {
-            .local => |*client| client.config = configWithModel(client.config, model),
-            .anthropic => |*client| client.config = configWithModel(client.config, model),
-            .openai => |*client| client.config = configWithModel(client.config, model),
-            .deepseek => |*client| client.config = configWithModel(client.config, model),
             .stub => {},
+            .provider => |*backend| backend.commitModel(
+                model.id,
+                model.request_policy.max_output_tokens,
+            ),
         }
         self.resolved_model = model;
         self.last_normal_anchor = null;
@@ -1133,10 +1016,7 @@ fn initFromEnvWithPreparedResume(
     session.compaction_settings = loaded_settings.compaction.core();
     switch (session.backend) {
         .stub => {},
-        .local => |*client| client.config.reserve_tokens = loaded_settings.compaction.reserve_tokens,
-        .anthropic => |*client| client.config.reserve_tokens = loaded_settings.compaction.reserve_tokens,
-        .openai => |*client| client.config.reserve_tokens = loaded_settings.compaction.reserve_tokens,
-        .deepseek => |*client| client.config.reserve_tokens = loaded_settings.compaction.reserve_tokens,
+        .provider => |*backend| backend.setReserveTokens(loaded_settings.compaction.reserve_tokens),
     }
 
     if (resolution) |resolved| {
@@ -1151,13 +1031,13 @@ fn initFromEnvWithPreparedResume(
     if (resolution) |resolved| {
         switch (session.backend) {
             .stub => {},
-            else => try session.setModel(allocator, resolved.model.id),
+            .provider => try session.setModel(allocator, resolved.model.id),
         }
     }
 
     const bootstrap_note: ?[]u8 = switch (session.backend) {
         .stub => null,
-        else => try meta_bootstrap.buildFromCwd(allocator),
+        .provider => try meta_bootstrap.buildFromCwd(allocator),
     };
     defer if (bootstrap_note) |note| allocator.free(note);
 
@@ -1784,7 +1664,7 @@ fn compactTranscriptDetailed(
     defer if (summary_owned) allocator.free(summary);
     const after_budget = try requestBudgetForConfig(
         allocator,
-        try normalRequestConfig(session),
+        try session.requestConfig(),
         tr,
         .{
             .summary = summary,
@@ -2136,47 +2016,6 @@ fn currentExternalTurnEntryId(transcript: *const transcript_mod.Transcript) tran
     return 0;
 }
 
-fn normalRequestConfig(session: *const AgentSession) !model_request.Config {
-    if (session.request_config_override) |config| return config;
-    return switch (session.backend) {
-        .stub => error.CompactionUnavailable,
-        .local => |client| .{
-            .provider = .local,
-            .model = client.config.model,
-            .max_output_tokens = client.config.max_tokens,
-            .stream = false,
-            .system_prompt = client.config.system_prompt,
-            .tools_json = client.config.tools_json,
-            .reserve_tokens = client.config.reserve_tokens,
-        },
-        .anthropic => |client| .{
-            .provider = .anthropic,
-            .model = client.config.model,
-            .max_output_tokens = client.config.max_tokens,
-            .system_prompt = client.config.system_prompt,
-            .tools_json = client.config.tools_json,
-            .reserve_tokens = client.config.reserve_tokens,
-        },
-        .openai => |client| .{
-            .provider = .openai,
-            .model = client.config.model,
-            .max_output_tokens = client.config.max_tokens,
-            .system_prompt = client.config.system_prompt,
-            .tools_json = client.config.tools_json,
-            .reserve_tokens = client.config.reserve_tokens,
-        },
-        .deepseek => |client| .{
-            .provider = .deepseek,
-            .model = client.config.model,
-            .max_output_tokens = client.config.max_tokens,
-            .stream = false,
-            .system_prompt = client.config.system_prompt,
-            .tools_json = client.config.tools_json,
-            .reserve_tokens = client.config.reserve_tokens,
-        },
-    };
-}
-
 fn requestBudgetForProjection(
     allocator: std.mem.Allocator,
     session: *const AgentSession,
@@ -2185,7 +2024,7 @@ fn requestBudgetForProjection(
 ) !context_budget.RequestBudget {
     return requestBudgetForConfig(
         allocator,
-        try normalRequestConfig(session),
+        try session.requestConfig(),
         transcript,
         projection_override,
         null,
@@ -2201,7 +2040,7 @@ fn normalRequestBudget(
 ) !context_budget.RequestBudget {
     return requestBudgetForConfig(
         allocator,
-        try normalRequestConfig(session),
+        try session.requestConfig(),
         transcript,
         null,
         extra_user_text,
@@ -2217,7 +2056,7 @@ fn admitSummaryRequest(
     var transcript: transcript_mod.Transcript = .{};
     defer transcript.deinit(allocator);
     try transcript.append(allocator, .{ .user_text = request.user_prompt });
-    var config = try normalRequestConfig(session);
+    var config = try session.requestConfig();
     config.system_prompt = request.system_prompt;
     config.tools_json = null;
     config.max_output_tokens = request.max_output_tokens;
@@ -2811,6 +2650,167 @@ test "StubClient ignores user_text and always returns the stub reply" {
     }
 }
 
+fn initLocalUnderAllocationFailure(allocator: std.mem.Allocator) !void {
+    var session = try AgentSession.initLocal(
+        allocator,
+        "owned local prompt",
+        "[{\"type\":\"function\",\"function\":{\"name\":\"local_tool\"}}]",
+        "http://127.0.0.1:18080",
+    );
+    defer session.deinit(allocator);
+}
+
+fn initAnthropicUnderAllocationFailure(allocator: std.mem.Allocator) !void {
+    var session = try AgentSession.initAnthropic(
+        allocator,
+        "owned anthropic key",
+        "owned anthropic prompt",
+        "[{\"name\":\"anthropic_tool\",\"description\":\"d\",\"input_schema\":{}}]",
+    );
+    defer session.deinit(allocator);
+}
+
+fn initOpenAiUnderAllocationFailure(allocator: std.mem.Allocator) !void {
+    var session = try AgentSession.initOpenAI(
+        allocator,
+        "owned openai key",
+        "owned openai prompt",
+        "[{\"type\":\"function\",\"function\":{\"name\":\"openai_tool\"}}]",
+        .{ .base_url = "http://127.0.0.1:18081/v1/responses" },
+    );
+    defer session.deinit(allocator);
+}
+
+fn initDeepSeekUnderAllocationFailure(allocator: std.mem.Allocator) !void {
+    var session = try AgentSession.initDeepSeek(
+        allocator,
+        "owned deepseek key",
+        "owned deepseek prompt",
+        "[{\"type\":\"function\",\"function\":{\"name\":\"deepseek_tool\"}}]",
+        "https://deepseek-gateway.example/v1",
+    );
+    defer session.deinit(allocator);
+}
+
+test "provider constructors release every partial allocation" {
+    try testing.checkAllAllocationFailures(testing.allocator, initLocalUnderAllocationFailure, .{});
+    try testing.checkAllAllocationFailures(testing.allocator, initAnthropicUnderAllocationFailure, .{});
+    try testing.checkAllAllocationFailures(testing.allocator, initOpenAiUnderAllocationFailure, .{});
+    try testing.checkAllAllocationFailures(testing.allocator, initDeepSeekUnderAllocationFailure, .{});
+}
+
+test "initLocal owns prompt tools and a non-default endpoint" {
+    const allocator = testing.allocator;
+    var session = blk: {
+        const prompt = try allocator.dupe(u8, "local caller prompt");
+        defer allocator.free(prompt);
+        const tools = try allocator.dupe(u8, "[{\"name\":\"local-owned-tool\"}]");
+        defer allocator.free(tools);
+        const endpoint = try allocator.dupe(u8, "http://127.0.0.1:18082");
+        defer allocator.free(endpoint);
+        const owned = try AgentSession.initLocal(allocator, prompt, tools, endpoint);
+        @memset(prompt, 'p');
+        @memset(tools, 't');
+        @memset(endpoint, 'e');
+        break :blk owned;
+    };
+    defer session.deinit(allocator);
+
+    const config = try session.requestConfig();
+    try testing.expectEqualStrings("local caller prompt", config.system_prompt);
+    try testing.expectEqualStrings("[{\"name\":\"local-owned-tool\"}]", config.tools_json.?);
+    try testing.expectEqualStrings("http://127.0.0.1:18082", session.backend.provider.endpoint());
+}
+
+test "initAnthropic owns auth prompt and non-null tools" {
+    const allocator = testing.allocator;
+    var session = blk: {
+        const key = try allocator.dupe(u8, "anthropic caller key");
+        defer allocator.free(key);
+        const prompt = try allocator.dupe(u8, "anthropic caller prompt");
+        defer allocator.free(prompt);
+        const tools = try allocator.dupe(u8, "[{\"name\":\"anthropic-owned-tool\"}]");
+        defer allocator.free(tools);
+        const owned = try AgentSession.initAnthropic(allocator, key, prompt, tools);
+        @memset(key, 'k');
+        @memset(prompt, 'p');
+        @memset(tools, 't');
+        break :blk owned;
+    };
+    defer session.deinit(allocator);
+
+    const config = try session.requestConfig();
+    try testing.expectEqualStrings("anthropic caller key", session.backend.provider.auth().?);
+    try testing.expectEqualStrings("anthropic caller prompt", config.system_prompt);
+    try testing.expectEqualStrings("[{\"name\":\"anthropic-owned-tool\"}]", config.tools_json.?);
+}
+
+test "initOpenAI owns auth prompt tools and a non-default endpoint" {
+    const allocator = testing.allocator;
+    var session = blk: {
+        const key = try allocator.dupe(u8, "openai caller key");
+        defer allocator.free(key);
+        const prompt = try allocator.dupe(u8, "openai caller prompt");
+        defer allocator.free(prompt);
+        const tools = try allocator.dupe(u8, "[{\"name\":\"openai-owned-tool\"}]");
+        defer allocator.free(tools);
+        const endpoint = try allocator.dupe(u8, "http://127.0.0.1:18083/v1/responses");
+        defer allocator.free(endpoint);
+        const owned = try AgentSession.initOpenAI(
+            allocator,
+            key,
+            prompt,
+            tools,
+            .{ .base_url = endpoint },
+        );
+        @memset(key, 'k');
+        @memset(prompt, 'p');
+        @memset(tools, 't');
+        @memset(endpoint, 'e');
+        break :blk owned;
+    };
+    defer session.deinit(allocator);
+
+    const config = try session.requestConfig();
+    try testing.expectEqualStrings("openai caller key", session.backend.provider.auth().?);
+    try testing.expectEqualStrings("openai caller prompt", config.system_prompt);
+    try testing.expectEqualStrings("[{\"name\":\"openai-owned-tool\"}]", config.tools_json.?);
+    try testing.expectEqualStrings(
+        "http://127.0.0.1:18083/v1/responses",
+        session.backend.provider.endpoint(),
+    );
+}
+
+test "initDeepSeek owns auth prompt tools and a non-default endpoint" {
+    const allocator = testing.allocator;
+    var session = blk: {
+        const key = try allocator.dupe(u8, "deepseek caller key");
+        defer allocator.free(key);
+        const prompt = try allocator.dupe(u8, "deepseek caller prompt");
+        defer allocator.free(prompt);
+        const tools = try allocator.dupe(u8, "[{\"name\":\"deepseek-owned-tool\"}]");
+        defer allocator.free(tools);
+        const endpoint = try allocator.dupe(u8, "https://deepseek-gateway.example/v1");
+        defer allocator.free(endpoint);
+        const owned = try AgentSession.initDeepSeek(allocator, key, prompt, tools, endpoint);
+        @memset(key, 'k');
+        @memset(prompt, 'p');
+        @memset(tools, 't');
+        @memset(endpoint, 'e');
+        break :blk owned;
+    };
+    defer session.deinit(allocator);
+
+    const config = try session.requestConfig();
+    try testing.expectEqualStrings("deepseek caller key", session.backend.provider.auth().?);
+    try testing.expectEqualStrings("deepseek caller prompt", config.system_prompt);
+    try testing.expectEqualStrings("[{\"name\":\"deepseek-owned-tool\"}]", config.tools_json.?);
+    try testing.expectEqualStrings(
+        "https://deepseek-gateway.example/v1",
+        session.backend.provider.endpoint(),
+    );
+}
+
 test "initAnthropic dupes api_key and system_prompt, deinit releases both" {
     var session = try AgentSession.initAnthropic(
         testing.allocator,
@@ -2820,13 +2820,14 @@ test "initAnthropic dupes api_key and system_prompt, deinit releases both" {
     );
     defer session.deinit(testing.allocator);
 
-    try testing.expect(session.backend == .anthropic);
-    try testing.expectEqualStrings("test-fixture-key", session.backend.anthropic.config.api_key);
-    try testing.expectEqualStrings("you are a zts expert", session.backend.anthropic.config.system_prompt);
-    try testing.expectEqualStrings("claude-sonnet-4-6", session.backend.anthropic.config.model);
-    try testing.expectEqual(@as(u32, 64_000), session.backend.anthropic.config.max_tokens);
-    try testing.expect(session.backend.anthropic.config.tools_json != null);
-    try testing.expect(session.system_prompt_owned != null);
+    try testing.expect(session.backend == .provider);
+    const config = try session.requestConfig();
+    try testing.expectEqual(Provider.anthropic, config.provider);
+    try testing.expectEqualStrings("test-fixture-key", session.backend.provider.auth().?);
+    try testing.expectEqualStrings("you are a zts expert", config.system_prompt);
+    try testing.expectEqualStrings("claude-sonnet-4-6", config.model);
+    try testing.expectEqual(@as(u32, 64_000), config.max_output_tokens);
+    try testing.expect(config.tools_json != null);
 }
 
 test "initOpenAI dupes api_key and system_prompt and routes through openai backend" {
@@ -2839,11 +2840,13 @@ test "initOpenAI dupes api_key and system_prompt and routes through openai backe
     );
     defer session.deinit(testing.allocator);
 
-    try testing.expect(session.backend == .openai);
-    try testing.expectEqualStrings("openai-fixture-key", session.backend.openai.config.api_key);
-    try testing.expectEqualStrings("you are a zts expert", session.backend.openai.config.system_prompt);
-    try testing.expectEqualStrings("gpt-4o-mini", session.backend.openai.config.model);
-    try testing.expectEqual(@as(u32, 8_192), session.backend.openai.config.max_tokens);
+    try testing.expect(session.backend == .provider);
+    const config = try session.requestConfig();
+    try testing.expectEqual(Provider.openai, config.provider);
+    try testing.expectEqualStrings("openai-fixture-key", session.backend.provider.auth().?);
+    try testing.expectEqualStrings("you are a zts expert", config.system_prompt);
+    try testing.expectEqualStrings("gpt-4o-mini", config.model);
+    try testing.expectEqual(@as(u32, 8_192), config.max_output_tokens);
     try testing.expectEqualStrings("openai", session.backendDescriptor().provider_label);
 }
 
@@ -2857,14 +2860,16 @@ test "initDeepSeek dupes its owned bytes and routes through the deepseek backend
     );
     defer session.deinit(testing.allocator);
 
-    try testing.expect(session.backend == .deepseek);
-    try testing.expectEqualStrings("deepseek-fixture-key", session.backend.deepseek.config.api_key);
-    try testing.expectEqualStrings("you are a zts expert", session.backend.deepseek.config.system_prompt);
-    try testing.expectEqualStrings("deepseek-v4-flash", session.backend.deepseek.config.model);
-    try testing.expectEqual(@as(u32, 32_768), session.backend.deepseek.config.max_tokens);
+    try testing.expect(session.backend == .provider);
+    const config = try session.requestConfig();
+    try testing.expectEqual(Provider.deepseek, config.provider);
+    try testing.expectEqualStrings("deepseek-fixture-key", session.backend.provider.auth().?);
+    try testing.expectEqualStrings("you are a zts expert", config.system_prompt);
+    try testing.expectEqualStrings("deepseek-v4-flash", config.model);
+    try testing.expectEqual(@as(u32, 32_768), config.max_output_tokens);
     try testing.expectEqualStrings("deepseek", session.backendDescriptor().provider_label);
     try testing.expectEqualStrings("api-key", session.backendDescriptor().auth_label);
-    try testing.expect(session.base_url_owned != null);
+    try testing.expectEqualStrings(deepseek_client.default_base_url, session.backend.provider.endpoint());
 }
 
 test "a deepseek session declares a remote destination at whatever root it uses" {
@@ -2898,14 +2903,14 @@ test "setModel moves a deepseek session between registered deepseek models only"
     defer session.deinit(testing.allocator);
 
     try session.setModel(testing.allocator, "deepseek-v4-pro");
-    try testing.expectEqualStrings("deepseek-v4-pro", session.backend.deepseek.config.model);
+    try testing.expectEqualStrings("deepseek-v4-pro", (try session.requestConfig()).model);
     try testing.expectEqualStrings("deepseek-v4-pro", session.currentModel().?);
 
     try testing.expectError(
         error.ProviderMismatch,
         session.setModel(testing.allocator, "gpt-4o-mini"),
     );
-    try testing.expectEqualStrings("deepseek-v4-pro", session.backend.deepseek.config.model);
+    try testing.expectEqualStrings("deepseek-v4-pro", (try session.requestConfig()).model);
 }
 
 test "an endpoint override redirects the client without touching the hosted default" {
@@ -2920,14 +2925,16 @@ test "an endpoint override redirects the client without touching the hosted defa
     );
     defer local.deinit(testing.allocator);
 
-    try testing.expectEqualStrings("http://127.0.0.1:11434/v1/responses", local.backend.openai.config.base_url);
-    try testing.expectEqualStrings("gpt-4o-mini", local.backend.openai.config.model);
-    try testing.expectEqual(@as(u32, 8_192), local.backend.openai.config.max_tokens);
+    try testing.expectEqualStrings("http://127.0.0.1:11434/v1/responses", local.backend.provider.endpoint());
+    const local_config = try local.requestConfig();
+    try testing.expectEqualStrings("gpt-4o-mini", local_config.model);
+    try testing.expectEqual(@as(u32, 8_192), local_config.max_output_tokens);
 
     var hosted = try AgentSession.initOpenAI(testing.allocator, "k", "p", null, null);
     defer hosted.deinit(testing.allocator);
-    try testing.expectEqualStrings("gpt-4o-mini", hosted.backend.openai.config.model);
-    try testing.expectEqual(@as(u32, 8_192), hosted.backend.openai.config.max_tokens);
+    const hosted_config = try hosted.requestConfig();
+    try testing.expectEqualStrings("gpt-4o-mini", hosted_config.model);
+    try testing.expectEqual(@as(u32, 8_192), hosted_config.max_output_tokens);
 }
 
 test "an endpoint that moves only the host keeps the registry model" {
@@ -2943,9 +2950,10 @@ test "an endpoint that moves only the host keeps the registry model" {
     );
     defer session.deinit(testing.allocator);
 
-    try testing.expectEqualStrings("http://proxy.internal/v1/responses", session.backend.openai.config.base_url);
-    try testing.expectEqualStrings("gpt-4o-mini", session.backend.openai.config.model);
-    try testing.expectEqual(@as(u32, 8_192), session.backend.openai.config.max_tokens);
+    try testing.expectEqualStrings("http://proxy.internal/v1/responses", session.backend.provider.endpoint());
+    const config = try session.requestConfig();
+    try testing.expectEqualStrings("gpt-4o-mini", config.model);
+    try testing.expectEqual(@as(u32, 8_192), config.max_output_tokens);
 }
 
 test "modelClient wraps the active backend with the normal request lifecycle" {
@@ -2974,16 +2982,19 @@ test "setModel validates provider and commits model with request policy atomical
     defer session.deinit(testing.allocator);
 
     try session.setModel(testing.allocator, "claude-sonnet-4-6");
-    try testing.expectEqual(@as(u32, 64_000), session.backend.anthropic.config.max_tokens);
-    try testing.expectEqualStrings("claude-sonnet-4-6", session.backend.anthropic.config.model);
+    var config = try session.requestConfig();
+    try testing.expectEqual(@as(u32, 64_000), config.max_output_tokens);
+    try testing.expectEqualStrings("claude-sonnet-4-6", config.model);
 
     try testing.expectError(error.UnknownModel, session.setModel(testing.allocator, "some-unknown-model"));
-    try testing.expectEqual(@as(u32, 64_000), session.backend.anthropic.config.max_tokens);
-    try testing.expectEqualStrings("claude-sonnet-4-6", session.backend.anthropic.config.model);
+    config = try session.requestConfig();
+    try testing.expectEqual(@as(u32, 64_000), config.max_output_tokens);
+    try testing.expectEqualStrings("claude-sonnet-4-6", config.model);
 
     try testing.expectError(error.ProviderMismatch, session.setModel(testing.allocator, "gpt-4o-mini"));
-    try testing.expectEqual(@as(u32, 64_000), session.backend.anthropic.config.max_tokens);
-    try testing.expectEqualStrings("claude-sonnet-4-6", session.backend.anthropic.config.model);
+    config = try session.requestConfig();
+    try testing.expectEqual(@as(u32, 64_000), config.max_output_tokens);
+    try testing.expectEqualStrings("claude-sonnet-4-6", config.model);
 }
 
 test "setModel rejects compaction tuples with no post-summary request capacity" {
@@ -3002,9 +3013,35 @@ test "setModel rejects compaction tuples with no post-summary request capacity" 
     );
     try testing.expectEqualStrings(
         models_registry.defaultForProvider(.anthropic).id,
-        session.backend.anthropic.config.model,
+        (try session.requestConfig()).model,
     );
 }
+
+fn testInputAnchor(provider: Provider, model: []const u8) !context_budget.InputAnchor {
+    const budget = try context_budget.estimate(
+        .{ .system = 1, .tools = 1, .history = 1, .transient = 1 },
+        4,
+        .{ .context_window_tokens = 100_000 },
+    );
+    return .{
+        .usage = .{
+            .epoch = .{
+                .provider = provider,
+                .model = model,
+                .checkpoint_generation = 3,
+            },
+            .logical_input_tokens = 4,
+        },
+        .budget = budget,
+    };
+}
+
+fn discardCapturedExchange(
+    _: *anyopaque,
+    _: usize,
+    _: *const model_request.ModelRequestSnapshot,
+    _: []const u8,
+) anyerror!void {}
 
 test "setModel persistence failure leaves the live model unchanged" {
     const FailRestamp = struct {
@@ -3018,8 +3055,24 @@ test "setModel persistence failure leaves the live model unchanged" {
         }
     };
 
-    var session = try AgentSession.initAnthropic(testing.allocator, "k", "p", null);
+    var session = try AgentSession.initAnthropic(
+        testing.allocator,
+        "failure-key",
+        "failure prompt",
+        "[{\"name\":\"failure-tool\"}]",
+    );
     defer session.deinit(testing.allocator);
+    var capture_marker: u8 = 0;
+    var capture: capture_sink.CaptureSink = .{
+        .context = &capture_marker,
+        .record_fn = discardCapturedExchange,
+    };
+    try session.setCaptureSink(&capture);
+    session.last_normal_anchor = try testInputAnchor(.anthropic, "claude-sonnet-4-6");
+    session.compaction_bridge_anchor = try testInputAnchor(.anthropic, "claude-sonnet-4-6");
+    const previous_normal_anchor = session.last_normal_anchor;
+    const previous_bridge_anchor = session.compaction_bridge_anchor;
+    const previous_config = try session.requestConfig();
     try testing.expectEqualStrings(
         "claude-sonnet-4-6",
         session.currentModel() orelse return error.TestUnexpectedResult,
@@ -3033,8 +3086,95 @@ test "setModel persistence failure leaves the live model unchanged" {
         "claude-sonnet-4-6",
         session.currentModel() orelse return error.TestUnexpectedResult,
     );
-    try testing.expectEqualStrings("claude-sonnet-4-6", session.backend.anthropic.config.model);
-    try testing.expectEqual(@as(u32, 64_000), session.backend.anthropic.config.max_tokens);
+    const current_config = try session.requestConfig();
+    try testing.expectEqualStrings(previous_config.model, current_config.model);
+    try testing.expectEqual(previous_config.max_output_tokens, current_config.max_output_tokens);
+    try testing.expectEqualStrings(previous_config.system_prompt, current_config.system_prompt);
+    try testing.expectEqualStrings(previous_config.tools_json.?, current_config.tools_json.?);
+    try testing.expectEqual(previous_config.reserve_tokens, current_config.reserve_tokens);
+    try testing.expectEqual(previous_config.purpose, current_config.purpose);
+    try testing.expectEqual(previous_config.cache_policy, current_config.cache_policy);
+    try testing.expectEqualDeep(previous_normal_anchor, session.last_normal_anchor);
+    try testing.expectEqualDeep(previous_bridge_anchor, session.compaction_bridge_anchor);
+    try testing.expect(session.backend.provider.captureSink() == &capture);
+    try testing.expect(destinationForSession(&session) == .anthropic);
+}
+
+test "setModel restamps before committing the full backend state" {
+    const ObserveRestamp = struct {
+        fn run(
+            _: std.mem.Allocator,
+            session: *const AgentSession,
+            provider: Provider,
+            model: []const u8,
+        ) !void {
+            try testing.expectEqual(Provider.deepseek, provider);
+            try testing.expectEqualStrings("deepseek-v4-pro", model);
+            try testing.expectEqualStrings(
+                "deepseek-v4-flash",
+                session.currentModel() orelse return error.TestUnexpectedResult,
+            );
+            const config = try session.requestConfig();
+            try testing.expectEqualStrings("deepseek-v4-flash", config.model);
+            try testing.expectEqual(@as(u32, 32_768), config.max_output_tokens);
+            try testing.expectEqualStrings("restamp prompt", config.system_prompt);
+            try testing.expectEqualStrings("[{\"name\":\"restamp-tool\"}]", config.tools_json.?);
+            try testing.expectEqual(model_request.Purpose.normal, config.purpose);
+            try testing.expectEqual(model_request.CachePolicy.enabled, config.cache_policy);
+            try testing.expect(session.last_normal_anchor != null);
+            try testing.expect(session.compaction_bridge_anchor != null);
+            try testing.expect(session.backend.provider.captureSink() != null);
+            const destination = destinationForSession(session);
+            try testing.expectEqualStrings(
+                "https://restamp-gateway.example/v1",
+                destination.deepseek,
+            );
+        }
+    };
+
+    var session = try AgentSession.initDeepSeek(
+        testing.allocator,
+        "restamp-key",
+        "restamp prompt",
+        "[{\"name\":\"restamp-tool\"}]",
+        "https://restamp-gateway.example/v1",
+    );
+    defer session.deinit(testing.allocator);
+    var capture_marker: u8 = 0;
+    var capture: capture_sink.CaptureSink = .{
+        .context = &capture_marker,
+        .record_fn = discardCapturedExchange,
+    };
+    try session.setCaptureSink(&capture);
+    session.setProviderRequestTimeout(1_234);
+    session.setProviderStallTimeout(5_678);
+    session.last_normal_anchor = try testInputAnchor(.deepseek, "deepseek-v4-flash");
+    session.compaction_bridge_anchor = try testInputAnchor(.deepseek, "deepseek-v4-flash");
+
+    try session.setModelWithRestamp(testing.allocator, "deepseek-v4-pro", ObserveRestamp.run);
+
+    const config = try session.requestConfig();
+    try testing.expectEqualStrings("deepseek-v4-pro", config.model);
+    try testing.expectEqual(@as(u32, 32_768), config.max_output_tokens);
+    try testing.expectEqualStrings("restamp prompt", config.system_prompt);
+    try testing.expectEqualStrings("[{\"name\":\"restamp-tool\"}]", config.tools_json.?);
+    try testing.expectEqual(model_request.Purpose.normal, config.purpose);
+    try testing.expectEqual(model_request.CachePolicy.enabled, config.cache_policy);
+    try testing.expect(!config.stream);
+    try testing.expectEqualStrings("restamp-key", session.backend.provider.auth().?);
+    try testing.expectEqualStrings(
+        "https://restamp-gateway.example/v1",
+        session.backend.provider.endpoint(),
+    );
+    try testing.expectEqual(@as(?u64, 1_234), session.backend.provider.requestTimeout());
+    try testing.expectEqual(@as(?u64, 5_678), session.backend.provider.stallTimeout());
+    try testing.expect(session.backend.provider.captureSink() == &capture);
+    try testing.expect(session.last_normal_anchor == null);
+    try testing.expect(session.compaction_bridge_anchor == null);
+    try testing.expectEqualStrings(
+        "deepseek-v4-pro",
+        session.currentModel() orelse return error.TestUnexpectedResult,
+    );
 }
 
 test "OpenAI and stub model selection respect backend provider state" {
@@ -3045,13 +3185,38 @@ test "OpenAI and stub model selection respect backend provider state" {
         openai.activeProvider() orelse return error.TestUnexpectedResult,
     );
     try openai.setModel(testing.allocator, "gpt-4o-mini");
-    try testing.expectEqual(@as(u32, 8_192), openai.backend.openai.config.max_tokens);
+    try testing.expectEqual(@as(u32, 8_192), (try openai.requestConfig()).max_output_tokens);
 
     var stub = AgentSession.initStub();
     defer stub.deinit(testing.allocator);
     try testing.expect(stub.activeProvider() == null);
     try testing.expectError(error.NoActiveProvider, stub.setModel(testing.allocator, "gpt-4o-mini"));
     try testing.expect(stub.currentModel() == null);
+}
+
+test "controlled model selection updates identity without changing request config" {
+    const model = models_registry.defaultForProvider(.anthropic);
+    var session = AgentSession.initControlled(testing.allocator, model, .{
+        .provider = .anthropic,
+        .model = model.id,
+        .max_output_tokens = model.request_policy.max_output_tokens,
+        .system_prompt = "controlled prompt",
+        .tools_json = "[]",
+    });
+    defer session.deinit(testing.allocator);
+    const previous = try session.requestConfig();
+
+    try session.setModel(testing.allocator, "claude-opus-4-8");
+
+    const current = try session.requestConfig();
+    try testing.expectEqualStrings(previous.model, current.model);
+    try testing.expectEqual(previous.max_output_tokens, current.max_output_tokens);
+    try testing.expect(current.system_prompt.ptr == previous.system_prompt.ptr);
+    try testing.expect(current.tools_json.?.ptr == previous.tools_json.?.ptr);
+    try testing.expectEqualStrings(
+        "claude-opus-4-8",
+        session.currentModel() orelse return error.TestUnexpectedResult,
+    );
 }
 
 test "explicit Claude selects only the Anthropic credential" {
@@ -3146,8 +3311,8 @@ test "explicit DeepSeek selects only the DeepSeek credential" {
         Provider.deepseek,
         session.activeProvider() orelse return error.TestUnexpectedResult,
     );
-    try testing.expectEqualStrings("deepseek-key", session.backend.deepseek.config.api_key);
-    try testing.expectEqualStrings(deepseek_client.default_base_url, session.backend.deepseek.config.base_url);
+    try testing.expectEqualStrings("deepseek-key", session.backend.provider.auth().?);
+    try testing.expectEqualStrings(deepseek_client.default_base_url, session.backend.provider.endpoint());
     try testing.expectEqualStrings("deepseek-v4-pro", session.currentModel().?);
 
     try testing.expectError(
@@ -4931,8 +5096,8 @@ test "initFromEnvWithSessionConfig appends AGENTS and CLAUDE files as read-only 
     });
     defer session.deinit(allocator);
 
-    try testing.expect(session.backend == .anthropic);
-    const actual = session.system_prompt_owned orelse return error.TestUnexpectedResult;
+    try testing.expect(session.backend == .provider);
+    const actual = (try session.requestConfig()).system_prompt;
     try testing.expect(std.mem.indexOf(u8, actual, "AGENTS_MARKER_XYZ") != null);
     try testing.expect(std.mem.indexOf(u8, actual, "CLAUDE_MARKER_ABC") != null);
     try testing.expect(std.mem.indexOf(u8, actual, "PROJECT INSTRUCTIONS") != null);
@@ -4966,7 +5131,7 @@ test "initFromEnvWithSessionConfig: no_context_files suppresses AGENTS and CLAUD
     });
     defer session.deinit(allocator);
 
-    const actual = session.system_prompt_owned orelse return error.TestUnexpectedResult;
+    const actual = (try session.requestConfig()).system_prompt;
     try testing.expect(std.mem.indexOf(u8, actual, "SHOULD_NOT_APPEAR_A") == null);
     try testing.expect(std.mem.indexOf(u8, actual, "SHOULD_NOT_APPEAR_B") == null);
     try testing.expect(std.mem.indexOf(u8, actual, "PROJECT CONTEXT") == null);
@@ -5077,15 +5242,14 @@ test "a loopback endpoint override is reported as local, a remote one is not" {
         "http://[::1]:11434/v1/responses",
     };
     for (local_urls) |url| {
-        const session = AgentSession{
-            .backend = .{ .openai = .{ .config = .{
-                .api_key = "test",
-                .model = "gpt-4o-mini",
-                .system_prompt = "test",
-                .base_url = url,
-                .max_tokens = 1,
-            } } },
-        };
+        var session = try AgentSession.initOpenAI(
+            testing.allocator,
+            "test",
+            "test",
+            null,
+            .{ .base_url = url },
+        );
+        defer session.deinit(testing.allocator);
         const dest = destinationForSession(&session);
         try testing.expect(dest == .openai_custom);
         try testing.expect(dest.isLocal());
@@ -5093,15 +5257,14 @@ test "a loopback endpoint override is reported as local, a remote one is not" {
 
     // A proxy in front of a hosted provider is still off-machine, and the
     // banner must not tell the user their source stays put.
-    const session = AgentSession{
-        .backend = .{ .openai = .{ .config = .{
-            .api_key = "test",
-            .model = "gpt-4o-mini",
-            .system_prompt = "test",
-            .base_url = "https://proxy.example.com/v1/responses",
-            .max_tokens = 1,
-        } } },
-    };
+    var session = try AgentSession.initOpenAI(
+        testing.allocator,
+        "test",
+        "test",
+        null,
+        .{ .base_url = "https://proxy.example.com/v1/responses" },
+    );
+    defer session.deinit(testing.allocator);
     const dest = destinationForSession(&session);
     try testing.expect(dest == .openai_custom);
     try testing.expect(!dest.isLocal());

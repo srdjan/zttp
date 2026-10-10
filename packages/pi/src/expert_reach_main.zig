@@ -223,20 +223,10 @@ fn compilerIdentity(allocator: std.mem.Allocator) !report.CompilerIdentity {
 }
 
 fn requestConfigForSession(session: *const agent.AgentSession) !model_request.Config {
-    return switch (session.backend) {
-        .deepseek => |client| .{
-            .provider = .deepseek,
-            .model = client.config.model,
-            .max_output_tokens = client.config.max_tokens,
-            .stream = false,
-            .system_prompt = client.config.system_prompt,
-            .tools_json = client.config.tools_json,
-            .reserve_tokens = client.config.reserve_tokens,
-            .purpose = client.config.purpose,
-            .cache_policy = client.config.cache_policy,
-        },
-        else => error.UnexpectedReachProvider,
-    };
+    if (session.backend == .stub) return error.UnexpectedReachProvider;
+    const config = session.requestConfig() catch return error.UnexpectedReachProvider;
+    if (config.provider != .deepseek) return error.UnexpectedReachProvider;
+    return config;
 }
 
 fn modelIdentity(
@@ -461,10 +451,8 @@ const LiveCapture = struct {
 };
 
 fn setSessionCapture(session: *agent.AgentSession, sink: ?*capture_sink.CaptureSink) !void {
-    switch (session.backend) {
-        .deepseek => |*client| client.capture = sink,
-        else => return error.UnexpectedReachProvider,
-    }
+    if (session.activeProvider() != .deepseek) return error.UnexpectedReachProvider;
+    session.setCaptureSink(sink) catch return error.UnexpectedReachProvider;
 }
 
 fn renderTranscript(allocator: std.mem.Allocator, transcript: *const transcript_mod.Transcript) ![]u8 {

@@ -421,38 +421,15 @@ fn cachedModelRevision(allocator: std.mem.Allocator, provider: agent.Provider, m
 }
 
 fn requestConfigForSession(session: *const agent.AgentSession) !model_request.Config {
-    return switch (session.backend) {
-        .local => |client| .{
-            .provider = .local,
-            .model = client.config.model,
-            .max_output_tokens = client.config.max_tokens,
-            .stream = false,
-            .system_prompt = client.config.system_prompt,
-            .tools_json = client.config.tools_json,
-        },
-        .anthropic => |client| .{
-            .provider = .anthropic,
-            .model = client.config.model,
-            .max_output_tokens = client.config.max_tokens,
-            .system_prompt = client.config.system_prompt,
-            .tools_json = client.config.tools_json,
-        },
-        .openai => |client| .{
-            .provider = .openai,
-            .model = client.config.model,
-            .max_output_tokens = client.config.max_tokens,
-            .system_prompt = client.config.system_prompt,
-            .tools_json = client.config.tools_json,
-        },
-        .deepseek => |client| .{
-            .provider = .deepseek,
-            .model = client.config.model,
-            .max_output_tokens = client.config.max_tokens,
-            .stream = false,
-            .system_prompt = client.config.system_prompt,
-            .tools_json = client.config.tools_json,
-        },
-        .stub => error.UnsupportedRecordingProvider,
+    if (session.backend == .stub) return error.UnsupportedRecordingProvider;
+    const config = session.requestConfig() catch return error.UnsupportedRecordingProvider;
+    return .{
+        .provider = config.provider,
+        .model = config.model,
+        .max_output_tokens = config.max_output_tokens,
+        .stream = config.stream,
+        .system_prompt = config.system_prompt,
+        .tools_json = config.tools_json,
     };
 }
 
@@ -632,13 +609,7 @@ fn replayCorpusTurn(
 }
 
 fn setSessionCapture(session: *agent.AgentSession, sink: ?*capture_sink.CaptureSink) !void {
-    switch (session.backend) {
-        .local => |*client| client.capture = sink,
-        .anthropic => |*client| client.capture = sink,
-        .openai => |*client| client.capture = sink,
-        .deepseek => |*client| client.capture = sink,
-        .stub => return error.UnsupportedRecordingProvider,
-    }
+    return session.setCaptureSink(sink);
 }
 
 /// Borrowed env-var read (no allocation), mirroring agent.zig's `envVar`:

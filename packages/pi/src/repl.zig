@@ -1788,8 +1788,7 @@ test "processSubmit: cross-provider model rejection preserves session config" {
     defer reg.deinit(testing.allocator);
     var session = try agent.AgentSession.initAnthropic(testing.allocator, "k", "p", null);
     defer session.deinit(testing.allocator);
-    const previous_model = session.backend.anthropic.config.model;
-    const previous_budget = session.backend.anthropic.config.max_tokens;
+    const previous_config = try session.requestConfig();
 
     var outcome = try processSubmit(testing.allocator, &session, &reg, "/model gpt-4o-mini", null);
     switch (outcome) {
@@ -1800,8 +1799,9 @@ test "processSubmit: cross-provider model rejection preserves session config" {
         },
         else => return error.TestUnexpectedResult,
     }
-    try testing.expectEqualStrings(previous_model, session.backend.anthropic.config.model);
-    try testing.expectEqual(previous_budget, session.backend.anthropic.config.max_tokens);
+    const current_config = try session.requestConfig();
+    try testing.expectEqualStrings(previous_config.model, current_config.model);
+    try testing.expectEqual(previous_config.max_output_tokens, current_config.max_output_tokens);
 }
 
 test "processSubmit: /status reports provider auth and persistence state" {
