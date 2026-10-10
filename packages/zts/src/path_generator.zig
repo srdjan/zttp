@@ -195,8 +195,12 @@ fn dupePathIoCall(
 /// 1 is the implicit version before this constant existed: no path version was
 /// hashed. 2 is the analysis after every failable call counts as a site, a call
 /// the walk cannot see or a non-exhaustive walk blocks `fault_covered`, and
-/// `fetch` is an upstream call forked by `res.ok`.
-pub const path_analyzer_version: u32 = 2;
+/// `fetch` is an upstream call forked by `res.ok`. 3 (R4) enumerates the
+/// short-circuit cases of an `&&` condition, counts failable calls in imported
+/// files and blocks on any import it cannot scan, forks on a `res.status`
+/// comparison that is the complement of `ok`, and counts the severities that
+/// F5 declared.
+pub const path_analyzer_version: u32 = 3;
 
 // ---------------------------------------------------------------------------
 // PathGenerator

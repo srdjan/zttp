@@ -60,7 +60,10 @@ fi
 # matches the policy. Bump the version whenever fault coverage can prove less or
 # more.
 EXPECTED_PROFILE="zts-model-1"
-EXPECTED_POLICY_HASH="11da0cd82a59bc753a0104c885f98ff6b4a2821170f3e8e5d79f8803c59000be"
+# Moved 2026-10-10: path_analyzer_version 3 (R4): short-circuit cases of an &&
+# condition, failable calls in imported files, the res.status fork, and the
+# severities that R4 F5 declared.
+EXPECTED_POLICY_HASH="b2038448f90d24c22a47c63f4f546b370a4d60b39985a7bc94e49b2bdc177ae3"
 # TSX is separately identified, and its hash binds the core grammar it lowers
 # into, so the declaration cut moves both hashes even though TSX syntax did not.
 EXPECTED_GRAMMAR_HASH="8c555c6dfe5afb98cf73d034a548dd5f18db5a6b540f334a43f0ac871f4d73be"
