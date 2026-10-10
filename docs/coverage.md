@@ -8,7 +8,7 @@ What the offline suite proves, and what it does not.
 > and replay, the loop, veto, apply, retry, salvage, compiler repair, and the
 > hole loop execute correctly over their declared fixtures. And the
 > corpus is load-bearing: of the compiler's 62 advertised rules,
-> 2 are tripped by at least one case. It proves nothing about what a
+> 5 are tripped by at least one case. It proves nothing about what a
 > model will draft. Raw first-draft pass, first-attempt green, median
 > round-trips, and intent pass
 > exist only as recordings of a live model, an offline run is structurally unable
@@ -41,9 +41,9 @@ whatever moved it, and `git log docs/coverage.json` is the history.
 
 | Rules advertised | Tripped by at least one case | Untripped |
 |---|---|---|
-| 62 | 2 | 60 |
+| 62 | 5 | 57 |
 
-Tripped: `ZTS500`, `ZTS502`
+Tripped: `ZTS400`, `ZTS500`, `ZTS502`, `ZTS509`, `ZTS604`
 
 The list above is a fair description of what these prompts ask for and a poor
 description of what the compiler proves. It is the mechanical form of an
@@ -56,14 +56,14 @@ was wrong the first time the count moved. Nothing in this section restates a
 number the generator computes; the codes are printed, and a reader who wants the
 breakdown reads them.
 
-Untripped: `ZTS302`, `ZTS303`, `ZTS304`, `ZTS305`, `ZTS306`, `ZTS308`, `ZTS309`, `ZTS310`, `ZTS501`, `ZTS600`, `ZTS629`, `ZTS601`, `ZTS061`, `ZTS602`, `ZTS603`, `ZTS604`, `ZTS605`, `ZTS608`, `ZTS609`, `ZTS610`, `ZTS623`, `ZTS611`, `ZTS612`, `ZTS621`, `ZTS613`, `ZTS614`, `ZTS616`, `ZTS620`, `ZTS622`, `ZTS625`, `ZTS626`, `ZTS627`, `ZTS628`, `ZTS624`, `ZTS606`, `ZTS503`, `ZTS504`, `ZTS505`, `ZTS506`, `ZTS508`, `ZTS607`, `ZTS509`, `ZTS510`, `ZTS511`, `ZTS512`, `ZTS513`, `ZTS514`, `POL001`, `POL003`, `POL005`, `POL007`, `ZTS400`, `ZTS401`, `ZTS402`, `ZTS403`, `ZTS404`, `ZTS405`, `ZTS406`, `ZTS407`, `ZTS408`
+Untripped: `ZTS302`, `ZTS303`, `ZTS304`, `ZTS305`, `ZTS306`, `ZTS308`, `ZTS309`, `ZTS310`, `ZTS501`, `ZTS600`, `ZTS629`, `ZTS601`, `ZTS061`, `ZTS602`, `ZTS603`, `ZTS605`, `ZTS608`, `ZTS609`, `ZTS610`, `ZTS623`, `ZTS611`, `ZTS612`, `ZTS621`, `ZTS613`, `ZTS614`, `ZTS616`, `ZTS620`, `ZTS622`, `ZTS625`, `ZTS626`, `ZTS627`, `ZTS628`, `ZTS624`, `ZTS606`, `ZTS503`, `ZTS504`, `ZTS505`, `ZTS506`, `ZTS508`, `ZTS607`, `ZTS510`, `ZTS511`, `ZTS512`, `ZTS513`, `ZTS514`, `POL001`, `POL003`, `POL005`, `POL007`, `ZTS401`, `ZTS402`, `ZTS403`, `ZTS404`, `ZTS405`, `ZTS406`, `ZTS407`, `ZTS408`
 
 ## What this corpus has ever reached
 
 The row above is one draw. Recordings of the same headline corpus have measured
 different sets. A rule is counted only when the recorded model output makes the
-mistake that trips it. Across the 10 published runs of corpus `e6801afae099`,
-the tripped set took 7 distinct shapes, the smallest naming 2
+mistake that trips it. Across the 11 published runs of corpus `e6801afae099`,
+the tripped set took 8 distinct shapes, the smallest naming 2
 rules and the largest 7.
 
 | Union across runs | Smallest single run | Largest single run |
@@ -102,9 +102,9 @@ differently. It also proves less: a seed shows the compiler rejects a draft the
 harness supplied, and says nothing about whether a model would ever write one.
 That is the question the section above answers, and only a recording can.
 
-Neither number bounds the other. The corpus leaves 59 of the rules
+Neither number bounds the other. The corpus leaves 56 of the rules
 verified here untripped; it trips 0 that no seed covers; and the two
-sets share 2. Together they name 61 of the 62
+sets share 5. Together they name 61 of the 62
 advertised rules, and taking the corpus union above instead of this single run
 raises that to 61 - the closest thing to a combined answer this
 repository can produce, and still two claims added up rather than one
@@ -126,7 +126,7 @@ since covered. Neither list can drift from the registry without failing a build.
 
 ## Codes the registry does not carry
 
-`ZTS001`, `ZTS002`, `ZTS056`
+`ZTS001`, `ZTS060`, `ZTS102`, `ZTS200`, `ZTS202`, `ZTS203`, `ZTS207`
 
 These are real diagnostics the corpus trips that no `rule_registry` entry
 carries - the parser, stripper, bool-checker, and type-checker families. The
