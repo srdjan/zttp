@@ -83,7 +83,9 @@ EXPECTED_RESTRICTION_HASH="3409f9e0490c698e67dcd1e7a6e3465f0d14c50e0a611bbe96520
 # zttp:sse. These surfaces share one generated module registry hash.
 # Moved 2026-10-09: zttp:durable signalAt declares its fourth argument, the
 # payload that signalAtNative already read (A2).
-EXPECTED_BUILTIN_HASH="c75cb499e42c133dc1050d14b14caffc14d9ca9a08f8d499dc5838ea55d4b047"
+# Moved 2026-10-09: zttp:fetch declares failure_severity upstream on fetch and
+# fetchWithRetry (fault coverage R3 U2), which is part of the module manifest.
+EXPECTED_BUILTIN_HASH="59f990c92fac5231fdd3e2fac86309b154056132f5ae25d75b68ac474cc7e0f4"
 
 fail() {
   printf 'meta drift: %s\n' "$1" >&2

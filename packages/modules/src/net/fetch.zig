@@ -55,6 +55,11 @@ pub const binding = sdk.ModuleBinding{
             // accident. It is optional on purpose.
             .required_arg_count = 1,
             .effect = .write,
+            // An external service failure: a non-2xx response or a refusal is
+            // a fault the handler must answer. `x.ok` on the result forks the
+            // path generator (the signature declares the `ok: boolean` record),
+            // and a 2xx answer on the failure path is reported, not refused.
+            .failure_severity = .upstream,
             .returns = .object,
             .param_types = &.{ .string, .object },
             .param_names = &.{ "url", "init" },
@@ -88,6 +93,11 @@ pub const binding = sdk.ModuleBinding{
             .arg_count = 3,
             .required_arg_count = 1,
             .effect = .write,
+            // An external service failure: a non-2xx response or a refusal is
+            // a fault the handler must answer. `x.ok` on the result forks the
+            // path generator (the signature declares the `ok: boolean` record),
+            // and a 2xx answer on the failure path is reported, not refused.
+            .failure_severity = .upstream,
             .returns = .object,
             .param_types = &.{ .string, .object, .object },
             .param_names = &.{ "url", "init", "retry" },

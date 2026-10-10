@@ -12,11 +12,12 @@
 //! Direction A (`severity_probe`): every export with a `failure_severity` other
 //! than `.none` gets a probe that calls it and branches on its failure shape
 //! (`!r.ok` for a Result, `r === undefined` for an optional, `!r` for a
-//! boolean). The verdict is `ok` when the generator emitted a failure
-//! constraint for that call, the stub on that path has the failing shape, and
-//! the fault checker counts the call as one covered site. Otherwise the verdict
-//! names the first link that broke: `no_fork`, `stub_not_failing`, or
-//! `not_counted`.
+//! boolean, and `!r.ok` again for an export whose declared signature is an
+//! `ok: boolean` record, which is `fetch` and `fetchWithRetry`). The verdict is
+//! `ok` when the generator emitted a failure constraint for that call, the stub
+//! on that path has the failing shape, and the fault checker counts the call as
+//! one covered site. Otherwise the verdict names the first link that broke:
+//! `no_fork`, `stub_not_failing`, or `not_counted`.
 //!
 //! Direction B (`reverse_probe`): every export whose declared return the
 //! generator can fork on (`.result`, `.optional_*`, `.boolean`) and whose
@@ -57,6 +58,10 @@ pub const ProbeKind = enum { severity_probe, reverse_probe, sentinel_probe };
 pub const Shape = enum {
     /// `const r = f("a"); if (!r.ok) return 502;`
     result_ok,
+    /// The same test on an export whose declared signature returns a record
+    /// with an `ok: boolean` field (`fetch`). The stub that fails it is a
+    /// response with a failing `status`, not a Result.
+    ok_record,
     /// `const r = f("a"); if (r === undefined) return 502;` on an optional.
     optional_absent,
     /// `const r = f("a"); if (!r) return 502;`
@@ -98,11 +103,33 @@ pub fn shapeFor(returns: mb.ReturnKind) Shape {
     };
 }
 
-/// A declared return the path generator has a fork rule for.
+/// The probe shape of one export. An export that declares a failure severity and
+/// whose declared signature spells an `ok: boolean` field is probed as an
+/// `ok_record`. The test reads the declared text on purpose: it is the census's
+/// own oracle, so a generator rule that stops recognizing the record shows up
+/// as a `no_fork` finding instead of moving the probe with it. A `Result`
+/// export (`ledger.post`) also spells `ok: boolean`, and forks through its
+/// return kind, so it keeps the `result_ok` probe and its Result stub.
+pub fn shapeForExport(func: *const mb.FunctionBinding) Shape {
+    if (func.returns != .result and func.failure_severity != .none and declaresOkField(func)) return .ok_record;
+    return shapeFor(func.returns);
+}
+
+fn declaresOkField(func: *const mb.FunctionBinding) bool {
+    const sig = func.signature orelse return false;
+    return std.mem.indexOf(u8, sig.returns, "ok: boolean") != null;
+}
+
+/// A declared return the path generator has a fork rule for. This reads the
+/// return kind only: an `ok`-record export declares `.object`, so a severity
+/// of `.none` leaves it out of the reverse direction, and a probe row for it
+/// exists only through its declared severity.
 pub fn isForkableReturn(returns: mb.ReturnKind) bool {
     return switch (shapeFor(returns)) {
         .result_ok, .optional_absent, .boolean_falsy => true,
         .undefined_sentinel => false,
+        // No return kind maps to an `ok_record` probe: `shapeFor` never yields it.
+        .ok_record => false,
     };
 }
 
@@ -431,11 +458,11 @@ pub const Floors = struct {
 /// The committed floors. A change to the registry that moves a row between
 /// verdicts edits `allowed_rows`; one that adds or drops an export edits these.
 const floors = Floors{
-    .total = 62,
-    .severity_rows = 28,
-    .forkable_rows = 58,
+    .total = 64,
+    .severity_rows = 30,
+    .forkable_rows = 60,
     .sentinel_rows = 4,
-    .ok_rows = 27,
+    .ok_rows = 29,
 };
 
 // ---------------------------------------------------------------------------
@@ -449,7 +476,7 @@ fn probeSource(
     shape: Shape,
 ) ![]u8 {
     const test_line: []const u8 = switch (shape) {
-        .result_ok => "if (!r.ok) return Response.text(\"failed\", { status: 502 });",
+        .result_ok, .ok_record => "if (!r.ok) return Response.text(\"failed\", { status: 502 });",
         .optional_absent, .undefined_sentinel => "if (r === undefined) return Response.text(\"failed\", { status: 502 });",
         .boolean_falsy => "if (!r) return Response.text(\"failed\", { status: 502 });",
     };
@@ -460,7 +487,12 @@ fn probeSource(
     );
 }
 
-fn failingStubShape(returns: mb.ReturnKind, json: []const u8) bool {
+/// Whether the stub has the shape that fails the probed call. An `ok_record` stub
+/// must be a response the replay reads as a failure: an integer `status` of 400
+/// or more, beside the `statusText`, `headers`, and `body` the replay reads. The
+/// replay derives `ok` from `status` and ignores a field named `ok`.
+fn failingStubShape(shape: Shape, returns: mb.ReturnKind, json: []const u8) bool {
+    if (shape == .ok_record) return failingResponseStub(json);
     return switch (returns) {
         .result => std.mem.indexOf(u8, json, "\"ok\":false") != null,
         .optional_string, .optional_object, .optional_number => std.mem.eql(u8, json, "null"),
@@ -469,12 +501,25 @@ fn failingStubShape(returns: mb.ReturnKind, json: []const u8) bool {
     };
 }
 
+fn failingResponseStub(json: []const u8) bool {
+    var parsed = std.json.parseFromSlice(std.json.Value, std.heap.page_allocator, json, .{}) catch return false;
+    defer parsed.deinit();
+    if (parsed.value != .object) return false;
+    const fields = parsed.value.object;
+    const status = fields.get("status") orelse return false;
+    if (status != .integer or status.integer < 400 or status.integer > 599) return false;
+    if (fields.get("statusText") == null or fields.get("headers") == null or fields.get("body") == null) return false;
+    // A Result-shaped stub carries `ok`; the replay would ignore it.
+    return fields.get("ok") == null;
+}
+
 /// Run the real path generator and fault checker over one probe handler.
 fn observe(
     allocator: std.mem.Allocator,
     source: []const u8,
     module: []const u8,
     func: []const u8,
+    shape: Shape,
     returns: mb.ReturnKind,
     severity: mb.FailureSeverity,
 ) !Observation {
@@ -506,7 +551,7 @@ fn observe(
             observed.fork = true;
             for (test_case.io_stubs.items) |stub| {
                 if (stub.call_site != info.call_site) continue;
-                if (failingStubShape(returns, stub.result_json)) observed.stub_fails = true;
+                if (failingStubShape(shape, returns, stub.result_json)) observed.stub_fails = true;
             }
         }
     }
@@ -543,11 +588,11 @@ pub fn collectRows(allocator: std.mem.Allocator) !std.ArrayList(Row) {
         for (binding.exports) |*export_fn| {
             const returns = export_fn.returns;
             const severity = export_fn.failure_severity;
-            const shape = shapeFor(returns);
+            const shape = shapeForExport(export_fn);
 
             const source = try probeSource(allocator, binding.specifier, export_fn.name, shape);
             defer allocator.free(source);
-            const obs = try observe(allocator, source, binding.name, export_fn.name, returns, severity);
+            const obs = try observe(allocator, source, binding.name, export_fn.name, shape, returns, severity);
 
             if (severity != .none) {
                 const key = try appendKey(allocator, binding.name, export_fn.name, .severity_probe);
@@ -570,7 +615,7 @@ pub fn collectRows(allocator: std.mem.Allocator) !std.ArrayList(Row) {
         };
         const source = try probeSource(allocator, found.specifier, sentinel.func, .undefined_sentinel);
         defer allocator.free(source);
-        const obs = try observe(allocator, source, sentinel.module, sentinel.func, found.returns, found.severity);
+        const obs = try observe(allocator, source, sentinel.module, sentinel.func, .undefined_sentinel, found.returns, found.severity);
         const key = try appendKey(allocator, sentinel.module, sentinel.func, .sentinel_probe);
         errdefer allocator.free(key);
         try rows.append(allocator, .{ .key = key, .kind = .sentinel_probe, .verdict = classifySentinelProbe(obs) });
@@ -583,6 +628,7 @@ const FoundExport = struct {
     specifier: []const u8,
     returns: mb.ReturnKind,
     severity: mb.FailureSeverity,
+    shape: Shape,
 };
 
 fn findExport(module: []const u8, func: []const u8) ?FoundExport {
@@ -594,6 +640,7 @@ fn findExport(module: []const u8, func: []const u8) ?FoundExport {
                     .specifier = binding.specifier,
                     .returns = export_fn.returns,
                     .severity = export_fn.failure_severity,
+                    .shape = shapeForExport(export_fn),
                 };
             }
         }
@@ -834,18 +881,55 @@ test "every mechanism owns at least one allowed row" {
     }
 }
 
-test "a probe observes a fork on a Result, an optional, and a boolean" {
+test "a probe observes a fork on a Result, an optional, and an ok record" {
     // The gate's own probes, one per fork kind, on exports that must pass.
     const allocator = std.testing.allocator;
     const cases = [_]struct { module: []const u8, func: []const u8 }{
         .{ .module = "auth", .func = "jwtVerify" },
         .{ .module = "env", .func = "env" },
+        .{ .module = "fetch", .func = "fetch" },
+        .{ .module = "fetch", .func = "fetchWithRetry" },
     };
     for (cases) |case| {
         const found = findExport(case.module, case.func) orelse return error.ExportMissing;
-        const source = try probeSource(allocator, found.specifier, case.func, shapeFor(found.returns));
+        const source = try probeSource(allocator, found.specifier, case.func, found.shape);
         defer allocator.free(source);
-        const obs = try observe(allocator, source, case.module, case.func, found.returns, found.severity);
+        const obs = try observe(allocator, source, case.module, case.func, found.shape, found.returns, found.severity);
         try std.testing.expectEqual(Verdict.ok, classifySeverityProbe(obs));
     }
+}
+
+test "the failing stub of an ok-record call is a response the replay reads as a failure" {
+    try std.testing.expect(failingResponseStub("{\"status\":503,\"statusText\":\"Service Unavailable\",\"headers\":{},\"body\":\"{}\"}"));
+    // The Result shape is not a fetch response.
+    try std.testing.expect(!failingResponseStub("{\"ok\":false,\"error\":\"test-error\"}"));
+    // A stub with an `ok` field and no failing status reads as a 200.
+    try std.testing.expect(!failingResponseStub("{\"ok\":false,\"statusText\":\"x\",\"headers\":{},\"body\":\"\"}"));
+    try std.testing.expect(!failingResponseStub("{\"status\":200,\"statusText\":\"OK\",\"headers\":{},\"body\":\"{}\"}"));
+    // Missing fields the replay reads.
+    try std.testing.expect(!failingResponseStub("{\"status\":503}"));
+    try std.testing.expect(!failingResponseStub("null"));
+    try std.testing.expect(!failingResponseStub("not json"));
+}
+
+test "only fetch and fetchWithRetry are probed as ok records" {
+    var count: usize = 0;
+    for (&builtin_modules.all) |*binding| {
+        for (binding.exports) |*export_fn| {
+            if (shapeForExport(export_fn) != .ok_record) continue;
+            count += 1;
+            const listed = std.mem.eql(u8, binding.name, "fetch") and
+                (std.mem.eql(u8, export_fn.name, "fetch") or std.mem.eql(u8, export_fn.name, "fetchWithRetry"));
+            if (!listed) {
+                std.debug.print("unexpected ok-record export {s}.{s}\n", .{ binding.name, export_fn.name });
+                return error.UnexpectedOkRecordExport;
+            }
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 2), count);
+
+    // `zttp:workflow` `call` declares the same record with no severity, so the
+    // census does not probe it as an ok record: it forks on nothing.
+    const call = findExport("workflow", "call") orelse return error.ExportMissing;
+    try std.testing.expectEqual(Shape.undefined_sentinel, call.shape);
 }

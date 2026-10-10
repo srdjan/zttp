@@ -602,6 +602,9 @@ pub const FaultCoverageInfo = struct {
     /// serialized: a decoded contract reports zero, and the property bit the
     /// build stamped is what a consumer reads.
     unseen_calls: u32 = 0,
+    /// Covered upstream sites whose failure path returns 2xx. Not serialized:
+    /// a count for the proof trace, which reports it as `upstreamFallbackSites`.
+    upstream_fallback_sites: u32 = 0,
 
     pub fn isCovered(self: FaultCoverageInfo) bool {
         return self.covered == self.total_failable and self.total_failable > 0 and self.unseen_calls == 0;

@@ -5,7 +5,6 @@ import { fetch } from "zttp:fetch";
 
 structural Guardrails<T> = Proof<T,
   | "state_isolated"
-  | "fault_covered"
   | "result_safe"
   | "optional_safe"
   | "canonical"

@@ -179,6 +179,9 @@ pub const CallSiteEntry = struct {
     has_failure_path: bool,
     failure_status: u16,
     flagged: bool,
+    /// A failure path of an upstream site returns 2xx. The site is covered, and
+    /// this records that the 2xx may be a fallback the author meant.
+    upstream_fallback: bool = false,
 };
 
 // ---------------------------------------------------------------------------
@@ -191,6 +194,9 @@ pub const FaultCoverageReport = struct {
     total_failable: u32,
     covered: u32,
     warning_count: u32,
+    /// Covered upstream sites whose failure path returns 2xx. They stay covered
+    /// (a fallback may be intended), and this count makes them visible.
+    upstream_fallback_sites: u32 = 0,
 
     pub fn isCovered(self: FaultCoverageReport) bool {
         return self.covered == self.total_failable and self.total_failable > 0;
@@ -393,6 +399,7 @@ pub const FaultCoverageChecker = struct {
                 });
             },
             .upstream => {
+                entry.upstream_fallback = true;
                 const message = if (ext_override) |ext|
                     ext.reason
                 else
@@ -443,10 +450,12 @@ pub const FaultCoverageChecker = struct {
         var total_failable: u32 = 0;
         var covered: u32 = 0;
         var warning_count: u32 = 0;
+        var upstream_fallback_sites: u32 = 0;
 
         for (self.entries.items) |entry| {
             total_failable += 1;
             if (entry.has_failure_path) covered += 1;
+            if (entry.has_failure_path and entry.upstream_fallback) upstream_fallback_sites += 1;
         }
         for (self.diagnostics.items) |diag| {
             if (diag.severity == .warning) warning_count += 1;
@@ -458,6 +467,7 @@ pub const FaultCoverageChecker = struct {
             .total_failable = total_failable,
             .covered = covered,
             .warning_count = warning_count,
+            .upstream_fallback_sites = upstream_fallback_sites,
         };
     }
 
@@ -530,6 +540,7 @@ const SourceFaultCoverage = struct {
     covered: u32,
     unseen_calls: usize,
     paths_exhaustive: bool,
+    upstream_fallback_sites: u32,
 };
 
 fn analyzeSourceFaultCoverage(allocator: std.mem.Allocator, source: []const u8) !SourceFaultCoverage {
@@ -558,6 +569,7 @@ fn analyzeSourceFaultCoverage(allocator: std.mem.Allocator, source: []const u8) 
         .covered = report.covered,
         .unseen_calls = generator.unseenFailableCalls().len,
         .paths_exhaustive = generator.pathsExhaustive(),
+        .upstream_fallback_sites = report.upstream_fallback_sites,
     };
 }
 
@@ -1306,4 +1318,226 @@ test "a ?? fallback does not cover a Result export" {
     try std.testing.expectEqual(@as(u32, 1), coverage.total_failable);
     try std.testing.expectEqual(@as(u32, 0), coverage.covered);
     try std.testing.expect(!coverage.clean);
+}
+
+const fetch_prefix =
+    \\import { fetch } from "zttp:fetch";
+    \\import { parallel } from "zttp:io";
+    \\import { logInfo } from "zttp:log";
+    \\import { routerMatch } from "zttp:router";
+    \\function wrap(r) {
+    \\  return r;
+    \\}
+    \\
+;
+
+const routed_tail =
+    \\function getHealth(req) {
+    \\  return Response.json({ healthy: true });
+    \\}
+    \\const routes = { "GET /data": getData, "GET /health": getHealth };
+    \\function handler(req) {
+    \\  const found = routerMatch(routes, req);
+    \\  if (found === undefined) return Response.text("not found", { status: 404 });
+    \\  return found.handler(req);
+    \\}
+;
+
+/// Fetch probes. The verdict is read from the unfiltered source, so a hidden
+/// second `fetch` must make `clean` false through the unseen-call scan, and a
+/// handler with every `fetch` checked must be clean.
+const fetch_probes = [_]FaultProbe{
+    .{ .name = "p1 one fetch, !res.ok returns 502", .clean = true, .source = fetch_prefix ++
+        \\function handler(req) {
+        \\  const res = fetch("https://api.example.com/data");
+        \\  if (!res.ok) return Response.text("upstream failed", { status: 502 });
+        \\  return Response.text("ok");
+        \\}
+    },
+    .{ .name = "p2 fetch with an init object", .clean = true, .source = fetch_prefix ++
+        \\function handler(req) {
+        \\  const res = fetch("https://api.example.com/data", { method: "POST", body: "x" });
+        \\  if (!res.ok) return Response.text("upstream failed", { status: 502 });
+        \\  return Response.text("ok");
+        \\}
+    },
+    .{ .name = "p3 fetch result never checked", .clean = false, .source = fetch_prefix ++
+        \\function handler(req) {
+        \\  const res = fetch("https://api.example.com/data");
+        \\  return Response.text(res.body);
+        \\}
+    },
+    .{ .name = "p4 two fetches, only the first checked", .clean = false, .source = fetch_prefix ++
+        \\function handler(req) {
+        \\  const a = fetch("https://api.example.com/a");
+        \\  const b = fetch("https://api.example.com/b");
+        \\  if (!a.ok) return Response.text("upstream failed", { status: 502 });
+        \\  return Response.text(b.body);
+        \\}
+    },
+    .{ .name = "p5 two fetches, both checked", .clean = true, .source = fetch_prefix ++
+        \\function handler(req) {
+        \\  const a = fetch("https://api.example.com/a");
+        \\  if (!a.ok) return Response.text("a failed", { status: 502 });
+        \\  const b = fetch("https://api.example.com/b");
+        \\  if (!b.ok) return Response.text("b failed", { status: 503 });
+        \\  return Response.text("ok");
+        \\}
+    },
+    .{ .name = "p6 !res.ok returns a 2xx fallback", .clean = true, .source = fetch_prefix ++
+        \\function handler(req) {
+        \\  const res = fetch("https://api.example.com/data");
+        \\  if (!res.ok) return Response.text("fallback", { status: 200 });
+        \\  return Response.text("ok");
+        \\}
+    },
+    .{ .name = "p7 a status comparison is not a fork", .clean = false, .source = fetch_prefix ++
+        \\function handler(req) {
+        \\  const res = fetch("https://api.example.com/data");
+        \\  if (res.status !== 200) return Response.text("upstream failed", { status: 502 });
+        \\  return Response.text("ok");
+        \\}
+    },
+    .{ .name = "p9 routed, the route function never checks its fetch", .clean = false, .source = fetch_prefix ++
+        \\function getData(req) {
+        \\  const res = fetch("https://api.example.com/data");
+        \\  return Response.text(res.body);
+        \\}
+        \\
+    ++ routed_tail },
+    .{ .name = "p10 routed, the route function checks its fetch", .clean = true, .source = fetch_prefix ++
+        \\function getData(req) {
+        \\  const res = fetch("https://api.example.com/data");
+        \\  if (!res.ok) return Response.text("upstream failed", { status: 502 });
+        \\  return Response.text(res.body);
+        \\}
+        \\
+    ++ routed_tail },
+    .{ .name = "f1 second fetch in a nested function (parallel)", .clean = false, .source = fetch_prefix ++
+        \\function handler(req) {
+        \\  const a = fetch("https://api.example.com/a");
+        \\  if (!a.ok) return Response.text("a failed", { status: 502 });
+        \\  function load() {
+        \\    return fetch("https://api.example.com/b", {});
+        \\  }
+        \\  const rows = parallel([load]);
+        \\  return Response.json({ rows: rows });
+        \\}
+    },
+    .{ .name = "f2 second fetch inline", .clean = false, .source = fetch_prefix ++
+        \\function handler(req) {
+        \\  const a = fetch("https://api.example.com/a");
+        \\  if (!a.ok) return Response.text("a failed", { status: 502 });
+        \\  return Response.text(fetch("https://api.example.com/b").body);
+        \\}
+    },
+    .{ .name = "f3 second fetch in a helper", .clean = false, .source = fetch_prefix ++
+        \\function load() {
+        \\  const r = fetch("https://api.example.com/b");
+        \\  return r;
+        \\}
+        \\function handler(req) {
+        \\  const a = fetch("https://api.example.com/a");
+        \\  if (!a.ok) return Response.text("a failed", { status: 502 });
+        \\  const b = load();
+        \\  return Response.json({ b: b });
+        \\}
+    },
+    .{ .name = "f6 second fetch as a match scrutinee", .clean = false, .source = fetch_prefix ++
+        \\function handler(req) {
+        \\  const a = fetch("https://api.example.com/a");
+        \\  if (!a.ok) return Response.text("a failed", { status: 502 });
+        \\  return match (fetch("https://api.example.com/b").ok) {
+        \\    when true: Response.text("ok")
+        \\    when false: Response.text("b failed", { status: 502 })
+        \\  };
+        \\}
+    },
+    .{ .name = "f12 second fetch as an argument", .clean = false, .source = fetch_prefix ++
+        \\function handler(req) {
+        \\  const a = fetch("https://api.example.com/a");
+        \\  if (!a.ok) return Response.text("a failed", { status: 502 });
+        \\  const b = wrap(fetch("https://api.example.com/b"));
+        \\  return Response.json({ b: b });
+        \\}
+    },
+    .{ .name = "f14 second fetch in a branch that does not return", .clean = false, .source = fetch_prefix ++
+        \\function handler(req) {
+        \\  const a = fetch("https://api.example.com/a");
+        \\  if (!a.ok) return Response.text("a failed", { status: 502 });
+        \\  if (req.method === "POST") {
+        \\    const b = fetch("https://api.example.com/b");
+        \\    logInfo(b.body, {});
+        \\  }
+        \\  return Response.text("ok");
+        \\}
+    },
+    .{ .name = "a fetch held in a const and called later", .clean = false, .source = fetch_prefix ++
+        \\function handler(req) {
+        \\  const a = fetch("https://api.example.com/a");
+        \\  if (!a.ok) return Response.text("a failed", { status: 502 });
+        \\  const grab = fetch;
+        \\  const b = grab("https://api.example.com/b");
+        \\  return Response.json({ b: b });
+        \\}
+    },
+};
+
+test "a hidden or unchecked fetch never makes fault coverage true" {
+    // The census must run every probe: a loop that skipped them would pass.
+    try std.testing.expectEqual(@as(usize, 16), fetch_probes.len);
+    var held: usize = 0;
+    var blocked: usize = 0;
+    var mismatched: usize = 0;
+    for (fetch_probes) |probe| {
+        const coverage = analyzeSourceFaultCoverage(std.testing.allocator, probe.source) catch |err| {
+            std.debug.print("fetch probe '{s}' did not analyze: {s}\n", .{ probe.name, @errorName(err) });
+            return err;
+        };
+        if (probe.clean != coverage.clean) {
+            std.debug.print("fetch probe '{s}': expected clean={}, got clean={} ({d} of {d} sites, {d} unseen)\n", .{
+                probe.name,              probe.clean,
+                coverage.clean,          coverage.covered,
+                coverage.total_failable, coverage.unseen_calls,
+            });
+            mismatched += 1;
+        }
+        if (probe.clean) held += 1 else blocked += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 0), mismatched);
+    try std.testing.expectEqual(@as(usize, 5), held);
+    try std.testing.expectEqual(@as(usize, 11), blocked);
+}
+
+test "a 2xx fallback on an upstream failure is covered and counted" {
+    const fallback = try analyzeSourceFaultCoverage(std.testing.allocator, fetch_probes[5].source);
+    const refused = try analyzeSourceFaultCoverage(std.testing.allocator, fetch_probes[0].source);
+    // p6 answers the failed fetch with a 200. It stays covered and clean, and
+    // the report counts it so a reader can see it.
+    try std.testing.expect(fallback.clean);
+    try std.testing.expectEqual(@as(u32, 1), fallback.upstream_fallback_sites);
+    // p1 answers with a 502: no fallback.
+    try std.testing.expect(refused.clean);
+    try std.testing.expectEqual(@as(u32, 0), refused.upstream_fallback_sites);
+}
+
+test "a critical failure with 2xx is a warning, not an upstream fallback" {
+    const constraints = [_]Constraint{
+        .{ .result_not_ok = .{ .module = "auth", .func = "jwtVerify", .returns = .result } },
+    };
+    const tests = [_]GeneratedTest{.{
+        .name = "path 1 !result.ok",
+        .method = "GET",
+        .url = "/",
+        .has_auth_header = false,
+        .expected_status = 200,
+        .io_stubs = .empty,
+        .constraints = &constraints,
+    }};
+    var checker = FaultCoverageChecker.init(std.testing.allocator, &tests);
+    defer checker.deinit();
+    try checker.analyze();
+    const report = checker.getReport();
+    try std.testing.expectEqual(@as(u32, 1), report.warning_count);
+    try std.testing.expectEqual(@as(u32, 0), report.upstream_fallback_sites);
 }

@@ -1453,6 +1453,7 @@ fn analyzeHandlerPaths(
         .covered = report.covered,
         .warnings = report.warning_count,
         .unseen_calls = @intCast(unseen.len),
+        .upstream_fallback_sites = report.upstream_fallback_sites,
     };
     analysis.fault_clean = report.isClean() and generator.faultAnalysisComplete();
     if (unseen.len > 0) {
@@ -2815,6 +2816,7 @@ pub fn compileHandler(
                         .covered = fc_report.covered,
                         .warnings = fc_report.warning_count,
                         .unseen_calls = @intCast(gen.unseenFailableCalls().len),
+                        .upstream_fallback_sites = fc_report.upstream_fallback_sites,
                     };
                 }
 

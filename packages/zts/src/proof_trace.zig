@@ -91,6 +91,9 @@ pub const ProofTrace = struct {
     paths_exhaustive: bool = false,
     failable_sites: u32 = 0,
     covered_sites: u32 = 0,
+    /// Covered upstream sites whose failure path returns 2xx. Only the
+    /// `fault_covered` trace sets it, and the wire format omits it at zero.
+    upstream_fallback_sites: u32 = 0,
     counterexample: ?ProofCounterexample = null,
     resisted: ?ResistedCounterexample = null,
 };
@@ -561,12 +564,20 @@ fn buildTrace(
                 if (contract.fault_coverage) |fc| {
                     trace.failable_sites = fc.total_failable;
                     trace.covered_sites = fc.covered;
+                    trace.upstream_fallback_sites = fc.upstream_fallback_sites;
                     if (holds) {
                         trace.summary = try std.fmt.allocPrint(
                             arena,
                             "All {d} failable I/O site(s) have an explicit failure path, across {d} enumerated path(s).",
                             .{ fc.total_failable, paths_enumerated },
                         );
+                        if (fc.upstream_fallback_sites > 0) {
+                            trace.summary = try std.fmt.allocPrint(
+                                arena,
+                                "{s} {d} upstream site(s) answer a failure with a 2xx status; each is covered and may be an intended fallback.",
+                                .{ trace.summary, fc.upstream_fallback_sites },
+                            );
+                        }
                     } else if (fc.total_failable == 0) {
                         trace.summary = "No failable I/O sites in this handler yet.";
                     } else if (fc.covered == fc.total_failable and fc.warnings == 0 and !paths_exhaustive) {
@@ -822,9 +833,15 @@ pub fn writeJson(writer: anytype, traces: []const ProofTrace) !void {
 
         if (trace.kind == .path_enumeration) {
             try writer.print(
-                ",\"facts\":{{\"pathsEnumerated\":{d},\"pathsExhaustive\":{},\"failableSites\":{d},\"coveredSites\":{d}}}",
+                ",\"facts\":{{\"pathsEnumerated\":{d},\"pathsExhaustive\":{},\"failableSites\":{d},\"coveredSites\":{d}",
                 .{ trace.paths_enumerated, trace.paths_exhaustive, trace.failable_sites, trace.covered_sites },
             );
+            if (trace.upstream_fallback_sites > 0) {
+                // A fact for the fault-coverage trace only, and only when it is
+                // not zero, so a trace without a fallback keeps its wire bytes.
+                try writer.print(",\"upstreamFallbackSites\":{d}", .{trace.upstream_fallback_sites});
+            }
+            try writer.writeAll("}");
         }
 
         if (trace.counterexample) |cx| {
@@ -1117,4 +1134,34 @@ test "the verifier registry covers every contract property" {
     try std.testing.expectEqual(ProofKind.flow_trace, verifierKind("no_secret_leakage").?);
     try std.testing.expectEqual(ProofKind.path_enumeration, verifierKind("fault_covered").?);
     try std.testing.expectEqual(ProofKind.structural, verifierKind("pure").?);
+}
+
+test "writeJson reports upstream fallback sites inside the facts, and only when present" {
+    const with_fallback = [_]ProofTrace{.{
+        .property = "fault_covered",
+        .holds = true,
+        .kind = .path_enumeration,
+        .summary = "ok",
+        .paths_enumerated = 2,
+        .paths_exhaustive = true,
+        .failable_sites = 1,
+        .covered_sites = 1,
+        .upstream_fallback_sites = 1,
+    }};
+    var without_fallback = with_fallback;
+    without_fallback[0].upstream_fallback_sites = 0;
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(testing.allocator, &buf);
+    try writeJson(&aw.writer, &with_fallback);
+    buf = aw.toArrayList();
+    try testing.expect(std.mem.indexOf(u8, buf.items, "\"coveredSites\":1,\"upstreamFallbackSites\":1}") != null);
+
+    buf.clearRetainingCapacity();
+    var aw2: std.Io.Writer.Allocating = .fromArrayList(testing.allocator, &buf);
+    try writeJson(&aw2.writer, &without_fallback);
+    buf = aw2.toArrayList();
+    try testing.expect(std.mem.indexOf(u8, buf.items, "upstreamFallbackSites") == null);
+    try testing.expect(std.mem.indexOf(u8, buf.items, "\"coveredSites\":1}") != null);
 }

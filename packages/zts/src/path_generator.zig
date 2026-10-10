@@ -22,6 +22,8 @@ const route_resolution = @import("route_resolution.zig");
 const effect_inference = @import("effect_inference.zig");
 const mb = @import("zts-engine").module_binding;
 const bool_checker_mod = @import("bool_checker.zig");
+const type_pool_mod = @import("type_pool.zig");
+const type_env_mod = @import("type_env.zig");
 const handler_contract = @import("zts-contracts").handler_contract;
 const contract_types = @import("zts-contracts").contract_types;
 
@@ -223,12 +225,18 @@ pub const PathGenerator = struct {
         func: []const u8,
         returns: mb.ReturnKind,
         severity: mb.FailureSeverity,
+        /// The export is failable, does not return a `Result`, and its parsed
+        /// return type is a record with a top-level `ok: boolean` field (the
+        /// `fetch` response), so `x.ok` on a binding initialized from a call forks
+        /// success and failure. A `Result` export forks through `returns` alone.
+        ok_record: bool = false,
     };
 
     const IoCall = struct {
         module: []const u8,
         func: []const u8,
         returns: mb.ReturnKind,
+        ok_record: bool = false,
         binding_key: ?u32,
         mult: Mult,
         /// IR node of the originating call expression. Used at emission
@@ -923,6 +931,8 @@ pub const PathGenerator = struct {
                 .func = entry.func.name,
                 .returns = entry.func.returns,
                 .severity = entry.func.failure_severity,
+                .ok_record = entry.func.failure_severity != .none and entry.func.returns != .result and
+                    try declaresOkRecord(self.allocator, entry.func),
             });
         }
     }
@@ -1323,7 +1333,7 @@ pub const PathGenerator = struct {
         if (init_tag == .call) {
             const call = self.ir_view.getCall(init_node) orelse return null;
             if (self.getCalleeMeta(call.callee)) |meta| {
-                if (meta.returns == .result) {
+                if (meta.returns == .result or meta.ok_record) {
                     return .{ .result_ok = .{ .module = meta.module, .func = meta.func, .returns = meta.returns, .call_site = init_node } };
                 }
             }
@@ -1367,6 +1377,7 @@ pub const PathGenerator = struct {
                     .module = meta.module,
                     .func = meta.func,
                     .returns = meta.returns,
+                    .ok_record = meta.ok_record,
                     .binding_key = binding_key,
                     .mult = self.currentMultiplicity(),
                     .call_node = node,
@@ -1599,10 +1610,10 @@ pub const PathGenerator = struct {
                     try stub_overrides.put(self.allocator, info.call_site, stubValueForType(info.returns, false));
                 },
                 .result_ok => |info| {
-                    try stub_overrides.put(self.allocator, info.call_site, "{\"ok\":true,\"value\":{}}");
+                    try stub_overrides.put(self.allocator, info.call_site, resultOrOkRecordStub(info.returns, true));
                 },
                 .result_not_ok => |info| {
-                    try stub_overrides.put(self.allocator, info.call_site, "{\"ok\":false,\"error\":\"test-error\"}");
+                    try stub_overrides.put(self.allocator, info.call_site, resultOrOkRecordStub(info.returns, false));
                 },
             }
         }
@@ -1610,7 +1621,7 @@ pub const PathGenerator = struct {
         // Second pass: emit I/O stubs for tracked calls on this path
         for (self.io_seq.items) |io_call| {
             const result_json = stub_overrides.get(io_call.call_node orelse null_node) orelse
-                stubValueForType(io_call.returns, true);
+                if (io_call.ok_record) okRecordStub(true) else stubValueForType(io_call.returns, true);
 
             {
                 const arg_sig: ?[]const u8 = if (io_call.call_node) |cn|
@@ -2119,6 +2130,60 @@ pub const PathGenerator = struct {
 // ---------------------------------------------------------------------------
 // Stub value synthesis
 // ---------------------------------------------------------------------------
+
+/// Whether the export is forked by `x.ok` on its result because it declares an
+/// `ok: boolean` response record. The rule reads the parsed return type, not the
+/// signature text: `returnsOkRecord` resolves it through the type environment.
+/// The caller applies it only to exports with a failure severity, so
+/// `zttp:workflow` `call`, which declares the same record with severity `.none`,
+/// adds no fork.
+fn declaresOkRecord(allocator: std.mem.Allocator, func: *const mb.FunctionBinding) error{OutOfMemory}!bool {
+    const sig = func.signature orelse return false;
+    return returnsOkRecord(allocator, sig.returns);
+}
+
+/// True when `return_text` parses to a record that has a top-level, required
+/// field `ok` of type `boolean`. A nested `ok`, an optional `ok`, a union that
+/// holds such a record, and a function type all give false.
+pub fn returnsOkRecord(allocator: std.mem.Allocator, return_text: []const u8) error{OutOfMemory}!bool {
+    var pool = type_pool_mod.TypePool.init(allocator);
+    defer pool.deinit(allocator);
+    var env = type_env_mod.TypeEnv.init(allocator, &pool);
+    defer env.deinit();
+
+    const parsed = env.resolveType(return_text);
+    try env.ensureHealthy();
+    if (parsed == type_pool_mod.null_type_idx) return false;
+    const resolved = env.resolveRef(parsed);
+    if (pool.getTag(resolved) != .t_record) return false;
+    for (pool.getRecordFields(resolved)) |field| {
+        if (field.optional) continue;
+        if (!std.mem.eql(u8, pool.getName(field.name_start, field.name_len), "ok")) continue;
+        if (field.type_idx == pool.idx_boolean) return true;
+    }
+    return false;
+}
+
+/// The stub for a call forked by `x.ok`. A `Result` export gets the Result
+/// shape. An `ok`-record export (`fetch`) gets a response the replay reads:
+/// `status` decides `ok` (replay derives it from the status, never from a stub
+/// field), and `statusText`, `headers`, and `body` are the other fields
+/// `runtime_http.zig` reads from a recorded fetch.
+fn resultOrOkRecordStub(returns: mb.ReturnKind, ok: bool) []const u8 {
+    if (returns == .result) return stubValueForType(.result, ok);
+    return okRecordStub(ok);
+}
+
+const ok_record_stub_ok =
+    \\{"status":200,"statusText":"OK","headers":{},"body":"{\"id\":\"1\"}"}
+;
+const ok_record_stub_failed =
+    \\{"status":503,"statusText":"Service Unavailable","headers":{},"body":"{}"}
+;
+
+fn okRecordStub(ok: bool) []const u8 {
+    return if (ok) ok_record_stub_ok else ok_record_stub_failed;
+}
 
 fn stubValueForType(returns: mb.ReturnKind, truthy: bool) []const u8 {
     if (!truthy) {
@@ -3254,4 +3319,169 @@ test "a summarized path set is not a complete fault analysis" {
     try std.testing.expectEqual(@as(usize, 0), fixture.generator.unseenFailableCalls().len);
     try std.testing.expect(!fixture.generator.pathsExhaustive());
     try std.testing.expect(!fixture.generator.faultAnalysisComplete());
+}
+
+test "returnsOkRecord reads the parsed return type, not the text" {
+    const allocator = std.testing.allocator;
+    const cases = [_]struct { text: []const u8, expected: bool }{
+        .{ .text = "{ ok: boolean; status: number }", .expected = true },
+        .{ .text = "{ status: number; ok: boolean; body: string }", .expected = true },
+        .{ .text = "{ ok: boolean; headers: { get: (name: string) => string | undefined } }", .expected = true },
+        // A nested `ok` is not the record's own.
+        .{ .text = "{ meta: { ok: boolean }; status: number }", .expected = false },
+        // Optional, or another type, or a function type.
+        .{ .text = "{ ok?: boolean; status: number }", .expected = false },
+        .{ .text = "{ ok: string; status: number }", .expected = false },
+        .{ .text = "{ check: (ok: boolean) => boolean }", .expected = false },
+        // A text scan would match this: the text holds `ok: boolean` and the
+        // type is a union, not a record.
+        .{ .text = "{ ok: boolean } | undefined", .expected = false },
+        .{ .text = "string", .expected = false },
+        .{ .text = "", .expected = false },
+    };
+    for (cases) |case| {
+        const actual = try returnsOkRecord(allocator, case.text);
+        if (actual != case.expected) {
+            std.debug.print("returnsOkRecord(\"{s}\"): expected {}, got {}\n", .{ case.text, case.expected, actual });
+            return error.WrongOkRecordVerdict;
+        }
+    }
+}
+
+test "fetch and fetchWithRetry fork on ok, and workflow call does not" {
+    const allocator = std.testing.allocator;
+    const fetch_source =
+        \\import { fetch } from "zttp:fetch";
+        \\function handler(req) {
+        \\  const res = fetch("https://api.example.com/data");
+        \\  if (!res.ok) return Response.text("upstream failed", { status: 502 });
+        \\  return Response.text("ok");
+        \\}
+    ;
+    const retry_source =
+        \\import { fetchWithRetry } from "zttp:fetch";
+        \\function handler(req) {
+        \\  const res = fetchWithRetry("https://api.example.com/data");
+        \\  if (!res.ok) return Response.text("upstream failed", { status: 502 });
+        \\  return Response.text("ok");
+        \\}
+    ;
+    const workflow_source =
+        \\import { call } from "zttp:workflow";
+        \\function handler(req) {
+        \\  const res = call("worker", {});
+        \\  if (!res.ok) return Response.text("upstream failed", { status: 502 });
+        \\  return Response.text("ok");
+        \\}
+    ;
+
+    var fetch_fixture = try generateFixture(allocator, fetch_source);
+    defer fetch_fixture.deinit();
+    var retry_fixture = try generateFixture(allocator, retry_source);
+    defer retry_fixture.deinit();
+    var workflow_fixture = try generateFixture(allocator, workflow_source);
+    defer workflow_fixture.deinit();
+
+    // fetch: two paths, and each carries one I/O constraint on its fetch.
+    for ([_]*PathGeneratorFixture{ &fetch_fixture, &retry_fixture }) |fixture| {
+        const fetch_tests = fixture.generator.getTests();
+        try std.testing.expectEqual(@as(usize, 2), fetch_tests.len);
+        for (fetch_tests) |test_case| try std.testing.expectEqual(@as(usize, 1), test_case.constraints.len);
+    }
+    // `zttp:workflow` `call` declares the same record with severity `.none`, so
+    // `res.ok` stays an ordinary branch. The two paths exist and neither holds
+    // an I/O constraint.
+    const workflow_tests = workflow_fixture.generator.getTests();
+    try std.testing.expectEqual(@as(usize, 2), workflow_tests.len);
+    for (workflow_tests) |test_case| try std.testing.expectEqual(@as(usize, 0), test_case.constraints.len);
+    try std.testing.expectEqual(@as(usize, 0), workflow_fixture.generator.unseenFailableCalls().len);
+}
+
+test "a failing fetch path stubs a response the replay reads as a 503" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { fetch } from "zttp:fetch";
+        \\function handler(req) {
+        \\  const a = fetch("https://api.example.com/a");
+        \\  if (!a.ok) return Response.text("a failed", { status: 502 });
+        \\  const b = fetch("https://api.example.com/b");
+        \\  if (!b.ok) return Response.text("b failed", { status: 504 });
+        \\  return Response.text("ok");
+        \\}
+    ;
+
+    var fixture = try generateFixture(allocator, source);
+    defer fixture.deinit();
+
+    const ok_stub = "\"status\":200";
+    const failed_stub = "\"status\":503";
+    var seen_502: bool = false;
+    var seen_504: bool = false;
+    var seen_200: bool = false;
+    for (fixture.generator.getTests()) |test_case| {
+        switch (test_case.expected_status) {
+            502 => {
+                // The first fetch fails and the second is never reached.
+                try std.testing.expectEqual(@as(usize, 1), test_case.io_stubs.items.len);
+                try std.testing.expect(std.mem.indexOf(u8, test_case.io_stubs.items[0].result_json, failed_stub) != null);
+                seen_502 = true;
+            },
+            504 => {
+                // Only the second fetch fails. Each call has its own stub.
+                try std.testing.expectEqual(@as(usize, 2), test_case.io_stubs.items.len);
+                try std.testing.expect(std.mem.indexOf(u8, test_case.io_stubs.items[0].result_json, ok_stub) != null);
+                try std.testing.expect(std.mem.indexOf(u8, test_case.io_stubs.items[1].result_json, failed_stub) != null);
+                seen_504 = true;
+            },
+            200 => {
+                try std.testing.expectEqual(@as(usize, 2), test_case.io_stubs.items.len);
+                for (test_case.io_stubs.items) |stub| {
+                    try std.testing.expect(std.mem.indexOf(u8, stub.result_json, ok_stub) != null);
+                }
+                seen_200 = true;
+            },
+            else => return error.UnexpectedStatus,
+        }
+    }
+    try std.testing.expect(seen_502 and seen_504 and seen_200);
+
+    // The stub carries the fields the replay reads, and no Result shape.
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+    try fixture.generator.writeJsonl(&aw.writer);
+    buf = aw.toArrayList();
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "\"statusText\":\"Service Unavailable\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "\"headers\":{}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "\"error\":\"test-error\"") == null);
+}
+
+test "a Result export keeps its Result stubs beside a fetch" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { fetch } from "zttp:fetch";
+        \\import { jwtVerify } from "zttp:auth";
+        \\function handler(req) {
+        \\  const auth = jwtVerify("t", "secret");
+        \\  if (!auth.ok) return Response.text("unauthorized", { status: 401 });
+        \\  const res = fetch("https://api.example.com/a");
+        \\  if (!res.ok) return Response.text("upstream failed", { status: 502 });
+        \\  return Response.text("ok");
+        \\}
+    ;
+
+    var fixture = try generateFixture(allocator, source);
+    defer fixture.deinit();
+
+    for (fixture.generator.getTests()) |test_case| {
+        switch (test_case.expected_status) {
+            401 => try std.testing.expect(std.mem.indexOf(u8, test_case.io_stubs.items[0].result_json, "\"ok\":false") != null),
+            502 => {
+                try std.testing.expect(std.mem.indexOf(u8, test_case.io_stubs.items[0].result_json, "\"ok\":true") != null);
+                try std.testing.expect(std.mem.indexOf(u8, test_case.io_stubs.items[1].result_json, "\"status\":503") != null);
+            },
+            200 => {},
+            else => return error.UnexpectedStatus,
+        }
+    }
 }

@@ -261,7 +261,7 @@
       { "name": "zttp:time", "binding_digest": "c92ca4b021e33abd1f6b735502d4637046029234ce813fcb8fecad64d88fa82d" },
       { "name": "zttp:ratelimit", "binding_digest": "fac23b4a7784653b7e17b0d53f383f6ea7b74eab627a59177db22c2e582bc87b" },
       { "name": "zttp:service", "binding_digest": "0e13487277a309390c123b1d973a3ff884b7469ab86a12146db76fc8a7437d32" },
-      { "name": "zttp:fetch", "binding_digest": "2eda4246f64fae03388656740761d775fd22dd86a55abee1fb2508caa1b80449" },
+      { "name": "zttp:fetch", "binding_digest": "1ae949c40c5410c3a214d81c2f6905fe54918e0c1a64994e269ef1977d84a4fe" },
       { "name": "zttp:tool", "binding_digest": "89c9691f736dda3caeea0b2ac0e916ddf2d3d24e93d2c5b0b9f3f7265e153bc9" },
       { "name": "zttp:sse", "binding_digest": "3f279f119acfed32534ee361d23831077f4e69f618482bddd5c3d23981933220" }
     ] },
@@ -292,7 +292,7 @@
       { "name": "zttp:time", "binding_digest": "c92ca4b021e33abd1f6b735502d4637046029234ce813fcb8fecad64d88fa82d" },
       { "name": "zttp:ratelimit", "binding_digest": "fac23b4a7784653b7e17b0d53f383f6ea7b74eab627a59177db22c2e582bc87b" },
       { "name": "zttp:service", "binding_digest": "0e13487277a309390c123b1d973a3ff884b7469ab86a12146db76fc8a7437d32" },
-      { "name": "zttp:fetch", "binding_digest": "2eda4246f64fae03388656740761d775fd22dd86a55abee1fb2508caa1b80449" },
+      { "name": "zttp:fetch", "binding_digest": "1ae949c40c5410c3a214d81c2f6905fe54918e0c1a64994e269ef1977d84a4fe" },
       { "name": "zttp:tool", "binding_digest": "89c9691f736dda3caeea0b2ac0e916ddf2d3d24e93d2c5b0b9f3f7265e153bc9" },
       { "name": "zttp:sse", "binding_digest": "3f279f119acfed32534ee361d23831077f4e69f618482bddd5c3d23981933220" }
     ] },
@@ -321,6 +321,6 @@
     "handler_contract_version": 24,
     "agent_protocol_schema": 2,
     "policy_hash": "baa218ec7b025b993a2d48194553b4a0fa7c3d704ff68c740d891a70c7dfe108",
-    "module_registry_hash": "c75cb499e42c133dc1050d14b14caffc14d9ca9a08f8d499dc5838ea55d4b047"
+    "module_registry_hash": "59f990c92fac5231fdd3e2fac86309b154056132f5ae25d75b68ac474cc7e0f4"
   }
 }
