@@ -7,13 +7,8 @@
 
 const std = @import("std");
 const registry_mod = @import("../registry/registry.zig");
+const client = @import("zts_agent_client.zig");
 
-const meta_tool = @import("zts_expert_meta.zig");
-const features_tool = @import("zts_expert_features.zig");
-const restrictions_tool = @import("zts_expert_restrictions.zig");
-const describe_rule_tool = @import("zts_expert_describe_rule.zig");
-const search_tool = @import("zts_expert_search.zig");
-const modules_tool = @import("zts_expert_modules.zig");
 const effects_tool = @import("zts_expert_effects.zig");
 const holes_tool = @import("zts_expert_holes.zig");
 const narrow_tool = @import("zts_expert_narrow.zig");
@@ -154,17 +149,122 @@ fn execute(allocator: std.mem.Allocator, args: []const []const u8) anyerror!regi
         return registry_mod.ToolResult.errFmt(allocator, name ++ ": unknown operation {s}\n", .{args[0]});
     const tail = args[1..];
     return switch (operation) {
-        .meta => meta_tool.tool.execute(allocator, tail),
-        .features => features_tool.tool.execute(allocator, tail),
-        .restrictions => restrictions_tool.tool.execute(allocator, tail),
-        .describe_rule => describe_rule_tool.tool.execute(allocator, tail),
-        .search_rules => search_tool.tool.execute(allocator, tail),
-        .modules => modules_tool.tool.execute(allocator, tail),
-        .effects => effects_tool.tool.execute(allocator, tail),
-        .holes => holes_tool.tool.execute(allocator, tail),
-        .narrow => narrow_tool.tool.execute(allocator, tail),
-        .ratchet => ratchet_tool.tool.execute(allocator, tail),
+        .meta => runProtocol(allocator, .meta, "view", if (tail.len == 1) tail[0] else null),
+        .features => if (tail.len != 0)
+            registry_mod.ToolResult.err(allocator, "zts_expert_features: takes no arguments\n")
+        else
+            runProtocol(allocator, .features, null, null),
+        .restrictions => if (tail.len != 0)
+            registry_mod.ToolResult.err(allocator, "zts_expert_restrictions: takes no arguments\n")
+        else
+            runProtocol(allocator, .restrictions, null, null),
+        .describe_rule => runProtocol(
+            allocator,
+            .describe_rule,
+            "rule",
+            if (tail.len == 1) tail[0] else null,
+        ),
+        .search_rules => if (tail.len != 1)
+            registry_mod.ToolResult.err(allocator, "zts_expert_search requires one keyword argument\n")
+        else
+            searchRules(allocator, tail[0]),
+        .modules => if (tail.len != 1)
+            registry_mod.ToolResult.err(allocator, "zts_expert_modules: requires one file\n")
+        else
+            runProtocol(allocator, .modules, "file", tail[0]),
+        .effects => if (tail.len == 0)
+            registry_mod.ToolResult.err(allocator, "zts_expert_effects: requires a path\n")
+        else
+            effects_tool.run(allocator, tail[0]),
+        .holes => if (tail.len == 0)
+            registry_mod.ToolResult.err(allocator, "zts_expert_holes: requires a path\n")
+        else
+            holes_tool.run(allocator, tail[0]),
+        .narrow => if (tail.len == 0)
+            registry_mod.ToolResult.err(allocator, "zts_expert_narrow: requires a path\n")
+        else
+            narrow_tool.run(allocator, tail[0]),
+        .ratchet => if (tail.len == 0)
+            registry_mod.ToolResult.err(allocator, "zts_expert_ratchet: requires a path\n")
+        else
+            ratchet_tool.run(allocator, tail[0]),
     };
+}
+
+fn runProtocol(
+    allocator: std.mem.Allocator,
+    operation: client.Operation,
+    field: ?[]const u8,
+    value: ?[]const u8,
+) anyerror!registry_mod.ToolResult {
+    const input_json = try protocolInput(allocator, field, value);
+    defer allocator.free(input_json);
+    const projection = try client.invokeForTool(allocator, .{
+        .operation = operation,
+        .input_json = input_json,
+    });
+    return .{ .ok = projection.ok, .llm_text = projection.llm_text };
+}
+
+fn protocolInput(
+    allocator: std.mem.Allocator,
+    field: ?[]const u8,
+    value: ?[]const u8,
+) ![]u8 {
+    if (value == null) return allocator.dupe(u8, "{}");
+    var out = registry_mod.helpers.TextBuffer.init(allocator);
+    errdefer out.deinit();
+    var json: std.json.Stringify = .{ .writer = out.writer() };
+    try json.beginObject();
+    try json.objectField(field.?);
+    try json.write(value.?);
+    try json.endObject();
+    return out.toOwnedSlice();
+}
+
+fn searchRules(
+    allocator: std.mem.Allocator,
+    query: []const u8,
+) anyerror!registry_mod.ToolResult {
+    const projection = try client.invokeForTool(allocator, .{
+        .operation = .describe_rule,
+        .input_json = "{}",
+    });
+    if (!projection.ok) return .{ .ok = false, .llm_text = projection.llm_text };
+    defer allocator.free(projection.llm_text);
+
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, projection.llm_text, .{}) catch
+        return error.MalformedProtocolResponse;
+    defer parsed.deinit();
+    const payload = parsed.value.object.getPtr("payload") orelse return error.MalformedProtocolResponse;
+    if (payload.* != .object) return error.MalformedProtocolResponse;
+    const rules = payload.object.getPtr("rules") orelse return error.MalformedProtocolResponse;
+    if (rules.* != .array) return error.MalformedProtocolResponse;
+
+    var kept: usize = 0;
+    for (rules.array.items) |rule| {
+        if (!ruleMatches(rule, query)) continue;
+        rules.array.items[kept] = rule;
+        kept += 1;
+    }
+    rules.array.shrinkRetainingCapacity(kept);
+
+    var out = registry_mod.helpers.TextBuffer.init(allocator);
+    errdefer out.deinit();
+    var json: std.json.Stringify = .{ .writer = out.writer() };
+    try json.write(parsed.value);
+    try out.writer().writeByte('\n');
+    return .{ .ok = true, .llm_text = try out.toOwnedSlice() };
+}
+
+fn ruleMatches(value: std.json.Value, query: []const u8) bool {
+    if (value != .object) return false;
+    const fields = [_][]const u8{ "name", "description", "help" };
+    for (fields) |field| {
+        const candidate = value.object.get(field) orelse continue;
+        if (candidate == .string and std.mem.indexOf(u8, candidate.string, query) != null) return true;
+    }
+    return false;
 }
 
 fn normalizeTrustedOperation(value: []const u8) []const u8 {
@@ -253,4 +353,153 @@ test "query dispatch preserves schema-v2 envelopes" {
     defer rule.deinit(testing.allocator);
     try testing.expect(rule.ok);
     try testing.expect(std.mem.indexOf(u8, rule.llm_text, "\"ZTS303\"") != null);
+}
+
+test "trusted operation aliases preserve canonical response bytes" {
+    const Case = struct {
+        alias: []const u8,
+        canonical: []const u8,
+        value: ?[]const u8 = null,
+    };
+    const fixture = "packages/tools/tests/fixtures/expert/clean_handler.ts";
+    const cases = [_]Case{
+        .{ .alias = "/meta", .canonical = "meta" },
+        .{ .alias = "/features", .canonical = "features" },
+        .{ .alias = "/restrictions", .canonical = "restrictions" },
+        .{ .alias = "/rule", .canonical = "describe_rule", .value = "ZTS303" },
+        .{ .alias = "describe-rule", .canonical = "describe_rule", .value = "ZTS303" },
+        .{ .alias = "/search", .canonical = "search_rules", .value = "result" },
+        .{ .alias = "search", .canonical = "search_rules", .value = "result" },
+        .{ .alias = "/modules", .canonical = "modules", .value = fixture },
+    };
+    for (cases) |case| try expectAliasBytes(case.alias, case.canonical, case.value);
+}
+
+test "trusted argv errors preserve exact text and arity" {
+    const Case = struct { args: []const []const u8, expected: []const u8 };
+    const cases = [_]Case{
+        .{ .args = &.{}, .expected = "zts_expert_query: requires one operation and at most one value\n" },
+        .{ .args = &.{ "meta", "full", "extra" }, .expected = "zts_expert_query: requires one operation and at most one value\n" },
+        .{ .args = &.{"unknown"}, .expected = "zts_expert_query: unknown operation unknown\n" },
+        .{ .args = &.{ "features", "extra" }, .expected = "zts_expert_features: takes no arguments\n" },
+        .{ .args = &.{ "restrictions", "extra" }, .expected = "zts_expert_restrictions: takes no arguments\n" },
+        .{ .args = &.{"search_rules"}, .expected = "zts_expert_search requires one keyword argument\n" },
+        .{ .args = &.{"modules"}, .expected = "zts_expert_modules: requires one file\n" },
+        .{ .args = &.{"effects"}, .expected = "zts_expert_effects: requires a path\n" },
+        .{ .args = &.{"holes"}, .expected = "zts_expert_holes: requires a path\n" },
+        .{ .args = &.{"narrow"}, .expected = "zts_expert_narrow: requires a path\n" },
+        .{ .args = &.{"ratchet"}, .expected = "zts_expert_ratchet: requires a path\n" },
+    };
+    for (cases) |case| {
+        var result = try tool.execute(testing.allocator, case.args);
+        defer result.deinit(testing.allocator);
+        try testing.expect(!result.ok);
+        try testing.expectEqualStrings(case.expected, result.llm_text);
+    }
+}
+
+test "protocol operations preserve direct response bytes" {
+    const fixture = "packages/tools/tests/fixtures/expert/clean_handler.ts";
+    try expectDirectProtocolBytes(&.{"meta"}, .meta, "{}", true);
+    try expectDirectProtocolBytes(&.{ "meta", "full" }, .meta, "{\"view\":\"full\"}", true);
+    try expectDirectProtocolBytes(&.{"features"}, .features, "{}", true);
+    try expectDirectProtocolBytes(&.{"restrictions"}, .restrictions, "{}", true);
+    try expectDirectProtocolBytes(&.{"describe_rule"}, .describe_rule, "{}", true);
+    try expectDirectProtocolBytes(
+        &.{ "describe_rule", "ZTS303" },
+        .describe_rule,
+        "{\"rule\":\"ZTS303\"}",
+        true,
+    );
+    try expectDirectProtocolBytes(
+        &.{ "describe_rule", "not-a-real-rule" },
+        .describe_rule,
+        "{\"rule\":\"not-a-real-rule\"}",
+        true,
+    );
+    try expectDirectProtocolBytes(
+        &.{ "modules", fixture },
+        .modules,
+        "{\"file\":\"packages/tools/tests/fixtures/expert/clean_handler.ts\"}",
+        true,
+    );
+    try expectDirectProtocolBytes(
+        &.{ "modules", "../outside.ts" },
+        .modules,
+        "{\"file\":\"../outside.ts\"}",
+        false,
+    );
+}
+
+test "search preserves frozen response bytes" {
+    var query_result = try tool.execute(testing.allocator, &.{ "search_rules", "result" });
+    defer query_result.deinit(testing.allocator);
+
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(query_result.llm_text, &digest, .{});
+    const hex = std.fmt.bytesToHex(digest, .lower);
+    try testing.expect(query_result.ok);
+    try testing.expectEqual(@as(usize, 1017), query_result.llm_text.len);
+    try testing.expectEqualStrings(
+        "3d4712643f7f82d673220518d9ccc4ddb5cd096f9f016ba0a196c36766a7b461",
+        &hex,
+    );
+    try testing.expect(query_result.llm_text[query_result.llm_text.len - 1] == '\n');
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, query_result.llm_text, .{});
+    defer parsed.deinit();
+    try testing.expectEqualStrings("describe_rule", parsed.value.object.get("operation").?.string);
+    const rules = parsed.value.object.get("payload").?.object.get("rules").?.array;
+    try testing.expect(rules.items.len >= 1);
+    for (rules.items) |rule| try testing.expect(ruleMatches(rule, "result"));
+}
+
+test "custom operations run through query" {
+    const fixture = "packages/tools/tests/fixtures/expert/clean_handler.ts";
+    const cases = [_][]const u8{ "effects", "holes", "narrow", "ratchet" };
+    for (cases) |operation| {
+        var result = try tool.execute(testing.allocator, &.{ operation, fixture });
+        defer result.deinit(testing.allocator);
+        try testing.expect(result.ok);
+        try testing.expect(std.mem.indexOf(u8, result.llm_text, fixture) != null);
+    }
+}
+
+fn expectDirectProtocolBytes(
+    query_args: []const []const u8,
+    operation: client.Operation,
+    input_json: []const u8,
+    expected_ok: bool,
+) !void {
+    var query_result = try tool.execute(testing.allocator, query_args);
+    defer query_result.deinit(testing.allocator);
+    const projection = try client.invokeForTool(testing.allocator, .{
+        .operation = operation,
+        .input_json = input_json,
+    });
+    defer testing.allocator.free(projection.llm_text);
+
+    try testing.expectEqual(expected_ok, query_result.ok);
+    try testing.expectEqual(projection.ok, query_result.ok);
+    try testing.expectEqualStrings(projection.llm_text, query_result.llm_text);
+}
+
+fn expectAliasBytes(
+    alias: []const u8,
+    canonical: []const u8,
+    value: ?[]const u8,
+) !void {
+    var alias_result = if (value) |present|
+        try tool.execute(testing.allocator, &.{ alias, present })
+    else
+        try tool.execute(testing.allocator, &.{alias});
+    defer alias_result.deinit(testing.allocator);
+    var canonical_result = if (value) |present|
+        try tool.execute(testing.allocator, &.{ canonical, present })
+    else
+        try tool.execute(testing.allocator, &.{canonical});
+    defer canonical_result.deinit(testing.allocator);
+
+    try testing.expectEqual(canonical_result.ok, alias_result.ok);
+    try testing.expectEqualStrings(canonical_result.llm_text, alias_result.llm_text);
 }

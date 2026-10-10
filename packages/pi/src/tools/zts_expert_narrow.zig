@@ -16,44 +16,13 @@ const writeJsonString = zts.writeJsonString;
 
 const name = "zts_expert_narrow";
 
-pub const tool: registry_mod.ToolDef = .{
-    .name = name,
-    .label = "narrow",
-    .effect = .read_workspace,
-    .context_policy = .exact,
-    .model_exposure = .visible,
-    .description =
-    \\Report per-path label flow for a handler. Each diagnostic carries the
-    \\path constraints (request method comparisons, stub truthiness checks,
-    \\result-ok narrowing) that witness it. The expert reads this to
-    \\propose a discriminating guard that would prove a sink safe on the
-    \\offending branch instead of restructuring the handler. Compose with
-    \\pi_repair_plan to land the guard, then re-run zts_expert_narrow to
-    \\confirm the path is closed.
-    ,
-    .input_schema = "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}",
-    .decode_json = decodeJson,
-    .execute = execute,
-};
-
-fn decodeJson(
+pub fn run(
     allocator: std.mem.Allocator,
-    args_json: []const u8,
-) ![]const []const u8 {
-    return registry_mod.helpers.decodeSingleStringField(allocator, args_json, "path");
-}
-
-fn execute(
-    allocator: std.mem.Allocator,
-    args: []const []const u8,
+    path: []const u8,
 ) anyerror!registry_mod.ToolResult {
-    if (args.len == 0) {
-        return registry_mod.ToolResult.err(allocator, name ++ ": requires a path\n");
-    }
-
     const root = try common.workspaceRoot(allocator);
     defer allocator.free(root);
-    const absolute = try common.resolveInsideWorkspace(allocator, root, args[0]);
+    const absolute = try common.resolveInsideWorkspace(allocator, root, path);
     defer allocator.free(absolute);
 
     const source = zts.file_io.readFile(
@@ -64,12 +33,12 @@ fn execute(
         return registry_mod.ToolResult.errFmt(
             allocator,
             name ++ ": cannot read {s}: {s}\n",
-            .{ args[0], @errorName(e) },
+            .{ path, @errorName(e) },
         );
     };
     defer allocator.free(source);
 
-    var prepared = zts.PreparedSource.init(allocator, source, args[0], .{
+    var prepared = zts.PreparedSource.init(allocator, source, path, .{
         .comptime_env = .{},
     }) catch |e| {
         return registry_mod.ToolResult.errFmt(
@@ -114,7 +83,7 @@ fn execute(
 
     var text_buf = registry_mod.helpers.TextBuffer.init(allocator);
     defer text_buf.deinit();
-    try writeEnvelope(text_buf.writer(), args[0], checker.getDiagnostics());
+    try writeEnvelope(text_buf.writer(), path, checker.getDiagnostics());
 
     return .{
         .ok = true,
@@ -209,22 +178,4 @@ fn writeStubConstraint(
     try writer.writeAll(",\"func\":");
     try writeJsonString(writer, info.func);
     try writer.writeAll("}");
-}
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
-const testing = std.testing;
-
-test "missing args returns not-ok" {
-    var result = try execute(testing.allocator, &.{});
-    defer result.deinit(testing.allocator);
-    try testing.expect(!result.ok);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "requires a path") != null);
-}
-
-test "tool description mentions guard synthesis" {
-    try testing.expect(std.mem.indexOf(u8, tool.description, "discriminating guard") != null);
-    try testing.expect(std.mem.indexOf(u8, tool.description, "path constraints") != null);
 }

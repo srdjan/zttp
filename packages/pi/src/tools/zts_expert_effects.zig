@@ -12,43 +12,13 @@ const registry_mod = @import("../registry/registry.zig");
 const common = @import("common.zig");
 const name = "zts_expert_effects";
 
-pub const tool: registry_mod.ToolDef = .{
-    .name = name,
-    .label = "effect rows",
-    .effect = .read_workspace,
-    .context_policy = .exact,
-    .model_exposure = .visible,
-    .description =
-    \\Report the inferred effect row for every named function in a source
-    \\file. Each row records the union of capabilities required by direct
-    \\or transitive calls, plus determinism, purity, recursion, and
-    \\egress flags. Use this before proposing edits to surface the effect
-    \\delta of a refactor; widening an effect row should be a conscious
-    \\decision the user reviews on the proof card.
-    ,
-    .input_schema = "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}",
-    .decode_json = decodeJson,
-    .execute = execute,
-};
-
-fn decodeJson(
+pub fn run(
     allocator: std.mem.Allocator,
-    args_json: []const u8,
-) ![]const []const u8 {
-    return registry_mod.helpers.decodeSingleStringField(allocator, args_json, "path");
-}
-
-fn execute(
-    allocator: std.mem.Allocator,
-    args: []const []const u8,
+    path: []const u8,
 ) anyerror!registry_mod.ToolResult {
-    if (args.len == 0) {
-        return registry_mod.ToolResult.err(allocator, name ++ ": requires a path\n");
-    }
-
     const root = try common.workspaceRoot(allocator);
     defer allocator.free(root);
-    const absolute = try common.resolveInsideWorkspace(allocator, root, args[0]);
+    const absolute = try common.resolveInsideWorkspace(allocator, root, path);
     defer allocator.free(absolute);
 
     const source = zts.file_io.readFile(
@@ -59,12 +29,12 @@ fn execute(
         return registry_mod.ToolResult.errFmt(
             allocator,
             name ++ ": cannot read {s}: {s}\n",
-            .{ args[0], @errorName(e) },
+            .{ path, @errorName(e) },
         );
     };
     defer allocator.free(source);
 
-    var prepared = zts.PreparedSource.init(allocator, source, args[0], .{
+    var prepared = zts.PreparedSource.init(allocator, source, path, .{
         .comptime_env = .{},
     }) catch |e| {
         return registry_mod.ToolResult.errFmt(
@@ -115,7 +85,7 @@ fn execute(
     const ctx: WriteContext = .{ .allocator = allocator, .env = &type_env, .ir_view = ir_view };
     var text_buf = registry_mod.helpers.TextBuffer.init(allocator);
     defer text_buf.deinit();
-    try writeEnvelope(text_buf.writer(), ctx, args[0], analyzer.all());
+    try writeEnvelope(text_buf.writer(), ctx, path, analyzer.all());
 
     return .{
         .ok = true,
@@ -197,22 +167,4 @@ fn writeFunction(
     try writer.writeAll("],\"declaredUnreadable\":");
     try writer.writeAll(if (declared_unreadable) "true" else "false");
     try writer.writeAll("}");
-}
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
-const testing = std.testing;
-
-test "missing args returns not-ok" {
-    var result = try execute(testing.allocator, &.{});
-    defer result.deinit(testing.allocator);
-    try testing.expect(!result.ok);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "requires a path") != null);
-}
-
-test "tool description names the proof-card behaviour" {
-    try testing.expect(std.mem.indexOf(u8, tool.description, "effect row") != null);
-    try testing.expect(std.mem.indexOf(u8, tool.description, "proof card") != null);
 }

@@ -21,53 +21,13 @@ const common = @import("common.zig");
 
 const name = "zts_expert_holes";
 
-pub const tool: registry_mod.ToolDef = .{
-    .name = name,
-    .label = "holes",
-    .effect = .read_workspace,
-    .context_policy = .exact,
-    .model_exposure = .visible,
-    .description =
-    \\List every `hole()` in a handler with the frame around it: the
-    \\enclosing function, the line and column, the type the expression
-    \\must produce, the bindings in scope with their types, the properties
-    \\that function has not discharged, and the capability budget the
-    \\handler declared but has not yet spent.
-    \\
-    \\`hole()` is typed `never`, so a program with holes still type-checks
-    \\and still proves its properties - the compiler describes the frame
-    \\and only the expression is missing. Reaching one at runtime answers
-    \\501, not 500.
-    \\
-    \\Fill one hole per turn rather than regenerating the file. The frame
-    \\is what narrows the expression: `inScope` is the material to build
-    \\from, `expectedType` is what it must produce, `remainingBudget` is
-    \\what it may spend, and `undischarged` is what it must not break. A
-    \\binding typed "unknown" carries no annotation the compiler could
-    \\read, so treat its type as open rather than assuming one. An empty
-    \\list means the program has no holes left.
-    ,
-    .input_schema = "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}",
-    .decode_json = decodeJson,
-    .execute = execute,
-};
-
-fn decodeJson(
+pub fn run(
     allocator: std.mem.Allocator,
-    args_json: []const u8,
-) ![]const []const u8 {
-    return registry_mod.helpers.decodeSingleStringField(allocator, args_json, "path");
-}
-
-fn execute(
-    allocator: std.mem.Allocator,
-    args: []const []const u8,
+    path: []const u8,
 ) anyerror!registry_mod.ToolResult {
-    if (args.len == 0) return registry_mod.ToolResult.err(allocator, name ++ ": requires a path\n");
-
     const root = try common.workspaceRoot(allocator);
     defer allocator.free(root);
-    const absolute = try common.resolveInsideWorkspace(allocator, root, args[0]);
+    const absolute = try common.resolveInsideWorkspace(allocator, root, path);
     defer allocator.free(absolute);
     const relative = common.relativeToRoot(root, absolute);
 
@@ -88,7 +48,7 @@ fn execute(
     return renderFromSource(allocator, source, absolute, relative);
 }
 
-fn renderFromSource(
+pub fn renderFromSource(
     allocator: std.mem.Allocator,
     source: []const u8,
     source_path: []const u8,
@@ -113,14 +73,16 @@ fn renderFromSource(
     // The analyzer's own failures are results, not Zig errors leaving the tool.
     // `MissingSqlSchema` used to escape `execute` and reach the autoloop as an
     // aborting error and the model as opaque text with no frames.
-    var check = zts_cli.precompile.runCheckOnlyFromSource(
+    var check = zts_cli.precompile.runCheckOnlyFromSourceWithOptions(
         allocator,
         source,
         relative,
-        sql_schema_path,
-        true,
-        system_path,
-        false,
+        .{
+            .sql_schema_path = sql_schema_path,
+            .json_mode = true,
+            .system_path = system_path,
+            .skip_contract = false,
+        },
     ) catch |err| {
         return registry_mod.ToolResult.errFmt(
             allocator,
@@ -295,13 +257,6 @@ test "in-process publisher preserves discovered system service-call analysis" {
     try testing.expect(!result.ok);
     try testing.expect(std.mem.indexOf(u8, result.llm_text, "serviceCall is missing path param 'id'") != null);
     try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"diagnostics\":[{") != null);
-}
-
-test "tool description names the three facts a fill needs" {
-    try testing.expect(std.mem.indexOf(u8, tool.description, "expected type") != null or
-        std.mem.indexOf(u8, tool.description, "type the expression") != null);
-    try testing.expect(std.mem.indexOf(u8, tool.description, "budget") != null);
-    try testing.expect(std.mem.indexOf(u8, tool.description, "Fill one hole per turn") != null);
 }
 
 test "in-process publisher answers a zttp:sql handler with a result, not a Zig error" {

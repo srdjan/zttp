@@ -16,31 +16,21 @@ const deepseek = @import("providers/deepseek/client.zig");
 const local = @import("providers/local/client.zig");
 
 const query_tool = @import("tools/zts_expert_query.zig");
-const meta_tool = @import("tools/zts_expert_meta.zig");
-const features_tool = @import("tools/zts_expert_features.zig");
-const restrictions_tool = @import("tools/zts_expert_restrictions.zig");
-const describe_rule_tool = @import("tools/zts_expert_describe_rule.zig");
-const search_tool = @import("tools/zts_expert_search.zig");
-const modules_tool = @import("tools/zts_expert_modules.zig");
-const effects_tool = @import("tools/zts_expert_effects.zig");
-const holes_tool = @import("tools/zts_expert_holes.zig");
-const narrow_tool = @import("tools/zts_expert_narrow.zig");
-const ratchet_tool = @import("tools/zts_expert_ratchet.zig");
-
-const legacy_queries = [_]registry_mod.ToolDef{
-    meta_tool.tool,
-    features_tool.tool,
-    restrictions_tool.tool,
-    describe_rule_tool.tool,
-    search_tool.tool,
-    modules_tool.tool,
-    effects_tool.tool,
-    holes_tool.tool,
-    narrow_tool.tool,
-    ratchet_tool.tool,
+const legacy_query_names = [_][]const u8{
+    "zts_expert_meta",
+    "zts_expert_features",
+    "zts_expert_restrictions",
+    "zts_expert_describe_rule",
+    "zts_expert_search",
+    "zts_expert_modules",
+    "zts_expert_effects",
+    "zts_expert_holes",
+    "zts_expert_narrow",
+    "zts_expert_ratchet",
 };
 
 const ProviderProjection = enum { openai, anthropic, deepseek, local };
+const legacy_tool_count: usize = 35;
 const retired_model_routes: usize = 5;
 
 const ExpectedPrefix = struct {
@@ -71,22 +61,6 @@ fn expectedPrefix(provider: ProviderProjection) ExpectedPrefix {
     };
 }
 
-fn buildLegacyRegistry(allocator: std.mem.Allocator) !registry_mod.Registry {
-    var live = try tool_registry.buildRegistry(allocator);
-    defer live.deinit(allocator);
-
-    var legacy: registry_mod.Registry = .{};
-    errdefer legacy.deinit(allocator);
-    for (live.list()) |definition| {
-        if (std.mem.eql(u8, definition.name, query_tool.tool.name)) continue;
-        var legacy_definition = definition;
-        legacy_definition.model_exposure = .visible;
-        try legacy.register(allocator, legacy_definition);
-    }
-    for (legacy_queries) |definition| try legacy.register(allocator, definition);
-    return legacy;
-}
-
 fn serialize(
     allocator: std.mem.Allocator,
     provider: ProviderProjection,
@@ -114,13 +88,11 @@ const testing = std.testing;
 test "unified compiler query removes old model authority and at least forty percent of every provider prefix" {
     var live = try tool_registry.buildRegistry(testing.allocator);
     defer live.deinit(testing.allocator);
-    var legacy = try buildLegacyRegistry(testing.allocator);
-    defer legacy.deinit(testing.allocator);
 
     try testing.expect(live.findByName(query_tool.tool.name) != null);
-    for (legacy_queries) |definition| try testing.expect(live.findByName(definition.name) == null);
+    for (legacy_query_names) |legacy_name| try testing.expect(live.findByName(legacy_name) == null);
     try testing.expectEqual(
-        tool_catalog.count(&legacy) - (legacy_queries.len - 1) - retired_model_routes,
+        legacy_tool_count - (legacy_query_names.len - 1) - retired_model_routes,
         tool_catalog.count(&live),
     );
 
