@@ -69,7 +69,7 @@ pub const binding = mb.ModuleBinding{
         .{ .name = "call", .func = callNative, .arg_count = 2, .effect = .write, .returns = .object, .signature = .{
             .params = &.{ "string", "unknown" },
             .returns = "{ ok: boolean; status: number; statusText: string; body: string; headers: { get: (name: string) => string | undefined; has: (name: string) => boolean }; json: () => unknown; text: () => string }",
-        }, .param_types = &.{ .string, .unknown }, .param_names = &.{ "name", "init" }, .return_labels = .{ .external = true, .unknown = true }, .contract_extractions = &.{.{ .category = .workflow_call }} },
+        }, .param_types = &.{ .string, .unknown }, .param_names = &.{ "name", "init" }, .failure_severity = .upstream, .return_labels = .{ .external = true, .unknown = true }, .contract_extractions = &.{.{ .category = .workflow_call }} },
         .{ .name = "saga", .func = sagaNative, .arg_count = 1, .effect = .write, .returns = .object, .param_types = &.{.unknown}, .param_names = &.{"steps"}, .return_labels = .{ .external = true, .unknown = true } },
         // Named `fanout`, not `parallel`: module exports share one flat global
         // name namespace (resolver registers each via ctx.setGlobal by name), so

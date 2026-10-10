@@ -50,6 +50,7 @@
         "clock",
         "policy_check"
       ],
+      "failureSeverity": "expected",
       "contractExtractions": [
         {
           "category": "cache_namespace"

@@ -71,6 +71,9 @@ pub const binding = sdk.ModuleBinding{
             .returns = .boolean,
             .param_types = &.{ .string, .string, .string },
             .param_names = &.{ "payload", "secret", "signature" },
+            // false means a bad signature or a length mismatch: an authentication
+            // failure the handler must answer.
+            .failure_severity = .critical,
             .laws = &.{.pure},
         },
         .{

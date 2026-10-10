@@ -4110,7 +4110,7 @@ test "returnsOkRecord reads the parsed return type, not the text" {
     }
 }
 
-test "fetch and fetchWithRetry fork on ok, and workflow call does not" {
+test "fetch, fetchWithRetry, serviceCall, and workflow call fork on ok" {
     const allocator = std.testing.allocator;
     const fetch_source =
         \\import { fetch } from "zttp:fetch";
@@ -4137,26 +4137,53 @@ test "fetch and fetchWithRetry fork on ok, and workflow call does not" {
         \\}
     ;
 
+    const service_source =
+        \\import { serviceCall } from "zttp:service";
+        \\function handler(req) {
+        \\  const res = serviceCall("users", "GET /api/users", {});
+        \\  if (!res.ok) return Response.text("upstream failed", { status: 502 });
+        \\  return Response.text("ok");
+        \\}
+    ;
+
     var fetch_fixture = try generateFixture(allocator, fetch_source);
     defer fetch_fixture.deinit();
     var retry_fixture = try generateFixture(allocator, retry_source);
     defer retry_fixture.deinit();
     var workflow_fixture = try generateFixture(allocator, workflow_source);
     defer workflow_fixture.deinit();
+    var service_fixture = try generateFixture(allocator, service_source);
+    defer service_fixture.deinit();
 
-    // fetch: two paths, and each carries one I/O constraint on its fetch.
-    for ([_]*PathGeneratorFixture{ &fetch_fixture, &retry_fixture }) |fixture| {
-        const fetch_tests = fixture.generator.getTests();
-        try std.testing.expectEqual(@as(usize, 2), fetch_tests.len);
-        for (fetch_tests) |test_case| try std.testing.expectEqual(@as(usize, 1), test_case.constraints.len);
+    // Each export declares the `ok` record with a severity: two paths, and each
+    // carries one I/O constraint on its call.
+    for ([_]*PathGeneratorFixture{ &fetch_fixture, &retry_fixture, &workflow_fixture, &service_fixture }) |fixture| {
+        const tests = fixture.generator.getTests();
+        try std.testing.expectEqual(@as(usize, 2), tests.len);
+        for (tests) |test_case| try std.testing.expectEqual(@as(usize, 1), test_case.constraints.len);
+        try std.testing.expectEqual(@as(usize, 0), fixture.generator.unseenFailableCalls().len);
     }
-    // `zttp:workflow` `call` declares the same record with severity `.none`, so
-    // `res.ok` stays an ordinary branch. The two paths exist and neither holds
-    // an I/O constraint.
-    const workflow_tests = workflow_fixture.generator.getTests();
-    try std.testing.expectEqual(@as(usize, 2), workflow_tests.len);
-    for (workflow_tests) |test_case| try std.testing.expectEqual(@as(usize, 0), test_case.constraints.len);
-    try std.testing.expectEqual(@as(usize, 0), workflow_fixture.generator.unseenFailableCalls().len);
+}
+
+test "an ok record with no severity, or a Result return, is not forked on ok" {
+    const allocator = std.testing.allocator;
+    const base = mb.FunctionBinding{
+        .name = "probe",
+        .arg_count = 0,
+        .effect = .write,
+        .returns = .object,
+        .signature = .{ .params = &.{}, .returns = "{ ok: boolean; status: number }" },
+        .failure_severity = .upstream,
+    };
+    try std.testing.expect(try isOkRecordExport(allocator, &base));
+
+    var no_severity = base;
+    no_severity.failure_severity = .none;
+    try std.testing.expect(!(try isOkRecordExport(allocator, &no_severity)));
+
+    var result_return = base;
+    result_return.returns = .result;
+    try std.testing.expect(!(try isOkRecordExport(allocator, &result_return)));
 }
 
 test "a failing fetch path stubs a response the replay reads as a 503" {

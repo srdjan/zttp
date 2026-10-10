@@ -13,6 +13,11 @@ pub const binding = sdk.ModuleBinding{
     .summary = "Register every schema once with schemaCompile(name, schemaJson) at module scope, then validate against it by that name: the first argument of validateJson, validateObject, and coerceJson is the registered name, never the schema.",
     .stateful = true,
     .exports = &.{
+        // Returns false on invalid arguments, a registry setup failure, invalid JSON,
+        // an invalid schema, or an allocation failure. The registry has no capacity
+        // limit (schemaCompileImpl). No failure severity: a schema that did not
+        // compile makes validateJson, validateObject, and coerceJson answer
+        // `schema not found` (decodeValue), and those are critical (R4 D8).
         .{ .name = "schemaCompile", .module_func = schemaCompileImpl, .arg_count = 2, .effect = .write, .returns = .boolean, .param_types = &.{ .string, .string }, .param_names = &.{ "name", "schemaJson" }, .traceable = false, .contract_extractions = &.{.{ .category = .schema_compile }} },
         .{
             .name = "validateJson",

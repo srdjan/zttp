@@ -62,13 +62,13 @@ pub const binding = mb.ModuleBinding{
         // `signal(key, name)` and gave a reader no way to learn a payload can
         // be delivered at all. Optional, because the impl defaults it to
         // undefined.
-        .{ .name = "signal", .func = signalNative, .arg_count = 3, .required_arg_count = 2, .effect = .write, .returns = .boolean, .param_types = &.{ .string, .string, .unknown }, .param_names = &.{ "key", "name", "payload" }, .contract_extractions = &.{
+        .{ .name = "signal", .func = signalNative, .arg_count = 3, .required_arg_count = 2, .effect = .write, .returns = .boolean, .param_types = &.{ .string, .string, .unknown }, .param_names = &.{ "key", "name", "payload" }, .failure_severity = .expected, .contract_extractions = &.{
             .{ .category = .durable_producer_key },
             .{ .arg_position = 1, .category = .durable_signal },
         }, .contract_flags = .{ .sets_durable_used = true } },
         // `signalAtNative` reads `args[3]` as the payload, as `signal` does, and
         // the shipped orchestrator example passes it. The payload is optional.
-        .{ .name = "signalAt", .func = signalAtNative, .arg_count = 4, .required_arg_count = 3, .effect = .write, .returns = .boolean, .param_types = &.{ .string, .string, .number, .unknown }, .param_names = &.{ "key", "name", "atMs", "payload" }, .contract_extractions = &.{
+        .{ .name = "signalAt", .func = signalAtNative, .arg_count = 4, .required_arg_count = 3, .effect = .write, .returns = .boolean, .param_types = &.{ .string, .string, .number, .unknown }, .param_names = &.{ "key", "name", "atMs", "payload" }, .failure_severity = .expected, .contract_extractions = &.{
             .{ .category = .durable_producer_key },
             .{ .arg_position = 1, .category = .durable_signal },
         }, .contract_flags = .{ .sets_durable_used = true, .sets_durable_timers = true } },

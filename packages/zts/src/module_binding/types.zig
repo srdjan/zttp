@@ -113,7 +113,7 @@ pub const DeclaredSignature = struct {
 /// counts, and a call to it that no enumerated path holds blocks `fault_covered`.
 /// `none` is not a claim that the function cannot fail: the severity census
 /// (`severity_census.zig`) lists the `none` exports that return `false` or
-/// `undefined` on failure (`cacheSet`, `setCookie`, `base64Decode`, and others),
+/// `undefined` on failure (`setCookie`, `base64Decode`, and others),
 /// each with the reason it has no severity yet.
 pub const FailureSeverity = enum {
     /// Auth or validation failure - 2xx on failure path is a warning.

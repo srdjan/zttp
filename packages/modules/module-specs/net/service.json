@@ -26,6 +26,7 @@
         "network",
         "runtime_callback"
       ],
+      "failureSeverity": "upstream",
       "contractExtractions": [
         {
           "category": "service_call"

@@ -90,6 +90,10 @@ pub const binding = sdk.ModuleBinding{
             .returns = .result,
             .param_types = &.{ .string, .string, .string },
             .param_names = &.{ "callId", "name", "argsJson" },
+            // An agent handler reports a tool failure inside a 2xx stream, so the
+            // failure is upstream, not critical: critical would make those handlers
+            // unprovable. `upstreamFallbackSites` shows the 2xx fallback.
+            .failure_severity = .upstream,
             .derives_from_args = true,
         },
     },
@@ -197,7 +201,7 @@ test "callTool has its runtime callback signature" {
     try std.testing.expectEqual(sdk.ReturnKind.result, call_tool.returns);
     try std.testing.expectEqualSlices(sdk.ReturnKind, &.{ .string, .string, .string }, call_tool.param_types);
     try std.testing.expect(call_tool.derives_from_args);
-    try std.testing.expectEqual(sdk.FailureSeverity.none, call_tool.failure_severity);
+    try std.testing.expectEqual(sdk.FailureSeverity.upstream, call_tool.failure_severity);
     try std.testing.expectEqualSlices(
         sdk.ModuleCapability,
         &.{.runtime_callback},

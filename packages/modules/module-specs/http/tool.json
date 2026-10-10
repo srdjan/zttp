@@ -70,7 +70,8 @@
       ],
       "requiredCapabilities": [
         "runtime_callback"
-      ]
+      ],
+      "failureSeverity": "upstream"
     }
   ]
 }

@@ -20,10 +20,23 @@
 //! `no_fork`, `stub_not_failing`, or `not_counted`.
 //!
 //! Direction B (`reverse_probe`): every export whose declared return the
-//! generator can fork on (`.result`, `.optional_*`, `.boolean`) and whose
-//! severity is `.none`. The generator forks on such a call and the checker
-//! drops it. The verdict is `fork_without_severity`. A declared forkable return
-//! that the generator does not fork on is `declared_forkable_no_fork`.
+//! generator can fork on (`.result`, `.optional_*`, `.boolean`, or an `ok:
+//! boolean` response record) and whose severity is `.none`. The generator forks
+//! on such a call and the checker drops it. The verdict is
+//! `fork_without_severity`. A declared forkable return that the generator does
+//! not fork on is `declared_forkable_no_fork`. The `ok`-record test reads the
+//! declared signature whatever the severity, so a record export that loses its
+//! severity needs a row.
+//!
+//! Object rows (`object_probe`): every export that returns `.object`, declares
+//! no signature, has a severity of `.none`, and has an effect other than
+//! `.none`. Such an export hands back an unresolved record, so no fork can read
+//! its failure, and the generator forks on it never. The probe compares the
+//! result to `undefined`; the verdict is `no_fork` and each row names the
+//! mechanism that keeps it unforked. The threat this bounds is an I/O call that
+//! can fail and returns an opaque record. A pure export (`effect == .none`)
+//! is outside it, as is an export that declares a signature, which the `ok`
+//! record test above reads.
 //!
 //! Sentinel rows (`sentinel_probe`): exports the audit found to fail with a
 //! plain `undefined` that their declared return does not name. The probe
@@ -52,7 +65,7 @@ const fault_coverage = @import("fault_coverage.zig");
 
 const IrView = parser_mod.IrView;
 
-pub const ProbeKind = enum { severity_probe, reverse_probe, sentinel_probe };
+pub const ProbeKind = enum { severity_probe, reverse_probe, sentinel_probe, object_probe };
 
 /// The shape of the failure test the probe handler writes.
 pub const Shape = enum {
@@ -103,15 +116,15 @@ pub fn shapeFor(returns: mb.ReturnKind) Shape {
     };
 }
 
-/// The probe shape of one export. An export that declares a failure severity and
-/// whose declared signature spells an `ok: boolean` field is probed as an
-/// `ok_record`. The test reads the declared text on purpose: it is the census's
+/// The probe shape of one export. An export whose declared signature spells an
+/// `ok: boolean` field is probed as an `ok_record`, whatever its severity, so a
+/// record export with severity `.none` reaches the reverse direction. The test reads the declared text on purpose: it is the census's
 /// own oracle, so a generator rule that stops recognizing the record shows up
 /// as a `no_fork` finding instead of moving the probe with it. A `Result`
 /// export (`ledger.post`) also spells `ok: boolean`, and forks through its
 /// return kind, so it keeps the `result_ok` probe and its Result stub.
 pub fn shapeForExport(func: *const mb.FunctionBinding) Shape {
-    if (func.returns != .result and func.failure_severity != .none and declaresOkField(func)) return .ok_record;
+    if (func.returns != .result and declaresOkField(func)) return .ok_record;
     return shapeFor(func.returns);
 }
 
@@ -121,9 +134,8 @@ fn declaresOkField(func: *const mb.FunctionBinding) bool {
 }
 
 /// A declared return the path generator has a fork rule for. This reads the
-/// return kind only: an `ok`-record export declares `.object`, so a severity
-/// of `.none` leaves it out of the reverse direction, and a probe row for it
-/// exists only through its declared severity.
+/// return kind only: an `ok`-record export declares `.object`, which
+/// `isForkableExport` reads through the signature.
 pub fn isForkableReturn(returns: mb.ReturnKind) bool {
     return switch (shapeFor(returns)) {
         .result_ok, .optional_absent, .boolean_falsy => true,
@@ -131,6 +143,19 @@ pub fn isForkableReturn(returns: mb.ReturnKind) bool {
         // No return kind maps to an `ok_record` probe: `shapeFor` never yields it.
         .ok_record => false,
     };
+}
+
+/// A declared return the generator has a fork rule for, read from the export:
+/// the return kind, or an `ok: boolean` response record in the signature.
+pub fn isForkableExport(func: *const mb.FunctionBinding) bool {
+    return shapeForExport(func) == .ok_record or isForkableReturn(func.returns);
+}
+
+/// An export the object probe covers: it returns an opaque `.object`, declares
+/// no signature, has no severity, and performs I/O (see the header).
+pub fn isOpaqueObjectExport(func: *const mb.FunctionBinding) bool {
+    return func.returns == .object and func.signature == null and
+        func.failure_severity == .none and func.effect != .none;
 }
 
 /// Direction A. The first broken link names the verdict.
@@ -150,7 +175,9 @@ pub fn classifyReverseProbe(obs: Observation) Verdict {
 }
 
 /// A sentinel probe asks whether the generator forks on `=== undefined`. A
-/// fork there is a finding gone, which makes the row stale.
+/// fork there is a finding gone, which makes the row stale. The object probe
+/// asks the same question of an opaque `.object` export, so it shares this
+/// classification.
 pub fn classifySentinelProbe(obs: Observation) Verdict {
     if (!obs.ran) return .probe_error;
     if (!obs.fork) return .no_fork;
@@ -184,6 +211,15 @@ pub const Mechanism = enum {
     pure_data,
     /// A constructor or propagator of a Result. It performs no I/O.
     result_plumbing,
+    /// An orchestration or I/O export that returns an opaque `.object` with no
+    /// signature, or an optional that also carries a non-failure answer. A
+    /// fork on `x.ok` or `=== undefined` cannot read its failure, so it needs
+    /// its own fork rule before it can declare a severity.
+    needs_own_fork,
+    /// Its failure always reaches a later critical export that the handler must
+    /// cover, so counting it again would only block handlers that call it
+    /// outside every path.
+    subsumed_by_critical,
 };
 
 pub const AllowedRow = struct {
@@ -207,70 +243,42 @@ const allowed_rows = [_]AllowedRow{
         .key = "ratelimit.rateCheck#sentinel_probe",
         .verdict = .no_fork,
         .mechanism = .sentinel_fork,
-        .reason = "its Result failures fork (the severity_probe row is ok); bad arguments, a non-finite window, and clock, store, or allocation errors return plain `undefined` (ratelimit.zig:210-224), which no fork represents",
+        .reason = "its Result failures fork (the severity_probe row is ok); bad arguments, a non-finite window, and clock, store, or allocation errors return plain `undefined` (ratelimit.zig:210-224; a representative list, not a full one), which no fork represents",
     },
     .{
         .key = "cache.cacheIncr#sentinel_probe",
         .verdict = .no_fork,
         .mechanism = .sentinel_fork,
-        .reason = "returns `undefined` on bad arguments, overflow, and capacity (cache.zig:422-446) while declaring a plain `number`; it declares no severity either",
+        .reason = "returns `undefined` on, for example, bad arguments, overflow, and capacity (cache.zig:422-446; a representative list) while declaring a plain `number`; it declares no severity either",
     },
     .{
         .key = "http.setCookie#sentinel_probe",
         .verdict = .no_fork,
         .mechanism = .sentinel_fork,
-        .reason = "returns `undefined` on an invalid cookie name, header-injection characters, or a bad SameSite (http_mod.zig:66-124) while declaring a plain `string`; it declares no severity either",
+        .reason = "returns `undefined` on, for example, an invalid cookie name, header-injection characters, or a bad SameSite (http_mod.zig:66-124; a representative list) while declaring a plain `string`; it declares no severity either",
     },
     .{
         .key = "crypto.base64Decode#sentinel_probe",
         .verdict = .no_fork,
         .mechanism = .sentinel_fork,
-        .reason = "returns `undefined` on invalid base64 (crypto.zig:120-130) while declaring a plain `string`; it declares no severity either",
+        .reason = "returns `undefined` on, for example, invalid base64 (crypto.zig:120-130; a representative list) while declaring a plain `string`; it declares no severity either",
     },
 
-    // A fork with no severity, where the failure may be a fault. Follow-up:
-    // the severity audit (R3 section 2.3); each call needs a decision.
-    .{
-        .key = "auth.verifyWebhookSignature#reverse_probe",
-        .verdict = .fork_without_severity,
-        .mechanism = .severity_decision,
-        .reason = "false means a bad signature or a length mismatch (auth.zig:437-451), a security decision",
-    },
-    .{
-        .key = "validate.schemaCompile#reverse_probe",
-        .verdict = .fork_without_severity,
-        .mechanism = .severity_decision,
-        .reason = "false on bad JSON, a bad schema, or a full registry (validate.zig:156-185)",
-    },
-    .{
-        .key = "cache.cacheSet#reverse_probe",
-        .verdict = .fork_without_severity,
-        .mechanism = .severity_decision,
-        .reason = "false on capacity exceeded, bad arguments, or a clock error (cache.zig:397-409); the builtin_modules.zig severity test pins `.none` and names this row",
-    },
-    .{
-        .key = "durable.signal#reverse_probe",
-        .verdict = .fork_without_severity,
-        .mechanism = .severity_decision,
-        .reason = "false when the target durable run does not exist (durable_executor.zig:436-452)",
-    },
-    .{
-        .key = "durable.signalAt#reverse_probe",
-        .verdict = .fork_without_severity,
-        .mechanism = .severity_decision,
-        .reason = "false when the target durable run does not exist (durable_executor.zig:436-466)",
-    },
-    .{
-        .key = "tool.callTool#reverse_probe",
-        .verdict = .fork_without_severity,
-        .mechanism = .severity_decision,
-        .reason = "returns a Result and `.ok` forks; only the severity is missing, and tool.zig:200 pins `.none`",
-    },
+    // A fork with no severity, where the failure may be a fault. D3 (R4 F5)
+    // gave a severity to every export of this group but `race`.
     .{
         .key = "io.race#reverse_probe",
         .verdict = .fork_without_severity,
         .mechanism = .severity_decision,
-        .reason = "answers the first thunk's 599 Response when none succeeds, and `undefined` when no thunk fetched (io.zig:337,369); it is an orchestration call that needs its own fork",
+        .reason = "declares `optional_object`, so the generator already forks it on `undefined` (no thunk fetched, io.zig:337); that is one failure only. The winner is the first thunk, in declaration order, whose fetch completed, and a completed fetch sets `ok` for any status (runtime_http.zig:2636), so the result can be any non-2xx Response (io.zig:352-369); no severity check reads that status, so it needs its own fork",
+    },
+
+    // A fork with no severity, where a later critical export reports the failure.
+    .{
+        .key = "validate.schemaCompile#reverse_probe",
+        .verdict = .fork_without_severity,
+        .mechanism = .subsumed_by_critical,
+        .reason = "false on invalid arguments, a registry setup failure, invalid JSON, an invalid schema, or an allocation failure (validate.zig:156-185); the schema is then absent, so validateJson, validateObject, and coerceJson answer `schema not found` (validate.zig:218), and those are critical. It is called at module scope, on no path, so a severity would block every handler that registers a schema (R4 D8)",
     },
 
     // A fork with no severity, where the answer is the export's answer.
@@ -416,6 +424,39 @@ const allowed_rows = [_]AllowedRow{
         .mechanism = .result_plumbing,
         .reason = "propagates the input Result; it performs no I/O",
     },
+
+    // An opaque `.object` I/O export with no signature and no severity: no
+    // `ok` or `undefined` fork can read its failure.
+    .{
+        .key = "io.parallel#object_probe",
+        .verdict = .no_fork,
+        .mechanism = .needs_own_fork,
+        .reason = "returns an array of the thunks' fetch Responses (io.zig:47); a thunk that gets a non-2xx status or a refusal puts that Response in the array, and no `ok` or `undefined` test reads an element, so it needs its own fork",
+    },
+    .{
+        .key = "workflow.follow#object_probe",
+        .verdict = .no_fork,
+        .mechanism = .needs_own_fork,
+        .reason = "dispatches an affordance to a bundle route and returns the sub-handler's Response record; it declares no signature, so `res.ok` and a status comparison have nothing to read, and it needs its own fork",
+    },
+    .{
+        .key = "workflow.saga#object_probe",
+        .verdict = .no_fork,
+        .mechanism = .needs_own_fork,
+        .reason = "returns the outcome of an ordered step list, including which steps compensated when a later step failed (workflow.zig summary); a handler that ignores it reports success on a rolled-back saga, and it needs its own fork",
+    },
+    .{
+        .key = "workflow.fanout#object_probe",
+        .verdict = .no_fork,
+        .mechanism = .needs_own_fork,
+        .reason = "aggregates co-located calls in declaration order and returns the combined record; one failed call is inside the aggregate, and it needs its own fork",
+    },
+    .{
+        .key = "cache.cacheStats#object_probe",
+        .verdict = .no_fork,
+        .mechanism = .answer_not_failure,
+        .reason = "returns hit, miss, entry, and byte counts and a zero record for an unknown namespace (cache.zig:452-482); the counts are the answer, and a blocked namespace throws",
+    },
 };
 
 pub const FailureKind = enum {
@@ -451,6 +492,8 @@ pub const Floors = struct {
     forkable_rows: usize,
     /// Rows from the audit's undefined-sentinel exports.
     sentinel_rows: usize,
+    /// Rows from opaque `.object` I/O exports with no signature and no severity.
+    object_rows: usize,
     /// Rows whose verdict is `ok`.
     ok_rows: usize,
 };
@@ -458,11 +501,12 @@ pub const Floors = struct {
 /// The committed floors. A change to the registry that moves a row between
 /// verdicts edits `allowed_rows`; one that adds or drops an export edits these.
 const floors = Floors{
-    .total = 64,
-    .severity_rows = 30,
-    .forkable_rows = 60,
+    .total = 71,
+    .severity_rows = 37,
+    .forkable_rows = 62,
     .sentinel_rows = 4,
-    .ok_rows = 29,
+    .object_rows = 5,
+    .ok_rows = 36,
 };
 
 // ---------------------------------------------------------------------------
@@ -598,10 +642,14 @@ pub fn collectRows(allocator: std.mem.Allocator) !std.ArrayList(Row) {
                 const key = try appendKey(allocator, binding.name, export_fn.name, .severity_probe);
                 errdefer allocator.free(key);
                 try rows.append(allocator, .{ .key = key, .kind = .severity_probe, .verdict = classifySeverityProbe(obs) });
-            } else if (isForkableReturn(returns)) {
+            } else if (isForkableExport(export_fn)) {
                 const key = try appendKey(allocator, binding.name, export_fn.name, .reverse_probe);
                 errdefer allocator.free(key);
                 try rows.append(allocator, .{ .key = key, .kind = .reverse_probe, .verdict = classifyReverseProbe(obs) });
+            } else if (isOpaqueObjectExport(export_fn)) {
+                const key = try appendKey(allocator, binding.name, export_fn.name, .object_probe);
+                errdefer allocator.free(key);
+                try rows.append(allocator, .{ .key = key, .kind = .object_probe, .verdict = classifySentinelProbe(obs) });
             }
         }
     }
@@ -692,6 +740,9 @@ pub fn check(
     if (countKind(rows, .sentinel_probe) < committed.sentinel_rows) {
         try failures.append(allocator, .{ .kind = .below_floor, .key = "sentinel_rows" });
     }
+    if (countKind(rows, .object_probe) < committed.object_rows) {
+        try failures.append(allocator, .{ .kind = .below_floor, .key = "object_rows" });
+    }
     if (countVerdict(rows, .ok) < committed.ok_rows) {
         try failures.append(allocator, .{ .kind = .verdict_below_floor, .key = "ok" });
     }
@@ -754,11 +805,12 @@ test "severity census over the registry" {
     for (std.meta.tags(Verdict)) |verdict| {
         std.debug.print("[severity-census] {s}: {d}\n", .{ @tagName(verdict), countVerdict(rows.items, verdict) });
     }
-    std.debug.print("[severity-census] rows: {d} ({d} severity, {d} reverse, {d} sentinel), allowed: {d}\n", .{
+    std.debug.print("[severity-census] rows: {d} ({d} severity, {d} reverse, {d} sentinel, {d} object), allowed: {d}\n", .{
         rows.items.len,
         countKind(rows.items, .severity_probe),
         countKind(rows.items, .reverse_probe),
         countKind(rows.items, .sentinel_probe),
+        countKind(rows.items, .object_probe),
         allowed_rows.len,
     });
 
@@ -775,7 +827,7 @@ test "severity census over the registry" {
 // failure kind and each verdict is produced from a small synthetic input.
 // ---------------------------------------------------------------------------
 
-const synthetic_floors = Floors{ .total = 2, .severity_rows = 1, .forkable_rows = 2, .sentinel_rows = 1, .ok_rows = 1 };
+const synthetic_floors = Floors{ .total = 2, .severity_rows = 1, .forkable_rows = 2, .sentinel_rows = 1, .object_rows = 0, .ok_rows = 1 };
 
 fn expectKinds(
     rows: []const Row,
@@ -889,6 +941,9 @@ test "a probe observes a fork on a Result, an optional, and an ok record" {
         .{ .module = "env", .func = "env" },
         .{ .module = "fetch", .func = "fetch" },
         .{ .module = "fetch", .func = "fetchWithRetry" },
+        .{ .module = "service", .func = "serviceCall" },
+        .{ .module = "workflow", .func = "call" },
+        .{ .module = "tool", .func = "callTool" },
     };
     for (cases) |case| {
         const found = findExport(case.module, case.func) orelse return error.ExportMissing;
@@ -912,24 +967,93 @@ test "the failing stub of an ok-record call is a response the replay reads as a 
     try std.testing.expect(!failingResponseStub("not json"));
 }
 
-test "only fetch and fetchWithRetry are probed as ok records" {
+test "exactly the four response-record exports are probed as ok records" {
+    const allocator = std.testing.allocator;
+    const expected = [_]struct { module: []const u8, func: []const u8 }{
+        .{ .module = "fetch", .func = "fetch" },
+        .{ .module = "fetch", .func = "fetchWithRetry" },
+        .{ .module = "service", .func = "serviceCall" },
+        .{ .module = "workflow", .func = "call" },
+    };
     var count: usize = 0;
     for (&builtin_modules.all) |*binding| {
         for (binding.exports) |*export_fn| {
-            if (shapeForExport(export_fn) != .ok_record) continue;
+            const probed = shapeForExport(export_fn) == .ok_record;
+            // The census's text oracle and the generator's parsed rule must
+            // agree on every export, or one of them reads a record the other
+            // does not.
+            const generator_rule = try path_gen.returnsOkRecord(allocator, if (export_fn.signature) |sig| sig.returns else "");
+            if (export_fn.returns != .result and generator_rule != probed) {
+                std.debug.print("ok-record oracles disagree on {s}.{s}\n", .{ binding.name, export_fn.name });
+                return error.OkRecordOraclesDisagree;
+            }
+            if (!probed) continue;
             count += 1;
-            const listed = std.mem.eql(u8, binding.name, "fetch") and
-                (std.mem.eql(u8, export_fn.name, "fetch") or std.mem.eql(u8, export_fn.name, "fetchWithRetry"));
+            var listed = false;
+            for (expected) |entry| {
+                if (std.mem.eql(u8, binding.name, entry.module) and std.mem.eql(u8, export_fn.name, entry.func)) listed = true;
+            }
             if (!listed) {
                 std.debug.print("unexpected ok-record export {s}.{s}\n", .{ binding.name, export_fn.name });
                 return error.UnexpectedOkRecordExport;
             }
+            // Every ok-record export declares a severity today. One that loses
+            // it is probed by the reverse direction and needs a row.
+            try std.testing.expect(export_fn.failure_severity != .none);
         }
     }
-    try std.testing.expectEqual(@as(usize, 2), count);
+    try std.testing.expectEqual(expected.len, count);
+}
 
-    // `zttp:workflow` `call` declares the same record with no severity, so the
-    // census does not probe it as an ok record: it forks on nothing.
-    const call = findExport("workflow", "call") orelse return error.ExportMissing;
-    try std.testing.expectEqual(Shape.undefined_sentinel, call.shape);
+test "an ok-record export with no severity reaches the reverse direction" {
+    const record = "{ ok: boolean; status: number }";
+    const base = mb.FunctionBinding{
+        .name = "probe",
+        .arg_count = 0,
+        .effect = .write,
+        .returns = .object,
+        .signature = .{ .params = &.{}, .returns = record },
+        .failure_severity = .none,
+    };
+    try std.testing.expectEqual(Shape.ok_record, shapeForExport(&base));
+    try std.testing.expect(isForkableExport(&base));
+    // A Result return keeps its Result probe, and an opaque object is not forkable.
+    var result_return = base;
+    result_return.returns = .result;
+    try std.testing.expectEqual(Shape.result_ok, shapeForExport(&result_return));
+    var opaque_object = base;
+    opaque_object.signature = null;
+    try std.testing.expect(!isForkableExport(&opaque_object));
+    try std.testing.expect(isOpaqueObjectExport(&opaque_object));
+    // A pure export, or one with a severity, is outside the object probe.
+    var pure = opaque_object;
+    pure.effect = .none;
+    try std.testing.expect(!isOpaqueObjectExport(&pure));
+    var severe = opaque_object;
+    severe.failure_severity = .upstream;
+    try std.testing.expect(!isOpaqueObjectExport(&severe));
+}
+
+test "a boolean export with a severity is probed with a failing boolean stub" {
+    // F5 gave the first boolean exports a severity: verifyWebhookSignature,
+    // cacheSet, signal, and signalAt.
+    const allocator = std.testing.allocator;
+    const cases = [_]struct { module: []const u8, func: []const u8 }{
+        .{ .module = "auth", .func = "verifyWebhookSignature" },
+        .{ .module = "cache", .func = "cacheSet" },
+        .{ .module = "durable", .func = "signal" },
+        .{ .module = "durable", .func = "signalAt" },
+    };
+    for (cases) |case| {
+        const found = findExport(case.module, case.func) orelse return error.ExportMissing;
+        try std.testing.expectEqual(mb.ReturnKind.boolean, found.returns);
+        try std.testing.expectEqual(Shape.boolean_falsy, found.shape);
+        const source = try probeSource(allocator, found.specifier, case.func, found.shape);
+        defer allocator.free(source);
+        const obs = try observe(allocator, source, case.module, case.func, found.shape, found.returns, found.severity);
+        try std.testing.expectEqual(Verdict.ok, classifySeverityProbe(obs));
+    }
+    // The stub check refuses a true boolean stub.
+    try std.testing.expect(failingStubShape(.boolean_falsy, .boolean, "false"));
+    try std.testing.expect(!failingStubShape(.boolean_falsy, .boolean, "true"));
 }

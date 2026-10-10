@@ -19,6 +19,7 @@
         "name",
         "init"
       ],
+      "failureSeverity": "upstream",
       "contractExtractions": [
         {
           "category": "workflow_call"

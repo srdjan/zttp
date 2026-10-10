@@ -115,6 +115,7 @@
         "name",
         "payload"
       ],
+      "failureSeverity": "expected",
       "contractExtractions": [
         {
           "category": "durable_producer_key"
@@ -141,6 +142,7 @@
         "atMs",
         "payload"
       ],
+      "failureSeverity": "expected",
       "contractExtractions": [
         {
           "category": "durable_producer_key"

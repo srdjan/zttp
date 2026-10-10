@@ -90,7 +90,10 @@ EXPECTED_RESTRICTION_HASH="3409f9e0490c698e67dcd1e7a6e3465f0d14c50e0a611bbe96520
 # payload that signalAtNative already read (A2).
 # Moved 2026-10-09: zttp:fetch declares failure_severity upstream on fetch and
 # fetchWithRetry (fault coverage R3 U2), which is part of the module manifest.
-EXPECTED_BUILTIN_HASH="59f990c92fac5231fdd3e2fac86309b154056132f5ae25d75b68ac474cc7e0f4"
+# Moved 2026-10-10: R4 F5 declares failure_severity on verifyWebhookSignature,
+# cacheSet, signal, signalAt, callTool, workflow call, and serviceCall (which
+# also gains the fetch response signature).
+EXPECTED_BUILTIN_HASH="3bc86b0dcc9757067d695edc1cc73c942872d2c2854282df82c6cbcb5612713d"
 
 fail() {
   printf 'meta drift: %s\n' "$1" >&2

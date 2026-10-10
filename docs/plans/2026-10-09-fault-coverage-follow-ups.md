@@ -271,6 +271,17 @@ F1 to F8, one commit per unit.
 Answered 2026-10-10: D1 to D7 all as recommended. The owner approved this
 plan, including one paid DeepSeek re-record (F9) after F8 and the full verify.
 
+Answered 2026-10-10 during F5: **D8** replaces the `schemaCompile` row of D3.
+The D3 recommendation (`expected`) was wrong: it predicted a cost only for
+`cacheSet`. `schemaCompile` is called at module scope, on no path, so any
+severity makes it an unseen call. F5 measured the cost: four contract goldens,
+`sql/sql-crud.ts` losing its declared `fault_covered`, `validate-external.ts`
+losing it, and three DeepSeek corpus cases with the idiom. A failed compile
+leaves the schema absent, so `validateJson`, `validateObject`, and
+`coerceJson` answer `schema not found` (`validate.zig:218`), and those are
+critical. The owner chose to keep `.none`, with a census row under a new
+mechanism, `subsumed_by_critical`.
+
 **D1 (extent of the imported scan).** (a) The whole imported file,
 transitively, as the same-file scan does; (b) only the functions that the
 imported names reach. Recommendation: (a). An unused failable helper in a

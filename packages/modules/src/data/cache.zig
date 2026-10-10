@@ -66,6 +66,9 @@ pub const binding = sdk.ModuleBinding{
             .param_types = &.{ .string, .string, .string, .number },
             .param_names = &.{ "namespace", "key", "value", "ttlSeconds" },
             .required_arg_count = 3,
+            // false on bad arguments, a clock error, or capacity exceeded. A failed
+            // write can leave an earlier value in place (cacheSetImpl).
+            .failure_severity = .expected,
             .contract_extractions = &.{.{ .category = .cache_namespace }},
             .laws = &.{.idempotent_call},
         },

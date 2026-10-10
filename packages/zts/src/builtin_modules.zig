@@ -332,8 +332,10 @@ test "findFunction finds optional-producing functions" {
 }
 
 test "failure_severity annotations on failable functions" {
-    // Critical: auth and validation failures
+    // Critical: auth and validation failures. A bad webhook signature is an
+    // authentication failure and returns boolean false.
     try std.testing.expectEqual(mb.FailureSeverity.critical, findFunction("jwtVerify").?.func.failure_severity);
+    try std.testing.expectEqual(mb.FailureSeverity.critical, findFunction("verifyWebhookSignature").?.func.failure_severity);
     try std.testing.expectEqual(mb.FailureSeverity.critical, findFunction("validateJson").?.func.failure_severity);
     try std.testing.expectEqual(mb.FailureSeverity.critical, findFunction("validateObject").?.func.failure_severity);
     try std.testing.expectEqual(mb.FailureSeverity.critical, findFunction("coerceJson").?.func.failure_severity);
@@ -344,16 +346,25 @@ test "failure_severity annotations on failable functions" {
     try std.testing.expectEqual(mb.FailureSeverity.expected, findFunction("routerMatch").?.func.failure_severity);
     try std.testing.expectEqual(mb.FailureSeverity.expected, findFunction("parseBearer").?.func.failure_severity);
     try std.testing.expectEqual(mb.FailureSeverity.expected, findFunction("sqlOne").?.func.failure_severity);
+    // cacheSet returns false on bad arguments, a clock error, or capacity
+    // exceeded, and a failed write can leave an earlier value in place.
+    try std.testing.expectEqual(mb.FailureSeverity.expected, findFunction("cacheSet").?.func.failure_severity);
+    // signal and signalAt return false when the target run does not exist.
+    try std.testing.expectEqual(mb.FailureSeverity.expected, findFunction("signal").?.func.failure_severity);
+    try std.testing.expectEqual(mb.FailureSeverity.expected, findFunction("signalAt").?.func.failure_severity);
+
+    // Upstream: a non-2xx answer or refusal from a service the handler calls.
+    // callTool reports a tool failure inside a 2xx agent stream, so it is not
+    // critical.
+    try std.testing.expectEqual(mb.FailureSeverity.upstream, findFunction("fetch").?.func.failure_severity);
+    try std.testing.expectEqual(mb.FailureSeverity.upstream, findFunction("serviceCall").?.func.failure_severity);
+    try std.testing.expectEqual(mb.FailureSeverity.upstream, findFunction("callTool").?.func.failure_severity);
+    try std.testing.expectEqual(mb.FailureSeverity.upstream, findFunction("call").?.func.failure_severity);
 
     // None: functions that always succeed
     try std.testing.expectEqual(mb.FailureSeverity.none, findFunction("sha256").?.func.failure_severity);
     try std.testing.expectEqual(mb.FailureSeverity.none, findFunction("urlParse").?.func.failure_severity);
     try std.testing.expectEqual(mb.FailureSeverity.none, findFunction("urlEncode").?.func.failure_severity);
-
-    // None, but not total: cacheSet returns false on capacity exceeded, bad
-    // arguments, or a clock error. The severity is an open decision, recorded
-    // by the `cache.cacheSet#reverse_probe` row in severity_census.zig.
-    try std.testing.expectEqual(mb.FailureSeverity.none, findFunction("cacheSet").?.func.failure_severity);
 }
 
 fn bindingHasCapability(binding: *const ModuleBinding, capability: mb.ModuleCapability) bool {

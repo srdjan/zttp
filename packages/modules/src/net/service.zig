@@ -76,6 +76,15 @@ pub const binding = sdk.ModuleBinding{
             .arg_count = 3,
             .effect = .write,
             .returns = .object,
+            // The same non-2xx fault as `fetch`: serviceCall reaches the runtime's
+            // fetch path (`fetchSyncResult`), so `ok` means a 200..299 status.
+            // `x.ok` and `x.status` comparisons fork the path generator, and a
+            // 2xx answer on the failure path is reported, not refused.
+            .failure_severity = .upstream,
+            .signature = .{
+                .params = &.{ "string", "string", "object" },
+                .returns = "{ ok: boolean; status: number; statusText: string; body: string; error?: string; details?: string; headers: { get: (name: string) => string | undefined; has: (name: string) => boolean }; json: () => unknown; text: () => string }",
+            },
             .param_types = &.{ .string, .string, .object },
             .param_names = &.{ "service", "route", "init" },
             .return_labels = .{ .external = true },

@@ -157,10 +157,13 @@ mutants per input there, and the default is 4.
 `packages/zts/src/severity_census.zig`. It generates one probe handler per
 builtin export and runs the real path generator and fault checker over it. An
 export with a `failure_severity` must show a failure fork, a failing stub, and
-one covered site. An export with a forkable return and no severity is a finding
-too. Each finding needs one row in `allowed_rows` in that file, with a mechanism
-and a reason, and a row for a finding that is gone fails, so the list only
-shrinks. The gate asserts a floor on its rows, prints the counts per verdict on
+one covered site. An export with a forkable return, or a response record that
+declares an `ok: boolean` field, and no severity is a finding too. An I/O export
+that returns an opaque `.object` with no signature (`parallel`, `follow`, `saga`,
+`fanout`) cannot be forked at all, so it has a row of its own. Each finding
+needs one row in `allowed_rows` in that file, with a mechanism and a reason, and
+a row for a finding that is gone fails, so the list only shrinks. The gate
+asserts a floor on its rows, prints the counts per verdict on
 every run, and probes every failure kind through a small synthetic census.
 
 The audits and gates: `test-capability-audit`, `test-module-boundary`,
