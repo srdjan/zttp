@@ -541,6 +541,7 @@ const SourceFaultCoverage = struct {
     unseen_calls: usize,
     paths_exhaustive: bool,
     upstream_fallback_sites: u32,
+    warning_count: u32,
 };
 
 fn analyzeSourceFaultCoverage(allocator: std.mem.Allocator, source: []const u8) !SourceFaultCoverage {
@@ -570,6 +571,7 @@ fn analyzeSourceFaultCoverage(allocator: std.mem.Allocator, source: []const u8) 
         .unseen_calls = generator.unseenFailableCalls().len,
         .paths_exhaustive = generator.pathsExhaustive(),
         .upstream_fallback_sites = report.upstream_fallback_sites,
+        .warning_count = report.warning_count,
     };
 }
 
@@ -1540,4 +1542,119 @@ test "a critical failure with 2xx is a warning, not an upstream fallback" {
     const report = checker.getReport();
     try std.testing.expectEqual(@as(u32, 1), report.warning_count);
     try std.testing.expectEqual(@as(u32, 0), report.upstream_fallback_sites);
+}
+
+const and_prefix =
+    \\import { jwtVerify } from "zttp:auth";
+    \\import { fetch } from "zttp:fetch";
+    \\
+;
+
+test "a failed check behind an && with an opaque conjunct can answer 2xx" {
+    // The 401 is reached only when the header test is also true. A request
+    // with a bad token and a false header test falls through to the 200.
+    const source = and_prefix ++
+        \\function handler(req) {
+        \\  const auth = jwtVerify("t", "secret");
+        \\  if (!auth.ok && req.headers["x"] === "y") {
+        \\    return Response.json({ error: "unauthorized" }, { status: 401 });
+        \\  }
+        \\  return Response.json({ data: "private" });
+        \\}
+    ;
+    const coverage = try analyzeSourceFaultCoverage(std.testing.allocator, source);
+    try std.testing.expect(coverage.paths_exhaustive);
+    try std.testing.expectEqual(@as(u32, 1), coverage.warning_count);
+    try std.testing.expect(!coverage.clean);
+}
+
+test "the same hole with the opaque conjunct first also warns" {
+    const source = and_prefix ++
+        \\function handler(req) {
+        \\  const auth = jwtVerify("t", "secret");
+        \\  if (req.headers["x"] === "y" && !auth.ok) {
+        \\    return Response.json({ error: "unauthorized" }, { status: 401 });
+        \\  }
+        \\  return Response.json({ data: "private" });
+        \\}
+    ;
+    const coverage = try analyzeSourceFaultCoverage(std.testing.allocator, source);
+    try std.testing.expectEqual(@as(u32, 1), coverage.warning_count);
+    try std.testing.expect(!coverage.clean);
+}
+
+test "a second check inside an && can fail while the first passes" {
+    // a passes and b fails: the condition is false and the handler answers 200.
+    const source = and_prefix ++
+        \\function handler(req) {
+        \\  const a = jwtVerify("t1", "secret");
+        \\  const b = jwtVerify("t2", "secret");
+        \\  if (!a.ok && !b.ok) return Response.text("both failed", { status: 401 });
+        \\  return Response.text("ok");
+        \\}
+    ;
+    const coverage = try analyzeSourceFaultCoverage(std.testing.allocator, source);
+    try std.testing.expectEqual(@as(u32, 2), coverage.warning_count);
+    try std.testing.expect(!coverage.clean);
+}
+
+test "an upstream fallback behind an && is counted" {
+    const source = and_prefix ++
+        \\function handler(req) {
+        \\  const res = fetch("https://api.example.com/a");
+        \\  if (!res.ok && req.headers["x"] === "y") {
+        \\    return Response.json({ error: "upstream" }, { status: 502 });
+        \\  }
+        \\  return Response.json({ a: res.body });
+        \\}
+    ;
+    const coverage = try analyzeSourceFaultCoverage(std.testing.allocator, source);
+    try std.testing.expect(coverage.clean);
+    try std.testing.expectEqual(@as(u32, 1), coverage.upstream_fallback_sites);
+}
+
+test "an && that guards no failable call leaves a covered handler clean" {
+    const source = and_prefix ++
+        \\function handler(req) {
+        \\  const auth = jwtVerify("t", "secret");
+        \\  if (!auth.ok) return Response.json({ error: "unauthorized" }, { status: 401 });
+        \\  if (req.headers["x"] === "y" && req.headers["z"] === "w") {
+        \\    return Response.json({ error: "bad request" }, { status: 400 });
+        \\  }
+        \\  return Response.json({ data: "private" });
+        \\}
+    ;
+    const coverage = try analyzeSourceFaultCoverage(std.testing.allocator, source);
+    try std.testing.expect(coverage.clean);
+    try std.testing.expectEqual(@as(u32, 1), coverage.total_failable);
+    try std.testing.expectEqual(@as(u32, 1), coverage.covered);
+    try std.testing.expectEqual(@as(u32, 0), coverage.warning_count);
+}
+
+test "a check behind || or a negated && gives no failure path and blocks the property" {
+    // Neither form yields a constraint, so no path holds the failed check.
+    // That under-claims coverage and never claims it falsely.
+    const or_source = and_prefix ++
+        \\function handler(req) {
+        \\  const auth = jwtVerify("t", "secret");
+        \\  if (!auth.ok || req.headers["x"] === "y") {
+        \\    return Response.json({ error: "unauthorized" }, { status: 401 });
+        \\  }
+        \\  return Response.json({ data: "private" });
+        \\}
+    ;
+    const negated_source = and_prefix ++
+        \\function handler(req) {
+        \\  const auth = jwtVerify("t", "secret");
+        \\  if (!(auth.ok && req.headers["x"] === "y")) {
+        \\    return Response.json({ error: "unauthorized" }, { status: 401 });
+        \\  }
+        \\  return Response.json({ data: "private" });
+        \\}
+    ;
+    for ([_][]const u8{ or_source, negated_source }) |source| {
+        const coverage = try analyzeSourceFaultCoverage(std.testing.allocator, source);
+        try std.testing.expectEqual(@as(u32, 0), coverage.covered);
+        try std.testing.expect(!coverage.clean);
+    }
 }

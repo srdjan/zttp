@@ -93,6 +93,24 @@ pub const GeneratedTest = struct {
     root_function: NodeIndex = null_node,
 };
 
+fn stubInfoEql(a: StubInfo, b: StubInfo) bool {
+    return std.mem.eql(u8, a.module, b.module) and
+        std.mem.eql(u8, a.func, b.func) and
+        a.returns == b.returns and
+        a.call_site == b.call_site;
+}
+
+fn constraintEql(a: Constraint, b: Constraint) bool {
+    return switch (a) {
+        .req_method => |x| b == .req_method and std.mem.eql(u8, x, b.req_method),
+        .req_url => |x| b == .req_url and std.mem.eql(u8, x, b.req_url),
+        .stub_truthy => |x| b == .stub_truthy and stubInfoEql(x, b.stub_truthy),
+        .stub_falsy => |x| b == .stub_falsy and stubInfoEql(x, b.stub_falsy),
+        .result_ok => |x| b == .result_ok and stubInfoEql(x, b.result_ok),
+        .result_not_ok => |x| b == .result_not_ok and stubInfoEql(x, b.result_not_ok),
+    };
+}
+
 fn dupePathCondition(
     allocator: std.mem.Allocator,
     constraint: Constraint,
@@ -1018,17 +1036,22 @@ pub const PathGenerator = struct {
                 const saved_io = self.io_seq.items.len;
 
                 // Push all extractable constraints for then-branch
-                try self.extractAllConstraints(if_s.condition, false);
+                try self.extractAllConstraints(if_s.condition);
                 try self.walkPaths(if_s.then_branch);
                 self.constraints.shrinkRetainingCapacity(saved_constraints);
                 self.io_seq.shrinkRetainingCapacity(saved_io);
 
-                // Else-branch: push negated constraints
+                // Else-branch: walked once for each way the condition is false
                 if (if_s.else_branch != null_node) {
-                    try self.extractAllConstraints(if_s.condition, true);
-                    try self.walkPaths(if_s.else_branch);
-                    self.constraints.shrinkRetainingCapacity(saved_constraints);
-                    self.io_seq.shrinkRetainingCapacity(saved_io);
+                    var cases = try self.falseCases(if_s.condition);
+                    defer cases.deinit(self.allocator);
+                    for (0..cases.count()) |k| {
+                        if (k > 0 and self.path_count >= MAX_PATHS) break;
+                        try self.constraints.appendSlice(self.allocator, cases.slice(k));
+                        try self.walkPaths(if_s.else_branch);
+                        self.constraints.shrinkRetainingCapacity(saved_constraints);
+                        self.io_seq.shrinkRetainingCapacity(saved_io);
+                    }
                 }
                 // If no else and then-branch doesn't always return, fall-through
                 // is handled by the caller walking the next statement in the block.
@@ -1116,7 +1139,11 @@ pub const PathGenerator = struct {
     }
 
     fn walkBlock(self: *PathGenerator, block: Node.BlockData) !void {
-        var i: u16 = 0;
+        try self.walkBlockFrom(block, 0);
+    }
+
+    fn walkBlockFrom(self: *PathGenerator, block: Node.BlockData, first: u16) !void {
+        var i: u16 = first;
         while (i < block.stmts_count) : (i += 1) {
             const stmt_idx = self.ir_view.getListIndex(block.stmts_start, i);
             const stmt_tag = self.ir_view.getTag(stmt_idx) orelse continue;
@@ -1133,14 +1160,27 @@ pub const PathGenerator = struct {
                     // Then-branch returns, no else: fork then-path, continue for fall-through
                     const saved = self.constraints.items.len;
                     const saved_io = self.io_seq.items.len;
-                    try self.extractAllConstraints(if_s.condition, false);
+                    try self.extractAllConstraints(if_s.condition);
                     try self.walkPaths(if_s.then_branch);
                     self.constraints.shrinkRetainingCapacity(saved);
                     self.io_seq.shrinkRetainingCapacity(saved_io);
 
-                    // Fall-through with negated constraints
-                    try self.extractAllConstraints(if_s.condition, true);
-                    continue;
+                    // Fall-through: one way the condition is false continues in
+                    // this loop, several walk the rest of the block each.
+                    var cases = try self.falseCases(if_s.condition);
+                    defer cases.deinit(self.allocator);
+                    if (cases.count() == 1) {
+                        try self.constraints.appendSlice(self.allocator, cases.slice(0));
+                        continue;
+                    }
+                    for (0..cases.count()) |k| {
+                        if (k > 0 and self.path_count >= MAX_PATHS) break;
+                        try self.constraints.appendSlice(self.allocator, cases.slice(k));
+                        try self.walkBlockFrom(block, i + 1);
+                        self.constraints.shrinkRetainingCapacity(saved);
+                        self.io_seq.shrinkRetainingCapacity(saved_io);
+                    }
+                    return;
                 } else {
                     // Neither always returns: just recurse normally
                     try self.walkPaths(stmt_idx);
@@ -1159,26 +1199,130 @@ pub const PathGenerator = struct {
     // Phase 3: Constraint extraction from conditions
     // -------------------------------------------------------------------
 
-    /// Push all extractable constraints from a condition into the constraint list.
-    /// When `negate` is true, each constraint is negated (for else/fall-through paths).
-    fn extractAllConstraints(self: *PathGenerator, cond: NodeIndex, negate: bool) error{OutOfMemory}!void {
+    /// Push all extractable constraints from a condition into the constraint
+    /// list: the constraints that hold on the path where the condition is true.
+    fn extractAllConstraints(self: *PathGenerator, cond: NodeIndex) error{OutOfMemory}!void {
         const tag = self.ir_view.getTag(cond) orelse return;
 
         // AND chains: extract from both sides
         if (tag == .binary_op) {
             const bin = self.ir_view.getBinary(cond) orelse return;
             if (bin.op == .and_op) {
-                try self.extractAllConstraints(bin.left, negate);
-                try self.extractAllConstraints(bin.right, negate);
+                try self.extractAllConstraints(bin.left);
+                try self.extractAllConstraints(bin.right);
                 return;
             }
         }
 
         // Extract single constraint from this node
-        if (self.extractConditionConstraint(cond)) |c| {
-            const final = if (negate) self.negateConstraint(c) else c;
-            if (final) |f| try self.constraints.append(self.allocator, f);
+        if (self.extractConditionConstraint(cond)) |c| try self.constraints.append(self.allocator, c);
+    }
+
+    /// The ways a condition can be false, each as the constraints that hold on
+    /// the path reaching it. `a && b` is false when `a` is false, or when `a`
+    /// is true and `b` is false, so the negation of every conjunct on one path
+    /// is not the complement of the then-path.
+    const FalseCases = struct {
+        constraints: std.ArrayList(Constraint) = .empty,
+        spans: std.ArrayList(Span) = .empty,
+
+        const Span = struct { start: usize, len: usize };
+
+        fn deinit(self: *FalseCases, allocator: std.mem.Allocator) void {
+            self.constraints.deinit(allocator);
+            self.spans.deinit(allocator);
         }
+
+        fn count(self: *const FalseCases) usize {
+            return self.spans.items.len;
+        }
+
+        fn slice(self: *const FalseCases, k: usize) []const Constraint {
+            const span = self.spans.items[k];
+            return self.constraints.items[span.start..][0..span.len];
+        }
+
+        /// Append `parts` joined as one case, unless an equal case exists.
+        fn add(
+            self: *FalseCases,
+            allocator: std.mem.Allocator,
+            parts: []const []const Constraint,
+        ) error{OutOfMemory}!void {
+            const start = self.constraints.items.len;
+            for (parts) |part| try self.constraints.appendSlice(allocator, part);
+            const added = self.constraints.items[start..];
+            for (0..self.count()) |k| {
+                const existing = self.slice(k);
+                if (existing.len != added.len) continue;
+                for (existing, added) |a, b| {
+                    if (!constraintEql(a, b)) break;
+                } else {
+                    self.constraints.shrinkRetainingCapacity(start);
+                    return;
+                }
+            }
+            try self.spans.append(allocator, .{ .start = start, .len = added.len });
+        }
+    };
+
+    /// Cases for the conjuncts `c1 && ... && cn`. For each `ci` false with
+    /// `c1..c(i-1)` true, one case holds the negation of `ci`. A conjunct with
+    /// no constraint, or none expressible when false, still gets its case,
+    /// holding only the earlier conjuncts. Short-circuit evaluation never reads
+    /// the conjuncts after `ci`, so a failable call that one of them tests can
+    /// still have failed: each such conjunct adds a case with its failure.
+    /// The result always holds at least one case.
+    fn falseCases(self: *PathGenerator, cond: NodeIndex) error{OutOfMemory}!FalseCases {
+        var conjuncts: std.ArrayList(NodeIndex) = .empty;
+        defer conjuncts.deinit(self.allocator);
+        try self.collectConjuncts(cond, &conjuncts);
+
+        var cases: FalseCases = .{};
+        errdefer cases.deinit(self.allocator);
+        // The constraints of the conjuncts before `ci`, each true.
+        var held: std.ArrayList(Constraint) = .empty;
+        defer held.deinit(self.allocator);
+
+        for (conjuncts.items, 0..) |conjunct, i| {
+            const positive = self.extractConditionConstraint(conjunct);
+            const negated: ?Constraint = if (positive) |c| self.negateConstraint(c) else null;
+            const last: []const Constraint = if (negated) |*n| n[0..1] else &.{};
+            try cases.add(self.allocator, &.{ held.items, last });
+            for (conjuncts.items[i + 1 ..]) |later| {
+                const failure = self.failurePolarity(self.extractConditionConstraint(later)) orelse continue;
+                try cases.add(self.allocator, &.{ held.items, last, (&failure)[0..1] });
+            }
+            if (positive) |c| try held.append(self.allocator, c);
+        }
+        return cases;
+    }
+
+    /// The failing side of a conjunct's constraint, when it has one.
+    fn failurePolarity(self: *const PathGenerator, positive: ?Constraint) ?Constraint {
+        const c = positive orelse return null;
+        if (c.isFailure()) return c;
+        const negated = self.negateConstraint(c) orelse return null;
+        return if (negated.isFailure()) negated else null;
+    }
+
+    /// Flatten an `&&` chain into its conjuncts, left to right.
+    fn collectConjuncts(
+        self: *const PathGenerator,
+        cond: NodeIndex,
+        out: *std.ArrayList(NodeIndex),
+    ) error{OutOfMemory}!void {
+        if (self.ir_view.getTag(cond)) |tag| {
+            if (tag == .binary_op) {
+                if (self.ir_view.getBinary(cond)) |bin| {
+                    if (bin.op == .and_op) {
+                        try self.collectConjuncts(bin.left, out);
+                        try self.collectConjuncts(bin.right, out);
+                        return;
+                    }
+                }
+            }
+        }
+        try out.append(self.allocator, cond);
     }
 
     fn extractConditionConstraint(self: *PathGenerator, cond: NodeIndex) ?Constraint {
@@ -3503,4 +3647,184 @@ test "a Result export keeps its Result stubs beside a fetch" {
             else => return error.UnexpectedStatus,
         }
     }
+}
+
+/// Count the generated tests with `status` whose constraints are exactly
+/// `kinds`, in order.
+fn countPaths(tests: []const GeneratedTest, status: u16, kinds: []const std.meta.Tag(Constraint)) usize {
+    var count: usize = 0;
+    for (tests) |t| {
+        if (t.expected_status != status or t.constraints.len != kinds.len) continue;
+        for (t.constraints, kinds) |c, kind| {
+            if (std.meta.activeTag(c) != kind) break;
+        } else count += 1;
+    }
+    return count;
+}
+
+test "an && fall-through keeps the case where a later conjunct is false" {
+    const allocator = std.testing.allocator;
+    // `req.headers["x"] === "y"` yields no constraint. The fall-through is
+    // reached when the token check passes, and also when it fails and the
+    // header test is false: that second path returns 200 on a failed check.
+    const source =
+        \\import { jwtVerify } from "zttp:auth";
+        \\function handler(req) {
+        \\  const auth = jwtVerify("t", "secret");
+        \\  if (!auth.ok && req.headers["x"] === "y") {
+        \\    return Response.json({ error: "unauthorized" }, { status: 401 });
+        \\  }
+        \\  return Response.json({ data: "private" });
+        \\}
+    ;
+    var fixture = try generateFixture(allocator, source);
+    defer fixture.deinit();
+
+    const tests = fixture.generator.getTests();
+    try std.testing.expectEqual(@as(usize, 3), tests.len);
+    try std.testing.expectEqual(@as(usize, 1), countPaths(tests, 401, &.{.result_not_ok}));
+    try std.testing.expectEqual(@as(usize, 1), countPaths(tests, 200, &.{.result_ok}));
+    try std.testing.expectEqual(@as(usize, 1), countPaths(tests, 200, &.{.result_not_ok}));
+    for (tests) |t| {
+        const failed = std.mem.indexOf(u8, t.io_stubs.items[0].result_json, "\"ok\":false") != null;
+        try std.testing.expectEqual(t.constraints[0] == .result_not_ok, failed);
+    }
+    try std.testing.expect(fixture.generator.pathsExhaustive());
+}
+
+test "an && of two checks enumerates each short-circuit case" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { jwtVerify } from "zttp:auth";
+        \\function handler(req) {
+        \\  const a = jwtVerify("t1", "secret");
+        \\  const b = jwtVerify("t2", "secret");
+        \\  if (!a.ok && !b.ok) return Response.text("both failed", { status: 401 });
+        \\  return Response.text("ok");
+        \\}
+    ;
+    var fixture = try generateFixture(allocator, source);
+    defer fixture.deinit();
+
+    // Both fail; a passes; a passes and b fails; a fails and b passes.
+    const tests = fixture.generator.getTests();
+    try std.testing.expectEqual(@as(usize, 4), tests.len);
+    try std.testing.expectEqual(@as(usize, 1), countPaths(tests, 401, &.{ .result_not_ok, .result_not_ok }));
+    try std.testing.expectEqual(@as(usize, 1), countPaths(tests, 200, &.{.result_ok}));
+    try std.testing.expectEqual(@as(usize, 1), countPaths(tests, 200, &.{ .result_ok, .result_not_ok }));
+    try std.testing.expectEqual(@as(usize, 1), countPaths(tests, 200, &.{ .result_not_ok, .result_ok }));
+}
+
+test "an opaque conjunct that comes first still lets a later check fail" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { jwtVerify } from "zttp:auth";
+        \\function handler(req) {
+        \\  const auth = jwtVerify("t", "secret");
+        \\  if (req.headers["x"] === "y" && !auth.ok) {
+        \\    return Response.json({ error: "unauthorized" }, { status: 401 });
+        \\  }
+        \\  return Response.json({ data: "private" });
+        \\}
+    ;
+    var fixture = try generateFixture(allocator, source);
+    defer fixture.deinit();
+
+    // The header test is false, so the token check is never read, and the
+    // token can still be bad: that path answers 200.
+    const tests = fixture.generator.getTests();
+    try std.testing.expectEqual(@as(usize, 1), countPaths(tests, 401, &.{.result_not_ok}));
+    try std.testing.expectEqual(@as(usize, 1), countPaths(tests, 200, &.{.result_not_ok}));
+}
+
+test "opaque conjuncts that add no constraint do not repeat a path" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\function handler(req) {
+        \\  if (req.headers["x"] === "y" && req.headers["z"] === "w") {
+        \\    return Response.text("both", { status: 400 });
+        \\  }
+        \\  return Response.text("ok");
+        \\}
+    ;
+    var fixture = try generateFixture(allocator, source);
+    defer fixture.deinit();
+
+    try std.testing.expectEqual(@as(usize, 2), fixture.generator.getTests().len);
+}
+
+test "an else branch is reached by every short-circuit case" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { jwtVerify } from "zttp:auth";
+        \\function handler(req) {
+        \\  const auth = jwtVerify("t", "secret");
+        \\  if (!auth.ok && req.headers["x"] === "y") {
+        \\    return Response.text("unauthorized", { status: 401 });
+        \\  } else {
+        \\    return Response.text("ok");
+        \\  }
+        \\}
+    ;
+    var fixture = try generateFixture(allocator, source);
+    defer fixture.deinit();
+
+    const tests = fixture.generator.getTests();
+    try std.testing.expectEqual(@as(usize, 3), tests.len);
+    try std.testing.expectEqual(@as(usize, 1), countPaths(tests, 401, &.{.result_not_ok}));
+    try std.testing.expectEqual(@as(usize, 1), countPaths(tests, 200, &.{.result_ok}));
+    try std.testing.expectEqual(@as(usize, 1), countPaths(tests, 200, &.{.result_not_ok}));
+}
+
+test "short-circuit enumeration that passes MAX_PATHS reports truncation" {
+    const allocator = std.testing.allocator;
+    // Each guard doubles the paths that follow it. Twelve guards give far
+    // more than MAX_PATHS, so the set must say it is not exhaustive.
+    const guard =
+        \\  if (!a.ok && req.headers["x"] === "y") return Response.text("no", { status: 401 });
+        \\
+    ;
+    const source = try std.mem.concat(allocator, u8, &.{
+        "import { jwtVerify } from \"zttp:auth\";\nfunction handler(req) {\n  const a = jwtVerify(\"t\", \"secret\");\n",
+        guard ** 12,
+        "  return Response.text(\"ok\");\n}\n",
+    });
+    defer allocator.free(source);
+    var fixture = try generateFixture(allocator, source);
+    defer fixture.deinit();
+
+    try std.testing.expectEqual(@as(usize, PathGenerator.MAX_PATHS), fixture.generator.getTests().len);
+    try std.testing.expect(!fixture.generator.pathsExhaustive());
+    try std.testing.expectEqual(PathGenerator.Coverage.truncated, fixture.generator.coverage());
+}
+
+test "generate cleans every fatal allocation failure through short-circuit cases" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { jwtVerify } from "zttp:auth";
+        \\export function handler(req) {
+        \\  const a = jwtVerify("t1", "secret");
+        \\  const b = jwtVerify("t2", "secret");
+        \\  if (!a.ok && !b.ok && req.headers["x"] === "y") return Response.text("no", { status: 401 });
+        \\  if (!a.ok && req.headers["x"] === "y") {
+        \\    return Response.text("no", { status: 403 });
+        \\  } else {
+        \\    return Response.text("ok");
+        \\  }
+        \\}
+    ;
+    var parser = try parser_mod.JsParser.init(allocator, source);
+    defer parser.deinit();
+    var atoms = atom_table.AtomTable.init(allocator);
+    defer atoms.deinit();
+    parser.setAtomTable(&atoms);
+    const root = try parser.parse();
+    const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    const handler_fn = handler_verifier.findHandlerFunction(ir_view, root) orelse return error.HandlerNotFound;
+
+    try std.testing.checkAllAllocationFailures(
+        allocator,
+        generateWithAllocator,
+        .{ ir_view, &atoms, handler_fn },
+    );
 }

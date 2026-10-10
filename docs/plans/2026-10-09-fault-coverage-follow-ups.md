@@ -168,7 +168,10 @@ status read directly. In addition:
 fall-through of `if (c1 && ... && cn) <exit>`, emit one path per recognized
 conjunct `ci` false with `c1..c(i-1)` true; when a conjunct is unrecognized,
 also emit the path with every recognized conjunct before it true (decision
-D6). Measure `||` in the then-path and apply the mirror rule if it has the
+D6). A later conjunct that tests a failable call also adds a case with its
+failure, because short-circuit evaluation skips the test but the call has
+already run (found in F1: without it, `opaque && !auth.ok` stays a wrong true).
+Measure `||` in the then-path and apply the mirror rule if it has the
 same defect. Tests, each seen failing first: `p_and.ts` raises the critical
 warning and loses `fault_covered`; `p_fetch_and.ts` reports one
 `upstreamFallbackSites`; generated tests for both pass. Measure the three
@@ -331,6 +334,17 @@ Bare unresolved specifiers block under both options.
 - Contradictory constraints on one call site are not pruned
   (`p_two_checks.ts`); no wrong true follows today.
 - R3's side observation on `has_egress`.
+- Found in F1: request-binding recognition never fires.
+  `findHandlerBindings` sets `req_binding_key` only when the first parameter
+  node is `.identifier`, and the parser emits `.pattern_element`. So no
+  `req_method` or `req_url` constraint is ever produced. Generated tests for a
+  then-path that needs a POST therefore send a GET. A one-line fix
+  (`ir_view.paramBinding`) was measured to change one example snapshot
+  (`handler-full.tsx`). It still misses a direct `req.method === "X"`, and it
+  moves path names and contracts, so it needs its own unit.
+- `proof_trace.zig:595` prints "0 of N failable I/O site(s) have no explicit
+  failure path" for a handler that is not covered only because of a critical
+  2xx warning. F1 makes this reachable for `&&` conditions.
 
 ## 8. Review record
 
