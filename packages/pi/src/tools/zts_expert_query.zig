@@ -126,9 +126,10 @@ fn operationArgs(
     operation: Operation,
     value: ?[]const u8,
 ) ![]const []const u8 {
-    const args = try allocator.alloc([]const u8, if (value == null) 1 else 2);
+    const present = value orelse return registry_mod.helpers.singleArg(allocator, @tagName(operation));
+    const args = try allocator.alloc([]const u8, 2);
     args[0] = @tagName(operation);
-    if (value) |present| args[1] = present;
+    args[1] = present;
     return args;
 }
 

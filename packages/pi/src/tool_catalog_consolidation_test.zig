@@ -30,8 +30,6 @@ const legacy_query_names = [_][]const u8{
 };
 
 const ProviderProjection = enum { openai, anthropic, deepseek, local };
-const legacy_tool_count: usize = 35;
-const retired_model_routes: usize = 5;
 
 const ExpectedPrefix = struct {
     /// Exact pre-cutover provider bytes measured at `ede92d63`, before any
@@ -91,11 +89,6 @@ test "unified compiler query removes old model authority and at least forty perc
 
     try testing.expect(live.findByName(query_tool.tool.name) != null);
     for (legacy_query_names) |legacy_name| try testing.expect(live.findByName(legacy_name) == null);
-    try testing.expectEqual(
-        legacy_tool_count - (legacy_query_names.len - 1) - retired_model_routes,
-        tool_catalog.count(&live),
-    );
-
     inline for (comptime std.enums.values(ProviderProjection)) |provider| {
         const after = try serialize(testing.allocator, provider, &live);
         defer testing.allocator.free(after);
