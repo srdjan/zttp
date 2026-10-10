@@ -23,7 +23,7 @@ index when a plan starts, closes, or moves to the archive.
 | [M4 T2: tool catalog and schema subset](2026-09-23-m4-t2-tool-catalog-design.md) | Implemented 2026-09-23 | Owner accepted the design and answered its four questions |
 | [M4 T1b: connect and handshake deadline](2026-09-23-m4-t1b-connect-deadline-design.md) | Implemented 2026-09-23 | Owner accepted the design and answered its three questions |
 | [M3: provable-set reach measurement](2026-09-21-0955-feat-provable-set-reach-plan.md) | Complete, 2026-09-21 | User approved pilot and full DeepSeek runs; [8/8 reached](../provable-reach.md#first-full-measurement) |
-| [Fault coverage for upstream calls](2026-10-09-fault-coverage-for-upstream-calls.md) | Accepted revision 2, 2026-10-09; Q1 to Q7 answered (a) | Owner approved on 2026-10-09; U5 re-record needs a separate go-ahead |
+| [Fault coverage for upstream calls](2026-10-09-fault-coverage-for-upstream-calls.md) | Complete 2026-10-10; fetch counts, unseen calls fail closed; re-record 13/19 | Owner approved on 2026-10-09; U5 approved separately |
 | [Flow-checker sinks in callees](2026-10-08-flow-checker-sinks-in-callees.md) | Complete 2026-10-09; census 776/776; follow-up R3 (`fault_covered` for a fixed-URL fetch) needs its own plan | Owner approved on 2026-10-08 |
 | [Boolean checks and call arity](2026-10-08-boolean-and-arity-checks.md) | Complete 2026-10-09; shared DeepSeek re-record 12/19 (cohorts 15/19, 13/19) | Owner approved on 2026-10-08 |
 | [Tier 1: test and diagnostic discipline](2026-10-07-tier1-test-and-diagnostic-discipline.md) | Complete 2026-10-08; section 8 lists 15 findings for owner decision | Owner approved implementation in plan order on 2026-10-07 |

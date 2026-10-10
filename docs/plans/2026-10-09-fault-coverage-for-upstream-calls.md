@@ -1,6 +1,6 @@
 # Plan: fault coverage for upstream calls
 
-Status: accepted 2026-10-09, revision 2. Source: follow-up R3
+Status: complete 2026-10-10 (section 9), revision 2. Source: follow-up R3
 of the [flow-checker plan](2026-10-08-flow-checker-sinks-in-callees.md),
 section 9. Code references are to local `main` at `423cb4b8`. The owner
 approved implementation on 2026-10-09 (section 6).
@@ -296,3 +296,36 @@ invisible info diagnostic (`upstreamFallbackSites`), a census that restated its
 rule (now two-directional and generator-driven), the policy-hash enforcement
 point and its ten pins, and measuring U1 alone. Reports:
 `r3/codex-review.md`, `r3/fable-review.md`.
+
+## 9. Result
+
+Completed 2026-10-10. Every unit is on local `main`; nothing is pushed.
+
+- U0 (`de055ce8`, extended in U2): the severity census runs the real path
+  generator over 64 rows; 29 are ok and 35 carry allowlist rows with reasons
+  (5 with no fork, 30 forkable exports with no severity). It does not catch a
+  wrong boolean failure stub, because no boolean export declares a severity yet.
+- U1 (`aa9006f9`): every failable call is a site keyed by call site; a failable
+  call on no enumerated path, or a non-exhaustive walk, blocks `fault_covered`;
+  a `??` fallback on an optional export is a covered site (Q7). Three examples
+  lost a vacuous `fault_covered` (`bytes-boundary`, `router`, `tools`).
+- U2 (`d96450d1`): `fetch` and `fetchWithRetry` are `.upstream`; `x.ok` forks
+  when the parsed return type is an `ok: boolean` record of a failable,
+  non-`Result` export; stubs carry `status`; `upstreamFallbackSites` reports
+  2xx fallbacks. Three `fetch` examples now prove `fault_covered`; generated
+  tests for `fetch` handlers pass end to end. E3: `parallel.ts` dropped its
+  claim.
+- U3 (`63020455`): `path_analyzer_version` 2 is in `policyHash`
+  (`11da0cd82a59`).
+- U4 (`a17396ac`): `docs/verification.md`, the ZTS500 suggestion, the deploy
+  manifest line, and the severity enum doc say what is checked.
+- U5: one DeepSeek re-record (`05b43d95`): raw first-draft pass 13/19, reached
+  green 18/19, intent 19/19, replay 19/19; convergence (`ee4334b9`) and
+  coverage (`5d9baa20`) republished offline.
+- Final gate: `bash scripts/verify.sh` exit 0 on 2026-10-10 at `5d9baa20`.
+
+Follow-ups, beyond section 7: the unseen-call scan reads one file, so a
+failable call inside a helper imported from another file stays invisible; a
+failable call inline in an expression is counted as unseen rather than as a
+site, which costs `routing/router.ts` its verdict; the `builtin_modules.zig`
+test still calls `cacheSet` a function that always succeeds.
