@@ -236,6 +236,11 @@ subagents implement U0 to U4 in section 5 order, one commit per unit. U5 is a
 paid DeepSeek re-record, so the main session confirms with the owner before it
 starts.
 
+Answered 2026-10-09 during U2: E3, remove `fault_covered` from the capsule of
+`examples/parallel/parallel.ts`. Its three `fetch` calls run in callbacks
+passed to `parallel()`, which no path covers, so the claim was never provable;
+it held only while `fetch` did not count.
+
 **Q1 (scope of the upstream severity).** Options: (a) `fetch` and
 `fetchWithRetry` now, the rest of the audit as listed follow-ups; (b) also
 `serviceCall`, the `zttp:workflow` results, `parallel`, and `race` now.
