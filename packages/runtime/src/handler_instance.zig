@@ -1368,14 +1368,6 @@ pub const HandlerInstance = struct {
         self.armRequestDeadlineMs(self.config.request_timeout_ms);
     }
 
-    /// Arm a callback deadline bounded by both the configured request timeout
-    /// and an enclosing lifecycle budget such as graceful shutdown.
-    pub fn armRequestDeadlineWithin(self: *Self, max_ms: u32) void {
-        const configured_ms = self.config.request_timeout_ms;
-        const effective_ms = if (configured_ms == 0) max_ms else @min(configured_ms, max_ms);
-        self.armRequestDeadlineMs(effective_ms);
-    }
-
     fn armRequestDeadlineMs(self: *Self, ms: u32) void {
         self.ctx.interrupt_requested.store(false, .monotonic);
         self.ctx.deadline_ns = 0;

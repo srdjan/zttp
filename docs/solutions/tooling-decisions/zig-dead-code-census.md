@@ -171,11 +171,13 @@ file's directory. That returned 450 of 450 sources reachable, with only the 8
 package reaches" to "75 internal modules, 100 allowed package reaches",
 confirming exactly one module and one allowlist row went away.
 
-**Distinguishing a pre-existing log line from a regression.** `zig build
-test-zruntime` prints `failed command: ...` next to a WebSocket timeout
-warning while exiting 0. Rather than assume, `git stash` the working changes,
-rerun, and compare: identical output on the untouched tree, so it is the
-suite exercising `recycleAfterTimeout`, not a new break.
+**Read the exit status directly.** A successful test run can print
+`failed command: ...` when a negative test emits diagnostics.
+That text alone does not establish a regression.
+The earlier claim that this suite exercised `recycleAfterTimeout` was wrong.
+The method had no tracked caller after WebSocket support was removed.
+The October 10 cleanup removed both obsolete WebSocket methods.
+HTTP requests still use `armRequestDeadline` and recycle slots after timeouts.
 
 ## Related
 
