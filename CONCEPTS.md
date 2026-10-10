@@ -33,6 +33,14 @@ A capsule written into a fixture is a claim about a program that does not exist 
 ### Effects ceiling
 A declared upper bound on the Capabilities a function may reach. The inferred set must sit inside the ceiling; reaching past it is an error, and declaring a Capability never reached is a warning, so the ceiling stays honest in both directions.
 
+### Failure severity
+How the fault-coverage Property treats a built-in function's failure: critical (a success response on the failure path is a warning), expected (a success response is normal degradation), upstream (an external service failed, and a success response is reported as a fallback), or none (the function is not counted). Every call to a function with a severity other than none must have an explicit failure path before the Handler is fault-covered.
+
+A severity of none is not a claim that the function cannot fail. It can mean that a later critical function already reports the failure, or that the function needs a fork of its own before its failure can be counted.
+
+### Unseen call
+A call to a function with a Failure severity that the path enumeration cannot hold on any path, so no failure path can cover it. Examples are a call inside a nested function or callback, a call at module scope, and a call in a file the Handler imports. An import that the analysis could not scan also counts as one. Any unseen call blocks the fault-coverage Property: the analysis fails closed on what it cannot see, and the absence of an answer is never read as a clean answer.
+
 ## Accepting an artifact
 
 ### Deployment artifact
