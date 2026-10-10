@@ -1,6 +1,6 @@
 # Plan: fault coverage follow-ups (R4)
 
-Status: approved 2026-10-10, revision 2. Source: the follow-ups of the
+Status: complete 2026-10-10 (section 9), revision 2. Source: the follow-ups of the
 [R3 plan](2026-10-09-fault-coverage-for-upstream-calls.md), section 7 and
 section 9. Code references are to local `main` at `1d821395`. Revision 1 was
 reviewed by Fable and Codex astra (section 8).
@@ -371,3 +371,40 @@ Codex astra fact-checked 27 claims: six corrections, among them the
 `race` row and its non-2xx responses, the `schemaCompile` registry limit, and
 the depth of the import stack. Reports: scratchpad `r4/fable-review.md`,
 `r4/codex-review.md`.
+
+## 9. Result
+
+Completed 2026-10-10. Every unit is on local `main`; nothing is pushed.
+
+- F0 (`1d821395`): the `builtin_modules.zig` severity test stops calling
+  `cacheSet` total.
+- F1 (`166cfadf`): an `&&` condition enumerates each short-circuit case, and a
+  later conjunct that tests a failable call adds its failure case. The
+  `p_and.ts` wrong true is gone. `||` and a negated `&&` yield no constraint,
+  so they under-claim; a test pins that. No example changed.
+- F2 (`ca98f7f3`): every non-builtin import record needs a clean scan of its
+  file, transitively; a bare specifier, a partner module, an unreadable file,
+  and a chain deeper than eight files block. The browser analyzer blocks on
+  any relative import. No example changed.
+- F3 (`1d879237`): `status_check.zig` forks `res.status` comparisons that are
+  the complement of `ok` (D2 a); other recognized comparisons stub a status
+  that takes each branch. No example changed.
+- F4 (`a81f6078`): flow witnesses fork on `res.ok` and on the F3 comparisons,
+  and give an ok-record call the generator's response stub. A replay test
+  drives three witnesses into the leak.
+- F5 (`e41ae719`): severities per D3, except `schemaCompile` (D8). The census
+  probes ok-record returns whatever their severity, adds an object probe, and
+  checks its first boolean failure stubs; a sabotage of that stub fails it.
+  `system/users.ts` (bare `cacheSet`) and `workflow/entry-orchestrator.ts`
+  (unchecked `workflow.call`) lost `fault_covered`.
+- F6 (`e6314c9c`): every `rateCheck` failure is an error Result (D4 b).
+- F7 (`778ea6c7`): `path_analyzer_version` 3; `policy_hash` `b2038448...7ae3`.
+- F8 (`835fe4df`): `docs/verification.md` and the severity enum doc.
+- F9: one DeepSeek re-record (`286da2d5`): raw first-draft pass 13/19,
+  first-attempt green 13/19, reached green 19/19, intent 19/19, replay 19/19;
+  convergence (`8f7ddcdc`) and coverage (`b64716f1`, 5 of 62 rules tripped)
+  republished offline.
+- Final gate: `bash scripts/verify.sh` offline, exit 0 on 2026-10-10 at
+  `b64716f1` ("all CI test-job steps passed").
+
+The four declared-return changes of D4 (b) stay a follow-up in section 7.
