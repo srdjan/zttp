@@ -20,6 +20,7 @@ const contract_types = @import("zts-contracts").contract_types;
 const strict_checker = @import("strict_checker.zig");
 const handler_policy = @import("zts-engine").handler_policy;
 const flow_checker = @import("flow_checker.zig");
+const path_generator = @import("path_generator.zig");
 const repair_intent_mod = @import("repair_intent.zig");
 
 pub const RepairIntent = repair_intent_mod.RepairIntent;
@@ -869,10 +870,10 @@ pub fn policyHash() [64]u8 {
 }
 
 fn computePolicyHash() [64]u8 {
-    return computePolicyHashFor(flow_checker.flow_analyzer_version);
+    return computePolicyHashFor(flow_checker.flow_analyzer_version, path_generator.path_analyzer_version);
 }
 
-fn computePolicyHashFor(flow_version: u32) [64]u8 {
+fn computePolicyHashFor(flow_version: u32, path_version: u32) [64]u8 {
     var hasher = std.crypto.hash.sha2.Sha256.init(.{});
 
     for (&all_rules) |*rule| {
@@ -909,6 +910,14 @@ fn computePolicyHashFor(flow_version: u32) [64]u8 {
     hasher.update(version_text);
     hasher.update("\x01");
 
+    // The path analyzer version, for the same reason: fault coverage proves
+    // less or more without a rule moving. See
+    // `path_generator.path_analyzer_version`.
+    const path_text = std.fmt.bufPrint(&version_buf, "{d}", .{path_version}) catch unreachable;
+    hasher.update("path-analyzer-version\x00");
+    hasher.update(path_text);
+    hasher.update("\x01");
+
     const digest = hasher.finalResult();
     return std.fmt.bytesToHex(digest, .lower);
 }
@@ -918,10 +927,22 @@ fn computePolicyHashFor(flow_version: u32) [64]u8 {
 // ---------------------------------------------------------------------------
 
 test "policy hash covers the flow analyzer version" {
-    const current = computePolicyHashFor(flow_checker.flow_analyzer_version);
+    const current = computePolicyHashFor(flow_checker.flow_analyzer_version, path_generator.path_analyzer_version);
     try std.testing.expectEqualStrings(&current, &policyHash());
-    const older = computePolicyHashFor(flow_checker.flow_analyzer_version - 1);
+    const older = computePolicyHashFor(flow_checker.flow_analyzer_version - 1, path_generator.path_analyzer_version);
     try std.testing.expect(!std.mem.eql(u8, &current, &older));
+}
+
+test "policy hash covers the path analyzer version" {
+    const current = computePolicyHashFor(flow_checker.flow_analyzer_version, path_generator.path_analyzer_version);
+    try std.testing.expectEqualStrings(&current, &policyHash());
+    // Version 1 is the analysis before the constant existed.
+    try std.testing.expect(path_generator.path_analyzer_version >= 2);
+    const older = computePolicyHashFor(flow_checker.flow_analyzer_version, path_generator.path_analyzer_version - 1);
+    try std.testing.expect(!std.mem.eql(u8, &current, &older));
+    // The two versions are separate inputs: moving one is not moving the other.
+    const flow_older = computePolicyHashFor(flow_checker.flow_analyzer_version - 1, path_generator.path_analyzer_version);
+    try std.testing.expect(!std.mem.eql(u8, &older, &flow_older));
 }
 
 test "all_rules has expected count" {

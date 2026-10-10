@@ -141,6 +141,25 @@ fn dupePathIoCall(
     };
 }
 
+/// The version of the path analysis, hashed into `policyHash`.
+///
+/// The path generator and the fault-coverage checker that reads its paths
+/// decide `fault_covered` and the other path properties. The acceptance kernel
+/// takes those on the producer's word, and rule metadata does not move when the
+/// analysis learns to prove less or more. Any change to what fault coverage can
+/// prove (which calls count as failable, which forks the generator emits, what
+/// blocks `fault_covered`, how a site is keyed) MUST bump this number. The bump
+/// moves `policy_hash`, so a contract stamped by an older analysis no longer
+/// matches the policy and is rebuilt instead of trusted. It lives here, beside
+/// the walk that the fault-coverage checker consumes, as `flow_analyzer_version`
+/// lives with the flow checker.
+///
+/// 1 is the implicit version before this constant existed: no path version was
+/// hashed. 2 is the analysis after every failable call counts as a site, a call
+/// the walk cannot see or a non-exhaustive walk blocks `fault_covered`, and
+/// `fetch` is an upstream call forked by `res.ok`.
+pub const path_analyzer_version: u32 = 2;
+
 // ---------------------------------------------------------------------------
 // PathGenerator
 // ---------------------------------------------------------------------------
