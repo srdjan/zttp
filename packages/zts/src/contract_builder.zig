@@ -1645,6 +1645,80 @@ pub const ContractBuilder = struct {
         return self.ir_view.getProperty(prop_idx);
     }
 
+    const CatalogFieldRefusals = struct {
+        not_literal: contract_types.ToolCatalogRefusal,
+        unknown: contract_types.ToolCatalogRefusal,
+        repeated: contract_types.ToolCatalogRefusal,
+        missing: contract_types.ToolCatalogRefusal,
+    };
+
+    fn CollectedCatalogFields(comptime count: usize) type {
+        return struct {
+            object_node: NodeIndex,
+            fields: [count]NodeIndex,
+            readable: bool,
+        };
+    }
+
+    fn collectClosedCatalogFields(
+        self: *ContractBuilder,
+        contract: *HandlerContract,
+        subject: []const u8,
+        node: NodeIndex,
+        comptime field_names: []const []const u8,
+        comptime required_slots: []const usize,
+        refusals: CatalogFieldRefusals,
+    ) !?CollectedCatalogFields(field_names.len) {
+        const object_node = self.resolveObjectLiteralNode(node) orelse {
+            try self.refuseToolCatalog(contract, refusals.not_literal, subject, node, null);
+            return null;
+        };
+        const object_literal = self.ir_view.getObject(object_node) orelse {
+            try self.refuseToolCatalog(contract, refusals.not_literal, subject, node, null);
+            return null;
+        };
+
+        var fields = [_]NodeIndex{null_node} ** field_names.len;
+        var readable = true;
+        var property_index: u16 = 0;
+        while (property_index < object_literal.properties_count) : (property_index += 1) {
+            const property_node = self.ir_view.getListIndex(object_literal.properties_start, property_index);
+            const property = self.literalProperty(property_node) orelse {
+                try self.refuseToolCatalog(contract, refusals.not_literal, subject, property_node, null);
+                readable = false;
+                continue;
+            };
+            const key = self.getObjectPropertyKey(property.key) orelse {
+                try self.refuseToolCatalog(contract, refusals.not_literal, subject, property_node, null);
+                readable = false;
+                continue;
+            };
+            const slot = for (field_names, 0..) |known, index| {
+                if (std.mem.eql(u8, known, key)) break index;
+            } else {
+                try self.refuseToolCatalog(contract, refusals.unknown, subject, property_node, key);
+                readable = false;
+                continue;
+            };
+            if (fields[slot] != null_node) {
+                try self.refuseToolCatalog(contract, refusals.repeated, subject, property_node, key);
+                readable = false;
+                continue;
+            }
+            fields[slot] = property.value;
+        }
+        for (required_slots) |slot| {
+            if (fields[slot] != null_node) continue;
+            try self.refuseToolCatalog(contract, refusals.missing, subject, object_node, field_names[slot]);
+            readable = false;
+        }
+        return .{
+            .object_node = object_node,
+            .fields = fields,
+            .readable = readable,
+        };
+    }
+
     fn readToolEntry(
         self: *ContractBuilder,
         contract: *HandlerContract,
@@ -1658,47 +1732,22 @@ pub const ContractBuilder = struct {
         }
         try state.names.append(self.allocator, name);
 
-        const entry_node = self.resolveObjectLiteralNode(value_idx) orelse
-            return self.refuseToolCatalog(contract, .entry_not_literal, name, value_idx, null);
-        const entry_obj = self.ir_view.getObject(entry_node) orelse
-            return self.refuseToolCatalog(contract, .entry_not_literal, name, value_idx, null);
-
-        var fields = [_]NodeIndex{null_node} ** catalog_fields.len;
-        var readable = true;
-        var j: u16 = 0;
-        while (j < entry_obj.properties_count) : (j += 1) {
-            const field_idx = self.ir_view.getListIndex(entry_obj.properties_start, j);
-            const field = self.literalProperty(field_idx) orelse {
-                try self.refuseToolCatalog(contract, .entry_not_literal, name, field_idx, null);
-                readable = false;
-                continue;
-            };
-            const key = self.getObjectPropertyKey(field.key) orelse {
-                try self.refuseToolCatalog(contract, .entry_not_literal, name, field_idx, null);
-                readable = false;
-                continue;
-            };
-            const slot = for (catalog_fields, 0..) |known, k| {
-                if (std.mem.eql(u8, known, key)) break k;
-            } else {
-                try self.refuseToolCatalog(contract, .entry_field_unknown, name, field_idx, key);
-                readable = false;
-                continue;
-            };
-            if (fields[slot] != null_node) {
-                try self.refuseToolCatalog(contract, .entry_field_repeated, name, field_idx, key);
-                readable = false;
-                continue;
-            }
-            fields[slot] = field.value;
-        }
-        const required_common = [_]usize{ field_route, field_description, field_max_input_bytes };
-        for (required_common) |slot| {
-            const field = fields[slot];
-            if (field != null_node) continue;
-            try self.refuseToolCatalog(contract, .entry_field_missing, name, entry_node, catalog_fields[slot]);
-            readable = false;
-        }
+        const collected = (try self.collectClosedCatalogFields(
+            contract,
+            name,
+            value_idx,
+            &catalog_fields,
+            &.{ field_route, field_description, field_max_input_bytes },
+            .{
+                .not_literal = .entry_not_literal,
+                .unknown = .entry_field_unknown,
+                .repeated = .entry_field_repeated,
+                .missing = .entry_field_missing,
+            },
+        )) orelse return;
+        const entry_node = collected.object_node;
+        const fields = collected.fields;
+        var readable = collected.readable;
         const has_input = fields[field_input] != null_node;
         const has_output = fields[field_output] != null_node;
         const has_agent = fields[field_agent] != null_node;
@@ -1795,45 +1844,21 @@ pub const ContractBuilder = struct {
         max_input_bytes: u32,
         agent_node: NodeIndex,
     ) !void {
-        const obj_node = self.resolveObjectLiteralNode(agent_node) orelse
-            return self.refuseToolCatalog(contract, .agent_not_literal, name, agent_node, null);
-        const obj = self.ir_view.getObject(obj_node) orelse
-            return self.refuseToolCatalog(contract, .agent_not_literal, name, agent_node, null);
-        var fields = [_]NodeIndex{null_node} ** agent_fields.len;
-        var readable = true;
-        var i: u16 = 0;
-        while (i < obj.properties_count) : (i += 1) {
-            const prop_idx = self.ir_view.getListIndex(obj.properties_start, i);
-            const prop = self.literalProperty(prop_idx) orelse {
-                try self.refuseToolCatalog(contract, .agent_not_literal, name, prop_idx, null);
-                readable = false;
-                continue;
-            };
-            const key = self.getObjectPropertyKey(prop.key) orelse {
-                try self.refuseToolCatalog(contract, .agent_not_literal, name, prop_idx, null);
-                readable = false;
-                continue;
-            };
-            const slot = for (agent_fields, 0..) |known, index| {
-                if (std.mem.eql(u8, known, key)) break index;
-            } else {
-                try self.refuseToolCatalog(contract, .agent_field_unknown, name, prop_idx, key);
-                readable = false;
-                continue;
-            };
-            if (fields[slot] != null_node) {
-                try self.refuseToolCatalog(contract, .agent_field_repeated, name, prop_idx, key);
-                readable = false;
-                continue;
-            }
-            fields[slot] = prop.value;
-        }
-        for (fields, agent_fields) |field, field_name| {
-            if (field != null_node) continue;
-            try self.refuseToolCatalog(contract, .agent_field_missing, name, obj_node, field_name);
-            readable = false;
-        }
-        if (!readable) return;
+        const collected = (try self.collectClosedCatalogFields(
+            contract,
+            name,
+            agent_node,
+            &agent_fields,
+            &.{ 0, 1, 2 },
+            .{
+                .not_literal = .agent_not_literal,
+                .unknown = .agent_field_unknown,
+                .repeated = .agent_field_repeated,
+                .missing = .agent_field_missing,
+            },
+        )) orelse return;
+        if (!collected.readable) return;
+        const fields = collected.fields;
 
         var tools = (try self.readAgentTools(contract, name, fields[0])) orelse return;
         defer {
@@ -1943,49 +1968,21 @@ pub const ContractBuilder = struct {
         name: []const u8,
         node: NodeIndex,
     ) !?AgentProvider {
-        const obj_node = self.resolveObjectLiteralNode(node) orelse {
-            try self.refuseToolCatalog(contract, .agent_provider_not_literal, name, node, null);
-            return null;
-        };
-        const obj = self.ir_view.getObject(obj_node) orelse {
-            try self.refuseToolCatalog(contract, .agent_provider_not_literal, name, node, null);
-            return null;
-        };
-        var fields = [_]NodeIndex{null_node} ** agent_provider_fields.len;
-        var readable = true;
-        var i: u16 = 0;
-        while (i < obj.properties_count) : (i += 1) {
-            const prop_idx = self.ir_view.getListIndex(obj.properties_start, i);
-            const prop = self.literalProperty(prop_idx) orelse {
-                try self.refuseToolCatalog(contract, .agent_provider_not_literal, name, prop_idx, null);
-                readable = false;
-                continue;
-            };
-            const key = self.getObjectPropertyKey(prop.key) orelse {
-                try self.refuseToolCatalog(contract, .agent_provider_not_literal, name, prop_idx, null);
-                readable = false;
-                continue;
-            };
-            const slot = for (agent_provider_fields, 0..) |known, index| {
-                if (std.mem.eql(u8, known, key)) break index;
-            } else {
-                try self.refuseToolCatalog(contract, .agent_provider_field_unknown, name, prop_idx, key);
-                readable = false;
-                continue;
-            };
-            if (fields[slot] != null_node) {
-                try self.refuseToolCatalog(contract, .agent_provider_field_repeated, name, prop_idx, key);
-                readable = false;
-                continue;
-            }
-            fields[slot] = prop.value;
-        }
-        for (fields, agent_provider_fields) |field, field_name| {
-            if (field != null_node) continue;
-            try self.refuseToolCatalog(contract, .agent_provider_field_missing, name, obj_node, field_name);
-            readable = false;
-        }
-        if (!readable) return null;
+        const collected = (try self.collectClosedCatalogFields(
+            contract,
+            name,
+            node,
+            &agent_provider_fields,
+            &.{ 0, 1 },
+            .{
+                .not_literal = .agent_provider_not_literal,
+                .unknown = .agent_provider_field_unknown,
+                .repeated = .agent_provider_field_repeated,
+                .missing = .agent_provider_field_missing,
+            },
+        )) orelse return null;
+        if (!collected.readable) return null;
+        const fields = collected.fields;
         const raw_endpoint = self.getLiteralString(fields[0]) orelse {
             try self.refuseToolCatalog(contract, .agent_provider_value_invalid, name, fields[0], "endpoint");
             return null;
@@ -2017,49 +2014,21 @@ pub const ContractBuilder = struct {
         name: []const u8,
         node: NodeIndex,
     ) !?contract_types.AgentLimits {
-        const obj_node = self.resolveObjectLiteralNode(node) orelse {
-            try self.refuseToolCatalog(contract, .agent_limits_not_literal, name, node, null);
-            return null;
-        };
-        const obj = self.ir_view.getObject(obj_node) orelse {
-            try self.refuseToolCatalog(contract, .agent_limits_not_literal, name, node, null);
-            return null;
-        };
-        var fields = [_]NodeIndex{null_node} ** agent_limit_fields.len;
-        var readable = true;
-        var i: u16 = 0;
-        while (i < obj.properties_count) : (i += 1) {
-            const prop_idx = self.ir_view.getListIndex(obj.properties_start, i);
-            const prop = self.literalProperty(prop_idx) orelse {
-                try self.refuseToolCatalog(contract, .agent_limits_not_literal, name, prop_idx, null);
-                readable = false;
-                continue;
-            };
-            const key = self.getObjectPropertyKey(prop.key) orelse {
-                try self.refuseToolCatalog(contract, .agent_limits_not_literal, name, prop_idx, null);
-                readable = false;
-                continue;
-            };
-            const slot = for (agent_limit_fields, 0..) |known, index| {
-                if (std.mem.eql(u8, known, key)) break index;
-            } else {
-                try self.refuseToolCatalog(contract, .agent_limit_field_unknown, name, prop_idx, key);
-                readable = false;
-                continue;
-            };
-            if (fields[slot] != null_node) {
-                try self.refuseToolCatalog(contract, .agent_limit_field_repeated, name, prop_idx, key);
-                readable = false;
-                continue;
-            }
-            fields[slot] = prop.value;
-        }
-        for (fields, agent_limit_fields) |field, field_name| {
-            if (field != null_node) continue;
-            try self.refuseToolCatalog(contract, .agent_limit_field_missing, name, obj_node, field_name);
-            readable = false;
-        }
-        if (!readable) return null;
+        const collected = (try self.collectClosedCatalogFields(
+            contract,
+            name,
+            node,
+            &agent_limit_fields,
+            &.{ 0, 1, 2, 3, 4, 5, 6 },
+            .{
+                .not_literal = .agent_limits_not_literal,
+                .unknown = .agent_limit_field_unknown,
+                .repeated = .agent_limit_field_repeated,
+                .missing = .agent_limit_field_missing,
+            },
+        )) orelse return null;
+        if (!collected.readable) return null;
+        const fields = collected.fields;
 
         const maxima = [_]u32{
             contract_types.max_agent_rounds,
@@ -7754,6 +7723,107 @@ fn expectToolRefusal(case: ToolRefusalCase) !void {
         return error.TestExpectedRefusal;
     }
     try std.testing.expectEqual(@as(usize, 0), contract.tools.items.len);
+}
+
+const CatalogDiagnosticExpectation = struct {
+    reason: contract_types.ToolCatalogRefusal,
+    line: u32,
+    detail: ?[]const u8 = null,
+};
+
+fn expectCatalogDiagnostics(source: []const u8, expected: []const CatalogDiagnosticExpectation) !void {
+    var contract = try buildTestContract(source);
+    defer contract.deinit(std.testing.allocator);
+
+    var index: usize = 0;
+    for (contract.spec_diagnostics.items) |diagnostic| {
+        if (diagnostic.kind != .tool_catalog_refused) continue;
+        if (index == expected.len) return error.TestUnexpectedRefusal;
+        const want = expected[index];
+        try std.testing.expectEqualStrings(@tagName(want.reason), diagnostic.spec_name);
+        const suggestion = if (want.detail) |detail|
+            try std.fmt.allocPrint(
+                std.testing.allocator,
+                "tool \"assistant\" (line {d}): {s} ({s})",
+                .{ want.line, want.reason.sentence(), detail },
+            )
+        else
+            try std.fmt.allocPrint(
+                std.testing.allocator,
+                "tool \"assistant\" (line {d}): {s}",
+                .{ want.line, want.reason.sentence() },
+            );
+        defer std.testing.allocator.free(suggestion);
+        try std.testing.expectEqualStrings(suggestion, diagnostic.suggestion orelse return error.TestExpectedSuggestion);
+        index += 1;
+    }
+    try std.testing.expectEqual(expected.len, index);
+    try std.testing.expectEqual(@as(usize, 0), contract.tools.items.len);
+}
+
+test "catalog structural refusals preserve order source and detail" {
+    const entry_source = toolSource(
+        "",
+        "\"POST /a\": a",
+        toolCatalogOf(
+            \\assistant: {
+            \\  route: "POST /a",
+            \\  route: "POST /a",
+            \\  mystery: true
+            \\}
+        ),
+    );
+    try expectCatalogDiagnostics(entry_source, &.{
+        .{ .reason = .entry_field_repeated, .line = 11, .detail = "route" },
+        .{ .reason = .entry_field_unknown, .line = 12, .detail = "mystery" },
+        .{ .reason = .entry_field_missing, .line = 9, .detail = "description" },
+        .{ .reason = .entry_field_missing, .line = 9, .detail = "maxInputBytes" },
+        .{ .reason = .entry_kind_invalid, .line = 9 },
+    });
+
+    const agent_source = agentSource(
+        \\{ tools: ["ta"],
+        \\  tools: ["ta"],
+        \\  model: "x"
+        \\}
+    );
+    try expectCatalogDiagnostics(agent_source, &.{
+        .{ .reason = .agent_field_repeated, .line = 10, .detail = "tools" },
+        .{ .reason = .agent_field_unknown, .line = 11, .detail = "model" },
+        .{ .reason = .agent_field_missing, .line = 9, .detail = "provider" },
+        .{ .reason = .agent_field_missing, .line = 9, .detail = "limits" },
+    });
+
+    const provider_source = agentSource(
+        \\{ tools: ["ta"], provider: {
+        \\    endpoint: "https://api.deepseek.com/chat/completions",
+        \\    endpoint: "https://api.deepseek.com/chat/completions",
+        \\    region: "us"
+        \\  }, limits: { rounds: 4, toolCalls: 8, toolCallsPerRound: 4, argumentBytes: 4096, resultBytes: 16384, turnDeadlineMs: 20000, providerRequestBytes: 32768 } }
+    );
+    try expectCatalogDiagnostics(provider_source, &.{
+        .{ .reason = .agent_provider_field_repeated, .line = 11, .detail = "endpoint" },
+        .{ .reason = .agent_provider_field_unknown, .line = 12, .detail = "region" },
+        .{ .reason = .agent_provider_field_missing, .line = 9, .detail = "credential" },
+    });
+
+    const limits_source = agentSource(
+        \\{ tools: ["ta"], provider: { endpoint: "https://api.deepseek.com/chat/completions", credential: "provider" }, limits: {
+        \\    rounds: 4,
+        \\    rounds: 5,
+        \\    burst: 2
+        \\  } }
+    );
+    try expectCatalogDiagnostics(limits_source, &.{
+        .{ .reason = .agent_limit_field_repeated, .line = 11, .detail = "rounds" },
+        .{ .reason = .agent_limit_field_unknown, .line = 12, .detail = "burst" },
+        .{ .reason = .agent_limit_field_missing, .line = 9, .detail = "toolCalls" },
+        .{ .reason = .agent_limit_field_missing, .line = 9, .detail = "toolCallsPerRound" },
+        .{ .reason = .agent_limit_field_missing, .line = 9, .detail = "argumentBytes" },
+        .{ .reason = .agent_limit_field_missing, .line = 9, .detail = "resultBytes" },
+        .{ .reason = .agent_limit_field_missing, .line = 9, .detail = "turnDeadlineMs" },
+        .{ .reason = .agent_limit_field_missing, .line = 9, .detail = "providerRequestBytes" },
+    });
 }
 
 test "a tool catalog is refused for each build rule it breaks" {
