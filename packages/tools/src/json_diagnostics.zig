@@ -292,7 +292,48 @@ pub fn writeSuccessJson(
     witnesses_block_json: ?[]const u8,
     proof_trace_json: ?[]const u8,
 ) !void {
-    try writer.writeAll("{\"success\":true");
+    return writeProofEnvelopeJson(
+        writer,
+        true,
+        contract,
+        diagnostics,
+        witnesses_block_json,
+        proof_trace_json,
+    );
+}
+
+/// Emit error JSON with diagnostics array. When a contract exists, include the
+/// same proof object as the success envelope so clients can inspect declared
+/// specs that failed discharge while still treating the check as failed.
+///
+/// `witnesses_block_json` is the same as on `writeSuccessJson`: pre-formatted
+/// JSON inserted under `proof.witnesses`, or null to omit.
+pub fn writeErrorJson(
+    writer: anytype,
+    contract: ?*const zts.HandlerContract,
+    diagnostics: []const JsonDiagnostic,
+    witnesses_block_json: ?[]const u8,
+    proof_trace_json: ?[]const u8,
+) !void {
+    return writeProofEnvelopeJson(
+        writer,
+        false,
+        contract,
+        diagnostics,
+        witnesses_block_json,
+        proof_trace_json,
+    );
+}
+
+fn writeProofEnvelopeJson(
+    writer: anytype,
+    success: bool,
+    contract: ?*const zts.HandlerContract,
+    diagnostics: []const JsonDiagnostic,
+    witnesses_block_json: ?[]const u8,
+    proof_trace_json: ?[]const u8,
+) !void {
+    try writer.writeAll(if (success) "{\"success\":true" else "{\"success\":false");
 
     // Proof section from contract
     if (contract) |c| {
@@ -365,81 +406,10 @@ pub fn writeSuccessJson(
         try writer.writeByte('}');
     }
 
-    // Diagnostics (warnings only for success)
+    // Diagnostics follow the optional proof for both outcomes.
     try writer.writeAll(",\"diagnostics\":");
     try writeDiagnosticsArray(writer, diagnostics);
 
-    try writer.writeAll("}\n");
-}
-
-/// Emit error JSON with diagnostics array. When a contract exists, include the
-/// same proof object as the success envelope so clients can inspect declared
-/// specs that failed discharge while still treating the check as failed.
-///
-/// `witnesses_block_json` is the same as on `writeSuccessJson`: pre-formatted
-/// JSON inserted under `proof.witnesses`, or null to omit.
-pub fn writeErrorJson(
-    writer: anytype,
-    contract: ?*const zts.HandlerContract,
-    diagnostics: []const JsonDiagnostic,
-    witnesses_block_json: ?[]const u8,
-    proof_trace_json: ?[]const u8,
-) !void {
-    try writer.writeAll("{\"success\":false");
-    if (contract) |c| {
-        try writer.writeAll(",\"proof\":{");
-
-        try writer.writeAll("\"env_vars\":[");
-        for (c.env.literal.items, 0..) |v, i| {
-            if (i > 0) try writer.writeByte(',');
-            try writeJsonString(writer, v);
-        }
-        try writer.writeAll("],\"outbound_hosts\":[");
-        for (c.egress.endpoints.items, 0..) |h, i| {
-            if (i > 0) try writer.writeByte(',');
-            try writeJsonString(writer, h);
-        }
-        try writer.writeAll("],\"virtual_modules\":[");
-        for (c.modules.items, 0..) |m, i| {
-            if (i > 0) try writer.writeByte(',');
-            try writeJsonString(writer, m);
-        }
-        try writer.writeByte(']');
-
-        if (c.properties) |props| {
-            try writer.writeAll(",\"properties\":{");
-            try writer.print("\"retry_safe\":{},\"idempotent\":{},\"injection_safe\":{},\"deterministic\":{},\"read_only\":{},\"state_isolated\":{},\"fault_covered\":{}", .{
-                props.retry_safe,
-                props.idempotent,
-                props.injection_safe,
-                props.deterministic,
-                props.read_only,
-                props.state_isolated,
-                props.fault_covered,
-            });
-            try writer.writeByte('}');
-        }
-
-        if (proof_trace_json) |ptj| {
-            try writer.writeAll(",\"proofTrace\":");
-            try writer.writeAll(ptj);
-        }
-
-        try writer.writeAll(",\"declared_specs\":[");
-        for (c.declared_specs.items, 0..) |s, i| {
-            if (i > 0) try writer.writeByte(',');
-            try writeJsonString(writer, s);
-        }
-        try writer.writeAll("],");
-        try writeSpecAndCapsulesJson(writer, c);
-        if (witnesses_block_json) |wb| {
-            try writer.writeAll(",\"witnesses\":");
-            try writer.writeAll(wb);
-        }
-        try writer.writeByte('}');
-    }
-    try writer.writeAll(",\"diagnostics\":");
-    try writeDiagnosticsArray(writer, diagnostics);
     try writer.writeAll("}\n");
 }
 
@@ -1071,6 +1041,63 @@ pub fn writeRestrictionsMarkdown(writer: anytype) !void {
 // -------------------------------------------------------------------------
 // Tests
 // -------------------------------------------------------------------------
+
+test "public proof writers omit proof without a contract" {
+    const allocator = std.testing.allocator;
+
+    var success: std.Io.Writer.Allocating = .init(allocator);
+    defer success.deinit();
+    try writeSuccessJson(&success.writer, null, &.{}, null, null);
+    try std.testing.expectEqualStrings(
+        "{\"success\":true,\"diagnostics\":[]}\n",
+        success.written(),
+    );
+
+    var failure: std.Io.Writer.Allocating = .init(allocator);
+    defer failure.deinit();
+    try writeErrorJson(&failure.writer, null, &.{}, null, null);
+    try std.testing.expectEqualStrings(
+        "{\"success\":false,\"diagnostics\":[]}\n",
+        failure.written(),
+    );
+}
+
+test "public proof writers insert optional blocks as raw JSON" {
+    const allocator = std.testing.allocator;
+    var contract = handler_contract.emptyContract(try allocator.dupe(u8, "handler.ts"));
+    defer contract.deinit(allocator);
+
+    const proof_trace_json = "{\"retry_safe\":\"declared\"}";
+    const witnesses_block_json = "{\"total\":1}";
+
+    var success: std.Io.Writer.Allocating = .init(allocator);
+    defer success.deinit();
+    try writeSuccessJson(
+        &success.writer,
+        &contract,
+        &.{},
+        witnesses_block_json,
+        proof_trace_json,
+    );
+    try std.testing.expectEqualStrings(
+        "{\"success\":true,\"proof\":{\"env_vars\":[],\"outbound_hosts\":[],\"virtual_modules\":[],\"proofTrace\":{\"retry_safe\":\"declared\"},\"declared_specs\":[],\"spec_diagnostics\":[],\"proofCapsules\":[],\"effectCapsules\":[],\"holes\":[],\"witnesses\":{\"total\":1}},\"diagnostics\":[]}\n",
+        success.written(),
+    );
+
+    var failure: std.Io.Writer.Allocating = .init(allocator);
+    defer failure.deinit();
+    try writeErrorJson(
+        &failure.writer,
+        &contract,
+        &.{},
+        witnesses_block_json,
+        proof_trace_json,
+    );
+    try std.testing.expectEqualStrings(
+        "{\"success\":false,\"proof\":{\"env_vars\":[],\"outbound_hosts\":[],\"virtual_modules\":[],\"proofTrace\":{\"retry_safe\":\"declared\"},\"declared_specs\":[],\"spec_diagnostics\":[],\"proofCapsules\":[],\"effectCapsules\":[],\"holes\":[],\"witnesses\":{\"total\":1}},\"diagnostics\":[]}\n",
+        failure.written(),
+    );
+}
 
 test "splitSuggestion: unsupported feature message" {
     const result = splitSuggestion("'while' is not supported; use 'for-of' with a finite collection instead");
