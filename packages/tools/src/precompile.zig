@@ -571,6 +571,208 @@ fn collectImportedFnSummaries(
     return out;
 }
 
+/// What the scan of the handler's imported files answered, one entry per
+/// non-builtin import record, keyed by the record's local slot. The entries
+/// borrow their strings from `strings`.
+const ImportedFaultScan = struct {
+    entries: std.ArrayList(zts.PathGenerator.ImportScanEntry) = .empty,
+    strings: std.ArrayList([]u8) = .empty,
+
+    fn deinit(self: *ImportedFaultScan, allocator: std.mem.Allocator) void {
+        for (self.strings.items) |s| allocator.free(s);
+        self.strings.deinit(allocator);
+        self.entries.deinit(allocator);
+    }
+
+    fn own(self: *ImportedFaultScan, allocator: std.mem.Allocator, text: []const u8) error{OutOfMemory}![]const u8 {
+        const copy = try allocator.dupe(u8, text);
+        errdefer allocator.free(copy);
+        try self.strings.append(allocator, copy);
+        return copy;
+    }
+};
+
+fn isRelativeSpecifier(specifier: []const u8) bool {
+    return std.mem.startsWith(u8, specifier, "./") or std.mem.startsWith(u8, specifier, "../");
+}
+
+/// Scan the files that the handler imports for failable calls, for fault
+/// coverage (unit F2 of the R4 plan). The polarity is the opposite of
+/// `collectImportedFnSummaries`: for the flow checker a missing entry is the
+/// conservative answer, and here a missing or partial answer would mean
+/// "scanned clean". So this returns one entry for every import record of the
+/// handler that is not a builtin, and every failure to reach a verdict is a
+/// blocking entry, never an omitted one.
+///
+/// Returns null, never an empty list, on a freestanding build: the browser
+/// analyzer has one source buffer and no filesystem, so no record has an answer.
+///
+/// A `./` or `../` import is resolved, read, stripped, parsed, and scanned as a
+/// whole file, then every relative import of that file in turn. The visited
+/// set holds the handler's own path first, so a cycle through the handler
+/// ends without listing the handler's own sites (the generator scans those).
+/// A partner record, a bare specifier, a file that cannot be resolved, read,
+/// stripped, or parsed, and a chain past `max_import_depth` each give a
+/// blocking entry.
+fn collectImportedFailableCalls(
+    allocator: std.mem.Allocator,
+    facts: *const zts.pipeline.ModuleFacts,
+    handler_path: []const u8,
+) error{OutOfMemory}!?ImportedFaultScan {
+    if (comptime builtin.target.os.tag == .freestanding) return null;
+
+    var out: ImportedFaultScan = .{};
+    errdefer out.deinit(allocator);
+
+    const handler_resolved = try std.fs.path.resolve(allocator, &.{handler_path});
+    defer allocator.free(handler_resolved);
+    const handler_dir = std.fs.path.dirname(handler_resolved) orelse ".";
+
+    // The answer for a start file does not depend on which record names it, so
+    // two names imported from one file share one scan.
+    var memo: std.StringHashMapUnmanaged(zts.PathGenerator.ImportScan) = .empty;
+    defer {
+        var keys = memo.keyIterator();
+        while (keys.next()) |key| allocator.free(key.*);
+        memo.deinit(allocator);
+    }
+
+    for (facts.imports.items) |rec| {
+        const scan: zts.PathGenerator.ImportScan = switch (rec.resolution) {
+            .builtin => continue,
+            .partner => .{ .blocked = .{ .file = try out.own(allocator, rec.module_specifier), .reason = .partner } },
+            .unresolved => blk: {
+                if (!isRelativeSpecifier(rec.module_specifier)) {
+                    break :blk .{ .blocked = .{ .file = try out.own(allocator, rec.module_specifier), .reason = .not_relative } };
+                }
+                const path = try std.fs.path.resolve(allocator, &.{ handler_dir, rec.module_specifier });
+                defer allocator.free(path);
+                if (memo.get(path)) |known| break :blk known;
+
+                var visited: std.StringHashMapUnmanaged(void) = .empty;
+                defer {
+                    var keys = visited.keyIterator();
+                    while (keys.next()) |key| allocator.free(key.*);
+                    visited.deinit(allocator);
+                }
+                try visited.put(allocator, try allocator.dupe(u8, handler_resolved), {});
+
+                const result = try scanImportedFileTree(allocator, &out, &visited, path, rec.module_specifier, handler_dir, 1);
+                const key = try allocator.dupe(u8, path);
+                errdefer allocator.free(key);
+                try memo.put(allocator, key, result);
+                break :blk result;
+            },
+        };
+        try out.entries.append(allocator, .{ .slot = rec.slot, .scan = scan });
+    }
+    return out;
+}
+
+/// The name that the report gives a file: the path from the handler's
+/// directory with a leading `./`, or the whole path when the file lies outside.
+fn importedFileDisplay(
+    allocator: std.mem.Allocator,
+    out: *ImportedFaultScan,
+    handler_dir: []const u8,
+    path: []const u8,
+) error{OutOfMemory}![]const u8 {
+    if (path.len > handler_dir.len + 1 and
+        std.mem.startsWith(u8, path, handler_dir) and
+        path[handler_dir.len] == std.fs.path.sep)
+    {
+        const text = try std.fmt.allocPrint(allocator, "./{s}", .{path[handler_dir.len + 1 ..]});
+        defer allocator.free(text);
+        return out.own(allocator, text);
+    }
+    return out.own(allocator, path);
+}
+
+/// Scan one file, then every relative import of it, for failable calls. The
+/// first failable call or the first blocking cause ends the walk, so the answer
+/// names one file. `display` is how the report names this file.
+fn scanImportedFileTree(
+    allocator: std.mem.Allocator,
+    out: *ImportedFaultScan,
+    visited: *std.StringHashMapUnmanaged(void),
+    path: []const u8,
+    display_in: []const u8,
+    handler_dir: []const u8,
+    depth: usize,
+) error{OutOfMemory}!zts.PathGenerator.ImportScan {
+    const display = try out.own(allocator, display_in);
+    const blocked = struct {
+        fn at(file: []const u8, reason: zts.PathGenerator.BlockReason) zts.PathGenerator.ImportScan {
+            return .{ .blocked = .{ .file = file, .reason = reason } };
+        }
+    }.at;
+
+    // A file already on the walk is scanned, or being scanned, by the frame
+    // that opened it. A whole-file scan is idempotent, so this loses nothing.
+    if (visited.contains(path)) return .clean;
+    if (depth >= max_import_depth) return blocked(display, .too_deep);
+    try visited.put(allocator, try allocator.dupe(u8, path), {});
+
+    const source = readFilePosix(allocator, path, 10 * 1024 * 1024) catch return blocked(display, .unreadable);
+    defer allocator.free(source);
+
+    var prepared = zts.PreparedSource.init(allocator, source, path, .{
+        .enable_comptime = true,
+        .comptime_env = .{},
+    }) catch return blocked(display, .unreadable);
+    defer prepared.deinit();
+
+    var atoms = zts.AtomTable.init(allocator);
+    defer atoms.deinit();
+    var parser = zts.parser.JsParser.init(allocator, prepared.parserInput()) catch return blocked(display, .unreadable);
+    defer parser.deinit();
+    parser.setAtomTable(&atoms);
+    const root = parser.parse() catch return blocked(display, .unreadable);
+
+    const view = zts.IrView.fromIRStore(&parser.nodes, &parser.constants);
+    var module_facts = zts.pipeline.buildModuleFacts(
+        allocator,
+        zts.pipeline.ParsedModule.fromExisting(view, root, &atoms),
+        null,
+    ) catch return blocked(display, .unreadable);
+    defer module_facts.deinit();
+
+    var sites: std.ArrayList(zts.PathGenerator.UnseenCall) = .empty;
+    defer sites.deinit(allocator);
+    zts.PathGenerator.scanImportedFile(allocator, view, module_facts.imports.items, &sites) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.InvalidIR => return blocked(display, .unreadable),
+    };
+    if (sites.items.len > 0) {
+        return .{ .failable = .{
+            .file = display,
+            .module = sites.items[0].module,
+            .func = sites.items[0].func,
+        } };
+    }
+
+    const base_dir = std.fs.path.dirname(path) orelse ".";
+    for (module_facts.imports.items) |rec| {
+        switch (rec.resolution) {
+            .builtin => continue,
+            .partner => return blocked(try out.own(allocator, rec.module_specifier), .partner),
+            .unresolved => {},
+        }
+        if (!isRelativeSpecifier(rec.module_specifier)) {
+            return blocked(try out.own(allocator, rec.module_specifier), .not_relative);
+        }
+        const child = try std.fs.path.resolve(allocator, &.{ base_dir, rec.module_specifier });
+        defer allocator.free(child);
+        const child_display = try importedFileDisplay(allocator, out, handler_dir, child);
+        const result = try scanImportedFileTree(allocator, out, visited, child, child_display, handler_dir, depth + 1);
+        switch (result) {
+            .clean => {},
+            .failable, .blocked => return result,
+        }
+    }
+    return .clean;
+}
+
 fn deinitImportedSummaries(allocator: std.mem.Allocator, list: *std.ArrayList(zts.pipeline.ImportedFnSummary)) void {
     for (list.items) |*entry| entry.summary.deinit(allocator);
     list.deinit(allocator);
@@ -1389,8 +1591,13 @@ const PathAnalysis = struct {
     /// Where the first unseen failable call sits, when there is one. The
     /// snippet is the export name, a static string from the module binding.
     fault_unseen_cause: ?handler_contract.PropertyCause,
+    /// The cause's snippet when it was allocated (it names an imported file).
+    /// Whoever takes the cause for a contract moves this to the contract and
+    /// sets it null; otherwise `deinit` frees it.
+    fault_unseen_snippet_owned: ?[]const u8 = null,
 
     fn deinit(self: *PathAnalysis, allocator: std.mem.Allocator) void {
+        if (self.fault_unseen_snippet_owned) |snippet| allocator.free(snippet);
         if (self.cost_envelope) |*envelope| envelope.deinit(allocator);
         for (self.behaviors.items) |*behavior| behavior.deinit(allocator);
         self.behaviors.deinit(allocator);
@@ -1403,10 +1610,17 @@ fn analyzeHandlerPaths(
     ir_view: zts.IrView,
     atoms: *zts.AtomTable,
     handler_fn: ir.NodeIndex,
+    handler_path: []const u8,
     include_behaviors: bool,
 ) !PathAnalysis {
     var generator = zts.PathGenerator.init(state_allocator, ir_view, atoms);
     defer generator.deinit();
+    // Fault coverage reads every file the handler imports, because a failable
+    // call there is on no path of this handler. A null scan (no filesystem)
+    // leaves each such import counted as unseen.
+    var imported = try collectImportedFailableCalls(state_allocator, try generator.importFacts(), handler_path);
+    defer if (imported) |*scan| scan.deinit(state_allocator);
+    generator.setImportedScan(if (imported) |scan| scan.entries.items else null);
     try generator.generate(handler_fn);
 
     const tests = generator.getTests();
@@ -1457,11 +1671,13 @@ fn analyzeHandlerPaths(
     };
     analysis.fault_clean = report.isClean() and generator.faultAnalysisComplete();
     if (unseen.len > 0) {
-        const loc = ir_view.getLoc(unseen[0].node);
+        const loc = if (unseen[0].node == ir.null_node) null else ir_view.getLoc(unseen[0].node);
+        const described = try unseen[0].describe(output_allocator);
+        if (described.owned) analysis.fault_unseen_snippet_owned = described.text;
         analysis.fault_unseen_cause = .{
             .line = if (loc) |l| l.line else 0,
             .column = if (loc) |l| l.column else 0,
-            .snippet = unseen[0].func,
+            .snippet = described.text,
         };
     }
     return analysis;
@@ -2018,6 +2234,7 @@ fn runCheckOnPreparedSource(
                 ir_view,
                 &atoms,
                 hf,
+                handler_path,
                 result.contract != null,
             );
             defer path_analysis.deinit(allocator);
@@ -2038,6 +2255,11 @@ fn runCheckOnPreparedSource(
                     props.fault_covered = path_analysis.fault_clean;
                 }
                 c.property_provenance.fault_covered = path_analysis.fault_unseen_cause;
+                // The cause borrows its snippet, so the contract takes the
+                // allocation that backs it.
+                if (c.owned_fault_cause_snippet) |old| allocator.free(old);
+                c.owned_fault_cause_snippet = path_analysis.fault_unseen_snippet_owned;
+                path_analysis.fault_unseen_snippet_owned = null;
                 if (path_analysis.cost_envelope) |envelope| {
                     c.cost_envelope = envelope;
                     path_analysis.cost_envelope = null;
@@ -2752,6 +2974,10 @@ pub fn compileHandler(
         if (handler_fn) |hf| {
             var gen = zts.PathGenerator.init(allocator, ir_view, &atoms);
             defer gen.deinit();
+            // See analyzeHandlerPaths: the imported files decide `fault_covered`.
+            var imported_scan = try collectImportedFailableCalls(allocator, try gen.importFacts(), filename);
+            defer if (imported_scan) |*scan| scan.deinit(allocator);
+            gen.setImportedScan(if (imported_scan) |scan| scan.entries.items else null);
 
             try gen.generate(hf);
 
@@ -8097,4 +8323,353 @@ test "parse failure text counts characters on a multi-byte line" {
     // Sixteen characters precede `while`, though the line holds twenty bytes
     // before it.
     try std.testing.expect(std.mem.indexOf(u8, text, "   | " ++ " " ** 16 ++ "^^^^^\n") != null);
+}
+
+// ---------------------------------------------------------------------------
+// Fault coverage reads the files the handler imports (R4 unit F2)
+// ---------------------------------------------------------------------------
+
+/// A handler whose one `fetch` is checked, and which calls `enrich` from a
+/// sibling file. Whether `fault_covered` holds depends on that sibling.
+const fault_sibling_handler =
+    \\import { fetch } from "zttp:fetch";
+    \\import { enrich } from "./dep.ts";
+    \\function handler(req: Request): Response {
+    \\  const res = fetch("https://api.example.com/a");
+    \\  if (!res.ok) {
+    \\    return Response.json({ error: "upstream" }, { status: 502 });
+    \\  }
+    \\  return Response.json({ a: res.body, b: enrich() });
+    \\}
+    \\
+;
+
+const fault_unchecked_helper =
+    \\import { fetch } from "zttp:fetch";
+    \\export function enrich(): string {
+    \\  const res = fetch("https://api.example.com/b");
+    \\  return res.body;
+    \\}
+    \\
+;
+
+fn faultCovered(result: *const CheckResult) !bool {
+    return (result.contract orelse return error.TestExpectedEqual).properties.?.fault_covered;
+}
+
+fn faultUnseenCalls(result: *const CheckResult) !u32 {
+    return (result.contract orelse return error.TestExpectedEqual).fault_coverage.?.unseen_calls;
+}
+
+/// The text that names the first unseen call, from the handler's provenance.
+fn faultCauseSnippet(result: *const CheckResult) ![]const u8 {
+    const contract = result.contract orelse return error.TestExpectedEqual;
+    const cause = contract.property_provenance.fault_covered orelse return error.TestExpectedEqual;
+    return cause.snippet;
+}
+
+test "a sibling helper with an unchecked fetch blocks fault_covered" {
+    var fixture = try SiblingFixture.init(fault_sibling_handler);
+    defer fixture.deinit();
+    try fixture.add("dep.ts", fault_unchecked_helper);
+    var result = try fixture.check();
+    defer result.deinit(std.testing.allocator);
+
+    try std.testing.expect(!try faultCovered(&result));
+    try std.testing.expectEqual(@as(u32, 1), try faultUnseenCalls(&result));
+    // The cause sits on the handler's import line and names the sibling.
+    const cause = result.contract.?.property_provenance.fault_covered.?;
+    try std.testing.expectEqual(@as(u32, 2), cause.line);
+    try std.testing.expectEqualStrings("fetch in ./dep.ts", cause.snippet);
+    // The proof trace prints the same text.
+    try std.testing.expect(std.mem.indexOf(u8, result.proof_trace_json orelse "", "The first is `fetch in ./dep.ts`.") != null);
+}
+
+test "a sibling helper with only pure code keeps fault_covered" {
+    var fixture = try SiblingFixture.init(fault_sibling_handler);
+    defer fixture.deinit();
+    try fixture.add("dep.ts",
+        \\export function enrich(): string {
+        \\  return "pure".toUpperCase();
+        \\}
+        \\
+    );
+    var result = try fixture.check();
+    defer result.deinit(std.testing.allocator);
+
+    try std.testing.expect(try faultCovered(&result));
+    try std.testing.expectEqual(@as(u32, 0), try faultUnseenCalls(&result));
+    try std.testing.expect(result.contract.?.property_provenance.fault_covered == null);
+}
+
+test "a failable call two files deep blocks fault_covered" {
+    var fixture = try SiblingFixture.init(fault_sibling_handler);
+    defer fixture.deinit();
+    try fixture.add("dep.ts",
+        \\import { inner } from "./deeper.ts";
+        \\export function enrich(): string {
+        \\  return inner();
+        \\}
+        \\
+    );
+    try fixture.add("deeper.ts",
+        \\import { fetch } from "zttp:fetch";
+        \\export function inner(): string {
+        \\  const res = fetch("https://api.example.com/c");
+        \\  return res.body;
+        \\}
+        \\
+    );
+    var result = try fixture.check();
+    defer result.deinit(std.testing.allocator);
+
+    try std.testing.expect(!try faultCovered(&result));
+    try std.testing.expectEqualStrings("fetch in ./deeper.ts", try faultCauseSnippet(&result));
+}
+
+test "a sibling that exports a failable builtin as a value blocks fault_covered" {
+    var fixture = try SiblingFixture.init(
+        \\import { fetch } from "zttp:fetch";
+        \\import { enrich } from "./dep.ts";
+        \\function handler(req: Request): Response {
+        \\  const res = fetch("https://api.example.com/a");
+        \\  if (!res.ok) {
+        \\    return Response.json({ error: "upstream" }, { status: 502 });
+        \\  }
+        \\  return Response.json({ a: res.body, b: enrich });
+        \\}
+        \\
+    );
+    defer fixture.deinit();
+    try fixture.add("dep.ts",
+        \\import { fetch } from "zttp:fetch";
+        \\export const enrich = fetch;
+        \\
+    );
+    var result = try fixture.check();
+    defer result.deinit(std.testing.allocator);
+
+    try std.testing.expect(!try faultCovered(&result));
+    try std.testing.expectEqualStrings("fetch in ./dep.ts", try faultCauseSnippet(&result));
+}
+
+test "a tsx sibling that fetches blocks fault_covered" {
+    var fixture = try SiblingFixture.init(
+        \\import { fetch } from "zttp:fetch";
+        \\import { view } from "./view.tsx";
+        \\function handler(req: Request): Response {
+        \\  const res = fetch("https://api.example.com/a");
+        \\  if (!res.ok) {
+        \\    return Response.json({ error: "upstream" }, { status: 502 });
+        \\  }
+        \\  return Response.html(view());
+        \\}
+        \\
+    );
+    defer fixture.deinit();
+    try fixture.add("view.tsx",
+        \\import { fetch } from "zttp:fetch";
+        \\export function view(): string {
+        \\  const res = fetch("https://api.example.com/b");
+        \\  return renderToString(<p>{res.body}</p>);
+        \\}
+        \\
+    );
+    var result = try fixture.check();
+    defer result.deinit(std.testing.allocator);
+
+    try std.testing.expect(!try faultCovered(&result));
+    try std.testing.expectEqualStrings("fetch in ./view.tsx", try faultCauseSnippet(&result));
+}
+
+test "a sibling that does not exist blocks fault_covered" {
+    var fixture = try SiblingFixture.init(fault_sibling_handler);
+    defer fixture.deinit();
+    var result = try fixture.check();
+    defer result.deinit(std.testing.allocator);
+
+    try std.testing.expect(!try faultCovered(&result));
+    try std.testing.expectEqual(@as(u32, 1), try faultUnseenCalls(&result));
+    try std.testing.expectEqualStrings("./dep.ts (unreadable)", try faultCauseSnippet(&result));
+}
+
+test "a sibling that does not parse blocks fault_covered" {
+    var fixture = try SiblingFixture.init(fault_sibling_handler);
+    defer fixture.deinit();
+    try fixture.add("dep.ts", "export function enrich( {{{\n");
+    var result = try fixture.check();
+    defer result.deinit(std.testing.allocator);
+
+    try std.testing.expect(!try faultCovered(&result));
+    try std.testing.expectEqualStrings("./dep.ts (unreadable)", try faultCauseSnippet(&result));
+}
+
+test "a bare specifier import blocks fault_covered" {
+    var fixture = try SiblingFixture.init(
+        \\import { fetch } from "zttp:fetch";
+        \\import { identity } from "lodash";
+        \\function handler(req: Request): Response {
+        \\  const res = fetch("https://api.example.com/a");
+        \\  if (!res.ok) {
+        \\    return Response.json({ error: "upstream" }, { status: 502 });
+        \\  }
+        \\  return Response.json({ a: res.body });
+        \\}
+        \\
+    );
+    defer fixture.deinit();
+    var result = try fixture.check();
+    defer result.deinit(std.testing.allocator);
+
+    try std.testing.expect(!try faultCovered(&result));
+    try std.testing.expectEqualStrings("lodash (not a relative path)", try faultCauseSnippet(&result));
+}
+
+test "an import cycle through the handler ends without listing the handler's own sites" {
+    var fixture = try SiblingFixture.init(fault_sibling_handler);
+    defer fixture.deinit();
+    // The helper imports the handler back. The handler's own fetch is checked
+    // and the scan must not list it again.
+    try fixture.add("dep.ts",
+        \\import { handler } from "./handler.ts";
+        \\export function enrich(): string {
+        \\  return "x";
+        \\}
+        \\
+    );
+    var result = try fixture.check();
+    defer result.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(u32, 0), try faultUnseenCalls(&result));
+    try std.testing.expect(try faultCovered(&result));
+}
+
+test "an import cycle between siblings still finds a failable call inside it" {
+    var fixture = try SiblingFixture.init(fault_sibling_handler);
+    defer fixture.deinit();
+    try fixture.add("dep.ts",
+        \\import { other } from "./other.ts";
+        \\export function enrich(): string {
+        \\  return other();
+        \\}
+        \\
+    );
+    try fixture.add("other.ts",
+        \\import { enrich } from "./dep.ts";
+        \\import { fetch } from "zttp:fetch";
+        \\export function other(): string {
+        \\  const res = fetch("https://api.example.com/d");
+        \\  return res.body;
+        \\}
+        \\
+    );
+    var result = try fixture.check();
+    defer result.deinit(std.testing.allocator);
+
+    try std.testing.expect(!try faultCovered(&result));
+    try std.testing.expectEqualStrings("fetch in ./other.ts", try faultCauseSnippet(&result));
+}
+
+test "two names imported from one failing sibling count once per record" {
+    var fixture = try SiblingFixture.init(
+        \\import { fetch } from "zttp:fetch";
+        \\import { enrich, extra } from "./dep.ts";
+        \\function handler(req: Request): Response {
+        \\  const res = fetch("https://api.example.com/a");
+        \\  if (!res.ok) {
+        \\    return Response.json({ error: "upstream" }, { status: 502 });
+        \\  }
+        \\  return Response.json({ a: res.body, b: enrich(), c: extra() });
+        \\}
+        \\
+    );
+    defer fixture.deinit();
+    try fixture.add("dep.ts",
+        \\import { fetch } from "zttp:fetch";
+        \\export function enrich(): string {
+        \\  const res = fetch("https://api.example.com/b");
+        \\  return res.body;
+        \\}
+        \\export function extra(): string {
+        \\  return "x";
+        \\}
+        \\
+    );
+    var result = try fixture.check();
+    defer result.deinit(std.testing.allocator);
+
+    // One unseen call for each import record, not for each call site.
+    try std.testing.expect(!try faultCovered(&result));
+    try std.testing.expectEqual(@as(u32, 2), try faultUnseenCalls(&result));
+}
+
+test "a chain of imports past the depth limit blocks fault_covered" {
+    var fixture = try SiblingFixture.init(fault_sibling_handler);
+    defer fixture.deinit();
+    // dep.ts -> f1.ts -> ... -> f9.ts, nine files below the handler.
+    try fixture.add("dep.ts",
+        \\import { f1 } from "./f1.ts";
+        \\export function enrich(): string { return f1(); }
+        \\
+    );
+    var index: usize = 1;
+    while (index <= 9) : (index += 1) {
+        var name_buf: [16]u8 = undefined;
+        const name = try std.fmt.bufPrint(&name_buf, "f{d}.ts", .{index});
+        var body_buf: [128]u8 = undefined;
+        const body = if (index < 9)
+            try std.fmt.bufPrint(&body_buf, "import {{ f{d} }} from \"./f{d}.ts\";\nexport function f{d}(): string {{ return f{d}(); }}\n", .{ index + 1, index + 1, index, index + 1 })
+        else
+            try std.fmt.bufPrint(&body_buf, "export function f9(): string {{ return \"end\"; }}\n", .{});
+        try fixture.add(name, body);
+    }
+    var result = try fixture.check();
+    defer result.deinit(std.testing.allocator);
+
+    try std.testing.expect(!try faultCovered(&result));
+    try std.testing.expect(std.mem.endsWith(u8, try faultCauseSnippet(&result), "(import chain too deep)"));
+}
+
+test "collectImportedFailableCalls answers every non-builtin record" {
+    const handler_source =
+        \\import { fetch } from "zttp:fetch";
+        \\import { enrich } from "./dep.ts";
+        \\import { identity } from "lodash";
+        \\function handler(req) {
+        \\  return Response.json({ a: identity(enrich()) });
+        \\}
+        \\
+    ;
+    var fixture = try SiblingFixture.init(handler_source);
+    defer fixture.deinit();
+    try fixture.add("dep.ts", "export function enrich(): string { return \"x\"; }\n");
+
+    const allocator = std.testing.allocator;
+    var parser = try zts.parser.JsParser.init(allocator, handler_source);
+    defer parser.deinit();
+    var atoms = zts.AtomTable.init(allocator);
+    defer atoms.deinit();
+    parser.setAtomTable(&atoms);
+    const root = try parser.parse();
+    const view = zts.IrView.fromIRStore(&parser.nodes, &parser.constants);
+    var facts = try zts.pipeline.buildModuleFacts(allocator, zts.pipeline.ParsedModule.fromExisting(view, root, &atoms), null);
+    defer facts.deinit();
+
+    var scan = (try collectImportedFailableCalls(allocator, &facts, fixture.handler_path)) orelse return error.TestExpectedEqual;
+    defer scan.deinit(allocator);
+
+    // `fetch` is a builtin and has no entry; the other two records do.
+    try std.testing.expectEqual(@as(usize, 2), scan.entries.items.len);
+    var clean: usize = 0;
+    var blocked: usize = 0;
+    for (scan.entries.items) |entry| switch (entry.scan) {
+        .clean => clean += 1,
+        .blocked => |b| {
+            blocked += 1;
+            try std.testing.expectEqual(zts.PathGenerator.BlockReason.not_relative, b.reason);
+        },
+        .failable => return error.TestExpectedEqual,
+    };
+    try std.testing.expectEqual(@as(usize, 1), clean);
+    try std.testing.expectEqual(@as(usize, 1), blocked);
 }

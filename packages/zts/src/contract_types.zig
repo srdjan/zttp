@@ -2545,6 +2545,10 @@ pub const HandlerContract = struct {
     /// Set only when a decoded rate-limit namespace does not also appear in
     /// `cache.namespaces`. Transient and not serialized independently.
     owned_rate_limit_namespace: ?[]const u8 = null,
+    /// Backs `property_provenance.fault_covered.snippet` when that cause names an
+    /// imported file, which is built at check time and so is not a static string.
+    /// Transient and not serialized.
+    owned_fault_cause_snippet: ?[]const u8 = null,
     properties: ?HandlerProperties = null,
     /// Author-declared intent assertions. Null when the handler module
     /// has no `export const intent` literal. See `IntentInfo` for shape.
@@ -2687,6 +2691,7 @@ pub const HandlerContract = struct {
         }
         self.cache.namespaces.deinit(allocator);
         if (self.owned_rate_limit_namespace) |namespace| allocator.free(namespace);
+        if (self.owned_fault_cause_snippet) |snippet| allocator.free(snippet);
         self.sql.deinit(allocator);
         self.durable.deinit(allocator);
         self.scope.deinit(allocator);

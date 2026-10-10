@@ -247,14 +247,93 @@ pub const PathGenerator = struct {
     /// nor cover these, so it must not claim the handler is covered. Computed
     /// at the end of `generate`.
     unseen_failable_calls: std.ArrayList(UnseenCall),
+    /// What the caller learned about the files the handler imports, one entry
+    /// per import record. Borrowed; must outlive the generator. Null means the
+    /// caller gave no answer at all (no filesystem, or it did not look), so no
+    /// non-builtin import record has an entry and each counts as unseen.
+    imported_scan: ?[]const ImportScanEntry = null,
 
     pub const MAX_PATHS = 1024;
 
+    /// Why an import record of the handler has no clean answer.
+    pub const BlockReason = enum {
+        /// The caller gave no entry for this record.
+        not_scanned,
+        /// A specifier that is neither `./` nor `../`, such as a bare package.
+        not_relative,
+        /// A file on the chain could not be resolved, read, stripped, or parsed.
+        unreadable,
+        /// The import chain went past the depth limit.
+        too_deep,
+        /// A partner module. Partner exports have no failure model.
+        partner,
+
+        pub fn text(self: BlockReason) []const u8 {
+            return switch (self) {
+                .not_scanned => "not scanned",
+                .not_relative => "not a relative path",
+                .unreadable => "unreadable",
+                .too_deep => "import chain too deep",
+                .partner => "partner module",
+            };
+        }
+    };
+
+    /// The answer for one import record of the handler.
+    pub const ImportScan = union(enum) {
+        /// Every file reachable from the import was scanned and holds no
+        /// failable call or value use.
+        clean,
+        /// A file reachable from the import holds a failable call or value use.
+        /// `file` names that file, as the handler reaches it.
+        failable: struct {
+            file: []const u8,
+            module: []const u8,
+            func: []const u8,
+        },
+        /// The scan could not reach a verdict. `file` names where it stopped.
+        blocked: struct {
+            file: []const u8,
+            reason: BlockReason,
+        },
+    };
+
+    /// The scan answer for the import record bound to local slot `slot`.
+    pub const ImportScanEntry = struct {
+        slot: u16,
+        scan: ImportScan,
+    };
+
+    /// Where a failable call sits when it is not in the handler file.
+    pub const ImportedCause = struct {
+        /// The sibling file, or the import specifier when no file was reached.
+        file: []const u8,
+        /// Null when `file` holds the call (`UnseenCall.module` and `func`
+        /// name it). Set when the scan could not reach a verdict.
+        blocked: ?BlockReason,
+    };
+
     /// A call to a failable export that the walk never recorded on a path.
     pub const UnseenCall = struct {
+        /// The call node in the handler file. For an imported file, the
+        /// `import_decl` node in the handler that binds the record.
         node: NodeIndex,
         module: []const u8,
         func: []const u8,
+        /// Null for a call in the handler file.
+        imported: ?ImportedCause = null,
+
+        /// The text that names this call in a report. Static for a call in
+        /// the handler file; allocated for an imported file. The caller frees
+        /// the result when `owned` is true.
+        pub fn describe(self: UnseenCall, allocator: std.mem.Allocator) error{OutOfMemory}!struct { text: []const u8, owned: bool } {
+            const cause = self.imported orelse return .{ .text = self.func, .owned = false };
+            const text = if (cause.blocked) |reason|
+                try std.fmt.allocPrint(allocator, "{s} ({s})", .{ cause.file, reason.text() })
+            else
+                try std.fmt.allocPrint(allocator, "{s} in {s}", .{ self.func, cause.file });
+            return .{ .text = text, .owned = true };
+        }
     };
 
     const FnMeta = struct {
@@ -438,29 +517,53 @@ pub const PathGenerator = struct {
             }
         }
 
+        try scanFileFailableCalls(
+            self.allocator,
+            self.ir_view,
+            &self.module_fn_bindings,
+            &seen,
+            &self.unseen_failable_calls,
+        );
+        try self.scanImportRecords();
+    }
+
+    /// The scan core for one parsed file. It lists every call to a failable
+    /// builtin export, and every value use of one, that is not in `walked`.
+    /// `walked` holds the call nodes a path recorded as I/O stubs. The
+    /// handler file passes it. An imported file has no walk, so it passes
+    /// null and every failable call counts. A call that is the left operand of
+    /// `??` on an optional-returning export is answered by its fallback and is
+    /// not listed.
+    fn scanFileFailableCalls(
+        allocator: std.mem.Allocator,
+        ir_view: IrView,
+        bindings: *const std.AutoHashMapUnmanaged(u16, FnMeta),
+        walked: ?*const std.AutoHashMapUnmanaged(NodeIndex, void),
+        out: *std.ArrayList(UnseenCall),
+    ) error{ OutOfMemory, InvalidIR }!void {
         var absent_answered: std.AutoHashMapUnmanaged(NodeIndex, void) = .empty;
-        defer absent_answered.deinit(self.allocator);
-        for (0..self.ir_view.nodeCount()) |idx_usize| {
+        defer absent_answered.deinit(allocator);
+        for (0..ir_view.nodeCount()) |idx_usize| {
             const idx: NodeIndex = @intCast(idx_usize);
-            if (self.ir_view.getTag(idx) != .binary_op) continue;
-            const bin = self.ir_view.getBinary(idx) orelse return error.InvalidIR;
-            if (bin.op == .nullish) try absent_answered.put(self.allocator, bin.left, {});
+            if (ir_view.getTag(idx) != .binary_op) continue;
+            const bin = ir_view.getBinary(idx) orelse return error.InvalidIR;
+            if (bin.op == .nullish) try absent_answered.put(allocator, bin.left, {});
         }
 
         var callees: std.AutoHashMapUnmanaged(NodeIndex, void) = .empty;
-        defer callees.deinit(self.allocator);
+        defer callees.deinit(allocator);
 
-        for (0..self.ir_view.nodeCount()) |idx_usize| {
+        for (0..ir_view.nodeCount()) |idx_usize| {
             const idx: NodeIndex = @intCast(idx_usize);
-            const tag = self.ir_view.getTag(idx) orelse continue;
+            const tag = ir_view.getTag(idx) orelse continue;
             if (tag != .call and tag != .method_call) continue;
-            const call = self.ir_view.getCall(idx) orelse return error.InvalidIR;
-            try callees.put(self.allocator, call.callee, {});
-            const meta = self.getCalleeMeta(call.callee) orelse continue;
+            const call = ir_view.getCall(idx) orelse return error.InvalidIR;
+            try callees.put(allocator, call.callee, {});
+            const meta = calleeMeta(ir_view, bindings, call.callee) orelse continue;
             if (meta.severity == .none) continue;
-            if (seen.contains(idx)) continue;
+            if (walked) |w| if (w.contains(idx)) continue;
             if (isOptionalReturn(meta.returns) and absent_answered.contains(idx)) continue;
-            try self.unseen_failable_calls.append(self.allocator, .{
+            try out.append(allocator, .{
                 .node = idx,
                 .module = meta.module,
                 .func = meta.func,
@@ -471,20 +574,122 @@ pub const PathGenerator = struct {
         // or `parallel([jwtVerify])`. The call it makes later has a callee the
         // walk cannot resolve to the module, so no path records it. Imports are
         // globals, so a local or a parameter never matches.
-        for (0..self.ir_view.nodeCount()) |idx_usize| {
+        for (0..ir_view.nodeCount()) |idx_usize| {
             const idx: NodeIndex = @intCast(idx_usize);
-            if (self.ir_view.getTag(idx) != .identifier) continue;
+            if (ir_view.getTag(idx) != .identifier) continue;
             if (callees.contains(idx)) continue;
-            const binding = self.ir_view.getBinding(idx) orelse continue;
+            const binding = ir_view.getBinding(idx) orelse continue;
             if (binding.kind != .global) continue;
-            const meta = self.module_fn_bindings.get(binding.slot) orelse continue;
+            const meta = bindings.get(binding.slot) orelse continue;
             if (meta.severity == .none) continue;
-            try self.unseen_failable_calls.append(self.allocator, .{
+            try out.append(allocator, .{
                 .node = idx,
                 .module = meta.module,
                 .func = meta.func,
             });
         }
+    }
+
+    /// Every failable call, and every failable value use, in a file other than
+    /// the handler's. `imports` is that file's own import index. The nodes
+    /// belong to `ir_view`, so the caller reads each location before it
+    /// releases the parse. There is no walk for such a file, so every
+    /// failable call counts.
+    pub fn scanImportedFile(
+        allocator: std.mem.Allocator,
+        ir_view: IrView,
+        imports: []const module_facts_mod.ImportRecord,
+        out: *std.ArrayList(UnseenCall),
+    ) error{ OutOfMemory, InvalidIR }!void {
+        var bindings: std.AutoHashMapUnmanaged(u16, FnMeta) = .empty;
+        defer bindings.deinit(allocator);
+        try fillFnBindings(allocator, imports, &bindings);
+        try scanFileFailableCalls(allocator, ir_view, &bindings, null, out);
+    }
+
+    /// Count the handler's own imports of files it does not own. A record that
+    /// resolves to a builtin module is read by `scanFileFailableCalls`. Every
+    /// other record needs a clean answer from the caller (`imported_scan`).
+    /// A record with no entry, a blocked entry, an entry with a failable call,
+    /// and every partner record each add one unseen call, located at the
+    /// import. A partner export has no failure model, so no entry can clear it.
+    fn scanImportRecords(self: *PathGenerator) error{OutOfMemory}!void {
+        const facts = try self.resolveFacts();
+
+        var decl_of: std.AutoHashMapUnmanaged(u16, NodeIndex) = .empty;
+        defer decl_of.deinit(self.allocator);
+        var decl_scanned = false;
+
+        for (facts.imports.items) |rec| {
+            if (rec.resolution == .builtin) continue;
+
+            var call: UnseenCall = .{
+                .node = null_node,
+                .module = "",
+                .func = "",
+                .imported = .{ .file = rec.module_specifier, .blocked = .not_scanned },
+            };
+            if (rec.resolution == .partner) {
+                call.imported = .{ .file = rec.module_specifier, .blocked = .partner };
+            } else if (self.importScanFor(rec.slot)) |entry| {
+                switch (entry.scan) {
+                    .clean => continue,
+                    .failable => |f| {
+                        call.module = f.module;
+                        call.func = f.func;
+                        call.imported = .{ .file = f.file, .blocked = null };
+                    },
+                    .blocked => |b| call.imported = .{ .file = b.file, .blocked = b.reason },
+                }
+            }
+
+            if (!decl_scanned) {
+                try self.indexImportDecls(&decl_of);
+                decl_scanned = true;
+            }
+            if (decl_of.get(rec.slot)) |node| call.node = node;
+            try self.unseen_failable_calls.append(self.allocator, call);
+        }
+    }
+
+    fn importScanFor(self: *const PathGenerator, slot: u16) ?ImportScanEntry {
+        const entries = self.imported_scan orelse return null;
+        for (entries) |entry| {
+            if (entry.slot == slot) return entry;
+        }
+        return null;
+    }
+
+    /// Map each imported local slot to the `import_decl` node that binds it.
+    fn indexImportDecls(
+        self: *const PathGenerator,
+        out: *std.AutoHashMapUnmanaged(u16, NodeIndex),
+    ) error{OutOfMemory}!void {
+        for (0..self.ir_view.nodeCount()) |idx_usize| {
+            const idx: NodeIndex = @intCast(idx_usize);
+            if (self.ir_view.getTag(idx) != .import_decl) continue;
+            const decl = self.ir_view.getImportDecl(idx) orelse continue;
+            var j: u8 = 0;
+            while (j < decl.specifiers_count) : (j += 1) {
+                const spec_idx = self.ir_view.getListIndex(decl.specifiers_start, j);
+                const spec = self.ir_view.getImportSpec(spec_idx) orelse continue;
+                try out.put(self.allocator, spec.local_binding.slot, idx);
+            }
+        }
+    }
+
+    /// The import index the generator reads. Callers that scan the imported
+    /// files build their answer from these records, so the records and the
+    /// answer agree on every slot.
+    pub fn importFacts(self: *PathGenerator) error{OutOfMemory}!*const module_facts_mod.ModuleFacts {
+        return self.resolveFacts();
+    }
+
+    /// Give the generator the answer for the handler's non-builtin import
+    /// records. Call it before `generate`. Borrowed; `entries` must outlive the
+    /// generator. Null says the caller has no answer.
+    pub fn setImportedScan(self: *PathGenerator, entries: ?[]const ImportScanEntry) void {
+        self.imported_scan = entries;
     }
 
     fn isOptionalReturn(returns: mb.ReturnKind) bool {
@@ -958,10 +1163,18 @@ pub const PathGenerator = struct {
     /// partner-registered module was skipped before and stays skipped.
     fn scanImports(self: *PathGenerator) error{OutOfMemory}!void {
         const facts = try self.resolveFacts();
-        for (facts.imports.items) |rec| {
+        try fillFnBindings(self.allocator, facts.imports.items, &self.module_fn_bindings);
+    }
+
+    fn fillFnBindings(
+        allocator: std.mem.Allocator,
+        imports: []const module_facts_mod.ImportRecord,
+        bindings: *std.AutoHashMapUnmanaged(u16, FnMeta),
+    ) error{OutOfMemory}!void {
+        for (imports) |rec| {
             if (rec.resolution != .builtin) continue;
             const entry = builtin_modules.findExport(rec.module_specifier, rec.imported_name) orelse continue;
-            try self.module_fn_bindings.put(self.allocator, rec.slot, .{
+            try bindings.put(allocator, rec.slot, .{
                 // The binding's short name, not its specifier: that is what the
                 // legacy scan stored and what downstream comparisons expect.
                 .module = entry.binding.name,
@@ -969,7 +1182,7 @@ pub const PathGenerator = struct {
                 .returns = entry.func.returns,
                 .severity = entry.func.failure_severity,
                 .ok_record = entry.func.failure_severity != .none and entry.func.returns != .result and
-                    try declaresOkRecord(self.allocator, entry.func),
+                    try declaresOkRecord(allocator, entry.func),
             });
         }
     }
@@ -1899,10 +2112,18 @@ pub const PathGenerator = struct {
     }
 
     fn getCalleeMeta(self: *const PathGenerator, callee: NodeIndex) ?FnMeta {
-        const tag = self.ir_view.getTag(callee) orelse return null;
+        return calleeMeta(self.ir_view, &self.module_fn_bindings, callee);
+    }
+
+    fn calleeMeta(
+        ir_view: IrView,
+        bindings: *const std.AutoHashMapUnmanaged(u16, FnMeta),
+        callee: NodeIndex,
+    ) ?FnMeta {
+        const tag = ir_view.getTag(callee) orelse return null;
         if (tag != .identifier) return null;
-        const binding = self.ir_view.getBinding(callee) orelse return null;
-        return self.module_fn_bindings.get(binding.slot);
+        const binding = ir_view.getBinding(callee) orelse return null;
+        return bindings.get(binding.slot);
     }
 
     fn getPropertyKeyName(self: *const PathGenerator, key_idx: NodeIndex) ?[]const u8 {
@@ -2430,13 +2651,18 @@ test "scanImports tracks virtual module functions with binding names" {
 
 const parser_mod = @import("zts-engine").parser;
 const handler_verifier = @import("handler_verifier.zig");
+const module_manifest_mod = @import("zts-engine").module_manifest;
+const manifest_registry_mod = @import("manifest_registry.zig");
 
 const PathGeneratorFixture = struct {
     parser: parser_mod.JsParser,
     atoms: atom_table.AtomTable,
     generator: PathGenerator,
+    /// The scan answer given to the generator, owned here.
+    scan_entries: []PathGenerator.ImportScanEntry = &.{},
 
     fn deinit(self: *PathGeneratorFixture) void {
+        std.testing.allocator.free(self.scan_entries);
         self.generator.deinit();
         self.parser.deinit();
         self.atoms.deinit();
@@ -2781,6 +3007,23 @@ test "route roots stay internal to analysis outputs" {
 }
 
 fn generateFixture(allocator: std.mem.Allocator, source: []const u8) !PathGeneratorFixture {
+    return generateFixtureScanned(allocator, source, null);
+}
+
+/// One answer for the import records that name `specifier`.
+const SpecifierScan = struct {
+    specifier: []const u8,
+    scan: PathGenerator.ImportScan,
+};
+
+/// Like `generateFixture`, and gives the generator an import scan before it
+/// generates. `scans` null gives no input at all; a slice gives an entry for
+/// each non-builtin record whose specifier it names, and none for the rest.
+fn generateFixtureScanned(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    scans: ?[]const SpecifierScan,
+) !PathGeneratorFixture {
     var parser = try parser_mod.JsParser.init(allocator, source);
     errdefer parser.deinit();
 
@@ -2794,12 +3037,25 @@ fn generateFixture(allocator: std.mem.Allocator, source: []const u8) !PathGenera
 
     var generator = PathGenerator.init(allocator, ir_view, &atoms);
     errdefer generator.deinit();
+    var entries: std.ArrayList(PathGenerator.ImportScanEntry) = .empty;
+    errdefer entries.deinit(allocator);
+    if (scans) |given| {
+        const facts = try generator.importFacts();
+        for (facts.imports.items) |rec| {
+            for (given) |candidate| {
+                if (!std.mem.eql(u8, candidate.specifier, rec.module_specifier)) continue;
+                try entries.append(allocator, .{ .slot = rec.slot, .scan = candidate.scan });
+            }
+        }
+        generator.setImportedScan(entries.items);
+    }
     try generator.generate(handler_fn);
 
     return .{
         .parser = parser,
         .atoms = atoms,
         .generator = generator,
+        .scan_entries = try entries.toOwnedSlice(allocator),
     };
 }
 
@@ -3461,6 +3717,226 @@ test "a call to an export with no failure severity is never listed" {
     defer fixture.deinit();
 
     try std.testing.expectEqual(@as(usize, 0), fixture.generator.unseenFailableCalls().len);
+}
+
+const sibling_import_handler =
+    \\import { jwtVerify } from "zttp:auth";
+    \\import { helper } from "./dep.ts";
+    \\function handler(req) {
+    \\  const a = jwtVerify("t", "secret");
+    \\  if (!a.ok) return Response.text("unauthorized", { status: 401 });
+    \\  return Response.text(helper());
+    \\}
+;
+
+test "no import scan counts a relative import as one unseen call at its import line" {
+    const allocator = std.testing.allocator;
+    var fixture = try generateFixture(allocator, sibling_import_handler);
+    defer fixture.deinit();
+
+    const unseen = fixture.generator.unseenFailableCalls();
+    try std.testing.expectEqual(@as(usize, 1), unseen.len);
+    const cause = unseen[0].imported orelse return error.TestExpectedEqual;
+    try std.testing.expectEqualStrings("./dep.ts", cause.file);
+    try std.testing.expectEqual(PathGenerator.BlockReason.not_scanned, cause.blocked orelse return error.TestExpectedEqual);
+    // The location is the handler's import, not a node of another file.
+    try std.testing.expect(unseen[0].node != null_node);
+    try std.testing.expectEqual(@as(u32, 2), fixture.generator.ir_view.getLoc(unseen[0].node).?.line);
+    try std.testing.expect(!fixture.generator.faultAnalysisComplete());
+}
+
+test "an import scan that omits one record leaves that record unseen" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { a } from "./a.ts";
+        \\import { b } from "./b.ts";
+        \\function handler(req) {
+        \\  return Response.text(a() + b());
+        \\}
+    ;
+    var fixture = try generateFixtureScanned(allocator, source, &.{
+        .{ .specifier = "./a.ts", .scan = .clean },
+    });
+    defer fixture.deinit();
+
+    const unseen = fixture.generator.unseenFailableCalls();
+    try std.testing.expectEqual(@as(usize, 1), unseen.len);
+    try std.testing.expectEqualStrings("./b.ts", unseen[0].imported.?.file);
+    try std.testing.expectEqual(PathGenerator.BlockReason.not_scanned, unseen[0].imported.?.blocked.?);
+    try std.testing.expect(!fixture.generator.faultAnalysisComplete());
+}
+
+test "a clean answer for every relative import leaves the analysis complete" {
+    const allocator = std.testing.allocator;
+    var fixture = try generateFixtureScanned(allocator, sibling_import_handler, &.{
+        .{ .specifier = "./dep.ts", .scan = .clean },
+    });
+    defer fixture.deinit();
+
+    try std.testing.expectEqual(@as(usize, 0), fixture.generator.unseenFailableCalls().len);
+    try std.testing.expect(fixture.generator.faultAnalysisComplete());
+}
+
+test "a handler with only builtin imports needs no import scan" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { jwtVerify } from "zttp:auth";
+        \\function handler(req) {
+        \\  const a = jwtVerify("t", "secret");
+        \\  if (!a.ok) return Response.text("unauthorized", { status: 401 });
+        \\  return Response.text("ok");
+        \\}
+    ;
+    var fixture = try generateFixture(allocator, source);
+    defer fixture.deinit();
+
+    try std.testing.expectEqual(@as(usize, 0), fixture.generator.unseenFailableCalls().len);
+    try std.testing.expect(fixture.generator.faultAnalysisComplete());
+}
+
+test "a failable answer and every blocked answer each count and name their cause" {
+    const allocator = std.testing.allocator;
+    const reasons = [_]PathGenerator.BlockReason{ .not_relative, .unreadable, .too_deep, .partner };
+    for (reasons) |reason| {
+        var fixture = try generateFixtureScanned(allocator, sibling_import_handler, &.{
+            .{ .specifier = "./dep.ts", .scan = .{ .blocked = .{ .file = "./deep.ts", .reason = reason } } },
+        });
+        defer fixture.deinit();
+
+        const unseen = fixture.generator.unseenFailableCalls();
+        try std.testing.expectEqual(@as(usize, 1), unseen.len);
+        try std.testing.expectEqual(reason, unseen[0].imported.?.blocked.?);
+        try std.testing.expectEqualStrings("./deep.ts", unseen[0].imported.?.file);
+        try std.testing.expect(!fixture.generator.faultAnalysisComplete());
+        const described = try unseen[0].describe(allocator);
+        defer if (described.owned) allocator.free(described.text);
+        const expected = try std.fmt.allocPrint(allocator, "./deep.ts ({s})", .{reason.text()});
+        defer allocator.free(expected);
+        try std.testing.expectEqualStrings(expected, described.text);
+    }
+
+    var failable = try generateFixtureScanned(allocator, sibling_import_handler, &.{
+        .{ .specifier = "./dep.ts", .scan = .{ .failable = .{ .file = "./dep.ts", .module = "fetch", .func = "fetch" } } },
+    });
+    defer failable.deinit();
+    const unseen = failable.generator.unseenFailableCalls();
+    try std.testing.expectEqual(@as(usize, 1), unseen.len);
+    try std.testing.expect(unseen[0].imported.?.blocked == null);
+    const described = try unseen[0].describe(allocator);
+    defer if (described.owned) allocator.free(described.text);
+    try std.testing.expectEqualStrings("fetch in ./dep.ts", described.text);
+    try std.testing.expect(!failable.generator.faultAnalysisComplete());
+}
+
+test "a partner import is unseen even when an answer calls it clean" {
+    const allocator = std.testing.allocator;
+    var manifest = try module_manifest_mod.parse(allocator,
+        \\{
+        \\  "schemaVersion": 1,
+        \\  "specifier": "zttp-ext:stripe",
+        \\  "backend": "native-zig",
+        \\  "requiredCapabilities": ["network"],
+        \\  "exports": [
+        \\    { "name": "chargeCard", "effect": "write", "returns": "result" }
+        \\  ]
+        \\}
+    );
+    errdefer manifest.deinit(allocator);
+    var registry = manifest_registry_mod.Registry.init(allocator);
+    defer registry.deinit();
+    try registry.register(manifest);
+
+    const source =
+        \\import { chargeCard } from "zttp-ext:stripe";
+        \\function handler(req) {
+        \\  const r = chargeCard("x");
+        \\  return Response.text("ok");
+        \\}
+    ;
+    var parser = try parser_mod.JsParser.init(allocator, source);
+    defer parser.deinit();
+    var atoms = atom_table.AtomTable.init(allocator);
+    defer atoms.deinit();
+    parser.setAtomTable(&atoms);
+    const root = try parser.parse();
+    const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    const handler_fn = handler_verifier.findHandlerFunction(ir_view, root) orelse return error.HandlerNotFound;
+
+    var facts = try module_facts_mod.ModuleFacts.build(allocator, ir_view, &atoms, &registry);
+    defer facts.deinit();
+    try std.testing.expectEqual(module_facts_mod.ImportRecord.Resolution.partner, facts.imports.items[0].resolution);
+
+    var generator = PathGenerator.init(allocator, ir_view, &atoms);
+    defer generator.deinit();
+    generator.facts = &facts;
+    const clean = [_]PathGenerator.ImportScanEntry{.{ .slot = facts.imports.items[0].slot, .scan = .clean }};
+    generator.setImportedScan(&clean);
+    try generator.generate(handler_fn);
+
+    const unseen = generator.unseenFailableCalls();
+    try std.testing.expectEqual(@as(usize, 1), unseen.len);
+    try std.testing.expectEqual(PathGenerator.BlockReason.partner, unseen[0].imported.?.blocked.?);
+    try std.testing.expectEqualStrings("zttp-ext:stripe", unseen[0].imported.?.file);
+    try std.testing.expect(!generator.faultAnalysisComplete());
+}
+
+/// Parse `source` as an imported file and list what the scan core finds in it.
+fn scanImportedSource(allocator: std.mem.Allocator, source: []const u8) !usize {
+    var parser = try parser_mod.JsParser.init(allocator, source);
+    defer parser.deinit();
+    var atoms = atom_table.AtomTable.init(allocator);
+    defer atoms.deinit();
+    parser.setAtomTable(&atoms);
+    _ = try parser.parse();
+    const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    var facts = try module_facts_mod.ModuleFacts.build(allocator, ir_view, &atoms, null);
+    defer facts.deinit();
+    var sites: std.ArrayList(PathGenerator.UnseenCall) = .empty;
+    defer sites.deinit(allocator);
+    try PathGenerator.scanImportedFile(allocator, ir_view, facts.imports.items, &sites);
+    return sites.items.len;
+}
+
+test "the file scan lists a failable call, a failable value use, and nothing else" {
+    const allocator = std.testing.allocator;
+    // An unchecked call in a helper: no walk exists, so it counts.
+    try std.testing.expectEqual(@as(usize, 1), try scanImportedSource(allocator,
+        \\import { fetch } from "zttp:fetch";
+        \\export function enrich() {
+        \\  const res = fetch("https://api.example.com/b");
+        \\  return res.body;
+        \\}
+    ));
+    // A call that a branch checks still counts: only the handler's own walk
+    // can record a stub.
+    try std.testing.expectEqual(@as(usize, 1), try scanImportedSource(allocator,
+        \\import { jwtVerify } from "zttp:auth";
+        \\export function check(t) {
+        \\  const a = jwtVerify(t, "secret");
+        \\  if (!a.ok) return "no";
+        \\  return "yes";
+        \\}
+    ));
+    // The failable export used as a value.
+    try std.testing.expectEqual(@as(usize, 1), try scanImportedSource(allocator,
+        \\import { fetch } from "zttp:fetch";
+        \\export const f = fetch;
+    ));
+    // `??` on an optional-returning export answers the absent value.
+    try std.testing.expectEqual(@as(usize, 0), try scanImportedSource(allocator,
+        \\import { env } from "zttp:env";
+        \\export function token() { return env("API_TOKEN") ?? "none"; }
+    ));
+    // The same call without `??` counts.
+    try std.testing.expectEqual(@as(usize, 1), try scanImportedSource(allocator,
+        \\import { env } from "zttp:env";
+        \\export function token() { return env("API_TOKEN"); }
+    ));
+    // Pure code and a severity-less export give nothing.
+    try std.testing.expectEqual(@as(usize, 0), try scanImportedSource(allocator,
+        \\import { sha256 } from "zttp:crypto";
+        \\export function digest(s) { return sha256(s); }
+    ));
 }
 
 test "a summarized path set is not a complete fault analysis" {
