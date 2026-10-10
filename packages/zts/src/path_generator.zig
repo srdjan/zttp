@@ -1201,8 +1201,7 @@ pub const PathGenerator = struct {
                 .func = entry.func.name,
                 .returns = entry.func.returns,
                 .severity = entry.func.failure_severity,
-                .ok_record = entry.func.failure_severity != .none and entry.func.returns != .result and
-                    try declaresOkRecord(allocator, entry.func),
+                .ok_record = try isOkRecordExport(allocator, entry.func),
             });
         }
     }
@@ -1721,25 +1720,16 @@ pub const PathGenerator = struct {
     /// comparison that splits the statuses gets a `status_is` constraint.
     /// The returned constraint holds where the comparison is true.
     fn extractStatusComparison(self: *PathGenerator, bin: Node.BinaryExpr) ?Constraint {
-        const op: status_check.Op = switch (bin.op) {
-            .strict_eq => .eq,
-            .strict_neq => .neq,
-            .lt => .lt,
-            .lte => .lte,
-            .gt => .gt,
-            .gte => .gte,
-            else => return null,
-        };
-        var literal_left = false;
         var call_site: NodeIndex = undefined;
-        var literal: f64 = undefined;
+        var comparison: status_check.Comparison = undefined;
         if (self.statusMemberCall(bin.left)) |site| {
-            literal = self.numericLiteral(bin.right) orelse return null;
+            const shape = status_check.shape(self.ir_view, bin, true) orelse return null;
             call_site = site;
+            comparison = shape.comparison;
         } else if (self.statusMemberCall(bin.right)) |site| {
-            literal = self.numericLiteral(bin.left) orelse return null;
+            const shape = status_check.shape(self.ir_view, bin, false) orelse return null;
             call_site = site;
-            literal_left = true;
+            comparison = shape.comparison;
         } else return null;
 
         const call = self.ir_view.getCall(call_site) orelse return null;
@@ -1750,7 +1740,6 @@ pub const PathGenerator = struct {
             .returns = meta.returns,
             .call_site = call_site,
         };
-        const comparison: status_check.Comparison = .{ .op = op, .literal = literal, .literal_left = literal_left };
         return switch (status_check.classify(comparison)) {
             .constant => null,
             .plain => .{ .status_is = .{ .stub = info, .comparison = comparison, .expect = true } },
@@ -1773,29 +1762,6 @@ pub const PathGenerator = struct {
         const meta = self.getCalleeMeta(call.callee) orelse return null;
         if (!meta.ok_record) return null;
         return init_node;
-    }
-
-    /// The value of an integer or float literal, or of a unary minus over
-    /// one. `NaN` and `Infinity` are identifiers, so they are not literals.
-    fn numericLiteral(self: *const PathGenerator, node: NodeIndex) ?f64 {
-        switch (self.ir_view.getTag(node) orelse return null) {
-            .lit_int => {
-                const value = self.ir_view.getIntValue(node) orelse return null;
-                return @floatFromInt(value);
-            },
-            .lit_float => {
-                const idx = self.ir_view.getFloatIdx(node) orelse return null;
-                return self.ir_view.getFloat(idx);
-            },
-            .unary_op => {
-                const unary = self.ir_view.getUnary(node) orelse return null;
-                if (unary.op != .neg) return null;
-                const operand = self.ir_view.getTag(unary.operand) orelse return null;
-                if (operand != .lit_int and operand != .lit_float) return null;
-                return -(self.numericLiteral(unary.operand) orelse return null);
-            },
-            else => return null,
-        }
     }
 
     fn extractResultOkConstraint(self: *PathGenerator, member_node: NodeIndex) ?Constraint {
@@ -2669,6 +2635,15 @@ pub const PathGenerator = struct {
 // Stub value synthesis
 // ---------------------------------------------------------------------------
 
+/// Whether `x.ok` and `x.status` fork the result of a call to this export: it is
+/// failable, does not return a `Result`, and declares an `ok`-record response
+/// (`fetch`). The flow checker's witness search asks the same question, so the
+/// generated tests and the counterexamples fork the same calls.
+pub fn isOkRecordExport(allocator: std.mem.Allocator, func: *const mb.FunctionBinding) error{OutOfMemory}!bool {
+    return func.failure_severity != .none and func.returns != .result and
+        try declaresOkRecord(allocator, func);
+}
+
 /// Whether the export is forked by `x.ok` on its result because it declares an
 /// `ok: boolean` response record. The rule reads the parsed return type, not the
 /// signature text: `returnsOkRecord` resolves it through the type environment.
@@ -2712,39 +2687,10 @@ fn resultOrOkRecordStub(returns: mb.ReturnKind, ok: bool) []const u8 {
     return okRecordStub(ok);
 }
 
-const ok_record_stub_ok =
-    \\{"status":200,"statusText":"OK","headers":{},"body":"{\"id\":\"1\"}"}
-;
-const ok_record_stub_failed =
-    \\{"status":503,"statusText":"Service Unavailable","headers":{},"body":"{}"}
-;
-
-fn okRecordStub(ok: bool) []const u8 {
-    return if (ok) ok_record_stub_ok else ok_record_stub_failed;
-}
-
-/// One `ok`-record stub for each status from 100 to 599, in the shape of
-/// `ok_record_stub_ok`. The runtime reads `status` and derives `ok` from it.
-const status_stubs = blk: {
-    @setEvalBranchQuota(4_000_000);
-    const count = status_check.max_status - status_check.min_status + 1;
-    var table: [count][]const u8 = undefined;
-    for (&table, 0..) |*slot, i| {
-        const status: u16 = status_check.min_status + @as(u16, @intCast(i));
-        const phrase = std.http.Status.phrase(@enumFromInt(status)) orelse "Unknown";
-        const body = if (status_check.isOkStatus(status)) "{\\\"id\\\":\\\"1\\\"}" else "{}";
-        slot.* = std.fmt.comptimePrint(
-            "{{\"status\":{d},\"statusText\":\"{s}\",\"headers\":{{}},\"body\":\"{s}\"}}",
-            .{ status, phrase, body },
-        );
-    }
-    break :blk table;
-};
-
-/// The `ok`-record stub for a response with this status (100 to 599).
-fn statusStub(status: u16) []const u8 {
-    return status_stubs[status - status_check.min_status];
-}
+/// The stubs are shared with the counterexample solver, so a witness and a
+/// generated test drive an `ok`-record call with the same response.
+const okRecordStub = status_check.okRecordStub;
+const statusStub = status_check.statusStub;
 
 fn stubValueForType(returns: mb.ReturnKind, truthy: bool) []const u8 {
     if (!truthy) {

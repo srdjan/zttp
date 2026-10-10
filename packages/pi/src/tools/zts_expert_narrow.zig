@@ -185,6 +185,15 @@ fn writeConstraint(writer: *std.Io.Writer, c: counterexample.WitnessConstraint) 
         .stub_falsy => |info| try writeStubConstraint(writer, "stub_falsy", info),
         .result_ok => |info| try writeStubConstraint(writer, "result_ok", info),
         .result_not_ok => |info| try writeStubConstraint(writer, "result_not_ok", info),
+        .status_is => |t| {
+            // A status test needs its truth value: the stub alone does not say
+            // which side of the comparison the path takes.
+            try writer.writeAll("{\"kind\":\"status_is\",\"module\":");
+            try writeJsonString(writer, t.stub.module);
+            try writer.writeAll(",\"func\":");
+            try writeJsonString(writer, t.stub.func);
+            try writer.print(",\"expect\":{s}}}", .{if (t.expect) "true" else "false"});
+        },
     }
 }
 

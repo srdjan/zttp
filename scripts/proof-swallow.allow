@@ -367,3 +367,10 @@ packages/zts/src/flow_checker.zig noteHtmlProducer catch-poison
 # poison before they publish a proof, so the checker returns an error instead
 # of a verdict.
 packages/zts/src/flow_checker.zig setCarrier catch-poison
+
+# The ok-record probe in the import scan (F4 of R4): a failed allocation while
+# parsing a return type marks allocation poison and leaves `ok_record` false.
+# Both checker entry points reject poison before they publish a proof. The
+# flag only chooses the stub a counterexample witness gives a `fetch` call, and
+# witnesses decide no verdict.
+packages/zts/src/flow_checker.zig scanImports catch-block

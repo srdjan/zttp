@@ -501,6 +501,151 @@ test "witness round-trip: solved witness replays into an executable leak" {
     try std.testing.expectEqual(@as(u32, 0), replay_state.divergences);
 }
 
+const witness_flow_path = "witness-flow.ts";
+
+/// Check `handler_code` with the flow checker, solve the witness of its first
+/// `secret_in_response` diagnostic, write it as JSONL, parse that back, and
+/// replay it against the same handler. Returns the response body, owned by
+/// `allocator`. This is the path a persisted witness takes, minus the file.
+fn replayFlowWitnessBody(allocator: std.mem.Allocator, handler_code: []const u8) ![]u8 {
+    const rt = try HandlerInstance.init(allocator, .{ .replay_file_path = "witness-flow-test" });
+    defer rt.deinit();
+
+    // Parse the way `loadCode` does, so the flow check reads the same IR.
+    var prepared = try zq.PreparedSource.init(allocator, handler_code, witness_flow_path, .{});
+    defer prepared.deinit();
+    var p = try zq.Parser.init(allocator, prepared.parserInput(), rt.strings, &rt.ctx.atoms);
+    defer p.deinit();
+    _ = try p.parse();
+    const ir_view = zq.IrView.fromIRStore(&p.js_parser.nodes, &p.js_parser.constants);
+    const handler_fn = zq.findHandlerFunction(ir_view, p.root_node) orelse return error.HandlerNotFound;
+
+    var checker = zq.FlowChecker.init(allocator, ir_view, &rt.ctx.atoms);
+    defer checker.deinit();
+    _ = try checker.check(handler_fn);
+
+    var jsonl: std.ArrayList(u8) = .empty;
+    defer jsonl.deinit(allocator);
+    for (checker.getDiagnostics()) |d| {
+        if (d.kind != .secret_in_response) continue;
+        const w = d.witness orelse return error.MissingWitness;
+        var witness = try zq.solveCounterexample(allocator, .{
+            .property = .no_secret_leakage,
+            .origin = .{ .line = 1, .column = 1 },
+            .sink = .{ .line = 1, .column = 1 },
+            .summary = "t",
+            .constraints = w.path_constraints,
+            .io_calls = w.io_calls,
+        });
+        defer witness.deinit(allocator);
+        var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &jsonl);
+        try counterexample.writeJsonl(&aw.writer, witness);
+        jsonl = aw.toArrayList();
+        break;
+    } else return error.NoSecretDiagnostic;
+
+    const groups = try zq.trace.parseTraceFile(allocator, jsonl.items);
+    defer {
+        for (groups) |g| allocator.free(g.io_calls);
+        allocator.free(groups);
+    }
+    if (groups.len != 1) return error.UnexpectedGroupCount;
+    const group = groups[0];
+
+    var replay_state = zq.trace.ReplayState{ .io_calls = group.io_calls, .cursor = 0, .divergences = 0 };
+    rt.ctx.setModuleState(
+        zq.trace.REPLAY_STATE_SLOT,
+        @ptrCast(&replay_state),
+        &zq.trace.ReplayState.deinitOpaque,
+    );
+    defer rt.ctx.module_state[zq.trace.REPLAY_STATE_SLOT] = null;
+    try rt.loadCode(handler_code, witness_flow_path);
+
+    var headers: std.ArrayListUnmanaged(HttpHeader) = .empty;
+    defer headers.deinit(allocator);
+    try parseHeadersFromJson(allocator, group.request.headers_json, &headers);
+    const request = HttpRequestView{
+        .method = group.request.method,
+        .url = group.request.url,
+        .headers = headers,
+        .body = group.request.body,
+    };
+    var response = try rt.executeHandler(request);
+    defer response.deinit();
+    if (replay_state.divergences != 0) return error.ReplayDiverged;
+    return allocator.dupe(u8, response.body);
+}
+
+test "a flow witness for a leak behind a failed fetch replays into the leak" {
+    // The secret reaches the response only when the fetch fails. Before the
+    // witness knew about `ok`-record exports it stubbed the fetch with a
+    // default object, replay read that as status 200, and the handler took the
+    // safe branch.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const sources = [_][]const u8{
+        \\import { env } from "zttp:env";
+        \\import { fetch } from "zttp:fetch";
+        \\function handler(req: Request): Response {
+        \\  const secret = env("API_SECRET");
+        \\  const res = fetch("https://api.example.com/a");
+        \\  if (!res.ok) {
+        \\    return Response.json({ leaked: secret });
+        \\  }
+        \\  return Response.json({ ok: true });
+        \\}
+        ,
+        \\import { env } from "zttp:env";
+        \\import { fetch } from "zttp:fetch";
+        \\function handler(req: Request): Response {
+        \\  const secret = env("API_SECRET");
+        \\  const res = fetch("https://api.example.com/a");
+        \\  if (res.status !== 200) {
+        \\    return Response.json({ leaked: secret });
+        \\  }
+        \\  return Response.json({ ok: true });
+        \\}
+        ,
+        \\import { env } from "zttp:env";
+        \\import { fetch } from "zttp:fetch";
+        \\function handler(req: Request): Response {
+        \\  const secret = env("API_SECRET");
+        \\  const res = fetch("https://api.example.com/a");
+        \\  if (res.status === 404) {
+        \\    return Response.json({ leaked: secret });
+        \\  }
+        \\  return Response.json({ ok: true });
+        \\}
+        ,
+    };
+    for (sources) |source| {
+        const body = try replayFlowWitnessBody(allocator, source);
+        try std.testing.expect(std.mem.indexOf(u8, body, "secret-sentinel") != null);
+    }
+}
+
+test "a flow witness for a leak on the fetch success side still replays into the leak" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const body = try replayFlowWitnessBody(allocator,
+        \\import { env } from "zttp:env";
+        \\import { fetch } from "zttp:fetch";
+        \\function handler(req: Request): Response {
+        \\  const secret = env("API_SECRET");
+        \\  const res = fetch("https://api.example.com/a");
+        \\  if (res.ok) {
+        \\    return Response.json({ leaked: secret });
+        \\  }
+        \\  return Response.json({ error: "upstream" }, { status: 502 });
+        \\}
+    );
+    try std.testing.expect(std.mem.indexOf(u8, body, "secret-sentinel") != null);
+}
+
 // Build a replay runtime, install a single recorded crypto.sha256 entry, run a
 // handler that hashes `live_arg`, and return the resulting divergence count.
 fn replaySha256ArgDivergences(allocator: std.mem.Allocator, comptime live_arg: []const u8) !u32 {

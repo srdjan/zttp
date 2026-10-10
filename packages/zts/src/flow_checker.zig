@@ -30,6 +30,8 @@ const mb = @import("zts-engine").module_binding;
 const bool_checker_mod = @import("bool_checker.zig");
 const known_globals = @import("zts-base").known_globals;
 const counterexample = @import("counterexample.zig");
+const path_generator = @import("path_generator.zig");
+const status_check = @import("status_check.zig");
 const repair_intent_mod = @import("repair_intent.zig");
 
 pub const RepairIntent = repair_intent_mod.RepairIntent;
@@ -1597,6 +1599,12 @@ pub const FlowChecker = struct {
                     .module = entry.binding.name,
                     .func = entry.func.name,
                     .returns = entry.func.returns,
+                    // The same rule the path generator applies, so a witness
+                    // forks the calls that a generated test forks.
+                    .ok_record = path_generator.isOkRecordExport(self.allocator, entry.func) catch blk: {
+                        self.markAllocationFailure();
+                        break :blk false;
+                    },
                 },
             ) catch self.markAllocationFailure();
             if (entry.func.derives_from_args) {
@@ -5625,6 +5633,7 @@ pub const FlowChecker = struct {
             },
             .binary_op => {
                 const bin = self.ir_view.getBinary(cond) orelse return null;
+                if (self.extractStatusComparison(bin)) |c| return c;
                 if (bin.op != .strict_eq and bin.op != .strict_neq) return null;
 
                 const raw = self.extractLiteralReqComparison(bin.left, bin.right) orelse
@@ -5706,7 +5715,8 @@ pub const FlowChecker = struct {
     }
 
     /// Recognise `result.ok` where `result` is an identifier bound to a
-    /// Result-returning module call (validateJson, jwtVerify, etc.).
+    /// Result-returning module call (validateJson, jwtVerify, etc.) or to a call
+    /// of an `ok`-record export (`fetch`).
     fn extractResultOkConstraint(
         self: *FlowChecker,
         member_node: NodeIndex,
@@ -5720,14 +5730,57 @@ pub const FlowChecker = struct {
         const binding = self.bindingAt(member.object) orelse return null;
         const key = packBindingKey(binding.scope_id, binding.slot);
         const meta = self.binding_origin.get(key) orelse return null;
-        if (meta.returns != .result) return null;
+        if (meta.returns != .result and !meta.ok_record) return null;
 
         return .{ .result_ok = .{
             .module = meta.module,
             .func = meta.func,
             .returns = meta.returns,
             .call_index = meta.call_index,
+            .ok_record = meta.ok_record,
         } };
+    }
+
+    /// Recognise `x.status OP n` and `n OP x.status`, where `x` is bound to a
+    /// call of an `ok`-record export (`fetch`) and `n` is a numeric literal.
+    /// `status_check.classify` decides, with the rule the generated tests use.
+    /// A comparison that is the complement of `ok` forks like `x.ok`: the side
+    /// that holds on a failed response is `result_not_ok`, the other
+    /// `result_ok`. Any other comparison that splits the statuses is a
+    /// `status_is` test, and the solver picks a status that takes the branch.
+    /// The returned constraint holds where the comparison is true.
+    fn extractStatusComparison(self: *FlowChecker, bin: Node.BinaryExpr) ?counterexample.WitnessConstraint {
+        for ([_]bool{ true, false }) |member_left| {
+            const shape = status_check.shape(self.ir_view, bin, member_left) orelse continue;
+            const meta = self.okRecordOfStatusMember(shape.member) orelse continue;
+            const info: counterexample.StubInfo = .{
+                .module = meta.module,
+                .func = meta.func,
+                .returns = meta.returns,
+                .call_index = meta.call_index,
+                .ok_record = true,
+            };
+            return switch (status_check.classify(shape.comparison)) {
+                .constant => null,
+                .plain => .{ .status_is = .{ .stub = info, .comparison = shape.comparison, .expect = true } },
+                .fork => |failure_side| if (failure_side) .{ .result_not_ok = info } else .{ .result_ok = info },
+            };
+        }
+        return null;
+    }
+
+    /// The call origin when `node` is `x.status` and `x` is an identifier bound
+    /// to a call of an `ok`-record export.
+    fn okRecordOfStatusMember(self: *FlowChecker, node: NodeIndex) ?counterexample.StubInfo {
+        if (self.ir_view.getTag(node) != .member_access) return null;
+        const member = self.ir_view.getMember(node) orelse return null;
+        const prop_name = self.resolveAtomName(member.property) orelse return null;
+        if (!std.mem.eql(u8, prop_name, "status")) return null;
+        if (self.ir_view.getTag(member.object) != .identifier) return null;
+        const binding = self.bindingAt(member.object) orelse return null;
+        const meta = self.binding_origin.get(packBindingKey(binding.scope_id, binding.slot)) orelse return null;
+        if (!meta.ok_record) return null;
+        return meta;
     }
 
     fn resolveAtomName(self: *const FlowChecker, atom_idx: u16) ?[]const u8 {
@@ -6242,6 +6295,273 @@ test "FlowChecker captures result_ok constraint on validated path" {
         try std.testing.expect(saw_result_ok);
     }
     try std.testing.expect(found);
+}
+
+/// Test harness: the JSONL of the witness that the solver builds for the first
+/// `secret_in_response` diagnostic of `source`. The caller frees the result.
+fn secretWitnessJsonl(allocator: std.mem.Allocator, source: []const u8) ![]u8 {
+    var parser = try @import("zts-engine").parser.JsParser.init(allocator, source);
+    var atoms = atom_table.AtomTable.init(allocator);
+    defer atoms.deinit();
+    parser.setAtomTable(&atoms);
+    defer parser.deinit();
+    const root = try parser.parse();
+    const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    const handler_verifier = @import("handler_verifier.zig");
+    const handler_fn = handler_verifier.findHandlerFunction(ir_view, root) orelse
+        return error.HandlerNotFound;
+
+    var checker = FlowChecker.init(allocator, ir_view, &atoms);
+    defer checker.deinit();
+    _ = try checker.check(handler_fn);
+
+    for (checker.getDiagnostics()) |d| {
+        if (d.kind != .secret_in_response) continue;
+        const w = d.witness orelse return error.MissingWitness;
+        var witness = try counterexample.solve(allocator, .{
+            .property = .no_secret_leakage,
+            .origin = .{ .line = 1, .column = 1 },
+            .sink = .{ .line = 1, .column = 1 },
+            .summary = "t",
+            .constraints = w.path_constraints,
+            .io_calls = w.io_calls,
+        });
+        defer witness.deinit(allocator);
+        var aw: std.Io.Writer.Allocating = .init(allocator);
+        errdefer aw.deinit();
+        try counterexample.writeJsonl(&aw.writer, witness);
+        return aw.toOwnedSlice();
+    }
+    return error.NoSecretDiagnostic;
+}
+
+const fetch_io_503 =
+    \\{"type":"io","seq":1,"module":"fetch","fn":"fetch","result":{"status":503,"statusText":"Service Unavailable","headers":{},"body":"{}"}}
+;
+const fetch_io_200 =
+    \\{"type":"io","seq":1,"module":"fetch","fn":"fetch","result":{"status":200,"statusText":"OK","headers":{},"body":"{\"id\":\"1\"}"}}
+;
+
+fn expectFetchIo(jsonl: []const u8, expected: []const u8) !void {
+    if (std.mem.indexOf(u8, jsonl, expected) == null) {
+        std.debug.print("\nexpected the witness to contain:\n{s}\ngot:\n{s}\n", .{ expected, jsonl });
+        return error.TestExpectedEqual;
+    }
+}
+
+const fetch_leak_prefix =
+    \\import { env } from "zttp:env";
+    \\import { fetch } from "zttp:fetch";
+    \\
+;
+
+test "a leak behind !res.ok drives the fetch to the failing stub" {
+    const source = fetch_leak_prefix ++
+        \\function handler(req) {
+        \\  const secret = env("API_SECRET");
+        \\  const res = fetch("https://api.example.com/a");
+        \\  if (!res.ok) {
+        \\    return Response.json({ leaked: secret });
+        \\  }
+        \\  return Response.json({ ok: true });
+        \\}
+    ;
+    const jsonl = try secretWitnessJsonl(std.testing.allocator, source);
+    defer std.testing.allocator.free(jsonl);
+    try expectFetchIo(jsonl, fetch_io_503);
+}
+
+test "a leak behind res.status !== 200 drives the fetch to the failing stub" {
+    const source = fetch_leak_prefix ++
+        \\function handler(req) {
+        \\  const secret = env("API_SECRET");
+        \\  const res = fetch("https://api.example.com/a");
+        \\  if (res.status !== 200) {
+        \\    return Response.json({ leaked: secret });
+        \\  }
+        \\  return Response.json({ ok: true });
+        \\}
+    ;
+    const jsonl = try secretWitnessJsonl(std.testing.allocator, source);
+    defer std.testing.allocator.free(jsonl);
+    try expectFetchIo(jsonl, fetch_io_503);
+}
+
+test "a leak only on the fetch success side drives the fetch to the 200 stub" {
+    const ok_source = fetch_leak_prefix ++
+        \\function handler(req) {
+        \\  const secret = env("API_SECRET");
+        \\  const res = fetch("https://api.example.com/a");
+        \\  if (res.ok) {
+        \\    return Response.json({ leaked: secret });
+        \\  }
+        \\  return Response.json({ error: "upstream" }, { status: 502 });
+        \\}
+    ;
+    const eq_source = fetch_leak_prefix ++
+        \\function handler(req) {
+        \\  const secret = env("API_SECRET");
+        \\  const res = fetch("https://api.example.com/a");
+        \\  if (res.status === 200) {
+        \\    return Response.json({ leaked: secret });
+        \\  }
+        \\  return Response.json({ error: "upstream" }, { status: 502 });
+        \\}
+    ;
+    for ([_][]const u8{ ok_source, eq_source }) |source| {
+        const jsonl = try secretWitnessJsonl(std.testing.allocator, source);
+        defer std.testing.allocator.free(jsonl);
+        try expectFetchIo(jsonl, fetch_io_200);
+    }
+}
+
+test "a leak on a status test that does not fork gets a status that takes the branch" {
+    const Row = struct { cond: []const u8, status: []const u8 };
+    const rows = [_]Row{
+        .{ .cond = "res.status === 404", .status = "\"status\":404,\"statusText\":\"Not Found\"" },
+        .{ .cond = "res.status >= 500", .status = "\"status\":500,\"statusText\":\"Internal Server Error\"" },
+        .{ .cond = "404 === res.status", .status = "\"status\":404,\"statusText\":\"Not Found\"" },
+    };
+    for (rows) |row| {
+        const source = try std.fmt.allocPrint(std.testing.allocator,
+            \\{s}
+            \\function handler(req) {{
+            \\  const secret = env("API_SECRET");
+            \\  const res = fetch("https://api.example.com/a");
+            \\  if ({s}) {{
+            \\    return Response.json({{ leaked: secret }});
+            \\  }}
+            \\  return Response.json({{ ok: true }});
+            \\}}
+        , .{ fetch_leak_prefix, row.cond });
+        defer std.testing.allocator.free(source);
+        const jsonl = try secretWitnessJsonl(std.testing.allocator, source);
+        defer std.testing.allocator.free(jsonl);
+        try expectFetchIo(jsonl, row.status);
+    }
+}
+
+test "a status test and an ok test on one fetch are solved together" {
+    const source = fetch_leak_prefix ++
+        \\function handler(req) {
+        \\  const secret = env("API_SECRET");
+        \\  const res = fetch("https://api.example.com/a");
+        \\  if (res.status === 404) {
+        \\    if (!res.ok) {
+        \\      return Response.json({ leaked: secret });
+        \\    }
+        \\  }
+        \\  return Response.json({ ok: true });
+        \\}
+    ;
+    const jsonl = try secretWitnessJsonl(std.testing.allocator, source);
+    defer std.testing.allocator.free(jsonl);
+    try expectFetchIo(jsonl, "\"status\":404,\"statusText\":\"Not Found\"");
+}
+
+test "a status test the checker does not recognise leaves the fetch on its default stub" {
+    const default_io =
+        \\{"type":"io","seq":1,"module":"fetch","fn":"fetch","result":{"id":"1"}}
+    ;
+    const sources = [_][]const u8{
+        // The status is copied to a name first: no binding to a fetch call.
+        fetch_leak_prefix ++
+            \\function handler(req) {
+            \\  const secret = env("API_SECRET");
+            \\  const res = fetch("https://api.example.com/a");
+            \\  const s = res.status;
+            \\  if (s !== 200) {
+            \\    return Response.json({ leaked: secret });
+            \\  }
+            \\  return Response.json({ ok: true });
+            \\}
+        ,
+        // A comparison with the same value at every status splits nothing.
+        fetch_leak_prefix ++
+            \\function handler(req) {
+            \\  const secret = env("API_SECRET");
+            \\  const res = fetch("https://api.example.com/a");
+            \\  if (res.status >= 100) {
+            \\    return Response.json({ leaked: secret });
+            \\  }
+            \\  return Response.json({ ok: true });
+            \\}
+        ,
+        // A non-literal operand.
+        fetch_leak_prefix ++
+            \\function handler(req) {
+            \\  const secret = env("API_SECRET");
+            \\  const res = fetch("https://api.example.com/a");
+            \\  if (res.status !== req.method) {
+            \\    return Response.json({ leaked: secret });
+            \\  }
+            \\  return Response.json({ ok: true });
+            \\}
+        ,
+    };
+    for (sources) |source| {
+        const jsonl = try secretWitnessJsonl(std.testing.allocator, source);
+        defer std.testing.allocator.free(jsonl);
+        try expectFetchIo(jsonl, default_io);
+    }
+}
+
+test "a status test on a Result export records no constraint" {
+    const source =
+        \\import { env } from "zttp:env";
+        \\import { validateJson } from "zttp:validate";
+        \\function handler(req) {
+        \\  const secret = env("API_SECRET");
+        \\  const r = validateJson(0, "{}");
+        \\  if (r.status === 404) {
+        \\    return Response.json({ leaked: secret });
+        \\  }
+        \\  return Response.json({ ok: true });
+        \\}
+    ;
+    const jsonl = try secretWitnessJsonl(std.testing.allocator, source);
+    defer std.testing.allocator.free(jsonl);
+    try expectFetchIo(jsonl,
+        \\{"type":"io","seq":1,"module":"validate","fn":"validateJson","result":{"ok":true,"value":"secret-sentinel"}}
+    );
+}
+
+test "a Result export witness keeps its Result stub" {
+    const ok_source =
+        \\import { env } from "zttp:env";
+        \\import { validateJson } from "zttp:validate";
+        \\function handler(req) {
+        \\  const secret = env("API_SECRET");
+        \\  const r = validateJson(0, "{}");
+        \\  if (r.ok) {
+        \\    return Response.json({ leaked: secret });
+        \\  }
+        \\  return Response.json({ ok: true });
+        \\}
+    ;
+    const jsonl = try secretWitnessJsonl(std.testing.allocator, ok_source);
+    defer std.testing.allocator.free(jsonl);
+    try expectFetchIo(jsonl,
+        \\{"type":"io","seq":1,"module":"validate","fn":"validateJson","result":{"ok":true,"value":{}}}
+    );
+
+    const failed_source =
+        \\import { env } from "zttp:env";
+        \\import { validateJson } from "zttp:validate";
+        \\function handler(req) {
+        \\  const secret = env("API_SECRET");
+        \\  const r = validateJson(0, "{}");
+        \\  if (!r.ok) {
+        \\    return Response.json({ leaked: secret });
+        \\  }
+        \\  return Response.json({ ok: true });
+        \\}
+    ;
+    const failed = try secretWitnessJsonl(std.testing.allocator, failed_source);
+    defer std.testing.allocator.free(failed);
+    try expectFetchIo(failed,
+        \\{"type":"io","seq":1,"module":"validate","fn":"validateJson","result":{"ok":false,"error":"counterexample"}}
+    );
 }
 
 test "FlowChecker records validated defended path reaching egress body" {

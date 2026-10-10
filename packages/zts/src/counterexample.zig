@@ -26,6 +26,7 @@
 const std = @import("std");
 const mb = @import("zts-engine").module_binding;
 const json_utils = @import("zts-base").json_utils;
+const status_check = @import("status_check.zig");
 
 // TODO: these types intentionally stay close to `path_generator.Constraint`
 // / `StubInfo`; a future extraction into a shared `witness_types.zig` lets
@@ -36,6 +37,20 @@ pub const StubInfo = struct {
     func: []const u8,
     returns: mb.ReturnKind,
     call_index: ?u32 = null,
+    /// The export is failable, does not return a `Result`, and declares an
+    /// `ok`-record response (`fetch`). A `result_ok` or `result_not_ok` on it
+    /// is a fork on `x.ok`, or on a status test that is its complement, and
+    /// the solver stubs it with a response whose status decides `ok`.
+    ok_record: bool = false,
+};
+
+/// A test of `x.status` against a literal, on a call of an `ok`-record export,
+/// that does not fork like `x.ok`. `expect` is the value the comparison must
+/// take on this path. The solver picks a status that satisfies it.
+pub const StatusTest = struct {
+    stub: StubInfo,
+    comparison: status_check.Comparison,
+    expect: bool,
 };
 
 pub const WitnessConstraint = union(enum) {
@@ -47,6 +62,7 @@ pub const WitnessConstraint = union(enum) {
     stub_falsy: StubInfo,
     result_ok: StubInfo,
     result_not_ok: StubInfo,
+    status_is: StatusTest,
 };
 
 /// Invert a witness constraint's truthiness. Request method/url negation is
@@ -61,6 +77,7 @@ pub fn negate(c: WitnessConstraint) ?WitnessConstraint {
         .stub_falsy => |info| .{ .stub_truthy = info },
         .result_ok => |info| .{ .result_not_ok = info },
         .result_not_ok => |info| .{ .result_ok = info },
+        .status_is => |t| .{ .status_is = .{ .stub = t.stub, .comparison = t.comparison, .expect = !t.expect } },
     };
 }
 
@@ -295,14 +312,27 @@ fn solveStubs(
                 &call_overrides,
                 &func_overrides,
                 info,
-                "{\"ok\":true,\"value\":{}}",
+                if (info.ok_record)
+                    try okRecordStubFor(allocator, constraints, info)
+                else
+                    "{\"ok\":true,\"value\":{}}",
             ),
             .result_not_ok => |info| try putStubOverride(
                 allocator,
                 &call_overrides,
                 &func_overrides,
                 info,
-                "{\"ok\":false,\"error\":\"counterexample\"}",
+                if (info.ok_record)
+                    try okRecordStubFor(allocator, constraints, info)
+                else
+                    "{\"ok\":false,\"error\":\"counterexample\"}",
+            ),
+            .status_is => |t| try putStubOverride(
+                allocator,
+                &call_overrides,
+                &func_overrides,
+                t.stub,
+                try okRecordStubFor(allocator, constraints, t.stub),
             ),
             else => {},
         }
@@ -321,6 +351,49 @@ fn solveStubs(
         };
     }
     return stubs;
+}
+
+/// Whether two constraints name the same call. A constraint carries its call's
+/// index when the checker knew it, and the function name otherwise, exactly as
+/// `putStubOverride` keys it.
+fn sameCall(a: StubInfo, b: StubInfo) bool {
+    if (a.call_index != null or b.call_index != null) return a.call_index == b.call_index;
+    return std.mem.eql(u8, a.func, b.func);
+}
+
+/// The response for a call of an `ok`-record export. Every constraint that
+/// names the call counts: the last `result_ok` or `result_not_ok` sets whether
+/// the response is `ok`, and each `status_is` adds a status test. The stub
+/// carries the status that satisfies them all, chosen by the rule the
+/// generated tests use. A path that no status satisfies keeps the plain
+/// success or failure stub; such a path cannot occur, so the choice is free.
+fn okRecordStubFor(
+    allocator: std.mem.Allocator,
+    constraints: []const WitnessConstraint,
+    call: StubInfo,
+) error{OutOfMemory}![]const u8 {
+    var requirements: std.ArrayList(status_check.Requirement) = .empty;
+    defer requirements.deinit(allocator);
+    var ok_state: ?bool = null;
+    for (constraints) |c| {
+        switch (c) {
+            .result_ok => |info| if (sameCall(info, call)) {
+                ok_state = true;
+            },
+            .result_not_ok => |info| if (sameCall(info, call)) {
+                ok_state = false;
+            },
+            .status_is => |t| if (sameCall(t.stub, call)) {
+                try requirements.append(allocator, .{ .comparison = t.comparison, .expect = t.expect });
+            },
+            // exhaustive: the remaining constraints describe the request or a
+            // truthiness test, not the status of this response.
+            else => {},
+        }
+    }
+    const status = status_check.chooseStatus(ok_state, requirements.items) orelse
+        return status_check.okRecordStub(ok_state != false);
+    return status_check.statusStub(status);
 }
 
 fn putStubOverride(
@@ -845,4 +918,118 @@ test "writeJsonl escapes control characters and quotes in summary" {
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "backslash:\\\\") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "newline:\\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "ctrl:\\u0001") != null);
+}
+
+const fetch_info: StubInfo = .{ .module = "fetch", .func = "fetch", .returns = .object, .call_index = 0, .ok_record = true };
+const fetch_calls = [_]TrackedIoCall{.{ .module = "fetch", .func = "fetch", .returns = .object }};
+
+fn solveOne(allocator: std.mem.Allocator, constraints: []const WitnessConstraint, calls: []const TrackedIoCall) !CounterexampleWitness {
+    return solve(allocator, .{
+        .property = .no_secret_leakage,
+        .origin = .{ .line = 1, .column = 1 },
+        .sink = .{ .line = 1, .column = 1 },
+        .summary = "t",
+        .constraints = constraints,
+        .io_calls = calls,
+    });
+}
+
+test "an ok-record stub carries the generator's response for each side of ok" {
+    const allocator = std.testing.allocator;
+    const ok = [_]WitnessConstraint{.{ .result_ok = fetch_info }};
+    var ok_witness = try solveOne(allocator, &ok, &fetch_calls);
+    defer ok_witness.deinit(allocator);
+    try std.testing.expectEqualStrings(
+        \\{"status":200,"statusText":"OK","headers":{},"body":"{\"id\":\"1\"}"}
+    , ok_witness.io_stubs[0].result_json);
+
+    const failed = [_]WitnessConstraint{.{ .result_not_ok = fetch_info }};
+    var failed_witness = try solveOne(allocator, &failed, &fetch_calls);
+    defer failed_witness.deinit(allocator);
+    try std.testing.expectEqualStrings(
+        \\{"status":503,"statusText":"Service Unavailable","headers":{},"body":"{}"}
+    , failed_witness.io_stubs[0].result_json);
+}
+
+test "an export that is not an ok-record keeps the Result stubs" {
+    const allocator = std.testing.allocator;
+    const info: StubInfo = .{ .module = "validate", .func = "validateJson", .returns = .result, .call_index = 0 };
+    const calls = [_]TrackedIoCall{.{ .module = "validate", .func = "validateJson", .returns = .result }};
+
+    const ok = [_]WitnessConstraint{.{ .result_ok = info }};
+    var ok_witness = try solveOne(allocator, &ok, &calls);
+    defer ok_witness.deinit(allocator);
+    try std.testing.expectEqualStrings("{\"ok\":true,\"value\":{}}", ok_witness.io_stubs[0].result_json);
+
+    const failed = [_]WitnessConstraint{.{ .result_not_ok = info }};
+    var failed_witness = try solveOne(allocator, &failed, &calls);
+    defer failed_witness.deinit(allocator);
+    try std.testing.expectEqualStrings("{\"ok\":false,\"error\":\"counterexample\"}", failed_witness.io_stubs[0].result_json);
+}
+
+test "a status test picks a status that takes the branch, joint with ok" {
+    const allocator = std.testing.allocator;
+    const is_404: status_check.Comparison = .{ .op = .eq, .literal = 404, .literal_left = false };
+    const ge_500: status_check.Comparison = .{ .op = .gte, .literal = 500, .literal_left = false };
+
+    const Row = struct { constraints: []const WitnessConstraint, status: u16 };
+    const rows = [_]Row{
+        // Alone: the canonical 200 does not satisfy, so the smallest status does.
+        .{ .constraints = &.{.{ .status_is = .{ .stub = fetch_info, .comparison = is_404, .expect = true } }}, .status = 404 },
+        .{ .constraints = &.{.{ .status_is = .{ .stub = fetch_info, .comparison = ge_500, .expect = true } }}, .status = 500 },
+        // The branch where the test is false keeps the success stub.
+        .{ .constraints = &.{.{ .status_is = .{ .stub = fetch_info, .comparison = is_404, .expect = false } }}, .status = 200 },
+        // Joint with a failed ok, the failure stub already satisfies "not 404".
+        .{ .constraints = &.{
+            .{ .result_not_ok = fetch_info },
+            .{ .status_is = .{ .stub = fetch_info, .comparison = is_404, .expect = false } },
+        }, .status = 503 },
+        // Joint with a failed ok and "is 404".
+        .{ .constraints = &.{
+            .{ .status_is = .{ .stub = fetch_info, .comparison = is_404, .expect = true } },
+            .{ .result_not_ok = fetch_info },
+        }, .status = 404 },
+        // A contradiction (ok, but 404) keeps the plain success stub.
+        .{ .constraints = &.{
+            .{ .result_ok = fetch_info },
+            .{ .status_is = .{ .stub = fetch_info, .comparison = is_404, .expect = true } },
+        }, .status = 200 },
+    };
+    for (rows) |row| {
+        var witness = try solveOne(allocator, row.constraints, &fetch_calls);
+        defer witness.deinit(allocator);
+        try std.testing.expectEqualStrings(status_check.statusStub(row.status), witness.io_stubs[0].result_json);
+    }
+}
+
+test "a status test on one call leaves another call's stub alone" {
+    const allocator = std.testing.allocator;
+    const second: StubInfo = .{ .module = "fetch", .func = "fetch", .returns = .object, .call_index = 1, .ok_record = true };
+    const calls = [_]TrackedIoCall{
+        .{ .module = "fetch", .func = "fetch", .returns = .object },
+        .{ .module = "fetch", .func = "fetch", .returns = .object },
+    };
+    const constraints = [_]WitnessConstraint{
+        .{ .result_not_ok = second },
+        .{ .status_is = .{
+            .stub = fetch_info,
+            .comparison = .{ .op = .eq, .literal = 404, .literal_left = false },
+            .expect = true,
+        } },
+    };
+    var witness = try solveOne(allocator, &constraints, &calls);
+    defer witness.deinit(allocator);
+    try std.testing.expectEqualStrings(status_check.statusStub(404), witness.io_stubs[0].result_json);
+    try std.testing.expectEqualStrings(status_check.statusStub(503), witness.io_stubs[1].result_json);
+}
+
+test "negate flips the expectation of a status test" {
+    const test_constraint: WitnessConstraint = .{ .status_is = .{
+        .stub = fetch_info,
+        .comparison = .{ .op = .eq, .literal = 404, .literal_left = false },
+        .expect = true,
+    } };
+    const flipped = negate(test_constraint) orelse return error.NoNegation;
+    try std.testing.expect(!flipped.status_is.expect);
+    try std.testing.expect(negate(flipped).?.status_is.expect);
 }

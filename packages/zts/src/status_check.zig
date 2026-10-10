@@ -3,9 +3,11 @@
 //! A handler can test `res.status !== 200` instead of `!res.ok`. This file
 //! decides, from the comparison alone, whether that test splits the response
 //! into the same two sides as `res.ok`, and which status a stub must carry to
-//! take each side. It reads no IR: callers recognize the comparison, build a
-//! `Comparison`, and ask here. The fault-coverage path generator uses it, and
-//! the flow checker's witness search will use the same rule.
+//! take each side. It reads the IR only to split a comparison into its operator
+//! and literal (`shape`). The caller checks that the other operand is a call of
+//! an `ok`-record export, builds a `Comparison`, and asks here. The
+//! fault-coverage path generator and the flow checker's witness search both use
+//! this rule, and both emit the stubs that this file holds.
 //!
 //! `ok` is `200 <= status < 300`. `fetch` does not follow redirects, so a 3xx
 //! reaches the handler with `ok` false. A comparison therefore stands in for
@@ -13,6 +15,7 @@
 //! to the other.
 
 const std = @import("std");
+const ir = @import("zts-engine").parser.ir;
 
 /// The lowest and highest status that a response can carry.
 pub const min_status: u16 = 100;
@@ -113,6 +116,107 @@ fn satisfies(status: u16, ok_state: ?bool, requirements: []const Requirement) bo
 }
 
 // ---------------------------------------------------------------------------
+// Operand shape
+// ---------------------------------------------------------------------------
+
+/// A `.status` operand and the comparison it is part of. The operand is the
+/// member-access node. The caller decides whether its object is a call of an
+/// `ok`-record export, because that lookup differs between the path generator
+/// and the flow checker.
+pub const Shape = struct {
+    member: ir.NodeIndex,
+    comparison: Comparison,
+};
+
+/// Read `bin` as a comparison of one operand against a numeric literal. When
+/// `member_left` is true the member is the left operand and the literal is the
+/// right one, and the reverse otherwise. Returns null when the operator is not
+/// one of the six, or when the other operand is not a numeric literal.
+pub fn shape(view: ir.IrView, bin: ir.Node.BinaryExpr, member_left: bool) ?Shape {
+    const op: Op = switch (bin.op) {
+        .strict_eq => .eq,
+        .strict_neq => .neq,
+        .lt => .lt,
+        .lte => .lte,
+        .gt => .gt,
+        .gte => .gte,
+        else => return null,
+    };
+    const member = if (member_left) bin.left else bin.right;
+    const literal = literalNumber(view, if (member_left) bin.right else bin.left) orelse return null;
+    return .{
+        .member = member,
+        .comparison = .{ .op = op, .literal = literal, .literal_left = !member_left },
+    };
+}
+
+/// The value of an integer or float literal, or of a unary minus over one.
+/// `NaN` and `Infinity` are identifiers, so they are not literals.
+pub fn literalNumber(view: ir.IrView, node: ir.NodeIndex) ?f64 {
+    switch (view.getTag(node) orelse return null) {
+        .lit_int => {
+            const value = view.getIntValue(node) orelse return null;
+            return @floatFromInt(value);
+        },
+        .lit_float => {
+            const idx = view.getFloatIdx(node) orelse return null;
+            return view.getFloat(idx);
+        },
+        .unary_op => {
+            const unary = view.getUnary(node) orelse return null;
+            if (unary.op != .neg) return null;
+            const operand = view.getTag(unary.operand) orelse return null;
+            if (operand != .lit_int and operand != .lit_float) return null;
+            return -(literalNumber(view, unary.operand) orelse return null);
+        },
+        else => return null,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Stubs
+// ---------------------------------------------------------------------------
+
+const ok_record_stub_ok =
+    \\{"status":200,"statusText":"OK","headers":{},"body":"{\"id\":\"1\"}"}
+;
+const ok_record_stub_failed =
+    \\{"status":503,"statusText":"Service Unavailable","headers":{},"body":"{}"}
+;
+
+/// The stub for a call forked by `x.ok` on an `ok`-record export (`fetch`). The
+/// runtime reads `status` and derives `ok` from it, never from a stub field.
+/// `statusText`, `headers`, and `body` are the other fields `runtime_http.zig`
+/// reads from a recorded fetch. The generated tests and the counterexample
+/// witnesses both emit this shape.
+pub fn okRecordStub(ok: bool) []const u8 {
+    return if (ok) ok_record_stub_ok else ok_record_stub_failed;
+}
+
+/// One `ok`-record stub for each status from 100 to 599, in the shape of
+/// `ok_record_stub_ok`.
+const status_stubs = blk: {
+    @setEvalBranchQuota(4_000_000);
+    const count = max_status - min_status + 1;
+    var table: [count][]const u8 = undefined;
+    for (&table, 0..) |*slot, i| {
+        const status: u16 = min_status + @as(u16, @intCast(i));
+        const phrase = std.http.Status.phrase(@enumFromInt(status)) orelse "Unknown";
+        const body = if (isOkStatus(status)) "{\\\"id\\\":\\\"1\\\"}" else "{}";
+        slot.* = std.fmt.comptimePrint(
+            "{{\"status\":{d},\"statusText\":\"{s}\",\"headers\":{{}},\"body\":\"{s}\"}}",
+            .{ status, phrase, body },
+        );
+    }
+    break :blk table;
+};
+
+/// The `ok`-record stub for a response with this status (100 to 599).
+pub fn statusStub(status: u16) []const u8 {
+    return status_stubs[status - min_status];
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -183,4 +287,18 @@ test "chooseStatus is null for a contradiction" {
     const not_404: Requirement = .{ .comparison = cmp(.eq, 404), .expect = false };
     try std.testing.expectEqual(@as(?u16, null), chooseStatus(null, &.{ is_404, not_404 }));
     try std.testing.expectEqual(@as(?u16, null), chooseStatus(true, &.{is_404}));
+}
+
+test "the canonical stubs keep the bytes the generated tests were recorded with" {
+    try std.testing.expectEqualStrings(
+        \\{"status":200,"statusText":"OK","headers":{},"body":"{\"id\":\"1\"}"}
+    , okRecordStub(true));
+    try std.testing.expectEqualStrings(
+        \\{"status":503,"statusText":"Service Unavailable","headers":{},"body":"{}"}
+    , okRecordStub(false));
+    try std.testing.expectEqualStrings(okRecordStub(true), statusStub(200));
+    try std.testing.expectEqualStrings(okRecordStub(false), statusStub(503));
+    try std.testing.expectEqualStrings(
+        \\{"status":404,"statusText":"Not Found","headers":{},"body":"{}"}
+    , statusStub(404));
 }
