@@ -164,7 +164,7 @@ pub const ProviderBackend = struct {
     }
 
     pub fn authLabel(self: *const ProviderBackend) []const u8 {
-        return if (self.request_config.provider == .local) "none" else "api-key";
+        return if (self.auth() == null) "none" else "api-key";
     }
 
     pub fn captureSink(self: *const ProviderBackend) ?*capture_sink.CaptureSink {
