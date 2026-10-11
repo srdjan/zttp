@@ -578,6 +578,56 @@ fn readAtRef(arena: std.mem.Allocator, cwd: []const u8, ref: []const u8, path: [
     return res.stdout;
 }
 
+/// The path of an imported file relative to `cwd`, for `git show <ref>:./<rel>`.
+/// A relative path is already relative to `cwd` (the analyzer resolves it
+/// without the filesystem, so it stays relative); an absolute path is made
+/// relative to `cwd`. A path that leaves `cwd`, or names `cwd` itself, is
+/// `OutsideRepo`: the gate runs from the repository root, and `git show` has
+/// no revision of a file above it.
+fn repoRelativePath(allocator: std.mem.Allocator, cwd: []const u8, path: []const u8) error{ OutOfMemory, OutsideRepo }![]u8 {
+    const rel = if (std.fs.path.isAbsolute(path))
+        try std.fs.path.relative(allocator, cwd, null, cwd, path)
+    else
+        try std.fs.path.resolve(allocator, &.{path});
+    errdefer allocator.free(rel);
+    if (rel.len == 0 or std.fs.path.isAbsolute(rel) or
+        std.mem.eql(u8, rel, "..") or std.mem.startsWith(u8, rel, "../"))
+    {
+        return error.OutsideRepo;
+    }
+    return rel;
+}
+
+/// Serves the files a handler imports from one git revision, so the analyzer
+/// reads a helper at the same revision as the handler that imports it. Without
+/// it the analyzer reads every helper from the working tree and a pull request
+/// that changes only a helper changes neither side's contract.
+const RevisionReader = struct {
+    cwd: []const u8,
+    ref: []const u8,
+
+    fn importReader(self: *RevisionReader) zts_cli.precompile.ImportReader {
+        return .{ .context = self, .read = read };
+    }
+
+    /// Any failure (a path outside the repository, a file that does not exist
+    /// at the revision, git failing) reads as an unreadable file, which the
+    /// analyzer already answers with its blocked or unresolved verdict.
+    fn read(context: *anyopaque, allocator: std.mem.Allocator, path: []const u8) anyerror![]u8 {
+        const self: *RevisionReader = @ptrCast(@alignCast(context));
+        const rel = try repoRelativePath(allocator, self.cwd, path);
+        defer allocator.free(rel);
+        const spec = try std.fmt.allocPrint(allocator, "{s}:./{s}", .{ self.ref, rel });
+        defer allocator.free(spec);
+        const res = try runGit(allocator, self.cwd, &.{ "git", "show", spec });
+        if (!res.ok) {
+            allocator.free(res.stdout);
+            return error.FileNotFound;
+        }
+        return res.stdout;
+    }
+};
+
 // ---------------------------------------------------------------------------
 // Orchestration
 // ---------------------------------------------------------------------------
@@ -673,7 +723,7 @@ pub fn run(
             continue;
         }
 
-        const result = analyzeHandler(gpa, arena, path, before.?, after.?, !opts.no_sign) catch |err| {
+        const result = analyzeHandler(gpa, arena, cwd, base, opts.head, path, before.?, after.?, !opts.no_sign) catch |err| {
             // analyzeHandler returns null (handled below) for genuine
             // non-handler / no-contract files; reaching here means an analysis
             // or allocation failure. Swallowing it as `no_contract` drops the
@@ -765,6 +815,51 @@ fn hasAnalysisErrors(result: *const zts_cli.precompile.CheckResult) bool {
         result.policy_errors > 0;
 }
 
+/// The check results of the two sides of one handler. Each side reads the
+/// helpers it imports at its own revision: the base side at `base`, and the
+/// after side at `head` when `--head` names a ref. With no `--head` the after
+/// side is the working tree, which is where the analyzer reads by default.
+const CheckedSides = struct {
+    before: zts_cli.precompile.CheckResult,
+    after: zts_cli.precompile.CheckResult,
+
+    fn deinit(self: *CheckedSides, gpa: std.mem.Allocator) void {
+        self.before.deinit(gpa);
+        self.after.deinit(gpa);
+    }
+};
+
+fn checkSides(
+    gpa: std.mem.Allocator,
+    cwd: []const u8,
+    base: []const u8,
+    head: ?[]const u8,
+    path: []const u8,
+    before_src: []const u8,
+    after_src: []const u8,
+) !CheckedSides {
+    var before_reader: RevisionReader = .{ .cwd = cwd, .ref = base };
+    var before = try zts_cli.precompile.runCheckOnlyFromSourceWithOptions(gpa, before_src, path, .{
+        .json_mode = true,
+        .import_reader = before_reader.importReader(),
+    });
+    errdefer before.deinit(gpa);
+
+    var after_reader: RevisionReader = undefined;
+    var after_import: ?zts_cli.precompile.ImportReader = null;
+    if (head) |head_ref| {
+        after_reader = .{ .cwd = cwd, .ref = head_ref };
+        after_import = after_reader.importReader();
+    }
+    var after = try zts_cli.precompile.runCheckOnlyFromSourceWithOptions(gpa, after_src, path, .{
+        .json_mode = true,
+        .import_reader = after_import,
+    });
+    errdefer after.deinit(gpa);
+
+    return .{ .before = before, .after = after };
+}
+
 /// Compile before/after to contracts, diff them, and project the result into
 /// the arena-owned data model. Returns null when either side has no contract
 /// (not a handler). The ContractDiff and compile results live only for the
@@ -774,21 +869,20 @@ fn hasAnalysisErrors(result: *const zts_cli.precompile.CheckResult) bool {
 fn analyzeHandler(
     gpa: std.mem.Allocator,
     arena: std.mem.Allocator,
+    cwd: []const u8,
+    base: []const u8,
+    head: ?[]const u8,
     path: []const u8,
     before_src: []const u8,
     after_src: []const u8,
     sign: bool,
 ) !?HandlerResult {
-    var before_result = try zts_cli.precompile.runCheckOnlyFromSourceWithOptions(gpa, before_src, path, .{
-        .json_mode = true,
-    });
-    defer before_result.deinit(gpa);
-    var after_result = try zts_cli.precompile.runCheckOnlyFromSourceWithOptions(gpa, after_src, path, .{
-        .json_mode = true,
-    });
-    defer after_result.deinit(gpa);
+    var sides = try checkSides(gpa, cwd, base, head, path, before_src, after_src);
+    defer sides.deinit(gpa);
+    const before_result = &sides.before;
+    const after_result = &sides.after;
 
-    if (hasAnalysisErrors(&before_result) or hasAnalysisErrors(&after_result)) {
+    if (hasAnalysisErrors(before_result) or hasAnalysisErrors(after_result)) {
         return error.UnanalysableSource;
     }
 
@@ -1096,4 +1190,187 @@ test "renderJson: shape carries schema, verdict, safe, and behaviorDiff keys" {
     try testing.expect(handler.get("signed").?.bool);
     const surface_routes = handler.get("surface").?.object.get("routes").?.object;
     try testing.expectEqualStrings("/v2/orders", surface_routes.get("added").?.array.items[0].string);
+}
+
+// ---------------------------------------------------------------------------
+// Imported helpers are read at the revision under analysis
+// ---------------------------------------------------------------------------
+
+const helper_handler_base =
+    \\import { fetch } from "zttp:fetch";
+    \\import { enrich } from "./lib.ts";
+    \\function handler(req: Request): Response {
+    \\  const res = fetch("https://api.example.com/a");
+    \\  if (!res.ok) {
+    \\    return Response.json({ error: "upstream" }, { status: 502 });
+    \\  }
+    \\  return Response.json({ a: res.body, b: enrich() });
+    \\}
+    \\
+;
+
+const helper_handler_head =
+    \\import { fetch } from "zttp:fetch";
+    \\import { enrich } from "./lib.ts";
+    \\function handler(req: Request): Response {
+    \\  const res = fetch("https://api.example.com/a");
+    \\  if (!res.ok) {
+    \\    return Response.json({ error: "upstream" }, { status: 502 });
+    \\  }
+    \\  return Response.json({ a: res.body, c: enrich() });
+    \\}
+    \\
+;
+
+const helper_pure =
+    \\export function enrich(): string {
+    \\  return "pure".toUpperCase();
+    \\}
+    \\
+;
+
+const helper_unchecked_fetch =
+    \\import { fetch } from "zttp:fetch";
+    \\export function enrich(): string {
+    \\  const res = fetch("https://api.example.com/b");
+    \\  return res.body;
+    \\}
+    \\
+;
+
+fn expectGit(repo_path: []const u8, command: []const []const u8) !void {
+    const git = try runGit(testing.allocator, repo_path, command);
+    defer testing.allocator.free(git.stdout);
+    try testing.expect(git.ok);
+}
+
+/// A repository whose base commit holds a handler and a pure helper.
+fn initHelperRepo(tmp: *testing.TmpDir, repo_path: []const u8) !void {
+    try expectGit(repo_path, &.{ "git", "init", "-q" });
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "handler.ts", .data = helper_handler_base });
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "lib.ts", .data = helper_pure });
+    try expectGit(repo_path, &.{ "git", "add", "handler.ts", "lib.ts" });
+    try expectGit(repo_path, &.{ "git", "-c", "user.name=zttp test", "-c", "user.email=test@example.invalid", "commit", "-qm", "base" });
+}
+
+fn faultCoveredOf(result: *const zts_cli.precompile.CheckResult) !bool {
+    const contract = result.contract orelse return error.TestUnexpectedResult;
+    return (contract.properties orelse return error.TestUnexpectedResult).fault_covered;
+}
+
+test "a helper that gains an unchecked fetch flips fault_covered between base and the working tree" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path_len = try tmp.dir.realPath(testing.io, &path_buf);
+    const repo_path = path_buf[0..path_len];
+    try initHelperRepo(&tmp, repo_path);
+
+    // The working tree: the helper gains an unchecked fetch, and the handler changes.
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "lib.ts", .data = helper_unchecked_fetch });
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "handler.ts", .data = helper_handler_head });
+
+    const old_cwd = try @import("../proof_ledger.zig").chdirTmpForTest(&tmp);
+    defer testing.allocator.free(old_cwd);
+    defer std.Io.Threaded.chdir(old_cwd) catch {};
+
+    const cwd = try shared.realCwd(testing.allocator);
+    defer testing.allocator.free(cwd);
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const before_src = (try readAtRef(arena_state.allocator(), cwd, "HEAD", "handler.ts")) orelse return error.TestUnexpectedResult;
+    const after_src = (try readAfter(arena_state.allocator(), cwd, null, "handler.ts")) orelse return error.TestUnexpectedResult;
+
+    var sides = try checkSides(testing.allocator, cwd, "HEAD", null, "handler.ts", before_src, after_src);
+    defer sides.deinit(testing.allocator);
+
+    // The base handler imports the pure helper as committed; reading the working
+    // tree instead would give both sides the unchecked fetch.
+    try testing.expect(try faultCoveredOf(&sides.before));
+    try testing.expect(!try faultCoveredOf(&sides.after));
+}
+
+test "with --head the after side reads the helper at head, not the working tree" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path_len = try tmp.dir.realPath(testing.io, &path_buf);
+    const repo_path = path_buf[0..path_len];
+    try initHelperRepo(&tmp, repo_path);
+
+    // Head commit: the helper gains an unchecked fetch, and the handler changes.
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "lib.ts", .data = helper_unchecked_fetch });
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "handler.ts", .data = helper_handler_head });
+    try expectGit(repo_path, &.{ "git", "add", "handler.ts", "lib.ts" });
+    try expectGit(repo_path, &.{ "git", "-c", "user.name=zttp test", "-c", "user.email=test@example.invalid", "commit", "-qm", "head" });
+    // The working tree then drifts back to the pure helper.
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "lib.ts", .data = helper_pure });
+
+    const old_cwd = try @import("../proof_ledger.zig").chdirTmpForTest(&tmp);
+    defer testing.allocator.free(old_cwd);
+    defer std.Io.Threaded.chdir(old_cwd) catch {};
+
+    const cwd = try shared.realCwd(testing.allocator);
+    defer testing.allocator.free(cwd);
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const before_src = (try readAtRef(arena_state.allocator(), cwd, "HEAD~1", "handler.ts")) orelse return error.TestUnexpectedResult;
+    const after_src = (try readAfter(arena_state.allocator(), cwd, "HEAD", "handler.ts")) orelse return error.TestUnexpectedResult;
+
+    var sides = try checkSides(testing.allocator, cwd, "HEAD~1", "HEAD", "handler.ts", before_src, after_src);
+    defer sides.deinit(testing.allocator);
+
+    try testing.expect(try faultCoveredOf(&sides.before));
+    try testing.expect(!try faultCoveredOf(&sides.after));
+}
+
+test "a helper missing at the base revision is unresolved, not read from the working tree" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path_len = try tmp.dir.realPath(testing.io, &path_buf);
+    const repo_path = path_buf[0..path_len];
+
+    // The base commit holds the handler only. The working tree adds a pure helper.
+    try expectGit(repo_path, &.{ "git", "init", "-q" });
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "handler.ts", .data = helper_handler_base });
+    try expectGit(repo_path, &.{ "git", "add", "handler.ts" });
+    try expectGit(repo_path, &.{ "git", "-c", "user.name=zttp test", "-c", "user.email=test@example.invalid", "commit", "-qm", "base" });
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "lib.ts", .data = helper_pure });
+
+    const old_cwd = try @import("../proof_ledger.zig").chdirTmpForTest(&tmp);
+    defer testing.allocator.free(old_cwd);
+    defer std.Io.Threaded.chdir(old_cwd) catch {};
+
+    const cwd = try shared.realCwd(testing.allocator);
+    defer testing.allocator.free(cwd);
+
+    var sides = try checkSides(testing.allocator, cwd, "HEAD", null, "handler.ts", helper_handler_base, helper_handler_base);
+    defer sides.deinit(testing.allocator);
+
+    // The helper did not exist at base: the answer is unresolved, which fails closed.
+    try testing.expect(!try faultCoveredOf(&sides.before));
+    // The working-tree side finds the pure helper.
+    try testing.expect(try faultCoveredOf(&sides.after));
+}
+
+test "repoRelativePath keeps a relative path, relativizes an absolute one, and refuses an outside path" {
+    const a = testing.allocator;
+
+    const kept = try repoRelativePath(a, "/repo", "src/lib.ts");
+    defer a.free(kept);
+    try testing.expectEqualStrings("src/lib.ts", kept);
+
+    const normalized = try repoRelativePath(a, "/repo", "src/./deep/../lib.ts");
+    defer a.free(normalized);
+    try testing.expectEqualStrings("src/lib.ts", normalized);
+
+    const absolute = try repoRelativePath(a, "/repo", "/repo/src/lib.ts");
+    defer a.free(absolute);
+    try testing.expectEqualStrings("src/lib.ts", absolute);
+
+    try testing.expectError(error.OutsideRepo, repoRelativePath(a, "/repo", "../outside.ts"));
+    try testing.expectError(error.OutsideRepo, repoRelativePath(a, "/repo", "src/../../outside.ts"));
+    try testing.expectError(error.OutsideRepo, repoRelativePath(a, "/repo", "/elsewhere/lib.ts"));
+    try testing.expectError(error.OutsideRepo, repoRelativePath(a, "/repo", "/repo"));
 }

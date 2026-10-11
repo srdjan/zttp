@@ -611,6 +611,8 @@ fn collectImportedFnSummaries(
     /// One status per classification, raised to what any helper walk saw.
     seen: []handler_contract.ClassificationStatus,
     stack: *ImportStack,
+    /// Where each imported file's bytes come from; null is the working tree.
+    reader: ?ImportReader,
 ) std.ArrayList(zts.pipeline.ImportedFnSummary) {
     var out: std.ArrayList(zts.pipeline.ImportedFnSummary) = .empty;
     // Browser analysis receives one source buffer and has no filesystem. Keep
@@ -636,6 +638,7 @@ fn collectImportedFnSummaries(
             declaration,
             seen,
             stack,
+            reader,
         ) orelse continue;
         out.append(allocator, .{ .slot = rec.slot, .summary = summary }) catch {
             summary.deinit(allocator);
@@ -692,6 +695,8 @@ fn collectImportedFailableCalls(
     allocator: std.mem.Allocator,
     facts: *const zts.pipeline.ModuleFacts,
     handler_path: []const u8,
+    /// Where each imported file's bytes come from; null is the working tree.
+    reader: ?ImportReader,
 ) error{OutOfMemory}!?ImportedFaultScan {
     if (comptime builtin.target.os.tag == .freestanding) return null;
 
@@ -731,7 +736,7 @@ fn collectImportedFailableCalls(
                 }
                 try visited.put(allocator, try allocator.dupe(u8, handler_resolved), {});
 
-                const result = try scanImportedFileTree(allocator, &out, &visited, path, rec.module_specifier, handler_dir, 1);
+                const result = try scanImportedFileTree(allocator, &out, &visited, path, rec.module_specifier, handler_dir, 1, reader);
                 const key = try allocator.dupe(u8, path);
                 errdefer allocator.free(key);
                 try memo.put(allocator, key, result);
@@ -773,6 +778,7 @@ fn scanImportedFileTree(
     display_in: []const u8,
     handler_dir: []const u8,
     depth: usize,
+    reader: ?ImportReader,
 ) error{OutOfMemory}!zts.PathGenerator.ImportScan {
     const display = try out.own(allocator, display_in);
     const blocked = struct {
@@ -788,7 +794,7 @@ fn scanImportedFileTree(
     try visited.put(allocator, try allocator.dupe(u8, path), {});
 
     var file: ImportedFile = undefined;
-    file.load(allocator, null, path) catch return blocked(display, .unreadable);
+    file.load(allocator, reader, path) catch return blocked(display, .unreadable);
     defer file.deinit();
     const module_facts = &file.module_facts;
 
@@ -819,7 +825,7 @@ fn scanImportedFileTree(
         const child = try std.fs.path.resolve(allocator, &.{ base_dir, rec.module_specifier });
         defer allocator.free(child);
         const child_display = try importedFileDisplay(allocator, out, handler_dir, child);
-        const result = try scanImportedFileTree(allocator, out, visited, child, child_display, handler_dir, depth + 1);
+        const result = try scanImportedFileTree(allocator, out, visited, child, child_display, handler_dir, depth + 1, reader);
         switch (result) {
             .clean => {},
             .failable, .blocked => return result,
@@ -844,6 +850,7 @@ fn importedFunctionSummary(
     declaration: ?*const zts.declaration.Declaration,
     seen: []handler_contract.ClassificationStatus,
     stack: *ImportStack,
+    reader: ?ImportReader,
 ) ?zts.pipeline.ImportedSummary {
     if (stack.len >= max_import_depth or stack.contains(path)) return null;
     stack.paths[stack.len] = path;
@@ -851,7 +858,7 @@ fn importedFunctionSummary(
     defer stack.len -= 1;
 
     var file: ImportedFile = undefined;
-    file.load(allocator, null, path) catch return null;
+    file.load(allocator, reader, path) catch return null;
     defer file.deinit();
     const view = file.view;
     const module_facts = &file.module_facts;
@@ -880,7 +887,7 @@ fn importedFunctionSummary(
 
     // The helpers of this helper come first, so a call into one of them applies
     // that file's sinks to this file's parameters.
-    var nested = collectImportedFnSummaries(allocator, module_facts, path, declaration, seen, stack);
+    var nested = collectImportedFnSummaries(allocator, module_facts, path, declaration, seen, stack, reader);
     defer deinitImportedSummaries(allocator, &nested);
     for (nested.items) |*entry| flow.setFileFunctionSummary(entry.slot, &entry.summary);
 
@@ -1357,6 +1364,12 @@ pub const CheckOptions = struct {
     /// `.zttp/witnesses/`. On for every real check. The diagnostic corpus gate
     /// turns it off so a gate run leaves nothing in the working tree.
     persist_witnesses: bool = true,
+    /// Where the files the handler imports are read from. Null reads the
+    /// working tree. A caller that checks a revision other than the working
+    /// tree (the PR gate, for the base side) passes a reader for that
+    /// revision, so a helper is analyzed at the revision of the handler that
+    /// imports it. Borrowed for the call.
+    import_reader: ?ImportReader = null,
 };
 
 /// Why a declaration was refused, for a caller that reports it itself.
@@ -1649,13 +1662,14 @@ fn analyzeHandlerPaths(
     handler_fn: ir.NodeIndex,
     handler_path: []const u8,
     include_behaviors: bool,
+    import_reader: ?ImportReader,
 ) !PathAnalysis {
     var generator = zts.PathGenerator.init(state_allocator, ir_view, atoms);
     defer generator.deinit();
     // Fault coverage reads every file the handler imports, because a failable
     // call there is on no path of this handler. A null scan (no filesystem)
     // leaves each such import counted as unseen.
-    var imported = try collectImportedFailableCalls(state_allocator, try generator.importFacts(), handler_path);
+    var imported = try collectImportedFailableCalls(state_allocator, try generator.importFacts(), handler_path, import_reader);
     defer if (imported) |*scan| scan.deinit(state_allocator);
     generator.setImportedScan(if (imported) |scan| scan.entries.items else null);
     try generator.generate(handler_fn);
@@ -2175,7 +2189,7 @@ fn runCheckOnPreparedSource(
             import_stack.paths[0] = p;
             import_stack.len = 1;
         }
-        var imported_summaries = collectImportedFnSummaries(allocator, &module_facts, handler_path, opts.declaration, imported_seen, &import_stack);
+        var imported_summaries = collectImportedFnSummaries(allocator, &module_facts, handler_path, opts.declaration, imported_seen, &import_stack, opts.import_reader);
         defer deinitImportedSummaries(allocator, &imported_summaries);
 
         var checked = try zts.pipeline.check(allocator, &resolved, hf, .{
@@ -2330,6 +2344,7 @@ fn runCheckOnPreparedSource(
                 hf,
                 handler_path,
                 result.contract != null,
+                opts.import_reader,
             );
             defer path_analysis.deinit(allocator);
 
@@ -3108,7 +3123,7 @@ pub fn compileHandler(
             var gen = zts.PathGenerator.init(allocator, ir_view, &atoms);
             defer gen.deinit();
             // See analyzeHandlerPaths: the imported files decide `fault_covered`.
-            var imported_scan = try collectImportedFailableCalls(allocator, try gen.importFacts(), filename);
+            var imported_scan = try collectImportedFailableCalls(allocator, try gen.importFacts(), filename, null);
             defer if (imported_scan) |*scan| scan.deinit(allocator);
             gen.setImportedScan(if (imported_scan) |scan| scan.entries.items else null);
 
@@ -8905,7 +8920,7 @@ test "collectImportedFailableCalls answers every non-builtin record" {
     var facts = try zts.pipeline.buildModuleFacts(allocator, zts.pipeline.ParsedModule.fromExisting(view, root, &atoms), null);
     defer facts.deinit();
 
-    var scan = (try collectImportedFailableCalls(allocator, &facts, fixture.handler_path)) orelse return error.TestExpectedEqual;
+    var scan = (try collectImportedFailableCalls(allocator, &facts, fixture.handler_path, null)) orelse return error.TestExpectedEqual;
     defer scan.deinit(allocator);
 
     // `fetch` is a builtin and has no entry; the other two records do.

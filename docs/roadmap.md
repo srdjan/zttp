@@ -70,6 +70,12 @@ with the [tool-profile recommendation](zttp-next/zttp-v1.0-scope-and-v1x-roadmap
   declared trusted, while `results_checked`, `no_secret_leakage`, and
   `capability_bounded` enter at `tested`. See
   [Verification](verification.md#what-is-not-checked-said-out-loud).
+- `zttp proofs gate` does not analyze a pull request that changes only an
+  imported helper. The gate lists changed files, and a helper that exports no
+  routes classifies as a non-handler, so the handler that imports it is not
+  compared. When a handler also changes, the gate reads each helper at the
+  revision of the handler that imports it. Closing the gap needs the gate to
+  map a changed helper to the handlers that import it.
 - Computed SQL resources remain refused. The configured SQL policy cannot
   distinguish read from write authority. Other residual-guard limits are in
   [Verification](verification.md#residual-runtime-guard-boundary).
