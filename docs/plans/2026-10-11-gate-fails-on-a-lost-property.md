@@ -1,6 +1,6 @@
 # The PR gate fails on a lost proven property
 
-Status: plan, revision 2 (Fable review folded in; owner decision 3 on 2026-10-11: critical losses only). Decision by the owner on 2026-10-11 (decision 1,
+Status: complete, 2026-10-11 (commits b3c5cac0, d9e97bec, 56f77fcf). Revision 2 (Fable review folded in; owner decision 3 on 2026-10-11: critical losses only). Decision by the owner on 2026-10-11 (decision 1,
 option a, after the code review fixes in
 `docs/plans/2026-10-10-code-review-fixes.md`).
 
@@ -131,3 +131,16 @@ R6 (tests, Fable 6).
   equivalence receipt was written. Confirm the test fails before the change.
 - A non-critical-only loss (for example adding a `logInfo` call) gives a
   non-breaking verdict and lists the lost properties.
+
+## Result
+
+The gate gives `breaking` for a handler that loses a critical proof, withholds
+its signed receipt, and lists every lost proof in Markdown and in the JSON key
+`lostProperties`. Two premises of this plan proved wrong. First, an edit that
+loses a critical proof inside the handler already changed its I/O paths and was
+already `breaking`, so the new rule matters mainly for a loss through an
+imported helper. Second, a changed helper at a normal path is analyzed alone
+and usually ends the run with exit 2, so the test helper sits under
+`fixtures/`. Owner decision 4 (2026-10-11, option a): the gate gives no verdict
+for a handler without a `Proof<...>` return type, and `docs/roadmap.md` records
+that limit with no other change.

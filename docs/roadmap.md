@@ -73,9 +73,17 @@ with the [tool-profile recommendation](zttp-next/zttp-v1.0-scope-and-v1x-roadmap
 - `zttp proofs gate` does not analyze a pull request that changes only an
   imported helper. The gate lists changed files, and a helper that exports no
   routes classifies as a non-handler, so the handler that imports it is not
-  compared. When a handler also changes, the gate reads each helper at the
-  revision of the handler that imports it. Closing the gap needs the gate to
-  map a changed helper to the handlers that import it.
+  compared. A changed helper that calls a capability, such as `fetch`, has no
+  `Effects<...>` or `Proof<...>` declaration of its own. Its analysis fails,
+  and the gate stops with exit 2. When a handler also changes, the gate reads
+  each helper at the revision of the handler that imports it. Closing the gap
+  needs the gate to map a changed helper to the handlers that import it.
+- `zttp proofs gate` gives no verdict for a handler without a `Proof<...>`
+  return type. Such a handler demands the full v1 proof profile and gets a
+  ZTS500 error on each side, so the gate stops with exit 2. Exit 2 fails CI,
+  so no regression passes, but the report names an analysis error and not the
+  changed behavior. Closing the gap needs the gate to compare such a handler on
+  its behavior alone.
 - Computed SQL resources remain refused. The configured SQL policy cannot
   distinguish read from write authority. Other residual-guard limits are in
   [Verification](verification.md#residual-runtime-guard-boundary).
