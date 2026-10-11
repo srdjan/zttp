@@ -125,6 +125,7 @@ proposed moving a default that already names this provider and model.
 | 2026-10-09 | `f40395d8` | `e6801afae099` | 19 | deepseek | deepseek-v4-flash | `baa218ec7b02` | 63% (12/19) | 63% (12/19) | 5 | 94% (17/18) |
 | 2026-10-10 | `05b43d95` | `e6801afae099` | 19 | deepseek | deepseek-v4-flash | `11da0cd82a59` | 68% (13/19) | 68% (13/19) | 4 | 100% (18/18) |
 | 2026-10-10 | `286da2d5` | `e6801afae099` | 19 | deepseek | deepseek-v4-flash | `b2038448f90d` | 68% (13/19) | 68% (13/19) | 4 | 100% (18/18) |
+| 2026-10-11 | `755ba918` | `e6801afae099` | 19 | deepseek | deepseek-v4-flash | `b2038448f90d` | 68% (13/19) | 68% (13/19) | 4 | 100% (18/18) |
 
 Regenerate with `bash scripts/update-convergence.sh`, which appends a row and
 rewrites [convergence.json](convergence.json). History is git history on those
