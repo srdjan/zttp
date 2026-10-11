@@ -52,7 +52,7 @@ Local repository evidence supplies the implementation authority. No external dep
 
 Advisor preflight returned `parent_runtime_unavailable`. No advisor consultation ran.
 Five document reviewers completed their checks. One correction was applied; no unresolved review findings remain.
-The planning run makes no product edits and runs no Zig tests.
+The planning run made no product edits and ran no Zig tests.
 The Python pack resolver and cross-model runner cannot run under the repository's no-Python constraint.
 No cross-model corroboration or whole-document peer sweep is claimed.
 
@@ -83,8 +83,9 @@ Confidence review found no section that required further research.
 
 ## Next action
 
-The documentation diff passes `git diff --check`. Product files remain unchanged.
-The main agent will execute characterization, add the analysis owner, migrate both producers, and establish compatibility evidence.
+The selected multi-module contract phase is complete.
+The owner owns review and publication of the local commits.
+Full convergence between CHECK and compilation requires a separate bounded plan.
 
 ## Execution checkpoint
 
@@ -161,5 +162,84 @@ The loaded review skill requires Python helpers for scope facts and stage record
 The review's scope reference says: "Derive deterministic facts once with `scripts/review-scope.py`" and prohibits replacement of those mechanics.
 The attempted top-level review returned `status: failed`. No completed CE review receipt is claimed.
 The private execution directory contains that failure record.
-The main agent owns the manual final scan. Two independent Sol high reviewers inspect frozen final code for lifecycle and compatibility.
-The main agent will finish the compiling mutations and full verification contract before completion.
+The main agent completed the manual final scan. Two independent Sol high reviewers inspected frozen final code for lifecycle and compatibility.
+The following sections record the completed mutations and verification contract.
+
+## Mutation and independent review evidence
+
+The first compiling mutation omitted completion for default pipeline graph analysis while retaining completion for custom callbacks.
+Unfiltered `test-zts` exited 1. Three unchanged graph tests failed with `AnalysisNotCompleted`; 1456 compiler tests still passed.
+The failure confirms that graph extraction cannot project a session whose required analysis operation never ran.
+The second compiling mutation retained validation but omitted dependency contract merges in tools.
+Unfiltered `test-precompile` exited 1. Two unchanged capability tests found zero entries where one or three entries were required.
+The remaining 241 tests passed, including the policy refusal control. Both mutations compiled successfully before the test failures.
+The main agent restored both files and confirmed exact equality with the frozen review snapshots.
+
+Two independent Sol high reviewers found no justified code findings.
+One review covered stable storage, allocation cleanup, facts inputs, callback compatibility, and the pass matrix.
+The other covered public outcomes, artifact order, test assertions, scope exclusions, and requirements.
+Both reviews examined frozen final code. Neither reviewer ran tests or measurements.
+The main agent completed the final manual diff scan and reopened the plan's requirements and verification contract.
+The full unfiltered verification contract passed after mutation restoration.
+
+## Responsibility and size report
+
+The pipeline coordinator no longer owns local type storage, facts creation, resolution, refusal checks, or fallback contract analysis.
+The tools coordinator no longer calls fallback extraction to produce its default contract type session.
+Both coordinators initialize `ModuleContractAnalysis` in place and consume its completed extraction operation.
+The default operation uses `extractContractFromTypeSession`. Only custom callbacks retain the existing fallback branch in the owner.
+Public fallback compatibility and the prior single-module coordinator remain unchanged.
+
+The owner adds 202 source lines. The two adapters remove 16 net lines, so production code grows by 186 lines.
+Test blocks and helpers add the remaining 599 net lines in the two product files.
+This phase consolidates responsibility and adds completion guards. It does not establish a reduction in total code size.
+The measured tiny pipeline fixture removes three allocations and 174 total allocated bytes. Tools allocation totals remain unchanged.
+Return retention remains unchanged for both producers. No speed or peak-retention claim follows from these measurements.
+
+## Final verification and closure
+
+All nine required named steps passed after both mutation restorations.
+The build returned exit status 0 directly. Its summary reports 219 successful steps, 10769 passed tests, and six skipped tests.
+The main agent ran this unfiltered command:
+
+```sh
+zig build test-zts test-precompile test-zts-cli test-contract-golden test-module-graph-record test-module-boundary test-zts-layering test-proof-swallow test -j2 --summary all
+```
+
+The compiler tier passed 1459 tests. Precompile passed 243 tests, the CLI passed 251 tests, and graph records passed 20 tests.
+The golden step ran all eleven fixture invocations without regeneration.
+The module, layering, and proof-swallow gates passed without new allowlist rows.
+The aggregate step also passed runtime purity, policy audit, acceptance-kernel boundaries, and stand-in coverage.
+
+The final `zig build -j2` returned exit status 0.
+Both public CLI fixtures compiled again after that build.
+All four comparisons matched baseline generated code and contract JSON exactly.
+The fixtures cover a two-module graph and a graph with fanout and a shared dependency.
+The fixed-metadata pipeline test also matched default extraction against the retained callback projection.
+The execution directory contains the baseline artifacts, mutation logs, allocation probe, review snapshots, and final build logs.
+
+| Requirement | Completion evidence |
+|---|---|
+| R1: preserve producer behavior | Public tests retain pass selection, effective maps, callbacks, diagnostics, capability merging, policy refusal, and entry-only options. |
+| R2: preserve artifact bytes and order | Four public artifact comparisons match exactly. Unchanged goldens and signed graph record tests pass. |
+| R3: preserve CHECK behavior | CHECK remains unchanged. The aggregate suite passes existing revision-reader and missing-base-file tests. |
+| R4: retain operation ownership | Allocation probes free all counted bytes. Owner tests cover failure cleanup and stable borrowed storage. |
+| R5: share default contract analysis | Both live graph producers consume the same completed per-module owner. The responsibility report identifies removed coordinator duties. |
+| R6: reject incomplete analysis | API tests cover incomplete, failed, and repeated operations. The compiling omission mutation fails three unchanged graph tests. |
+| R7: preserve declaration refusal | Public tests retain early `DeclarationNotEnforced`. This phase adds no verifier, flow, path generation, or declaration support. |
+
+The standalone `test-zruntime` step remains outside the selected verification contract because runtime execution and constant ownership remain unchanged.
+The six skips limit the aggregate test result. The result does not claim that every repository test executed.
+No speed benchmark or peak-retention measurement ran.
+The approved plan remains unchanged, with the SHA-256 recorded in the research section.
+
+The advisor completion preflight returned `parent_runtime_unavailable`. No advisor consultation ran.
+Code review: skipped (ce-code-review unavailable).
+The required Python helpers conflict with repository instructions. The two independent native reviews and the main agent's manual scan completed separately.
+No completed CE review receipt or external cross-model corroboration is claimed.
+
+## Local delivery
+
+The main agent committed each isolated unit on local `main` and did not push.
+The execution commits are `3cb72d74`, `0fca3b03`, `6ff23cd6`, `a442c7e7`, and `4cb45865`, followed by the closure commit.
+The owner owns the next action: review the local commits and publish the accepted changes.
