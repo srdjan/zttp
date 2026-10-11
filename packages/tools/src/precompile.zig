@@ -517,6 +517,80 @@ const ImportStack = struct {
     }
 };
 
+/// Where the bytes of an imported file come from. A null reader means the
+/// working tree (`readFilePosix`). A caller that analyzes a revision other than
+/// the working tree passes a reader that serves that revision, so a helper is
+/// read at the same revision as the handler that imports it. A read failure of
+/// any kind is the same answer as an unreadable file: the existing blocked or
+/// unresolved verdict. The reader owns its own size cap.
+pub const ImportReader = struct {
+    context: *anyopaque,
+    read: *const fn (context: *anyopaque, allocator: std.mem.Allocator, path: []const u8) anyerror![]u8,
+};
+
+/// One imported file, read, prepared, parsed, and reduced to its module facts.
+/// Both import walkers (`scanImportedFileTree` for fault coverage and
+/// `importedFunctionSummary` for flow) start here, so a change to how an
+/// imported file is loaded is one change.
+///
+/// Initialize in place with `load`. The parser holds a pointer to `atoms`, so
+/// the struct must not move after `load`.
+const ImportedFile = struct {
+    allocator: std.mem.Allocator,
+    source: []u8,
+    prepared: zts.PreparedSource,
+    atoms: zts.AtomTable,
+    parser: zts.parser.JsParser,
+    root: ir.NodeIndex,
+    view: zts.IrView,
+    module_facts: zts.pipeline.ModuleFacts,
+
+    /// Every failure (read, strip, parse, facts) is `Unreadable`: neither
+    /// caller tells them apart, and an out-of-memory failure has always read as
+    /// an unreadable file here. On failure nothing is left to `deinit`.
+    fn load(
+        self: *ImportedFile,
+        allocator: std.mem.Allocator,
+        reader: ?ImportReader,
+        path: []const u8,
+    ) error{Unreadable}!void {
+        self.allocator = allocator;
+        self.source = (if (reader) |r|
+            r.read(r.context, allocator, path)
+        else
+            readFilePosix(allocator, path, 10 * 1024 * 1024)) catch return error.Unreadable;
+        errdefer allocator.free(self.source);
+
+        self.prepared = zts.PreparedSource.init(allocator, self.source, path, .{
+            .enable_comptime = true,
+            .comptime_env = .{},
+        }) catch return error.Unreadable;
+        errdefer self.prepared.deinit();
+
+        self.atoms = zts.AtomTable.init(allocator);
+        errdefer self.atoms.deinit();
+        self.parser = zts.parser.JsParser.init(allocator, self.prepared.parserInput()) catch return error.Unreadable;
+        errdefer self.parser.deinit();
+        self.parser.setAtomTable(&self.atoms);
+        self.root = self.parser.parse() catch return error.Unreadable;
+
+        self.view = zts.IrView.fromIRStore(&self.parser.nodes, &self.parser.constants);
+        self.module_facts = zts.pipeline.buildModuleFacts(
+            allocator,
+            zts.pipeline.ParsedModule.fromExisting(self.view, self.root, &self.atoms),
+            null,
+        ) catch return error.Unreadable;
+    }
+
+    fn deinit(self: *ImportedFile) void {
+        self.module_facts.deinit();
+        self.parser.deinit();
+        self.atoms.deinit();
+        self.prepared.deinit();
+        self.allocator.free(self.source);
+    }
+};
+
 /// Sink summaries for every function imported from a sibling file, keyed by the
 /// local binding slot (plan unit F7). Each imported module is read and walked on
 /// its own, and the modules it imports in turn are summarized first, so a sink
@@ -713,33 +787,14 @@ fn scanImportedFileTree(
     if (depth >= max_import_depth) return blocked(display, .too_deep);
     try visited.put(allocator, try allocator.dupe(u8, path), {});
 
-    const source = readFilePosix(allocator, path, 10 * 1024 * 1024) catch return blocked(display, .unreadable);
-    defer allocator.free(source);
-
-    var prepared = zts.PreparedSource.init(allocator, source, path, .{
-        .enable_comptime = true,
-        .comptime_env = .{},
-    }) catch return blocked(display, .unreadable);
-    defer prepared.deinit();
-
-    var atoms = zts.AtomTable.init(allocator);
-    defer atoms.deinit();
-    var parser = zts.parser.JsParser.init(allocator, prepared.parserInput()) catch return blocked(display, .unreadable);
-    defer parser.deinit();
-    parser.setAtomTable(&atoms);
-    const root = parser.parse() catch return blocked(display, .unreadable);
-
-    const view = zts.IrView.fromIRStore(&parser.nodes, &parser.constants);
-    var module_facts = zts.pipeline.buildModuleFacts(
-        allocator,
-        zts.pipeline.ParsedModule.fromExisting(view, root, &atoms),
-        null,
-    ) catch return blocked(display, .unreadable);
-    defer module_facts.deinit();
+    var file: ImportedFile = undefined;
+    file.load(allocator, null, path) catch return blocked(display, .unreadable);
+    defer file.deinit();
+    const module_facts = &file.module_facts;
 
     var sites: std.ArrayList(zts.PathGenerator.UnseenCall) = .empty;
     defer sites.deinit(allocator);
-    zts.PathGenerator.scanImportedFile(allocator, view, module_facts.imports.items, &sites) catch |err| switch (err) {
+    zts.PathGenerator.scanImportedFile(allocator, file.view, module_facts.imports.items, &sites) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.InvalidIR => return blocked(display, .unreadable),
     };
@@ -795,46 +850,28 @@ fn importedFunctionSummary(
     stack.len += 1;
     defer stack.len -= 1;
 
-    const source = readFilePosix(allocator, path, 10 * 1024 * 1024) catch return null;
-    defer allocator.free(source);
+    var file: ImportedFile = undefined;
+    file.load(allocator, null, path) catch return null;
+    defer file.deinit();
+    const view = file.view;
+    const module_facts = &file.module_facts;
 
-    var prepared = zts.PreparedSource.init(allocator, source, path, .{
-        .enable_comptime = true,
-        .comptime_env = .{},
-    }) catch return null;
-    defer prepared.deinit();
-
-    var atoms = zts.AtomTable.init(allocator);
-    defer atoms.deinit();
-    var parser = zts.parser.JsParser.init(allocator, prepared.parserInput()) catch return null;
-    defer parser.deinit();
-    parser.setAtomTable(&atoms);
-    const root = parser.parse() catch return null;
-
-    const view = zts.IrView.fromIRStore(&parser.nodes, &parser.constants);
     var type_env_storage: zts.pipeline.TypeEnvStorage = .{};
     defer type_env_storage.deinit(allocator);
-    if (prepared.typeMap()) |type_map| {
+    if (file.prepared.typeMap()) |type_map| {
         type_env_storage.init(allocator, type_map) catch return null;
     }
     var type_checker: ?zts.TypeChecker = null;
     defer if (type_checker) |*checker| checker.deinit();
     if (type_env_storage.envPtr()) |type_env| {
-        type_checker = zts.TypeChecker.init(allocator, view, &atoms, type_env, null);
-        const type_errors = type_checker.?.check(root) catch return null;
+        type_checker = zts.TypeChecker.init(allocator, view, &file.atoms, type_env, null);
+        const type_errors = type_checker.?.check(file.root) catch return null;
         if (type_errors != 0) return null;
     }
 
-    var module_facts = zts.pipeline.buildModuleFacts(
-        allocator,
-        zts.pipeline.ParsedModule.fromExisting(view, root, &atoms),
-        null,
-    ) catch return null;
-    defer module_facts.deinit();
-
-    var flow = zts.FlowChecker.init(allocator, view, &atoms);
+    var flow = zts.FlowChecker.init(allocator, view, &file.atoms);
     defer flow.deinit();
-    flow.facts = &module_facts;
+    flow.facts = module_facts;
     if (type_checker) |*checker| flow.setTypeChecker(checker);
     // Without the declaration a helper that reads a declared field would hand
     // the handler a value carrying none of its declared labels. A failed
@@ -843,7 +880,7 @@ fn importedFunctionSummary(
 
     // The helpers of this helper come first, so a call into one of them applies
     // that file's sinks to this file's parameters.
-    var nested = collectImportedFnSummaries(allocator, &module_facts, path, declaration, seen, stack);
+    var nested = collectImportedFnSummaries(allocator, module_facts, path, declaration, seen, stack);
     defer deinitImportedSummaries(allocator, &nested);
     for (nested.items) |*entry| flow.setFileFunctionSummary(entry.slot, &entry.summary);
 
@@ -9015,4 +9052,70 @@ test "formatProofCard: the card lists fault_covered and counts the call sites no
 
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "fault_covered") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "failable call sites covered, 1 not on any path") != null);
+}
+
+// ---------------------------------------------------------------------------
+// One loader for an imported file
+// ---------------------------------------------------------------------------
+
+/// Serves one in-memory file named `lib.ts` and refuses every other path.
+const MemoryImportReader = struct {
+    source: []const u8,
+    reads: u32 = 0,
+
+    fn read(context: *anyopaque, allocator: std.mem.Allocator, path: []const u8) anyerror![]u8 {
+        const self: *MemoryImportReader = @ptrCast(@alignCast(context));
+        self.reads += 1;
+        if (!std.mem.endsWith(u8, path, "lib.ts")) return error.FileNotFound;
+        return allocator.dupe(u8, self.source);
+    }
+
+    fn reader(self: *MemoryImportReader) ImportReader {
+        return .{ .context = self, .read = read };
+    }
+};
+
+test "ImportedFile loads the file a reader serves and reduces it to module facts" {
+    var served: MemoryImportReader = .{ .source =
+        \\import { fetch } from "zttp:fetch";
+        \\export function enrich(): string {
+        \\  return "x";
+        \\}
+        \\
+    };
+    var file: ImportedFile = undefined;
+    try file.load(std.testing.allocator, served.reader(), "/virtual/lib.ts");
+    defer file.deinit();
+
+    try std.testing.expectEqual(@as(u32, 1), served.reads);
+    try std.testing.expectEqual(@as(usize, 1), file.module_facts.imports.items.len);
+    try std.testing.expectEqualStrings("zttp:fetch", file.module_facts.imports.items[0].module_specifier);
+}
+
+test "ImportedFile is unreadable when the reader fails or the source does not parse" {
+    var served: MemoryImportReader = .{ .source = "export function enrich(): string { return \"x\"; }\n" };
+    var file: ImportedFile = undefined;
+    // The reader refuses this path, and the loader leaves nothing to free.
+    try std.testing.expectError(error.Unreadable, file.load(std.testing.allocator, served.reader(), "/virtual/other.ts"));
+    try std.testing.expectEqual(@as(u32, 1), served.reads);
+
+    var broken: MemoryImportReader = .{ .source = "const b = while;\n" };
+    try std.testing.expectError(error.Unreadable, file.load(std.testing.allocator, broken.reader(), "/virtual/lib.ts"));
+    try std.testing.expectEqual(@as(u32, 1), broken.reads);
+}
+
+test "ImportedFile without a reader reads the working tree" {
+    var fixture = try SiblingFixture.init("function handler(req) { return Response.text(\"x\"); }\n");
+    defer fixture.deinit();
+    try fixture.add("lib.ts", "export function enrich(): string { return \"x\"; }\n");
+    const lib_path = try std.fs.path.join(std.testing.allocator, &.{ std.fs.path.dirname(fixture.handler_path).?, "lib.ts" });
+    defer std.testing.allocator.free(lib_path);
+
+    var file: ImportedFile = undefined;
+    try file.load(std.testing.allocator, null, lib_path);
+    defer file.deinit();
+    try std.testing.expectEqual(@as(usize, 0), file.module_facts.imports.items.len);
+
+    var missing: ImportedFile = undefined;
+    try std.testing.expectError(error.Unreadable, missing.load(std.testing.allocator, null, "/nonexistent/zttp-u7/lib.ts"));
 }
