@@ -302,7 +302,8 @@ The [next bounded plan](plans/2026-10-11-1608-refactor-multi-module-contract-ana
 CHECK retains its current import traversal because strict graph reuse would change its verdicts and revision reads.
 Full convergence between CHECK and compilation remains follow-up work.
 The [new worklog](plans/2026-10-11-multi-module-analysis-worklog.md) records the research and review.
-The owner owns the next action: select the concrete plan for execution.
+The owner approved the concrete plan with "yes, execute".
+The main agent owns the next action: characterize both graph producers before product edits.
 
 The [reset ledger](archive/plans/2026-07-28-001-reset-simplification-plan.md) is historical.
 The shared import/binding index and compile-time parser reuse shipped. The

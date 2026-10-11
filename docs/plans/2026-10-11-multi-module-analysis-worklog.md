@@ -5,7 +5,7 @@
 The objective is to simplify analysis ownership for imported handlers while preserving documented features and initial wire formats.
 The owner selected shared analysis before typed frontend work.
 The owner selected the next phase for a bounded implementation plan with "yes, go ahead".
-Product implementation requires selection of the concrete plan.
+The owner selected the concrete plan for execution with "yes, execute".
 The main agent owns research, planning, review, verification, and local commits. The owner owns publication.
 
 Canonical plan: [Multi-module contract analysis](2026-10-11-1608-refactor-multi-module-contract-analysis-plan.md).
@@ -84,4 +84,11 @@ Confidence review found no section that required further research.
 ## Next action
 
 The documentation diff passes `git diff --check`. Product files remain unchanged.
-The owner will select the reviewed plan for execution or request a revision.
+The main agent will execute characterization, add the analysis owner, migrate both producers, and establish compatibility evidence.
+
+## Execution checkpoint
+
+Execution starts from `850e9e76` on local `main` with a clean working tree.
+Seven existing local commits remain unpublished. This run will not push them.
+The native engine runs under the repository's branch and model constraints.
+Characterization runs before production edits. The main agent owns authoritative tests and commits.

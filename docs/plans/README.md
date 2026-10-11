@@ -6,7 +6,7 @@ index when a plan starts, closes, or moves to the archive.
 
 | Document | Role and status | Work authority |
 |---|---|---|
-| [Multi-module contract analysis](2026-10-11-1608-refactor-multi-module-contract-analysis-plan.md) | Bounded plan; research and review in [worklog](2026-10-11-multi-module-analysis-worklog.md) | Owner selected next-phase planning; concrete execution remains unselected |
+| [Multi-module contract analysis](2026-10-11-1608-refactor-multi-module-contract-analysis-plan.md) | In execution; research, review, and results in [worklog](2026-10-11-multi-module-analysis-worklog.md) | Owner approved the concrete plan with "yes, execute" |
 | [Shared analysis first unit](2026-10-11-shared-analysis-first-unit.md) | Complete 2026-10-11; results and coverage limits in [worklog](2026-10-11-shared-analysis-worklog.md) | Owner approved execution with "go ahead" |
 | [Minimal design audit](2026-10-08-minimal-design-audit.md) | Research complete; reductions, compatibility questions, and acceptance checks | User requested simplification discovery; implementation scope remains unselected |
 | [M5: release contract for agent handlers](2026-09-27-m5-agent-handler-release-contract.md) | Accepted 2026-09-27 with decisions 1 to 5; A1 to A4 complete, A5 next | Owner accepted the contract on 2026-09-27 |
