@@ -1,6 +1,6 @@
 # Code review fixes for the R3 and R4 fault coverage series
 
-Status: plan, revision 2 (Fable review folded in; Codex astra could not run: its tool host timed out twice). Source: `/code-review --fix` over the 46 commits on
+Status: done, revision 2 (Fable review folded in; Codex astra could not run: its tool host timed out twice). Result below. Source: `/code-review --fix` over the 46 commits on
 local `main` ahead of `origin/main` (R3, R4, and the minimal design audit). The
 review kept 10 findings after verification and refuted 7. This plan fixes all
 10 and says why one of them needs only a comment change.
@@ -315,3 +315,22 @@ commit message: a pre-fix version 3 artifact under-claims `fault_covered`
 relative to the fixed analysis (U1 only adds proven cases) and over-lists
 behaviors (U3 removes paths). No stale local artifact can claim a property that
 the fixed analysis refuses.
+
+## Result
+
+All eight units landed on local `main`: U8 `b738b911`, U2 `37f2954e`, U4
+`51c87420`, U3 `dbbf4209`, U1 `1b3bd35c`, U5 `447ea1c7`, U7 `1dffdc82`, U6
+`6d6cfdea`. `path_analyzer_version` stays 3 and the policy hash did not move.
+On the merged tree, `scripts/verify.sh` and the offline
+`zig build test-expert-app` (no `DEEPSEEK_API_KEY`) exited 0, so no re-record
+is needed.
+
+Two plan claims proved wrong:
+- U1: `if (verifyWebhookSignature(...) && x)` is walked after the fix, not
+  counted as unseen. Each `&&` conjunct that tests the call gives it a path
+  constraint. A call under `||` gets no constraint and stays unseen.
+- U6: the gate does not report the `fault_covered` change. `classify` and
+  `behavioralVerdict` in `pr_gate.zig` ignore `effect_changes`, so no property
+  change reaches the verdict. U6 makes each side's contract correct, and the
+  tests assert `fault_covered` on each side through `checkSides`. Whether the
+  gate ranks a property loss is an open decision for the owner.
