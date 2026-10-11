@@ -297,7 +297,12 @@ The unit preserves documented features and initial wire formats. Its [worklog](p
 The unit is complete. Single-module coordinators own their analysis, and private contract operations consume completed results.
 All 13 named checks pass. Fixed public JSON and generated compiler output match the baseline exactly.
 The worklog records review coverage limits. Whole-graph migration remains outside this unit.
-The owner owns the next action: review this unit and select the next reset phase.
+The owner selected planning for the imported-handler phase.
+The [next bounded plan](plans/2026-10-11-1608-refactor-multi-module-contract-analysis-plan.md) shares default per-module contract analysis between the two graph producers.
+CHECK retains its current import traversal because strict graph reuse would change its verdicts and revision reads.
+Full convergence between CHECK and compilation remains follow-up work.
+The [new worklog](plans/2026-10-11-multi-module-analysis-worklog.md) records the research and review.
+The owner owns the next action: select the concrete plan for execution.
 
 The [reset ledger](archive/plans/2026-07-28-001-reset-simplification-plan.md) is historical.
 The shared import/binding index and compile-time parser reuse shipped. The
