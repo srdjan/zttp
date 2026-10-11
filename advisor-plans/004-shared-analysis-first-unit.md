@@ -1,5 +1,8 @@
 # Plan 004 Shared analysis for check and compile
 
+Promoted after owner approval on 2026-10-11 to [the accepted implementation plan](../docs/plans/2026-10-11-shared-analysis-first-unit.md).
+The accepted plan and its companion worklog govern execution.
+
 > **Executor instructions**: Promote this advisory plan before implementation. Follow each step after promotion. Touch only listed source files.
 >
 > **Drift check, run first**: `git diff --exit-code 38a0782fba69dafb3dec4a0974a828cb2bdca1bf -- packages/tools/src/precompile.zig packages/tools/src/precompile_check.zig packages/zts/src/pipeline.zig`

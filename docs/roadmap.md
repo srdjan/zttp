@@ -292,6 +292,11 @@ or generic-instantiation case. This is an investigation, not a confirmed bypass.
 
 ## Reset And Simplification
 
+The owner approved the [first shared-analysis unit](plans/2026-10-11-shared-analysis-first-unit.md) on 2026-10-11.
+The unit preserves documented features and initial wire formats. Its [worklog](plans/2026-10-11-shared-analysis-worklog.md) records execution evidence.
+The main agent will pin current behavior, then remove private contract fallback analysis from the single-module paths.
+Completion requires unchanged public outputs and passing named checks. Whole-graph migration remains outside this unit.
+
 The [reset ledger](archive/plans/2026-07-28-001-reset-simplification-plan.md) is historical.
 The shared import/binding index and compile-time parser reuse shipped. The
 compile-time evaluator uses `JsParser.initExpression` and the main IR; its
