@@ -24,7 +24,7 @@
 Decision 1 preserves all documented features.
 Decision 2 starts with shared analysis.
 Decision 3 preserves current wire formats during the first phases.
-The owner accepted this direction on 2026-10-11. Implementation still requires approval of this bounded plan.
+The owner accepted this direction on 2026-10-11. The owner then approved this bounded implementation plan.
 
 ## Why this matters
 
@@ -124,11 +124,13 @@ Add characterization tests beside existing tests in `precompile.zig`. Make each 
 
 Cover default check, `skip_contract`, compile with verification disabled, and compile with verification enabled. Assert exact stage presence and property values.
 
-Cover a missing handler. Cover the `emit_aot` transpiler failure return at `precompile.zig:3014-3050`.
+Cover a missing handler. Preserve the `emit_aot` allocation-error return at `precompile.zig:3014-3050` through source review.
+Unsupported syntax does not enter that return. Characterize its normal runtime bail separately.
+No bounded public trigger identifies this allocation phase without a fragile allocation ordinal.
 
 Cover contract-only extraction with no `TypeMap`. Use a source that would expose any newly added boolean, strict, or verifier pass.
 
-Assert that the AOT early return keeps its current property projection. Do not align it with the main compile return.
+Review that the AOT allocation-error return keeps its current property projection. Do not align it with the main compile return.
 
 Pin exact diagnostic code order for one refused handler. Pin current compile and check tool-catalog outcomes separately.
 
@@ -274,4 +276,4 @@ The main agent reviewed this plan against current source and requested narrower 
 The source drift check exits zero. The plan preserves those paths and their existing pass selection.
 No implementation, behavior tests, or performance benchmarks ran during planning.
 
-The repository owner owns the next action: review this bounded plan and approve implementation if the scope is acceptable.
+The main agent owns the next action: execute this approved plan and record checks in the companion worklog.

@@ -2541,6 +2541,147 @@ pub const CompileOptions = struct {
     credentials: ?[]const handler_contract.CredentialRef = null,
 };
 
+const shared_analysis_clean_source =
+    \\structural Guardrails<T> = Proof<T, "result_safe">;
+    \\
+    \\function handler(req: Request): Guardrails<Response> {
+    \\  return Response.json({ ok: true });
+    \\}
+;
+
+const shared_analysis_tool_catalog_source =
+    \\import { routerMatch } from "zttp:router";
+    \\import { callTool, toolCatalog } from "zttp:tool";
+    \\import { schemaCompile } from "zttp:validate";
+    \\
+    \\schemaCompile("In", "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"id\":{\"type\":\"string\",\"maxLength\":8}}}");
+    \\schemaCompile("Out", "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{}}");
+    \\
+    \\function tool(req: Request): Response {
+    \\  return Response.json({});
+    \\}
+    \\
+    \\function assistant(req: Request): Response {
+    \\  const result = callTool("call-1", "tool", "{}");
+    \\  if (!result.ok) return Response.json({ error: result.error }, { status: 502 });
+    \\  return Response.json({});
+    \\}
+    \\
+    \\const routes = { "POST /tool": tool, "POST /agent": assistant };
+    \\toolCatalog({
+    \\  tool: { route: "POST /tool", description: "tool", input: "In", output: "Out", maxInputBytes: 64 },
+    \\  assistant: {
+    \\    route: "POST /agent", description: "agent", maxInputBytes: 8192,
+    \\    agent: {
+    \\      tools: ["tool"],
+    \\      provider: { endpoint: "https://api.deepseek.com/chat/completions", credential: "provider" },
+    \\      limits: { rounds: 4, toolCalls: 8, toolCallsPerRound: 4, argumentBytes: 4096, resultBytes: 16384, turnDeadlineMs: 20000, providerRequestBytes: 32768 }
+    \\    }
+    \\  }
+    \\});
+    \\
+    \\function handler(req: Request): Proof<Response, "deterministic"> {
+    \\  const found = routerMatch(routes, req);
+    \\  if (found === undefined) return Response.json({ error: "not found" }, { status: 404 });
+    \\  return found.handler(req);
+    \\}
+;
+
+fn stagesOf(stages: []const Stage) StageSet {
+    var set = StageSet.initEmpty();
+    for (stages) |stage| set.insert(stage);
+    return set;
+}
+
+test "default check records its exact public stage set" {
+    const allocator = std.testing.allocator;
+    var result = try runCheckOnlyFromSourceWithOptions(
+        allocator,
+        shared_analysis_clean_source,
+        "shared-analysis-default.ts",
+        .{ .json_mode = true, .persist_witnesses = false },
+    );
+    defer result.deinit(allocator);
+
+    const expected = stagesOf(&.{
+        .strip, .parse,    .imports, .boolean, .types, .strict,    .verifier,
+        .flow,  .contract, .paths,   .trace,   .spec,  .canonical,
+    });
+    try std.testing.expectEqual(expected, result.stages_run);
+    try std.testing.expectEqual(@as(u32, 0), result.totalErrors());
+    try std.testing.expect(result.verify_ran);
+    try std.testing.expect(result.contract != null);
+}
+
+test "skip_contract stops after the exact computed stage set" {
+    const allocator = std.testing.allocator;
+    var result = try runCheckOnlyFromSourceWithOptions(
+        allocator,
+        shared_analysis_clean_source,
+        "shared-analysis-skip-contract.ts",
+        .{
+            .json_mode = true,
+            .skip_contract = true,
+            .persist_witnesses = false,
+        },
+    );
+    defer result.deinit(allocator);
+
+    const expected = stagesOf(&.{ .strip, .parse, .imports, .boolean, .types, .strict });
+    try std.testing.expectEqual(expected, result.stages_run);
+    try std.testing.expectEqual(@as(u32, 0), result.totalErrors());
+    try std.testing.expect(!result.verify_ran);
+    try std.testing.expect(!result.results_safe);
+    try std.testing.expect(!result.optionals_safe);
+    try std.testing.expect(result.properties == null);
+    try std.testing.expect(result.contract == null);
+    try std.testing.expect(result.proof_trace_json == null);
+}
+
+test "check keeps its literal tool-catalog flow outcome" {
+    const allocator = std.testing.allocator;
+    var result = try runCheckOnlyFromSourceWithOptions(
+        allocator,
+        shared_analysis_tool_catalog_source,
+        "shared-analysis-tool-check.ts",
+        .{ .json_mode = true, .persist_witnesses = false },
+    );
+    defer result.deinit(allocator);
+
+    const contract = &(result.contract orelse return error.MissingContract);
+    try std.testing.expectEqual(@as(usize, 2), contract.tools.items.len);
+    try std.testing.expectEqualStrings("tool", contract.tools.items[0].name);
+    try std.testing.expectEqualStrings("assistant", contract.tools.items[1].name);
+    try std.testing.expect(contract.properties.?.no_secret_leakage);
+}
+
+test "compile keeps its accepted tool-catalog flow outcome" {
+    const allocator = std.testing.allocator;
+    const paths = [_][]const u8{"/chat/completions"};
+    const credentials = [_]handler_contract.CredentialRef{.{
+        .name = "provider",
+        .env = "PROVIDER_API_KEY",
+        .endpoint = "https://api.deepseek.com:443",
+        .header = "authorization",
+        .scheme = "Bearer",
+        .methods = std.EnumSet(handler_contract.credential_ref.Method).initOne(.POST),
+        .paths = &paths,
+    }};
+    var compiled = try compileHandler(
+        allocator,
+        shared_analysis_tool_catalog_source,
+        "shared-analysis-tool-compile.ts",
+        .{ .emit_contract = true, .credentials = &credentials },
+    );
+    defer compiled.deinit(allocator);
+
+    const contract = &(compiled.contract orelse return error.MissingContract);
+    try std.testing.expectEqual(@as(usize, 2), contract.tools.items.len);
+    try std.testing.expectEqualStrings("tool", contract.tools.items[0].name);
+    try std.testing.expectEqualStrings("assistant", contract.tools.items[1].name);
+    try std.testing.expect(contract.properties.?.no_secret_leakage);
+}
+
 test "formatIsoTimestamp produces ISO-8601 UTC" {
     var buf: [24]u8 = undefined;
     const got = zts.pipeline.formatIsoTimestamp(&buf, 1_700_000_000);
@@ -5239,17 +5380,17 @@ test "runCheckOnlyWithOptions: json mode emits ZTS000 for an unreadable handler"
     );
     defer result.deinit(allocator);
 
-    try std.testing.expect(result.totalErrors() > 0);
-    var saw_zts000 = false;
-    for (result.json_diagnostics.items) |d| {
-        if (std.mem.eql(u8, d.code, "ZTS000")) {
-            saw_zts000 = true;
-            try std.testing.expectEqualStrings("error", d.severity);
-            try std.testing.expect(std.mem.indexOf(u8, d.message, "cannot read handler file") != null);
-            try std.testing.expect(std.mem.indexOf(u8, d.file, "zttp-cli2-missing.ts") != null);
-        }
-    }
-    try std.testing.expect(saw_zts000);
+    try std.testing.expectEqual(@as(u32, 1), result.totalErrors());
+    try std.testing.expectEqual(StageSet.initEmpty(), result.stages_run);
+    try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
+    const diagnostic = result.json_diagnostics.items[0];
+    try std.testing.expectEqualStrings("ZTS000", diagnostic.code);
+    try std.testing.expectEqualStrings("error", diagnostic.severity);
+    try std.testing.expect(std.mem.indexOf(u8, diagnostic.message, "cannot read handler file") != null);
+    try std.testing.expect(std.mem.indexOf(u8, diagnostic.file, "zttp-cli2-missing.ts") != null);
+    try std.testing.expect(result.contract == null);
+    try std.testing.expect(result.properties == null);
+    try std.testing.expect(result.proof_trace_json == null);
 }
 
 test "runCheckOnlyWithOptions: non-json mode still propagates a missing-handler error" {
@@ -5260,6 +5401,28 @@ test "runCheckOnlyWithOptions: non-json mode still propagates a missing-handler 
         error.FileNotFound,
         runCheckOnlyWithOptions(allocator, "/nonexistent/zttp-cli2-missing.ts", .{ .json_mode = false }),
     );
+}
+
+test "compileHandler keeps its default missing-handler outputs" {
+    var compiled = try compileHandler(
+        std.testing.allocator,
+        "const value = 1;",
+        "shared-analysis-missing-handler.ts",
+        .{},
+    );
+    defer compiled.deinit(std.testing.allocator);
+
+    try std.testing.expect(compiled.bytecode.len > 0);
+    try std.testing.expect(!compiled.verify_failed);
+    try std.testing.expect(compiled.aot == null);
+    try std.testing.expect(compiled.transpiled_source == null);
+    try std.testing.expect(compiled.proof_evidence == null);
+    const contract = &(compiled.contract orelse return error.MissingContract);
+    const props = contract.properties orelse return error.MissingProperties;
+    try std.testing.expect(!props.deterministic);
+    try std.testing.expect(!props.result_safe);
+    try std.testing.expect(!props.optional_safe);
+    try std.testing.expect(contract.fault_coverage == null);
 }
 
 test "formatProofCard: spec-less handler renders ZTS500 lines matching the footer count" {
@@ -6094,6 +6257,8 @@ test "check reports a strict error beside a type error" {
     try std.testing.expectEqual(@as(u32, 1), result.type_errors);
     try std.testing.expectEqual(@as(u32, 1), result.strict_errors);
     try std.testing.expectEqual(@as(usize, 2), result.json_diagnostics.items.len);
+    try std.testing.expectEqualStrings("ZTS105", result.json_diagnostics.items[0].code);
+    try std.testing.expectEqualStrings("ZTS601", result.json_diagnostics.items[1].code);
 }
 
 test "check still stops before the verifier when a computed stage has an error" {
@@ -7219,7 +7384,7 @@ test "compileHandler emits result_unsafe counterexample when jwtVerify result is
     try std.testing.expect(std.mem.indexOf(u8, vj, "\"ok\":false") != null);
 }
 
-test "compileHandler sets result_safe and optional_safe when verification passes" {
+test "compileHandler projects verifier properties only when verification runs" {
     const allocator = std.testing.allocator;
     // Handler that properly checks jwtVerify result and env optional before use.
     // Uses Response.text to avoid object-literal AOT serialization (pre-existing
@@ -7239,17 +7404,81 @@ test "compileHandler sets result_safe and optional_safe when verification passes
         \\}
     ;
 
-    var compiled = try compileHandler(allocator, source, "handler.ts", .{
+    var without_verification = try compileHandler(allocator, source, "handler.ts", .{
+        .emit_contract = true,
+    });
+    defer without_verification.deinit(allocator);
+
+    try std.testing.expect(!without_verification.verify_failed);
+    const unverified_contract = without_verification.contract orelse return error.MissingContract;
+    const unverified_props = unverified_contract.properties orelse return error.MissingProperties;
+    try std.testing.expect(!unverified_props.result_safe);
+    try std.testing.expect(!unverified_props.optional_safe);
+
+    var with_verification = try compileHandler(allocator, source, "handler.ts", .{
         .emit_verify = true,
         .emit_contract = true,
     });
-    defer compiled.deinit(allocator);
+    defer with_verification.deinit(allocator);
 
-    try std.testing.expect(!compiled.verify_failed);
-    const contract = compiled.contract orelse return error.MissingContract;
+    try std.testing.expect(!with_verification.verify_failed);
+    const contract = with_verification.contract orelse return error.MissingContract;
     const props = contract.properties orelse return error.MissingProperties;
     try std.testing.expect(props.result_safe);
     try std.testing.expect(props.optional_safe);
+}
+
+test "contract-only extraction with no TypeMap skips computed and verifier checks" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { jwtVerify } from "zttp:auth";
+        \\function handler(req) {
+        \\  if (5) return Response.text(jwtVerify("token", "secret").value);
+        \\  return Response.text(process.env.NAME);
+        \\}
+    ;
+
+    var contract = try buildTestContractForSource(
+        allocator,
+        source,
+        "shared-analysis-contract-only.js",
+        null,
+    );
+    defer contract.deinit(allocator);
+
+    const props = contract.properties orelse return error.MissingProperties;
+    try std.testing.expect(!props.result_safe);
+    try std.testing.expect(!props.optional_safe);
+}
+
+test "unsupported AOT statements emit a runtime bail without taking the error return" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\function handler(req: Request): Response {
+        \\  for (const item of ["a", "b"]) {
+        \\    const copy = item;
+        \\  }
+        \\  return Response.text("ok");
+        \\}
+    ;
+
+    var compiled = try compileHandler(allocator, source, "shared-analysis-aot.ts", .{
+        .emit_aot = true,
+        .emit_contract = true,
+    });
+    defer {
+        // CompiledHandler does not release this owned duplicate today.
+        if (compiled.transpiled_source) |transpiled| allocator.free(transpiled);
+        compiled.transpiled_source = null;
+        compiled.deinit(allocator);
+    }
+
+    const transpiled = compiled.transpiled_source orelse return error.MissingTranspiledSource;
+    try std.testing.expect(std.mem.indexOf(u8, transpiled, "return error.AotBail;") != null);
+    try std.testing.expect(compiled.aot == null);
+    const props = compiled.contract.?.properties orelse return error.MissingProperties;
+    try std.testing.expect(!props.result_safe);
+    try std.testing.expect(!props.optional_safe);
 }
 
 test "buildServiceTypeContextFromContracts: errdefer ladder closes every failure path" {
@@ -7467,6 +7696,101 @@ const bytecode_golden_cases = [_]struct {
         .sha256 = "d0f3192b21758b1a6bc5568d40e86baae68d38889e798117f26729af1222c43f",
     },
 };
+
+fn hashProofU32(hasher: *std.crypto.hash.sha2.Sha256, value: u32) void {
+    var bytes: [4]u8 = undefined;
+    std.mem.writeInt(u32, &bytes, value, .little);
+    hasher.update(&bytes);
+}
+
+fn hashProofI32(hasher: *std.crypto.hash.sha2.Sha256, value: i32) void {
+    var bytes: [4]u8 = undefined;
+    std.mem.writeInt(i32, &bytes, value, .little);
+    hasher.update(&bytes);
+}
+
+fn proofEvidenceDigest(evidence: *const zts.ProofEvidence) [32]u8 {
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    hasher.update("zttp-test-proof-evidence-v1");
+    hashProofU32(&hasher, evidence.proof.handler_function orelse std.math.maxInt(u32));
+    hashProofU32(&hasher, @intCast(evidence.proof.nodes.len));
+    for (evidence.proof.nodes) |node| {
+        hashProofU32(&hasher, node.id);
+        hashProofU32(&hasher, @intFromEnum(node.tag));
+        hashProofU32(&hasher, node.parent);
+        hashProofU32(&hasher, node.first_child);
+        hashProofU32(&hasher, node.child_count);
+        hasher.update(&node.digest);
+        hashProofU32(&hasher, node.source);
+        hashProofU32(&hasher, node.aux);
+    }
+    hashProofU32(&hasher, @intCast(evidence.total.len));
+    for (evidence.total) |value| hasher.update(if (value) "\x01" else "\x00");
+    hashProofU32(&hasher, @intCast(evidence.declared.len));
+    for (evidence.declared) |value| hashProofU32(&hasher, value);
+    hashProofU32(&hasher, @intCast(evidence.emissions.len));
+    for (evidence.emissions) |emission| {
+        hashProofU32(&hasher, emission.function_ordinal);
+        hashProofU32(&hasher, emission.scope);
+        hashProofU32(&hasher, emission.node);
+        hashProofU32(&hasher, emission.code_start);
+        hashProofU32(&hasher, emission.code_len);
+    }
+    hashProofU32(&hasher, @intCast(evidence.jumps.len));
+    for (evidence.jumps) |jump| {
+        hashProofU32(&hasher, jump.scope);
+        hashProofU32(&hasher, jump.node);
+        hashProofU32(&hasher, jump.instruction_offset);
+        hashProofU32(&hasher, jump.target_node);
+        hashProofU32(&hasher, jump.target_offset);
+    }
+    hashProofU32(&hasher, @intCast(evidence.rewrites.len));
+    for (evidence.rewrites) |rewrite| {
+        hashProofU32(&hasher, @intFromEnum(rewrite.kind));
+        hashProofU32(&hasher, rewrite.before_offset);
+        hashProofU32(&hasher, rewrite.before_len);
+        hashProofU32(&hasher, rewrite.after_offset);
+        hashProofU32(&hasher, rewrite.after_len);
+        hashProofI32(&hasher, rewrite.delta);
+    }
+    hashProofU32(&hasher, evidence.pre_optimization_len);
+    hashProofU32(&hasher, evidence.final_len);
+    return hasher.finalResult();
+}
+
+test "fixed metadata keeps bytecode and proof evidence frozen" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\const builtAt: string = comptime(__BUILD_TIME__);
+        \\const commit: string = comptime(__GIT_COMMIT__);
+        \\function handler(req: Request): Response {
+        \\  if (req.method === "GET") return Response.text(builtAt);
+        \\  return Response.text(commit);
+        \\}
+    ;
+    var compiled = try compileHandler(allocator, source, "shared-analysis-frozen.ts", .{
+        .emit_contract = true,
+        .emit_proof_evidence = true,
+        .build_time = "2026-10-11T00:00:00Z",
+        .git_commit = "38a0782f",
+    });
+    defer compiled.deinit(allocator);
+
+    var bytecode_digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(compiled.bytecode, &bytecode_digest, .{});
+    const proof = compiled.proof_evidence orelse return error.MissingProofEvidence;
+    const proof_digest = proofEvidenceDigest(&proof);
+    const bytecode_hex = std.fmt.bytesToHex(bytecode_digest, .lower);
+    const proof_hex = std.fmt.bytesToHex(proof_digest, .lower);
+    try std.testing.expectEqualStrings(
+        "607923b6251f133a04f1277bec4b962d43f04b83855c7570b9e50042cd83e6e7",
+        &bytecode_hex,
+    );
+    try std.testing.expectEqualStrings(
+        "4fad5bf350094942445238ae83d7b1036adfe87860ffea378e476a3d29133556",
+        &proof_hex,
+    );
+}
 
 test "serialized bytecode matches the committed goldens" {
     const allocator = std.testing.allocator;
@@ -9030,8 +9354,35 @@ test "compileHandler stamps the fault coverage record, the property, and the cau
 
 test "compileHandler and the check path agree on the fault coverage record" {
     const allocator = std.testing.allocator;
-    const sources = [_][]const u8{ unseen_call_handler, looped_call_handler };
-    for (sources) |source| {
+    const cases = [_]struct {
+        source: []const u8,
+        expected: handler_contract.FaultCoverageInfo,
+    }{
+        .{
+            .source = unseen_call_handler,
+            .expected = .{
+                .total_failable = 0,
+                .covered = 0,
+                .warnings = 0,
+                .unseen_calls = 1,
+                .upstream_fallback_sites = 0,
+                .analysis_complete = false,
+            },
+        },
+        .{
+            .source = looped_call_handler,
+            .expected = .{
+                .total_failable = 1,
+                .covered = 1,
+                .warnings = 0,
+                .unseen_calls = 0,
+                .upstream_fallback_sites = 0,
+                .analysis_complete = false,
+            },
+        },
+    };
+    for (cases) |case| {
+        const source = case.source;
         var compiled = try compileHandler(allocator, source, "agree.ts", .{ .emit_contract = true });
         defer compiled.deinit(allocator);
         var checked = try runCheckOnlyFromSourceWithOptions(allocator, source, "agree.ts", .{ .json_mode = true });
@@ -9041,11 +9392,10 @@ test "compileHandler and the check path agree on the fault coverage record" {
         const checked_contract = &(checked.contract orelse return error.TestUnexpectedResult);
         const compiled_fc = compiled_contract.fault_coverage orelse return error.TestUnexpectedResult;
         const checked_fc = checked_contract.fault_coverage orelse return error.TestUnexpectedResult;
-        try std.testing.expectEqual(checked_fc.total_failable, compiled_fc.total_failable);
-        try std.testing.expectEqual(checked_fc.covered, compiled_fc.covered);
-        try std.testing.expectEqual(checked_fc.unseen_calls, compiled_fc.unseen_calls);
-        try std.testing.expectEqual(checked_fc.isCovered(), compiled_fc.isCovered());
-        try std.testing.expectEqual(checked_contract.properties.?.fault_covered, compiled_contract.properties.?.fault_covered);
+        try std.testing.expectEqual(case.expected, checked_fc);
+        try std.testing.expectEqual(case.expected, compiled_fc);
+        try std.testing.expect(!checked_contract.properties.?.fault_covered);
+        try std.testing.expect(!compiled_contract.properties.?.fault_covered);
         try std.testing.expectEqual(
             checked_contract.property_provenance.fault_covered != null,
             compiled_contract.property_provenance.fault_covered != null,
