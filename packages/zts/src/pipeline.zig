@@ -889,6 +889,93 @@ fn parseSourceForTest(allocator: std.mem.Allocator, source: []const u8) !struct 
     return .{ .js_parser = js_parser, .root = root };
 }
 
+fn readGraphBaselineFile(allocator: std.mem.Allocator, path: []const u8) modules_mod.module_graph.ReadFileError![]const u8 {
+    const source: []const u8 = if (std.mem.endsWith(u8, path, "shared.ts"))
+        \\import { sqlOne } from "zttp:sql";
+        \\export function shared() {
+        \\  return fetchSync("https://shared.example/a");
+        \\}
+    else if (std.mem.endsWith(u8, path, "left.ts"))
+        \\import { shared } from "./shared.ts";
+        \\import { env } from "zttp:env";
+        \\export function left() {
+        \\  shared();
+        \\  env("LEFT_TOKEN");
+        \\  return fetchSync("https://left.example/a");
+        \\}
+    else if (std.mem.endsWith(u8, path, "right.ts"))
+        \\import { shared } from "./shared.ts";
+        \\import { cacheGet } from "zttp:cache";
+        \\export function right() {
+        \\  shared();
+        \\  cacheGet("RIGHT_CACHE", "key");
+        \\  return fetchSync("https://right.example/a");
+        \\}
+    else if (std.mem.endsWith(u8, path, "typed-bad.ts"))
+        \\export function request() {
+        \\  const port: number = "bad";
+        \\  return fetchSync("https://typed-dependency.example/a");
+        \\}
+    else
+        return error.FileNotFound;
+
+    return allocator.dupe(u8, source) catch return error.OutOfMemory;
+}
+
+const GraphCallbackModule = enum {
+    shared,
+    left,
+    right,
+    entry,
+};
+
+const GraphCallbackProbe = struct {
+    modules: [4]GraphCallbackModule = undefined,
+    count: usize = 0,
+    fail_after: ?usize = null,
+};
+
+threadlocal var active_graph_callback_probe: ?*GraphCallbackProbe = null;
+
+fn graphCallbackModule(type_checker: *const TypeChecker) ?GraphCallbackModule {
+    for (0..type_checker.ir_view.nodeCount()) |idx| {
+        const node: NodeIndex = @intCast(idx);
+        const tag = type_checker.ir_view.getTag(node) orelse continue;
+        if (tag != .import_decl) continue;
+        const import_decl = type_checker.ir_view.getImportDecl(node) orelse continue;
+        const module_name = type_checker.ir_view.getString(import_decl.module_idx) orelse continue;
+        if (std.mem.eql(u8, module_name, "zttp:sql")) return .shared;
+        if (std.mem.eql(u8, module_name, "zttp:env")) return .left;
+        if (std.mem.eql(u8, module_name, "zttp:cache")) return .right;
+        if (std.mem.eql(u8, module_name, "zttp:durable")) return .entry;
+    }
+    return null;
+}
+
+fn recordGraphContractTypeCheck(type_checker: *TypeChecker, root: NodeIndex) anyerror!u32 {
+    const probe = active_graph_callback_probe orelse return error.GraphCallbackProbeMissing;
+    if (probe.count >= probe.modules.len) return error.GraphCallbackCountExceeded;
+    probe.modules[probe.count] = graphCallbackModule(type_checker) orelse
+        return error.GraphCallbackModuleUnknown;
+    probe.count += 1;
+    if (probe.fail_after == probe.count) return error.GraphCallbackRefused;
+    return type_checker.check(root);
+}
+
+fn serializeContractForTest(allocator: std.mem.Allocator, contract: *const HandlerContract) ![]u8 {
+    var output: std.Io.Writer.Allocating = .init(allocator);
+    errdefer output.deinit();
+    try handler_contract_mod.writeContractJson(contract, &output.writer);
+    return output.toOwnedSlice();
+}
+
+fn expectStringSlices(expected: []const []const u8, actual: []const []const u8) !void {
+    try testing.expectEqual(expected.len, actual.len);
+    for (expected, actual) |expected_item, actual_item| {
+        try testing.expectEqualStrings(expected_item, actual_item);
+    }
+}
+
 test "ParsedModule.fromExisting wraps an IR view" {
     const allocator = testing.allocator;
     var parsed_state = try parseSourceForTest(allocator, "const x = true;\n");
@@ -1453,6 +1540,146 @@ test "extractContract rejects boolean diagnostics with strict disabled" {
     );
 }
 
+test "extractContract preserves typed and untyped entry type-map selection" {
+    const allocator = testing.allocator;
+    const typed_source =
+        \\function handler(req: Request): Response {
+        \\  const port: number = "bad";
+        \\  return Response.text(String(port));
+        \\}
+    ;
+
+    try testing.expectError(
+        error.SoundModeViolation,
+        extractContract(allocator, typed_source, "typed-entry.ts", .{ .strict = false }),
+    );
+
+    var frontend = try source_frontend_mod.PreparedSource.init(
+        allocator,
+        typed_source,
+        "typed-entry.ts",
+        .{},
+    );
+    defer frontend.deinit();
+
+    var untyped_contract = try extractContract(
+        allocator,
+        frontend.parserInput(),
+        "<untyped-entry>",
+        .{ .strict = false },
+    );
+    defer untyped_contract.deinit(allocator);
+    try testing.expectEqualStrings("<untyped-entry>", untyped_contract.handler.path);
+
+    try testing.expectError(
+        error.SoundModeViolation,
+        extractContract(allocator, frontend.parserInput(), "<mapped-entry>", .{
+            .strict = false,
+            .type_map = frontend.typeMap().?,
+        }),
+    );
+    try testing.expectError(
+        error.UnsupportedSourceExtension,
+        extractContract(allocator, frontend.parserInput(), "mapped-entry.js", .{
+            .strict = false,
+            .type_map = frontend.typeMap().?,
+        }),
+    );
+}
+
+test "extractContract leaves a dependency TypeMap unused" {
+    const source =
+        \\import { request } from "./typed-bad.ts";
+        \\function handler(req) { return Response.text("ok"); }
+    ;
+
+    var contract = try extractContract(testing.allocator, source, "/baseline/type-entry.ts", .{
+        .strict = false,
+        .read_file = readGraphBaselineFile,
+    });
+    defer contract.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(usize, 1), contract.egress.endpoints.items.len);
+    try testing.expectEqualStrings(
+        "https://typed-dependency.example:443",
+        contract.egress.endpoints.items[0],
+    );
+}
+
+test "extractContract preserves graph callback order and merged contract bytes" {
+    const allocator = testing.allocator;
+    const source =
+        \\import { left } from "./left.ts";
+        \\import { right } from "./right.ts";
+        \\import { sleep } from "zttp:durable";
+        \\function handler(req: Request): Response {
+        \\  left();
+        \\  right();
+        \\  return fetchSync("https://entry.example/a");
+        \\}
+    ;
+    const options = ExtractContractOptions{
+        .strict = false,
+        .type_check = recordGraphContractTypeCheck,
+        .build_time = "2026-10-11T16:08:00Z",
+        .git_commit = "baseline",
+        .version = "baseline",
+        .read_file = readGraphBaselineFile,
+    };
+
+    var success_probe = GraphCallbackProbe{};
+    active_graph_callback_probe = &success_probe;
+    defer active_graph_callback_probe = null;
+    var custom_contract = try extractContract(allocator, source, "/baseline/entry.ts", options);
+    active_graph_callback_probe = null;
+    defer custom_contract.deinit(allocator);
+
+    try testing.expectEqual(@as(usize, 4), success_probe.count);
+    try testing.expectEqualSlices(
+        GraphCallbackModule,
+        &.{ .shared, .left, .right, .entry },
+        success_probe.modules[0..success_probe.count],
+    );
+    try expectStringSlices(
+        &.{
+            "https://shared.example:443",
+            "https://left.example:443",
+            "https://right.example:443",
+            "https://entry.example:443",
+        },
+        custom_contract.egress.endpoints.items,
+    );
+    try expectStringSlices(&.{"LEFT_TOKEN"}, custom_contract.env.literal.items);
+    try expectStringSlices(&.{"RIGHT_CACHE"}, custom_contract.cache.namespaces.items);
+
+    var default_contract = try extractContract(allocator, source, "/baseline/entry.ts", .{
+        .strict = false,
+        .build_time = "2026-10-11T16:08:00Z",
+        .git_commit = "baseline",
+        .version = "baseline",
+        .read_file = readGraphBaselineFile,
+    });
+    defer default_contract.deinit(allocator);
+    const custom_json = try serializeContractForTest(allocator, &custom_contract);
+    defer allocator.free(custom_json);
+    const default_json = try serializeContractForTest(allocator, &default_contract);
+    defer allocator.free(default_json);
+    try testing.expectEqualStrings(default_json, custom_json);
+
+    var refusal_probe = GraphCallbackProbe{ .fail_after = 2 };
+    active_graph_callback_probe = &refusal_probe;
+    try testing.expectError(
+        error.GraphCallbackRefused,
+        extractContract(allocator, source, "/baseline/entry.ts", options),
+    );
+    try testing.expectEqual(@as(usize, 2), refusal_probe.count);
+    try testing.expectEqualSlices(
+        GraphCallbackModule,
+        &.{ .shared, .left },
+        refusal_probe.modules[0..refusal_probe.count],
+    );
+}
+
 test "extractContract merges capabilities from relative imports" {
     const allocator = testing.allocator;
     const file_io = @import("zts-engine").file_io;
@@ -1509,6 +1736,12 @@ test "extractContract merges capabilities from relative imports" {
         dependency_path,
         "export function request() { let response = fetchSync('http://localhost:1'); return response; }",
     );
+    var non_strict_contract = try extractContract(allocator, source, entry_path, .{
+        .strict = false,
+        .version = "test",
+        .read_file = file_io.readFileForModuleGraph,
+    });
+    non_strict_contract.deinit(allocator);
     try testing.expectError(
         error.SoundModeViolation,
         extractContract(allocator, source, entry_path, .{

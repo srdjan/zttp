@@ -92,3 +92,20 @@ Execution starts from `850e9e76` on local `main` with a clean working tree.
 Seven existing local commits remain unpublished. This run will not push them.
 The native engine runs under the repository's branch and model constraints.
 Characterization runs before production edits. The main agent owns authoritative tests and commits.
+
+## Characterization checkpoint
+
+Both producers now have public baseline tests before production changes.
+The tests cover pass selection, callback order, dependency capabilities, policy refusal, routes, merge order, and declaration refusal before import reads.
+The main agent reviewed both test diffs line by line.
+Unfiltered `test-zts` passed 2751 tests with one existing skip. Unfiltered `test-precompile` passed all 243 tests.
+`zig build` succeeded. Four `cmp` checks confirmed exact generated code and contract bytes for rebuilt two-module and shared-dependency fixtures.
+The artifact baselines remain in `/private/tmp/zttp-graph-execution.oZyY11` for post-migration comparisons.
+
+Execution corrected three inferred fixture expectations before production changes.
+Both public producers reject `.js` files before graph analysis. A virtual entry supports the explicit-map selection example.
+The plan's effective-map rule still applies. The plan does not authorize additional source extensions.
+Contract endpoints contain normalized origins. A dependency fixture now avoids an unrelated imported-call error in the entry.
+No product behavior changed. Manifest and explicit-facts behavior still need direct owner tests.
+
+The main agent will add the stable per-module analysis owner next.

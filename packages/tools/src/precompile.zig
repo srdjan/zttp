@@ -4841,10 +4841,54 @@ fn hexChar(n: u4) u8 {
     return hex_chars[n];
 }
 
-test "compileHandler aggregates contract across file imports" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
+const CompileGraphFixture = struct {
+    tmp: std.testing.TmpDir,
+    entry_source: []const u8,
+    entry_path: [:0]u8,
 
+    fn init(entry_name: []const u8, entry_source: []const u8) !CompileGraphFixture {
+        const allocator = std.testing.allocator;
+        var tmp = std.testing.tmpDir(.{});
+        errdefer tmp.cleanup();
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = entry_name, .data = entry_source });
+        const entry_path = try tmp.dir.realPathFileAlloc(std.testing.io, entry_name, allocator);
+        return .{ .tmp = tmp, .entry_source = entry_source, .entry_path = entry_path };
+    }
+
+    fn deinit(self: *CompileGraphFixture) void {
+        std.testing.allocator.free(self.entry_path);
+        self.tmp.cleanup();
+    }
+
+    fn add(self: *CompileGraphFixture, name: []const u8, source: []const u8) !void {
+        try self.tmp.dir.writeFile(std.testing.io, .{ .sub_path = name, .data = source });
+    }
+
+    fn compile(self: *const CompileGraphFixture, opts: CompileOptions) !CompiledHandler {
+        return compileHandler(std.testing.allocator, self.entry_source, self.entry_path, opts);
+    }
+};
+
+fn expectSameGraphArtifact(first: *const CompiledHandler, second: *const CompiledHandler) !void {
+    try std.testing.expectEqualSlices(u8, first.bytecode, second.bytecode);
+
+    const first_deps = first.dep_bytecodes orelse return error.TestUnexpectedResult;
+    const second_deps = second.dep_bytecodes orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(first_deps.len, second_deps.len);
+    for (first_deps, second_deps) |first_dep, second_dep| {
+        try std.testing.expectEqualSlices(u8, first_dep, second_dep);
+    }
+
+    var first_json: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer first_json.deinit();
+    try writeContractJson(&first.contract.?, &first_json.writer);
+    var second_json: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer second_json.deinit();
+    try writeContractJson(&second.contract.?, &second_json.writer);
+    try std.testing.expectEqualStrings(first_json.written(), second_json.written());
+}
+
+test "compileHandler aggregates contract across file imports" {
     const entry_source =
         \\import { readSecret } from "./dep.ts";
         \\export function handler(req) {
@@ -4858,17 +4902,15 @@ test "compileHandler aggregates contract across file imports" {
         \\}
     ;
 
-    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "entry.ts", .data = entry_source });
-    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "dep.ts", .data = dep_source });
+    var fixture = try CompileGraphFixture.init("entry.ts", entry_source);
+    defer fixture.deinit();
+    try fixture.add("dep.ts", dep_source);
 
     const allocator = std.testing.allocator;
-    const entry_path = try tmp.dir.realPathFileAlloc(std.testing.io, "entry.ts", allocator);
-    defer allocator.free(entry_path);
-
     var policy = try handler_policy.parsePolicyJson(allocator, "{\"env\":{\"allow\":[\"JWT_SECRET\"]}}");
     defer policy.deinit(allocator);
 
-    var compiled = try compileHandler(allocator, entry_source, entry_path, .{
+    var compiled = try fixture.compile(.{
         .emit_contract = true,
         .policy = policy,
     });
@@ -4881,9 +4923,6 @@ test "compileHandler aggregates contract across file imports" {
 }
 
 test "compileHandler rejects disallowed policy from imported module" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
     const entry_source =
         \\import { readSecret } from "./dep.ts";
         \\export function handler(req) {
@@ -4897,20 +4936,130 @@ test "compileHandler rejects disallowed policy from imported module" {
         \\}
     ;
 
-    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "entry.ts", .data = entry_source });
-    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "dep.ts", .data = dep_source });
+    var fixture = try CompileGraphFixture.init("entry.ts", entry_source);
+    defer fixture.deinit();
+    try fixture.add("dep.ts", dep_source);
 
     const allocator = std.testing.allocator;
-    const entry_path = try tmp.dir.realPathFileAlloc(std.testing.io, "entry.ts", allocator);
-    defer allocator.free(entry_path);
-
     var policy = try handler_policy.parsePolicyJson(allocator, "{\"env\":{\"allow\":[\"PUBLIC_KEY\"]}}");
     defer policy.deinit(allocator);
 
     try std.testing.expectError(
         error.PolicyViolation,
-        compileHandler(allocator, entry_source, entry_path, .{ .policy = policy }),
+        fixture.compile(.{ .policy = policy }),
     );
+}
+
+test "compileHandler graph accepts current type boolean and strict diagnostics" {
+    // Single-module checks reject these nodes. Graph compilation currently accepts them.
+    const typed_dependency =
+        \\export function count(): number {
+        \\  const value: number = "wrong";
+        \\  return value;
+        \\}
+        \\
+    ;
+    const typed_entry =
+        \\import { count } from "./dep.ts";
+        \\const typedMarker: number = 1;
+        \\export function handler(req) {
+        \\  if (5) return Response.text(String(count() + typedMarker));
+        \\  return Response.text("zero");
+        \\}
+        \\
+    ;
+    const untyped_entry =
+        \\import { count } from "./dep.ts";
+        \\export function handler(req) {
+        \\  return Response.text(String(count()));
+        \\}
+        \\
+    ;
+    const cases = [_][]const u8{ typed_entry, untyped_entry };
+
+    for (cases) |entry_source| {
+        var fixture = try CompileGraphFixture.init("entry.ts", entry_source);
+        defer fixture.deinit();
+        try fixture.add("dep.ts", typed_dependency);
+
+        var strict = try fixture.compile(.{ .emit_contract = true, .strict = true });
+        defer strict.deinit(std.testing.allocator);
+        var relaxed = try fixture.compile(.{ .emit_contract = true, .strict = false });
+        defer relaxed.deinit(std.testing.allocator);
+
+        try std.testing.expectEqual(@as(usize, 1), strict.dep_bytecodes.?.len);
+        try expectSameGraphArtifact(&strict, &relaxed);
+    }
+
+    var unsupported = try CompileGraphFixture.init("entry.js", untyped_entry);
+    defer unsupported.deinit();
+    try unsupported.add("dep.ts", typed_dependency);
+    try std.testing.expectError(error.UnsupportedSourceExtension, unsupported.compile(.{}));
+}
+
+test "compileHandler preserves fanout order shared dependencies and imported routes" {
+    const entry_source =
+        \\import { left } from "./left.ts";
+        \\import { right } from "./right.ts";
+        \\export function handler(req: Request): Response {
+        \\  left(req);
+        \\  return right(req);
+        \\}
+        \\
+    ;
+    var fixture = try CompileGraphFixture.init("entry.ts", entry_source);
+    defer fixture.deinit();
+    try fixture.add("left.ts",
+        \\import { env } from "zttp:env";
+        \\import { shared } from "./shared.ts";
+        \\export function left(req: Request): Response {
+        \\  shared(req);
+        \\  return Response.text(env("LEFT_SECRET") ?? "");
+        \\}
+        \\
+    );
+    try fixture.add("right.ts",
+        \\import { env } from "zttp:env";
+        \\import { shared } from "./shared.ts";
+        \\export function right(req: Request): Response {
+        \\  shared(req);
+        \\  return Response.text(env("RIGHT_SECRET") ?? "");
+        \\}
+        \\
+    );
+    try fixture.add("shared.ts",
+        \\import { env } from "zttp:env";
+        \\import { routerMatch } from "zttp:router";
+        \\function status(req: Request): Response {
+        \\  return Response.text(env("SHARED_SECRET") ?? "ok");
+        \\}
+        \\const routes = { "GET /shared": status };
+        \\export function shared(req: Request): Response {
+        \\  const found = routerMatch(routes, req);
+        \\  if (found !== undefined) return found.handler(req);
+        \\  return Response.text("missing", { status: 404 });
+        \\}
+        \\
+    );
+
+    var first = try fixture.compile(.{ .emit_contract = true });
+    defer first.deinit(std.testing.allocator);
+    var second = try fixture.compile(.{ .emit_contract = true });
+    defer second.deinit(std.testing.allocator);
+    try expectSameGraphArtifact(&first, &second);
+
+    try std.testing.expectEqual(@as(usize, 3), first.dep_bytecodes.?.len);
+    const contract = &first.contract.?;
+    try std.testing.expectEqual(@as(usize, 3), contract.env.literal.items.len);
+    try std.testing.expectEqualStrings("SHARED_SECRET", contract.env.literal.items[0]);
+    try std.testing.expectEqualStrings("LEFT_SECRET", contract.env.literal.items[1]);
+    try std.testing.expectEqualStrings("RIGHT_SECRET", contract.env.literal.items[2]);
+    try std.testing.expectEqual(@as(usize, 1), contract.api.routes.items.len);
+    try std.testing.expectEqualStrings("GET", contract.api.routes.items[0].method);
+    try std.testing.expectEqualStrings("/shared", contract.api.routes.items[0].path);
+    try std.testing.expect(contract.verification == null);
+    try std.testing.expect(contract.properties == null);
+    try std.testing.expect(contract.fault_coverage == null);
 }
 
 fn buildTestContractForSource(
@@ -8892,13 +9041,17 @@ test "a declaration cannot ride the multi-module build path, which runs no flow 
         \\
     ;
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "entry.ts", .data = entry_source });
-    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "dep.ts", .data = "export function name(): string {\n  return \"x\";\n}\n" });
     const entry_path = try tmp.dir.realPathFileAlloc(std.testing.io, "entry.ts", allocator);
     defer allocator.free(entry_path);
 
     var fixture = try DeclaredFixture.init(declared_leak_handler, tax_id_declaration);
     defer fixture.deinit();
 
+    // The control proves the dependency is missing. The declaration path must refuse before the graph read.
+    try std.testing.expectError(
+        error.ImportFileNotFound,
+        compileHandler(allocator, entry_source, entry_path, .{}),
+    );
     try std.testing.expectError(
         error.DeclarationNotEnforced,
         compileHandler(allocator, entry_source, entry_path, .{ .declaration = &fixture.declaration }),
