@@ -940,14 +940,14 @@ test "an ok-record stub carries the generator's response for each side of ok" {
     var ok_witness = try solveOne(allocator, &ok, &fetch_calls);
     defer ok_witness.deinit(allocator);
     try std.testing.expectEqualStrings(
-        \\{"status":200,"statusText":"OK","headers":{},"body":"{\"id\":\"1\"}"}
+        \\{"status":200,"statusText":"OK","ok":true,"headers":{},"body":"{\"id\":\"1\"}"}
     , ok_witness.io_stubs[0].result_json);
 
     const failed = [_]WitnessConstraint{.{ .result_not_ok = fetch_info }};
     var failed_witness = try solveOne(allocator, &failed, &fetch_calls);
     defer failed_witness.deinit(allocator);
     try std.testing.expectEqualStrings(
-        \\{"status":503,"statusText":"Service Unavailable","headers":{},"body":"{}"}
+        \\{"status":503,"statusText":"Service Unavailable","ok":false,"headers":{},"body":"{}"}
     , failed_witness.io_stubs[0].result_json);
 }
 

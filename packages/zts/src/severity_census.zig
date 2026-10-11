@@ -527,8 +527,10 @@ fn probeSource(
 
 /// Whether the stub has the shape that fails the probed call. An `ok_record` stub
 /// must be a response the replay reads as a failure: an integer `status` of 400
-/// or more, beside the `statusText`, `headers`, and `body` the replay reads. The
-/// replay derives `ok` from `status` and ignores a field named `ok`.
+/// or more, beside the `statusText`, `headers`, and `body` the replay reads. A
+/// `fetch` replay derives `ok` from `status` and ignores a field named `ok`; a
+/// `serviceCall` replay parses the stub verbatim. A stub `ok` field is therefore
+/// accepted only when it is `false`, so that both replays read a failure.
 fn failingStubShape(shape: Shape, returns: mb.ReturnKind, json: []const u8) bool {
     if (shape == .ok_record) return failingResponseStub(json);
     return switch (returns) {
@@ -547,8 +549,11 @@ fn failingResponseStub(json: []const u8) bool {
     const status = fields.get("status") orelse return false;
     if (status != .integer or status.integer < 400 or status.integer > 599) return false;
     if (fields.get("statusText") == null or fields.get("headers") == null or fields.get("body") == null) return false;
-    // A Result-shaped stub carries `ok`; the replay would ignore it.
-    return fields.get("ok") == null;
+    // The generated stub carries `ok` equal to `status` in 200..299, so `false`
+    // here. A Result-shaped stub has no `status`, and a stub with `ok` true
+    // would read as a success through a verbatim replay.
+    const ok = fields.get("ok") orelse return true;
+    return ok == .bool and !ok.bool;
 }
 
 /// Run the real path generator and fault checker over one probe handler.
@@ -950,6 +955,9 @@ test "a probe observes a fork on a Result, an optional, and an ok record" {
 
 test "the failing stub of an ok-record call is a response the replay reads as a failure" {
     try std.testing.expect(failingResponseStub("{\"status\":503,\"statusText\":\"Service Unavailable\",\"headers\":{},\"body\":\"{}\"}"));
+    try std.testing.expect(failingResponseStub("{\"status\":503,\"statusText\":\"Service Unavailable\",\"ok\":false,\"headers\":{},\"body\":\"{}\"}"));
+    // A verbatim replay would read `ok` true as a success.
+    try std.testing.expect(!failingResponseStub("{\"status\":503,\"statusText\":\"Service Unavailable\",\"ok\":true,\"headers\":{},\"body\":\"{}\"}"));
     // The Result shape is not a fetch response.
     try std.testing.expect(!failingResponseStub("{\"ok\":false,\"error\":\"test-error\"}"));
     // A stub with an `ok` field and no failing status reads as a 200.

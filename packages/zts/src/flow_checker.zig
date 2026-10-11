@@ -6336,10 +6336,10 @@ fn secretWitnessJsonl(allocator: std.mem.Allocator, source: []const u8) ![]u8 {
 }
 
 const fetch_io_503 =
-    \\{"type":"io","seq":1,"module":"fetch","fn":"fetch","result":{"status":503,"statusText":"Service Unavailable","headers":{},"body":"{}"}}
+    \\{"type":"io","seq":1,"module":"fetch","fn":"fetch","result":{"status":503,"statusText":"Service Unavailable","ok":false,"headers":{},"body":"{}"}}
 ;
 const fetch_io_200 =
-    \\{"type":"io","seq":1,"module":"fetch","fn":"fetch","result":{"status":200,"statusText":"OK","headers":{},"body":"{\"id\":\"1\"}"}}
+    \\{"type":"io","seq":1,"module":"fetch","fn":"fetch","result":{"status":200,"statusText":"OK","ok":true,"headers":{},"body":"{\"id\":\"1\"}"}}
 ;
 
 fn expectFetchIo(jsonl: []const u8, expected: []const u8) !void {
