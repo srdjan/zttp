@@ -277,3 +277,12 @@ The source drift check exits zero. The plan preserves those paths and their exis
 No implementation, behavior tests, or performance benchmarks ran during planning.
 
 The main agent owns the next action: execute this approved plan and record checks in the companion worklog.
+
+## Execution result
+
+The bounded unit is complete on 2026-10-11.
+Single-module coordinators own stable analysis. Private contract operations consume completed results and cannot construct missing analysis.
+Contract-only callers retain their separate type and flow sessions. Public extraction fallbacks and multi-module behavior remain unchanged.
+All 13 named unfiltered checks pass. Fixed public JSON and generated compiler output match the baseline exactly.
+The [worklog](2026-10-11-shared-analysis-worklog.md) records the mutation probe, review results, coverage limits, and measurements.
+The owner owns the next action: review the completed unit and select the next reset phase.

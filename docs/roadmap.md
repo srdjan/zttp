@@ -294,8 +294,10 @@ or generic-instantiation case. This is an investigation, not a confirmed bypass.
 
 The owner approved the [first shared-analysis unit](plans/2026-10-11-shared-analysis-first-unit.md) on 2026-10-11.
 The unit preserves documented features and initial wire formats. Its [worklog](plans/2026-10-11-shared-analysis-worklog.md) records execution evidence.
-The main agent will pin current behavior, then remove private contract fallback analysis from the single-module paths.
-Completion requires unchanged public outputs and passing named checks. Whole-graph migration remains outside this unit.
+The unit is complete. Single-module coordinators own their analysis, and private contract operations consume completed results.
+All 13 named checks pass. Fixed public JSON and generated compiler output match the baseline exactly.
+The worklog records review coverage limits. Whole-graph migration remains outside this unit.
+The owner owns the next action: review this unit and select the next reset phase.
 
 The [reset ledger](archive/plans/2026-07-28-001-reset-simplification-plan.md) is historical.
 The shared import/binding index and compile-time parser reuse shipped. The
