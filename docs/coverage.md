@@ -62,7 +62,7 @@ Untripped: `ZTS302`, `ZTS303`, `ZTS304`, `ZTS305`, `ZTS306`, `ZTS308`, `ZTS309`,
 
 The row above is one draw. Recordings of the same headline corpus have measured
 different sets. A rule is counted only when the recorded model output makes the
-mistake that trips it. Across the 12 published runs of corpus `e6801afae099`,
+mistake that trips it. Across the 14 published runs of corpus `e6801afae099`,
 the tripped set took 8 distinct shapes, the smallest naming 2
 rules and the largest 7.
 
