@@ -4,7 +4,7 @@
 //!
 //!   ParsedModule    — IR is built; nothing has been checked yet.
 //!   ResolvedModule  — Boolean and (optional) type checks have run.
-//!   CheckedModule   — Handler verification + flow analysis have run.
+//!   CheckedModule   - Handler verification and flow analysis can run independently.
 //!
 //! Each wrapper owns its pass structs by value (so a single `deinit()` cleans up
 //! everything the wrapper added) and exposes diagnostics through accessors.
@@ -13,8 +13,8 @@
 //! address stable in caller storage.
 //!
 //! Pass-ordering invariants ("type-check before flow-check", "resolve before
-//! check") are encoded in the function signatures: `check` only accepts a
-//! `ResolvedModule`, never a `ParsedModule`. Construction of `ParsedModule` is
+//! check") are encoded in the function signatures. `CheckedModule.init` only
+//! accepts a `ResolvedModule`, never a `ParsedModule`. Construction of `ParsedModule` is
 //! still permissive in this phase (`fromExisting`) — gating that constructor is
 //! WS5 work. A fourth `LoweredModule` phase is intentionally not added: it would
 //! need `precompile.zig`'s codegen-bearing orchestrator to migrate here first,
@@ -300,12 +300,62 @@ pub fn resolve(
 // Phase 3: Checked (handler verification + flow analysis)
 // ---------------------------------------------------------------------------
 
+const PassState = enum {
+    ready,
+    attempted,
+    completed,
+};
+
 pub const CheckedModule = struct {
     resolved: *const ResolvedModule,
     verifier: HandlerVerifier,
     flow_checker: FlowChecker,
     verifier_error_count: u32,
     flow_error_count: u32,
+    verifier_state: PassState,
+    flow_state: PassState,
+
+    pub fn init(
+        allocator: std.mem.Allocator,
+        resolved: *ResolvedModule,
+        opts: CheckOptions,
+    ) !CheckedModule {
+        const tc_ptr: ?*TypeChecker = if (resolved.type_checker) |*tc| tc else null;
+        const env_ptr: ?*const TypeEnv = if (resolved.type_checker) |*tc| tc.env else null;
+
+        var verifier = HandlerVerifier.init(
+            allocator,
+            resolved.parsed.ir_view,
+            resolved.parsed.atoms,
+            env_ptr,
+            tc_ptr,
+        );
+        verifier.facts = opts.module_facts;
+        errdefer verifier.deinit();
+
+        var flow = FlowChecker.init(
+            allocator,
+            resolved.parsed.ir_view,
+            resolved.parsed.atoms,
+        );
+        flow.facts = opts.module_facts;
+        if (tc_ptr) |tc| flow.setTypeChecker(tc);
+        errdefer flow.deinit();
+        for (opts.imported_fn_summaries) |*entry| {
+            flow.setFileFunctionSummary(entry.slot, &entry.summary);
+        }
+        if (opts.declaration) |decl| try flow.setDeclaration(decl);
+
+        return .{
+            .resolved = resolved,
+            .verifier = verifier,
+            .flow_checker = flow,
+            .verifier_error_count = 0,
+            .flow_error_count = 0,
+            .verifier_state = .ready,
+            .flow_state = .ready,
+        };
+    }
 
     pub fn deinit(self: *CheckedModule) void {
         self.flow_checker.deinit();
@@ -323,6 +373,41 @@ pub const CheckedModule = struct {
 
     pub fn defendedPaths(self: *const CheckedModule) []const flow_checker_mod.DefendedPath {
         return self.flow_checker.getDefendedPaths();
+    }
+
+    pub fn verifierCompleted(self: *const CheckedModule) bool {
+        return self.verifier_state == .completed;
+    }
+
+    pub fn flowCompleted(self: *const CheckedModule) bool {
+        return self.flow_state == .completed;
+    }
+
+    pub fn runVerifier(self: *CheckedModule, handler_func: NodeIndex) !u32 {
+        if (self.verifier_state != .ready) return error.PassAlreadyRun;
+        self.verifier_state = .attempted;
+
+        const error_count = try self.verifier.verify(handler_func);
+        if (self.resolved.type_checker) |*tc| try tc.ensureHealthy();
+        self.verifier_error_count = error_count;
+        self.verifier_state = .completed;
+        return error_count;
+    }
+
+    pub fn runFlow(
+        self: *CheckedModule,
+        handler_func: NodeIndex,
+        accepted_tools: ?[]const handler_contract_mod.ToolEntry,
+    ) !u32 {
+        if (self.flow_state != .ready) return error.PassAlreadyRun;
+        self.flow_state = .attempted;
+
+        if (accepted_tools) |tools| try self.flow_checker.setAcceptedToolCatalog(tools);
+        const error_count = try self.flow_checker.check(handler_func);
+        if (self.resolved.type_checker) |*tc| try tc.ensureHealthy();
+        self.flow_error_count = error_count;
+        self.flow_state = .completed;
+        return error_count;
     }
 };
 
@@ -357,43 +442,11 @@ pub fn check(
     handler_func: NodeIndex,
     opts: CheckOptions,
 ) !CheckedModule {
-    const tc_ptr: ?*TypeChecker = if (resolved.type_checker) |*tc| tc else null;
-    const env_ptr: ?*const TypeEnv = if (resolved.type_checker) |*tc| tc.env else null;
-
-    var verifier = HandlerVerifier.init(
-        allocator,
-        resolved.parsed.ir_view,
-        resolved.parsed.atoms,
-        env_ptr,
-        tc_ptr,
-    );
-    verifier.facts = opts.module_facts;
-    errdefer verifier.deinit();
-    const verifier_errors = try verifier.verify(handler_func);
-    if (tc_ptr) |tc| try tc.ensureHealthy();
-
-    var flow = FlowChecker.init(
-        allocator,
-        resolved.parsed.ir_view,
-        resolved.parsed.atoms,
-    );
-    flow.facts = opts.module_facts;
-    if (tc_ptr) |tc| flow.setTypeChecker(tc);
-    errdefer flow.deinit();
-    for (opts.imported_fn_summaries) |*entry| {
-        flow.setFileFunctionSummary(entry.slot, &entry.summary);
-    }
-    if (opts.declaration) |decl| try flow.setDeclaration(decl);
-    const flow_errors = try flow.check(handler_func);
-    if (tc_ptr) |tc| try tc.ensureHealthy();
-
-    return .{
-        .resolved = resolved,
-        .verifier = verifier,
-        .flow_checker = flow,
-        .verifier_error_count = verifier_errors,
-        .flow_error_count = flow_errors,
-    };
+    var checked = try CheckedModule.init(allocator, resolved, opts);
+    errdefer checked.deinit();
+    _ = try checked.runVerifier(handler_func);
+    _ = try checked.runFlow(handler_func, null);
+    return checked;
 }
 
 // ---------------------------------------------------------------------------
@@ -412,7 +465,7 @@ pub const TypeEnvStorage = struct {
     pub fn init(
         self: *TypeEnvStorage,
         allocator: std.mem.Allocator,
-        type_map: *const TypeMap,
+        type_map: ?*const TypeMap,
     ) !void {
         self.pool = TypePool.init(allocator);
         errdefer self.pool.deinit(allocator);
@@ -423,7 +476,7 @@ pub const TypeEnvStorage = struct {
         module_types_mod.populateModuleTypes(&self.env, &self.pool, allocator);
         abi_types_mod.populateHandlerAbiTypes(&self.env, &self.pool, allocator);
         try self.pool.ensureHealthy();
-        self.env.populateFromTypeMap(type_map);
+        if (type_map) |map| self.env.populateFromTypeMap(map);
         try self.finishInitialization();
     }
 
@@ -483,6 +536,36 @@ pub const ExtractContractOptions = struct {
 
 fn runContractTypeCheck(type_checker: *TypeChecker, root: NodeIndex) anyerror!u32 {
     return type_checker.check(root);
+}
+
+/// Build a contract from a type session that the caller completed.
+pub fn extractContractFromTypeSession(
+    allocator: std.mem.Allocator,
+    parsed: ParsedModule,
+    filename: []const u8,
+    opts: ExtractContractOptions,
+    type_checker: *TypeChecker,
+) !HandlerContract {
+    if (opts.type_check != runContractTypeCheck or opts.resolved != null) {
+        return error.IncompatibleTypeSessionOptions;
+    }
+    try type_checker.ensureHealthy();
+
+    const handler_fn = handler_verifier_mod.findHandlerFunction(parsed.ir_view, parsed.root);
+    const handler_loc = if (handler_fn) |hf| parsed.ir_view.getLoc(hf) else null;
+    var contract = try buildContractOn(
+        allocator,
+        parsed,
+        filename,
+        opts,
+        type_checker.env,
+        type_checker,
+        handler_fn,
+        handler_loc,
+    );
+    errdefer contract.deinit(allocator);
+    try type_checker.ensureHealthy();
+    return contract;
 }
 
 /// Build an owned handler contract from an already-parsed module.
@@ -872,6 +955,55 @@ test "TypeEnvStorage rejects a late poisoned TypePool" {
     try testing.expect(storage.envPtr() == null);
 }
 
+test "TypeEnvStorage initializes module types without a TypeMap" {
+    const allocator = testing.allocator;
+    var storage: TypeEnvStorage = .{};
+    defer storage.deinit(allocator);
+
+    try storage.init(allocator, null);
+    try testing.expect(storage.envPtr() != null);
+}
+
+fn rejectingContractTypeCheck(_: *TypeChecker, _: NodeIndex) anyerror!u32 {
+    return error.TestTypeCheckRan;
+}
+
+test "explicit type session extraction uses the completed caller session" {
+    const allocator = testing.allocator;
+    const source = "function handler(req) { return Response.text('ok'); }\n";
+    var parsed_state = try parseSourceForTest(allocator, source);
+    defer parsed_state.js_parser.deinit();
+    const view = IrView.fromIRStore(&parsed_state.js_parser.nodes, &parsed_state.js_parser.constants);
+    const parsed = ParsedModule.fromExisting(view, parsed_state.root, null);
+
+    var storage: TypeEnvStorage = .{};
+    defer storage.deinit(allocator);
+    try storage.init(allocator, null);
+    var type_checker = TypeChecker.init(allocator, view, null, storage.envPtr().?, null);
+    defer type_checker.deinit();
+    _ = try type_checker.check(parsed.root);
+
+    var contract = try extractContractFromTypeSession(
+        allocator,
+        parsed,
+        "explicit-session.ts",
+        .{},
+        &type_checker,
+    );
+    defer contract.deinit(allocator);
+    try testing.expectEqualStrings("explicit-session.ts", contract.handler.path);
+    try testing.expectError(
+        error.IncompatibleTypeSessionOptions,
+        extractContractFromTypeSession(
+            allocator,
+            parsed,
+            "explicit-session.ts",
+            .{ .type_check = rejectingContractTypeCheck },
+            &type_checker,
+        ),
+    );
+}
+
 test "pipeline.check does not emit a module after verifier allocation failure" {
     const allocator = testing.allocator;
     var parsed_state = try parseSourceForTest(allocator, "function handler(req) {}\n");
@@ -916,6 +1048,218 @@ test "pipeline.check rejects a TypePool poisoned after resolve" {
     _ = storage.pool.makeReadonly(failing.allocator(), record);
 
     try testing.expectError(error.OutOfMemory, check(allocator, &resolved, handler_func, .{}));
+}
+
+test "CheckedModule runs verifier and flow independently or together" {
+    const allocator = testing.allocator;
+    const source = "function handler(req) { return Response.text('ok'); }\n";
+    var parsed_state = try parseSourceForTest(allocator, source);
+    defer parsed_state.js_parser.deinit();
+    const view = IrView.fromIRStore(&parsed_state.js_parser.nodes, &parsed_state.js_parser.constants);
+    const parsed = ParsedModule.fromExisting(view, parsed_state.root, null);
+    var resolved = try resolve(allocator, parsed, .{ .strict = false });
+    defer resolved.deinit();
+    const handler_func = handler_verifier_mod.findHandlerFunction(view, parsed_state.root) orelse
+        return error.HandlerNotFound;
+
+    var verifier_only = try CheckedModule.init(allocator, &resolved, .{});
+    defer verifier_only.deinit();
+    try testing.expectEqual(@as(u32, 0), try verifier_only.runVerifier(handler_func));
+    try testing.expect(verifier_only.verifierCompleted());
+    try testing.expect(!verifier_only.flowCompleted());
+
+    var flow_only = try CheckedModule.init(allocator, &resolved, .{});
+    defer flow_only.deinit();
+    try testing.expectEqual(@as(u32, 0), try flow_only.runFlow(handler_func, null));
+    try testing.expect(!flow_only.verifierCompleted());
+    try testing.expect(flow_only.flowCompleted());
+
+    var both = try check(allocator, &resolved, handler_func, .{});
+    defer both.deinit();
+    try testing.expect(both.verifierCompleted());
+    try testing.expect(both.flowCompleted());
+}
+
+test "CheckedModule rejects completed and failed pass retries" {
+    const allocator = testing.allocator;
+    const source =
+        \\import { jwtVerify } from "zttp:auth";
+        \\function handler(req) { return Response.text('ok'); }
+    ;
+    var parsed_state = try parseSourceForTest(allocator, source);
+    defer parsed_state.js_parser.deinit();
+    const view = IrView.fromIRStore(&parsed_state.js_parser.nodes, &parsed_state.js_parser.constants);
+    const parsed = ParsedModule.fromExisting(view, parsed_state.root, null);
+    var resolved = try resolve(allocator, parsed, .{ .strict = false });
+    defer resolved.deinit();
+    const handler_func = handler_verifier_mod.findHandlerFunction(view, parsed_state.root) orelse
+        return error.HandlerNotFound;
+
+    var completed = try CheckedModule.init(allocator, &resolved, .{});
+    defer completed.deinit();
+    _ = try completed.runVerifier(handler_func);
+    _ = try completed.runFlow(handler_func, null);
+    try testing.expectError(error.PassAlreadyRun, completed.runVerifier(handler_func));
+    try testing.expectError(error.PassAlreadyRun, completed.runFlow(handler_func, null));
+
+    var verifier_failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    var failed_verifier = try CheckedModule.init(verifier_failing.allocator(), &resolved, .{});
+    defer failed_verifier.deinit();
+    try testing.expectError(error.OutOfMemory, failed_verifier.runVerifier(handler_func));
+    try testing.expect(verifier_failing.has_induced_failure);
+    try testing.expectError(error.PassAlreadyRun, failed_verifier.runVerifier(handler_func));
+    try testing.expect(!failed_verifier.verifierCompleted());
+
+    var flow_failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    var failed_flow = try CheckedModule.init(flow_failing.allocator(), &resolved, .{});
+    defer failed_flow.deinit();
+    try testing.expectError(error.OutOfMemory, failed_flow.runFlow(handler_func, null));
+    try testing.expect(flow_failing.has_induced_failure);
+    try testing.expectError(error.PassAlreadyRun, failed_flow.runFlow(handler_func, null));
+    try testing.expect(!failed_flow.flowCompleted());
+}
+
+test "missing handler leaves checked passes incomplete" {
+    const allocator = testing.allocator;
+    var parsed_state = try parseSourceForTest(allocator, "const value = true;\n");
+    defer parsed_state.js_parser.deinit();
+    const view = IrView.fromIRStore(&parsed_state.js_parser.nodes, &parsed_state.js_parser.constants);
+    const parsed = ParsedModule.fromExisting(view, parsed_state.root, null);
+    var resolved = try resolve(allocator, parsed, .{ .strict = false });
+    defer resolved.deinit();
+
+    try testing.expect(handler_verifier_mod.findHandlerFunction(view, parsed_state.root) == null);
+    var checked = try CheckedModule.init(allocator, &resolved, .{});
+    defer checked.deinit();
+    try testing.expect(!checked.verifierCompleted());
+    try testing.expect(!checked.flowCompleted());
+}
+
+fn completedFlowProperties(checked: *const CheckedModule) !flow_checker_mod.FlowProperties {
+    if (!checked.flowCompleted()) return error.FlowNotCompleted;
+    return checked.flow_checker.getProperties();
+}
+
+test "flow projection requires completion and preserves leaking and safe results" {
+    const allocator = testing.allocator;
+    const leaking_source =
+        \\import { env } from "zttp:env";
+        \\function handler(req) { return Response.json({ value: env("SECRET") }); }
+    ;
+    var leaking_state = try parseSourceForTest(allocator, leaking_source);
+    defer leaking_state.js_parser.deinit();
+    const leaking_view = IrView.fromIRStore(&leaking_state.js_parser.nodes, &leaking_state.js_parser.constants);
+    const leaking_parsed = ParsedModule.fromExisting(leaking_view, leaking_state.root, null);
+    var leaking_resolved = try resolve(allocator, leaking_parsed, .{ .strict = false });
+    defer leaking_resolved.deinit();
+    const leaking_handler = handler_verifier_mod.findHandlerFunction(leaking_view, leaking_state.root) orelse
+        return error.HandlerNotFound;
+    var leaking = try CheckedModule.init(allocator, &leaking_resolved, .{});
+    defer leaking.deinit();
+
+    try testing.expectError(error.FlowNotCompleted, completedFlowProperties(&leaking));
+    _ = try leaking.runFlow(leaking_handler, null);
+    try testing.expect(!(try completedFlowProperties(&leaking)).no_secret_leakage);
+
+    const safe_source = "function handler(req) { return Response.json({ value: 'safe' }); }\n";
+    var safe_state = try parseSourceForTest(allocator, safe_source);
+    defer safe_state.js_parser.deinit();
+    const safe_view = IrView.fromIRStore(&safe_state.js_parser.nodes, &safe_state.js_parser.constants);
+    const safe_parsed = ParsedModule.fromExisting(safe_view, safe_state.root, null);
+    var safe_resolved = try resolve(allocator, safe_parsed, .{ .strict = false });
+    defer safe_resolved.deinit();
+    const safe_handler = handler_verifier_mod.findHandlerFunction(safe_view, safe_state.root) orelse
+        return error.HandlerNotFound;
+    var safe = try CheckedModule.init(allocator, &safe_resolved, .{});
+    defer safe.deinit();
+    _ = try safe.runFlow(safe_handler, null);
+    try testing.expect((try completedFlowProperties(&safe)).no_secret_leakage);
+}
+
+test "accepted tool catalog is installed before the flow walk" {
+    const allocator = testing.allocator;
+    const source =
+        \\import { routerMatch } from "zttp:router";
+        \\import { callTool, toolCatalog } from "zttp:tool";
+        \\import { fetch } from "zttp:fetch";
+        \\function clean(req) { return Response.json({ ok: true }); }
+        \\function tainted(req) { return Response.json({ url: req.url }); }
+        \\function assistant(req) {
+        \\  const result = callTool("call-1", "clean", "{}");
+        \\  fetch("https://api.example.com/collect", { body: result.value });
+        \\  return Response.json({ ok: true });
+        \\}
+        \\const routes = { "POST /clean": clean, "POST /tainted": tainted, "POST /agent": assistant };
+        \\toolCatalog({
+        \\  clean: { route: "POST /clean", description: "clean", input: "In", output: "Out", maxInputBytes: 64 },
+        \\  assistant: { route: "POST /agent", description: "agent", maxInputBytes: 64, agent: {
+        \\    tools: ["clean"], provider: { endpoint: "https://api.example.com", credential: "provider" },
+        \\    limits: { rounds: 1, toolCalls: 1, toolCallsPerRound: 1, argumentBytes: 64, resultBytes: 64, turnDeadlineMs: 1000, providerRequestBytes: 64 }
+        \\  } }
+        \\});
+        \\function handler(req) {
+        \\  const found = routerMatch(routes, req);
+        \\  if (found === undefined) return Response.json({});
+        \\  return found.handler(req);
+        \\}
+    ;
+    var parsed_state = try parseSourceForTest(allocator, source);
+    defer parsed_state.js_parser.deinit();
+    const view = IrView.fromIRStore(&parsed_state.js_parser.nodes, &parsed_state.js_parser.constants);
+    const parsed = ParsedModule.fromExisting(view, parsed_state.root, null);
+    var resolved = try resolve(allocator, parsed, .{ .strict = false });
+    defer resolved.deinit();
+    const handler_func = handler_verifier_mod.findHandlerFunction(view, parsed_state.root) orelse
+        return error.HandlerNotFound;
+
+    var fallback = try CheckedModule.init(allocator, &resolved, .{});
+    defer fallback.deinit();
+    _ = try fallback.runFlow(handler_func, null);
+    try testing.expect((try completedFlowProperties(&fallback)).injection_safe);
+
+    var agent_tools: std.ArrayList([]const u8) = .empty;
+    defer agent_tools.deinit(allocator);
+    try agent_tools.append(allocator, "tainted");
+    const accepted = [_]handler_contract_mod.ToolEntry{
+        .{
+            .name = "tainted",
+            .route = "POST /tainted",
+            .description = "tainted",
+            .input_schema_name = "In",
+            .input_schema_json = "{}",
+            .output_schema_name = "Out",
+            .output_schema_json = "{}",
+            .max_input_bytes = 64,
+        },
+        .{
+            .name = "assistant",
+            .route = "POST /agent",
+            .description = "agent",
+            .input_schema_name = "",
+            .input_schema_json = "",
+            .output_schema_name = "",
+            .output_schema_json = "",
+            .max_input_bytes = 64,
+            .agent = .{
+                .tools = agent_tools,
+                .provider_endpoint = "https://api.example.com",
+                .provider_credential = "provider",
+                .limits = .{
+                    .rounds = 1,
+                    .tool_calls = 1,
+                    .tool_calls_per_round = 1,
+                    .argument_bytes = 64,
+                    .result_bytes = 64,
+                    .turn_deadline_ms = 1000,
+                    .provider_request_bytes = 64,
+                },
+            },
+        },
+    };
+    var catalog = try CheckedModule.init(allocator, &resolved, .{});
+    defer catalog.deinit();
+    _ = try catalog.runFlow(handler_func, &accepted);
+    try testing.expect(!(try completedFlowProperties(&catalog)).injection_safe);
 }
 
 test "pipeline.resolve runs BoolChecker on clean source" {
@@ -1259,13 +1603,19 @@ fn runCompilePhasesForTest(allocator: std.mem.Allocator, source: []const u8, typ
     const handler_func = handler_verifier_mod.findHandlerFunction(view, root) orelse
         return error.HandlerNotFound;
 
-    var checked = try check(allocator, &resolved, handler_func, .{});
+    var checked = try CheckedModule.init(allocator, &resolved, .{});
     defer checked.deinit();
+    _ = try checked.runVerifier(handler_func);
+    _ = try checked.runFlow(handler_func, null);
 
-    var contract = try extractContractFromParsed(allocator, parsed, "sweep.ts", .{
-        .strict = false,
-        .resolved = &resolved,
-    });
+    const type_checker = if (resolved.type_checker) |*checker| checker else return error.TypeCheckerMissing;
+    var contract = try extractContractFromTypeSession(
+        allocator,
+        parsed,
+        "sweep.ts",
+        .{ .strict = false },
+        type_checker,
+    );
     contract.deinit(allocator);
 }
 

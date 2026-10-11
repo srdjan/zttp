@@ -22,7 +22,11 @@ The main agent owns authoritative checks, review, and local commits. No push is 
 
 Characterization passes against unchanged production code: `test-precompile` exits zero with 241 of 241 tests passing.
 The main agent reviews every changed characterization line and records the fixed digests.
-Sol now adds selectable pipeline passes. A second Sol agent prepares coordinator ownership without source edits.
+Selectable pipeline passes now pass `test-zts`: 2748 of 2749 tests pass, with one existing skip.
+The main agent reviews every changed pipeline line. The allocation failure sweep reports no leaks.
+The catalog test distinguishes accepted catalog input from absent catalog input through the resulting flow property.
+Retry tests confirm an induced allocation failure and refuse a second pass attempt.
+Sol now adapts the coordinator and private contract callers in `precompile.zig`.
 The baseline build and both public CLI commands exit zero.
 The small check takes 0.38 seconds. The small compile reports 0.00 seconds at the timer's precision.
 These observations do not establish a performance change.
@@ -47,11 +51,10 @@ The AOT allocation-error return has source-reviewed coverage only. No test claim
 
 ## Remaining work
 
-Incremental passes must preserve concrete fields and clean up every allocation failure.
 One stable coordinator must remove private contract fallback production.
 Public output comparisons and all named unfiltered checks must pass.
 The main agent will review every changed line and obtain an independent code review.
 
 ## Next action
 
-The main agent will review and test the incremental pipeline API before coordinator edits begin.
+The main agent will review coordinator ownership and compare public outcomes after the caller changes.
