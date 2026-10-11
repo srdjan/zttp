@@ -147,3 +147,19 @@ Result retention stayed at 381 bytes for tools and 73 bytes for pipeline. Cleanu
 The temporary probe is absent from committed code.
 
 The main agent will complete mutation checks, independent review, and the full verification contract next.
+
+## Simplification and review checkpoint
+
+Three Sol high reviewers checked reuse, quality, and efficiency in the complete product diff.
+The main agent applied one reuse finding and one quality finding. The efficiency review found no justified change.
+The owner no longer stores two states with identical extraction and cleanup behavior.
+The test reader now propagates the allocator's existing error directly.
+Unfiltered `test-zts` and `test-precompile` passed after both reductions. Formatting and diff checks passed.
+
+Code review: skipped (ce-code-review unavailable).
+The loaded review skill requires Python helpers for scope facts and stage records. Repository instructions prohibit Python execution.
+The review's scope reference says: "Derive deterministic facts once with `scripts/review-scope.py`" and prohibits replacement of those mechanics.
+The attempted top-level review returned `status: failed`. No completed CE review receipt is claimed.
+The private execution directory contains that failure record.
+The main agent owns the manual final scan. Two independent Sol high reviewers inspect frozen final code for lifecycle and compatibility.
+The main agent will finish the compiling mutations and full verification contract before completion.

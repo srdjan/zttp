@@ -553,7 +553,6 @@ pub const ModuleContractAnalysis = struct {
         analysis_attempted,
         completed,
         extraction_attempted,
-        extracted,
     };
 
     allocator: std.mem.Allocator = undefined,
@@ -616,7 +615,7 @@ pub const ModuleContractAnalysis = struct {
     ) !HandlerContract {
         switch (self.state) {
             .completed => self.state = .extraction_attempted,
-            .extraction_attempted, .extracted => return error.ContractExtractionAlreadyAttempted,
+            .extraction_attempted => return error.ContractExtractionAlreadyAttempted,
             else => return error.AnalysisNotCompleted,
         }
 
@@ -632,7 +631,6 @@ pub const ModuleContractAnalysis = struct {
         if (self.resolved) |*resolved| {
             if (resolved.typeErrorCount() > 0) return error.SoundModeViolation;
         }
-        self.state = .extracted;
         return contract;
     }
 
@@ -1102,7 +1100,7 @@ fn readGraphBaselineFile(allocator: std.mem.Allocator, path: []const u8) modules
     else
         return error.FileNotFound;
 
-    return allocator.dupe(u8, source) catch return error.OutOfMemory;
+    return allocator.dupe(u8, source);
 }
 
 const GraphCallbackModule = enum {
