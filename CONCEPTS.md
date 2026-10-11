@@ -39,7 +39,7 @@ How the fault-coverage Property treats a built-in function's failure: critical (
 A severity of none is not a claim that the function cannot fail. It can mean that a later critical function already reports the failure, or that the function needs a fork of its own before its failure can be counted.
 
 ### Unseen call
-A call to a function with a Failure severity that the path enumeration cannot hold on any path, so no failure path can cover it. Examples are a call inside a nested function or callback, a call at module scope, and a call in a file the Handler imports. An import that the analysis could not scan also counts as one. Any unseen call blocks the fault-coverage Property: the analysis fails closed on what it cannot see, and the absence of an answer is never read as a clean answer.
+A call to a function with a Failure severity that the path enumeration cannot hold on any path, so no failure path can cover it. A path holds a call when it records the call or when its branch condition tests the call, and the coverage count uses the same rule, so a call is never both counted and unseen. Examples are a call inside a nested function or callback, a call at module scope, and a call in a file the Handler imports. An import that the analysis could not scan also counts as one. Any unseen call blocks the fault-coverage Property: the analysis fails closed on what it cannot see, and the absence of an answer is never read as a clean answer.
 
 ## Accepting an artifact
 
