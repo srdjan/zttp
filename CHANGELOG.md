@@ -33,6 +33,23 @@ For releases prior to v0.16 see git tags and [RELEASE_CHECKLIST.md](RELEASE_CHEC
   may carry any of these properties falsely as well.** A module-scope mutation
   now also fails a declared `state_isolated` capsule with ZTS500.
 
+### Changed
+
+- **`zttp proofs gate` now fails on a lost critical proven property.** The gate
+  took each handler's verdict from the behavior diff alone, so an edit that
+  turned `fault_covered`, `no_secret_leakage`, or another proven property from
+  true to false passed as `equivalent`. A handler is now `breaking` when it
+  loses `retry_safe`, `injection_safe`, `state_isolated`, `no_secret_leakage`,
+  `no_credential_leakage`, `fault_covered`, `result_safe`, or `optional_safe`:
+  the same eight that `zttp prove` calls critical, now read from one table in
+  `contract_diff`. Every lost monotonic proof is listed under "Lost proofs" in
+  the Markdown report and in a new `lostProperties` array in the JSON report
+  (`zttp.proof-gate.v1` gains a key and keeps its name). A lost proof outside
+  the critical set is listed and leaves the verdict unchanged. When a critical
+  proof is lost, the gate writes no signed `kind=equivalence` receipt for that
+  handler. **A pull request that passed the gate while losing one of the eight
+  properties now fails it.**
+
 ## [0.21.1] - 2026-09-26
 
 A maintenance release. The shipped binaries behave as in 0.21.0; artifacts,

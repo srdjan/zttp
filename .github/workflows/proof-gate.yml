@@ -2,8 +2,10 @@ name: Proof Gate
 
 # Posts a behavioral-proof verdict for every changed handler as a sticky PR
 # comment and fails the check when a change is `breaking` or the proof gate
-# itself errors. The verdict (equivalent / additive / breaking) is the
-# compiler's answer to "is this safe to merge?", computed by
+# itself errors. A change is `breaking` when a route or response is removed or
+# changed, and also when a critical proven property is lost (for example
+# `fault_covered` or `no_secret_leakage`). The verdict (equivalent / additive /
+# breaking) is the compiler's answer to "is this safe to merge?", computed by
 # `zttp proofs gate`. See docs/proofs-and-receipts.md.
 
 on:

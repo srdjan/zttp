@@ -184,6 +184,17 @@ zttp proofs gate --base origin/main --head HEAD
 zttp proofs replay <capsule>
 ```
 
+`zttp proofs gate` compares every changed handler between the base and the head.
+It exits 1 when a response or route is removed or changed, and also when a
+critical proven property is lost: `retry_safe`, `injection_safe`,
+`state_isolated`, `no_secret_leakage`, `no_credential_leakage`,
+`fault_covered`, `result_safe`, or `optional_safe`. The report lists every lost
+proof under "Lost proofs". A lost proof outside that set is listed and does
+not change the verdict. The JSON report adds `lostProperties` to each handler:
+an array of `{"property", "severity"}` objects, empty when nothing was lost.
+When a critical proof is lost, the gate writes no signed receipt for that
+handler. See [Proofs and receipts](proofs-and-receipts.md#proof-gate).
+
 `zttp proofs replay <capsule>` replays a capsule recorded by `zttp dev
 --record-proof` against the current handler: exit 0 reproduced, 1 regression. It
 fails closed when the capsule's pinned handler, contract, or policy hash no

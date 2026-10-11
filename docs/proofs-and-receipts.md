@@ -512,10 +512,37 @@ aggregates one repo-level verdict:
 | `equivalent` | Surfaces and every response path are identical. | Mechanically safe. A proven no-op. |
 | `equivalent_modulo_laws` | Identical after the algebraic laws declared on virtual modules. | Safe. The report lists which laws the proof used. |
 | `additive` | New routes/capabilities, nothing removed or changed. | Backward-compatible. |
-| `breaking` | A route/capability was removed, or a response on an existing path changed. | Needs review. The gate fails the check. |
+| `breaking` | A route/capability was removed, a response on an existing path changed, or a critical proven property was lost. | Needs review. The gate fails the check. |
 
 The repo verdict is the worst single handler: one `breaking` handler makes the
 whole pull request `breaking`.
+
+### A lost proof
+
+The gate also compares the proven properties of each handler. A property that
+was proven at the base and is not proven at the head is a lost proof. A gained
+proof never changes the verdict.
+
+Only a critical lost proof makes the handler `breaking`. The critical set is
+`retry_safe`, `injection_safe`, `state_isolated`, `no_secret_leakage`,
+`no_credential_leakage`, `fault_covered`, `result_safe`, and `optional_safe`.
+The upgrade verifier behind `zttp prove` classifies the same eight as
+critical, because both read one table, `contract_diff.propertyLossSeverity`.
+Every other lost proof, for example `pure`, `read_only`, or `stateless`, is
+listed in the report and leaves the verdict as it was. A first log call or
+cache read removes several of these properties, and failing the gate on them
+would turn ordinary additive edits into failures.
+
+The report lists each lost proof under **Lost proofs** with its severity, and
+the summary table shows `N proofs lost` in the "Δ behavior" column. When a
+critical proof is lost, the gate writes no signed `kind=equivalence` receipt
+for the handler, because that receipt classifies from the behavior alone and
+would record `equivalent`.
+
+The gate acts on a lost proof only when the handler still analyzes. A handler
+without a `Proof<...>` capsule must prove the whole default profile, and a
+handler that declares the lost property fails its own analysis at the head. In
+both cases the gate stops with exit 2 and names the file.
 
 ### Local use
 
@@ -533,7 +560,9 @@ fails to analyze is never classified: calling it additive or skipping it would
 hide a route the branch removed, so the gate names the file and stops. The
 Markdown form is a ready-to-paste PR comment; the JSON form
 (`zttp.proof-gate.v1`) carries the per-handler verdict, behavior delta,
-surface delta, and counterexamples.
+surface delta, counterexamples, and `lostProperties`: an array of
+`{"property", "severity"}` objects, empty when no proof was lost. The key is
+an addition, so the schema name does not change.
 
 Flags:
 
