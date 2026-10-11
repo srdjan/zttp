@@ -212,6 +212,8 @@ fn getOrCreateStore(handle: *sdk.ModuleHandle) !*RateStore {
 fn rateCheckImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const sdk.JSValue) anyerror!sdk.JSValue {
     // Every failure is an error Result, never a plain `undefined`: the path
     // generator forks a Result on `.ok`, and no fork represents `undefined`.
+    // The one exception is a failure to allocate the error value itself:
+    // `rateErrorResult` then propagates `OutOfMemory`, as the success path does.
     if (args.len < 3) return rateErrorResult(handle, "invalid_arguments");
     const key = sdk.extractString(args[0]) orelse return rateErrorResult(handle, "invalid_arguments");
     const limit_i = sdk.extractInt(args[1]) orelse return rateErrorResult(handle, "invalid_arguments");
