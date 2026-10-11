@@ -130,3 +130,20 @@ Both probes freed all counted bytes after result cleanup. These values do not me
 The probe source remains in the private execution directory for the same post-migration measurement.
 
 The main agent will migrate the two producers next.
+
+## Producer migration checkpoint
+
+Both default graph producers now use `ModuleContractAnalysis` and extraction from a completed type session.
+Tools selects `contract_only`. Pipeline selects `sound_extraction` and retains the custom callback compatibility branch through the owner.
+The adapters retain entry-only options, graph order, AOT analysis, SQL validation, policy checks, merging, and cleanup order.
+The main agent reviewed all adapter changes line by line.
+
+Unfiltered `test-precompile`, `test-zts`, `test-zts-cli`, `test-contract-golden`, and `test-module-graph-record` passed.
+All four public artifact comparisons matched their baselines exactly after `zig build`.
+The pipeline characterization also compares exact default and custom contract JSON with fixed metadata.
+The post-migration probe ran the same source, options, and counter method as the baseline.
+Tools retained its allocation totals. Pipeline made 691 allocations and allocated 349370 bytes in total.
+Result retention stayed at 381 bytes for tools and 73 bytes for pipeline. Cleanup freed all counted bytes.
+The temporary probe is absent from committed code.
+
+The main agent will complete mutation checks, independent review, and the full verification contract next.

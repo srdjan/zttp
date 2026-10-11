@@ -4127,10 +4127,11 @@ fn buildMultiModuleContract(
 
         const module_view = zts.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
         const parsed = zts.pipeline.ParsedModule.fromExisting(module_view, compiled_module.root, atoms);
-        var module_contract = try zts.pipeline.extractContractFromParsed(
+        var module_analysis: zts.pipeline.ModuleContractAnalysis = .{};
+        try module_analysis.init(
             allocator,
             parsed,
-            module.path,
+            .contract_only,
             .{
                 .dispatch = if (temp_aot) |analysis| analysis.dispatch else null,
                 .has_default_response = if (temp_aot) |analysis| analysis.default_response != null else false,
@@ -4138,6 +4139,10 @@ fn buildMultiModuleContract(
                 .manifest_registry = manifest_registry,
             },
         );
+        defer module_analysis.deinit();
+        try module_analysis.complete();
+
+        var module_contract = try module_analysis.extractContract(module.path);
         defer module_contract.deinit(allocator);
 
         try validateSqlContract(allocator, &module_contract, sql_schema_path);

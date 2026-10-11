@@ -1023,34 +1023,13 @@ fn extractMultiModuleContract(
             module_opts.verification = null;
         }
 
-        var type_env_storage: TypeEnvStorage = .{};
-        defer type_env_storage.deinit(allocator);
-        if (module_opts.type_map) |type_map| {
-            try type_env_storage.init(allocator, type_map);
-        }
-        // Per module, not per compile: each module in the graph has its own IR,
-        // so an index built over one says nothing about another.
-        var module_facts = try buildModuleFacts(allocator, parsed, null);
-        defer module_facts.deinit();
+        var analysis: ModuleContractAnalysis = .{};
+        try analysis.init(allocator, parsed, .sound_extraction, module_opts);
+        defer analysis.deinit();
+        try analysis.complete();
 
-        var resolved = try resolve(allocator, parsed, .{
-            .type_env = type_env_storage.envPtr(),
-            .service_type_context = module_opts.service_type_context,
-            .strict = module_opts.strict,
-            .module_facts = &module_facts,
-        });
-        defer resolved.deinit();
-        if (resolved.bool_error_count > 0 or
-            resolved.typeErrorCount() > 0 or
-            resolved.strict_error_count > 0)
-        {
-            return error.SoundModeViolation;
-        }
-
-        module_opts.resolved = &resolved;
-        var module_contract = try extractContractFromParsed(allocator, parsed, module.path, module_opts);
+        var module_contract = try analysis.extractContract(module.path);
         defer module_contract.deinit(allocator);
-        if (resolved.typeErrorCount() > 0) return error.SoundModeViolation;
         try handler_contract_mod.mergeModuleContract(allocator, &merged, &module_contract, is_entry);
     }
 
