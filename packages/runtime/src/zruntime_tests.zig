@@ -91,14 +91,6 @@ const setAotOverrideForTest = handler_instance.setAotOverrideForTest;
 // ===========================================================================
 
 // ============================================================================
-// Percentile Tracker for Latency Metrics
-// ============================================================================
-
-/// Mutex-protected ring buffer that records nanosecond-resolution latency samples.
-/// Used only for diagnostic metrics in debug builds, so we prefer correctness
-/// under contention over lock-free writes.
-
-// ============================================================================
 // Handler Pool (Lock-Free)
 // ============================================================================
 

@@ -108,10 +108,10 @@ the per-module kinds (`policy_denied_env`, `policy_denied_cache`,
 capability denials; non-policy events omit the generation. A background thread drains
 the event queue and flushes it at shutdown.
 
-Observability: per-request access logging is on by default (method, path,
-status, duration, request id; disable with `-q`), and pool/latency metrics are
-logged. There is no scrape-able `/metrics` endpoint yet; that is planned for a
-later release.
+The runtime logs each request by default: method, path, status, duration, and
+request ID. Use `-q` to disable access logging. The runtime pool does not record
+latency statistics. The runtime has no `/metrics` endpoint. A later release is
+planned to add this endpoint.
 
 ## Inspect The Project
 

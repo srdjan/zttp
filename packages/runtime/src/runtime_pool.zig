@@ -17,7 +17,6 @@ const runtime_config_mod = @import("runtime_config.zig");
 const RuntimeConfig = runtime_config_mod.RuntimeConfig;
 const RuntimePolicyGeneration = @import("runtime_policy_generation.zig").RuntimePolicyGeneration;
 const openTraceFile = runtime_config_mod.openTraceFile;
-const PercentileTracker = @import("runtime_percentile.zig").PercentileTracker;
 
 const bytecode_cache = zq.bytecode_cache;
 const HttpRequestView = http_types.HttpRequestView;
@@ -37,10 +36,6 @@ pub const HandlerPool = struct {
     acquire_timeout_ms: u32,
     in_use: std.atomic.Value(usize),
     request_seq: std.atomic.Value(u64),
-    total_wait_ns: std.atomic.Value(u64),
-    max_wait_ns: std.atomic.Value(u64),
-    total_exec_ns: std.atomic.Value(u64),
-    max_exec_ns: std.atomic.Value(u64),
     exhausted_count: std.atomic.Value(u64),
     /// Release-time arena audit failures. Exposed via getMetrics().
     arena_audit_failures: std.atomic.Value(u64),
@@ -55,8 +50,6 @@ pub const HandlerPool = struct {
     /// Contract-derived lifecycle policy. Set by the server after contract parse.
     pooling_policy: contract_runtime.PoolingPolicy = .reuse_bounded_by_count,
     pooling_thresholds: contract_runtime.PoolingThresholds = .{},
-    wait_percentiles: PercentileTracker,
-    exec_percentiles: PercentileTracker,
     pool: zq.LockFreePool,
     cache: zq.BytecodeCache,
     cache_mutex: compat.Mutex,
@@ -88,7 +81,6 @@ pub const HandlerPool = struct {
     debug_panic_path: ?[]const u8 = null,
 
     const Self = @This();
-    const collect_pool_metrics = builtin.mode == .Debug;
 
     pub const ResponseHandle = struct {
         response: HttpResponse,
@@ -200,18 +192,12 @@ pub const HandlerPool = struct {
             .acquire_timeout_ms = acquire_timeout_ms,
             .in_use = std.atomic.Value(usize).init(0),
             .request_seq = std.atomic.Value(u64).init(0),
-            .total_wait_ns = std.atomic.Value(u64).init(0),
-            .max_wait_ns = std.atomic.Value(u64).init(0),
-            .total_exec_ns = std.atomic.Value(u64).init(0),
-            .max_exec_ns = std.atomic.Value(u64).init(0),
             .exhausted_count = std.atomic.Value(u64).init(0),
             .arena_audit_failures = std.atomic.Value(u64).init(0),
             .persistent_escape_failures = std.atomic.Value(u64).init(0),
             .recycles = std.atomic.Value(u64).init(0),
             .panics = std.atomic.Value(u64).init(0),
             .timeouts = std.atomic.Value(u64).init(0),
-            .wait_percentiles = .{},
-            .exec_percentiles = .{},
             .pool = pool,
             .cache = zq.BytecodeCache.init(allocator),
             .cache_mutex = .{},
@@ -395,7 +381,7 @@ pub const HandlerPool = struct {
     }
 
     fn nextRequestId(self: *Self) u64 {
-        return if (collect_pool_metrics) self.request_seq.fetchAdd(1, .acq_rel) + 1 else 0;
+        return if (builtin.mode == .Debug) self.request_seq.fetchAdd(1, .acq_rel) + 1 else 0;
     }
 
     /// Acquire and pin a runtime to the current worker thread.
@@ -444,13 +430,6 @@ pub const HandlerPool = struct {
         const base_rt = try self.acquireForRequest();
         var slot_disposed = false;
         errdefer if (borrowed and !slot_disposed) self.releaseForRequest(base_rt);
-        var exec_timer: ?compat.Timer = null;
-        if (collect_pool_metrics) {
-            exec_timer = compat.Timer.start() catch null;
-        }
-        defer if (collect_pool_metrics) {
-            if (exec_timer) |*t| self.recordExec(t.read());
-        };
         defer if (!borrowed and !slot_disposed) self.releaseForRequest(base_rt);
 
         var attempt: u8 = 0;
@@ -599,9 +578,6 @@ pub const HandlerPool = struct {
                 // Check timeout first
                 if (self.acquire_timeout_ms == 0) {
                     _ = self.exhausted_count.fetchAdd(1, .monotonic);
-                    if (collect_pool_metrics) {
-                        if (wait_timer) |*t| self.recordWait(t.read());
-                    }
                     return error.PoolExhausted;
                 }
 
@@ -621,9 +597,6 @@ pub const HandlerPool = struct {
                     const elapsed = t.read();
                     if (elapsed >= timeout_ns) {
                         _ = self.exhausted_count.fetchAdd(1, .monotonic);
-                        if (collect_pool_metrics) {
-                            self.recordWait(elapsed);
-                        }
                         return error.PoolExhausted;
                     }
                 }
@@ -651,7 +624,7 @@ pub const HandlerPool = struct {
                 backoff_ns = @min(backoff_ns * 2, max_backoff_ns);
                 continue;
             } else {
-                // No limit - monotonic is fine for metrics-only counter
+                // No limit - monotonic is sufficient for the in-use counter.
                 _ = self.in_use.fetchAdd(1, .monotonic);
                 break;
             }
@@ -659,22 +632,8 @@ pub const HandlerPool = struct {
 
         const rt = self.pool.acquire() catch |err| {
             _ = self.in_use.fetchSub(1, .monotonic);
-            if (collect_pool_metrics) {
-                if (wait_timer) |*t| {
-                    self.recordWait(t.read());
-                } else {
-                    self.recordWait(0);
-                }
-            }
             return err;
         };
-        if (collect_pool_metrics) {
-            if (wait_timer) |*t| {
-                self.recordWait(t.read());
-            } else {
-                self.recordWait(0);
-            }
-        }
 
         // TTL-based pooling is the only consumer of first_use_ns, so skip
         // the clock read for every other policy.
@@ -757,16 +716,6 @@ pub const HandlerPool = struct {
     pub fn getMetrics(self: *Self) struct {
         requests: u64,
         exhausted: u64,
-        avg_wait_ns: u64,
-        max_wait_ns: u64,
-        avg_exec_ns: u64,
-        max_exec_ns: u64,
-        wait_p50_ns: u64,
-        wait_p95_ns: u64,
-        wait_p99_ns: u64,
-        exec_p50_ns: u64,
-        exec_p95_ns: u64,
-        exec_p99_ns: u64,
         arena_audit_failures: u64,
         persistent_escape_failures: u64,
         recycles: u64,
@@ -774,22 +723,9 @@ pub const HandlerPool = struct {
         timeouts: u64,
         pooling_policy: contract_runtime.PoolingPolicy,
     } {
-        const requests = self.request_seq.load(.acquire);
-        const wait_total = self.total_wait_ns.load(.acquire);
-        const exec_total = self.total_exec_ns.load(.acquire);
         return .{
-            .requests = requests,
+            .requests = self.request_seq.load(.acquire),
             .exhausted = self.exhausted_count.load(.acquire),
-            .avg_wait_ns = if (requests > 0) wait_total / requests else 0,
-            .max_wait_ns = self.max_wait_ns.load(.acquire),
-            .avg_exec_ns = if (requests > 0) exec_total / requests else 0,
-            .max_exec_ns = self.max_exec_ns.load(.acquire),
-            .wait_p50_ns = self.wait_percentiles.getPercentile(50.0),
-            .wait_p95_ns = self.wait_percentiles.getPercentile(95.0),
-            .wait_p99_ns = self.wait_percentiles.getPercentile(99.0),
-            .exec_p50_ns = self.exec_percentiles.getPercentile(50.0),
-            .exec_p95_ns = self.exec_percentiles.getPercentile(95.0),
-            .exec_p99_ns = self.exec_percentiles.getPercentile(99.0),
             .arena_audit_failures = self.arena_audit_failures.load(.acquire),
             .persistent_escape_failures = self.persistent_escape_failures.load(.acquire),
             .recycles = self.recycles.load(.acquire),
@@ -797,18 +733,6 @@ pub const HandlerPool = struct {
             .timeouts = self.timeouts.load(.acquire),
             .pooling_policy = self.pooling_policy,
         };
-    }
-
-    fn recordWait(self: *Self, ns: u64) void {
-        _ = self.total_wait_ns.fetchAdd(ns, .acq_rel);
-        updateMax(&self.max_wait_ns, ns);
-        self.wait_percentiles.record(ns);
-    }
-
-    fn recordExec(self: *Self, ns: u64) void {
-        _ = self.total_exec_ns.fetchAdd(ns, .acq_rel);
-        updateMax(&self.max_exec_ns, ns);
-        self.exec_percentiles.record(ns);
     }
 
     fn isHandlerInvalid(err: anyerror) bool {
@@ -886,14 +810,6 @@ pub const HandlerPool = struct {
         };
         rt.clearRequestDeadline();
         return response;
-    }
-
-    fn updateMax(target: *std.atomic.Value(u64), value: u64) void {
-        var current = target.load(.acquire);
-        while (value > current) {
-            if (target.cmpxchgStrong(current, value, .acq_rel, .acquire) == null) return;
-            current = target.load(.acquire);
-        }
     }
 
     fn ensureRuntime(self: *Self, base_rt: *zq.LockFreePool.Runtime) !*HandlerInstance {
