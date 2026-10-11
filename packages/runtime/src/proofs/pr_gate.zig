@@ -11,12 +11,16 @@
 //!
 //!   exit 0 = safe (equivalent / equivalent_modulo_laws / additive)
 //!   exit 1 = breaking (a response on an existing path changed or was removed,
-//!            a route/capability was removed)
+//!            a route/capability was removed, or a critical proven property
+//!            was lost: see `contract_diff.propertyLossSeverity`)
 //!   exit 2 = usage or git error
 //!
 //! The analysis is entirely reused: `diffContracts` + `behavioralVerdict` for
-//! the per-handler verdict, and `equivalence_probe_lib` for the signed
-//! `kind=equivalence` ledger rows (best-effort, skipped under `--no-sign`).
+//! the per-handler verdict, the lost-property table of `contract_diff` for the
+//! critical-loss rule (every lost monotonic proven boolean is listed; only a
+//! critical one makes the handler breaking), and `equivalence_probe_lib` for
+//! the signed `kind=equivalence` ledger rows (best-effort, skipped under
+//! `--no-sign` and withheld when a critical proof was lost).
 //! Only the git-range discovery, multi-handler aggregation, and the
 //! PR-oriented rendering are new here.
 
@@ -108,12 +112,33 @@ pub const SurfaceDelta = struct {
     }
 };
 
+/// A proven property the edit turned from true to false. `severity` comes
+/// from `contract_diff.propertyLossSeverity`, the table the upgrade verifier
+/// also uses. Only a `.critical` loss changes the handler's verdict.
+pub const LostProperty = struct {
+    field: []const u8,
+    severity: contract_diff.Severity,
+};
+
+/// True when any lost property is critical, i.e. the loss fails the gate.
+pub fn hasCriticalLoss(lost: []const LostProperty) bool {
+    for (lost) |l| {
+        if (l.severity == .critical) return true;
+    }
+    return false;
+}
+
 pub const HandlerResult = struct {
     path: []const u8,
     verdict: Classification,
     behavior: BehaviorCounts = .{},
     surface: SurfaceDelta = .{},
     counterexamples: []const Counterexample = &.{},
+    /// Every monotonic proven boolean the edit lost, in `effect_changes` order.
+    lost_properties: []const LostProperty = &.{},
+    /// True when a signed receipt was requested and withheld because a
+    /// critical proof was lost: the receipt would record `equivalent`.
+    receipt_withheld: bool = false,
     signed: bool = false,
     /// Why a requested receipt was not written. The verdict does not depend
     /// on it; the gate reports it on stderr.
@@ -179,18 +204,32 @@ pub fn renderMarkdown(
         try w.writeAll("|---|---|---|---|\n");
         for (results) |r| {
             try w.print("| `{s}` | `{s}` | ", .{ r.path, r.verdict.toString() });
-            try writeBehaviorCell(w, r.behavior);
+            try writeBehaviorCell(w, r.behavior, r.lost_properties.len);
             try w.writeAll(" | ");
             try writeSurfaceCell(w, r.surface);
             try w.writeAll(" |\n");
         }
 
         for (results) |r| {
-            if (r.verdict.isSafeNoOp()) continue;
+            if (r.verdict.isSafeNoOp() and r.lost_properties.len == 0) continue;
             try w.print("\n### `{s}` — {s}\n", .{ r.path, r.verdict.toString() });
             if (!r.surface.isEmpty()) {
                 try w.writeAll("\n**Surface changes**\n\n");
                 try writeSurfaceLines(w, r.surface);
+            }
+            if (r.lost_properties.len > 0) {
+                try w.writeAll("\n**Lost proofs**\n\n");
+                for (r.lost_properties) |l| {
+                    try w.print("- `{s}`: proven → not proven ({s})\n", .{ l.field, l.severity.toString() });
+                }
+                if (hasCriticalLoss(r.lost_properties)) {
+                    try w.writeAll("\nA critical proof was lost, so the gate fails this handler.\n");
+                    if (r.receipt_withheld) {
+                        try w.writeAll("No signed receipt was written because a proof was lost.\n");
+                    }
+                } else {
+                    try w.writeAll("\nNo lost proof is critical, so the verdict is unchanged.\n");
+                }
             }
             if (r.verdict == .breaking and r.counterexamples.len > 0) {
                 try w.writeAll("\n**Counterexample** — behavior changed on an existing path:\n\n");
@@ -215,7 +254,7 @@ pub fn renderMarkdown(
     }
 }
 
-fn writeBehaviorCell(w: *std.Io.Writer, b: BehaviorCounts) !void {
+fn writeBehaviorCell(w: *std.Io.Writer, b: BehaviorCounts, lost: usize) !void {
     var first = true;
     if (b.response_changed > 0) {
         try w.print("{d} response changed", .{b.response_changed});
@@ -229,6 +268,11 @@ fn writeBehaviorCell(w: *std.Io.Writer, b: BehaviorCounts) !void {
     if (b.removed > 0) {
         if (!first) try w.writeAll(", ");
         try w.print("{d} removed", .{b.removed});
+        first = false;
+    }
+    if (lost > 0) {
+        if (!first) try w.writeAll(", ");
+        try w.print("{d} proof{s} lost", .{ lost, plural(lost) });
         first = false;
     }
     if (first) try w.writeAll("—");
@@ -337,6 +381,17 @@ pub fn renderJson(
             try json.write(c.status);
             try json.objectField("change");
             try json.write(@tagName(c.change));
+            try json.endObject();
+        }
+        try json.endArray();
+        try json.objectField("lostProperties");
+        try json.beginArray();
+        for (r.lost_properties) |l| {
+            try json.beginObject();
+            try json.objectField("property");
+            try json.write(l.field);
+            try json.objectField("severity");
+            try json.write(l.severity.toString());
             try json.endObject();
         }
         try json.endArray();
@@ -485,6 +540,22 @@ fn isHandlerContract(contract: *const zts.HandlerContract) bool {
     return contract.routes.items.len > 0 or
         contract.api.routes.items.len > 0 or
         contract.behaviors.items.len > 0;
+}
+
+/// The monotonic proven booleans the edit lost (true to false). The
+/// `max_io_depth` and `cost_class` rows that `diffContracts` also records
+/// carry presence bits, not proofs, so they are not lost properties here.
+fn lostProperties(arena: std.mem.Allocator, diff: *const contract_diff.ContractDiff) ![]const LostProperty {
+    var list: std.ArrayList(LostProperty) = .empty;
+    for (diff.effect_changes.items) |change| {
+        if (!(change.old_value and !change.new_value)) continue;
+        if (!zts.handler_contract.HandlerProperties.isMonotonicProvenSpecName(change.field)) continue;
+        try list.append(arena, .{
+            .field = try arena.dupe(u8, change.field),
+            .severity = contract_diff.propertyLossSeverity(change.field),
+        });
+    }
+    return try list.toOwnedSlice(arena);
 }
 
 fn behaviorCounts(diff: *const contract_diff.ContractDiff) BehaviorCounts {
@@ -919,9 +990,15 @@ fn analyzeHandler(
     var diff = try contract_diff.diffContracts(gpa, before_contract.?, after_contract.?);
     defer diff.deinit(gpa);
 
+    // A critical lost proof makes the handler breaking. Compute it before the
+    // receipt: the signed receipt classifies from `behavioralVerdict()` alone
+    // and would record `equivalent` for an edit the gate fails.
+    const lost = try lostProperties(arena, &diff);
+    const critical_loss = hasCriticalLoss(lost);
+
     var signed = false;
     var sign_failure: ?anyerror = null;
-    if (sign) {
+    if (sign and !critical_loss) {
         // Append a signed kind=equivalence row from the contracts already in
         // hand. A failure never changes the verdict, but the report must not
         // claim a receipt that was not written.
@@ -934,10 +1011,12 @@ fn analyzeHandler(
 
     return .{
         .path = try arena.dupe(u8, path),
-        .verdict = diff.behavioralVerdict(),
+        .verdict = if (critical_loss) .breaking else diff.behavioralVerdict(),
         .behavior = behaviorCounts(&diff),
         .surface = try extractSurface(arena, &diff),
         .counterexamples = try extractCounterexamples(arena, &diff),
+        .lost_properties = lost,
+        .receipt_withheld = sign and critical_loss,
         .signed = signed,
         .sign_failure = sign_failure,
     };
@@ -1352,6 +1431,275 @@ test "a helper missing at the base revision is unresolved, not read from the wor
     try testing.expect(!try faultCoveredOf(&sides.before));
     // The working-tree side finds the pure helper.
     try testing.expect(try faultCoveredOf(&sides.after));
+}
+
+// ---------------------------------------------------------------------------
+// A lost proven property: the projection, the renderers, and the gate
+// ---------------------------------------------------------------------------
+
+fn emptyDiff() contract_diff.ContractDiff {
+    return .{
+        .routes = .empty,
+        .api_route_changes = .empty,
+        .env_changes = .empty,
+        .egress_changes = .empty,
+        .cache_changes = .empty,
+        .sql_changes = .empty,
+        .dynamic_changes = .empty,
+    };
+}
+
+test "lostProperties: keeps true-to-false monotonic booleans with their severity and drops the rest" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+
+    var diff = emptyDiff();
+    defer diff.deinit(testing.allocator);
+    try diff.effect_changes.appendSlice(testing.allocator, &.{
+        // A critical loss.
+        .{ .field = "fault_covered", .old_value = true, .new_value = false },
+        // A gain.
+        .{ .field = "retry_safe", .old_value = false, .new_value = true },
+        // A non-critical loss.
+        .{ .field = "pure", .old_value = true, .new_value = false },
+        // `has_egress` is an inverse fact, not a monotonic proof.
+        .{ .field = "has_egress", .old_value = true, .new_value = false },
+        // max_io_depth and cost_class carry presence bits, not proofs. The
+        // cost_class row asserts the projection only: `diffContracts` appends
+        // it with presence bits, and a class that disappears is not a lost
+        // property here (`cost_bounded` carries the cost proof).
+        .{ .field = "max_io_depth", .old_value = true, .new_value = false },
+        .{ .field = "cost_class", .old_value = true, .new_value = false, .old_label = "constant", .new_label = null },
+    });
+
+    const lost = try lostProperties(arena_state.allocator(), &diff);
+    try testing.expectEqual(@as(usize, 2), lost.len);
+    try testing.expectEqualStrings("fault_covered", lost[0].field);
+    try testing.expectEqual(contract_diff.Severity.critical, lost[0].severity);
+    try testing.expectEqualStrings("pure", lost[1].field);
+    try testing.expectEqual(contract_diff.Severity.info, lost[1].severity);
+    try testing.expect(hasCriticalLoss(lost));
+    try testing.expect(!hasCriticalLoss(lost[1..]));
+}
+
+test "lostProperties: a gain, max_io_depth, and cost_class alone lose nothing" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+
+    var diff = emptyDiff();
+    defer diff.deinit(testing.allocator);
+    try diff.effect_changes.appendSlice(testing.allocator, &.{
+        .{ .field = "no_secret_leakage", .old_value = false, .new_value = true },
+        .{ .field = "max_io_depth", .old_value = true, .new_value = false },
+        .{ .field = "cost_class", .old_value = true, .new_value = false },
+    });
+    const lost = try lostProperties(arena_state.allocator(), &diff);
+    try testing.expectEqual(@as(usize, 0), lost.len);
+}
+
+test "renderMarkdown: a lost proof is listed, counted in the table, and named as the reason" {
+    const lost = [_]LostProperty{
+        .{ .field = "fault_covered", .severity = .critical },
+        .{ .field = "pure", .severity = .info },
+    };
+    const results = [_]HandlerResult{
+        .{ .path = "api/users.ts", .verdict = .breaking, .lost_properties = &lost, .receipt_withheld = true },
+        // A non-critical loss keeps its verdict and still gets a section.
+        .{ .path = "api/health.ts", .verdict = .equivalent, .lost_properties = lost[1..] },
+    };
+
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    try renderMarkdown(&aw.writer, "origin/main", "working tree", &results, &.{}, .breaking, 0);
+    const out = aw.writer.buffered();
+
+    try testing.expect(std.mem.indexOf(u8, out, "| `api/users.ts` | `breaking` | 2 proofs lost |") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "| `api/health.ts` | `equivalent` | 1 proof lost |") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "**Lost proofs**") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "- `fault_covered`: proven → not proven (critical)") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "- `pure`: proven → not proven (info)") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "No signed receipt was written because a proof was lost.") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "No lost proof is critical, so the verdict is unchanged.") != null);
+    // The health section exists although its verdict is a safe no-op.
+    try testing.expect(std.mem.indexOf(u8, out, "### `api/health.ts` — equivalent") != null);
+}
+
+test "renderJson: lostProperties is always present and lists property and severity" {
+    const lost = [_]LostProperty{.{ .field = "no_secret_leakage", .severity = .critical }};
+    const results = [_]HandlerResult{
+        .{ .path = "a.ts", .verdict = .breaking, .lost_properties = &lost },
+        .{ .path = "b.ts", .verdict = .equivalent },
+    };
+
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    try renderJson(&aw.writer, "origin/main", "feature/x", &results, &.{}, .breaking);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, aw.writer.buffered(), .{});
+    defer parsed.deinit();
+    const handlers = parsed.value.object.get("handlers").?.array.items;
+    const a = handlers[0].object.get("lostProperties").?.array.items;
+    try testing.expectEqual(@as(usize, 1), a.len);
+    try testing.expectEqualStrings("no_secret_leakage", a[0].object.get("property").?.string);
+    try testing.expectEqualStrings("critical", a[0].object.get("severity").?.string);
+    try testing.expectEqual(@as(usize, 0), handlers[1].object.get("lostProperties").?.array.items.len);
+    try testing.expectEqualStrings(json_schema, parsed.value.object.get("schema").?.string);
+}
+
+// A handler with a `Proof<...>` capsule that does not name the lost property.
+// `canonical` holds on both sides, so the capsule discharges before and after.
+// The head changes the handler and its helper gains an unchecked fetch, so
+// `fault_covered` is lost while every response path is unchanged. The helper
+// sits under `fixtures/`, a path the gate does not list as a handler: a changed
+// helper that reaches a capability is otherwise analyzed alone, lacks its own
+// `Effects<...>` and `Proof<...>` declarations, and ends the run with exit 2.
+const capsule_handler_base =
+    \\import { fetch } from "zttp:fetch";
+    \\import { enrich } from "./fixtures/lib.ts";
+    \\function handler(req: Request): Proof<Response, "canonical"> {
+    \\  const res = fetch("https://api.example.com/a");
+    \\  if (!res.ok) {
+    \\    return Response.json({ error: "upstream" }, { status: 502 });
+    \\  }
+    \\  return Response.json({ a: res.body, b: enrich() });
+    \\}
+    \\
+;
+
+const capsule_handler_head =
+    \\import { fetch } from "zttp:fetch";
+    \\import { enrich } from "./fixtures/lib.ts";
+    \\function handler(req: Request): Proof<Response, "canonical"> {
+    \\  const res = fetch("https://api.example.com/a");
+    \\  if (!res.ok) {
+    \\    return Response.json({ error: "upstream" }, { status: 502 });
+    \\  }
+    \\  return Response.json({ a: res.body, c: enrich() });
+    \\}
+    \\
+;
+
+// Pure on both sides except that the head reads the clock: `deterministic` and
+// `idempotent` are lost, `retry_safe` is kept.
+const clock_handler_base =
+    \\function handler(req: Request): Proof<Response, "canonical"> {
+    \\  return Response.json({ ok: true, t: 1 });
+    \\}
+    \\
+;
+
+const clock_handler_head =
+    \\function handler(req: Request): Proof<Response, "canonical"> {
+    \\  return Response.json({ ok: true, t: Date.now() });
+    \\}
+    \\
+;
+
+extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+
+/// Points HOME at the temporary repository so a signed receipt, if the gate
+/// wrongly tries one, creates its key there and not in the developer's home.
+const HomeOverride = struct {
+    previous: ?[:0]u8,
+
+    fn set(path: []const u8) !HomeOverride {
+        const previous: ?[:0]u8 = if (std.c.getenv("HOME")) |h|
+            try testing.allocator.dupeZ(u8, std.mem.sliceTo(h, 0))
+        else
+            null;
+        errdefer if (previous) |p| testing.allocator.free(p);
+        const path_z = try testing.allocator.dupeZ(u8, path);
+        defer testing.allocator.free(path_z);
+        if (setenv("HOME", path_z.ptr, 1) != 0) return error.TestUnexpectedResult;
+        return .{ .previous = previous };
+    }
+
+    fn restore(self: *HomeOverride) void {
+        if (self.previous) |p| {
+            _ = setenv("HOME", p.ptr, 1);
+            testing.allocator.free(p);
+        }
+    }
+};
+
+test "run: a critical lost proof fails the gate, lists the loss, and writes no receipt" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path_len = try tmp.dir.realPath(testing.io, &path_buf);
+    const repo_path = path_buf[0..path_len];
+
+    try expectGit(repo_path, &.{ "git", "init", "-q" });
+    try tmp.dir.createDirPath(testing.io, "fixtures");
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "handler.ts", .data = capsule_handler_base });
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "fixtures/lib.ts", .data = helper_pure });
+    try expectGit(repo_path, &.{ "git", "add", "handler.ts", "fixtures/lib.ts" });
+    try expectGit(repo_path, &.{ "git", "-c", "user.name=zttp test", "-c", "user.email=test@example.invalid", "commit", "-qm", "base" });
+
+    // The working tree: the helper gains an unchecked fetch, and the handler changes.
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "fixtures/lib.ts", .data = helper_unchecked_fetch });
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "handler.ts", .data = capsule_handler_head });
+
+    const old_cwd = try @import("../proof_ledger.zig").chdirTmpForTest(&tmp);
+    defer testing.allocator.free(old_cwd);
+    defer std.Io.Threaded.chdir(old_cwd) catch {};
+    var home = try HomeOverride.set(repo_path);
+    defer home.restore();
+
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    var err: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer err.deinit();
+    const code = try run(testing.allocator, .{ .base = "HEAD", .format = .md, .no_sign = false }, &out.writer, &err.writer);
+    const report = out.writer.buffered();
+
+    try testing.expectEqual(@as(u8, 1), code);
+    try testing.expect(std.mem.indexOf(u8, report, "**Verdict: `breaking`**") != null);
+    try testing.expect(std.mem.indexOf(u8, report, "**Lost proofs**") != null);
+    try testing.expect(std.mem.indexOf(u8, report, "- `fault_covered`: proven → not proven (critical)") != null);
+    try testing.expect(std.mem.indexOf(u8, report, "No signed receipt was written because a proof was lost.") != null);
+    // The receipt would have recorded `equivalent`: none is written, and the
+    // gate does not report a signing failure either.
+    try testing.expectError(error.FileNotFound, tmp.dir.access(testing.io, ".zttp/proofs.jsonl", .{}));
+    try testing.expect(std.mem.indexOf(u8, err.writer.buffered(), "no signed receipt") == null);
+}
+
+test "run: a loss of only non-critical proofs is listed and does not fail the gate" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path_len = try tmp.dir.realPath(testing.io, &path_buf);
+    const repo_path = path_buf[0..path_len];
+
+    try expectGit(repo_path, &.{ "git", "init", "-q" });
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "handler.ts", .data = clock_handler_base });
+    try expectGit(repo_path, &.{ "git", "add", "handler.ts" });
+    try expectGit(repo_path, &.{ "git", "-c", "user.name=zttp test", "-c", "user.email=test@example.invalid", "commit", "-qm", "base" });
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "handler.ts", .data = clock_handler_head });
+
+    const old_cwd = try @import("../proof_ledger.zig").chdirTmpForTest(&tmp);
+    defer testing.allocator.free(old_cwd);
+    defer std.Io.Threaded.chdir(old_cwd) catch {};
+
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    var err: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer err.deinit();
+    const code = try run(testing.allocator, .{ .base = "HEAD", .format = .json, .no_sign = true }, &out.writer, &err.writer);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, out.writer.buffered(), .{});
+    defer parsed.deinit();
+    const handler = parsed.value.object.get("handlers").?.array.items[0].object;
+    const lost = handler.get("lostProperties").?.array.items;
+    try testing.expect(lost.len > 0);
+    var saw_deterministic = false;
+    for (lost) |l| {
+        try testing.expect(!std.mem.eql(u8, l.object.get("severity").?.string, "critical"));
+        if (std.mem.eql(u8, l.object.get("property").?.string, "deterministic")) saw_deterministic = true;
+    }
+    try testing.expect(saw_deterministic);
+    try testing.expect(!std.mem.eql(u8, handler.get("verdict").?.string, "breaking"));
+    try testing.expectEqual(@as(u8, 0), code);
 }
 
 test "repoRelativePath keeps a relative path, relativizes an absolute one, and refuses an outside path" {
