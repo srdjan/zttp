@@ -40,7 +40,12 @@ const packBindingKey = bool_checker_mod.packBindingKey;
 
 pub const Constraint = union(enum) {
     req_method: []const u8,
+    /// The request method must differ from this value: the false side of a
+    /// `req.method` comparison.
+    req_method_not: []const u8,
     req_url: []const u8,
+    /// The request URL must differ from this value.
+    req_url_not: []const u8,
     stub_truthy: StubInfo,
     stub_falsy: StubInfo,
     result_ok: StubInfo,
@@ -115,7 +120,9 @@ fn stubInfoEql(a: StubInfo, b: StubInfo) bool {
 fn constraintEql(a: Constraint, b: Constraint) bool {
     return switch (a) {
         .req_method => |x| b == .req_method and std.mem.eql(u8, x, b.req_method),
+        .req_method_not => |x| b == .req_method_not and std.mem.eql(u8, x, b.req_method_not),
         .req_url => |x| b == .req_url and std.mem.eql(u8, x, b.req_url),
+        .req_url_not => |x| b == .req_url_not and std.mem.eql(u8, x, b.req_url_not),
         .stub_truthy => |x| b == .stub_truthy and stubInfoEql(x, b.stub_truthy),
         .stub_falsy => |x| b == .stub_falsy and stubInfoEql(x, b.stub_falsy),
         .result_ok => |x| b == .result_ok and stubInfoEql(x, b.result_ok),
@@ -129,13 +136,15 @@ fn constraintEql(a: Constraint, b: Constraint) bool {
 }
 
 /// The contract condition for a constraint, or null for one the contract does
-/// not record (a status test that is not a failure path).
+/// not record: a status test that is not a failure path, and a negative request
+/// constraint. `PathCondition.Kind` has no negative request kind, and the
+/// contract bytes do not gain one.
 fn dupePathCondition(
     allocator: std.mem.Allocator,
     constraint: Constraint,
 ) !?handler_contract.PathCondition {
     return switch (constraint) {
-        .status_is => null,
+        .status_is, .req_method_not, .req_url_not => null,
         .req_method => |value| .{
             .kind = .req_method,
             .value = try allocator.dupe(u8, value),
@@ -201,6 +210,17 @@ fn dupePathIoCall(
 /// comparison that is the complement of `ok`, and counts the severities that
 /// F5 declared.
 pub const path_analyzer_version: u32 = 3;
+
+/// Methods tried in order for a path whose constraints name no method.
+const request_method_candidates = [_][]const u8{ "GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS" };
+
+/// URLs tried in order for a path whose constraints name no URL.
+const request_url_candidates = [_][]const u8{
+    "/",
+    "/__zttp_alternate__",
+    "/__zttp_alternate_2__",
+    "/__zttp_alternate_3__",
+};
 
 // ---------------------------------------------------------------------------
 // PathGenerator
@@ -1800,7 +1820,10 @@ pub const PathGenerator = struct {
 
     fn negateConstraint(_: *const PathGenerator, c: Constraint) ?Constraint {
         return switch (c) {
-            .req_method, .req_url => null,
+            .req_method => |m| .{ .req_method_not = m },
+            .req_method_not => |m| .{ .req_method = m },
+            .req_url => |u| .{ .req_url_not = u },
+            .req_url_not => |u| .{ .req_url = u },
             .stub_truthy => |info| .{ .stub_falsy = info },
             .stub_falsy => |info| .{ .stub_truthy = info },
             .result_ok => |info| .{ .result_not_ok = info },
@@ -2006,6 +2029,64 @@ pub const PathGenerator = struct {
     // Test case emission
     // -------------------------------------------------------------------
 
+    const SolvedRequest = struct {
+        method: []const u8,
+        url: []const u8,
+    };
+
+    /// The method and URL that satisfy the request constraints of this path. A
+    /// positive constraint names the value (the last one wins). With none, the
+    /// first candidate that differs from every negative constraint is used, so
+    /// the path after `if (req.method !== "POST") return 405` sends `POST` and
+    /// the 405 path sends a method other than `POST`.
+    fn solveRequest(self: *const PathGenerator) SolvedRequest {
+        var method: ?[]const u8 = null;
+        var url: ?[]const u8 = null;
+        for (self.constraints.items) |c| {
+            switch (c) {
+                .req_method => |m| method = m,
+                .req_url => |u| url = u,
+                .req_method_not,
+                .req_url_not,
+                .stub_truthy,
+                .stub_falsy,
+                .result_ok,
+                .result_not_ok,
+                .status_is,
+                => {},
+            }
+        }
+        return .{
+            .method = method orelse self.firstUnexcluded(&request_method_candidates, .method),
+            .url = url orelse self.firstUnexcluded(&request_url_candidates, .url),
+        };
+    }
+
+    const RequestPart = enum { method, url };
+
+    /// The first candidate that no negative constraint of that part excludes.
+    /// The candidate lists are longer than any path's negative constraints in
+    /// practice; the last candidate is the fallback.
+    fn firstUnexcluded(
+        self: *const PathGenerator,
+        candidates: []const []const u8,
+        part: RequestPart,
+    ) []const u8 {
+        for (candidates) |candidate| {
+            var excluded = false;
+            for (self.constraints.items) |c| {
+                const not = switch (c) {
+                    .req_method_not => |m| if (part == .method) m else continue,
+                    .req_url_not => |u| if (part == .url) u else continue,
+                    else => continue,
+                };
+                if (std.mem.eql(u8, not, candidate)) excluded = true;
+            }
+            if (!excluded) return candidate;
+        }
+        return candidates[candidates.len - 1];
+    }
+
     fn emitTestCase(self: *PathGenerator, status: u16) !void {
         if (self.path_count >= MAX_PATHS) return;
         self.path_count += 1;
@@ -2014,9 +2095,11 @@ pub const PathGenerator = struct {
         const prefix = std.fmt.bufPrint(name_buf[0..], "path {d}", .{self.path_count}) catch "path";
         name_len = prefix.len;
 
+        var negated_buf: [64]u8 = undefined;
         for (self.constraints.items) |c| {
             const desc: []const u8 = switch (c) {
                 .req_method => |m| m,
+                .req_method_not, .req_url_not => |v| std.fmt.bufPrint(&negated_buf, "!{s}", .{v}) catch "",
                 .req_url => |u| u,
                 .stub_truthy => |s| s.func,
                 .stub_falsy => "!falsy",
@@ -2036,8 +2119,6 @@ pub const PathGenerator = struct {
         errdefer self.allocator.free(name);
 
         // Derive request properties from constraints
-        var method: []const u8 = "GET";
-        var url: []const u8 = "/";
         var has_auth = false;
 
         // Build I/O stubs from constraints + tracked calls
@@ -2058,8 +2139,7 @@ pub const PathGenerator = struct {
 
         for (self.constraints.items) |c| {
             switch (c) {
-                .req_method => |m| method = m,
-                .req_url => |u| url = u,
+                .req_method, .req_method_not, .req_url, .req_url_not => {},
                 .stub_truthy => |info| {
                     try stub_overrides.put(self.allocator, info.call_site, stubValueForType(info.returns, true));
                     if (std.mem.eql(u8, info.func, "parseBearer")) has_auth = true;
@@ -2077,6 +2157,9 @@ pub const PathGenerator = struct {
             }
         }
         try self.applyStatusTests(&stub_overrides);
+        const request = self.solveRequest();
+        const method = request.method;
+        const url = request.url;
 
         // Second pass: emit I/O stubs for tracked calls on this path
         for (self.io_seq.items) |io_call| {
@@ -4823,4 +4906,111 @@ test "a failed check behind a method conjunct sends that method on its failure p
         saw_401 = true;
     }
     try std.testing.expect(saw_401);
+}
+
+test "a !== method guard sends POST on every path after it and another method on the guard path" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { jwtVerify } from "zttp:auth";
+        \\function handler(req) {
+        \\  if (req.method !== "POST") return Response.text("no", { status: 405 });
+        \\  const r = jwtVerify("t", "s");
+        \\  if (!r.ok) return Response.text("no", { status: 401 });
+        \\  return Response.text("ok");
+        \\}
+    ;
+    var fixture = try generateFixture(allocator, source);
+    defer fixture.deinit();
+
+    const tests = fixture.generator.getTests();
+    try std.testing.expectEqual(@as(usize, 3), tests.len);
+    var seen_405 = false;
+    var seen_401 = false;
+    var seen_200 = false;
+    for (tests) |t| {
+        switch (t.expected_status) {
+            405 => {
+                seen_405 = true;
+                try std.testing.expect(!std.mem.eql(u8, t.method, "POST"));
+            },
+            401 => {
+                seen_401 = true;
+                try std.testing.expectEqualStrings("POST", t.method);
+            },
+            200 => {
+                seen_200 = true;
+                try std.testing.expectEqualStrings("POST", t.method);
+            },
+            else => return error.UnexpectedStatus,
+        }
+    }
+    try std.testing.expect(seen_405 and seen_401 and seen_200);
+}
+
+test "a !== GET guard sends a method other than GET on the guard path" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\function handler(req) {
+        \\  if (req.method !== "GET") return Response.text("no", { status: 405 });
+        \\  return Response.text("ok");
+        \\}
+    ;
+    var fixture = try generateFixture(allocator, source);
+    defer fixture.deinit();
+
+    const tests = fixture.generator.getTests();
+    try std.testing.expectEqual(@as(usize, 2), tests.len);
+    for (tests) |t| {
+        if (t.expected_status == 405) {
+            try std.testing.expect(!std.mem.eql(u8, t.method, "GET"));
+        } else {
+            try std.testing.expectEqualStrings("GET", t.method);
+        }
+    }
+}
+
+test "the fall-through of two method tests sends a method that is neither" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\function handler(req) {
+        \\  if (req.method === "GET") return Response.text("a", { status: 201 });
+        \\  if (req.method === "POST") return Response.text("b", { status: 202 });
+        \\  return Response.text("c", { status: 203 });
+        \\}
+    ;
+    var fixture = try generateFixture(allocator, source);
+    defer fixture.deinit();
+
+    const tests = fixture.generator.getTests();
+    try std.testing.expectEqual(@as(usize, 3), tests.len);
+    var seen_third = false;
+    for (tests) |t| {
+        if (t.expected_status != 203) continue;
+        seen_third = true;
+        try std.testing.expect(!std.mem.eql(u8, t.method, "GET"));
+        try std.testing.expect(!std.mem.eql(u8, t.method, "POST"));
+    }
+    try std.testing.expect(seen_third);
+}
+
+test "a !== url guard sends a url other than the compared one" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\function handler(req) {
+        \\  if (req.url !== "/") return Response.text("no", { status: 404 });
+        \\  return Response.text("ok");
+        \\}
+    ;
+    var fixture = try generateFixture(allocator, source);
+    defer fixture.deinit();
+
+    const tests = fixture.generator.getTests();
+    try std.testing.expectEqual(@as(usize, 2), tests.len);
+    for (tests) |t| {
+        if (t.expected_status == 404) {
+            try std.testing.expect(!std.mem.eql(u8, t.url, "/"));
+        } else {
+            try std.testing.expectEqualStrings("/", t.url);
+        }
+    }
 }

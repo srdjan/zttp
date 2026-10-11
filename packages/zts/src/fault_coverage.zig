@@ -277,10 +277,10 @@ pub const FaultCoverageChecker = struct {
                 const info: StubInfo = switch (c) {
                     .stub_truthy, .stub_falsy => |s| s,
                     .result_ok, .result_not_ok => |s| s,
-                    // exhaustive: the four remaining WitnessConstraint variants
-                    // are req_method/req_url shapes carrying a string, not a
-                    // StubInfo. They constrain the request, not an I/O call, so
-                    // there is no stub for this loop to look up.
+                    // exhaustive: the remaining variants are the four request
+                    // shapes (req_method, req_method_not, req_url, req_url_not)
+                    // and status_is. They constrain the request or a status, not
+                    // whether an I/O call fails, so this loop counts none.
                     else => continue,
                 };
 
