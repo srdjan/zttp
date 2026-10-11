@@ -1815,6 +1815,77 @@ test "version 2 round-trips a populated contract field for field" {
     try std.testing.expectEqualSlices(u8, &original.source_identity.frontend.?.grammar_hash, &parsed.source_identity.frontend.?.grammar_hash);
 }
 
+/// The `faultCoverage` object of a written contract, in either key style. The
+/// whole document does not round-trip from an empty contract, because a decoded
+/// sandbox recomputes its capability hash, so these tests compare this slice.
+fn faultCoverageSection(bytes: []const u8) ![]const u8 {
+    const start = std.mem.indexOf(u8, bytes, "\"faultCoverage\"") orelse
+        std.mem.indexOf(u8, bytes, "\"fault_coverage\"") orelse return error.TestUnexpectedResult;
+    const end = std.mem.indexOfPos(u8, bytes, start, "\n  },") orelse return error.TestUnexpectedResult;
+    return bytes[start..end];
+}
+
+test "a fault coverage record with unseen calls round-trips to the same isCovered" {
+    const allocator = std.testing.allocator;
+    const versions = [_]JsonVersion{ .v1, .v2 };
+    inline for (versions) |json_version| {
+        var original = handler_contract.emptyContract(try allocator.dupe(u8, "handler.ts"));
+        defer original.deinit(allocator);
+        // Every counted site is covered, yet one failable call sits on no path.
+        original.fault_coverage = .{
+            .total_failable = 2,
+            .covered = 2,
+            .warnings = 0,
+            .unseen_calls = 1,
+            .analysis_complete = true,
+        };
+        const written = try writeTestContractJson(allocator, &original, json_version);
+        defer allocator.free(written);
+        try std.testing.expect(std.mem.indexOf(u8, written, ": false\n  },\n") != null);
+
+        var parsed = try handler_contract.parseFromJson(allocator, written);
+        defer parsed.deinit(allocator);
+        try std.testing.expect(!parsed.fault_coverage.?.isCovered());
+
+        const rewritten = try writeTestContractJson(allocator, &parsed, json_version);
+        defer allocator.free(rewritten);
+        try std.testing.expectEqualStrings(try faultCoverageSection(written), try faultCoverageSection(rewritten));
+    }
+}
+
+test "a fault coverage record with an incomplete analysis writes isCovered false" {
+    const allocator = std.testing.allocator;
+    var original = handler_contract.emptyContract(try allocator.dupe(u8, "handler.ts"));
+    defer original.deinit(allocator);
+    original.fault_coverage = .{
+        .total_failable = 1,
+        .covered = 1,
+        .warnings = 0,
+        .analysis_complete = false,
+    };
+    const written = try writeTestContractJson(allocator, &original, .v2);
+    defer allocator.free(written);
+    try std.testing.expect(std.mem.indexOf(u8, written, "\"is_covered\": false") != null);
+
+    var parsed = try handler_contract.parseFromJson(allocator, written);
+    defer parsed.deinit(allocator);
+    const rewritten = try writeTestContractJson(allocator, &parsed, .v2);
+    defer allocator.free(rewritten);
+    try std.testing.expectEqualStrings(try faultCoverageSection(written), try faultCoverageSection(rewritten));
+}
+
+test "a decoded fault coverage record without isCovered counts as complete" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{ "version": 1, "handler": { "path": "h.ts", "line": 1, "column": 1 },
+        \\  "faultCoverage": { "totalFailable": 1, "covered": 1, "warnings": 0 } }
+    ;
+    var parsed = try handler_contract.parseFromJson(allocator, json);
+    defer parsed.deinit(allocator);
+    try std.testing.expect(parsed.fault_coverage.?.analysis_complete);
+    try std.testing.expect(parsed.fault_coverage.?.isCovered());
+}
+
 test "source identity rejects unknown profiles and malformed hashes" {
     const allocator = std.testing.allocator;
     const unknown_profile =

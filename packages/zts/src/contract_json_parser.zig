@@ -371,6 +371,9 @@ const FaultCoverageWire = struct {
     totalFailable: WireU32 = .{ .value = null },
     covered: WireU32 = .{ .value = null },
     warnings: WireU32 = .{ .value = null },
+    /// Absent in a document that never wrote it; `projectFaultCoverage` reads
+    /// an absent key as a complete analysis.
+    isCovered: ?bool = null,
 };
 
 const AotWire = struct {
@@ -1813,10 +1816,23 @@ fn projectFaultCoverage(
     wire: ?FaultCoverageWire,
     contract: *HandlerContract,
 ) void {
-    contract.fault_coverage = if (wire) |value| .{
-        .total_failable = value.totalFailable.value orelse 0,
-        .covered = value.covered.value orelse 0,
-        .warnings = value.warnings.value orelse 0,
+    contract.fault_coverage = if (wire) |value| blk: {
+        const total = value.totalFailable.value orelse 0;
+        const covered = value.covered.value orelse 0;
+        // The writer derives `isCovered` from the counts plus the walk's
+        // completeness, and writes no key for the completeness alone. When the
+        // counts say covered yet `isCovered` is false, the analysis was
+        // incomplete (or an unseen call blocked it, which the record cannot
+        // tell apart), so restore false and the decoded record writes the same
+        // bytes it was read from. An absent key restores a complete analysis.
+        const counts_cover = covered == total and total > 0;
+        const written_covered = value.isCovered orelse true;
+        break :blk .{
+            .total_failable = total,
+            .covered = covered,
+            .warnings = value.warnings.value orelse 0,
+            .analysis_complete = written_covered or !counts_cover,
+        };
     } else null;
 }
 

@@ -605,9 +605,17 @@ pub const FaultCoverageInfo = struct {
     /// Covered upstream sites whose failure path returns 2xx. Not serialized:
     /// a count for the proof trace, which reports it as `upstreamFallbackSites`.
     upstream_fallback_sites: u32 = 0,
+    /// `PathGenerator.faultAnalysisComplete()` when the build stamped the
+    /// record: false when a loop, recursion, a limit, or an unresolved route
+    /// dispatch left the path set a summary. No default, so each constructor
+    /// states it. Not serialized as its own key: `isCovered` carries it, and a
+    /// decoded record restores it from `isCovered`. After a decode a false
+    /// value therefore cannot be told apart from `unseen_calls > 0`; both only
+    /// say that `isCovered` was false although every counted site is covered.
+    analysis_complete: bool,
 
     pub fn isCovered(self: FaultCoverageInfo) bool {
-        return self.covered == self.total_failable and self.total_failable > 0 and self.unseen_calls == 0;
+        return self.covered == self.total_failable and self.total_failable > 0 and self.unseen_calls == 0 and self.analysis_complete;
     }
 };
 

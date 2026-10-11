@@ -74,8 +74,13 @@ pub const CheckResult = struct {
     /// Why coverage is or is not complete. A static string, so nothing owns it.
     paths_coverage_note: []const u8 = "exhaustive",
     max_io_depth: ?u32 = null,
+    /// Failable call sites the path walk recorded, and how many of them have a
+    /// failure path. Call sites, not paths.
     fault_total: u32 = 0,
     fault_covered: u32 = 0,
+    /// Failable calls the walk never recorded on any path. They are in neither
+    /// count above, and each one blocks `fault_covered`.
+    fault_unseen: u32 = 0,
     properties: ?handler_contract.HandlerProperties = null,
     contract: ?HandlerContract = null,
     /// Structured diagnostics for JSON output mode.
@@ -536,6 +541,7 @@ pub fn formatProofCard(writer: anytype, r: *const CheckResult, filename: []const
         writeProven(writer, "deterministic", props.deterministic);
         writeProven(writer, "read_only", props.read_only);
         writeProven(writer, "cost_bounded", props.cost_bounded);
+        writeProven(writer, "fault_covered", props.fault_covered);
 
         writer.print("\n  Security:\n", .{}) catch return;
         writeProven(writer, "no_secret_leakage", props.no_secret_leakage);
@@ -545,8 +551,12 @@ pub fn formatProofCard(writer: anytype, r: *const CheckResult, filename: []const
 
     // Summary stats
     writer.print("\n", .{}) catch return;
-    if (r.fault_total > 0) {
-        writer.print("  Fault coverage: {d}/{d} paths covered\n", .{ r.fault_covered, r.fault_total }) catch return;
+    if (r.fault_total > 0 or r.fault_unseen > 0) {
+        writer.print("  Fault coverage: {d}/{d} failable call sites covered", .{ r.fault_covered, r.fault_total }) catch return;
+        if (r.fault_unseen > 0) {
+            writer.print(", {d} not on any path", .{r.fault_unseen}) catch return;
+        }
+        writer.print("\n", .{}) catch return;
     }
     if (r.paths_enumerated > 0) {
         // The note names the actual cause. A single bool made every cause read

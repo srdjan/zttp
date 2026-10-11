@@ -581,6 +581,7 @@ test "buildReport: from contract with verification and properties" {
         .total_failable = 2,
         .covered = 2,
         .warnings = 0,
+        .analysis_complete = true,
     };
 
     const br = buildReport(allocator, &contract, null, null, null, "handler.ts");
@@ -601,6 +602,27 @@ test "buildReport: from contract with verification and properties" {
     try std.testing.expect(br.flow_analysis.?.injection_safe);
     try std.testing.expect(br.manifest_alignment == null);
     try std.testing.expect(br.property_expectations == null);
+}
+
+test "buildReport: fault coverage is clean only when the analysis is complete" {
+    const allocator = std.testing.allocator;
+
+    var contract = emptyContract();
+    defer contract.deinit(allocator);
+
+    contract.fault_coverage = .{
+        .total_failable = 2,
+        .covered = 2,
+        .warnings = 0,
+        .analysis_complete = false,
+    };
+    try std.testing.expect(!buildReport(allocator, &contract, null, null, null, "h.ts").fault_coverage.?.clean);
+
+    contract.fault_coverage.?.analysis_complete = true;
+    try std.testing.expect(buildReport(allocator, &contract, null, null, null, "h.ts").fault_coverage.?.clean);
+
+    contract.fault_coverage.?.unseen_calls = 1;
+    try std.testing.expect(!buildReport(allocator, &contract, null, null, null, "h.ts").fault_coverage.?.clean);
 }
 
 test "buildReport: minimal contract" {

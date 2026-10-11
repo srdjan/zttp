@@ -580,13 +580,17 @@ fn buildTrace(
                         }
                     } else if (fc.total_failable == 0) {
                         trace.summary = "No failable I/O sites in this handler yet.";
-                    } else if (fc.covered == fc.total_failable and fc.warnings == 0 and !paths_exhaustive) {
-                        // Every counted site has a failure path, but the path
-                        // set is a summary (a loop walked once, recursion, a
-                        // limit), so a site on a path never emitted is unseen.
+                    } else if (fc.covered == fc.total_failable and fc.warnings == 0 and !fc.analysis_complete) {
+                        // Every counted site has a failure path, but the fault
+                        // analysis is incomplete: the path set is a summary (a
+                        // loop walked once, recursion, a limit), or a route
+                        // dispatch did not resolve. A site on a path never
+                        // emitted is unseen. `analysis_complete` is the
+                        // generator's own answer, so this branch also covers
+                        // the unresolved dispatch that `paths_exhaustive` misses.
                         trace.summary = try std.fmt.allocPrint(
                             arena,
-                            "All {d} counted failable I/O site(s) have a failure path, but the enumerated paths are not exhaustive, so the property is not proven.",
+                            "All {d} counted failable I/O site(s) have a failure path, but the fault analysis is not complete (the enumerated paths are a summary, or a route dispatch did not resolve), so the property is not proven.",
                             .{fc.total_failable},
                         );
                     } else {
@@ -985,6 +989,40 @@ test "collect emits durable workflow negative reasons" {
     try testing.expect(std.mem.indexOf(u8, buf.items, "\"durable_workflow_retry_safe\":{") != null);
     try testing.expect(std.mem.indexOf(u8, buf.items, "Durable workflow retry safety is unproven") != null);
     try testing.expect(std.mem.indexOf(u8, buf.items, "dynamic names") != null);
+}
+
+test "an incomplete fault analysis is named even when the enumerated paths are exhaustive" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    var contract = handler_contract.emptyContract(try testing.allocator.dupe(u8, "handler.ts"));
+    defer contract.deinit(testing.allocator);
+    contract.properties = .{
+        .pure = false,
+        .read_only = false,
+        .stateless = false,
+        .retry_safe = false,
+        .deterministic = true,
+        .has_egress = true,
+        .fault_covered = false,
+    };
+    // Every counted site is covered and the path set is exhaustive, yet the
+    // generator reported the analysis incomplete (an unresolved route dispatch).
+    contract.fault_coverage = .{
+        .total_failable = 2,
+        .covered = 2,
+        .warnings = 0,
+        .analysis_complete = false,
+    };
+
+    const traces = try collect(arena.allocator(), &contract, &.{}, &.{}, undefined, 4, true);
+    var summary: ?[]const u8 = null;
+    for (traces) |trace| {
+        if (std.mem.eql(u8, trace.property, "fault_covered")) summary = trace.summary;
+    }
+    const text = summary orelse return error.TestUnexpectedResult;
+    try testing.expect(std.mem.indexOf(u8, text, "fault analysis is not complete") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "route dispatch did not resolve") != null);
 }
 
 test "unbounded cost trace carries loop counterexample and lever" {
