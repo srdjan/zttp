@@ -1,6 +1,6 @@
 # Code review fixes for the R3 and R4 fault coverage series
 
-Status: plan, revision 1. Source: `/code-review --fix` over the 46 commits on
+Status: plan, revision 2 (Fable review folded in; Codex astra could not run: its tool host timed out twice). Source: `/code-review --fix` over the 46 commits on
 local `main` ahead of `origin/main` (R3, R4, and the minimal design audit). The
 review kept 10 findings after verification and refuted 7. This plan fixes all
 10 and says why one of them needs only a comment change.
@@ -254,3 +254,64 @@ Each group runs, unfiltered: `zig build test`, `zig build test-zruntime`,
 `env -u DEEPSEEK_API_KEY bash scripts/verify.sh` and
 `env -u DEEPSEEK_API_KEY zig build test-expert-app`, and read each exit status
 from a file, not through a pipe.
+
+## Revision 2: Fable review resolutions
+
+These override the unit text above where they disagree.
+
+R1 (U3, Fable 1). Only `req_method` conflicts make a path infeasible: two
+different `req_method` values, or a `req_method` equal to a `req_method_not` on
+one path. `req_url` stands for both `req.url` and `req.path`
+(`path_generator.zig:1634`, `:1658`), which the runtime keeps distinct, so a
+`req_url` conflict is not evidence of infeasibility. `req_url` keeps last-wins.
+When no `req_url` is on the path, `url` is a value that differs from every
+`req_url_not` value.
+
+R2 (U1, Fable 2). Add `pub fn countedSite(self: Constraint) ?StubInfo` on
+`path_generator.Constraint`: the `StubInfo` for `stub_truthy`, `stub_falsy`,
+`result_ok`, and `result_not_ok`, and null for every other variant (an
+exhaustive switch, no `else`). `FaultCoverageChecker.analyze`
+(`fault_coverage.zig:276-285`) and the U1 scan both use it, so the set the
+scan treats as walked is exactly the set the checker counts. `status_is` is not
+in it.
+
+R3 (U4, Fable 3). `dupePathCondition` (`path_generator.zig:133`) maps
+`req_method_not` and `req_url_not` to null, as it maps `status_is`.
+`PathCondition.Kind` does not change, and contract bytes do not gain a kind.
+
+R4 (U5, Fable 4). `analysis_complete` has no default. Every constructor sets
+it, so the compiler names each one. Document on the field that after a decode a
+false value cannot be told apart from `unseen_calls > 0`.
+
+R5 (U6, Fable 5). A PR that changes only an imported helper is still not
+analyzed: `changedHandlers` (`pr_gate.zig:543`) lists only changed files, and
+the helper classifies as a non-handler. U6 does not fix that. Record it in the
+U6 commit message and in `docs/roadmap.md` as a known gap of the gate.
+
+R6 (U3, Fable 6). A path where one call site carries both polarities
+(`result_ok` and `result_not_ok`, or `stub_truthy` and `stub_falsy`) is
+infeasible and is not emitted. Example:
+`const res = fetch(u); if (!res.ok && res.status === 200) return 1; return 2;`
+emits no path expecting 1.
+
+R7 (U6, Fable 7). Measured by Fable under Zig 0.16.0: `std.fs.path.resolve`
+keeps relative inputs relative. The reader uses a relative path as given and
+`std.fs.path.relative(cwd, p)` for an absolute one. It refuses a result that
+starts with `..`, and runs `git show <ref>:./<rel>` with `cwd` as the git
+working directory. A refusal or a failed `git show` is the existing blocked or
+unresolved answer.
+
+R8 (U5, Fable 8). `proof_trace.zig:583` branches on `!paths_exhaustive` for the
+"not exhaustive" summary. It branches on `!fc.analysis_complete` instead, with
+text that covers an unresolved route dispatch too.
+
+R9 (U8, Fable 9). U8 is done: commit `b738b911`.
+
+R10 (version, Fable). `path_analyzer_version` stays 3. The paragraph for 3 at
+`path_generator.zig:195-203` is amended to describe the fixed analysis: a
+failable call that a path condition tests is walked, an infeasible path is not
+emitted, and negative request constraints. The direction argument for the
+commit message: a pre-fix version 3 artifact under-claims `fault_covered`
+relative to the fixed analysis (U1 only adds proven cases) and over-lists
+behaviors (U3 removes paths). No stale local artifact can claim a property that
+the fixed analysis refuses.
