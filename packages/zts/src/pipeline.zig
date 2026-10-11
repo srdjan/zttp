@@ -538,6 +538,210 @@ fn runContractTypeCheck(type_checker: *TypeChecker, root: NodeIndex) anyerror!u3
     return type_checker.check(root);
 }
 
+/// Owns the analysis that one graph module needs for contract extraction.
+/// Initialize this value in final caller storage.
+/// Its checkers borrow the type environment and facts in this value.
+pub const ModuleContractAnalysis = struct {
+    pub const Profile = enum {
+        contract_only,
+        sound_extraction,
+    };
+
+    const State = enum {
+        uninitialized,
+        ready,
+        analysis_attempted,
+        completed,
+        extraction_attempted,
+        extracted,
+    };
+
+    allocator: std.mem.Allocator = undefined,
+    parsed: ParsedModule = undefined,
+    profile: Profile = undefined,
+    opts: ExtractContractOptions = .{},
+    state: State = .uninitialized,
+    type_env_storage: TypeEnvStorage = .{},
+    resolved: ?ResolvedModule = null,
+    standalone_checker: ?TypeChecker = null,
+    resolution_facts: ?ModuleFacts = null,
+    contract_facts: ?ModuleFacts = null,
+
+    pub fn init(
+        self: *ModuleContractAnalysis,
+        allocator: std.mem.Allocator,
+        parsed: ParsedModule,
+        profile: Profile,
+        opts: ExtractContractOptions,
+    ) !void {
+        if (self.state != .uninitialized) return error.AnalysisAlreadyInitialized;
+        self.* = .{
+            .allocator = allocator,
+            .parsed = parsed,
+            .profile = profile,
+            .opts = opts,
+            .state = .ready,
+        };
+    }
+
+    pub fn deinit(self: *ModuleContractAnalysis) void {
+        if (self.state == .uninitialized) return;
+
+        if (self.standalone_checker) |*checker| checker.deinit();
+        self.standalone_checker = null;
+        if (self.resolved) |*resolved| resolved.deinit();
+        self.resolved = null;
+        self.type_env_storage.deinit(self.allocator);
+        if (self.contract_facts) |*facts| facts.deinit();
+        self.contract_facts = null;
+        if (self.resolution_facts) |*facts| facts.deinit();
+        self.resolution_facts = null;
+        self.state = .uninitialized;
+    }
+
+    pub fn complete(self: *ModuleContractAnalysis) !void {
+        if (self.state != .ready) return error.AnalysisAlreadyAttempted;
+        self.state = .analysis_attempted;
+
+        switch (self.profile) {
+            .contract_only => try self.completeContractOnly(),
+            .sound_extraction => try self.completeSoundExtraction(),
+        }
+        self.state = .completed;
+    }
+
+    pub fn extractContract(
+        self: *ModuleContractAnalysis,
+        filename: []const u8,
+    ) !HandlerContract {
+        switch (self.state) {
+            .completed => self.state = .extraction_attempted,
+            .extraction_attempted, .extracted => return error.ContractExtractionAlreadyAttempted,
+            else => return error.AnalysisNotCompleted,
+        }
+
+        var contract = switch (self.profile) {
+            .contract_only => try self.extractDefault(filename),
+            .sound_extraction => if (self.opts.type_check == runContractTypeCheck)
+                try self.extractDefault(filename)
+            else
+                try self.extractCustom(filename),
+        };
+        errdefer contract.deinit(self.allocator);
+
+        if (self.resolved) |*resolved| {
+            if (resolved.typeErrorCount() > 0) return error.SoundModeViolation;
+        }
+        self.state = .extracted;
+        return contract;
+    }
+
+    fn completeContractOnly(self: *ModuleContractAnalysis) !void {
+        if (self.opts.type_check != runContractTypeCheck) {
+            return error.IncompatibleAnalysisProfile;
+        }
+
+        try self.completeStandaloneTypeSession();
+        try self.prepareContractFacts();
+    }
+
+    fn completeSoundExtraction(self: *ModuleContractAnalysis) !void {
+        self.resolution_facts = try buildModuleFacts(self.allocator, self.parsed, null);
+        const resolution_facts = &self.resolution_facts.?;
+
+        if (self.opts.type_map) |type_map| {
+            try self.type_env_storage.init(self.allocator, type_map);
+        }
+        self.resolved = try resolve(self.allocator, self.parsed, .{
+            .type_env = self.type_env_storage.envPtr(),
+            .service_type_context = self.opts.service_type_context,
+            .strict = self.opts.strict,
+            .module_facts = resolution_facts,
+        });
+        const resolved = &self.resolved.?;
+        if (resolved.bool_error_count > 0 or
+            resolved.typeErrorCount() > 0 or
+            resolved.strict_error_count > 0)
+        {
+            return error.SoundModeViolation;
+        }
+
+        if (self.opts.type_check != runContractTypeCheck) return;
+        if (resolved.type_checker) |*checker| {
+            try checker.ensureHealthy();
+        } else {
+            try self.completeStandaloneTypeSession();
+        }
+        try self.prepareContractFacts();
+    }
+
+    fn completeStandaloneTypeSession(self: *ModuleContractAnalysis) !void {
+        try self.type_env_storage.init(self.allocator, null);
+        self.standalone_checker = TypeChecker.init(
+            self.allocator,
+            self.parsed.ir_view,
+            self.parsed.atoms,
+            self.type_env_storage.envPtr().?,
+            self.opts.service_type_context,
+        );
+        const checker = &self.standalone_checker.?;
+        _ = try checker.check(self.parsed.root);
+        try checker.ensureHealthy();
+    }
+
+    fn prepareContractFacts(self: *ModuleContractAnalysis) !void {
+        if (self.opts.module_facts != null) return;
+        if (self.profile == .sound_extraction and self.opts.manifest_registry == null) {
+            return;
+        }
+        self.contract_facts = try buildModuleFacts(
+            self.allocator,
+            self.parsed,
+            self.opts.manifest_registry,
+        );
+    }
+
+    fn completedContractFacts(self: *ModuleContractAnalysis) *const ModuleFacts {
+        if (self.opts.module_facts) |facts| return facts;
+        if (self.contract_facts) |*facts| return facts;
+        if (self.resolution_facts) |*facts| return facts;
+        unreachable;
+    }
+
+    fn completedTypeChecker(self: *ModuleContractAnalysis) *TypeChecker {
+        if (self.resolved) |*resolved| {
+            if (resolved.type_checker) |*checker| return checker;
+        }
+        return &self.standalone_checker.?;
+    }
+
+    fn extractDefault(
+        self: *ModuleContractAnalysis,
+        filename: []const u8,
+    ) !HandlerContract {
+        var opts = self.opts;
+        opts.resolved = null;
+        opts.module_facts = self.completedContractFacts();
+        if (self.profile == .contract_only) opts.type_map = null;
+        return extractContractFromTypeSession(
+            self.allocator,
+            self.parsed,
+            filename,
+            opts,
+            self.completedTypeChecker(),
+        );
+    }
+
+    fn extractCustom(
+        self: *ModuleContractAnalysis,
+        filename: []const u8,
+    ) !HandlerContract {
+        var opts = self.opts;
+        opts.resolved = &self.resolved.?;
+        return extractContractFromParsed(self.allocator, self.parsed, filename, opts);
+    }
+};
+
 /// Build a contract from a type session that the caller completed.
 pub fn extractContractFromTypeSession(
     allocator: std.mem.Allocator,
@@ -1089,6 +1293,219 @@ test "explicit type session extraction uses the completed caller session" {
             &type_checker,
         ),
     );
+}
+
+test "ModuleContractAnalysis requires completion and permits one extraction" {
+    const allocator = testing.allocator;
+    const source = "function handler(req) { return Response.text('ok'); }\n";
+    var parsed_state = try parseSourceForTest(allocator, source);
+    defer parsed_state.js_parser.deinit();
+    const view = IrView.fromIRStore(&parsed_state.js_parser.nodes, &parsed_state.js_parser.constants);
+    const parsed = ParsedModule.fromExisting(view, parsed_state.root, null);
+
+    var analysis: ModuleContractAnalysis = .{};
+    try analysis.init(allocator, parsed, .contract_only, .{});
+    defer analysis.deinit();
+
+    try testing.expectError(error.AnalysisNotCompleted, analysis.extractContract("owner.ts"));
+    try analysis.complete();
+    try testing.expectError(error.AnalysisAlreadyAttempted, analysis.complete());
+
+    var contract = try analysis.extractContract("owner.ts");
+    defer contract.deinit(allocator);
+    try testing.expectEqualStrings("owner.ts", contract.handler.path);
+    try testing.expectError(
+        error.ContractExtractionAlreadyAttempted,
+        analysis.extractContract("owner.ts"),
+    );
+}
+
+test "ModuleContractAnalysis does not retry a refused sound analysis" {
+    const allocator = testing.allocator;
+    const source =
+        \\if ({}) { const unreachable = true; }
+        \\function handler(req) { return Response.text("ok"); }
+    ;
+    var parsed_state = try parseSourceForTest(allocator, source);
+    defer parsed_state.js_parser.deinit();
+    const view = IrView.fromIRStore(&parsed_state.js_parser.nodes, &parsed_state.js_parser.constants);
+    const parsed = ParsedModule.fromExisting(view, parsed_state.root, null);
+
+    var analysis: ModuleContractAnalysis = .{};
+    try analysis.init(allocator, parsed, .sound_extraction, .{ .strict = false });
+    defer analysis.deinit();
+
+    try testing.expectError(error.SoundModeViolation, analysis.complete());
+    try testing.expectError(error.AnalysisAlreadyAttempted, analysis.complete());
+    try testing.expectError(error.AnalysisNotCompleted, analysis.extractContract("refused.ts"));
+}
+
+test "ModuleContractAnalysis cleans a partial completion failure" {
+    const allocator = testing.allocator;
+    var parsed_state = try parseSourceForTest(
+        allocator,
+        "function handler(req) { return Response.text('ok'); }\n",
+    );
+    defer parsed_state.js_parser.deinit();
+    const view = IrView.fromIRStore(&parsed_state.js_parser.nodes, &parsed_state.js_parser.constants);
+    const parsed = ParsedModule.fromExisting(view, parsed_state.root, null);
+
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    var analysis: ModuleContractAnalysis = .{};
+    try analysis.init(failing.allocator(), parsed, .contract_only, .{});
+    defer analysis.deinit();
+
+    try testing.expectError(error.OutOfMemory, analysis.complete());
+    try testing.expect(failing.has_induced_failure);
+    try testing.expectError(error.AnalysisAlreadyAttempted, analysis.complete());
+}
+
+test "ModuleContractAnalysis refuses extraction retry after allocation failure" {
+    const allocator = testing.allocator;
+    var parsed_state = try parseSourceForTest(
+        allocator,
+        "function handler(req) { return Response.text('ok'); }\n",
+    );
+    defer parsed_state.js_parser.deinit();
+    const view = IrView.fromIRStore(&parsed_state.js_parser.nodes, &parsed_state.js_parser.constants);
+    const parsed = ParsedModule.fromExisting(view, parsed_state.root, null);
+
+    var failing = std.testing.FailingAllocator.init(allocator, .{});
+    var analysis: ModuleContractAnalysis = .{};
+    try analysis.init(failing.allocator(), parsed, .contract_only, .{});
+    defer analysis.deinit();
+    try analysis.complete();
+
+    failing.fail_index = failing.alloc_index;
+    try testing.expectError(error.OutOfMemory, analysis.extractContract("allocation.ts"));
+    try testing.expect(failing.has_induced_failure);
+    try testing.expectError(
+        error.ContractExtractionAlreadyAttempted,
+        analysis.extractContract("allocation.ts"),
+    );
+}
+
+test "ModuleContractAnalysis profiles preserve type diagnostic acceptance" {
+    const allocator = testing.allocator;
+    const source =
+        \\const joined = 1 + "y";
+        \\function handler(req: Request): Response {
+        \\  return Response.text(String(joined));
+        \\}
+    ;
+    var frontend = try source_frontend_mod.PreparedSource.init(
+        allocator,
+        source,
+        "profile.ts",
+        .{},
+    );
+    defer frontend.deinit();
+    var atoms = AtomTable.init(allocator);
+    defer atoms.deinit();
+    var js_parser = try JsParser.init(allocator, frontend.parserInput());
+    defer js_parser.deinit();
+    js_parser.setAtomTable(&atoms);
+    const root = try js_parser.parse();
+    const view = IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
+    const parsed = ParsedModule.fromExisting(view, root, &atoms);
+    const type_map = frontend.typeMap() orelse return error.TestExpectedTypeMap;
+
+    var contract_only: ModuleContractAnalysis = .{};
+    try contract_only.init(allocator, parsed, .contract_only, .{ .type_map = type_map });
+    defer contract_only.deinit();
+    try contract_only.complete();
+    var contract = try contract_only.extractContract("profile.ts");
+    defer contract.deinit(allocator);
+
+    var sound: ModuleContractAnalysis = .{};
+    try sound.init(allocator, parsed, .sound_extraction, .{
+        .strict = false,
+        .type_map = type_map,
+    });
+    defer sound.deinit();
+    try testing.expectError(error.SoundModeViolation, sound.complete());
+}
+
+test "ModuleContractAnalysis runs a custom callback only during extraction" {
+    const allocator = testing.allocator;
+    var parsed_state = try parseSourceForTest(
+        allocator,
+        "function handler(req) { return Response.text('ok'); }\n",
+    );
+    defer parsed_state.js_parser.deinit();
+    const view = IrView.fromIRStore(&parsed_state.js_parser.nodes, &parsed_state.js_parser.constants);
+    const parsed = ParsedModule.fromExisting(view, parsed_state.root, null);
+
+    var analysis: ModuleContractAnalysis = .{};
+    try analysis.init(allocator, parsed, .sound_extraction, .{
+        .strict = false,
+        .type_check = rejectingContractTypeCheck,
+    });
+    defer analysis.deinit();
+
+    try analysis.complete();
+    try testing.expectError(error.TestTypeCheckRan, analysis.extractContract("custom.ts"));
+    try testing.expectError(
+        error.ContractExtractionAlreadyAttempted,
+        analysis.extractContract("custom.ts"),
+    );
+}
+
+test "ModuleContractAnalysis keeps resolution and contract facts distinct" {
+    const allocator = testing.allocator;
+    const manifest_json =
+        \\{
+        \\  "schemaVersion": 1,
+        \\  "specifier": "zttp-ext:owner-test",
+        \\  "exports": [{ "name": "lookup", "effect": "read", "returns": "result" }]
+        \\}
+    ;
+    var manifest = try @import("zts-engine").module_manifest.parse(allocator, manifest_json);
+    var registry = manifest_registry_mod.Registry.init(allocator);
+    defer registry.deinit();
+    registry.register(manifest) catch |err| {
+        manifest.deinit(allocator);
+        return err;
+    };
+
+    const source =
+        \\import { lookup } from "zttp-ext:owner-test";
+        \\function handler(req) { return Response.text("ok"); }
+    ;
+    var atoms = AtomTable.init(allocator);
+    defer atoms.deinit();
+    var js_parser = try JsParser.init(allocator, source);
+    defer js_parser.deinit();
+    js_parser.setAtomTable(&atoms);
+    const root = try js_parser.parse();
+    const view = IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
+    const parsed = ParsedModule.fromExisting(view, root, &atoms);
+
+    var registry_analysis: ModuleContractAnalysis = .{};
+    try registry_analysis.init(allocator, parsed, .sound_extraction, .{
+        .strict = false,
+        .manifest_registry = &registry,
+    });
+    defer registry_analysis.deinit();
+    try registry_analysis.complete();
+    var registry_contract = try registry_analysis.extractContract("registry.ts");
+    defer registry_contract.deinit(allocator);
+    try testing.expectEqual(@as(usize, 1), registry_contract.modules.items.len);
+    try testing.expectEqualStrings("zttp-ext:owner-test", registry_contract.modules.items[0]);
+
+    var explicit_facts = try buildModuleFacts(allocator, parsed, null);
+    defer explicit_facts.deinit();
+    var explicit_analysis: ModuleContractAnalysis = .{};
+    try explicit_analysis.init(allocator, parsed, .sound_extraction, .{
+        .strict = false,
+        .manifest_registry = &registry,
+        .module_facts = &explicit_facts,
+    });
+    defer explicit_analysis.deinit();
+    try explicit_analysis.complete();
+    var explicit_contract = try explicit_analysis.extractContract("explicit.ts");
+    defer explicit_contract.deinit(allocator);
+    try testing.expectEqual(@as(usize, 0), explicit_contract.modules.items.len);
 }
 
 test "pipeline.check does not emit a module after verifier allocation failure" {

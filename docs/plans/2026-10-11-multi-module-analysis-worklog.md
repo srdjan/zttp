@@ -109,3 +109,24 @@ Contract endpoints contain normalized origins. A dependency fixture now avoids a
 No product behavior changed. Manifest and explicit-facts behavior still need direct owner tests.
 
 The main agent will add the stable per-module analysis owner next.
+
+## Analysis owner checkpoint
+
+`ModuleContractAnalysis` now owns stable type storage, selected resolution, and contract facts for one borrowed module.
+The owner supports the two fixed producer profiles and rejects incomplete or repeated extraction.
+Custom callbacks retain public fallback extraction after resolution. Default extraction consumes a completed checker.
+Seven API tests cover completion, refusal, allocation failure, callback timing, diagnostic acceptance, and registry or explicit facts.
+The main agent reviewed the entire diff and corrected ownership of the manifest in its test.
+
+All required owner checks passed: `test-zts`, `test-module-boundary`, `test-zts-layering`, and `test-proof-swallow`.
+The compiler tier passed all 1459 tests. The engine retained its existing skip.
+`test-precompile` also passed with one temporary measurement test, which is absent from committed code.
+Both producers still use their baseline paths at this checkpoint.
+
+The temporary public probe measured the same two-module input before producer migration.
+Tools made 705 allocations, allocated 350107 bytes in total, and retained 381 bytes at return.
+Pipeline made 694 allocations, allocated 349544 bytes in total, and retained 73 bytes at return.
+Both probes freed all counted bytes after result cleanup. These values do not measure peak retention or execution speed.
+The probe source remains in the private execution directory for the same post-migration measurement.
+
+The main agent will migrate the two producers next.
