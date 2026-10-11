@@ -219,7 +219,16 @@ fn dupePathIoCall(
 /// short-circuit cases of an `&&` condition, counts failable calls in imported
 /// files and blocks on any import it cannot scan, forks on a `res.status`
 /// comparison that is the complement of `ok`, and counts the severities that
-/// F5 declared.
+/// F5 declared. The code review fixes amend 3 before it ships, so it is not a
+/// new version: a failable call that a path condition tests is walked, so it is
+/// not listed as unseen; a path that no request or stub can satisfy is not
+/// emitted; and a `req.method` or `req.url` comparison constrains its false side
+/// (`req_method_not`, `req_url_not`). Version 3 is unpushed, so no released
+/// artifact is stamped with the old analysis. A pre-fix version 3 artifact on a
+/// developer machine under-claims `fault_covered` against the fixed analysis (the
+/// walked-call fix only adds proven cases) and over-lists behaviors (the
+/// infeasible-path fix removes paths), so it never claims a property that the
+/// fixed analysis refuses.
 pub const path_analyzer_version: u32 = 3;
 
 /// Methods tried in order for a path whose constraints name no method.
@@ -560,6 +569,13 @@ pub const PathGenerator = struct {
     /// whole IR, so it does not depend on what the walk saw, and it names each
     /// call the walk missed. A call that is the left operand of `??` on an
     /// optional-returning export is answered by its fallback and is not listed.
+    ///
+    /// A call that a path constraint tests is walked even when no path holds it
+    /// as an I/O stub: `if (!verifyWebhookSignature(b, s, sig)) return 401` has
+    /// the call as its condition, and `walkPaths` only tracks a call that is a
+    /// `const` initializer or a bare statement. The fault-coverage checker
+    /// counts and covers that site from its constraints, so the scan must not
+    /// list it. `Constraint.countedSite` is the set the checker counts.
     fn scanUnseenFailableCalls(self: *PathGenerator) error{ OutOfMemory, InvalidIR }!void {
         self.unseen_failable_calls.clearRetainingCapacity();
 
@@ -569,6 +585,11 @@ pub const PathGenerator = struct {
             for (test_case.io_stubs.items) |stub| {
                 if (stub.call_site == null_node) continue;
                 try seen.put(self.allocator, stub.call_site, {});
+            }
+            for (test_case.constraints) |constraint| {
+                const info = constraint.countedSite() orelse continue;
+                if (info.call_site == null_node) continue;
+                try seen.put(self.allocator, info.call_site, {});
             }
         }
 

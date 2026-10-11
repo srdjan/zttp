@@ -274,15 +274,11 @@ pub const FaultCoverageChecker = struct {
             }
 
             for (test_case.constraints) |c| {
-                const info: StubInfo = switch (c) {
-                    .stub_truthy, .stub_falsy => |s| s,
-                    .result_ok, .result_not_ok => |s| s,
-                    // exhaustive: the remaining variants are the four request
-                    // shapes (req_method, req_method_not, req_url, req_url_not)
-                    // and status_is. They constrain the request or a status, not
-                    // whether an I/O call fails, so this loop counts none.
-                    else => continue,
-                };
+                // `countedSite` is the one definition of which constraints name
+                // a call this checker counts; the generator's unseen-call scan
+                // uses it too, so the two cannot disagree. A request shape or a
+                // status test names no call and is skipped.
+                const info: StubInfo = c.countedSite() orelse continue;
 
                 const entry = try self.getOrPutEntry(
                     &seen_funcs,
@@ -1743,4 +1739,80 @@ test "a check behind || or a negated && gives no failure path and blocks the pro
         try std.testing.expectEqual(@as(u32, 0), coverage.covered);
         try std.testing.expect(!coverage.clean);
     }
+}
+
+test "a failable call used as an if condition is walked, so the guard is covered" {
+    const webhook =
+        \\import { verifyWebhookSignature } from "zttp:auth";
+        \\function handler(req) {
+        \\  if (!verifyWebhookSignature(req.body, "secret", "sig")) {
+        \\    return Response.text("bad signature", { status: 401 });
+        \\  }
+        \\  return Response.text("ok");
+        \\}
+    ;
+    const cache_set =
+        \\import { cacheSet } from "zttp:cache";
+        \\function handler(req) {
+        \\  if (!cacheSet("ns", "key", "value")) {
+        \\    return Response.text("cache write failed", { status: 503 });
+        \\  }
+        \\  return Response.text("ok");
+        \\}
+    ;
+
+    for ([_][]const u8{ webhook, cache_set }) |source| {
+        const coverage = try analyzeSourceFaultCoverage(std.testing.allocator, source);
+        try std.testing.expectEqual(@as(usize, 0), coverage.unseen_calls);
+        try std.testing.expectEqual(@as(u32, 1), coverage.total_failable);
+        try std.testing.expectEqual(@as(u32, 1), coverage.covered);
+        try std.testing.expect(coverage.paths_exhaustive);
+        try std.testing.expect(coverage.clean);
+    }
+}
+
+test "a failable call that a conjunct condition tests is walked" {
+    // Observed: each conjunct that tests the call gives it a stub constraint on
+    // some path, so the checker counts it and the scan no longer lists it. This
+    // holds for the call as the first conjunct and as a later one.
+    const first =
+        \\import { verifyWebhookSignature } from "zttp:auth";
+        \\function handler(req) {
+        \\  if (verifyWebhookSignature(req.body, "secret", "sig") && req.method === "POST") {
+        \\    return Response.text("ok");
+        \\  }
+        \\  return Response.text("rejected", { status: 401 });
+        \\}
+    ;
+    const later =
+        \\import { verifyWebhookSignature } from "zttp:auth";
+        \\function handler(req) {
+        \\  if (req.method === "POST" && verifyWebhookSignature(req.body, "secret", "sig")) {
+        \\    return Response.text("ok");
+        \\  }
+        \\  return Response.text("rejected", { status: 401 });
+        \\}
+    ;
+    for ([_][]const u8{ first, later }) |source| {
+        const coverage = try analyzeSourceFaultCoverage(std.testing.allocator, source);
+        try std.testing.expectEqual(@as(usize, 0), coverage.unseen_calls);
+        try std.testing.expectEqual(coverage.total_failable, coverage.covered);
+    }
+}
+
+test "a failable call under an or in an if condition has no constraint and stays unseen" {
+    // Observed: `||` yields no path constraint, so no path tests the call. It is
+    // on no path and stays listed as unseen, and the handler is not clean.
+    const source =
+        \\import { verifyWebhookSignature } from "zttp:auth";
+        \\function handler(req) {
+        \\  if (req.method === "POST" || verifyWebhookSignature(req.body, "secret", "sig")) {
+        \\    return Response.text("ok");
+        \\  }
+        \\  return Response.text("rejected", { status: 401 });
+        \\}
+    ;
+    const coverage = try analyzeSourceFaultCoverage(std.testing.allocator, source);
+    try std.testing.expectEqual(@as(usize, 1), coverage.unseen_calls);
+    try std.testing.expect(!coverage.clean);
 }

@@ -708,3 +708,31 @@ test "pipeline mutation regression: a schema literal with a repeated key is a dy
     };
     try std.testing.expect(outcome == .result);
 }
+
+test "pipeline regression: a guarded verifyWebhookSignature call keeps fault_covered" {
+    // `if (!verifyWebhookSignature(...)) return 401` has the call as its
+    // condition. It is on a path constraint and on no I/O stub, and the scan used
+    // to list it as unseen, which dropped `fault_covered`.
+    const source =
+        \\import { verifyWebhookSignature } from "zttp:auth";
+        \\
+        \\function handler(req: Request): Proof<Response, "fault_covered"> {
+        \\  if (!verifyWebhookSignature("payload", "secret", "sig")) {
+        \\    return Response.text("bad signature", { status: 401 });
+        \\  }
+        \\  return Response.text("ok");
+        \\}
+    ;
+    var result = try precompile.runCheckOnlyFromSourceWithOptions(std.testing.allocator, source, "handler.ts", .{
+        .json_mode = true,
+        .persist_witnesses = false,
+    });
+    defer result.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(u32, 0), result.totalErrors());
+    try std.testing.expect(result.fault_total > 0);
+    const contract = result.contract orelse return error.TestUnexpectedResult;
+    const properties = contract.properties orelse return error.MissingProperties;
+    try std.testing.expect(properties.fault_covered);
+    try std.testing.expectEqual(@as(u32, 0), contract.fault_coverage.?.unseen_calls);
+}
