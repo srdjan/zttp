@@ -55,6 +55,17 @@ pub const Constraint = union(enum) {
     /// fixes the status that the call's stub carries on this path.
     status_is: StatusIs,
 
+    /// The call that this constraint tests for failure, for the variants that
+    /// fault coverage counts as a call site: a truthiness or `ok` test. Null for
+    /// every other variant, including `status_is`, which only fixes the status a
+    /// stub carries.
+    pub fn countedSite(self: Constraint) ?StubInfo {
+        return switch (self) {
+            .stub_truthy, .stub_falsy, .result_ok, .result_not_ok => |info| info,
+            .req_method, .req_method_not, .req_url, .req_url_not, .status_is => null,
+        };
+    }
+
     /// Whether this constraint represents an I/O failure condition.
     pub fn isFailure(self: Constraint) bool {
         return switch (self) {
@@ -2087,8 +2098,21 @@ pub const PathGenerator = struct {
         return candidates[candidates.len - 1];
     }
 
+    /// Emit one path as a test, unless the path is infeasible: no request and
+    /// no stub can satisfy its constraints, so a test for it would expect a
+    /// status that its stubs cannot produce. An infeasible path emits no test,
+    /// no path cost, and no behavior, and is not counted toward `MAX_PATHS`, so
+    /// it is not a truncation.
     fn emitTestCase(self: *PathGenerator, status: u16) !void {
         if (self.path_count >= MAX_PATHS) return;
+
+        // An override is keyed by the call site, not the function name: a path
+        // that checks two calls to one function must stub each call by its own
+        // constraint.
+        var stub_overrides = std.AutoHashMapUnmanaged(NodeIndex, []const u8).empty;
+        defer stub_overrides.deinit(self.allocator);
+        if (!try self.solveConstraints(&stub_overrides)) return;
+
         self.path_count += 1;
         var name_buf: [256]u8 = undefined;
         var name_len: usize = 0;
@@ -2131,32 +2155,22 @@ pub const PathGenerator = struct {
         }
         var seq: u32 = 0;
 
-        // First pass: gather stub requirements from constraints. An override is
-        // keyed by the call site, not the function name: a path that checks
-        // two calls to one function must stub each call by its own constraint.
-        var stub_overrides = std.AutoHashMapUnmanaged(NodeIndex, []const u8).empty;
-        defer stub_overrides.deinit(self.allocator);
-
         for (self.constraints.items) |c| {
             switch (c) {
-                .req_method, .req_method_not, .req_url, .req_url_not => {},
-                .stub_truthy => |info| {
-                    try stub_overrides.put(self.allocator, info.call_site, stubValueForType(info.returns, true));
-                    if (std.mem.eql(u8, info.func, "parseBearer")) has_auth = true;
+                .stub_truthy => |info| if (std.mem.eql(u8, info.func, "parseBearer")) {
+                    has_auth = true;
                 },
-                .stub_falsy => |info| {
-                    try stub_overrides.put(self.allocator, info.call_site, stubValueForType(info.returns, false));
-                },
-                .result_ok => |info| {
-                    try stub_overrides.put(self.allocator, info.call_site, resultOrOkRecordStub(info.returns, true));
-                },
-                .result_not_ok => |info| {
-                    try stub_overrides.put(self.allocator, info.call_site, resultOrOkRecordStub(info.returns, false));
-                },
-                .status_is => {},
+                .req_method,
+                .req_method_not,
+                .req_url,
+                .req_url_not,
+                .stub_falsy,
+                .result_ok,
+                .result_not_ok,
+                .status_is,
+                => {},
             }
         }
-        try self.applyStatusTests(&stub_overrides);
         const request = self.solveRequest();
         const method = request.method;
         const url = request.url;
@@ -2204,14 +2218,75 @@ pub const PathGenerator = struct {
         });
     }
 
+    /// Fill `stub_overrides` with the stub that each constrained call must
+    /// return, and say whether the path is feasible: whether some request and
+    /// some stubs satisfy every constraint. The path is infeasible when it needs
+    /// two different methods, a method it also excludes, one call to both
+    /// succeed and fail, or a status that no value satisfies.
+    fn solveConstraints(
+        self: *PathGenerator,
+        stub_overrides: *std.AutoHashMapUnmanaged(NodeIndex, []const u8),
+    ) error{OutOfMemory}!bool {
+        const constraints = self.constraints.items;
+        for (constraints, 0..) |c, i| {
+            for (constraints[0..i]) |earlier| {
+                if (requestConflict(earlier, c)) return false;
+                const a = earlier.countedSite() orelse continue;
+                const b = c.countedSite() orelse continue;
+                // One call site that must both succeed and fail.
+                if (a.call_site != null_node and a.call_site == b.call_site and
+                    earlier.isFailure() != c.isFailure()) return false;
+            }
+        }
+
+        for (constraints) |c| {
+            switch (c) {
+                .stub_truthy => |info| {
+                    try stub_overrides.put(self.allocator, info.call_site, stubValueForType(info.returns, true));
+                },
+                .stub_falsy => |info| {
+                    try stub_overrides.put(self.allocator, info.call_site, stubValueForType(info.returns, false));
+                },
+                .result_ok => |info| {
+                    try stub_overrides.put(self.allocator, info.call_site, resultOrOkRecordStub(info.returns, true));
+                },
+                .result_not_ok => |info| {
+                    try stub_overrides.put(self.allocator, info.call_site, resultOrOkRecordStub(info.returns, false));
+                },
+                .req_method, .req_method_not, .req_url, .req_url_not, .status_is => {},
+            }
+        }
+        return self.applyStatusTests(stub_overrides);
+    }
+
+    /// Whether two constraints on the request method cannot both hold: two
+    /// different methods, or a method that the other constraint excludes.
+    /// `req_url` stands for both `req.url` and `req.path`, which the runtime
+    /// keeps distinct, so two URL constraints are never a conflict; the last
+    /// one wins.
+    fn requestConflict(a: Constraint, b: Constraint) bool {
+        return switch (a) {
+            .req_method => |x| switch (b) {
+                .req_method => |y| !std.mem.eql(u8, x, y),
+                .req_method_not => |y| std.mem.eql(u8, x, y),
+                else => false,
+            },
+            .req_method_not => |x| switch (b) {
+                .req_method => |y| std.mem.eql(u8, x, y),
+                else => false,
+            },
+            else => false,
+        };
+    }
+
     /// Give every call that a `status_is` constraint names the stub whose
     /// status satisfies all of its status tests and agrees with its `ok`
-    /// fork, when the path has one. A path that no status satisfies keeps the
-    /// stub it had: it cannot occur, and any stub is as good as another.
+    /// fork, when the path has one. Returns false when some call has no
+    /// satisfying status: the path cannot occur, and the caller drops it.
     fn applyStatusTests(
         self: *PathGenerator,
         stub_overrides: *std.AutoHashMapUnmanaged(NodeIndex, []const u8),
-    ) error{OutOfMemory}!void {
+    ) error{OutOfMemory}!bool {
         var requirements: std.ArrayList(status_check.Requirement) = .empty;
         defer requirements.deinit(self.allocator);
         for (self.constraints.items, 0..) |c, i| {
@@ -2243,9 +2318,10 @@ pub const PathGenerator = struct {
                     else => {},
                 }
             }
-            const status = status_check.chooseStatus(ok_state, requirements.items) orelse continue;
+            const status = status_check.chooseStatus(ok_state, requirements.items) orelse return false;
             try stub_overrides.put(self.allocator, site, statusStub(status));
         }
+        return true;
     }
 
     fn snapshotPathCost(self: *PathGenerator) !void {
@@ -4496,17 +4572,23 @@ test "an else branch is reached by every short-circuit case" {
 test "short-circuit enumeration that passes MAX_PATHS reports truncation" {
     const allocator = std.testing.allocator;
     // Each guard doubles the paths that follow it. Twelve guards give far
-    // more than MAX_PATHS, so the set must say it is not exhaustive.
-    const guard =
-        \\  if (!a.ok && req.headers["x"] === "y") return Response.text("no", { status: 401 });
-        \\
-    ;
-    const source = try std.mem.concat(allocator, u8, &.{
-        "import { jwtVerify } from \"zttp:auth\";\nfunction handler(req) {\n  const a = jwtVerify(\"t\", \"secret\");\n",
-        guard ** 12,
-        "  return Response.text(\"ok\");\n}\n",
-    });
-    defer allocator.free(source);
+    // more than MAX_PATHS, so the set must say it is not exhaustive. Each guard
+    // checks its own call: a second guard on one call would need that call to
+    // fail after it passed, which no path can do, and those paths are dropped.
+    var source_buf: std.ArrayList(u8) = .empty;
+    defer source_buf.deinit(allocator);
+    try source_buf.appendSlice(allocator, "import { jwtVerify } from \"zttp:auth\";\nfunction handler(req) {\n");
+    for (0..12) |i| {
+        const guard = try std.fmt.allocPrint(
+            allocator,
+            "  const a{d} = jwtVerify(\"t\", \"secret\");\n  if (!a{d}.ok && req.headers[\"x\"] === \"y\") return Response.text(\"no\", {{ status: 401 }});\n",
+            .{ i, i },
+        );
+        defer allocator.free(guard);
+        try source_buf.appendSlice(allocator, guard);
+    }
+    try source_buf.appendSlice(allocator, "  return Response.text(\"ok\");\n}\n");
+    const source = source_buf.items;
     var fixture = try generateFixture(allocator, source);
     defer fixture.deinit();
 
@@ -5013,4 +5095,110 @@ test "a !== url guard sends a url other than the compared one" {
             try std.testing.expectEqualStrings("/", t.url);
         }
     }
+}
+
+test "a path no status can satisfy is not emitted and is not a truncation" {
+    const allocator = std.testing.allocator;
+    // Past `!res.ok`, the response is ok, so no 404 can reach the then-branch of
+    // the status test. The generator used to emit it with the plain success stub.
+    const source = status_prefix ++
+        \\function handler(req) {
+        \\  const res = fetch("https://api.example.com/a");
+        \\  if (!res.ok) return Response.json({ error: "upstream" }, { status: 502 });
+        \\  if (res.status === 404) return Response.json({ error: "gone" }, { status: 404 });
+        \\  return Response.json({ a: res.body });
+        \\}
+    ;
+    var fixture = try generateFixture(allocator, source);
+    defer fixture.deinit();
+
+    const tests = fixture.generator.getTests();
+    try std.testing.expectEqual(@as(usize, 2), tests.len);
+    for (tests) |t| try std.testing.expect(t.expected_status != 404);
+    try std.testing.expectEqual(@as(usize, 1), countPaths(tests, 502, &.{.result_not_ok}));
+    try std.testing.expectEqual(@as(usize, 1), countPaths(tests, 200, &.{ .result_ok, .status_is }));
+    try std.testing.expect(fixture.generator.pathsExhaustive());
+    try std.testing.expectEqual(PathGenerator.Coverage.exhaustive, fixture.generator.coverage());
+
+    var behaviors = try fixture.generator.toBehaviorPaths(allocator);
+    defer {
+        for (behaviors.items) |*b| b.deinit(allocator);
+        behaviors.deinit(allocator);
+    }
+    try std.testing.expectEqual(@as(usize, 2), behaviors.items.len);
+    for (behaviors.items) |b| try std.testing.expect(b.response_status != 404);
+}
+
+test "two status tests that exclude each other leave no then-path" {
+    const allocator = std.testing.allocator;
+    const source = status_prefix ++
+        \\function handler(req) {
+        \\  const res = fetch("https://api.example.com/a");
+        \\  if (res.status === 404 && res.status === 500) return Response.text("both", { status: 418 });
+        \\  return Response.text("ok");
+        \\}
+    ;
+    var fixture = try generateFixture(allocator, source);
+    defer fixture.deinit();
+
+    const tests = fixture.generator.getTests();
+    try std.testing.expect(tests.len > 0);
+    for (tests) |t| try std.testing.expect(t.expected_status != 418);
+}
+
+test "one call that must be both ok and not ok leaves no path" {
+    const allocator = std.testing.allocator;
+    const source = status_prefix ++
+        \\function handler(req) {
+        \\  const res = fetch("https://api.example.com/a");
+        \\  if (!res.ok && res.status === 200) return Response.text("both", { status: 418 });
+        \\  return Response.text("ok");
+        \\}
+    ;
+    var fixture = try generateFixture(allocator, source);
+    defer fixture.deinit();
+
+    const tests = fixture.generator.getTests();
+    try std.testing.expect(tests.len > 0);
+    for (tests) |t| try std.testing.expect(t.expected_status != 418);
+}
+
+test "two method tests that exclude each other leave no then-path" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\function handler(req) {
+        \\  if (req.method === "GET" && req.method === "POST") return Response.text("both", { status: 418 });
+        \\  if (req.method === "GET" && req.method !== "GET") return Response.text("neither", { status: 419 });
+        \\  return Response.text("ok");
+        \\}
+    ;
+    var fixture = try generateFixture(allocator, source);
+    defer fixture.deinit();
+
+    const tests = fixture.generator.getTests();
+    try std.testing.expect(tests.len > 0);
+    for (tests) |t| {
+        try std.testing.expect(t.expected_status != 418);
+        try std.testing.expect(t.expected_status != 419);
+    }
+}
+
+test "two url tests keep the last url: req.url and req.path are distinct operands" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\function handler(req) {
+        \\  if (req.url === "/a" && req.path === "/b") return Response.text("both", { status: 418 });
+        \\  return Response.text("ok");
+        \\}
+    ;
+    var fixture = try generateFixture(allocator, source);
+    defer fixture.deinit();
+
+    var saw = false;
+    for (fixture.generator.getTests()) |t| {
+        if (t.expected_status != 418) continue;
+        saw = true;
+        try std.testing.expectEqualStrings("/b", t.url);
+    }
+    try std.testing.expect(saw);
 }
