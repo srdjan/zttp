@@ -151,6 +151,46 @@ pub const PropertiesChange = struct {
     new_label: ?[]const u8 = null,
 };
 
+/// How much a lost proven property matters. The single owner of the loss
+/// table: the upgrade verifier and the pull-request gate both classify a lost
+/// property through `propertyLossSeverity`, so the two cannot drift.
+pub const Severity = enum {
+    critical,
+    warning,
+    info,
+
+    pub fn toString(self: Severity) []const u8 {
+        return switch (self) {
+            .critical => "critical",
+            .warning => "warning",
+            .info => "info",
+        };
+    }
+};
+
+/// Classify the loss of the proven property `field` (true to false).
+/// Critical: properties whose loss indicates a safety regression.
+/// Warning: properties whose loss changes operational characteristics.
+/// Info: every other property.
+pub fn propertyLossSeverity(field: []const u8) Severity {
+    if (std.mem.eql(u8, field, "retry_safe")) return .critical;
+    if (std.mem.eql(u8, field, "injection_safe")) return .critical;
+    if (std.mem.eql(u8, field, "state_isolated")) return .critical;
+    if (std.mem.eql(u8, field, "no_secret_leakage")) return .critical;
+    if (std.mem.eql(u8, field, "no_credential_leakage")) return .critical;
+    if (std.mem.eql(u8, field, "fault_covered")) return .critical;
+    if (std.mem.eql(u8, field, "result_safe")) return .critical;
+    if (std.mem.eql(u8, field, "optional_safe")) return .critical;
+
+    if (std.mem.eql(u8, field, "idempotent")) return .warning;
+    if (std.mem.eql(u8, field, "deterministic")) return .warning;
+    if (std.mem.eql(u8, field, "read_only")) return .warning;
+    if (std.mem.eql(u8, field, "input_validated")) return .warning;
+    if (std.mem.eql(u8, field, "pii_contained")) return .warning;
+
+    return .info;
+}
+
 pub const BehaviorPathChange = struct {
     method: []const u8,
     pattern: []const u8,
@@ -636,8 +676,8 @@ pub fn diffContracts(
         }
     }
 
-    // Enumerate canonical monotonic proof properties. Policy and severity stay
-    // with the upgrade verifier; this layer only records factual changes.
+    // Enumerate canonical monotonic proof properties. This layer records
+    // factual changes; `propertyLossSeverity` classifies a loss for callers.
     var effect_changes: std.ArrayList(PropertiesChange) = .empty;
     errdefer effect_changes.deinit(allocator);
     const old_cost_class = costClassOf(old);
@@ -3254,4 +3294,18 @@ test "claimScope maps handler properties to claim strength" {
     try std.testing.expectEqualStrings("pure", claimScope(.{ .pure = true, .read_only = true, .stateless = true, .retry_safe = true, .deterministic = true, .has_egress = false }));
     try std.testing.expectEqualStrings("deterministic", claimScope(.{ .pure = false, .read_only = true, .stateless = true, .retry_safe = true, .deterministic = true, .has_egress = false }));
     try std.testing.expectEqualStrings("structural", claimScope(.{ .pure = false, .read_only = false, .stateless = false, .retry_safe = false, .deterministic = false, .has_egress = true }));
+}
+
+test "propertyLossSeverity: eight critical properties, a warning tier, everything else info" {
+    const critical = [_][]const u8{
+        "retry_safe",            "injection_safe", "state_isolated", "no_secret_leakage",
+        "no_credential_leakage", "fault_covered",  "result_safe",    "optional_safe",
+    };
+    for (critical) |name| {
+        try std.testing.expect(handler_contract.HandlerProperties.isMonotonicProvenSpecName(name));
+        try std.testing.expectEqual(Severity.critical, propertyLossSeverity(name));
+    }
+    try std.testing.expectEqual(Severity.warning, propertyLossSeverity("deterministic"));
+    try std.testing.expectEqual(Severity.info, propertyLossSeverity("pure"));
+    try std.testing.expectEqual(Severity.info, propertyLossSeverity("stateless"));
 }

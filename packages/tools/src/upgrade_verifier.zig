@@ -65,19 +65,9 @@ pub const UpgradeVerdict = enum {
 // Property regression
 // -------------------------------------------------------------------------
 
-pub const Severity = enum {
-    critical,
-    warning,
-    info,
-
-    pub fn toString(self: Severity) []const u8 {
-        return switch (self) {
-            .critical => "critical",
-            .warning => "warning",
-            .info => "info",
-        };
-    }
-};
+/// The severity enum and the loss table live in `contract_diff`, so the
+/// pull-request gate and this verifier classify a lost property identically.
+pub const Severity = contract_diff.Severity;
 
 pub const PropertyRegression = struct {
     field: []const u8,
@@ -86,31 +76,11 @@ pub const PropertyRegression = struct {
     severity: Severity,
 };
 
-/// Classify a property change by severity.
-/// Critical: properties whose loss indicates a safety regression.
-/// Warning: properties whose loss changes operational characteristics.
-/// Info: informational properties.
+/// Classify a property change by severity. Gains are always informational;
+/// a loss is classified by `contract_diff.propertyLossSeverity`.
 fn propertySeverity(field: []const u8, gained: bool) Severity {
-    // Gains are always informational
     if (gained) return .info;
-
-    // Losses are classified by impact
-    if (std.mem.eql(u8, field, "retry_safe")) return .critical;
-    if (std.mem.eql(u8, field, "injection_safe")) return .critical;
-    if (std.mem.eql(u8, field, "state_isolated")) return .critical;
-    if (std.mem.eql(u8, field, "no_secret_leakage")) return .critical;
-    if (std.mem.eql(u8, field, "no_credential_leakage")) return .critical;
-    if (std.mem.eql(u8, field, "fault_covered")) return .critical;
-    if (std.mem.eql(u8, field, "result_safe")) return .critical;
-    if (std.mem.eql(u8, field, "optional_safe")) return .critical;
-
-    if (std.mem.eql(u8, field, "idempotent")) return .warning;
-    if (std.mem.eql(u8, field, "deterministic")) return .warning;
-    if (std.mem.eql(u8, field, "read_only")) return .warning;
-    if (std.mem.eql(u8, field, "input_validated")) return .warning;
-    if (std.mem.eql(u8, field, "pii_contained")) return .warning;
-
-    return .info;
+    return contract_diff.propertyLossSeverity(field);
 }
 
 // -------------------------------------------------------------------------
