@@ -6,7 +6,7 @@ Baseline: local `main` at `176d81ca`. Roadmap row:
 reconciles proposal A, the
 [agent-handler specification](2026-09-19-feat-agent-handler-spec.md), with
 proposal B, the
-[tool-profile recommendation](../zttp-next/zttp-v1.0-scope-and-v1x-roadmap.md).
+tool-profile recommendation (`pre-rebase:docs/zttp-next/zttp-v1.0-scope-and-v1x-roadmap.md`).
 The owner accepted this text on 2026-09-22, which authorizes T1a to T7 in order.
 
 ## Status and decision record

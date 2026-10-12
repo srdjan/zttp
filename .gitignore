@@ -80,14 +80,6 @@ brag-output-*/
 __pycache__/
 *.pyc
 
-# Render verification for the archify diagrams: the screenshots and the
-# report `archify visual-check` writes beside the HTML. Regenerated on every
-# diagram render; the diagram source (*.archify.json) and the rendered page
-# are the tracked artifacts.
-*.visual-check.html
-*.visual-check.json
-*.visual-check.*.png
-
 # The proof gate's sticky PR comment body. `scripts/proof-gate.sh` writes it at
 # the repository root and .github/workflows/proof-gate.yml posts it as a comment;
 # it is a verdict about one base..head range, so a committed copy is a claim

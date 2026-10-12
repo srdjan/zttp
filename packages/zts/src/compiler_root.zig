@@ -13,7 +13,7 @@
 //! this module's surface alongside the other three.
 //!
 //! Tier membership is recorded in `scripts/zts-tiers.allow`. See
-//! docs/archive/plans/2026-08-07-021-zts-three-module-split-plan.md.
+//! pre-rebase:docs/archive/plans/2026-08-07-021-zts-three-module-split-plan.md.
 
 const std = @import("std");
 

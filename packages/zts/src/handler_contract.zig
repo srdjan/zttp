@@ -122,7 +122,7 @@ pub const HandlerContract = contract_types.HandlerContract;
 // builder made every consumer of the contract type import all of that: the
 // alias alone put 23 files into the engine's import closure. Name
 // `contract_builder.zig` directly. See
-// docs/archive/plans/2026-08-07-021-zts-three-module-split-plan.md.
+// pre-rebase:docs/archive/plans/2026-08-07-021-zts-three-module-split-plan.md.
 
 pub const containsString = json_utils.containsString;
 

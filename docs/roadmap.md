@@ -4,7 +4,7 @@ This document owns work status and scheduling. Reviewed against local `main`
 at `a0181c16` on 2026-09-21. Shipped changes live in
 [CHANGELOG.md](../CHANGELOG.md); current behavior lives in the
 [User Guide](user-guide.md). The [plan index](plans/README.md) separates open
-work from reference designs. [Product proposals](zttp-next/README.md) and
+work from reference designs. Product proposals (`pre-rebase:docs/zttp-next/README.md`) and
 [advisory plans](../advisor-plans/README.md) require a decision before execution.
 
 ## Milestones
@@ -14,18 +14,18 @@ M4 is complete: T1a to T7 are delivered. M5 has an accepted release contract and
 
 | Milestone | Status | Dependency | Next action | Completion evidence |
 |---|---|---|---|---|
-| M1: accurate active backlog | Complete, 2026-09-21 | Codebase review at `1b0686a1` | Select the next milestone | [Completion record](archive/plans/2026-09-21-active-backlog-cleanup.md); documentation gates pass and remaining work is classified |
-| M2: bounded correctness and assurance | Complete, 2026-09-22 | Three implementation units committed and reviewed; affected suites and mutation probes pass | Select the next milestone | [Completion record](archive/plans/2026-09-21-bounded-correctness-assurance.md); full local gate passed at `181d31d4`; public response regression test; selected lifecycle and decoder cases reject deliberate wrong behavior; affected unfiltered suites pass |
+| M1: accurate active backlog | Complete, 2026-09-21 | Codebase review at `1b0686a1` | Select the next milestone | Completion record (`pre-rebase:docs/archive/plans/2026-09-21-active-backlog-cleanup.md`); documentation gates pass and remaining work is classified |
+| M2: bounded correctness and assurance | Complete, 2026-09-22 | Three implementation units committed and reviewed; affected suites and mutation probes pass | Select the next milestone | Completion record (`pre-rebase:docs/archive/plans/2026-09-21-bounded-correctness-assurance.md`); full local gate passed at `181d31d4`; public response regression test; selected lifecycle and decoder cases reject deliberate wrong behavior; affected unfiltered suites pass |
 | M3: provable-set reach measurement | Complete, 2026-09-21 | Current DeepSeek default; pilot and full run authorized | Keep the used suite as regression evidence; select a new suite before a new holdout claim | [Full fresh report](provable-reach.md#first-full-measurement): 8/8 reached, 4/4 in each mode, with all selected tasks and source, policy, model, budget, and runtime evidence retained |
 | M4: next release boundary | Contract accepted 2026-09-22; T1a to T7 complete | M1 proposal inventory and current strategy | Delivered T1a to T7 of the [release contract](plans/2026-09-22-m4-release-contract.md) in order | One accepted release contract states scope, threat model, dependencies, and completion checks |
 | M5: agent handlers | Contract accepted 2026-09-27; A1 to A4 complete; A5 design accepted 2026-09-28 | M4 complete | Implement [A5, the buffered reference agent](plans/2026-09-28-m5-a5-reference-agent-design.md), in the next session; run C-A5 before A6 | M5a: a buffered agent route passes checks C-A1 to C-A6; M5b then adds streaming |
 
 M2's source evidence is `packages/zts/src/http.zig`,
 `packages/runtime/src/server_response.zig`, and the conditional test gaps in
-the [completed rederive record](archive/plans/2026-09-20-rederive-implementation-plan.md#conditional-discovery-items).
+the completed rederive record (`pre-rebase:docs/archive/plans/2026-09-20-rederive-implementation-plan.md`).
 M3 establishes bounded reach for the frozen suite in [STRATEGY.md](../STRATEGY.md#key-metrics).
 M4 compares the [agent-handler specification](plans/2026-09-19-feat-agent-handler-spec.md)
-with the [tool-profile recommendation](zttp-next/zttp-v1.0-scope-and-v1x-roadmap.md).
+with the tool-profile recommendation (`pre-rebase:docs/zttp-next/zttp-v1.0-scope-and-v1x-roadmap.md`).
 
 ## Supported Now
 
@@ -109,12 +109,12 @@ Socket health/readiness, in-flight shutdown-drain, and grace-expiry tests exist 
 exist, but `HandlerInstance` and extracted siblings still import each other.
 The remaining facade work concerns that dependency boundary.
 
-The [residual guard delivery record](archive/plans/2026-08-31-1242-feat-residual-runtime-guard-addendum-plan.md)
+The residual guard delivery record (`pre-rebase:docs/archive/plans/2026-08-31-1242-feat-residual-runtime-guard-addendum-plan.md`)
 is closed for env, egress, and cache. SQL remains deferred in the table above.
 CLI and module documentation derive from `zttp help --all` and the typed
 bindings exposed through `packages/zts/src/builtin_modules.zig`.
 `zttp module-spec-render --check` checks the generated module specifications.
-The [ledger foundation record](archive/plans/2026-09-18-feat-application-invariants-plan.md)
+The ledger foundation record (`pre-rebase:docs/archive/plans/2026-09-18-feat-application-invariants-plan.md`)
 describes the startup measurement question. General predicates, distributed
 ledger stores, currency conversion, and automatic migration remain outside
 the supported invariant scope.
@@ -132,7 +132,7 @@ no value. The gap must be measured, or the claim is only prose. The mechanisms t
 close the gap should move from rejection toward construction.
 
 Eight of the nine items are closed, and what each one found is
-[the closed agenda](archive/plans/2026-08-16-028-agent-compiler-agenda-closed.md).
+the closed agenda (`pre-rebase:docs/archive/plans/2026-08-16-028-agent-compiler-agenda-closed.md`).
 Read it before proposing work in this area: several items record a measurement that
 did not support the expectation the item was written on. One item is still open, and
 the refusals below stand.
@@ -268,8 +268,8 @@ The [formal spec](zts-formal-spec-northstar-advanced.md), revision 6, states the
 language and assurance target. Its stronger target does not mean the shipped
 certificate has no tested or trusted edges.
 
-The [closed phase record](archive/plans/2026-08-16-029-zts-advanced-language-program-closed.md)
-and [archived execution plans](archive/README.md) retain the implementation
+The closed phase record (`pre-rebase:docs/archive/plans/2026-08-16-029-zts-advanced-language-program-closed.md`)
+and archived execution plans (`pre-rebase:docs/archive/README.md`) retain the implementation
 history. D1, D2, and D3 remain [design references](plans/README.md).
 The model-minimal cutover shipped. `|>`, `pipe()`, `guard()`, and
 `interface` are removed; no compatibility profile is planned.
@@ -284,7 +284,7 @@ specified protocol outcomes under the same identities.
 |---|---|---|---|---|
 | Exported boundary-type scope | Investigation required | Revalidate the questions in the archived boundary-type plan against current diagnostics | Probe exported constants and generic signatures instantiated with raw scalar types through the public checker | Record accepted or refused behavior for each case; any scope change gets a separate decision and public regression tests |
 
-The [boundary-type record](archive/plans/2026-08-16-030-boundary-types-plan.md)
+The boundary-type record (`pre-rebase:docs/archive/plans/2026-08-16-030-boundary-types-plan.md`)
 left those questions outside its delivered scope. Current strict-checker tests
 already pin refusal of exported function-valued constants through the canonical
 declaration rule, rather than ZTS061. That does not settle every exported value
@@ -312,7 +312,7 @@ Full convergence between CHECK and compilation remains follow-up work.
 The owner owns the next action: review and publish the local commits.
 Further CHECK convergence requires a separate bounded plan.
 
-The [reset ledger](archive/plans/2026-07-28-001-reset-simplification-plan.md) is historical.
+The reset ledger (`pre-rebase:docs/archive/plans/2026-07-28-001-reset-simplification-plan.md`) is historical.
 The shared import/binding index and compile-time parser reuse shipped. The
 compile-time evaluator uses `JsParser.initExpression` and the main IR; its
 separate value/evaluation model remains. The old parser-deletion estimate is
@@ -323,11 +323,11 @@ obsolete. No further evaluator rewrite is selected.
 | Shared IR shape helpers | Deferred | A concrete new consumer, such as a build cache or incremental compile | Identify the repeated shape operation the consumer needs | A shared helper replaces measured duplication and preserves analyzer behavior |
 | Collector role | Measurement required | Reproduce remaining memory growth after the lifetime-arena fix | Attribute retained allocations before selecting any deletion | Repeatable allocation and RSS evidence identifies what grows and whether collection is required |
 | Compile-time value/evaluation unification | Deferred | New evidence of a behavior or maintenance problem | Measure the remaining evaluator overlap and pin public behavior | Accepted scope with measured benefit and equivalent public results, or a decision to keep the separate evaluator |
-| VM-loop deduplication | Deferred | Runtime hardening, engine facade, and the existing measurement gates | Revalidate the [deferred plan](archive/DEFERRED_VM_LOOP_DEDUPE_PLAN.md) against the selected runtime path | Public behavior preserved and the plan's measurements justify the change |
+| VM-loop deduplication | Deferred | Runtime hardening, engine facade, and the existing measurement gates | Revalidate the deferred plan (`pre-rebase:docs/archive/DEFERRED_VM_LOOP_DEDUPE_PLAN.md`) against the selected runtime path | Public behavior preserved and the plan's measurements justify the change |
 
 The reset's orchestration move remains declined. It has no selected consumer
 for another `LoweredModule` phase and no measured correctness or performance
-benefit. The [bounded rederive](archive/plans/2026-09-20-rederive-implementation-plan.md)
+benefit. The bounded rederive (`pre-rebase:docs/archive/plans/2026-09-20-rederive-implementation-plan.md`)
 closed the selected schema-writer, journal-decoding, and recovery-planning work.
 
 The reset ledger's owner-decision and retention sections are historical
@@ -343,9 +343,9 @@ a product decision and current usage evidence.
 |---|---|---|---|---|
 | Custom agent handlers and tool-profile v1 | Reconciled: M4 delivered the tool profile; M5 resumes agent handlers | M5 in progress | See the M5 row | One accepted contract and reconciled implementation scope, or an explicit deferral |
 | Broader tool platform, confidential hosting, and cloud adapters | Parked | A customer need and an accepted threat model | Evaluate separately from the current handler product | Recorded accept/defer decision and a bounded plan for any accepted work |
-| Predictable-performance advisory plan | Proposed; old baseline | Fresh process-level measurements | Revalidate the measurement unit before any optimization | Retained receipts identify a current bottleneck and justify a selected change |
+| Predictable-performance advisory plan (`pre-rebase:advisor-plans/001-tigerbeetle-inspired-predictable-performance-plan.md`) | Proposed; old baseline | Fresh process-level measurements | Revalidate the measurement unit before any optimization | Retained receipts identify a current bottleneck and justify a selected change |
 | [Consumer contract v1](consumer-contract.md) | Proposed | A consumer that commits to lowering into the declaration | Decide whether to accept producer obligations P1 to P14, starting with the published vocabulary envelope and its drift gate | The envelope exists, a gate compares a source-derived inventory against it for equality and fails on a missing or empty input, and one consumer's declaration reaches an admissibility answer |
 
-The [proposal index](zttp-next/README.md), [agent-handler specification](plans/2026-09-19-feat-agent-handler-spec.md),
+The proposal index (`pre-rebase:docs/zttp-next/README.md`), [agent-handler specification](plans/2026-09-19-feat-agent-handler-spec.md),
 and [advisory index](../advisor-plans/README.md) hold the supporting documents.
 Their presence does not schedule them.

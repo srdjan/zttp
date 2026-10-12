@@ -649,9 +649,7 @@ curl -H 'Accept: application/hal+json' http://127.0.0.1:3000/orders/42
 curl -H 'Accept: text/html' -H 'HX-Request: true' http://127.0.0.1:3000/orders/42
 ```
 
-See `examples/hypermedia/order.ts`. For an interactive walkthrough of HATEOAS
-and HAL with this resource (a live order workflow whose affordances change with
-state), open [hypermedia-explainer.html](hypermedia-explainer.html) in a browser.
+See `examples/hypermedia/order.ts`.
 
 ## Workflow Orchestration
 

@@ -6,7 +6,7 @@ index when a plan starts, closes, or moves to the archive.
 
 | Document | Role and status | Work authority |
 |---|---|---|
-| [Plan 005 Phase 1: feature removal](2026-10-11-feature-removal-phase-1.md) | Active 2026-10-11; G1 to G14 in order, progress in the worklog | Owner accepted plan 005 decisions 1 to 9 with "your recommendations"
+| [Plan 005 Phase 1: feature removal](2026-10-11-feature-removal-phase-1.md) | Active 2026-10-11; G1 to G14 in order, progress in the worklog | Owner accepted plan 005 decisions 1 to 9 with "your recommendations" |
 | [Multi-module contract analysis](2026-10-11-1608-refactor-multi-module-contract-analysis-plan.md) | Complete 2026-10-11; results and coverage limits in [worklog](2026-10-11-multi-module-analysis-worklog.md) | Owner approved the concrete plan with "yes, execute" |
 | [Shared analysis first unit](2026-10-11-shared-analysis-first-unit.md) | Complete 2026-10-11; results and coverage limits in [worklog](2026-10-11-shared-analysis-worklog.md) | Owner approved execution with "go ahead" |
 | [Minimal design audit](2026-10-08-minimal-design-audit.md) | Research complete; reductions, compatibility questions, and acceptance checks | User requested simplification discovery; implementation scope remains unselected |
@@ -36,11 +36,11 @@ index when a plan starts, closes, or moves to the archive.
 | [D3: canonical form and wire](2026-07-30-016-d3-canonical-form-wire-design.md) | Retained design reference; language phases complete | No new work scheduled |
 | [Custom LLM agent handlers](2026-09-19-feat-agent-handler-spec.md) | Proposed; baseline refreshed 2026-09-27 at `e6f33dfc`; resumed by M5 | M4 delivered its catalog, scope, and credential parts; the M5 contract states the rest |
 
-[Archived execution records](../archive/README.md) preserve completed work,
+Archived execution records (`pre-rebase:docs/archive/README.md`) preserve completed work,
 superseded plans, and historical measurements. The reset ledger's remaining
-questions are in the roadmap. The [product proposal index](../zttp-next/README.md)
+questions are in the roadmap. The product proposal index (`pre-rebase:docs/zttp-next/README.md`)
 and [advisory index](../../advisor-plans/README.md) classify separate proposals.
 
-M1 is complete in the [backlog cleanup record](../archive/plans/2026-09-21-active-backlog-cleanup.md).
-M2 is complete in the [bounded correctness record](../archive/plans/2026-09-21-bounded-correctness-assurance.md). M3 is complete with a retained full fresh report.
+M1 is complete in the backlog cleanup record (`pre-rebase:docs/archive/plans/2026-09-21-active-backlog-cleanup.md`).
+M2 is complete in the bounded correctness record (`pre-rebase:docs/archive/plans/2026-09-21-bounded-correctness-assurance.md`). M3 is complete with a retained full fresh report.
 The roadmap records the proposed later milestones.

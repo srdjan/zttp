@@ -2872,9 +2872,9 @@ humans.
 
 ## Sources inspected
 
-- `docs/archive/spec-explainers/zts-formal-spec-northstar.html` (then at
+- `pre-rebase:docs/archive/spec-explainers/zts-formal-spec-northstar.html` (then at
   `docs/zts-formal-spec-northstar.html`)
-- `docs/archive/spec-explainers/zts-formal-spec-design.html` (then at
+- `pre-rebase:docs/archive/spec-explainers/zts-formal-spec-design.html` (then at
   `docs/zts-formal-spec-design.html`)
 - `docs/typescript.md`, which has since absorbed `docs/typescript-patterns.md`
 - `docs/feature-detection.md`

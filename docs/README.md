@@ -5,8 +5,8 @@ These docs describe the current codebase. Release history lives in
 The [plan index](plans/README.md) identifies active work, retained design
 references, and parked proposals. A plan can define a design; the roadmap
 states its status, dependencies, next action, and completion checks. Finished
-and superseded execution records live under [archive](archive/README.md).
-The [product proposals](zttp-next/README.md) and repository-level
+and superseded execution records live in the `pre-rebase` git tag, under
+`pre-rebase:docs/archive/`. Repository-level
 [advisory plans](../advisor-plans/README.md) require a decision before execution.
 
 ## Start Here
@@ -36,9 +36,6 @@ The [product proposals](zttp-next/README.md) and repository-level
 
 ## Reference
 
-- [Patterns from Antfly's Zig Code](antfly-zig-patterns.html) - a source-linked
-  study of build ownership, generated source checks, compile-time invariants,
-  diagnostics, state publication, test gates, fault replay, and benchmarks.
 - [Contracts and Auto-Sandboxing](contracts-and-sandboxing.md) - handler
   contracts, least-privilege runtime policy, OpenAPI/SDK emit, replay,
   upgrade checks, and `Proof<T, P>`.
@@ -108,10 +105,8 @@ engineering problems, searchable by YAML frontmatter (`module`, `tags`,
 `problem_type`). Unlike the archive, these describe classes that recur, so they
 stay maintained.
 
-[Essay](essay.md) is the long-form argument for a machine-first language
-profile. It is opinion, not reference.
-
 ## Archive
 
-[docs/archive/](archive/README.md) holds dated records of finished work. It is
-unmaintained by design and describes the system as it was, not as it is.
+The `pre-rebase` git tag holds dated records of finished work under
+`pre-rebase:docs/archive/`. They are unmaintained by design and describe the
+system as it was, not as it is.

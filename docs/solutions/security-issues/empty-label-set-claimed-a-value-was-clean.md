@@ -137,8 +137,8 @@ Keep the probe type-correct or the type checker rejects it before the flow check
 - [normalize-unions-without-dropping-members](../logic-errors/normalize-unions-without-dropping-members.md) - the same polarity rule in `type_pool.zig`; cite it for the general principle rather than restating it
 - [sub-handler-contract-extraction-strict-profile](sub-handler-contract-extraction-strict-profile.md) - fail-closed discipline around the same compile pipeline
 - `scripts/check-proof-swallow.sh` - the standing gate for the sibling class (swallowed errors); this learning is its missing counterpart
-- `docs/archive/plans-advisory/018-fail-closed-on-analysis-allocation-errors.md` - the plan that produced that gate, scoped to allocation failure only, which is why the wrong-answer half stayed open
+- `pre-rebase:docs/archive/plans-advisory/018-fail-closed-on-analysis-allocation-errors.md` - the plan that produced that gate, scoped to allocation failure only, which is why the wrong-answer half stayed open
 - [docs/proofs-and-receipts.md](../../proofs-and-receipts.md) - defines `no_secret_leakage` as "no secret-labelled value reaches a response, header, or egress call", the claim these bugs falsified
 - `docs/roadmap.md` item 1 - the running record of this class
 
-No GitHub issue covered this; the repo tracks work in `docs/plans/` and `docs/archive/plans-advisory/`. Nothing in `docs/solutions/` mentioned the flow checker, data labels, or taint analysis when this learning was written.
+No GitHub issue covered this; the repo tracks work in `docs/plans/` and `pre-rebase:docs/archive/plans-advisory/`. Nothing in `docs/solutions/` mentioned the flow checker, data labels, or taint analysis when this learning was written.

@@ -12,8 +12,8 @@ overlapping plans at the same time.
 
 | Plan | Title | Priority | Effort | Status |
 |---|---|---|---|---|
-| 001 | TigerBeetle-inspired predictable performance | P1 | XL | PROPOSED |
-| 002 | Complete the local LFM measurement and default cutover | P1 | L | SUPERSEDED; historical measurement evidence only |
+| 001 | TigerBeetle-inspired predictable performance (`pre-rebase:advisor-plans/001-tigerbeetle-inspired-predictable-performance-plan.md`) | P1 | XL | PROPOSED |
+| 002 | Complete the local LFM measurement and default cutover (`pre-rebase:advisor-plans/002-local-lfm-default-cutover-plan.md`) | P1 | L | SUPERSEDED; historical measurement evidence only |
 | [003](003-zttp-zts-simplification-audit.md) | Simplify the zttp and zts foundation | P1 | L | DIRECTION ACCEPTED; preserve features and initial wire formats; shared analysis first |
 | [004](004-shared-analysis-first-unit.md) | Share single-module analysis between check and compile | P1 | M | ACCEPTED 2026-10-11; promoted to docs/plans |
 | [005](005-feature-removal-rebase.md) | Remove the features that do not carry the agent-compiler | P1 | XL | PROPOSED 2026-10-11; nine owner decisions open |

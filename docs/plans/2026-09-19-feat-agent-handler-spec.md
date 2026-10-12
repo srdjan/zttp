@@ -102,7 +102,7 @@ depend on promises, `async` functions, or browser `ReadableStream` support.
 
 `ContractBuilder` and `TypeChecker` now use `ir_json_literal.zig`, delivered in
 `6be705a6` and verified in the
-[bounded rederive record](../archive/plans/2026-09-20-rederive-implementation-plan.md).
+bounded rederive record (`pre-rebase:docs/archive/plans/2026-09-20-rederive-implementation-plan.md`).
 U1 must preserve the existing schema-byte and inferred-type contracts when it
 uses that writer.
 

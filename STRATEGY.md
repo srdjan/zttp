@@ -130,7 +130,7 @@ against without leaking the benchmark, and growing it is the binding constraint 
 number this section cites.
 
 Counts behind each of these live in
-[the closed agenda](docs/archive/plans/2026-08-16-028-agent-compiler-agenda-closed.md)
+the closed agenda (`pre-rebase:docs/archive/plans/2026-08-16-028-agent-compiler-agenda-closed.md`)
 and in what [the roadmap](docs/roadmap.md#agent-compiler-agenda) still carries open,
 each beside the file that owns it, so a reader can recount rather than trust a number
 that rots here.
